@@ -13,6 +13,7 @@ use crate::{
     script::vm::*,
     texture::Texture,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug)]
 pub struct DrawList(PoolId);
@@ -192,6 +193,7 @@ impl CxDrawKind {
 pub struct CxDrawCall {
     pub draw_shader_id: DrawShaderId, // if shader_id changed, delete gl vao
     pub options: CxDrawShaderOptions,
+    pub append_group_id: u64,
     pub total_instance_slots: usize,
     pub draw_call_uniforms: DrawCallUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
@@ -206,6 +208,7 @@ impl CxDrawCall {
         CxDrawCall {
             geometry_id: draw_vars.geometry_id,
             options: draw_vars.options.clone(),
+            append_group_id: draw_vars.append_group_id,
             draw_shader_id: draw_vars.draw_shader_id.unwrap(),
             total_instance_slots: mapping.instances.total_slots,
             draw_call_uniforms: DrawCallUniforms::default(),
@@ -325,6 +328,48 @@ pub struct CxRectArea {
 }
 
 impl CxDrawList {
+    fn append_trace_enabled() -> bool {
+        false
+    }
+
+    fn append_trace_log(message: String) {
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        if !Self::append_trace_enabled() {
+            return;
+        }
+        let n = COUNT.fetch_add(1, Ordering::Relaxed);
+        if n < 200 {
+            log!("{}", message);
+        } else if n == 200 {
+            log!("append_trace: log limit reached, suppressing further output");
+        }
+    }
+
+    #[inline]
+    fn group_base(group: u64) -> u64 {
+        group >> 8
+    }
+
+    #[inline]
+    fn group_lane(group: u64) -> u8 {
+        (group & 0xff) as u8
+    }
+
+    #[inline]
+    fn can_cross_group_barrier(target_group: u64, barrier_group: u64) -> bool {
+        let target_base = Self::group_base(target_group);
+        let barrier_base = Self::group_base(barrier_group);
+        if target_base != barrier_base {
+            return false;
+        }
+        let target_lane = Self::group_lane(target_group);
+        let barrier_lane = Self::group_lane(barrier_group);
+        // Only background lane draws may cross content lane barriers.
+        // Letting content lane cross background barriers can reorder text under
+        // newly-created background drawcalls when background batching splits.
+        target_lane == 0 && barrier_lane == 1
+    }
+
     pub fn find_appendable_drawcall(
         &mut self,
         sh: &CxDrawShader,
@@ -339,20 +384,33 @@ impl CxDrawList {
             .as_ref()
             .unwrap()
             .false_compare_check();
+        let target_group = draw_vars.append_group_id;
 
-        //let mut found = 0;
+        // Walk backward in draw order and stop at hard barriers.
+        // Only sibling parent lanes (background <-> content) may be crossed.
         for i in (0..self.draw_items.len()).rev() {
+            let draw_item = &mut self.draw_items[i];
+            let Some(draw_call) = &draw_item.draw_call() else {
+                break;
+            };
+
             if self.find_appendable_draw_shader_check[i] == draw_shader_check {
-                let draw_item = &mut self.draw_items[i];
-                if let Some(draw_call) = &draw_item.draw_call() {
-                    // TODO! figure out why this can happen
-                    if draw_call.draw_shader_id != draw_vars.draw_shader_id.unwrap() {
-                        continue;
-                    }
+                // TODO! figure out why this can happen
+                if draw_call.draw_shader_id != draw_vars.draw_shader_id.unwrap() {
+                    Self::append_trace_log(format!(
+                        "append_miss shader_mismatch call_shader={} vars_shader={}",
+                        draw_call.draw_shader_id.index,
+                        draw_vars.draw_shader_id.unwrap().index
+                    ));
+                } else if draw_call.append_group_id == target_group {
                     // lets compare uniforms and textures..
                     if !sh.mapping.flags.draw_call_nocompare {
                         if draw_call.geometry_id != draw_vars.geometry_id {
-                            continue;
+                            Self::append_trace_log(format!(
+                                "append_miss geom_mismatch shader={} at_draw_item={}",
+                                draw_call.draw_shader_id.index, i
+                            ));
+                            break;
                         }
                         let mut diff = false;
                         for i in 0..sh.mapping.dyn_uniforms.total_slots {
@@ -362,7 +420,11 @@ impl CxDrawList {
                             }
                         }
                         if diff {
-                            continue;
+                            Self::append_trace_log(format!(
+                                "append_barrier uniform_diff shader={} at_draw_item={}",
+                                draw_call.draw_shader_id.index, i
+                            ));
+                            break;
                         }
 
                         for i in 0..sh.mapping.textures.len() {
@@ -381,16 +443,37 @@ impl CxDrawList {
                             }
                         }
                         if diff {
-                            continue;
+                            Self::append_trace_log(format!(
+                                "append_barrier texture_diff shader={} at_draw_item={}",
+                                draw_call.draw_shader_id.index, i
+                            ));
+                            break;
                         }
                     }
                     if !draw_call.options._appendable_drawcall(&draw_vars.options) {
-                        continue;
+                        Self::append_trace_log(format!(
+                            "append_barrier options_diff shader={} at_draw_item={}",
+                            draw_call.draw_shader_id.index, i
+                        ));
+                        break;
                     }
+                    Self::append_trace_log(format!(
+                        "append_hit shader={} draw_item={} group={} draw_call_group={}",
+                        draw_call.draw_shader_id.index,
+                        i,
+                        draw_call.append_group_id,
+                        draw_call.options.draw_call_group.0
+                    ));
                     return Some(i);
-                } else {
-                    break;
                 }
+            }
+
+            if !Self::can_cross_group_barrier(target_group, draw_call.append_group_id) {
+                Self::append_trace_log(format!(
+                    "append_barrier group target={} barrier={} at_draw_item={}",
+                    target_group, draw_call.append_group_id, i
+                ));
+                break;
             }
         }
         None
@@ -402,6 +485,13 @@ impl CxDrawList {
         sh: &CxDrawShader,
         draw_vars: &DrawVars,
     ) -> &mut CxDrawItem {
+        Self::append_trace_log(format!(
+            "append_new shader={} group={} draw_call_group={} items_before={}",
+            draw_vars.draw_shader_id.map(|v| v.index).unwrap_or(usize::MAX),
+            draw_vars.append_group_id,
+            draw_vars.options.draw_call_group.0,
+            self.draw_items.len()
+        ));
         if let Some(ds) = &draw_vars.draw_shader_id {
             self.find_appendable_draw_shader_check
                 .push(ds.false_compare_check());
