@@ -6,29 +6,7 @@ use std::io::{self, Read, Seek};
 const GGML_FILE_MAGIC: u32 = 0x67676d6c;
 
 fn should_preserve_raw_weight_type() -> bool {
-    let parse_truthy = |v: &str| {
-        let v = v.trim().to_ascii_lowercase();
-        !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
-    };
-
-    if let Ok(backend) = std::env::var("MAKEPAD_VOICE_BACKEND") {
-        if backend.trim().eq_ignore_ascii_case("metal") {
-            return true;
-        }
-        if backend.trim().eq_ignore_ascii_case("cpu") {
-            return false;
-        }
-    }
-
-    if let Ok(v) = std::env::var("MAKEPAD_VOICE_PRESERVE_WTYPE") {
-        return parse_truthy(&v);
-    }
-
-    if let Ok(v) = std::env::var("MAKEPAD_VOICE_METAL") {
-        return parse_truthy(&v);
-    }
-
-    cfg!(target_os = "macos")
+    crate::settings::PRESERVE_RAW_WEIGHT_TYPE
 }
 
 #[derive(Debug, Clone)]
