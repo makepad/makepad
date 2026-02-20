@@ -1371,6 +1371,7 @@ impl BuildManager {
                     input: text,
                     replace_last: replace_last.unwrap_or(false),
                     was_paste: was_paste.unwrap_or(false),
+                    ..Default::default()
                 });
                 if let Err(message) = self.send_terminal_host_to_stdin(
                     cx,

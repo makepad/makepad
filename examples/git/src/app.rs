@@ -330,17 +330,6 @@ impl App {
         self.ui.widget(cx, ids!(log_list)).redraw(cx);
     }
 
-    fn debug_portal_list_state(&mut self, cx: &mut Cx, reason: &str) {
-        let state = self
-            .ui
-            .portal_list(cx, ids!(log_list.list))
-            .debug_scroll_state_line();
-        if state != self.last_portal_scroll_state {
-            self.last_portal_scroll_state = state.clone();
-            log!("PortalList[{}] {}", reason, state);
-        }
-    }
-
     fn destination_display_path() -> String {
         let rel = PathBuf::from(DEST_PATH);
         if let Ok(cwd) = std::env::current_dir() {
@@ -681,8 +670,6 @@ pub struct App {
     force_full_checkout: bool,
     #[rust]
     log_counter: u64,
-    #[rust]
-    last_portal_scroll_state: String,
 }
 
 impl MatchEvent for App {
@@ -764,14 +751,5 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
-
-        let reason = match event {
-            Event::Scroll(_) => Some("scroll"),
-            Event::NextFrame(_) => Some("next_frame"),
-            _ => None,
-        };
-        if let Some(reason) = reason {
-            self.debug_portal_list_state(cx, reason);
-        }
     }
 }
