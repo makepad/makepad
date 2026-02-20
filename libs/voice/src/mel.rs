@@ -119,7 +119,7 @@ pub fn log_mel_spectrogram(
     samples: &[f32],
     filters: &MelFilters,
     n_threads: usize,
-) -> (Vec<f32>, usize, usize) {
+) -> (Vec<f32>, usize, usize, usize) {
     let cache = MelCache::new();
     let n_samples = samples.len();
     let frame_size = WHISPER_N_FFT;
@@ -145,7 +145,7 @@ pub fn log_mel_spectrogram(
     // Zero pad the rest (already zeroed)
 
     let n_len = (padded_len - frame_size) / frame_step;
-    let _n_len_org = 1 + (n_samples + stage_2_pad - frame_size) / frame_step;
+    let n_len_org = 1 + (n_samples + stage_2_pad - frame_size) / frame_step;
 
     let mut mel_data = vec![0.0f32; n_mel * n_len];
 
@@ -229,5 +229,5 @@ pub fn log_mel_spectrogram(
         *v = (*v + 4.0) / 4.0;
     }
 
-    (mel_data, n_mel, n_len)
+    (mel_data, n_mel, n_len, n_len_org)
 }
