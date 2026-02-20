@@ -2546,9 +2546,15 @@ kernel void kernel_mul_mv_ext_q4x4_f32_disp(
 typedef decltype(kernel_mul_mv_ext_q4_f32_disp  <2, block_q8_0, 32,  dequantize_q8_0_t4>) mul_mv_ext_q4_f32_t;
 typedef decltype(kernel_mul_mv_ext_q4x4_f32_disp<2, block_q4_K, 256, dequantize_q4_K>)    mul_mv_ext_q4x4_f32_t;
 
+template [[host_name("kernel_mul_mv_ext_f32_f32_r1_2")]]    kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, float4,       4,  dequantize_f32_t4>;
 template [[host_name("kernel_mul_mv_ext_f32_f32_r1_3")]]    kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, float4,       4,  dequantize_f32_t4>;
+template [[host_name("kernel_mul_mv_ext_f32_f32_r1_4")]]    kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, float4,       4,  dequantize_f32_t4>;
+template [[host_name("kernel_mul_mv_ext_f32_f32_r1_5")]]    kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, float4,       4,  dequantize_f32_t4>;
 
+template [[host_name("kernel_mul_mv_ext_f16_f32_r1_2")]]    kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, half4,        4,  dequantize_f16_t4>;
 template [[host_name("kernel_mul_mv_ext_f16_f32_r1_3")]]    kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, half4,        4,  dequantize_f16_t4>;
+template [[host_name("kernel_mul_mv_ext_f16_f32_r1_4")]]    kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, half4,        4,  dequantize_f16_t4>;
+template [[host_name("kernel_mul_mv_ext_f16_f32_r1_5")]]    kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, half4,        4,  dequantize_f16_t4>;
 
 
 
@@ -3236,10 +3242,138 @@ template [[host_name("kernel_im2col_f32")]] kernel im2col_t kernel_im2col<float>
 //        uint3   ntg[[threads_per_threadgroup]]);
 //
 //template <typename T>
-
+//kernel void kernel_im2col_ext(
+//        constant ggml_metal_kargs_im2col & args,
+//        device const float * x,
+//        device        char * dst,
+//        uint3 tgpig[[threadgroup_position_in_grid]],
+//        uint3  tgpg[[threadgroups_per_grid]],      // tgpg[0] = D x IC x KH x KW, CHW = IC x KH x KW
+//        uint3 tpitg[[thread_position_in_threadgroup]],
+//        uint3   ntg[[threads_per_threadgroup]]) {  // [M, 1, 1]
+//    const int64_t KHW = (int64_t)args.KHW;
+//
+//    const int64_t d   = tgpig[0] / args.CHW;
+//    const int64_t chw = tgpig[0] % args.CHW;
+//    const int64_t tgpig_0 = chw / KHW;  // 0 ~ (IC - 1)
+//    const int64_t HW = tgpig[0] % KHW;
+//
+//    const int64_t tpitg_0 = (d * ntg[0]) + tpitg[0];
+//    if (tpitg_0 >= args.N) {
+//        return;
+//    }
+//
+//    const int64_t tpitg_1 = HW / args.KW;
+//    const int64_t tpitg_2 = HW % args.KW;
+//
+//    const int64_t iiw = tgpig[2] * args.s0 + tpitg_2 * args.d0 - args.p0;
+//    const int64_t iih = tgpig[1] * args.s1 + tpitg_1 * args.d1 - args.p1;
+//
+//    const int64_t offset_dst =
+//        (tpitg_0 * tgpg[1] * tgpg[2] + tgpig[1] * tgpg[2] + tgpig[2]) * args.CHW +
+//        (tgpig_0 * KHW + tpitg_1 * args.KW + tpitg_2);
+//
+//    device T * pdst = (device T *) (dst);
+//
+//    if (iih < 0 || iih >= args.IH || iiw < 0 || iiw >= args.IW) {
+//        pdst[offset_dst] = 0.0f;
+//    } else {
+//        const int64_t offset_src = tpitg_0 * args.ofs0 + tgpig_0 * args.ofs1;
+//        pdst[offset_dst] = x[offset_src + iih * args.IW + iiw];
+//    }
+//}
 //
 
+template <typename TK>
+kernel void kernel_conv_2d(
+        constant ggml_metal_kargs_conv_2d & args,
+        device const char * weights,
+        device const char * src,
+        device       char * dst,
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        uint3    tgpg[[threadgroups_per_grid]],
+        uint3   tpitg[[thread_position_in_threadgroup]],
+        uint3     ntg[[threads_per_threadgroup]]) {
 
+    const uint threads_per_tg = ntg.x * ntg.y * ntg.z;
+    const uint tg_index = (tgpig.z * tgpg.y + tgpig.y) * tgpg.x + tgpig.x;
+    const uint local_thread = tpitg.z * (ntg.x * ntg.y) + tpitg.y * ntg.x + tpitg.x;
+    const uint thread_index = tg_index * threads_per_tg + local_thread;
+    const uint64_t total_threads = (uint64_t) threads_per_tg * tgpg.x * tgpg.y * tgpg.z;
+    const uint64_t total_outputs = (uint64_t) args.N * args.OC * args.OH * args.OW;
+
+    for (uint64_t index = thread_index; index < total_outputs; index += total_threads) {
+        uint64_t tmp = index;
+
+        const int32_t ow = tmp % args.OW; tmp /= args.OW;
+        const int32_t oh = tmp % args.OH; tmp /= args.OH;
+        const int32_t oc = tmp % args.OC; tmp /= args.OC;
+        const int32_t  n = tmp;
+
+        float acc = 0.0f;
+
+        const int32_t base_x = ow*args.s0 - args.p0;
+        const int32_t base_y = oh*args.s1 - args.p1;
+
+        int32_t ky_start = 0;
+        if (base_y < 0) {
+            ky_start = (-base_y + args.d1 - 1)/args.d1;
+        }
+        int32_t ky_end = args.KH;
+        const int32_t y_max = args.IH - 1 - base_y;
+        if (y_max < 0) {
+            ky_end = ky_start;
+        } else if (base_y + (args.KH - 1)*args.d1 >= args.IH) {
+            ky_end = min(ky_end, y_max/args.d1 + 1);
+        }
+
+        int32_t kx_start = 0;
+        if (base_x < 0) {
+            kx_start = (-base_x + args.d0 - 1)/args.d0;
+        }
+        int32_t kx_end = args.KW;
+        const int32_t x_max = args.IW - 1 - base_x;
+        if (x_max < 0) {
+            kx_end = kx_start;
+        } else if (base_x + (args.KW - 1)*args.d0 >= args.IW) {
+            kx_end = min(kx_end, x_max/args.d0 + 1);
+        }
+
+        if (ky_start < ky_end && kx_start < kx_end) {
+            const uint64_t src_base_n = (uint64_t) n  * args.nb13;
+            const uint64_t w_base_oc  = (uint64_t) oc * args.nb03;
+
+            for (int32_t ic = 0; ic < args.IC; ++ic) {
+                const uint64_t src_base_nc = src_base_n + (uint64_t) ic * args.nb12;
+                const uint64_t w_base_ocic = w_base_oc  + (uint64_t) ic * args.nb02;
+
+                for (int32_t ky = ky_start; ky < ky_end; ++ky) {
+                    const int32_t iy = base_y + ky*args.d1;
+                    const uint64_t src_base_row = src_base_nc + (uint64_t) iy * args.nb11;
+                    const uint64_t w_base_row   = w_base_ocic + (uint64_t) ky * args.nb01;
+
+                    for (int32_t kx = kx_start; kx < kx_end; ++kx) {
+                        const int32_t ix = base_x + kx*args.d0;
+                        const uint64_t src_offs = src_base_row + (uint64_t) ix * args.nb10;
+                        const uint64_t w_offs   = w_base_row   + (uint64_t) kx * args.nb00;
+
+                        const float x = *(device const float *)(src + src_offs);
+                        const float w = (float) (*(device const TK *)(weights + w_offs));
+
+                        acc += x * w;
+                    }
+                }
+            }
+        }
+
+        const uint64_t dst_offs =
+            (uint64_t) n  * args.nb3 +
+            (uint64_t) oc * args.nb2 +
+            (uint64_t) oh * args.nb1 +
+            (uint64_t) ow * args.nb0;
+
+        *(device float *)(dst + dst_offs) = acc;
+    }
+}
 
 
 
@@ -3251,7 +3385,32 @@ typedef void (conv_transpose_1d_t)(
         uint3   tgpig[[threadgroup_position_in_grid]],
         uint3    tgpg[[threadgroups_per_grid]]);
 
+template <typename T>
+kernel void kernel_conv_transpose_1d(
+        constant ggml_metal_kargs_conv_transpose_1d & args,
+        device const     T * src0,
+        device const float * src1,
+        device        char * dst,
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        uint3   tgpg[[threadgroups_per_grid]]) {
 
+    float v = 0.0f;
+
+    for (int64_t c = 0; c < args.IC; c++) {
+        const int32_t kernel_offset = c * tgpg[1] * args.K + args.K * tgpig[1];
+        const int32_t input_offset = c * args.IL;
+
+        for (int64_t i = 0; i < args.IL; i++) {
+            if (tgpig[0] >= i * args.s0 && tgpig[0] < i * args.s0 + args.K) {
+                v += src0[kernel_offset + tgpig[0] - i * args.s0] * src1[input_offset + i];
+            }
+        }
+    }
+
+    device float * dst_ptr = (device float *) (dst + tgpig[0] * args.nb0 + tgpig[1] * args.nb1);
+
+    dst_ptr[0] = v;
+}
 
 
 
@@ -3264,7 +3423,65 @@ typedef void (conv_transpose_2d_t)(
         uint3   tgpig[[threadgroup_position_in_grid]],
         uint3    tgpg[[threadgroups_per_grid]]);
 
+template <typename T>
+kernel void kernel_conv_transpose_2d(
+        constant ggml_metal_kargs_conv_transpose_2d & args,
+        device const T * src0,
+        device const float * src1,
+        device        char * dst,
+        threadgroup float * shared_sum [[threadgroup(0)]],
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        uint3   tpitg[[thread_position_in_threadgroup]],
+        uint3     ntg[[threads_per_threadgroup]]) {
 
+    const int64_t out_x = tgpig[0];
+    const int64_t out_y = tgpig[1];
+    const int64_t out_c = tgpig[2];
+
+    const int64_t kw = tpitg[0];
+    const int64_t kh = tpitg[1];
+
+    float v = 0.0f;
+
+    for (int64_t in_c = 0; in_c < args.IC; in_c++) {
+        int64_t in_y = out_y - kh;
+
+        if (in_y < 0 || in_y % args.s0) continue;
+
+        in_y /= args.s0;
+
+        if (in_y >= args.IH) continue;
+
+        int64_t in_x = out_x - kw;
+
+        if (in_x < 0 || in_x % args.s0) continue;
+
+        in_x /= args.s0;
+
+        if (in_x >= args.IW) continue;
+
+        const int64_t input_idx = (args.IW * args.IH) * in_c + (args.IW) * in_y + in_x;
+        const int64_t kernel_idx = (args.KH * args.KW * args.OC) * in_c + (args.KH * args.KW) * out_c + (args.KW) * kh + kw;
+
+        v += (float)src0[kernel_idx] * src1[input_idx];
+    }
+
+    const uint tid = tpitg.y * ntg.x + tpitg.x;
+    shared_sum[tid] = v;
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0) {
+        float total = 0.0f;
+        const uint num_threads = ntg.x * ntg.y;
+        for (uint i = 0; i < num_threads; i++) {
+            total += shared_sum[i];
+        }
+
+        device float * dst_ptr = (device float *) (dst + out_x*args.nb0 + out_y * args.nb1 + out_c*args.nb2);
+        dst_ptr[0] = total;
+    }
+}
 
 
 
@@ -3288,7 +3505,67 @@ typedef void (argsort_t)(
         ushort3 tpitg[[thread_position_in_threadgroup]],
         ushort3   ntg[[threads_per_threadgroup]]);
 
+template<ggml_sort_order order>
+kernel void kernel_argsort_f32_i32(
+        constant   ggml_metal_kargs_argsort & args,
+        device   const char * src0,
+        device      int32_t * dst,
+        threadgroup int32_t * shmem_i32 [[threadgroup(0)]],
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        ushort3 tpitg[[thread_position_in_threadgroup]],
+        ushort3   ntg[[threads_per_threadgroup]]) {
+    // bitonic sort
+    const int col = tpitg[0];
+    const int ib  = tgpig[0] / args.ne01;
 
+    const int i00 = ib*ntg.x;
+    const int i01 = tgpig[0] % args.ne01;
+    const int i02 = tgpig[1];
+    const int i03 = tgpig[2];
+
+    device const float * src0_row = (device const float *) (src0 + args.nb01*i01 + args.nb02*i02 + args.nb03*i03);
+
+    // initialize indices
+    shmem_i32[col] = i00 + col;
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int k = 2; k <= ntg.x; k *= 2) {
+        for (int j = k / 2; j > 0; j /= 2) {
+            int ixj = col ^ j;
+            if (ixj > col) {
+                if ((col & k) == 0) {
+                    if (shmem_i32[col] >= args.ne00 ||
+                       (shmem_i32[ixj] <  args.ne00 && (order == GGML_SORT_ORDER_ASC ?
+                            src0_row[shmem_i32[col]] > src0_row[shmem_i32[ixj]] :
+                            src0_row[shmem_i32[col]] < src0_row[shmem_i32[ixj]]))
+                    ) {
+                        SWAP(shmem_i32[col], shmem_i32[ixj]);
+                    }
+                } else {
+                    if (shmem_i32[ixj] >= args.ne00 ||
+                       (shmem_i32[col] <  args.ne00 && (order == GGML_SORT_ORDER_ASC ?
+                            src0_row[shmem_i32[col]] < src0_row[shmem_i32[ixj]] :
+                            src0_row[shmem_i32[col]] > src0_row[shmem_i32[ixj]]))
+                    ) {
+                        SWAP(shmem_i32[col], shmem_i32[ixj]);
+                    }
+                }
+            }
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    const int64_t i0 = ib*args.top_k;
+
+    // copy the result to dst without the padding
+    if (i0 + col < args.ne0 && col < args.top_k) {
+        dst += i0 + args.ne0*i01 + args.ne0*args.ne1*i02 + args.ne0*args.ne1*args.ne2*i03;
+
+        dst[col] = shmem_i32[col];
+    }
+}
 
 
 typedef void (argsort_merge_t)(
@@ -3300,7 +3577,149 @@ typedef void (argsort_merge_t)(
         ushort3 tpitg[[thread_position_in_threadgroup]],
         ushort3   ntg[[threads_per_threadgroup]]);
 
+template<ggml_sort_order order>
+kernel void kernel_argsort_merge_f32_i32(
+        constant   ggml_metal_kargs_argsort_merge & args,
+        device const char    * src0,
+        device const int32_t * tmp,
+        device       int32_t * dst,
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        ushort3 tpitg[[thread_position_in_threadgroup]],
+        ushort3   ntg[[threads_per_threadgroup]]) {
 
+    const int im  = tgpig[0] / args.ne01;
+    const int i01 = tgpig[0] % args.ne01;
+    const int i02 = tgpig[1];
+    const int i03 = tgpig[2];
+
+    const int start = im * (2 * args.len);
+
+    const int len0 = MIN(args.len, MAX(0, args.ne0 - (int)(start)));
+    const int len1 = MIN(args.len, MAX(0, args.ne0 - (int)(start + args.len)));
+
+    const int total = len0 + len1;
+
+    device const int32_t * tmp0 = tmp + start
+        + i01*args.ne0
+        + i02*args.ne0*args.ne01
+        + i03*args.ne0*args.ne01*args.ne02;
+
+    device const int32_t * tmp1 = tmp0 + args.len;
+
+    dst += start
+        + i01*args.top_k
+        + i02*args.top_k*args.ne01
+        + i03*args.top_k*args.ne01*args.ne02;
+
+    device const float * src0_row = (device const float *)(src0
+        + args.nb01*i01
+        + args.nb02*i02
+        + args.nb03*i03);
+
+    if (total == 0) {
+        return;
+    }
+
+    const int chunk = (total + ntg.x - 1) / ntg.x;
+
+    const int k0 = tpitg.x * chunk;
+    const int k1 = MIN(MIN(k0 + chunk, total), args.top_k);
+
+    if (k0 >= args.top_k) {
+        return;
+    }
+
+    if (k0 >= total) {
+        return;
+    }
+
+    int low  = k0 > len1 ? k0 - len1 : 0;
+    int high = MIN(k0, len0);
+
+    // binary-search partition (i, j) such that i + j = k
+    while (low < high) {
+        const int mid = (low + high) >> 1;
+
+        const int32_t idx0 = tmp0[mid];
+        const int32_t idx1 = tmp1[k0 - mid - 1];
+
+        const float val0 = src0_row[idx0];
+        const float val1 = src0_row[idx1];
+
+        bool take_left;
+        if (order == GGML_SORT_ORDER_ASC) {
+            take_left = (val0 <= val1);
+        } else {
+            take_left = (val0 >= val1);
+        }
+
+        if (take_left) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    int i = low;
+    int j = k0 - i;
+
+    // keep the merge fronts into registers
+    int32_t idx0 = 0;
+    float   val0 = 0.0f;
+    if (i < len0) {
+        idx0 = tmp0[i];
+        val0 = src0_row[idx0];
+    }
+
+    int32_t idx1 = 0;
+    float   val1 = 0.0f;
+    if (j < len1) {
+        idx1 = tmp1[j];
+        val1 = src0_row[idx1];
+    }
+
+    for (int k = k0; k < k1; ++k) {
+        int32_t out_idx;
+
+        if (i >= len0) {
+            while (k < k1) {
+                dst[k++] = tmp1[j++];
+            }
+            break;
+        } else if (j >= len1) {
+            while (k < k1) {
+                dst[k++] = tmp0[i++];
+            }
+            break;
+        } else {
+            bool take_left;
+
+            if (order == GGML_SORT_ORDER_ASC) {
+                take_left = (val0 <= val1);
+            } else {
+                take_left = (val0 >= val1);
+            }
+
+            if (take_left) {
+                out_idx = idx0;
+                ++i;
+                if (i < len0) {
+                    idx0 = tmp0[i];
+                    val0 = src0_row[idx0];
+                }
+            } else {
+                out_idx = idx1;
+                ++j;
+                if (j < len1) {
+                    idx1 = tmp1[j];
+                    val1 = src0_row[idx1];
+                }
+            }
+        }
+
+        dst[k] = out_idx;
+    }
+}
 
 
 constant bool FC_flash_attn_ext_pad_has_mask [[function_constant(FC_FLASH_ATTN_EXT_PAD + 0)]];
