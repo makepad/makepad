@@ -37,6 +37,8 @@ pub struct DrawVars {
     #[rust]
     pub options: CxDrawShaderOptions,
     #[rust]
+    pub append_group_id: u64,
+    #[rust]
     pub draw_shader_id: Option<DrawShaderId>,
     #[rust]
     pub geometry_id: Option<GeometryId>,

@@ -1,0 +1,8 @@
+[package]
+name = "makepad-example-git"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-git = { path = "../../libs/git" }

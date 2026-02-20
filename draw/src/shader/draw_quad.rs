@@ -109,6 +109,8 @@ pub struct DrawColor {
 
 impl DrawQuad {
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
+        cx.push_draw_call_parent();
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         cx.begin_turtle(walk, layout);
         if self.draw_vars.draw_shader_id.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
@@ -119,6 +121,7 @@ impl DrawQuad {
     pub fn end(&mut self, cx: &mut Cx2d) {
         let rect = cx.end_turtle();
         self.draw_vars.area.set_rect(cx, &rect);
+        cx.pop_draw_call_parent();
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> Rect {
@@ -130,6 +133,7 @@ impl DrawQuad {
     }
 
     pub fn draw(&mut self, cx: &mut Cx2d) {
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         if let Some(mi) = &mut self.many_instances {
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
         } else if self.draw_vars.can_instance() {

@@ -8,6 +8,7 @@ workspace.members = [
     "examples/charts",
     "examples/scratchpad",
     "examples/todo",
+    "examples/git",
     "examples/vector",
     "examples/gltf",
     "examples/physics",
