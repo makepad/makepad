@@ -344,6 +344,12 @@ impl Image {
                 let scale_y = h as f32 / height as f32;
                 self.draw_bg.image_scale = vec2(scale_x, scale_y);
                 (w, h)
+            } else if image_texture.get_format(cx).is_render() {
+                // GL render target textures use Y-up (bottom-left origin) convention.
+                // Flip Y so the image displays correctly in Makepad's Y-down coordinate system.
+                self.draw_bg.image_scale = vec2(1.0, -1.0);
+                self.draw_bg.image_pan = vec2(0.0, 1.0);
+                (width as f64 * self.width_scale, height as f64)
             } else {
                 (width as f64 * self.width_scale, height as f64)
             }
