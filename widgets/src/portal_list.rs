@@ -1,6 +1,7 @@
 use {
     crate::{
         animator::AnimatorImpl,
+        event::TouchState,
         makepad_derive_widget::*,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
@@ -1548,6 +1549,24 @@ impl Widget for PortalList {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
 
+        // Selection autoscroll is driven by next-frame ticks. If pointer-up happens outside
+        // hit testing, selection can get "stuck" and keep scheduling frames. Clear it on
+        // global release/wheel-without-button as a safety net.
+        if self.is_selecting {
+            let clear_selection_autoscroll = match event {
+                Event::MouseUp(_) => true,
+                Event::TouchUpdate(e) => e.touches.iter().any(|touch| {
+                    matches!(touch.state, TouchState::Stop | TouchState::Stable)
+                }),
+                Event::Scroll(_) => cx.fingers.first_mouse_button.is_none(),
+                _ => false,
+            };
+            if clear_selection_autoscroll {
+                self.is_selecting = false;
+                self.select_scroll_state = None;
+            }
+        }
+
         let mut scroll_to = None;
         self.scroll_bar
             .handle_event_with(cx, event, &mut |_cx, action| {
@@ -2087,6 +2106,74 @@ impl PortalListRef {
             return 0.0;
         };
         inner.first_scroll
+    }
+
+    /// Returns a compact debug line with the current animated scroll state.
+    pub fn debug_scroll_state_line(&self) -> String {
+        let Some(inner) = self.borrow() else {
+            return "state=detached".to_string();
+        };
+
+        let mut state = "Stopped";
+        let mut delta = 0.0;
+        let mut velocity = 0.0;
+        let mut target_id: Option<usize> = None;
+        let mut drag_samples = 0usize;
+
+        match &inner.scroll_state {
+            ScrollState::Stopped => {}
+            ScrollState::Drag { samples } => {
+                state = "Drag";
+                drag_samples = samples.len();
+            }
+            ScrollState::Flick { delta: d, .. } => {
+                state = "Flick";
+                delta = *d;
+            }
+            ScrollState::Pulldown { .. } => {
+                state = "Pulldown";
+            }
+            ScrollState::ScrollingTo {
+                target_id: tid,
+                delta: d,
+                ..
+            } => {
+                state = "ScrollingTo";
+                target_id = Some(*tid);
+                delta = *d;
+            }
+            ScrollState::Tailing { velocity: v, .. } => {
+                state = "Tailing";
+                velocity = *v;
+            }
+        }
+
+        let bar_pos = inner.scroll_bar.get_scroll_pos();
+        let bar_total = inner.scroll_bar.get_scroll_view_total();
+        let bar_visible = inner.scroll_bar.get_scroll_view_visible();
+
+        format!(
+            "state={} first_id={} first_scroll={:.2} delta={:.2} velocity={:.2} target={:?} drag_samples={} tail_range={} tail_adjust={:.2} at_end={} not_fill={} auto_tail={} smooth_tail={} select_auto={} was_scrolling={} detect_tail={} bar={:.2}/{:.2} vis={:.2}",
+            state,
+            inner.first_id,
+            inner.first_scroll,
+            delta,
+            velocity,
+            target_id,
+            drag_samples,
+            inner.tail_range,
+            inner.tail_adjustment_needed,
+            inner.at_end,
+            inner.not_filling_viewport,
+            inner.auto_tail,
+            inner.smooth_tail,
+            inner.select_scroll_state.is_some(),
+            inner.was_scrolling,
+            inner.detect_tail_in_draw,
+            bar_pos,
+            bar_total,
+            bar_visible
+        )
     }
 
     /// See [`PortalList::item()`].
