@@ -1,31 +1,9 @@
-use std::sync::OnceLock;
-
-fn env_truthy(key: &str) -> Option<bool> {
-    std::env::var(key).ok().map(|v| {
-        let v = v.trim().to_ascii_lowercase();
-        !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
-    })
-}
-
 fn log_mul_mat_requested() -> bool {
-    static LOG_MUL_MAT: OnceLock<bool> = OnceLock::new();
-    *LOG_MUL_MAT.get_or_init(|| env_truthy("MAKEPAD_VOICE_METAL_LOG_MUL_MAT").unwrap_or(false))
+    crate::settings::LOG_METAL_MUL_MAT
 }
 
 fn metal_requested() -> bool {
-    static USE_METAL: OnceLock<bool> = OnceLock::new();
-    *USE_METAL.get_or_init(|| {
-        if let Ok(backend) = std::env::var("MAKEPAD_VOICE_BACKEND") {
-            let backend = backend.trim().to_ascii_lowercase();
-            if backend == "cpu" {
-                return false;
-            }
-            if backend == "metal" {
-                return true;
-            }
-        }
-        env_truthy("MAKEPAD_VOICE_METAL").unwrap_or(cfg!(target_os = "macos"))
-    })
+    crate::settings::USE_METAL_BACKEND
 }
 
 pub(crate) fn try_matmul_nn_f32(
@@ -1306,16 +1284,16 @@ mod imp {
     fn metal_compile_feature_macros(device: ObjcId) -> (bool, bool) {
         let mut has_bfloat = device_supports_family(device, MTL_GPU_FAMILY_METAL3)
             || device_supports_family(device, MTL_GPU_FAMILY_APPLE6);
-        if std::env::var("GGML_METAL_BF16_DISABLE").is_ok() {
+        if crate::settings::DISABLE_GGML_METAL_BF16 {
             has_bfloat = false;
         }
 
         let mut has_tensor = device_supports_family(device, MTL_GPU_FAMILY_METAL4);
-        if std::env::var("GGML_METAL_TENSOR_DISABLE").is_ok() {
+        if crate::settings::DISABLE_GGML_METAL_TENSOR {
             has_tensor = false;
         }
 
-        if std::env::var("GGML_METAL_TENSOR_ENABLE").is_err() && has_tensor {
+        if !crate::settings::FORCE_ENABLE_GGML_METAL_TENSOR && has_tensor {
             let dev_name_obj: ObjcId = unsafe { msg_send![device, name] };
             let dev_name = nsstring_to_string(dev_name_obj);
             let tensor_whitelisted = dev_name.contains("M5")
@@ -1934,6 +1912,11 @@ mod imp {
             Ok(self.matmul_out_buffers.get(&tag).unwrap().buf.as_id())
         }
 
+        fn buffer_length_bytes(&self, buffer: ObjcId) -> Result<usize, String> {
+            let len_u64: u64 = unsafe { msg_send![buffer, length] };
+            usize::try_from(len_u64).map_err(|_| format!("buffer length too large: {}", len_u64))
+        }
+
         fn zero_buffer_range(
             &self,
             buffer: ObjcId,
@@ -1942,6 +1925,16 @@ mod imp {
         ) -> Result<(), String> {
             if len_bytes == 0 {
                 return Ok(());
+            }
+            let buf_len = self.buffer_length_bytes(buffer)?;
+            let end = offset_bytes
+                .checked_add(len_bytes)
+                .ok_or_else(|| "overflow computing zero range end".to_string())?;
+            if end > buf_len {
+                return Err(format!(
+                    "zero range out of bounds: offset={}, len={}, buffer_len={}",
+                    offset_bytes, len_bytes, buf_len
+                ));
             }
             let ptr: *mut u8 = unsafe { msg_send![buffer, contents] };
             if ptr.is_null() {
@@ -1969,6 +1962,13 @@ mod imp {
                 .checked_mul(std::mem::size_of::<u16>())
                 .ok_or_else(|| "overflow computing decoder self mask bytes".to_string())?;
             let mask_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_MASK, mask_bytes)?;
+            let mask_cap = self.buffer_length_bytes(mask_id)?;
+            if mask_bytes > mask_cap {
+                return Err(format!(
+                    "decoder self mask write exceeds buffer: need={}, cap={}",
+                    mask_bytes, mask_cap
+                ));
+            }
             let ptr: *mut u16 = unsafe { msg_send![mask_id, contents] };
             if ptr.is_null() {
                 return Err("decoder self mask buffer contents returned null".to_string());
@@ -1989,6 +1989,16 @@ mod imp {
         }
 
         fn copy_f32_buffer_contents(&self, buffer: ObjcId, elems: usize) -> Result<Vec<f32>, String> {
+            let byte_len = elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "overflow computing f32 copy byte length".to_string())?;
+            let cap = self.buffer_length_bytes(buffer)?;
+            if byte_len > cap {
+                return Err(format!(
+                    "f32 read exceeds buffer: need={} bytes, cap={} bytes",
+                    byte_len, cap
+                ));
+            }
             let out_ptr: *const c_void = unsafe { msg_send![buffer, contents] };
             if out_ptr.is_null() {
                 return Err("output buffer contents returned null".to_string());
@@ -2007,6 +2017,13 @@ mod imp {
             len_bytes: usize,
         ) -> Result<StrongId, String> {
             let len_bytes = len_bytes.max(1);
+            let src_len = self.buffer_length_bytes(src_buffer)?;
+            if len_bytes > src_len {
+                return Err(format!(
+                    "staging copy exceeds source buffer: need={} bytes, src_len={} bytes",
+                    len_bytes, src_len
+                ));
+            }
             let dst_buffer = self.new_buffer_with_length(len_bytes)?;
 
             let command_buffer_obj: ObjcId =
