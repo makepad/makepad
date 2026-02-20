@@ -3,6 +3,18 @@ use crate::tensor::{parallel_for, SendPtr, Tensor};
 
 const EPS: f32 = 1e-5;
 
+fn pad_to(v: usize, align: usize) -> usize {
+    if align == 0 {
+        return v;
+    }
+    let rem = v % align;
+    if rem == 0 {
+        v
+    } else {
+        v + (align - rem)
+    }
+}
+
 /// KV cache for the decoder self-attention.
 /// Stores K and V for each layer, growing as tokens are generated.
 pub struct KvCache {
@@ -99,13 +111,53 @@ pub fn decode(
         // === Self-Attention ===
         let residual = cur.clone();
 
-        // Layer norm
-        let normed = Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
-
-        // Q, K, V projections
-        let q = Tensor::linear_raw(&normed, &layer.attn_q_w, &layer.attn_q_b);
-        let k_new = Tensor::matmul_raw(&normed, &layer.attn_k_w);
-        let v_new = Tensor::linear_raw(&normed, &layer.attn_v_w, &layer.attn_v_b);
+        // Q, K, V projections.
+        let (q, k_new, v_new) = if crate::metal_backend::is_requested() && n_tokens == 1 {
+            if let Some((q_data, k_data, v_data)) = crate::metal_backend::try_decoder_self_qkv_step_f32(
+                &cur.data,
+                n_state,
+                &layer.attn_ln_0_w.data,
+                &layer.attn_ln_0_b.data,
+                &layer.attn_q_w.data,
+                layer.attn_q_w.ggml_type,
+                &layer.attn_q_b.data,
+                &layer.attn_k_w.data,
+                layer.attn_k_w.ggml_type,
+                &layer.attn_v_w.data,
+                layer.attn_v_w.ggml_type,
+                &layer.attn_v_b.data,
+            ) {
+                (
+                    Tensor {
+                        data: q_data,
+                        shape: vec![1, n_state],
+                    },
+                    Tensor {
+                        data: k_data,
+                        shape: vec![1, n_state],
+                    },
+                    Tensor {
+                        data: v_data,
+                        shape: vec![1, n_state],
+                    },
+                )
+            } else {
+                let normed =
+                    Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
+                (
+                    Tensor::linear_raw(&normed, &layer.attn_q_w, &layer.attn_q_b),
+                    Tensor::matmul_raw(&normed, &layer.attn_k_w),
+                    Tensor::linear_raw(&normed, &layer.attn_v_w, &layer.attn_v_b),
+                )
+            }
+        } else {
+            let normed = Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
+            (
+                Tensor::linear_raw(&normed, &layer.attn_q_w, &layer.attn_q_b),
+                Tensor::matmul_raw(&normed, &layer.attn_k_w),
+                Tensor::linear_raw(&normed, &layer.attn_v_w, &layer.attn_v_b),
+            )
+        };
 
         // Append new K, V to cache
         kv_cache.append(il, &k_new.data, &v_new.data);
@@ -116,6 +168,14 @@ pub fn decode(
 
         let (ref k_cross, ref v_cross) = cross_kv[il];
         let n_audio_ctx = k_cross.shape[0];
+        let n_audio_ctx_flash = if decoder_flash_cross
+            && crate::metal_backend::is_requested()
+            && n_tokens == 1
+        {
+            pad_to(n_audio_ctx, 256)
+        } else {
+            n_audio_ctx
+        };
 
         let scale = 1.0 / (n_state_head as f32).sqrt();
         if decoder_flash_self
@@ -134,7 +194,7 @@ pub fn decode(
                 n_head,
                 &k_cross.data,
                 &v_cross.data,
-                n_audio_ctx,
+                n_audio_ctx_flash,
                 layer,
             ) {
                 cur = Tensor {
@@ -335,7 +395,7 @@ pub fn decode(
                 n_head,
                 &k_cross.data,
                 &v_cross.data,
-                n_audio_ctx,
+                n_audio_ctx_flash,
                 layer,
             ) {
                 cur = Tensor {
@@ -370,7 +430,7 @@ pub fn decode(
                 &k_cross.data,
                 &v_cross.data,
                 n_tokens,
-                n_audio_ctx,
+                n_audio_ctx_flash,
                 n_head,
                 n_state_head,
                 scale,
