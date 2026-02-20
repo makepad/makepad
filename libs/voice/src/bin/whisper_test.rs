@@ -79,7 +79,7 @@ fn read_wav_pcm_f32(path: &str) -> Vec<f32> {
 fn main() {
     let model_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "local/ggml-large-v3-turbo.bin".into());
+        .unwrap_or_else(|| "ggml-large-v3-turbo.bin".into());
     let wav_path = std::env::args()
         .nth(2)
         .unwrap_or_else(|| "local/whisper.cpp/samples/jfk.wav".into());
