@@ -1,23 +1,14 @@
 use crate::quant::*;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Condvar, Mutex};
 
 thread_local! {
     static Q8_ACT_SCRATCH: RefCell<Vec<u8>> = RefCell::new(Vec::new());
 }
 
 fn quant_gpu_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("MAKEPAD_VOICE_METAL_QUANT")
-            .ok()
-            .map(|v| {
-                let v = v.trim().to_ascii_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
-            })
-            .unwrap_or(true)
-    })
+    crate::settings::ENABLE_METAL_QUANT
 }
 
 /// Wrapper to pass raw *mut f32 across thread boundaries.
@@ -174,26 +165,14 @@ fn get_pool() -> &'static ThreadPool {
         } else {
             hw.min(8).max(4).min(max_threads)
         };
-        let n = std::env::var("MAKEPAD_VOICE_THREADS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .map(|v| v.clamp(1, max_threads))
-            .unwrap_or(default_threads);
+        let n = default_threads;
         ThreadPool::new(n)
     })
 }
 
 #[inline]
 fn use_act_q8() -> bool {
-    static USE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *USE.get_or_init(|| {
-        let default_on = cfg!(target_arch = "aarch64");
-        let on = std::env::var("MAKEPAD_VOICE_ACT_Q8")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(default_on);
-        on
-    })
+    crate::settings::ENABLE_ACT_Q8
 }
 
 /// Run `n_jobs` tasks in parallel, each receiving its job index.
@@ -1155,19 +1134,6 @@ impl Tensor {
         xq_rows: Option<&[u8]>,
     ) -> Tensor {
         let _t = std::time::Instant::now();
-        if std::env::var("MAKEPAD_VOICE_BACKEND")
-            .ok()
-            .map(|v| v.trim().eq_ignore_ascii_case("metal"))
-            .unwrap_or(false)
-        {
-            static LOG_FIRST: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-            if LOG_FIRST.set(()).is_ok() {
-                eprintln!(
-                    "[voice][debug] matmul_raw first-call weight.ggml_type={} shape={:?}",
-                    weight.ggml_type, weight.shape
-                );
-            }
-        }
         let in_features = weight.n_cols();
         let out_features = weight.n_rows();
         let batch = x.numel() / in_features;

@@ -72,27 +72,8 @@ pub fn decode(
     kv_cache: &mut KvCache,
     cross_kv: &[(Tensor, Tensor)],
 ) -> Tensor {
-    let decoder_flash = std::env::var("MAKEPAD_VOICE_METAL_DECODER_FLASH")
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
-        })
-        .unwrap_or(true);
-    let decoder_flash_self = std::env::var("MAKEPAD_VOICE_METAL_DECODER_FLASH_SELF")
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
-        })
-        .unwrap_or(decoder_flash);
-    let decoder_flash_cross = std::env::var("MAKEPAD_VOICE_METAL_DECODER_FLASH_CROSS")
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
-        })
-        .unwrap_or(true);
+    let decoder_flash_self = crate::settings::ENABLE_METAL_DECODER_FLASH_SELF;
+    let decoder_flash_cross = crate::settings::ENABLE_METAL_DECODER_FLASH_CROSS;
 
     let n_tokens = tokens.len();
     let n_state = model.hparams.n_text_state as usize;
@@ -295,9 +276,12 @@ pub fn decode(
                             let s_row = &scores[i * n_kv..(i + 1) * n_kv];
                             for d in 0..n_state_head {
                                 let v_col = &vh_t[d * n_kv..(d + 1) * n_kv];
+                                let out_idx = i * n_state + h_off + d;
+                                debug_assert!(out_idx < n_tokens * n_state);
                                 unsafe {
-                                    *out_ptr.ptr().add(i * n_state + h_off + d) =
-                                        Tensor::dot_f32(s_row, v_col);
+                                    // Safe: each parallel head writes to a disjoint [h_off, h_off+n_state_head)
+                                    // slice in every token row, and out_idx is bounds-checked above.
+                                    *out_ptr.ptr().add(out_idx) = Tensor::dot_f32(s_row, v_col);
                                 }
                             }
                         }
@@ -370,9 +354,11 @@ pub fn decode(
                         let s_row = &scores[i * n_kv..(i + 1) * n_kv];
                         for d in 0..n_state_head {
                             let v_col = &vh_t[d * n_kv..(d + 1) * n_kv];
+                            let out_idx = i * n_state + h_off + d;
+                            debug_assert!(out_idx < n_tokens * n_state);
                             unsafe {
-                                *out_ptr.ptr().add(i * n_state + h_off + d) =
-                                    Tensor::dot_f32(s_row, v_col);
+                                // Safe: per-head writes are disjoint; index bounds asserted above.
+                                *out_ptr.ptr().add(out_idx) = Tensor::dot_f32(s_row, v_col);
                             }
                         }
                     }
@@ -508,9 +494,11 @@ pub fn decode(
                         let s_row = &scores[i * n_audio_ctx..(i + 1) * n_audio_ctx];
                         for d in 0..n_state_head {
                             let v_col = &vh_t[d * n_audio_ctx..(d + 1) * n_audio_ctx];
+                            let out_idx = i * n_state + h_off + d;
+                            debug_assert!(out_idx < n_tokens * n_state);
                             unsafe {
-                                *out_ptr.ptr().add(i * n_state + h_off + d) =
-                                    Tensor::dot_f32(s_row, v_col);
+                                // Safe: per-head writes are disjoint; index bounds asserted above.
+                                *out_ptr.ptr().add(out_idx) = Tensor::dot_f32(s_row, v_col);
                             }
                         }
                     }
@@ -578,9 +566,11 @@ pub fn decode(
                     let s_row = &scores[i * n_audio_ctx..(i + 1) * n_audio_ctx];
                     for d in 0..n_state_head {
                         let v_col = &vh_t[d * n_audio_ctx..(d + 1) * n_audio_ctx];
+                        let out_idx = i * n_state + h_off + d;
+                        debug_assert!(out_idx < n_tokens * n_state);
                         unsafe {
-                            *out_ptr.ptr().add(i * n_state + h_off + d) =
-                                Tensor::dot_f32(s_row, v_col);
+                            // Safe: per-head writes are disjoint; index bounds asserted above.
+                            *out_ptr.ptr().add(out_idx) = Tensor::dot_f32(s_row, v_col);
                         }
                     }
                 }

@@ -5,6 +5,7 @@ mod mel;
 mod metal_backend;
 mod model;
 mod quant;
+mod settings;
 mod tensor;
 mod transcriber;
 
