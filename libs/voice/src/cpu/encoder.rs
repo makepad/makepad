@@ -33,9 +33,7 @@ fn multi_head_attention(
     let k = Tensor::matmul_raw_with_prequant(x, k_w, xq.as_deref());
     let v = Tensor::linear_raw_with_prequant(x, v_w, xq.as_deref(), v_b);
 
-    let metal_attn_enabled = crate::settings::ENABLE_METAL_ENCODER_ATTN;
-
-    if crate::metal_backend::is_requested() && metal_attn_enabled {
+    if crate::metal_backend::is_requested() {
         if let Some(out) = crate::metal_backend::try_flash_attn_f32_packed(
             &q.data,
             &k.data,
