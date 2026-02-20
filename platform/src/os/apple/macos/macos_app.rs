@@ -9,7 +9,10 @@ use {
         //turtle::{
         //    Rect
         //},
-        event::{KeyCode, KeyEvent, KeyModifiers, TextClipboardEvent, TextInputEvent, TimerEvent},
+        event::{
+            KeyCode, KeyEvent, KeyModifiers, TextClipboardEvent, TextInputEvent, ImageInputEvent,
+            TimerEvent,
+        },
         macos_menu::MacosMenu,
         makepad_live_id::*,
         makepad_math::Vec2d,
@@ -382,16 +385,36 @@ impl MacosApp {
                     match key_code {
                         KeyCode::KeyV => {
                             if modifiers.logo || modifiers.control {
-                                // was a paste
+                                // was a paste - collect text and image data (dispatch both when present)
                                 let pasteboard: ObjcId = with_macos_app(|app| app.pasteboard);
                                 let nsstring: ObjcId =
                                     msg_send![pasteboard, stringForType: NSStringPboardType];
+
+                                let image_types = [NSPasteboardTypePNG, NSPasteboardTypeTIFF];
+                                let mut image_data: ObjcId = std::ptr::null_mut();
+                                for ty in image_types {
+                                    let data: ObjcId = msg_send![pasteboard, dataForType: ty];
+                                    if data != std::ptr::null_mut() {
+                                        image_data = data;
+                                        break;
+                                    }
+                                }
+
                                 if nsstring != std::ptr::null_mut() {
                                     let string = nsstring_to_string(nsstring);
                                     MacosApp::do_callback(MacosEvent::TextInput(TextInputEvent {
                                         input: string,
                                         was_paste: true,
                                         replace_last: false,
+                                    }));
+                                }
+
+                                if image_data != std::ptr::null_mut() {
+                                    let length: usize = msg_send![image_data, length];
+                                    let bytes: *const u8 = msg_send![image_data, bytes];
+                                    let data = std::slice::from_raw_parts(bytes, length).to_vec();
+                                    MacosApp::do_callback(MacosEvent::ImageInput(ImageInputEvent {
+                                        data,
                                     }));
                                 }
                             }

@@ -132,6 +132,7 @@ pub use {
             NextFrameEvent,
             TextClipboardEvent,
             TextInputEvent,
+            ImageInputEvent,
             //MidiInputListEvent,
             Timer,
             TimerEvent,

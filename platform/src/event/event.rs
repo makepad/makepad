@@ -187,6 +187,7 @@ pub enum Event {
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
+    ImageInput(ImageInputEvent),
     TextRangeReplace(TextRangeReplaceEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
@@ -279,6 +280,7 @@ impl Event {
             35 => "TextRangeReplace",
             36 => "TextCopy",
             37 => "TextCut",
+            59 => "ImageInput",
 
             38 => "Drag",
             39 => "Drop",
@@ -355,6 +357,7 @@ impl Event {
             Self::TextRangeReplace(_) => 35,
             Self::TextCopy(_) => 36,
             Self::TextCut(_) => 37,
+            Self::ImageInput(_) => 59,
 
             Self::Drag(_) => 38,
             Self::Drop(_) => 39,
@@ -407,6 +410,7 @@ pub enum Hit {
     KeyUp(KeyEvent),
     Trigger(TriggerHitEvent),
     TextInput(TextInputEvent),
+    ImageInput(ImageInputEvent),
     TextRangeReplace(TextRangeReplaceEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),

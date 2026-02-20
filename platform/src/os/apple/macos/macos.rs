@@ -281,7 +281,8 @@ impl Cx {
             | MacosEvent::Scroll(_)
             | MacosEvent::KeyDown(_)
             | MacosEvent::KeyUp(_)
-            | MacosEvent::TextInput(_) => {
+            | MacosEvent::TextInput(_)
+            | MacosEvent::ImageInput(_) => {
                 self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
                 self.ensure_timer0_started();
             }
@@ -458,6 +459,7 @@ impl Cx {
                 self.call_event_handler(&Event::WindowCloseRequested(e))
             }
             MacosEvent::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
+            MacosEvent::ImageInput(e) => self.call_event_handler(&Event::ImageInput(e)),
             MacosEvent::Drag(e) => {
                 self.call_event_handler(&Event::Drag(e));
                 self.drag_drop.cycle_drag();

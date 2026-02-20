@@ -135,6 +135,11 @@ pub struct TextInputEvent {
 }
 
 #[derive(Clone, Debug)]
+pub struct ImageInputEvent {
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
 pub struct TextClipboardEvent {
     pub response: Rc<RefCell<Option<String>>>,
 }

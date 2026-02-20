@@ -143,6 +143,8 @@ extern "C" {
     pub static NSPasteboardTypeFileURL: ObjcId;
     pub static NSPasteboardTypeURL: ObjcId;
     pub static NSPasteboardTypeString: ObjcId;
+    pub static NSPasteboardTypePNG: ObjcId;
+    pub static NSPasteboardTypeTIFF: ObjcId;
 }
 
 #[link(name = "Vision", kind = "framework")]
