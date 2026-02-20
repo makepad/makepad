@@ -72,9 +72,6 @@ pub fn decode(
     kv_cache: &mut KvCache,
     cross_kv: &[(Tensor, Tensor)],
 ) -> Tensor {
-    let decoder_flash_self = crate::settings::ENABLE_METAL_DECODER_FLASH_SELF;
-    let decoder_flash_cross = crate::settings::ENABLE_METAL_DECODER_FLASH_CROSS;
-
     let n_tokens = tokens.len();
     let n_state = model.hparams.n_text_state as usize;
     let n_head = model.hparams.n_text_head as usize;
@@ -149,21 +146,14 @@ pub fn decode(
 
         let (ref k_cross, ref v_cross) = cross_kv[il];
         let n_audio_ctx = k_cross.shape[0];
-        let n_audio_ctx_flash = if decoder_flash_cross
-            && crate::metal_backend::is_requested()
-            && n_tokens == 1
-        {
+        let n_audio_ctx_flash = if crate::metal_backend::is_requested() && n_tokens == 1 {
             pad_to(n_audio_ctx, 256)
         } else {
             n_audio_ctx
         };
 
         let scale = 1.0 / (n_state_head as f32).sqrt();
-        if decoder_flash_self
-            && decoder_flash_cross
-            && crate::metal_backend::is_requested()
-            && n_tokens == 1
-        {
+        if crate::metal_backend::is_requested() && n_tokens == 1 {
             if let Some(out) = crate::metal_backend::try_decoder_self_cross_ffn_step_f32(
                 il,
                 &residual.data,
@@ -186,8 +176,7 @@ pub fn decode(
             }
         }
 
-        let attn_out =
-            if decoder_flash_self && crate::metal_backend::is_requested() && n_tokens == 1 {
+        let attn_out = if crate::metal_backend::is_requested() && n_tokens == 1 {
                 crate::metal_backend::try_flash_attn_f32_self_kv_cache(
                     il,
                     &q.data,
@@ -364,7 +353,7 @@ pub fn decode(
                     }
                 });
                 attn_out
-            };
+        };
 
         let attn_result = Tensor {
             data: attn_out,
@@ -373,7 +362,7 @@ pub fn decode(
         let projected = Tensor::linear_raw(&attn_result, &layer.attn_ln_1_w, &layer.attn_ln_1_b);
         cur = Tensor::add(&projected, &residual);
 
-        if decoder_flash_cross && crate::metal_backend::is_requested() && n_tokens == 1 {
+        if crate::metal_backend::is_requested() && n_tokens == 1 {
             if let Some(out) = crate::metal_backend::try_decoder_cross_ffn_step_f32(
                 il,
                 &cur.data,
@@ -406,10 +395,7 @@ pub fn decode(
 
         let scale = 1.0 / (n_state_head as f32).sqrt();
 
-        let attn_out = if decoder_flash_cross
-            && crate::metal_backend::is_requested()
-            && n_tokens == 1
-        {
+        let attn_out = if crate::metal_backend::is_requested() && n_tokens == 1 {
             crate::metal_backend::try_flash_attn_f32_cross_kv_cache(
                 il,
                 &q.data,

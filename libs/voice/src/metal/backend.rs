@@ -87,21 +87,6 @@ pub(crate) fn try_matmul_nt_ggml_bytes_add_bias(
     imp::try_matmul_nt_ggml_bytes_add_bias(a, bt_bytes, bt_ggml_type, m, k, n, bias)
 }
 
-#[allow(dead_code)]
-pub(crate) fn try_flash_attn_f32(
-    q: &[f32],
-    k: &[f32],
-    v: &[f32],
-    n_q: usize,
-    d: usize,
-    scale: f32,
-) -> Option<Vec<f32>> {
-    if !metal_requested() {
-        return None;
-    }
-    imp::try_flash_attn_f32(q, k, v, n_q, d, scale)
-}
-
 pub(crate) fn try_flash_attn_f32_packed(
     q: &[f32],
     k: &[f32],
@@ -527,18 +512,6 @@ mod imp {
         None
     }
 
-    #[allow(dead_code)]
-    pub(super) fn try_flash_attn_f32(
-        _q: &[f32],
-        _k: &[f32],
-        _v: &[f32],
-        _n_q: usize,
-        _d: usize,
-        _scale: f32,
-    ) -> Option<Vec<f32>> {
-        None
-    }
-
     pub(super) fn try_flash_attn_f32_packed(
         _q: &[f32],
         _k: &[f32],
@@ -834,11 +807,9 @@ mod imp {
     const N_R0_Q8_0: i32 = 2;
     const N_SG_Q8_0: i32 = 4;
 
-    const _GGML_METAL_SOURCE_RAW: &str =
-        include_str!("../../../local/whisper.cpp/ggml/src/ggml-metal/ggml-metal.metal");
-    const _GGML_COMMON_H: &str = include_str!("../../../local/whisper.cpp/ggml/src/ggml-common.h");
-    const _GGML_METAL_IMPL_H: &str =
-        include_str!("../../../local/whisper.cpp/ggml/src/ggml-metal/ggml-metal-impl.h");
+    const _GGML_METAL_SOURCE_RAW: &str = include_str!("ggml/ggml-metal.metal");
+    const _GGML_COMMON_H: &str = include_str!("ggml/ggml-common.h");
+    const _GGML_METAL_IMPL_H: &str = include_str!("ggml/ggml-metal-impl.h");
     const _GGML_METALLIB_BYTES: &[u8] = include_bytes!(env!("MAKEPAD_VOICE_GGML_METALLIB"));
 
     #[link(name = "Metal", kind = "framework")]
@@ -1308,11 +1279,48 @@ mod imp {
         (has_bfloat, has_tensor)
     }
 
+    fn read_text_with_fallback(paths: &[&str], fallback: &str) -> String {
+        for path in paths {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                return text;
+            }
+        }
+        fallback.to_string()
+    }
+
     fn build_ggml_source() -> String {
-        let mut src = _GGML_METAL_SOURCE_RAW.to_string();
-        src = src.replace("__embed_ggml-common.h__", _GGML_COMMON_H);
-        src = src.replace("#include \"ggml-common.h\"", _GGML_COMMON_H);
-        src = src.replace("#include \"ggml-metal-impl.h\"", _GGML_METAL_IMPL_H);
+        // Development path: prefer source files from disk so shader-pruning tools can
+        // iterate without rebuilding the Rust crate every edit.
+        let mut src = read_text_with_fallback(
+            &[
+                "libs/voice/src/ggml-metal/ggml-metal.metal",
+                "src/ggml-metal/ggml-metal.metal",
+                "libs/voice/src/metal/ggml/ggml-metal.metal",
+                "src/metal/ggml/ggml-metal.metal",
+            ],
+            _GGML_METAL_SOURCE_RAW,
+        );
+        let common_h = read_text_with_fallback(
+            &[
+                "libs/voice/src/ggml-metal/ggml-common.h",
+                "src/ggml-metal/ggml-common.h",
+                "libs/voice/src/metal/ggml/ggml-common.h",
+                "src/metal/ggml/ggml-common.h",
+            ],
+            _GGML_COMMON_H,
+        );
+        let impl_h = read_text_with_fallback(
+            &[
+                "libs/voice/src/ggml-metal/ggml-metal-impl.h",
+                "src/ggml-metal/ggml-metal-impl.h",
+                "libs/voice/src/metal/ggml/ggml-metal-impl.h",
+                "src/metal/ggml/ggml-metal-impl.h",
+            ],
+            _GGML_METAL_IMPL_H,
+        );
+        src = src.replace("__embed_ggml-common.h__", &common_h);
+        src = src.replace("#include \"ggml-common.h\"", &common_h);
+        src = src.replace("#include \"ggml-metal-impl.h\"", &impl_h);
         src
     }
 
@@ -2424,6 +2432,9 @@ mod imp {
             nsg: i32,
         ) -> Result<(ObjcId, usize, i32, i32, i32), String> {
             if !self.pipeline_cache.contains_key(&cache_name) {
+                if crate::settings::LOG_METAL_PIPELINES {
+                    eprintln!("[voice][metal] compile_pipeline base={}", base_name);
+                }
                 let compiled = self.compile_pipeline(base_name, constants)?;
                 self.pipeline_cache.insert(
                     cache_name.clone(),
@@ -6748,22 +6759,6 @@ mod imp {
         with_context(|ctx| {
             ctx.matmul_nt_ggml_bytes_add_bias(a, bt_bytes, bt_ggml_type, m, k, n, bias)
         })
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn try_flash_attn_f32(
-        q: &[f32],
-        k: &[f32],
-        v: &[f32],
-        n_q: usize,
-        d: usize,
-        scale: f32,
-    ) -> Option<Vec<f32>> {
-        if d == 0 || k.len() % d != 0 {
-            return None;
-        }
-        let n_kv = k.len() / d;
-        with_context(|ctx| ctx.flash_attn_f32_packed(q, k, v, n_q, n_kv, 1, d, scale))
     }
 
     pub(super) fn try_flash_attn_f32_packed(

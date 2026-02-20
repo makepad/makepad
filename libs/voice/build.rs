@@ -45,11 +45,8 @@ fn build_whisper_metallib() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
 
-    let ggml_src_dir = format!("{}/../../local/whisper.cpp/ggml/src", manifest_dir);
-    let ggml_metal_dir = format!(
-        "{}/../../local/whisper.cpp/ggml/src/ggml-metal",
-        manifest_dir
-    );
+    let ggml_src_dir = format!("{}/src/metal/ggml", manifest_dir);
+    let ggml_metal_dir = format!("{}/src/metal/ggml", manifest_dir);
 
     let metal_src = format!("{}/ggml-metal.metal", ggml_metal_dir);
     let common_h = format!("{}/ggml-common.h", ggml_src_dir);
