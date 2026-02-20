@@ -400,6 +400,40 @@ pub(crate) fn try_encoder_stack_f32(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn try_decoder_self_qkv_step_f32(
+    x: &[f32],
+    n_state: usize,
+    attn_ln_w: &[f32],
+    attn_ln_b: &[f32],
+    q_w_bytes: &[u8],
+    q_w_ggml_type: u32,
+    q_b: &[f32],
+    k_w_bytes: &[u8],
+    k_w_ggml_type: u32,
+    v_w_bytes: &[u8],
+    v_w_ggml_type: u32,
+    v_b: &[f32],
+) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+    if !metal_requested() {
+        return None;
+    }
+    imp::try_decoder_self_qkv_step_f32(
+        x,
+        n_state,
+        attn_ln_w,
+        attn_ln_b,
+        q_w_bytes,
+        q_w_ggml_type,
+        q_b,
+        k_w_bytes,
+        k_w_ggml_type,
+        v_w_bytes,
+        v_w_ggml_type,
+        v_b,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_decoder_cross_ffn_step_f32(
     layer_idx: usize,
     x: &[f32],
@@ -699,6 +733,24 @@ mod imp {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_decoder_self_qkv_step_f32(
+        _x: &[f32],
+        _n_state: usize,
+        _attn_ln_w: &[f32],
+        _attn_ln_b: &[f32],
+        _q_w_bytes: &[u8],
+        _q_w_ggml_type: u32,
+        _q_b: &[f32],
+        _k_w_bytes: &[u8],
+        _k_w_ggml_type: u32,
+        _v_w_bytes: &[u8],
+        _v_w_ggml_type: u32,
+        _v_b: &[f32],
+    ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn try_decoder_cross_ffn_step_f32(
         _layer_idx: usize,
         _x: &[f32],
@@ -735,8 +787,8 @@ mod imp {
 mod imp {
     use crate::model::{DecoderLayer, EncoderLayer};
     use crate::quant::{
-        block_size, GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q5_0,
-        GGML_TYPE_Q5_1, GGML_TYPE_Q8_0,
+        block_size, f32_to_f16, GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q4_1,
+        GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q8_0,
     };
     use makepad_objc_sys::runtime::{nil, ObjcId, Object, YES};
     use makepad_objc_sys::{class, msg_send, sel, sel_impl};
@@ -774,6 +826,7 @@ mod imp {
     const SCRATCH_FLASH_BLK: u8 = 2;
     const SCRATCH_FLASH_TMP: u8 = 3;
     const SCRATCH_FLASH_OUT: u8 = 4;
+    const SCRATCH_FLASH_MASK: u8 = 5;
     const SCRATCH_ENC_NORM0: u8 = 10;
     const SCRATCH_ENC_NORM1: u8 = 11;
     const SCRATCH_DEC_NORM0: u8 = 12;
@@ -1806,9 +1859,61 @@ mod imp {
             Ok(self.matmul_out_buffers.get(&tag).unwrap().buf.as_id())
         }
 
-        fn read_f32_buffer(&self, buffer: ObjcId, elems: usize) -> Result<Vec<f32>, String> {
-            self.wait_queue_idle()?;
+        fn zero_buffer_range(
+            &self,
+            buffer: ObjcId,
+            offset_bytes: usize,
+            len_bytes: usize,
+        ) -> Result<(), String> {
+            if len_bytes == 0 {
+                return Ok(());
+            }
+            let ptr: *mut u8 = unsafe { msg_send![buffer, contents] };
+            if ptr.is_null() {
+                return Err("buffer contents returned null".to_string());
+            }
+            unsafe {
+                std::ptr::write_bytes(ptr.add(offset_bytes), 0u8, len_bytes);
+            }
+            Ok(())
+        }
 
+        fn prepare_decoder_self_mask_f16(
+            &mut self,
+            n_valid: usize,
+            n_total: usize,
+        ) -> Result<ObjcId, String> {
+            if n_total == 0 || n_valid > n_total {
+                return Err(format!(
+                    "invalid decoder self mask sizes: n_valid={}, n_total={}",
+                    n_valid, n_total
+                ));
+            }
+
+            let mask_bytes = n_total
+                .checked_mul(std::mem::size_of::<u16>())
+                .ok_or_else(|| "overflow computing decoder self mask bytes".to_string())?;
+            let mask_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_MASK, mask_bytes)?;
+            let ptr: *mut u16 = unsafe { msg_send![mask_id, contents] };
+            if ptr.is_null() {
+                return Err("decoder self mask buffer contents returned null".to_string());
+            }
+
+            let neg_inf_h = f32_to_f16(f32::NEG_INFINITY);
+            unsafe {
+                let dst = std::slice::from_raw_parts_mut(ptr, n_total);
+                for v in dst.iter_mut().take(n_valid) {
+                    *v = 0;
+                }
+                for v in dst.iter_mut().skip(n_valid) {
+                    *v = neg_inf_h;
+                }
+            }
+
+            Ok(mask_id)
+        }
+
+        fn copy_f32_buffer_contents(&self, buffer: ObjcId, elems: usize) -> Result<Vec<f32>, String> {
             let out_ptr: *const c_void = unsafe { msg_send![buffer, contents] };
             if out_ptr.is_null() {
                 return Err("output buffer contents returned null".to_string());
@@ -1819,6 +1924,25 @@ mod imp {
                 std::ptr::copy_nonoverlapping(out_ptr as *const f32, out.as_mut_ptr(), elems);
             }
             Ok(out)
+        }
+
+        fn read_f32_buffer(&self, buffer: ObjcId, elems: usize) -> Result<Vec<f32>, String> {
+            self.wait_queue_idle()?;
+            self.copy_f32_buffer_contents(buffer, elems)
+        }
+
+        fn read_f32_buffers3(
+            &self,
+            b0: ObjcId,
+            b1: ObjcId,
+            b2: ObjcId,
+            elems: usize,
+        ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+            self.wait_queue_idle()?;
+            let o0 = self.copy_f32_buffer_contents(b0, elems)?;
+            let o1 = self.copy_f32_buffer_contents(b1, elems)?;
+            let o2 = self.copy_f32_buffer_contents(b2, elems)?;
+            Ok((o0, o1, o2))
         }
 
         fn get_or_create_cached_f32_buffer(
@@ -1938,15 +2062,35 @@ mod imp {
             k_cross: &[f32],
             v_cross: &[f32],
         ) -> Result<(ObjcId, ObjcId), String> {
-            let need = n_rows
-                .checked_mul(n_state)
-                .ok_or_else(|| "overflow computing cross kv size".to_string())?;
-            if k_cross.len() != need || v_cross.len() != need {
+            if n_state == 0 || n_rows == 0 {
                 return Err(format!(
-                    "cross kv len mismatch: k={}, v={}, expected={}",
+                    "invalid cross kv dimensions: n_state={}, n_rows={}",
+                    n_state, n_rows
+                ));
+            }
+            if k_cross.len() != v_cross.len() {
+                return Err(format!(
+                    "cross kv k/v len mismatch: k={}, v={}",
                     k_cross.len(),
                     v_cross.len(),
-                    need
+                ));
+            }
+            if k_cross.len() % n_state != 0 {
+                return Err(format!(
+                    "cross kv len not divisible by n_state: len={}, n_state={}",
+                    k_cross.len(),
+                    n_state
+                ));
+            }
+
+            let src_rows = k_cross.len() / n_state;
+            if src_rows == 0 {
+                return Err("cross kv has zero rows".to_string());
+            }
+            if src_rows > n_rows {
+                return Err(format!(
+                    "cross kv source rows exceed requested rows: src_rows={}, n_rows={}",
+                    src_rows, n_rows
                 ));
             }
 
@@ -1967,8 +2111,47 @@ mod imp {
                 }
             }
 
-            let k_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(k_cross))?;
-            let v_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(v_cross))?;
+            let row_bytes = n_state
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "overflow computing cross kv row bytes".to_string())?;
+            let total_bytes = n_rows
+                .checked_mul(row_bytes)
+                .ok_or_else(|| "overflow computing cross kv total bytes".to_string())?;
+            let copy_bytes = src_rows
+                .checked_mul(row_bytes)
+                .ok_or_else(|| "overflow computing cross kv copy bytes".to_string())?;
+
+            let (k_buf, v_buf) = if src_rows == n_rows {
+                (
+                    self.new_buffer_with_bytes(f32_slice_as_bytes(k_cross))?,
+                    self.new_buffer_with_bytes(f32_slice_as_bytes(v_cross))?,
+                )
+            } else {
+                let k_buf = self.new_buffer_with_length(total_bytes)?;
+                let v_buf = self.new_buffer_with_length(total_bytes)?;
+
+                let dst_k: *mut u8 = unsafe { msg_send![k_buf.as_id(), contents] };
+                let dst_v: *mut u8 = unsafe { msg_send![v_buf.as_id(), contents] };
+                if dst_k.is_null() || dst_v.is_null() {
+                    return Err("cross kv buffer contents returned null".to_string());
+                }
+                unsafe {
+                    std::ptr::write_bytes(dst_k, 0u8, total_bytes);
+                    std::ptr::write_bytes(dst_v, 0u8, total_bytes);
+                    std::ptr::copy_nonoverlapping(
+                        k_cross.as_ptr() as *const u8,
+                        dst_k,
+                        copy_bytes,
+                    );
+                    std::ptr::copy_nonoverlapping(
+                        v_cross.as_ptr() as *const u8,
+                        dst_v,
+                        copy_bytes,
+                    );
+                }
+
+                (k_buf, v_buf)
+            };
             self.cross_kv_layers.insert(
                 layer,
                 CrossKvLayer {
@@ -4065,7 +4248,9 @@ mod imp {
                 ));
             }
 
-            let (k_id, v_id) = self.ensure_decoder_kv_layer(layer, n_state, n_kv)?;
+            // Mirror whisper.cpp Metal path: self-KV cache length is padded to 32.
+            let n_kv_flash = pad_to(n_kv, 32);
+            let (k_id, v_id) = self.ensure_decoder_kv_layer(layer, n_state, n_kv_flash)?;
             let row_bytes = n_state
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| "overflow computing decoder kv row bytes".to_string())?;
@@ -4098,9 +4283,34 @@ mod imp {
                 }
             }
 
+            if n_kv < n_kv_flash {
+                let tail_off = n_kv
+                    .checked_mul(row_bytes)
+                    .ok_or_else(|| "overflow computing decoder kv tail offset".to_string())?;
+                let tail_len = (n_kv_flash - n_kv)
+                    .checked_mul(row_bytes)
+                    .ok_or_else(|| "overflow computing decoder kv tail bytes".to_string())?;
+                self.zero_buffer_range(k_id, tail_off, tail_len)?;
+                self.zero_buffer_range(v_id, tail_off, tail_len)?;
+            }
+
+            let mask_id = self.prepare_decoder_self_mask_f16(n_kv, n_kv_flash)?;
             let q_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(q))?;
-            let out_buf =
-                self.flash_attn_f32_from_buffers(q_buf.as_id(), k_id, v_id, 1, n_kv, n_head, d, scale)?;
+            let out_buf = self.flash_attn_f32_from_buffers_with_params(
+                q_buf.as_id(),
+                k_id,
+                v_id,
+                1,
+                n_kv_flash,
+                n_head,
+                d,
+                scale,
+                FlashAttnExtParams {
+                    has_mask: true,
+                    ..FlashAttnExtParams::default()
+                },
+                Some(mask_id),
+            )?;
             self.read_f32_buffer(out_buf.as_id(), n_state)
         }
 
@@ -4153,6 +4363,34 @@ mod imp {
             d: usize,
             scale: f32,
         ) -> Result<StrongId, String> {
+            self.flash_attn_f32_from_buffers_with_params(
+                q_id,
+                k_id,
+                v_id,
+                n_q,
+                n_kv,
+                n_head,
+                d,
+                scale,
+                FlashAttnExtParams::default(),
+                None,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn flash_attn_f32_from_buffers_with_params(
+            &mut self,
+            q_id: ObjcId,
+            k_id: ObjcId,
+            v_id: ObjcId,
+            n_q: usize,
+            n_kv: usize,
+            n_head: usize,
+            d: usize,
+            scale: f32,
+            params: FlashAttnExtParams,
+            mask_id: Option<ObjcId>,
+        ) -> Result<StrongId, String> {
             let out_elems = n_q
                 .checked_mul(n_head)
                 .and_then(|v| v.checked_mul(d))
@@ -4163,11 +4401,15 @@ mod imp {
 
             let dst_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_OUT, out_bytes)?;
 
-            let params = FlashAttnExtParams::default();
             let use_vec = flash_attn_use_vec(n_q, d);
             let pad_bytes =
                 flash_attn_ext_extra_pad_bytes(n_q, n_kv, n_head, d, params.has_mask, use_vec)?;
             let pad_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_PAD, pad_bytes)?;
+            let mask_buf_id = if params.has_mask {
+                mask_id.ok_or_else(|| "flash-attn requested mask but no mask buffer was provided".to_string())?
+            } else {
+                q_id
+            };
 
             if use_vec {
                 let tmp_bytes = flash_attn_ext_extra_tmp_bytes(n_q, n_head, d, 32)?;
@@ -4177,7 +4419,7 @@ mod imp {
                     q_id,
                     k_id,
                     v_id,
-                    q_id, // unused when has_mask=false
+                    mask_buf_id,
                     q_id, // unused when has_sinks=false
                     pad_id,
                     Some(tmp_id),
@@ -4200,7 +4442,7 @@ mod imp {
                     q_id,
                     k_id,
                     v_id,
-                    q_id, // unused when has_mask=false
+                    mask_buf_id,
                     q_id, // unused when has_sinks=false
                     pad_id,
                     blk_id,
@@ -4589,6 +4831,22 @@ mod imp {
                 tag_base.wrapping_add(2),
                 tag_base.wrapping_add(3),
             )?;
+
+            // Match whisper.cpp encoder flash-attn usage: keep KV rows padded.
+            let n_kv_flash = pad_to(seq_len, 256);
+            let kv_flash_bytes = n_kv_flash
+                .checked_mul(n_state)
+                .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+                .ok_or_else(|| "overflow computing encoder kv padded bytes".to_string())?;
+            let _ = self.get_or_create_matmul_out_buffer(
+                tag_base.wrapping_add(4),
+                kv_flash_bytes,
+            )?;
+            let _ = self.get_or_create_matmul_out_buffer(
+                tag_base.wrapping_add(5),
+                kv_flash_bytes,
+            )?;
+
             let k_buf = self.linear_from_src_buffer(
                 norm0_id,
                 seq_len,
@@ -4619,7 +4877,7 @@ mod imp {
                 k_buf.as_id(),
                 v_buf.as_id(),
                 seq_len,
-                seq_len,
+                n_kv_flash,
                 n_head,
                 d,
                 scale,
@@ -4806,13 +5064,13 @@ mod imp {
             let x_shape = shape4_from_row_major(&[seq_len, n_state], 4)?;
             let ln_shape = shape4_from_row_major(&[n_state], 4)?;
 
-            let mut cur_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
+            let out_buf = self.with_batch(|ctx| {
+                let mut cur_buf = ctx.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
 
-            for (il, layer) in layers.iter().enumerate() {
-                let tag_base = (il as u8).wrapping_mul(16).wrapping_add(160);
-                let cur_id = cur_buf.as_id();
-                cur_buf = self.with_batch(|ctx| {
-                    ctx.encoder_layer_from_buffer_f32(
+                for (il, layer) in layers.iter().enumerate() {
+                    let tag_base = (il as u8).wrapping_mul(16).wrapping_add(160);
+                    let cur_id = cur_buf.as_id();
+                    cur_buf = ctx.encoder_layer_from_buffer_f32(
                         cur_id,
                         seq_len,
                         n_state,
@@ -4839,26 +5097,119 @@ mod imp {
                         layer.mlp_1_w.ggml_type,
                         &layer.mlp_1_b.data,
                         tag_base,
-                    )
-                })?;
-            }
+                    )?;
+                }
 
-            let ln_w_id = self.get_or_create_cached_f32_buffer(final_ln_w, 120)?;
-            let ln_b_id = self.get_or_create_cached_f32_buffer(final_ln_b, 121)?;
-            let out_buf = self.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
-            self.dispatch_norm_f32(
-                cur_buf.as_id(),
-                ln_w_id,
-                ln_b_id,
-                out_buf.as_id(),
-                &x_shape,
-                &ln_shape,
-                &ln_shape,
-                1e-5f32,
-                3,
-            )?;
+                let ln_w_id = ctx.get_or_create_cached_f32_buffer(final_ln_w, 120)?;
+                let ln_b_id = ctx.get_or_create_cached_f32_buffer(final_ln_b, 121)?;
+                let out_buf = ctx.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
+                ctx.dispatch_norm_f32(
+                    cur_buf.as_id(),
+                    ln_w_id,
+                    ln_b_id,
+                    out_buf.as_id(),
+                    &x_shape,
+                    &ln_shape,
+                    &ln_shape,
+                    1e-5f32,
+                    3,
+                )?;
+                Ok(out_buf)
+            })?;
 
             self.read_f32_buffer(out_buf.as_id(), x_need)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn decoder_self_qkv_step_f32(
+            &mut self,
+            x: &[f32],
+            n_state: usize,
+            attn_ln_w: &[f32],
+            attn_ln_b: &[f32],
+            q_w_bytes: &[u8],
+            q_w_ggml_type: u32,
+            q_b: &[f32],
+            k_w_bytes: &[u8],
+            k_w_ggml_type: u32,
+            v_w_bytes: &[u8],
+            v_w_ggml_type: u32,
+            v_b: &[f32],
+        ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
+            if n_state == 0 {
+                return Err("decoder qkv: n_state is zero".to_string());
+            }
+            if x.len() != n_state
+                || attn_ln_w.len() != n_state
+                || attn_ln_b.len() != n_state
+                || q_b.len() != n_state
+                || v_b.len() != n_state
+            {
+                return Err("decoder qkv: input/affine size mismatch".to_string());
+            }
+
+            let x_shape = shape4_from_row_major(&[1, n_state], 4)?;
+            let ln_shape = shape4_from_row_major(&[n_state], 4)?;
+
+            let (q_buf, k_buf, v_buf) = self.with_batch(|ctx| {
+                let x_buf = ctx.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
+
+                let ln_w_id = ctx.get_or_create_cached_f32_buffer(attn_ln_w, 240)?;
+                let ln_b_id = ctx.get_or_create_cached_f32_buffer(attn_ln_b, 241)?;
+                let norm_bytes = n_state
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| "overflow computing decoder qkv norm bytes".to_string())?;
+                let norm_id = ctx.get_or_create_scratch_buffer(SCRATCH_DEC_NORM0, norm_bytes)?;
+                ctx.dispatch_norm_f32(
+                    x_buf.as_id(),
+                    ln_w_id,
+                    ln_b_id,
+                    norm_id,
+                    &x_shape,
+                    &ln_shape,
+                    &ln_shape,
+                    1e-5f32,
+                    3,
+                )?;
+
+                let q_buf = ctx.linear_from_src_buffer(
+                    norm_id,
+                    1,
+                    n_state,
+                    q_w_bytes,
+                    q_w_ggml_type,
+                    n_state,
+                    Some(q_b),
+                    242,
+                    243,
+                )?;
+                let k_buf = ctx.linear_from_src_buffer(
+                    norm_id,
+                    1,
+                    n_state,
+                    k_w_bytes,
+                    k_w_ggml_type,
+                    n_state,
+                    None,
+                    244,
+                    0,
+                )?;
+                let v_buf = ctx.linear_from_src_buffer(
+                    norm_id,
+                    1,
+                    n_state,
+                    v_w_bytes,
+                    v_w_ggml_type,
+                    n_state,
+                    Some(v_b),
+                    245,
+                    246,
+                )?;
+
+                Ok((q_buf, k_buf, v_buf))
+            })?;
+
+            self.read_f32_buffers3(q_buf.as_id(), k_buf.as_id(), v_buf.as_id(), n_state)
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -4928,7 +5279,9 @@ mod imp {
 
                 let x_buf = ctx.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
 
-                let (k_self_id, v_self_id) = ctx.ensure_decoder_kv_layer(layer_idx, n_state, n_kv)?;
+                let n_kv_flash = pad_to(n_kv, 32);
+                let (k_self_id, v_self_id) =
+                    ctx.ensure_decoder_kv_layer(layer_idx, n_state, n_kv_flash)?;
                 let row_bytes = n_state
                     .checked_mul(std::mem::size_of::<f32>())
                     .ok_or_else(|| "overflow computing decoder kv row bytes".to_string())?;
@@ -4961,16 +5314,33 @@ mod imp {
                     }
                 }
 
+                if n_kv < n_kv_flash {
+                    let tail_off = n_kv
+                        .checked_mul(row_bytes)
+                        .ok_or_else(|| "overflow computing decoder kv tail offset".to_string())?;
+                    let tail_len = (n_kv_flash - n_kv)
+                        .checked_mul(row_bytes)
+                        .ok_or_else(|| "overflow computing decoder kv tail bytes".to_string())?;
+                    ctx.zero_buffer_range(k_self_id, tail_off, tail_len)?;
+                    ctx.zero_buffer_range(v_self_id, tail_off, tail_len)?;
+                }
+
+                let mask_id = ctx.prepare_decoder_self_mask_f16(n_kv, n_kv_flash)?;
                 let q_self_buf = ctx.new_buffer_with_bytes(f32_slice_as_bytes(q_self))?;
-                let self_attn_buf = ctx.flash_attn_f32_from_buffers(
+                let self_attn_buf = ctx.flash_attn_f32_from_buffers_with_params(
                     q_self_buf.as_id(),
                     k_self_id,
                     v_self_id,
                     1,
-                    n_kv,
+                    n_kv_flash,
                     n_head,
                     d,
                     scale,
+                    FlashAttnExtParams {
+                        has_mask: true,
+                        ..FlashAttnExtParams::default()
+                    },
+                    Some(mask_id),
                 )?;
 
                 let self_proj_buf = ctx.linear_from_src_buffer(
@@ -5604,8 +5974,6 @@ mod imp {
             let mn = m
                 .checked_mul(n)
                 .ok_or_else(|| "matmul overflow computing m*n".to_string())?;
-
-            let _pool = AutoreleasePool::new();
 
             let mut src0_temp = None;
             let src0_id = if let Some(tag) = weight_cache_tag {
@@ -6301,6 +6669,39 @@ mod imp {
     ) -> Option<Vec<f32>> {
         with_context(|ctx| {
             ctx.encoder_stack_f32(x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_decoder_self_qkv_step_f32(
+        x: &[f32],
+        n_state: usize,
+        attn_ln_w: &[f32],
+        attn_ln_b: &[f32],
+        q_w_bytes: &[u8],
+        q_w_ggml_type: u32,
+        q_b: &[f32],
+        k_w_bytes: &[u8],
+        k_w_ggml_type: u32,
+        v_w_bytes: &[u8],
+        v_w_ggml_type: u32,
+        v_b: &[f32],
+    ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+        with_context(|ctx| {
+            ctx.decoder_self_qkv_step_f32(
+                x,
+                n_state,
+                attn_ln_w,
+                attn_ln_b,
+                q_w_bytes,
+                q_w_ggml_type,
+                q_b,
+                k_w_bytes,
+                k_w_ggml_type,
+                v_w_bytes,
+                v_w_ggml_type,
+                v_b,
+            )
         })
     }
 
