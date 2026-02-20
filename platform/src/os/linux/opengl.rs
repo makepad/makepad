@@ -26,7 +26,7 @@ use {
             ScriptVm,
         },
         script::vm::ScriptVmCx,
-        texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureUpdated},
+        texture::{CxTexture, Texture, TextureFormat, TexturePixel, TextureSize, TextureUpdated},
     },
     gl_sys::LibGl,
     std::{
@@ -882,6 +882,23 @@ impl Cx {
         // Temporary warning for Adreno failing at compiling shaders that use samplerExternalOES.
 
     }*/
+
+    /// Create a render texture and immediately allocate its GL resources.
+    /// Returns the Texture handle and the GL texture ID, which is valid in any shared EGL context.
+    /// Used by Servo integration: Makepad owns the texture, Servo renders into it via its FBO.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    pub fn create_gl_render_texture(&mut self, width: usize, height: usize) -> (Texture, u32) {
+        let texture = Texture::new_with_format(self, TextureFormat::RenderBGRAu8 {
+            size: TextureSize::Fixed { width, height },
+            initial: true,
+        });
+        let gl = self.os.gl();
+        let cxtexture = &mut self.textures[texture.texture_id()];
+        cxtexture.update_render_target(gl, width, height);
+        let gl_id = cxtexture.os.gl_texture.unwrap();
+        (texture, gl_id)
+    }
+
 }
 
 const NUM_SHADER_VARIANTS: usize = 2;
