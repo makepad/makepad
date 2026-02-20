@@ -1593,7 +1593,7 @@ pub struct CxOs {
     pub fullscreen: bool,
     pub(crate) start_time: Instant,
     pub(crate) timers: PollTimers,
-    pub(crate) display: Option<CxAndroidDisplay>,
+    pub display: Option<CxAndroidDisplay>,
     #[cfg(use_vulkan)]
     pub(crate) vulkan: Option<CxVulkan>,
     pub(crate) media: CxAndroidMedia,
@@ -1613,6 +1613,20 @@ impl CxOs {
 }
 
 impl CxAndroidDisplay {
+    /// Make Makepad's EGL context current (with its surface).
+    /// Required before creating shared GL contexts.
+    pub fn make_current(&self) {
+        unsafe {
+            let res = (self.libegl.eglMakeCurrent.unwrap())(
+                self.egl_display,
+                self.surface,
+                self.surface,
+                self.egl_context,
+            );
+            assert!(res != 0, "eglMakeCurrent failed in CxAndroidDisplay::make_current");
+        }
+    }
+
     #[cfg(not(use_vulkan))]
     unsafe fn destroy_surface(&mut self) {
         (self.libegl.eglMakeCurrent.unwrap())(

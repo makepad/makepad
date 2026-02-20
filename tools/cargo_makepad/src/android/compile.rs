@@ -97,14 +97,13 @@ fn rust_build(
     #[allow(non_snake_case)]
     let NDK_VERSION_FULL = urls.ndk_version_full;
     for android_target in android_targets {
-        let clang_filename = format!("{}33-clang", android_target.clang());
+        let clang_filename = format!("{}{}-clang", android_target.clang(), urls.sdk_version);
 
         let bin_path = |bin_filename: &str, windows_extension: &str| {
             match host_os {
             HostOs::MacosX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
-            // NOTE! The NDK version we install (33) does not have darwin-aarch64 binaries (host) so we have to use darwin-x86
-            // This automatically runs via rosetta on M1 and newer targets.
-            HostOs::MacosAarch64 => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
+            // NDK r28 ships native darwin-aarch64 prebuilt binaries.
+            HostOs::MacosAarch64 => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-aarch64/bin/{bin_filename}"),
             HostOs::WindowsX64   => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/{bin_filename}.{windows_extension}"),
             HostOs::LinuxX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64/bin/{bin_filename}"),
             _ => panic!()
@@ -512,7 +511,8 @@ fn build_unaligned_apk(
 /// Returns the NDK prebuilt host directory name for the given host OS.
 fn ndk_prebuilt_dir(host_os: HostOs) -> &'static str {
     match host_os {
-        HostOs::MacosX64 | HostOs::MacosAarch64 => "darwin-x86_64",
+        HostOs::MacosX64 => "darwin-x86_64",
+        HostOs::MacosAarch64 => "darwin-aarch64",
         HostOs::WindowsX64 => "windows-x86_64",
         HostOs::LinuxX64 => "linux-x86_64",
         _ => panic!("Unsupported host OS"),
@@ -588,7 +588,7 @@ fn bundle_ndk_shared_deps(
 
         // Extra guard: if the same filename also exists in the API-level
         // subdirectory it is an OS-provided stub and should NOT be bundled.
-        let api_level_stub = sysroot_lib_dir.join("33").join(lib_name);
+        let api_level_stub = sysroot_lib_dir.join(urls.sdk_version.to_string()).join(lib_name);
         if api_level_stub.exists() {
             continue;
         }
