@@ -5,6 +5,7 @@ pub use makepad_draw::makepad_platform;
 pub use makepad_draw::*;
 pub use makepad_platform::log;
 pub use makepad_platform::makepad_script;
+pub use makepad_script::script_eval;
 pub use makepad_script::{ScriptValue, ScriptVm};
 
 pub use makepad_html;
@@ -240,58 +241,45 @@ pub use crate::chart::*;
 #[cfg(target_os = "android")]
 pub use crate::video::*;
 
-#[macro_export]
-macro_rules! script_fn {
-    ($($tt:tt)*) => {
-        |vm: &mut $crate::makepad_script::ScriptVm| -> $crate::makepad_script::ScriptValue {
-            let sb = $crate::makepad_script::script! { $($tt)* };
-            vm.eval(sb)
-        }
-    };
-}
 
-pub fn mod_theme(vm: &mut ScriptVm) {
+pub fn theme_mod(vm: &mut ScriptVm) {
     makepad_draw::script_mod(vm);
     makepad_platform::ime::script_mod(vm);
 
     vm.bx.heap.new_module(id!(prelude));
     vm.bx.heap.new_module(id!(themes));
+    crate::animator::script_mod(vm);
     crate::theme_desktop_dark::script_mod(vm);
     crate::theme_desktop_light::script_mod(vm);
     crate::theme_desktop_skeleton::script_mod(vm);
+    script_eval!(vm, {
+        mod.prelude.system = {
+            ..mod.res,
+            ..mod.helper,
+            ..mod.std,
+            ..mod.pod,
+            ..mod.math,
+            ..mod.sdf,
+            ..mod.animator,
+            ..mod.turtle,
+            ..mod.ime,
+            ..mod.shader,
+            ..mod.animator.Play,
+            ..mod.animator.Ease,
+            draw:mod.draw,
+            MouseCursor:mod.draw.MouseCursor
+        }
+    });
 }
 
-pub fn mod_widgets(vm: &mut ScriptVm) {
-    crate::animator::script_mod(vm);
+pub fn widgets_mod(vm: &mut ScriptVm) {
     // make the prelude for our own widgets
-    {
-        script_mod! {
-            mod.prelude.widgets_internal = {
-                ..mod.res,
-                ..mod.helper,
-                ..mod.animator,
-                ..mod.animator.Play,
-                ..mod.animator.Ease,
-                ..mod.pod,
-                ..mod.math,
-                ..mod.sdf,
-                ..mod.shader,
-                ..mod.turtle,
-                ..mod.turtle.Size,
-                ..mod.turtle.Flow,
-                ..mod.ime,
-                ..mod.ime.InputMode,
-                ..mod.ime.AutoCapitalize,
-                ..mod.ime.AutoCorrect,
-                ..mod.ime.ReturnKeyType,
-                ..mod.std
-                theme:mod.theme,
-                draw:mod.draw,
-                MouseCursor:mod.draw.MouseCursor
-            }
+    script_eval!(vm, {
+        mod.prelude.widgets_internal = {
+            ..mod.prelude.system,
+            theme:mod.theme,
         }
-        script_mod(vm);
-    }
+    });
 
     vm.bx.heap.new_module(id!(widgets));
 
@@ -316,15 +304,12 @@ pub fn mod_widgets(vm: &mut ScriptVm) {
     #[cfg(feature = "voice")]
     crate::voice_wave::script_mod(vm);
     #[cfg(not(feature = "voice"))]
-    {
-        script_mod! {
-            use mod.widgets.View
-            mod.widgets.VoiceWave = mod.widgets.View {
-                visible: false
-            }
+    script_eval!(vm, {
+        use mod.widgets.View
+        mod.widgets.VoiceWave = mod.widgets.View {
+            visible: false
         }
-        script_mod(vm);
-    }
+    });
     crate::window_menu::script_mod(vm);
     crate::nav_control::script_mod(vm);
     crate::window::script_mod(vm);
@@ -386,55 +371,19 @@ pub fn mod_widgets(vm: &mut ScriptVm) {
     crate::map::view::script_mod(vm);
     crate::math_view::script_mod(vm);
 
-    // make the prelude.widgetst with all our components
-
-    {
-        script_mod! {
-            mod.prelude.widgets = {
-                ..mod.res,
-                ..mod.helper,
-                ..mod.std,
-                ..mod.pod,
-                ..mod.math,
-                ..mod.sdf,
-                theme:mod.theme,
-                draw:mod.draw,
-                net:mod.net,
-                ..mod.animator,
-                ..mod.animator.Play,
-                ..mod.animator.Ease,
-                ..mod.shader,
-                ..mod.widgets,
-                ..mod.turtle,
-                ..mod.turtle.Size,
-                ..mod.turtle.Flow,
-                ..mod.ime,
-                ..mod.ime.InputMode,
-                ..mod.ime.AutoCapitalize,
-                ..mod.ime.AutoCorrect,
-                ..mod.ime.ReturnKeyType,
-                ..mod.draw.MouseCursor
-            }
+    script_eval!(vm, {
+        mod.prelude.widgets = {
+            ..mod.prelude.system,
+            theme:mod.theme,
+            ..mod.widgets,
         }
-        script_mod(vm);
-    }
-    //crate::theme_desktop_dark::script_mod(vm);
-}
-
-pub fn script_mod_before_theme<F>(vm: &mut ScriptVm, callback: F)
-where
-    F: FnOnce(&mut ScriptVm) -> ScriptValue,
-{
-    mod_theme(vm);
-    callback(vm);
-    mod_widgets(vm);
+    });
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {
-    set_theme(
-        vm,
-        script_fn! {
-            mod.theme = mod.themes.dark
-        },
-    );
+    theme_mod(vm);
+    script_eval!(vm,{
+        mod.theme = mod.themes.dark
+    });
+    widgets_mod(vm);
 }

@@ -252,11 +252,11 @@ script_mod! {
 
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod_before_theme(vm, script_fn!{
-            // here we have to set the theme, and we can mess with values
-            // before the widget system loads up
+        crate::makepad_widgets::theme_mod(vm);
+        script_eval!(vm,{
             mod.theme = mod.themes.light
         });
+        crate::makepad_widgets::widgets_mod(vm);
         App::from_script_mod(vm, self::script_mod)
     }
 }
