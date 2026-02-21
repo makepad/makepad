@@ -682,7 +682,11 @@ impl Cx {
         let () = unsafe { msg_send![encoder, endEncoding] };
         let gpu_frame_group_key = self
             .get_pass_window_id(draw_pass_id)
-            .map(|window_id| window_id.id() as u64);
+            .map(|window_id| {
+                // Group GPU timing by (window, repaint_id) so we don't merge ranges
+                // across multiple frames that happen to complete out-of-order.
+                (window_id.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.repaint_id
+            });
 
         match mode {
             DrawPassMode::MTKView(view) => {
@@ -907,6 +911,11 @@ impl Cx {
                                     *end = end.max(raw_end);
                                 } else {
                                     ranges.insert(group_key, (raw_start, raw_end));
+                                }
+                                // Safety valve: if a backend path never flushes grouped
+                                // ranges, avoid unbounded map growth.
+                                if ranges.len() > 1024 {
+                                    ranges.clear();
                                 }
                             }
                             if flush_gpu_frame_group {
@@ -1399,6 +1408,28 @@ impl MetalBuffer {
             self.inner = None;
             return;
         }
+        if let Some(inner) = self.inner.as_mut() {
+            if inner.len == len {
+                let dst = unsafe {
+                    let ptr: *mut std::ffi::c_void = msg_send![inner.buffer.as_id(), contents];
+                    ptr
+                };
+                if !dst.is_null() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, dst as *mut u8, len);
+                    }
+                    #[cfg(target_os = "macos")]
+                    unsafe {
+                        let range = NSRange {
+                            location: 0,
+                            length: len as u64,
+                        };
+                        let _: () = msg_send![inner.buffer.as_id(), didModifyRange: range];
+                    }
+                    return;
+                }
+            }
+        }
         self.inner = Some(MetalBufferInner {
             buffer: RcObjcId::from_owned(
                 NonNull::new(unsafe {
@@ -1411,12 +1442,14 @@ impl MetalBuffer {
                 })
                 .unwrap(),
             ),
+            len,
         });
     }
 }
 
 struct MetalBufferInner {
     buffer: RcObjcId,
+    len: usize,
 }
 
 #[derive(Default)]
