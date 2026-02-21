@@ -17,6 +17,13 @@ pub struct EventSample {
 pub struct GPUSample {
     pub start: f64,
     pub end: f64,
+    pub draw_calls: u64,
+    pub instances: u64,
+    pub vertices: u64,
+    pub instance_bytes: u64,
+    pub uniform_bytes: u64,
+    pub vertex_buffer_bytes: u64,
+    pub texture_bytes: u64,
 }
 
 #[derive(SerBin, DeBin, Debug, Clone)]

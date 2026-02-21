@@ -7,7 +7,12 @@ pub use napi_ohos;
 
 pub fn should_run_stdin_loop_from_env() -> bool {
     std::env::args().any(|v| v == "--stdin-loop")
-        || std::env::var("STUDIO").is_ok_and(|v| !v.trim().is_empty())
+        || std::env::var("MAKEPAD_STDIN_LOOP").is_ok_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
 }
 
 fn normalize_studio_http_from_studio_var(studio: &str) -> String {

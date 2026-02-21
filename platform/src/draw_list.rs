@@ -11,8 +11,9 @@ use crate::{
     makepad_script::*,
     os::{CxOsDrawCall, CxOsDrawList},
     script::vm::*,
-    texture::Texture,
+    texture::{Texture, TextureFormat, TextureId, TextureUpdated},
 };
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug)]
@@ -34,6 +35,235 @@ impl ScriptNew for DrawList {
 
 #[derive(Clone, Debug, PartialEq, Copy, Hash, Ord, PartialOrd, Eq)]
 pub struct DrawListId(usize, u64);
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GpuPassMetrics {
+    pub draw_calls: u64,
+    pub instances: u64,
+    pub vertices: u64,
+    pub instance_bytes: u64,
+    pub uniform_bytes: u64,
+    pub vertex_buffer_bytes: u64,
+    pub texture_bytes: u64,
+}
+
+impl Cx {
+    pub fn collect_gpu_pass_metrics(&self, draw_pass_id: DrawPassId) -> GpuPassMetrics {
+        let mut metrics = GpuPassMetrics::default();
+        let mut uploaded_geometries = HashSet::new();
+        let mut uploaded_textures = Vec::<TextureId>::new();
+        let Some(draw_list_id) = self.passes[draw_pass_id].main_draw_list_id else {
+            return metrics;
+        };
+        self.collect_gpu_metrics_for_draw_list(
+            draw_list_id,
+            draw_pass_id,
+            &mut metrics,
+            &mut uploaded_geometries,
+            &mut uploaded_textures,
+        );
+        metrics
+    }
+
+    fn estimate_texture_upload_bytes(&self, texture_id: TextureId) -> u64 {
+        let cx_texture = &self.textures[texture_id];
+        match &cx_texture.format {
+            TextureFormat::VecBGRAu8_32 {
+                width,
+                height,
+                updated,
+                ..
+            } => {
+                if let TextureUpdated::Empty = updated {
+                    0
+                } else {
+                    (*width as u64)
+                        .saturating_mul(*height as u64)
+                        .saturating_mul(4)
+                }
+            }
+            TextureFormat::VecCubeBGRAu8_32 {
+                width,
+                height,
+                updated,
+                ..
+            } => {
+                if let TextureUpdated::Empty = updated {
+                    0
+                } else {
+                    (*width as u64)
+                        .saturating_mul(*height as u64)
+                        .saturating_mul(4)
+                        .saturating_mul(6)
+                }
+            }
+            TextureFormat::VecMipBGRAu8_32 {
+                width,
+                height,
+                updated,
+                ..
+            } => {
+                if let TextureUpdated::Empty = updated {
+                    0
+                } else {
+                    (*width as u64)
+                        .saturating_mul(*height as u64)
+                        .saturating_mul(4)
+                }
+            }
+            TextureFormat::VecRGBAf32 {
+                width,
+                height,
+                updated,
+                ..
+            } => {
+                if let TextureUpdated::Empty = updated {
+                    0
+                } else {
+                    (*width as u64)
+                        .saturating_mul(*height as u64)
+                        .saturating_mul(16)
+                }
+            }
+            TextureFormat::VecRu8 {
+                width,
+                height,
+                updated,
+                ..
+            } => {
+                if let TextureUpdated::Empty = updated {
+                    0
+                } else {
+                    (*width as u64).saturating_mul(*height as u64)
+                }
+            }
+            TextureFormat::VecRGu8 {
+                width,
+                height,
+                updated,
+                ..
+            } => {
+                if let TextureUpdated::Empty = updated {
+                    0
+                } else {
+                    (*width as u64)
+                        .saturating_mul(*height as u64)
+                        .saturating_mul(2)
+                }
+            }
+            TextureFormat::VecRf32 {
+                width,
+                height,
+                updated,
+                ..
+            } => {
+                if let TextureUpdated::Empty = updated {
+                    0
+                } else {
+                    (*width as u64)
+                        .saturating_mul(*height as u64)
+                        .saturating_mul(4)
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    fn collect_gpu_metrics_for_draw_list(
+        &self,
+        draw_list_id: DrawListId,
+        draw_pass_id: DrawPassId,
+        metrics: &mut GpuPassMetrics,
+        uploaded_geometries: &mut HashSet<GeometryId>,
+        uploaded_textures: &mut Vec<TextureId>,
+    ) {
+        let draw_list = &self.draw_lists[draw_list_id];
+        for order_index in 0..draw_list.draw_item_order_len() {
+            let Some(draw_item_id) = draw_list.draw_item_id_at_order_index(order_index) else {
+                continue;
+            };
+            let draw_item = &draw_list.draw_items[draw_item_id];
+            if let Some(sub_list_id) = draw_item.kind.sub_list() {
+                self.collect_gpu_metrics_for_draw_list(
+                    sub_list_id,
+                    draw_pass_id,
+                    metrics,
+                    uploaded_geometries,
+                    uploaded_textures,
+                );
+                continue;
+            }
+            let Some(draw_call) = draw_item.kind.draw_call() else {
+                continue;
+            };
+
+            let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
+            let instance_slots = sh.mapping.instances.total_slots;
+            if instance_slots == 0 {
+                continue;
+            }
+            let instance_count = draw_item
+                .instances
+                .as_ref()
+                .map_or(0usize, |instances| instances.len() / instance_slots);
+            if instance_count == 0 {
+                continue;
+            }
+
+            let Some(geometry_id) = draw_call.geometry_id else {
+                continue;
+            };
+            let geometry = &self.geometries[geometry_id];
+            let index_count = geometry.indices.len() as u64;
+
+            metrics.draw_calls = metrics.draw_calls.saturating_add(1);
+            metrics.instances = metrics.instances.saturating_add(instance_count as u64);
+            metrics.vertices = metrics
+                .vertices
+                .saturating_add(index_count.saturating_mul(instance_count as u64));
+
+            if draw_call.instance_dirty {
+                metrics.instance_bytes = metrics
+                    .instance_bytes
+                    .saturating_add((draw_item.instances.as_ref().map_or(0usize, Vec::len) * 4) as u64);
+            }
+
+            // OpenGL/Android fallback estimate: count per-draw uniform uploads for VS+FS.
+            let uniform_f32s = draw_call.draw_call_uniforms.as_slice().len()
+                + self.passes[draw_pass_id].pass_uniforms.as_slice().len()
+                + draw_list.draw_list_uniforms.as_slice().len()
+                + draw_call.dyn_uniforms.len()
+                + sh.mapping.scope_uniforms_buf.len();
+            metrics.uniform_bytes = metrics
+                .uniform_bytes
+                .saturating_add((uniform_f32s as u64).saturating_mul(4).saturating_mul(2));
+
+            if uploaded_geometries.insert(geometry_id) {
+                if geometry.dirty_vertices {
+                    metrics.vertex_buffer_bytes = metrics
+                        .vertex_buffer_bytes
+                        .saturating_add((geometry.vertices.len() * 4) as u64);
+                }
+                if geometry.dirty_indices {
+                    metrics.vertex_buffer_bytes = metrics
+                        .vertex_buffer_bytes
+                        .saturating_add((geometry.indices.len() * 4) as u64);
+                }
+            }
+
+            for texture in draw_call.texture_slots.iter().flatten() {
+                let texture_id = texture.texture_id();
+                if uploaded_textures.iter().any(|existing| *existing == texture_id) {
+                    continue;
+                }
+                uploaded_textures.push(texture_id);
+                metrics.texture_bytes = metrics
+                    .texture_bytes
+                    .saturating_add(self.estimate_texture_upload_bytes(texture_id));
+            }
+        }
+    }
+}
 
 impl DrawListId {
     pub fn index(&self) -> usize {

@@ -32,8 +32,35 @@ struct MetalGpuTimelineSync {
     host_to_app_offset: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct GpuSampleCounters {
+    draw_calls: u64,
+    instances: u64,
+    vertices: u64,
+    instance_bytes: u64,
+    uniform_bytes: u64,
+    vertex_buffer_bytes: u64,
+    texture_bytes: u64,
+}
+
+impl GpuSampleCounters {
+    fn accumulate(&mut self, other: Self) {
+        self.draw_calls = self.draw_calls.saturating_add(other.draw_calls);
+        self.instances = self.instances.saturating_add(other.instances);
+        self.vertices = self.vertices.saturating_add(other.vertices);
+        self.instance_bytes = self.instance_bytes.saturating_add(other.instance_bytes);
+        self.uniform_bytes = self.uniform_bytes.saturating_add(other.uniform_bytes);
+        self.vertex_buffer_bytes = self
+            .vertex_buffer_bytes
+            .saturating_add(other.vertex_buffer_bytes);
+        self.texture_bytes = self.texture_bytes.saturating_add(other.texture_bytes);
+    }
+}
+
 static METAL_GPU_TIMELINE_SYNC: Mutex<Option<MetalGpuTimelineSync>> = Mutex::new(None);
 static METAL_GPU_FRAME_RANGES: Mutex<Option<HashMap<u64, (f64, f64)>>> = Mutex::new(None);
+static METAL_GPU_FRAME_COUNTERS: Mutex<Option<HashMap<u64, GpuSampleCounters>>> =
+    Mutex::new(None);
 
 fn map_metal_gpu_times_to_app_timeline(
     raw_start: f64,
@@ -159,7 +186,17 @@ impl Cx {
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    self.os.bytes_written += draw_item.instances.as_ref().unwrap().len() * 4;
+                    let instance_bytes =
+                        (draw_item.instances.as_ref().unwrap().len() * std::mem::size_of::<f32>())
+                            as u64;
+                    self.os.bytes_written = self
+                        .os
+                        .bytes_written
+                        .saturating_add(instance_bytes as usize);
+                    self.os.instance_bytes_uploaded = self
+                        .os
+                        .instance_bytes_uploaded
+                        .saturating_add(instance_bytes);
                     draw_item
                         .os
                         .instance_buffer
@@ -206,14 +243,28 @@ impl Cx {
 
                 let geometry = &mut self.geometries[geometry_id];
 
-                if geometry.dirty {
-                    geometry.os.index_buffer.update(metal_cx, &geometry.indices);
+                if geometry.dirty_vertices || geometry.os.vertex_buffer.inner.is_none() {
+                    let bytes = (geometry.vertices.len() * std::mem::size_of::<f32>()) as u64;
+                    self.os.vertex_buffer_bytes_uploaded = self
+                        .os
+                        .vertex_buffer_bytes_uploaded
+                        .saturating_add(bytes);
                     geometry
                         .os
                         .vertex_buffer
                         .update(metal_cx, &geometry.vertices);
-                    geometry.dirty = false;
+                    geometry.dirty_vertices = false;
                 }
+                if geometry.dirty_indices || geometry.os.index_buffer.inner.is_none() {
+                    let bytes = (geometry.indices.len() * std::mem::size_of::<u32>()) as u64;
+                    self.os.vertex_buffer_bytes_uploaded = self
+                        .os
+                        .vertex_buffer_bytes_uploaded
+                        .saturating_add(bytes);
+                    geometry.os.index_buffer.update(metal_cx, &geometry.indices);
+                    geometry.dirty_indices = false;
+                }
+                geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
 
                 if debug_dump {
                     Self::debug_dump_draw_call(
@@ -263,6 +314,7 @@ impl Cx {
                 let pass_uniforms = self.passes[draw_pass_id].pass_uniforms.as_slice();
                 let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
                 let draw_call_uniforms = draw_call.draw_call_uniforms.as_slice();
+                let mut uniform_bytes_uploaded = 0u64;
 
                 unsafe {
                     //let () = msg_send![encoder, setVertexBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const //std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
@@ -272,24 +324,34 @@ impl Cx {
                     if let Some(id) = shp.draw_call_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: draw_call_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: draw_call_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call_uniforms.len() * 4) as u64 atIndex: id];
+                        uniform_bytes_uploaded = uniform_bytes_uploaded
+                            .saturating_add((draw_call_uniforms.len() * 4 * 2) as u64);
                     }
                     if let Some(id) = shp.pass_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
+                        uniform_bytes_uploaded =
+                            uniform_bytes_uploaded.saturating_add((pass_uniforms.len() * 4 * 2) as u64);
                     }
                     if let Some(id) = shp.draw_list_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
+                        uniform_bytes_uploaded = uniform_bytes_uploaded
+                            .saturating_add((draw_list_uniforms.len() * 4 * 2) as u64);
                     }
                     if let Some(id) = shp.dyn_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
+                        uniform_bytes_uploaded = uniform_bytes_uploaded
+                            .saturating_add((draw_call.dyn_uniforms.len() * 4 * 2) as u64);
                     }
                     if let Some(id) = shp.scope_uniform_buffer_id {
                         let scope_buf = &sh.mapping.scope_uniforms_buf;
                         if !scope_buf.is_empty() {
                             let () = msg_send![encoder, setVertexBytes: scope_buf.as_ptr() as *const std::ffi::c_void length: (scope_buf.len() * 4) as u64 atIndex: id];
                             let () = msg_send![encoder, setFragmentBytes: scope_buf.as_ptr() as *const std::ffi::c_void length: (scope_buf.len() * 4) as u64 atIndex: id];
+                            uniform_bytes_uploaded = uniform_bytes_uploaded
+                                .saturating_add((scope_buf.len() * 4 * 2) as u64);
                         }
                     }
                     /*
@@ -299,6 +361,10 @@ impl Cx {
                         let () = msg_send![encoder, setFragmentBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 3u64];
                     }*/
                 }
+                self.os.uniform_bytes_uploaded = self
+                    .os
+                    .uniform_bytes_uploaded
+                    .saturating_add(uniform_bytes_uploaded);
                 // lets set our textures
                 for i in 0..sh.mapping.textures.len() {
                     let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
@@ -327,7 +393,11 @@ impl Cx {
                         #[cfg(target_os = "macos")]
                         cxtexture.update_shared_texture(metal_cx.device);
                     } else if cxtexture.format.is_vec() {
-                        cxtexture.update_vec_texture(metal_cx);
+                        let texture_bytes = cxtexture.update_vec_texture(metal_cx);
+                        self.os.texture_bytes_uploaded = self
+                            .os
+                            .texture_bytes_uploaded
+                            .saturating_add(texture_bytes);
                     }
 
                     if let Some(texture) = cxtexture.os.texture.as_ref() {
@@ -361,6 +431,11 @@ impl Cx {
                 }
 
                 self.os.draw_calls_done += 1;
+                self.os.instances_done = self.os.instances_done.saturating_add(instances);
+                self.os.vertices_done = self
+                    .os
+                    .vertices_done
+                    .saturating_add((geometry.indices.len() as u64).saturating_mul(instances));
                 if let Some(inner) = geometry.os.index_buffer.inner.as_ref() {
                     let () = unsafe {
                         msg_send![
@@ -432,7 +507,14 @@ impl Cx {
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) {
+        self.os.bytes_written = 0;
         self.os.draw_calls_done = 0;
+        self.os.instances_done = 0;
+        self.os.vertices_done = 0;
+        self.os.instance_bytes_uploaded = 0;
+        self.os.uniform_bytes_uploaded = 0;
+        self.os.vertex_buffer_bytes_uploaded = 0;
+        self.os.texture_bytes_uploaded = 0;
         let draw_list_id = if let Some(draw_list_id) = self.passes[draw_pass_id].main_draw_list_id {
             draw_list_id
         } else {
@@ -666,6 +748,15 @@ impl Cx {
             encoder,
             &metal_cx,
         );
+        let gpu_counters = GpuSampleCounters {
+            draw_calls: self.os.draw_calls_done as u64,
+            instances: self.os.instances_done,
+            vertices: self.os.vertices_done,
+            instance_bytes: self.os.instance_bytes_uploaded,
+            uniform_bytes: self.os.uniform_bytes_uploaded,
+            vertex_buffer_bytes: self.os.vertex_buffer_bytes_uploaded,
+            texture_bytes: self.os.texture_bytes_uploaded,
+        };
         if Self::total_drawcall_log_enabled() {
             static LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
             if LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 200 {
@@ -707,6 +798,7 @@ impl Cx {
                     None,
                     gpu_frame_group_key,
                     true,
+                    gpu_counters,
                     command_buffer,
                 );
             }
@@ -716,6 +808,7 @@ impl Cx {
                     None,
                     gpu_frame_group_key,
                     false,
+                    gpu_counters,
                     command_buffer,
                 );
             }
@@ -725,6 +818,7 @@ impl Cx {
                     None,
                     gpu_frame_group_key,
                     false,
+                    gpu_counters,
                     command_buffer,
                 );
             }
@@ -749,6 +843,7 @@ impl Cx {
                     Some(stdin_frame),
                     gpu_frame_group_key,
                     true,
+                    gpu_counters,
                     command_buffer,
                 );
             }
@@ -769,6 +864,7 @@ impl Cx {
                     None,
                     gpu_frame_group_key,
                     true,
+                    gpu_counters,
                     command_buffer,
                 );
             }
@@ -788,6 +884,7 @@ impl Cx {
                     None,
                     gpu_frame_group_key,
                     true,
+                    gpu_counters,
                     command_buffer,
                 );
                 let () = unsafe { msg_send![command_buffer, waitUntilScheduled] };
@@ -853,6 +950,7 @@ impl Cx {
         stdin_frame: Option<PresentableDraw>,
         gpu_frame_group_key: Option<u64>,
         flush_gpu_frame_group: bool,
+        gpu_counters: GpuSampleCounters,
         command_buffer: ObjcId,
     ) {
         let screenshot_info = Mutex::new(screenshot_info);
@@ -932,6 +1030,28 @@ impl Cx {
 
                     let app_now = Instant::now().duration_since(start_time).as_secs_f64();
                     let host_now = unsafe { CACurrentMediaTime() };
+                    let frame_counters = if let Some(group_key) = gpu_frame_group_key {
+                        if let Ok(mut grouped) = METAL_GPU_FRAME_COUNTERS.lock() {
+                            let counters = grouped.get_or_insert_with(HashMap::new);
+                            if let Some(aggregated) = counters.get_mut(&group_key) {
+                                aggregated.accumulate(gpu_counters);
+                            } else {
+                                counters.insert(group_key, gpu_counters);
+                            }
+                            if counters.len() > 1024 {
+                                counters.clear();
+                            }
+                            if flush_gpu_frame_group {
+                                counters.remove(&group_key).unwrap_or_default()
+                            } else {
+                                GpuSampleCounters::default()
+                            }
+                        } else {
+                            gpu_counters
+                        }
+                    } else {
+                        gpu_counters
+                    };
                     if let Some((raw_sample_start, raw_sample_end)) = raw_range {
                         if let Some((start, end)) = map_metal_gpu_times_to_app_timeline(
                             raw_sample_start,
@@ -942,6 +1062,13 @@ impl Cx {
                             Cx::send_studio_message(AppToStudio::GPUSample(GPUSample {
                                 start,
                                 end,
+                                draw_calls: frame_counters.draw_calls,
+                                instances: frame_counters.instances,
+                                vertices: frame_counters.vertices,
+                                instance_bytes: frame_counters.instance_bytes,
+                                uniform_bytes: frame_counters.uniform_bytes,
+                                vertex_buffer_bytes: frame_counters.vertex_buffer_bytes,
+                                texture_bytes: frame_counters.texture_bytes,
                             }));
                         }
                     }
@@ -1500,7 +1627,7 @@ impl CxTexture {
         None
     }*/
 
-    fn update_vec_texture(&mut self, metal_cx: &MetalCx) {
+    fn update_vec_texture(&mut self, metal_cx: &MetalCx) -> u64 {
         if self.alloc_vec() {
             let alloc = self.alloc.as_ref().unwrap();
 
@@ -1528,7 +1655,7 @@ impl CxTexture {
         }
         let update = self.take_updated();
         if update.is_empty() {
-            return;
+            return 0;
         }
 
         fn update_data(
@@ -1609,6 +1736,9 @@ impl CxTexture {
                     4,
                     data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                 );
+                (*width as u64)
+                    .saturating_mul(*height as u64)
+                    .saturating_mul(4)
             }
             TextureFormat::VecCubeBGRAu8_32 {
                 width,
@@ -1619,6 +1749,10 @@ impl CxTexture {
                 if let Some(data) = data.as_ref() {
                     update_cube_data(&self.os.texture, *width, *height, 4, data);
                 }
+                (*width as u64)
+                    .saturating_mul(*height as u64)
+                    .saturating_mul(4)
+                    .saturating_mul(6)
             }
             TextureFormat::VecRGBAf32 {
                 width,
@@ -1633,6 +1767,9 @@ impl CxTexture {
                     16,
                     data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                 );
+                (*width as u64)
+                    .saturating_mul(*height as u64)
+                    .saturating_mul(16)
             }
             TextureFormat::VecRu8 {
                 width,
@@ -1647,6 +1784,7 @@ impl CxTexture {
                     1,
                     data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                 );
+                (*width as u64).saturating_mul(*height as u64)
             }
             TextureFormat::VecRGu8 {
                 width,
@@ -1661,6 +1799,9 @@ impl CxTexture {
                     2,
                     data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                 );
+                (*width as u64)
+                    .saturating_mul(*height as u64)
+                    .saturating_mul(2)
             }
             TextureFormat::VecRf32 {
                 width,
@@ -1675,8 +1816,11 @@ impl CxTexture {
                     4,
                     data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                 );
+                (*width as u64)
+                    .saturating_mul(*height as u64)
+                    .saturating_mul(4)
             }
-            _ => panic!(),
+            _ => 0,
         }
     }
 

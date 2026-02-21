@@ -9,7 +9,7 @@ impl ScriptHandleGc for Geometry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GeometryId(usize, u64);
 
 impl Geometry {
@@ -66,6 +66,8 @@ impl Geometry {
         cx.geometries[geometry.geometry_id()].indices.clear();
         cx.geometries[geometry.geometry_id()].vertices.clear();
         cx.geometries[geometry.geometry_id()].dirty = true;
+        cx.geometries[geometry.geometry_id()].dirty_vertices = true;
+        cx.geometries[geometry.geometry_id()].dirty_indices = true;
         geometry
     }
 
@@ -74,12 +76,15 @@ impl Geometry {
         cxgeom.indices = indices;
         cxgeom.vertices = vertices;
         cxgeom.dirty = true;
+        cxgeom.dirty_vertices = true;
+        cxgeom.dirty_indices = true;
     }
 
     pub fn update_indices(&self, cx: &mut Cx, indices: Vec<u32>) {
         let cxgeom = &mut cx.geometries[self.geometry_id()];
         cxgeom.indices = indices;
         cxgeom.dirty = true;
+        cxgeom.dirty_indices = true;
     }
 }
 
@@ -88,6 +93,8 @@ pub struct CxGeometry {
     pub indices: Vec<u32>,
     pub vertices: Vec<f32>,
     pub dirty: bool,
+    pub dirty_vertices: bool,
+    pub dirty_indices: bool,
     #[allow(unused)]
     pub os: CxOsGeometry,
 }
