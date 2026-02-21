@@ -15,7 +15,7 @@ script_mod! {
     mod.widgets.ProfilerBase = #(Profiler::register_widget(vm))
 
     mod.widgets.ProfilerEventChart = set_type_default() do mod.widgets.ProfilerEventChartBase {
-        height: Fill
+        height: Fit
         width: Fill
         draw_bg +: {
             pixel: fn() { return theme.color_bg_container }
@@ -37,6 +37,9 @@ script_mod! {
             pixel: fn() {
                 return self.color
             }
+        }
+        draw_vector +: {
+            draw_depth: 2.0
         }
         draw_time +: {
             text_style: theme.font_regular {
@@ -103,16 +106,31 @@ script_mod! {
                 }
             }
         }
-        chart := mod.widgets.ProfilerEventChart {}
+        chart_scroll := ScrollYView {
+            width: Fill
+            height: Fill
+            flow: Down
+            chart := mod.widgets.ProfilerEventChart {}
+        }
     }
 }
 
 const DEFAULT_PROFILE_WINDOW_SECONDS: f64 = 0.5;
 const MIN_PROFILE_WINDOW_SECONDS: f64 = 0.000_01;
 const PROFILE_ROW_Y_STEP: f64 = 25.0;
-const SELF_PROFILE_ROW_OFFSET_Y: f64 = 85.0;
+const PROFILE_GRAPH_START_Y: f64 = PROFILE_ROW_Y_STEP * 3.0 + 24.0;
+const PROFILE_GRAPH_LANE_HEIGHT: f64 = 56.0;
+const PROFILE_GRAPH_LANE_GAP: f64 = 10.0;
+const PROFILE_FRAMETIME_GRAPH_OFFSET_Y: f64 = PROFILE_GRAPH_START_Y;
+const PROFILE_COUNTS_GRAPH_OFFSET_Y: f64 =
+    PROFILE_FRAMETIME_GRAPH_OFFSET_Y + PROFILE_GRAPH_LANE_HEIGHT + PROFILE_GRAPH_LANE_GAP;
+const PROFILE_UPLOAD_GRAPH_OFFSET_Y: f64 =
+    PROFILE_COUNTS_GRAPH_OFFSET_Y + PROFILE_GRAPH_LANE_HEIGHT + PROFILE_GRAPH_LANE_GAP;
+const PROFILE_STORE_HEIGHT: f64 = PROFILE_UPLOAD_GRAPH_OFFSET_Y + PROFILE_GRAPH_LANE_HEIGHT + 12.0;
+const SELF_PROFILE_ROW_OFFSET_Y: f64 = PROFILE_STORE_HEIGHT + 16.0;
 const DRAW_EVENT_U32: u32 = 7;
 const FRAME_BUDGET_SECONDS: f64 = 1.0 / 60.0;
+const FRAME_BUDGET_120HZ_SECONDS: f64 = 1.0 / 120.0;
 const HICCUP_GAP_SECONDS: f64 = FRAME_BUDGET_SECONDS * 1.5;
 
 #[derive(Clone)]
@@ -146,6 +164,8 @@ struct ProfilerEventChart {
     draw_line: DrawQuad,
     #[live]
     draw_item: DrawColor,
+    #[live]
+    draw_vector: DrawVector,
     #[live]
     draw_label: DrawText,
     #[live]
@@ -396,6 +416,7 @@ impl ProfilerEventChart {
             .iter()
             .position(|sample| sample.end + time_offset > self.time_range.start)
         {
+            let mut gpu_label = String::new();
             for i in first..samples.gpu.len() {
                 let sample = &samples.gpu[i];
                 let sample_start = sample.start + time_offset;
@@ -403,6 +424,23 @@ impl ProfilerEventChart {
                 if sample_start > self.time_range.end {
                     break;
                 }
+                gpu_label.clear();
+                if label_prefix.is_empty() {
+                    gpu_label.push_str("GPU");
+                } else {
+                    gpu_label.push_str("Self GPU");
+                }
+                let _ = write!(
+                    &mut gpu_label,
+                    " d:{} i:{} v*i:{} ib:{:.1}k ub:{:.1}k vb:{:.1}k tb:{:.1}k",
+                    sample.draw_calls,
+                    sample.instances,
+                    sample.vertices,
+                    sample.instance_bytes as f64 / 1024.0,
+                    sample.uniform_bytes as f64 / 1024.0,
+                    sample.vertex_buffer_bytes as f64 / 1024.0,
+                    sample.texture_bytes as f64 / 1024.0,
+                );
                 self.draw_block(
                     cx,
                     &Rect {
@@ -411,11 +449,7 @@ impl ProfilerEventChart {
                     },
                     sample_start,
                     sample_end,
-                    if label_prefix.is_empty() {
-                        "GPU"
-                    } else {
-                        "Self GPU"
-                    },
+                    &gpu_label,
                     0,
                 );
             }
@@ -454,6 +488,467 @@ impl ProfilerEventChart {
                     sample.heap_live,
                 );
             }
+        }
+    }
+
+    fn draw_graph_lane_background(
+        &mut self,
+        cx: &mut Cx2d,
+        rect: &Rect,
+        base_y: f64,
+        lane_offset_y: f64,
+        label_prefix: &str,
+    ) -> Option<Rect> {
+        let graph_rect = Rect {
+            pos: rect.pos + dvec2(0.0, base_y + lane_offset_y),
+            size: dvec2(rect.size.x, PROFILE_GRAPH_LANE_HEIGHT),
+        };
+        if graph_rect.size.x <= 1.0
+            || graph_rect.size.y <= 1.0
+            || graph_rect.pos.y >= rect.pos.y + rect.size.y
+        {
+            return None;
+        }
+
+        self.draw_item.color = Vec4f::from_u32(if label_prefix.is_empty() {
+            0x142a2a30
+        } else {
+            0x141a1a30
+        });
+        self.draw_item.draw_abs(cx, graph_rect);
+
+        for i in 1..=3 {
+            let ypos = graph_rect.pos.y + graph_rect.size.y * (i as f64 / 4.0);
+            self.draw_line.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(graph_rect.pos.x, ypos),
+                    size: dvec2(graph_rect.size.x, 1.0),
+                },
+            );
+        }
+        Some(graph_rect)
+    }
+
+    fn draw_gpu_frametime_graph(
+        &mut self,
+        cx: &mut Cx2d,
+        rect: &Rect,
+        samples: &ProfileSampleStore,
+        base_y: f64,
+        label_prefix: &str,
+        time_offset: f64,
+        label: &mut String,
+    ) {
+        let Some(graph_rect) = self.draw_graph_lane_background(
+            cx,
+            rect,
+            base_y,
+            PROFILE_FRAMETIME_GRAPH_OFFSET_Y,
+            label_prefix,
+        ) else {
+            return;
+        };
+
+        let range_len = self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS);
+        let x_scale = rect.size.x / range_len;
+        let mut max_ms = 0.0_f64;
+        let mut visible_count = 0usize;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            visible_count += 1;
+            max_ms = max_ms.max((sample.end - sample.start).max(0.0) * 1000.0);
+        }
+
+        if visible_count == 0 {
+            return;
+        }
+
+        let max_ms = max_ms.max(FRAME_BUDGET_120HZ_SECONDS * 1000.0);
+        let metric_to_y = |value_ms: f64| -> f32 {
+            let t = (value_ms / max_ms).clamp(0.0, 1.0);
+            (graph_rect.pos.y + graph_rect.size.y - t * (graph_rect.size.y - 1.0)) as f32
+        };
+
+        label.clear();
+        let _ = write!(
+            label,
+            "{} GPU frametime (max {:.2} ms, 120Hz {:.2} ms)",
+            if label_prefix.is_empty() { "App" } else { "Self" },
+            max_ms,
+            FRAME_BUDGET_120HZ_SECONDS * 1000.0
+        );
+        self.draw_time
+            .draw_abs(cx, graph_rect.pos + dvec2(4.0, 2.0), label);
+
+        let budget_y = metric_to_y(FRAME_BUDGET_120HZ_SECONDS * 1000.0) as f64;
+        self.draw_item.color = Vec4f::from_u32(0xffb05050);
+        self.draw_item.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(graph_rect.pos.x, budget_y),
+                size: dvec2(graph_rect.size.x, 1.0),
+            },
+        );
+
+        self.draw_vector.set_color(0.95, 0.64, 0.12, 1.0);
+        let mut is_first = true;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            let xpos =
+                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let ypos = metric_to_y((sample.end - sample.start).max(0.0) * 1000.0);
+            if is_first {
+                self.draw_vector.move_to(xpos as f32, ypos);
+                is_first = false;
+            } else {
+                self.draw_vector.line_to(xpos as f32, ypos);
+            }
+        }
+        if !is_first {
+            self.draw_vector.stroke(1.25);
+        }
+    }
+
+    fn draw_gpu_counts_graph(
+        &mut self,
+        cx: &mut Cx2d,
+        rect: &Rect,
+        samples: &ProfileSampleStore,
+        base_y: f64,
+        label_prefix: &str,
+        time_offset: f64,
+        label: &mut String,
+    ) {
+        let Some(graph_rect) = self.draw_graph_lane_background(
+            cx,
+            rect,
+            base_y,
+            PROFILE_COUNTS_GRAPH_OFFSET_Y,
+            label_prefix,
+        ) else {
+            return;
+        };
+
+        let range_len = self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS);
+        let x_scale = rect.size.x / range_len;
+        let mut max_count = 0u64;
+        let mut visible_count = 0usize;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            visible_count += 1;
+            max_count = max_count.max(sample.draw_calls);
+            max_count = max_count.max(sample.instances);
+            max_count = max_count.max(sample.vertices);
+        }
+
+        if visible_count == 0 {
+            return;
+        }
+
+        let max_count = max_count.max(1);
+        let metric_to_y = |value: u64| -> f32 {
+            let t = (value as f64 / max_count as f64).clamp(0.0, 1.0);
+            (graph_rect.pos.y + graph_rect.size.y - t * (graph_rect.size.y - 1.0)) as f32
+        };
+
+        label.clear();
+        let _ = write!(
+            label,
+            "{} GPU counts (max {})",
+            if label_prefix.is_empty() { "App" } else { "Self" },
+            max_count
+        );
+        self.draw_time
+            .draw_abs(cx, graph_rect.pos + dvec2(4.0, 2.0), label);
+
+        self.draw_vector.set_color(0.95, 0.64, 0.12, 1.0);
+        let mut is_first = true;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            let xpos =
+                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let ypos = metric_to_y(sample.draw_calls);
+            if is_first {
+                self.draw_vector.move_to(xpos as f32, ypos);
+                is_first = false;
+            } else {
+                self.draw_vector.line_to(xpos as f32, ypos);
+            }
+        }
+        if !is_first {
+            self.draw_vector.stroke(1.25);
+        }
+
+        self.draw_vector.set_color(0.26, 0.65, 0.96, 1.0);
+        is_first = true;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            let xpos =
+                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let ypos = metric_to_y(sample.instances);
+            if is_first {
+                self.draw_vector.move_to(xpos as f32, ypos);
+                is_first = false;
+            } else {
+                self.draw_vector.line_to(xpos as f32, ypos);
+            }
+        }
+        if !is_first {
+            self.draw_vector.stroke(1.25);
+        }
+
+        // "vertices" already contains vertex_count * instance_count from backend.
+        self.draw_vector.set_color(0.40, 0.73, 0.42, 1.0);
+        is_first = true;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            let xpos =
+                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let ypos = metric_to_y(sample.vertices);
+            if is_first {
+                self.draw_vector.move_to(xpos as f32, ypos);
+                is_first = false;
+            } else {
+                self.draw_vector.line_to(xpos as f32, ypos);
+            }
+        }
+        if !is_first {
+            self.draw_vector.stroke(1.25);
+        }
+
+        let legend_top = graph_rect.pos.y + 14.0;
+        let legend_x = graph_rect.pos.x + 6.0;
+        let legend = [
+            (0xfff18f01, "D"),
+            (0xff42a5f5, "I"),
+            (0xff66bb6a, "VxI"),
+        ];
+        for (i, (color, ch)) in legend.iter().enumerate() {
+            let x = legend_x + i as f64 * 28.0;
+            self.draw_item.color = Vec4f::from_u32(*color);
+            self.draw_item.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x, legend_top),
+                    size: dvec2(6.0, 6.0),
+                },
+            );
+            self.draw_time
+                .draw_abs(cx, dvec2(x + 8.0, legend_top - 4.0), ch);
+        }
+    }
+
+    fn draw_gpu_upload_graph(
+        &mut self,
+        cx: &mut Cx2d,
+        rect: &Rect,
+        samples: &ProfileSampleStore,
+        base_y: f64,
+        label_prefix: &str,
+        time_offset: f64,
+        label: &mut String,
+    ) {
+        let Some(graph_rect) = self.draw_graph_lane_background(
+            cx,
+            rect,
+            base_y,
+            PROFILE_UPLOAD_GRAPH_OFFSET_Y,
+            label_prefix,
+        ) else {
+            return;
+        };
+
+        let range_len = self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS);
+        let x_scale = rect.size.x / range_len;
+        let mut max_bytes = 0u64;
+        let mut visible_count = 0usize;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            visible_count += 1;
+            max_bytes = max_bytes.max(sample.instance_bytes);
+            max_bytes = max_bytes.max(sample.uniform_bytes);
+            max_bytes = max_bytes.max(sample.vertex_buffer_bytes);
+            max_bytes = max_bytes.max(sample.texture_bytes);
+        }
+        if visible_count == 0 {
+            return;
+        }
+
+        let max_bytes = max_bytes.max(1);
+        let metric_to_y = |value: u64| -> f32 {
+            let t = (value as f64 / max_bytes as f64).clamp(0.0, 1.0);
+            (graph_rect.pos.y + graph_rect.size.y - t * (graph_rect.size.y - 1.0)) as f32
+        };
+
+        label.clear();
+        let _ = write!(
+            label,
+            "{} GPU upload bytes (max {:.1} KB)",
+            if label_prefix.is_empty() { "App" } else { "Self" },
+            max_bytes as f64 / 1024.0
+        );
+        self.draw_time
+            .draw_abs(cx, graph_rect.pos + dvec2(4.0, 2.0), label);
+
+        self.draw_vector.set_color(0.94, 0.56, 0.01, 1.0);
+        let mut is_first = true;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            let xpos =
+                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let ypos = metric_to_y(sample.instance_bytes);
+            if is_first {
+                self.draw_vector.move_to(xpos as f32, ypos);
+                is_first = false;
+            } else {
+                self.draw_vector.line_to(xpos as f32, ypos);
+            }
+        }
+        if !is_first {
+            self.draw_vector.stroke(1.25);
+        }
+
+        self.draw_vector.set_color(0.26, 0.65, 0.96, 1.0);
+        is_first = true;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            let xpos =
+                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let ypos = metric_to_y(sample.uniform_bytes);
+            if is_first {
+                self.draw_vector.move_to(xpos as f32, ypos);
+                is_first = false;
+            } else {
+                self.draw_vector.line_to(xpos as f32, ypos);
+            }
+        }
+        if !is_first {
+            self.draw_vector.stroke(1.25);
+        }
+
+        self.draw_vector.set_color(0.40, 0.73, 0.42, 1.0);
+        is_first = true;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            let xpos =
+                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let ypos = metric_to_y(sample.vertex_buffer_bytes);
+            if is_first {
+                self.draw_vector.move_to(xpos as f32, ypos);
+                is_first = false;
+            } else {
+                self.draw_vector.line_to(xpos as f32, ypos);
+            }
+        }
+        if !is_first {
+            self.draw_vector.stroke(1.25);
+        }
+
+        self.draw_vector.set_color(0.93, 0.25, 0.48, 1.0);
+        is_first = true;
+        for sample in &samples.gpu {
+            let sample_end = sample.end + time_offset;
+            if sample_end < self.time_range.start {
+                continue;
+            }
+            if sample_end > self.time_range.end {
+                break;
+            }
+            let xpos =
+                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let ypos = metric_to_y(sample.texture_bytes);
+            if is_first {
+                self.draw_vector.move_to(xpos as f32, ypos);
+                is_first = false;
+            } else {
+                self.draw_vector.line_to(xpos as f32, ypos);
+            }
+        }
+        if !is_first {
+            self.draw_vector.stroke(1.25);
+        }
+
+        let legend_top = graph_rect.pos.y + 14.0;
+        let legend_x = graph_rect.pos.x + 6.0;
+        let legend = [
+            (0xfff18f01, "I"),
+            (0xff42a5f5, "U"),
+            (0xff66bb6a, "V"),
+            (0xffec407a, "T"),
+        ];
+        for (i, (color, ch)) in legend.iter().enumerate() {
+            let x = legend_x + i as f64 * 18.0;
+            self.draw_item.color = Vec4f::from_u32(*color);
+            self.draw_item.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x, legend_top),
+                    size: dvec2(6.0, 6.0),
+                },
+            );
+            self.draw_time
+                .draw_abs(cx, dvec2(x + 8.0, legend_top - 4.0), ch);
         }
     }
 
@@ -526,16 +1021,28 @@ impl ProfilerEventChart {
 
 impl Widget for ProfilerEventChart {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.draw_bg.begin(cx, walk, Layout::default());
         let bm = &scope.data.get::<AppData>().unwrap().build_manager;
         let mut label = String::new();
 
-        let rect = cx.turtle().rect();
         let app_samples = bm.current_profile_store().map(|(_, samples)| samples);
         let self_samples = bm.self_profile_store();
 
         let has_app_samples = app_samples.map_or(false, Self::has_samples);
         let has_self_samples = Self::has_samples(self_samples);
+        let chart_content_height = if has_app_samples && has_self_samples {
+            SELF_PROFILE_ROW_OFFSET_Y + PROFILE_STORE_HEIGHT + 8.0
+        } else {
+            PROFILE_STORE_HEIGHT + 8.0
+        }
+        .max(220.0);
+
+        let chart_walk = Walk {
+            height: Size::Fixed(chart_content_height),
+            ..walk
+        };
+        self.draw_bg.begin(cx, chart_walk, Layout::default());
+        let rect = cx.turtle().rect();
+
         let latest_app_end = app_samples.and_then(Self::latest_sample_end);
         let latest_self_end = if has_self_samples {
             Self::latest_sample_end(self_samples)
@@ -568,6 +1075,7 @@ impl Widget for ProfilerEventChart {
             }
 
             self.draw_time_grid(cx, &rect, &mut label);
+            self.draw_vector.begin();
             let self_base_y = if has_app_samples {
                 SELF_PROFILE_ROW_OFFSET_Y
             } else {
@@ -579,6 +1087,17 @@ impl Widget for ProfilerEventChart {
                     self.draw_frame_gap_markers(cx, &rect, app_samples, 0.0, &mut label);
                     self.draw_time.draw_abs(cx, rect.pos + dvec2(4.0, 2.0), "App");
                     self.draw_profile_store(cx, &rect, app_samples, 0.0, "", 0.0);
+                    self.draw_gpu_frametime_graph(
+                        cx,
+                        &rect,
+                        app_samples,
+                        0.0,
+                        "",
+                        0.0,
+                        &mut label,
+                    );
+                    self.draw_gpu_counts_graph(cx, &rect, app_samples, 0.0, "", 0.0, &mut label);
+                    self.draw_gpu_upload_graph(cx, &rect, app_samples, 0.0, "", 0.0, &mut label);
                 }
             } else if has_self_samples {
                 self.draw_frame_gap_markers(
@@ -600,7 +1119,35 @@ impl Widget for ProfilerEventChart {
                     "Self ",
                     self_time_offset,
                 );
+                self.draw_gpu_frametime_graph(
+                    cx,
+                    &rect,
+                    self_samples,
+                    self_base_y,
+                    "Self ",
+                    self_time_offset,
+                    &mut label,
+                );
+                self.draw_gpu_counts_graph(
+                    cx,
+                    &rect,
+                    self_samples,
+                    self_base_y,
+                    "Self ",
+                    self_time_offset,
+                    &mut label,
+                );
+                self.draw_gpu_upload_graph(
+                    cx,
+                    &rect,
+                    self_samples,
+                    self_base_y,
+                    "Self ",
+                    self_time_offset,
+                    &mut label,
+                );
             }
+            self.draw_vector.end(cx);
         }
         self.draw_bg.end(cx);
         DrawStep::done()

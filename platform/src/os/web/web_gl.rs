@@ -162,27 +162,30 @@ impl Cx {
 
                 let geometry = &mut self.geometries[geometry_id];
 
-                if geometry.dirty || geometry.os.vb_id.is_none() || geometry.os.ib_id.is_none() {
+                if geometry.dirty_vertices || geometry.os.vb_id.is_none() {
                     if geometry.os.vb_id.is_none() {
                         geometry.os.vb_id = Some(self.os.vertex_buffers);
                         self.os.vertex_buffers += 1;
-                    }
-                    if geometry.os.ib_id.is_none() {
-                        geometry.os.ib_id = Some(self.os.index_buffers);
-                        self.os.index_buffers += 1;
                     }
                     self.os.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: geometry.os.vb_id.unwrap(),
                         data: WasmPtrF32::new(&geometry.vertices),
                     });
+                    geometry.dirty_vertices = false;
+                }
 
+                if geometry.dirty_indices || geometry.os.ib_id.is_none() {
+                    if geometry.os.ib_id.is_none() {
+                        geometry.os.ib_id = Some(self.os.index_buffers);
+                        self.os.index_buffers += 1;
+                    }
                     self.os.from_wasm(FromWasmAllocIndexBuffer {
                         buffer_id: geometry.os.ib_id.unwrap(),
                         data: WasmPtrU32::new(&geometry.indices),
                     });
-
-                    geometry.dirty = false;
+                    geometry.dirty_indices = false;
                 }
+                geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
 
                 // lets check if our vao is still valid
                 if draw_item.os.vao.is_none() {
