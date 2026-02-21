@@ -111,7 +111,7 @@ impl Cx {
             for _i in 0..depth {
                 indent.push_str("|   ");
             }
-            let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
+            let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
             //if draw_list_id == 0 {
             //    writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
             // }
@@ -120,7 +120,7 @@ impl Cx {
             writeln!(
                 s,
                 "{}{} {:?}: len:{}",
-                indent, cx.draw_lists[draw_list_id].debug_id, draw_list_id, draw_items_len,
+                indent, cx.draw_lists[draw_list_id].debug_id, draw_list_id, draw_order_len,
             )
             .unwrap();
             indent.push_str("  ");
@@ -128,7 +128,12 @@ impl Cx {
             for _i in 0..depth + 1 {
                 indent.push_str("|   ");
             }
-            for draw_item_id in 0..draw_items_len {
+            for order_index in 0..draw_order_len {
+                let Some(draw_item_id) =
+                    cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
+                else {
+                    continue;
+                };
                 if let Some(sub_list_id) =
                     cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
                 {

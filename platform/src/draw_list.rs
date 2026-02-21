@@ -313,6 +313,7 @@ pub struct CxDrawList {
     pub draw_pass_id: Option<DrawPassId>,
 
     pub draw_items: CxDrawItems,
+    pub draw_item_reorder: Option<Vec<usize>>,
 
     pub draw_list_uniforms: DrawListUniforms,
     pub draw_list_has_clip: bool,
@@ -540,6 +541,24 @@ impl CxDrawList {
             redraw_id,
             CxDrawKind::DrawCall(CxDrawCall::new(&sh.mapping, draw_vars)),
         )
+    }
+
+    pub fn draw_item_order_len(&self) -> usize {
+        self.draw_item_reorder
+            .as_ref()
+            .map(|reorder| reorder.len())
+            .unwrap_or_else(|| self.draw_items.len())
+    }
+
+    pub fn draw_item_id_at_order_index(&self, order_index: usize) -> Option<usize> {
+        let draw_item_id = if let Some(reorder) = self.draw_item_reorder.as_ref() {
+            *reorder.get(order_index)?
+        } else if order_index < self.draw_items.len() {
+            order_index
+        } else {
+            return None;
+        };
+        (draw_item_id < self.draw_items.len()).then_some(draw_item_id)
     }
 
     pub fn clear_draw_items(&mut self, redraw_id: u64) {

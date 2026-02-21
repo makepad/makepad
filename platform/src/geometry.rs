@@ -75,6 +75,12 @@ impl Geometry {
         cxgeom.vertices = vertices;
         cxgeom.dirty = true;
     }
+
+    pub fn update_indices(&self, cx: &mut Cx, indices: Vec<u32>) {
+        let cxgeom = &mut cx.geometries[self.geometry_id()];
+        cxgeom.indices = indices;
+        cxgeom.dirty = true;
+    }
 }
 
 #[derive(Default)]

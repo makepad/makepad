@@ -1,4 +1,5 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
+use std::cmp::Ordering;
 
 use super::chart_3d::Chart3DData;
 
@@ -19,6 +20,15 @@ pub struct SceneState3D {
 pub struct SceneScope3D {
     pub scene: SceneState3D,
     pub chart_data: Option<Chart3DData>,
+    pub draw_call_anchors: Vec<SceneDrawCallAnchor>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SceneDrawCallAnchor {
+    pub area: Area,
+    pub draw_list_id: Option<DrawListId>,
+    pub draw_item_id: Option<usize>,
+    pub world_pos: Vec3f,
 }
 
 pub fn scene_state_from_scope(scope: &mut Scope) -> Option<SceneState3D> {
@@ -36,6 +46,121 @@ pub fn chart_data_from_scope(scope: &mut Scope) -> Option<Chart3DData> {
         return scope_3d.chart_data.clone();
     }
     scope.data.get::<Chart3DData>().cloned()
+}
+
+pub fn register_draw_call_anchor(scope: &mut Scope, area: Area, world_pos: Vec3f) {
+    let Some(scope_3d) = scope.data.get_mut::<SceneScope3D>() else {
+        return;
+    };
+    let (draw_list_id, draw_item_id) = match area {
+        Area::Instance(inst) => (Some(inst.draw_list_id), Some(inst.draw_item_id)),
+        _ => (None, None),
+    };
+    scope_3d
+        .draw_call_anchors
+        .push(SceneDrawCallAnchor {
+            area,
+            draw_list_id,
+            draw_item_id,
+            world_pos,
+        });
+}
+
+pub fn register_last_draw_call_anchor(cx: &mut Cx2d, scope: &mut Scope, world_pos: Vec3f) {
+    let Some(draw_list_id) = cx.get_current_draw_list_id() else {
+        return;
+    };
+    let draw_item_id = {
+        let draw_list = &cx.cx.draw_lists[draw_list_id];
+        let len = draw_list.draw_items.len();
+        if len == 0 {
+            return;
+        }
+        len - 1
+    };
+
+    let Some(scope_3d) = scope.data.get_mut::<SceneScope3D>() else {
+        return;
+    };
+    scope_3d.draw_call_anchors.push(SceneDrawCallAnchor {
+        area: Area::Empty,
+        draw_list_id: Some(draw_list_id),
+        draw_item_id: Some(draw_item_id),
+        world_pos,
+    });
+}
+
+pub fn apply_draw_call_reorder_for_draw_list(
+    cx: &mut Cx2d,
+    scope: &mut Scope,
+    draw_list_id: DrawListId,
+    enabled: bool,
+) {
+    let draw_list = &mut cx.cx.draw_lists[draw_list_id];
+    let draw_count = draw_list.draw_items.len();
+    let scope_3d = scope.data.get::<SceneScope3D>();
+
+    if !enabled || draw_count <= 1 || scope_3d.is_none() {
+        draw_list.draw_item_reorder = None;
+        return;
+    }
+
+    let scope_3d = scope_3d.unwrap();
+    if scope_3d.draw_call_anchors.is_empty() {
+        draw_list.draw_item_reorder = None;
+        return;
+    }
+
+    let mut depth_by_draw_item = vec![None; draw_count];
+    for anchor in &scope_3d.draw_call_anchors {
+        let (anchor_draw_list_id, anchor_draw_item_id) = match anchor.area {
+            Area::Instance(inst) => (Some(inst.draw_list_id), Some(inst.draw_item_id)),
+            _ => (anchor.draw_list_id, anchor.draw_item_id),
+        };
+        let (Some(anchor_draw_list_id), Some(anchor_draw_item_id)) =
+            (anchor_draw_list_id, anchor_draw_item_id)
+        else {
+            continue;
+        };
+        if anchor_draw_list_id != draw_list_id || anchor_draw_item_id >= draw_count {
+            continue;
+        }
+        let view = scope_3d.scene.view.transform_vec4(vec4(
+            anchor.world_pos.x,
+            anchor.world_pos.y,
+            anchor.world_pos.z,
+            1.0,
+        ));
+        depth_by_draw_item[anchor_draw_item_id] = Some(view.z);
+    }
+
+    let mut sort_slots = Vec::new();
+    let mut sorted_items = Vec::new();
+    for draw_item_id in 0..draw_count {
+        if let Some(depth) = depth_by_draw_item[draw_item_id] {
+            sort_slots.push(draw_item_id);
+            sorted_items.push((draw_item_id, depth));
+        }
+    }
+
+    if sorted_items.len() <= 1 {
+        draw_list.draw_item_reorder = None;
+        return;
+    }
+
+    sorted_items.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+
+    let mut reorder: Vec<usize> = (0..draw_count).collect();
+    for (slot, (draw_item_id, _)) in sort_slots.into_iter().zip(sorted_items.into_iter()) {
+        reorder[slot] = draw_item_id;
+    }
+
+    let is_identity = reorder.iter().enumerate().all(|(index, value)| *value == index);
+    draw_list.draw_item_reorder = if is_identity { None } else { Some(reorder) };
 }
 
 pub fn apply_scene_to_draw_pbr(draw: &mut DrawPbr, cx: &mut Cx2d, scene: &SceneState3D) {
@@ -58,6 +183,7 @@ script_mod! {
     mod.widgets.Scene3D = set_type_default() do mod.widgets.Scene3DBase{
         width: Fill
         height: Fill
+        sort_draw_calls_by_depth: true
         draw_bg +: {
             color: #x171d26
             draw_depth: -99.0
@@ -104,6 +230,8 @@ pub struct Scene3D {
     depth_range: Vec2f,
     #[live(0.0)]
     depth_forward_bias: f32,
+    #[live(true)]
+    sort_draw_calls_by_depth: bool,
 
     #[rust]
     next_frame: NextFrame,
@@ -224,11 +352,21 @@ impl Scene3D {
         let mut scene_scope_data = SceneScope3D {
             scene: self.current_scene_state,
             chart_data,
+            draw_call_anchors: Vec::new(),
         };
         let mut scene_scope = Scope::with_data(&mut scene_scope_data);
         let cx3d = &mut Cx3d::new(cx.cx);
         for layer in layer_refs {
             layer.draw_3d_all(cx3d, &mut scene_scope);
+        }
+
+        if let Some(draw_list_id) = cx.get_current_draw_list_id() {
+            apply_draw_call_reorder_for_draw_list(
+                cx,
+                &mut scene_scope,
+                draw_list_id,
+                self.sort_draw_calls_by_depth,
+            );
         }
     }
 }

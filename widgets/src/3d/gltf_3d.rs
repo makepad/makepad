@@ -1,7 +1,9 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 use std::{path::PathBuf, rc::Rc};
 
-use super::scene_3d::{apply_scene_to_draw_pbr, scene_state_from_scope};
+use super::scene_3d::{
+    apply_scene_to_draw_pbr, register_draw_call_anchor, scene_state_from_scope,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -199,7 +201,12 @@ impl Widget for Gltf3D {
                 &Mat4f::nonuniform_scaled_translation(self.scale, vec3(0.0, 0.0, 0.0)),
             ),
         );
-        let _ = renderer.draw_with_transform(&mut self.draw_pbr, cx, local);
+        let _ = renderer.draw_with_transform_anchors(
+            &mut self.draw_pbr,
+            cx,
+            local,
+            |area, world_pos| register_draw_call_anchor(scope, area, world_pos),
+        );
         DrawStep::done()
     }
 
