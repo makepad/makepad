@@ -253,7 +253,7 @@ pub fn theme_mod(vm: &mut ScriptVm) {
     crate::theme_desktop_light::script_mod(vm);
     crate::theme_desktop_skeleton::script_mod(vm);
     script_eval!(vm, {
-        mod.prelude.system = {
+        mod.prelude.widgets_header = {
             ..mod.res,
             ..mod.helper,
             ..mod.std,
@@ -276,7 +276,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     // make the prelude for our own widgets
     script_eval!(vm, {
         mod.prelude.widgets_internal = {
-            ..mod.prelude.system,
+            ..mod.prelude.widgets_header,
             theme:mod.theme,
         }
     });
@@ -373,7 +373,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     script_eval!(vm, {
         mod.prelude.widgets = {
-            ..mod.prelude.system,
+            ..mod.prelude.widgets_header,
             theme:mod.theme,
             ..mod.widgets,
         }
