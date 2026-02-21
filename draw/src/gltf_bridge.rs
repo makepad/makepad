@@ -363,6 +363,35 @@ impl GltfRenderer {
         Ok(())
     }
 
+    pub fn draw_with_transform_anchors<F>(
+        &mut self,
+        draw: &mut DrawPbr,
+        cx: &mut Cx2d,
+        transform: Mat4f,
+        mut on_draw_call: F,
+    ) -> Result<(), GltfError>
+    where
+        F: FnMut(Area, Vec3f),
+    {
+        self.poll_textures(cx);
+
+        for object in &self.draw_objects {
+            let object_transform = Mat4f::mul(&transform, &object.world_transform);
+            draw.set_transform(object_transform);
+            self.apply_material(draw, cx, object.material_index);
+            draw.draw_mesh(cx, object.mesh_handle)
+                .map_err(GltfError::Validation)?;
+            let world = object_transform.transform_vec4(vec4(
+                object.local_centroid.x,
+                object.local_centroid.y,
+                object.local_centroid.z,
+                1.0,
+            ));
+            on_draw_call(draw.draw_vars.area, vec3(world.x, world.y, world.z));
+        }
+        Ok(())
+    }
+
     fn apply_material(&self, draw: &mut DrawPbr, cx: &mut Cx2d, material_index: Option<usize>) {
         let material = material_index
             .and_then(|index| self.materials.get(index))

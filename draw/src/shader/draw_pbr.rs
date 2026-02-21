@@ -801,6 +801,20 @@ impl DrawPbr {
         Ok(self.meshes.len() - 1)
     }
 
+    pub fn update_mesh_indices(
+        &mut self,
+        cx: &mut Cx2d,
+        mesh: PbrMeshHandle,
+        indices: Vec<u32>,
+    ) -> Result<(), String> {
+        let geom = self
+            .meshes
+            .get(mesh)
+            .ok_or_else(|| format!("invalid mesh handle {mesh}"))?;
+        geom.update_indices(cx.cx.cx, indices);
+        Ok(())
+    }
+
     pub fn upload_decoded_primitive_mesh(
         &mut self,
         cx: &mut Cx2d,

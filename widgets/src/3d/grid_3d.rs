@@ -13,23 +13,43 @@ script_mod! {
             ambient: 0.18
             spec_power: 64.0
             spec_strength: 0.35
+            grid_line_aa: fn(centered: vec2, px: vec2, scale: float) {
+                let g = centered * scale;
+                let cell = abs(fract(g - vec2(0.5, 0.5)) - vec2(0.5, 0.5));
+                let fw = px * scale;
+                let aa = min(
+                    cell.x / max(fw.x, 0.000001),
+                    cell.y / max(fw.y, 0.000001)
+                );
+                return 1.0 - min(aa, 1.0)
+            }
             get_base_color: fn(uv: vec2, vertex_color: vec4) {
                 let base = self.u_base_color_factor * vertex_color;
-                let tiled = uv * 22.0;
-                let fu = fract(tiled.x);
-                let fv = fract(tiled.y);
-                let du = min(fu, 1.0 - fu);
-                let dv = min(fv, 1.0 - fv);
-                let minor = 1.0 - smoothstep(0.0, 0.015, min(du, dv));
+                let centered = uv - vec2(0.5, 0.5);
+                let px = vec2(
+                    max(length(vec2(dFdx(centered.x), dFdy(centered.x))), 0.000001),
+                    max(length(vec2(dFdx(centered.y), dFdy(centered.y))), 0.000001)
+                );
 
-                let major_u = min(fract(uv.x * 5.5), 1.0 - fract(uv.x * 5.5));
-                let major_v = min(fract(uv.y * 5.5), 1.0 - fract(uv.y * 5.5));
-                let major = 1.0 - smoothstep(0.0, 0.02, min(major_u, major_v));
+                let micro = self.grid_line_aa(centered, px, 96.0);
+                let minor = self.grid_line_aa(centered, px, 24.0);
+                let major = self.grid_line_aa(centered, px, 6.0);
 
-                let line_mix = clamp(minor * 0.65 + major * 0.55, 0.0, 1.0);
-                let line_color = vec3(0.78, 0.80, 0.84);
-                let floor_color = base.xyz * 0.78;
-                return vec4(mix(floor_color, line_color, line_mix), base.w)
+                let axis_x = 1.0 - min(abs(centered.x) / px.x, 1.0);
+                let axis_z = 1.0 - min(abs(centered.y) / px.y, 1.0);
+
+                let floor_color = mix(base.xyz * 0.54, vec3(0.18, 0.185, 0.195), 0.40);
+                let micro_color = vec3(0.26, 0.27, 0.285);
+                let minor_color = vec3(0.36, 0.37, 0.40);
+                let major_color = vec3(0.50, 0.52, 0.56);
+
+                let mut color = floor_color;
+                color = mix(color, micro_color, micro * 0.18);
+                color = mix(color, minor_color, minor * 0.50);
+                color = mix(color, major_color, major * 0.80);
+                color = mix(color, vec3(0.47, 0.30, 0.30), axis_x * 0.60);
+                color = mix(color, vec3(0.30, 0.37, 0.52), axis_z * 0.60);
+                return vec4(color, base.w)
             }
         }
     }
@@ -55,7 +75,7 @@ pub struct Grid3D {
     rotation: Vec3f,
     #[live(vec3(1.0, 1.0, 1.0))]
     scale: Vec3f,
-    #[live(vec4(0.72, 0.74, 0.78, 1.0))]
+    #[live(vec4(0.58, 0.60, 0.63, 1.0))]
     color: Vec4f,
 }
 
@@ -77,9 +97,7 @@ impl Widget for Grid3D {
             .scale_xyz(self.scale.x, self.scale.y, self.scale.z);
         self.draw_pbr.fill(self.color);
         self.draw_pbr.set_metal_roughness(0.02, 0.96);
-        let _ = self
-            .draw_pbr
-            .draw_surface(cx, vec2(self.size, self.size), 1, 1);
+        let _ = self.draw_pbr.draw_surface(cx, vec2(self.size, self.size), 1, 1);
         self.draw_pbr.pop_matrix();
         DrawStep::done()
     }

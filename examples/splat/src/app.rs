@@ -19,16 +19,16 @@ script_mod! {
                         camera_fov_y: 46.0
                         camera_distance: 5.6
                         camera_near: 0.02
-                        camera_far: 200.0
+                        camera_far: 400.0
                         draw_bg +: {
                             color: #x111823
-                            draw_depth: -99.0
+                            draw_depth: -400.0
                         }
 
                         ground := Grid3D{
                             size: 18.0
                             position: vec3(0.0, -1.25, 0.0)
-                            color: vec4(0.64, 0.67, 0.72, 1.0)
+                            color: vec4(0.56, 0.58, 0.61, 1.0)
                         }
 
                         helmet := Gltf3D{

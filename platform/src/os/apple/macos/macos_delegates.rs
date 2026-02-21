@@ -820,7 +820,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         (Arc::new(items), pos)
     }
 
-    extern "C" fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
+    extern "C" fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) -> BOOL {
         //let window = get_cocoa_window(this);
         //window.end_live_resize();
         let modifiers = unsafe {
@@ -830,12 +830,18 @@ pub fn define_cocoa_view_class() -> *const Class {
         };
         let window = get_cocoa_window(this);
         let (items, pos) = get_drag_items_from_pasteboard(this, sender);
+        let handled = Arc::new(Mutex::new(false));
         window.do_callback(MacosEvent::Drop(DropEvent {
             modifiers,
-            handled: Arc::new(Mutex::new(false)),
+            handled: handled.clone(),
             abs: pos,
             items,
         }));
+        if *handled.lock().unwrap() {
+            YES
+        } else {
+            NO
+        }
     }
 
     /*
@@ -1000,7 +1006,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             );
             decl.add_method(
                 sel!(performDragOperation:),
-                perform_drag_operation as extern "C" fn(&Object, Sel, ObjcId),
+                perform_drag_operation as extern "C" fn(&Object, Sel, ObjcId) -> BOOL,
             );
             decl.add_method(
                 sel!(draggingEnded:),
