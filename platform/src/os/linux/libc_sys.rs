@@ -48,7 +48,12 @@ pub struct fd_set {
 
 pub const RTLD_LAZY: c_int = 1;
 pub const RTLD_LOCAL: c_int = 0;
+#[cfg(target_arch = "x86_64")]
+pub const SYS_GETTID: c_long = 186;
+#[cfg(target_arch = "aarch64")]
 pub const SYS_GETTID: c_long = 178;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub const SYS_GETTID: c_long = 178; // fallback, may need updating for other arches
 
 extern "C" {
     pub fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
