@@ -571,9 +571,7 @@ class ResizingLayout
     public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
         Insets imeInsets = insets.getInsets(WindowInsets.Type.ime());
         v.setPadding(0, 0, 0, imeInsets.bottom);
-        // Consume all insets so child views (SurfaceView) are not offset
-        // by system bar insets. The app handles fullscreen via WindowInsetsController.
-        return WindowInsets.CONSUMED;
+        return insets;
     }
 }
 
@@ -623,13 +621,9 @@ public class MakepadActivity
         
         this.requestWindowFeature(Window.FEATURE_NO_TITLE);
 
-        // On API 30+, use the modern API to extend window behind system bars from the start.
-        if (Build.VERSION.SDK_INT >= 30) {
-            getWindow().setDecorFitsSystemWindows(false);
-            // LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS = 3 (API 30+)
-            // Forces window to extend into all cutout/inset areas including status bar.
-            getWindow().getAttributes().layoutInDisplayCutoutMode = 3;
-        }
+        // Default state: content below system bars (status bar visible).
+        // Apps that want fullscreen can request CxOsOp::FullscreenWindow which
+        // calls applyFullScreen(true) to hide bars and extend content behind them.
 
         view = new MakepadSurface(this);
         // Put it inside a parent layout which can resize it using padding

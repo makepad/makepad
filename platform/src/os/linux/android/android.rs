@@ -317,6 +317,7 @@ impl Cx {
                     //if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
                     //crate::log!("{} {:?} {} {}", time, touch.state, touch.uid, touch.abs);
                     touch.abs /= dpi_factor;
+                    touch.radius /= dpi_factor;
                 }
                 self.fingers.process_touch_update_start(time, &touches);
                 let e = Event::TouchUpdate(TouchUpdateEvent {
