@@ -16,7 +16,7 @@ use {
         },
         makepad_platform::studio::{
             AppToStudio, AppToStudioVec, DesignerComponentPosition, DesignerZoomPan, EventSample,
-            GPUSample, StudioScreenshotRequest, StudioScreenshotResponse, StudioToApp,
+            GCSample, GPUSample, StudioScreenshotRequest, StudioScreenshotResponse, StudioToApp,
             StudioToAppVec, StudioWidgetTreeDumpRequest, StudioWidgetTreeDumpResponse,
         },
         makepad_shell::*,
@@ -121,6 +121,7 @@ impl ActiveBuilds {
 pub struct ProfileSampleStore {
     pub event: Vec<EventSample>,
     pub gpu: Vec<GPUSample>,
+    pub gc: Vec<GCSample>,
 }
 
 #[derive(Default)]
@@ -132,6 +133,7 @@ pub struct BuildManager {
     pending_aux_chan_host_endpoints: HashMap<LiveId, cx_stdin::aux_chan::HostEndpoint>,
     pub log: Vec<(LiveId, LogItem)>,
     pub profile: HashMap<LiveId, ProfileSampleStore>,
+    profile_focus_build: Option<LiveId>,
     recompile_timeout: f64,
     recompile_timer: Timer,
     pub binaries: Vec<BuildBinary>,
@@ -158,6 +160,8 @@ pub struct BuildManager {
     terminal_latest_widget_dumps: HashMap<LiveId, String>,
     terminal_startup_queries: HashMap<LiveId, String>,
     terminal_startup_dump_pending: HashSet<LiveId>,
+    run_view_tick_monitor: Mutex<HashMap<LiveId, RunViewTickMonitorState>>,
+    run_view_tick_hiccup_logs: Mutex<Vec<(LiveId, String)>>,
 }
 
 #[derive(Default)]
@@ -207,6 +211,18 @@ struct PendingTerminalWidgetTreeDump {
 
 const STUDIO_TERMINAL_PATH: &str = "/$studio_terminal";
 const STUDIO_WEBSOCKET_PATH: &str = "/$studio_web_socket";
+const PROFILE_MAX_SAMPLES_PER_BUILD: usize = 16_384;
+const RUN_VIEW_TICK_HICCUP_THRESHOLD_FRAMES: f64 = 1.5;
+const RUN_VIEW_TICK_FRAME_TIME_SECONDS: f64 = 1.0 / 60.0;
+const RUN_VIEW_TICK_HICCUP_THRESHOLD_SECONDS: f64 =
+    RUN_VIEW_TICK_HICCUP_THRESHOLD_FRAMES * RUN_VIEW_TICK_FRAME_TIME_SECONDS;
+
+#[derive(Default)]
+struct RunViewTickMonitorState {
+    last_tick: Option<Instant>,
+    tick_count: u64,
+    hiccup_count: u64,
+}
 
 #[derive(Debug, Clone, SerJson, DeJson)]
 pub enum StudioTerminalRequest {
@@ -987,6 +1003,70 @@ impl BuildManager {
         cx.action(AppAction::RedrawLog);
     }
 
+    fn observe_run_view_tick_hiccup(&self, build_id: LiveId, msg: &HostToStdin) {
+        if !matches!(msg, HostToStdin::Tick) {
+            return;
+        }
+
+        let now = Instant::now();
+        let wall_clock_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|v| v.as_millis())
+            .unwrap_or(0);
+
+        let mut hiccup_line = None;
+        if let Ok(mut monitor) = self.run_view_tick_monitor.lock() {
+            let state = monitor.entry(build_id).or_default();
+            state.tick_count = state.tick_count.saturating_add(1);
+            let Some(last_tick) = state.last_tick.replace(now) else {
+                return;
+            };
+
+            let delta_seconds = now.duration_since(last_tick).as_secs_f64();
+            if delta_seconds > RUN_VIEW_TICK_HICCUP_THRESHOLD_SECONDS {
+                state.hiccup_count = state.hiccup_count.saturating_add(1);
+                hiccup_line = Some(format!(
+                    "[run-view tick-hiccup] wall_ms={} dt_ms={:.2} (~{:.2} frames @60hz) tick={} hiccup={}",
+                    wall_clock_ms,
+                    delta_seconds * 1000.0,
+                    delta_seconds / RUN_VIEW_TICK_FRAME_TIME_SECONDS,
+                    state.tick_count,
+                    state.hiccup_count
+                ));
+            }
+        }
+
+        if let Some(hiccup_line) = hiccup_line {
+            if let Ok(mut pending) = self.run_view_tick_hiccup_logs.lock() {
+                pending.push((build_id, hiccup_line));
+            }
+        }
+    }
+
+    fn flush_run_view_tick_hiccup_logs(&mut self, cx: &mut Cx) {
+        let mut drained = Vec::new();
+        if let Ok(mut pending) = self.run_view_tick_hiccup_logs.lock() {
+            if pending.is_empty() {
+                return;
+            }
+            std::mem::swap(&mut drained, &mut *pending);
+        } else {
+            return;
+        }
+
+        for (build_id, line) in drained {
+            self.log.push((
+                build_id,
+                LogItem::Bare(LogItemBare {
+                    level: LogLevel::Warning,
+                    line: line.clone(),
+                }),
+            ));
+            self.send_terminal_log(build_id, "warning", line);
+        }
+        cx.action(AppAction::RedrawLog);
+    }
+
     fn request_terminal_screenshot(
         &mut self,
         cx: &mut Cx,
@@ -1337,12 +1417,19 @@ impl BuildManager {
                 let build_id = LiveId(build_id);
                 let removed_running = self.running_processes.remove(&build_id).is_some();
                 let removed_active = self.active.builds.remove(&build_id).is_some();
+                self.remove_profile_build(build_id);
                 self.terminal_build_owners.remove(&build_id);
                 self.terminal_build_origins.remove(&build_id);
                 self.terminal_build_dpi.remove(&build_id);
                 self.terminal_latest_widget_dumps.remove(&build_id);
                 self.terminal_startup_queries.remove(&build_id);
                 self.terminal_startup_dump_pending.remove(&build_id);
+                if let Ok(mut monitor) = self.run_view_tick_monitor.lock() {
+                    monitor.remove(&build_id);
+                }
+                if let Ok(mut pending) = self.run_view_tick_hiccup_logs.lock() {
+                    pending.retain(|(id, _)| *id != build_id);
+                }
                 self.clear_terminal_screenshots_for_build(build_id);
                 self.clear_terminal_widget_tree_dumps_for_build(build_id);
                 self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
@@ -1644,6 +1731,7 @@ impl BuildManager {
                 .borrow_mut()
                 .send_studio_to_app(item_id, StudioToApp::HostToStdin(msg.clone()))
             {
+                self.observe_run_view_tick_hiccup(item_id, &msg);
                 return;
             }
         }
@@ -1701,6 +1789,58 @@ impl BuildManager {
             return Some(process.binary.clone());
         }
         None
+    }
+
+    fn trim_profile_samples<T>(samples: &mut Vec<T>) {
+        if samples.len() > PROFILE_MAX_SAMPLES_PER_BUILD {
+            let remove = samples.len() - PROFILE_MAX_SAMPLES_PER_BUILD;
+            samples.drain(0..remove);
+        }
+    }
+
+    fn push_event_profile_sample(&mut self, build_id: LiveId, sample: EventSample) {
+        self.profile_focus_build = Some(build_id);
+        let samples = self.profile.entry(build_id).or_default();
+        samples.event.push(sample);
+        Self::trim_profile_samples(&mut samples.event);
+    }
+
+    fn push_gpu_profile_sample(&mut self, build_id: LiveId, sample: GPUSample) {
+        self.profile_focus_build = Some(build_id);
+        let samples = self.profile.entry(build_id).or_default();
+        samples.gpu.push(sample);
+        Self::trim_profile_samples(&mut samples.gpu);
+    }
+
+    fn push_gc_profile_sample(&mut self, build_id: LiveId, sample: GCSample) {
+        self.profile_focus_build = Some(build_id);
+        let samples = self.profile.entry(build_id).or_default();
+        samples.gc.push(sample);
+        Self::trim_profile_samples(&mut samples.gc);
+    }
+
+    fn remove_profile_build(&mut self, build_id: LiveId) {
+        self.profile.remove(&build_id);
+        if self.profile_focus_build == Some(build_id) {
+            self.profile_focus_build = self.profile.keys().copied().next();
+        }
+    }
+
+    pub fn clear_profile_samples(&mut self) {
+        self.profile.clear();
+        self.profile_focus_build = None;
+    }
+
+    pub fn current_profile_store(&self) -> Option<(LiveId, &ProfileSampleStore)> {
+        if let Some(build_id) = self.profile_focus_build {
+            if let Some(samples) = self.profile.get(&build_id) {
+                return Some((build_id, samples));
+            }
+        }
+        self.profile
+            .iter()
+            .next()
+            .map(|(build_id, samples)| (*build_id, samples))
     }
 
     fn send_kill_to_build(&self, build_id: LiveId) -> bool {
@@ -1773,6 +1913,7 @@ impl BuildManager {
 
         self.active.builds.remove(&build_id);
         self.running_processes.remove(&build_id);
+        self.remove_profile_build(build_id);
         if let Some(web_socket_id) = self.terminal_build_owners.remove(&build_id) {
             self.send_terminal_response(
                 web_socket_id,
@@ -1855,7 +1996,7 @@ impl BuildManager {
         file_system.clear_all_decorations();
         file_system.redraw_all_views(cx, dock);
         self.log.clear();
-        self.profile.clear();
+        self.clear_profile_samples();
     }
 
     pub fn start_recompile_timer(&mut self, cx: &mut Cx) {
@@ -1922,6 +2063,8 @@ impl BuildManager {
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) {
+        self.flush_run_view_tick_hiccup_logs(cx);
+
         if let Some(_) = self.tick_timer.is_event(event) {
             self.broadcast_to_stdin(HostToStdin::Tick);
         }
@@ -2036,6 +2179,7 @@ impl BuildManager {
             while let Ok(build_id) = self.recv_studio_disconnect.try_recv() {
                 let had_local_process = self.running_processes.remove(&build_id).is_some();
                 self.active.builds.remove(&build_id);
+                self.remove_profile_build(build_id);
                 if let Some(web_socket_id) = self.terminal_build_owners.remove(&build_id) {
                     self.send_terminal_response(
                         web_socket_id,
@@ -2049,6 +2193,12 @@ impl BuildManager {
                 self.terminal_latest_widget_dumps.remove(&build_id);
                 self.terminal_startup_queries.remove(&build_id);
                 self.terminal_startup_dump_pending.remove(&build_id);
+                if let Ok(mut monitor) = self.run_view_tick_monitor.lock() {
+                    monitor.remove(&build_id);
+                }
+                if let Ok(mut pending) = self.run_view_tick_hiccup_logs.lock() {
+                    pending.retain(|(id, _)| *id != build_id);
+                }
                 self.clear_terminal_screenshots_for_build(build_id);
                 self.clear_terminal_widget_tree_dumps_for_build(build_id);
                 if had_local_process {
@@ -2166,15 +2316,15 @@ impl BuildManager {
                             self.handle_terminal_widget_tree_dump_response(build_id, dump_response);
                         }
                         AppToStudio::EventSample(sample) => {
-                            // ok lets push this profile sample into the profiles
-                            let values = self.profile.entry(build_id).or_default();
-                            values.event.push(sample);
+                            self.push_event_profile_sample(build_id, sample);
                             cx.action(AppAction::RedrawProfiler)
                         }
                         AppToStudio::GPUSample(sample) => {
-                            // ok lets push this profile sample into the profiles
-                            let values = self.profile.entry(build_id).or_default();
-                            values.gpu.push(sample);
+                            self.push_gpu_profile_sample(build_id, sample);
+                            cx.action(AppAction::RedrawProfiler)
+                        }
+                        AppToStudio::GCSample(sample) => {
+                            self.push_gc_profile_sample(build_id, sample);
                             cx.action(AppAction::RedrawProfiler)
                         }
                         AppToStudio::FocusDesign => cx.action(AppAction::FocusDesign(build_id)),
