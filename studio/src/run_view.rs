@@ -12,7 +12,7 @@ script_mod! {
     mod.widgets.RunView = set_type_default() do mod.widgets.RunViewBase {
         draw_app +: {
             tex: texture_2d(float)
-            recompiling: instance(0.0)
+            inactive: instance(0.0)
             started: instance(0.0)
             tex_scale: instance(vec2(0.0, 0.0))
             tex_size: instance(vec2(0.0, 0.0))
@@ -26,7 +26,7 @@ script_mod! {
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #2
                 }
-                return fb.mix(#4, self.recompiling * 0.4)
+                return fb.mix(#4, self.inactive * 0.4)
             }
         }
         animator: Animator {
@@ -41,15 +41,15 @@ script_mod! {
                     apply: {draw_app: {started: 1.0}}
                 }
             }
-            recompiling: {
+            inactive: {
                 default: @off
                 off: AnimatorState {
                     from: {all: Forward {duration: 0.05}}
-                    apply: {draw_app: {recompiling: 0.0}}
+                    apply: {draw_app: {inactive: 0.0}}
                 }
                 on: AnimatorState {
                     from: {all: Forward {duration: 0.05}}
-                    apply: {draw_app: {recompiling: 1.0}}
+                    apply: {draw_app: {inactive: 1.0}}
                 }
             }
         }
@@ -194,14 +194,14 @@ impl RunView {
     }
 
     pub fn ready_to_start(&mut self, cx: &mut Cx) {
-        self.animator_play(cx, ids!(recompiling.off));
+        self.animator_play(cx, ids!(inactive.off));
         // cause a resize event to fire
         self.last_rect = Default::default();
         self.redraw(cx);
     }
 
-    pub fn recompile_started(&mut self, cx: &mut Cx) {
-        self.animator_play(cx, ids!(recompiling.on));
+    pub fn websocket_disconnect(&mut self, cx: &mut Cx) {
+        self.animator_play(cx, ids!(inactive.on));
     }
 
     pub fn redraw(&mut self, cx: &mut Cx) {
@@ -256,6 +256,7 @@ impl RunView {
                 },
             );
         }
+
         if self.last_rect.size != rect.size {
             let min_width = ((rect.size.x * dpi_factor).ceil() as u32).max(1);
             let min_height = ((rect.size.y * dpi_factor).ceil() as u32).max(1);
