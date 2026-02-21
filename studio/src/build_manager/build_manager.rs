@@ -16,7 +16,8 @@ use {
         },
         makepad_platform::studio::{
             AppToStudio, AppToStudioVec, DesignerComponentPosition, DesignerZoomPan, EventSample,
-            GCSample, GPUSample, StudioScreenshotRequest, StudioScreenshotResponse, StudioToApp,
+            GCSample, GPUSample, LocalProfileSample, StudioScreenshotRequest,
+            StudioScreenshotResponse, StudioToApp,
             StudioToAppVec, StudioWidgetTreeDumpRequest, StudioWidgetTreeDumpResponse,
         },
         makepad_shell::*,
@@ -133,7 +134,11 @@ pub struct BuildManager {
     pending_aux_chan_host_endpoints: HashMap<LiveId, cx_stdin::aux_chan::HostEndpoint>,
     pub log: Vec<(LiveId, LogItem)>,
     pub profile: HashMap<LiveId, ProfileSampleStore>,
+    pub self_profile: ProfileSampleStore,
+    profile_time_origin: HashMap<LiveId, f64>,
+    self_profile_time_origin: Option<f64>,
     profile_focus_build: Option<LiveId>,
+    profiler_running: bool,
     recompile_timeout: f64,
     recompile_timer: Timer,
     pub binaries: Vec<BuildBinary>,
@@ -1798,37 +1803,118 @@ impl BuildManager {
         }
     }
 
-    fn push_event_profile_sample(&mut self, build_id: LiveId, sample: EventSample) {
+    fn rebase_sample_range(start: f64, end: f64, origin: &mut Option<f64>) -> (f64, f64) {
+        let base = *origin.get_or_insert(start.min(end));
+        let mut rebased_start = start - base;
+        let mut rebased_end = end - base;
+        if rebased_start < 0.0 && rebased_start > -0.001 {
+            rebased_start = 0.0;
+        }
+        if rebased_end < 0.0 && rebased_end > -0.001 {
+            rebased_end = 0.0;
+        }
+        if rebased_end < rebased_start {
+            rebased_end = rebased_start;
+        }
+        (rebased_start, rebased_end)
+    }
+
+    fn push_event_profile_sample(&mut self, build_id: LiveId, mut sample: EventSample) {
+        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        sample.start -= *origin;
+        sample.end -= *origin;
+        if sample.end < sample.start {
+            sample.end = sample.start;
+        }
         self.profile_focus_build = Some(build_id);
         let samples = self.profile.entry(build_id).or_default();
         samples.event.push(sample);
         Self::trim_profile_samples(&mut samples.event);
+        Cx::set_local_profile_capture_enabled(true);
     }
 
-    fn push_gpu_profile_sample(&mut self, build_id: LiveId, sample: GPUSample) {
+    fn push_gpu_profile_sample(&mut self, build_id: LiveId, mut sample: GPUSample) {
+        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        sample.start -= *origin;
+        sample.end -= *origin;
+        if sample.end < sample.start {
+            sample.end = sample.start;
+        }
         self.profile_focus_build = Some(build_id);
         let samples = self.profile.entry(build_id).or_default();
         samples.gpu.push(sample);
         Self::trim_profile_samples(&mut samples.gpu);
+        Cx::set_local_profile_capture_enabled(true);
     }
 
-    fn push_gc_profile_sample(&mut self, build_id: LiveId, sample: GCSample) {
+    fn push_gc_profile_sample(&mut self, build_id: LiveId, mut sample: GCSample) {
+        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        sample.start -= *origin;
+        sample.end -= *origin;
+        if sample.end < sample.start {
+            sample.end = sample.start;
+        }
         self.profile_focus_build = Some(build_id);
         let samples = self.profile.entry(build_id).or_default();
         samples.gc.push(sample);
         Self::trim_profile_samples(&mut samples.gc);
+        Cx::set_local_profile_capture_enabled(true);
+    }
+
+    fn push_self_event_profile_sample(&mut self, mut sample: EventSample) {
+        let (start, end) = Self::rebase_sample_range(
+            sample.start,
+            sample.end,
+            &mut self.self_profile_time_origin,
+        );
+        sample.start = start;
+        sample.end = end;
+        self.self_profile.event.push(sample);
+        Self::trim_profile_samples(&mut self.self_profile.event);
+    }
+
+    fn push_self_gpu_profile_sample(&mut self, mut sample: GPUSample) {
+        let (start, end) = Self::rebase_sample_range(
+            sample.start,
+            sample.end,
+            &mut self.self_profile_time_origin,
+        );
+        sample.start = start;
+        sample.end = end;
+        self.self_profile.gpu.push(sample);
+        Self::trim_profile_samples(&mut self.self_profile.gpu);
+    }
+
+    fn push_self_gc_profile_sample(&mut self, mut sample: GCSample) {
+        let (start, end) = Self::rebase_sample_range(
+            sample.start,
+            sample.end,
+            &mut self.self_profile_time_origin,
+        );
+        sample.start = start;
+        sample.end = end;
+        self.self_profile.gc.push(sample);
+        Self::trim_profile_samples(&mut self.self_profile.gc);
     }
 
     fn remove_profile_build(&mut self, build_id: LiveId) {
         self.profile.remove(&build_id);
+        self.profile_time_origin.remove(&build_id);
         if self.profile_focus_build == Some(build_id) {
             self.profile_focus_build = self.profile.keys().copied().next();
+        }
+        if self.profile.is_empty() {
+            Cx::set_local_profile_capture_enabled(false);
         }
     }
 
     pub fn clear_profile_samples(&mut self) {
         self.profile.clear();
+        self.self_profile = ProfileSampleStore::default();
+        self.profile_time_origin.clear();
+        self.self_profile_time_origin = None;
         self.profile_focus_build = None;
+        Cx::set_local_profile_capture_enabled(false);
     }
 
     pub fn current_profile_store(&self) -> Option<(LiveId, &ProfileSampleStore)> {
@@ -1841,6 +1927,27 @@ impl BuildManager {
             .iter()
             .next()
             .map(|(build_id, samples)| (*build_id, samples))
+    }
+
+    pub fn self_profile_store(&self) -> &ProfileSampleStore {
+        &self.self_profile
+    }
+
+    pub fn set_profiler_running(&mut self, running: bool) {
+        let was_running = self.profiler_running;
+        self.profiler_running = running;
+        if !running {
+            Cx::set_local_profile_capture_enabled(false);
+            let _ = Cx::take_local_profile_samples();
+        } else if !was_running {
+            // Start a fresh profiling session at t=0 when the user presses Run.
+            self.profile.clear();
+            self.self_profile = ProfileSampleStore::default();
+            self.profile_time_origin.clear();
+            self.self_profile_time_origin = None;
+            self.profile_focus_build = None;
+            Cx::set_local_profile_capture_enabled(false);
+        }
     }
 
     fn send_kill_to_build(&self, build_id: LiveId) -> bool {
@@ -2064,6 +2171,24 @@ impl BuildManager {
 
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) {
         self.flush_run_view_tick_hiccup_logs(cx);
+
+        if self.profiler_running {
+            for sample in Cx::take_local_profile_samples() {
+                match sample {
+                    LocalProfileSample::Event(sample) => {
+                        self.push_self_event_profile_sample(sample);
+                    }
+                    LocalProfileSample::GPU(sample) => {
+                        self.push_self_gpu_profile_sample(sample);
+                    }
+                    LocalProfileSample::GC(sample) => {
+                        self.push_self_gc_profile_sample(sample);
+                    }
+                }
+            }
+        } else {
+            let _ = Cx::take_local_profile_samples();
+        }
 
         if let Some(_) = self.tick_timer.is_event(event) {
             self.broadcast_to_stdin(HostToStdin::Tick);
@@ -2316,16 +2441,22 @@ impl BuildManager {
                             self.handle_terminal_widget_tree_dump_response(build_id, dump_response);
                         }
                         AppToStudio::EventSample(sample) => {
-                            self.push_event_profile_sample(build_id, sample);
-                            cx.action(AppAction::RedrawProfiler)
+                            if self.profiler_running {
+                                self.push_event_profile_sample(build_id, sample);
+                                cx.action(AppAction::RedrawProfiler)
+                            }
                         }
                         AppToStudio::GPUSample(sample) => {
-                            self.push_gpu_profile_sample(build_id, sample);
-                            cx.action(AppAction::RedrawProfiler)
+                            if self.profiler_running {
+                                self.push_gpu_profile_sample(build_id, sample);
+                                cx.action(AppAction::RedrawProfiler)
+                            }
                         }
                         AppToStudio::GCSample(sample) => {
-                            self.push_gc_profile_sample(build_id, sample);
-                            cx.action(AppAction::RedrawProfiler)
+                            if self.profiler_running {
+                                self.push_gc_profile_sample(build_id, sample);
+                                cx.action(AppAction::RedrawProfiler)
+                            }
                         }
                         AppToStudio::FocusDesign => cx.action(AppAction::FocusDesign(build_id)),
                         AppToStudio::PatchFile(ef) => cx.action(AppAction::PatchFile(ef)),

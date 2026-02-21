@@ -49,7 +49,10 @@ script_mod! {
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
         // Platform-specific initialization (for macos)
-        vm.with_cx_mut(|cx| cx.start_stdin_service());
+        vm.with_cx_mut(|cx| {
+            cx.start_stdin_service();
+            Cx::set_local_profile_capture_enabled(false);
+        });
         // Register widgets2 script modules
         crate::makepad_widgets::script_mod(vm);
         crate::script_mod(vm);

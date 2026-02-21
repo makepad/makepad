@@ -1,10 +1,12 @@
 #[allow(unused_imports)]
 use crate::{
     cx_api::*,
+    event::Event,
     event::{HttpMethod, HttpRequest},
     makepad_micro_serde::*,
     os::OsWebSocket,
-    studio::{AppToStudio, AppToStudioVec},
+    studio::{AppToStudio, AppToStudioVec, LocalProfileSample},
+    thread::SignalToUI,
     Cx,
 };
 #[allow(unused_imports)]
@@ -57,6 +59,9 @@ pub(crate) static WEB_SOCKET_THREAD_SENDER: Mutex<Option<Sender<WebSocketThreadM
     Mutex::new(None);
 pub(crate) static WEB_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HAS_STUDIO_WEB_SOCKET: AtomicBool = AtomicBool::new(false);
+pub(crate) static LOCAL_PROFILE_CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
+pub(crate) static LOCAL_PROFILE_SAMPLES: Mutex<Vec<LocalProfileSample>> = Mutex::new(Vec::new());
+const LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT: usize = 16_384;
 
 impl Drop for WebSocket {
     fn drop(&mut self) {
@@ -66,6 +71,52 @@ impl Drop for WebSocket {
 impl Cx {
     pub fn has_studio_web_socket() -> bool {
         HAS_STUDIO_WEB_SOCKET.load(Ordering::SeqCst)
+    }
+
+    pub fn local_profile_capture_enabled() -> bool {
+        LOCAL_PROFILE_CAPTURE_ENABLED.load(Ordering::SeqCst)
+    }
+
+    pub fn set_local_profile_capture_enabled(enabled: bool) {
+        LOCAL_PROFILE_CAPTURE_ENABLED.store(enabled, Ordering::SeqCst);
+        if !enabled {
+            if let Ok(mut samples) = LOCAL_PROFILE_SAMPLES.lock() {
+                samples.clear();
+            }
+        }
+    }
+
+    pub fn take_local_profile_samples() -> Vec<LocalProfileSample> {
+        if let Ok(mut samples) = LOCAL_PROFILE_SAMPLES.lock() {
+            return samples.drain(..).collect();
+        }
+        Vec::new()
+    }
+
+    fn capture_local_profile_sample(msg: &AppToStudio) {
+        if !Self::local_profile_capture_enabled() {
+            return;
+        }
+
+        let sample = match msg {
+            AppToStudio::EventSample(sample)
+                if Event::name_from_u32(sample.event_u32) == "Draw" =>
+            {
+                LocalProfileSample::Event(sample.clone())
+            }
+            AppToStudio::GPUSample(sample) => LocalProfileSample::GPU(sample.clone()),
+            AppToStudio::GCSample(sample) => LocalProfileSample::GC(sample.clone()),
+            _ => return,
+        };
+
+        if let Ok(mut samples) = LOCAL_PROFILE_SAMPLES.lock() {
+            samples.push(sample);
+            if samples.len() > LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT {
+                let remove = samples.len() - LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT;
+                samples.drain(0..remove);
+            }
+        }
+        SignalToUI::set_ui_signal();
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -248,6 +299,7 @@ impl Cx {
     }
 
     pub fn send_studio_message(msg: AppToStudio) {
+        Self::capture_local_profile_sample(&msg);
         if !Cx::has_studio_web_socket() {
             return;
         }

@@ -1,6 +1,7 @@
 use {
     crate::{
         app::{AppAction, AppData},
+        build_manager::build_manager::ProfileSampleStore,
         makepad_widgets::*,
     },
     std::fmt::Write,
@@ -67,7 +68,7 @@ script_mod! {
 
             running_button := ToggleFlat {
                 text: "Running"
-                active: true
+                active: false
                 icon_walk: Walk{ width: 8. }
             }
             clear_button := ButtonFlat {
@@ -90,13 +91,13 @@ script_mod! {
                 }
                 sample_count_label := P {
                     width: Fit
-                    text: "Events: 0 GPU: 0 GC: 0"
+                    text: "App E: 0 G: 0 C: 0 | Self E: 0 G: 0 C: 0"
                     margin: 0.
                     padding: theme.mspace_v_1
                 }
                 window_label := Pbold {
                     width: Fit
-                    text: "Live"
+                    text: "Paused"
                     margin: 0.
                     padding: theme.mspace_v_1
                 }
@@ -108,6 +109,11 @@ script_mod! {
 
 const DEFAULT_PROFILE_WINDOW_SECONDS: f64 = 0.5;
 const MIN_PROFILE_WINDOW_SECONDS: f64 = 0.000_01;
+const PROFILE_ROW_Y_STEP: f64 = 25.0;
+const SELF_PROFILE_ROW_OFFSET_Y: f64 = 85.0;
+const DRAW_EVENT_U32: u32 = 7;
+const FRAME_BUDGET_SECONDS: f64 = 1.0 / 60.0;
+const HICCUP_GAP_SECONDS: f64 = FRAME_BUDGET_SECONDS * 1.5;
 
 #[derive(Clone)]
 struct TimeRange {
@@ -148,8 +154,10 @@ struct ProfilerEventChart {
     time_range: TimeRange,
     #[rust]
     time_drag: Option<TimeRange>,
-    #[rust(true)]
+    #[rust(false)]
     follow_live: bool,
+    #[rust]
+    self_time_offset: Option<f64>,
     #[rust]
     tmp_label: String,
 }
@@ -159,6 +167,9 @@ impl ProfilerEventChart {
         if self.follow_live != follow_live {
             self.follow_live = follow_live;
             self.time_drag = None;
+            if self.follow_live {
+                self.self_time_offset = None;
+            }
             self.draw_bg.redraw(cx);
         }
     }
@@ -169,10 +180,281 @@ impl ProfilerEventChart {
 
     fn sync_live_window(&mut self, latest_sample_end: f64) {
         let window = self.current_window_seconds().max(MIN_PROFILE_WINDOW_SECONDS);
-        self.time_range = TimeRange {
-            start: latest_sample_end - window,
-            end: latest_sample_end,
+        self.time_range = if latest_sample_end <= window {
+            TimeRange {
+                start: 0.0,
+                end: window,
+            }
+        } else {
+            TimeRange {
+                start: latest_sample_end - window,
+                end: latest_sample_end,
+            }
         };
+    }
+
+    fn reset_for_new_session(&mut self, cx: &mut Cx) {
+        self.time_drag = None;
+        self.self_time_offset = None;
+        self.time_range = TimeRange {
+            start: 0.0,
+            end: DEFAULT_PROFILE_WINDOW_SECONDS,
+        };
+        self.draw_bg.redraw(cx);
+    }
+
+    fn has_samples(samples: &ProfileSampleStore) -> bool {
+        !(samples.event.is_empty() && samples.gpu.is_empty() && samples.gc.is_empty())
+    }
+
+    fn latest_sample_end(samples: &ProfileSampleStore) -> Option<f64> {
+        [
+            samples.event.last().map(|sample| sample.end),
+            samples.gpu.last().map(|sample| sample.end),
+            samples.gc.last().map(|sample| sample.end),
+        ]
+        .into_iter()
+        .flatten()
+        .max_by(|a, b| a.total_cmp(b))
+    }
+
+    fn format_time_to_now_label(label: &mut String, seconds_to_now: f64) {
+        label.clear();
+        if seconds_to_now.abs() < 0.000_5 {
+            label.push_str("now");
+            return;
+        }
+        let abs_seconds = seconds_to_now.abs();
+        if abs_seconds < 1.0 {
+            let _ = write!(label, "-{:.0}ms", abs_seconds * 1000.0);
+        } else {
+            let _ = write!(label, "-{:.2}s", abs_seconds);
+        }
+    }
+
+    fn draw_time_grid(&mut self, cx: &mut Cx2d, rect: &Rect, label: &mut String) {
+        let range_len = self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS);
+        let scale = rect.size.x / range_len;
+        let mut major_step = FRAME_BUDGET_SECONDS;
+        while major_step * scale < 90.0 {
+            major_step *= 2.0;
+        }
+        while major_step * scale > 180.0 && major_step > 0.001 {
+            major_step *= 0.5;
+        }
+        let minor_step = major_step * 0.5;
+
+        if minor_step * scale >= 28.0 {
+            let mut t = (self.time_range.start / minor_step).floor() * minor_step;
+            while t <= self.time_range.end {
+                let major_index = (t / major_step).round();
+                let major_t = major_index * major_step;
+                let is_major = (t - major_t).abs() <= minor_step * 0.06;
+                if !is_major {
+                    let xpos = rect.pos.x + (t - self.time_range.start) * scale;
+                    self.draw_line.draw_abs(
+                        cx,
+                        Rect {
+                            pos: dvec2(xpos, rect.pos.y),
+                            size: dvec2(1.0, rect.size.y),
+                        },
+                    );
+                }
+                t += minor_step;
+            }
+        }
+
+        let mut t = (self.time_range.start / major_step).floor() * major_step;
+        while t <= self.time_range.end {
+            let xpos = rect.pos.x + (t - self.time_range.start) * scale;
+            let pos = dvec2(xpos, rect.pos.y);
+            self.draw_line.draw_abs(
+                cx,
+                Rect {
+                    pos,
+                    size: dvec2(2.0, rect.size.y),
+                },
+            );
+            Self::format_time_to_now_label(label, self.time_range.end - t);
+            self.draw_time.draw_abs(cx, pos + dvec2(2.0, 2.0), label);
+            t += major_step;
+        }
+    }
+
+    fn draw_frame_gap_markers(
+        &mut self,
+        cx: &mut Cx2d,
+        rect: &Rect,
+        samples: &ProfileSampleStore,
+        time_offset: f64,
+        label: &mut String,
+    ) {
+        let range_len = self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS);
+        let scale = rect.size.x / range_len;
+        let mut prev_draw_end = None;
+        let mut last_label_x = f64::NEG_INFINITY;
+
+        for sample in &samples.event {
+            if sample.event_u32 != DRAW_EVENT_U32 {
+                continue;
+            }
+            let draw_end = sample.end + time_offset;
+            if draw_end < self.time_range.start {
+                prev_draw_end = Some(draw_end);
+                continue;
+            }
+            if draw_end > self.time_range.end {
+                break;
+            }
+            if let Some(prev_end) = prev_draw_end {
+                let gap = draw_end - prev_end;
+                if gap >= HICCUP_GAP_SECONDS {
+                    let xpos = rect.pos.x + (draw_end - self.time_range.start) * scale;
+                    self.draw_item.color = Vec4f::from_u32(0xff5f5f50);
+                    self.draw_item.draw_abs(
+                        cx,
+                        Rect {
+                            pos: dvec2((xpos - 1.0).max(rect.pos.x), rect.pos.y),
+                            size: dvec2(2.0, rect.size.y),
+                        },
+                    );
+                    if xpos - last_label_x > 84.0 {
+                        label.clear();
+                        let _ = write!(label, "{:.1}ms gap", gap * 1000.0);
+                        self.draw_time.draw_abs(cx, dvec2(xpos + 3.0, rect.pos.y + 14.0), label);
+                        last_label_x = xpos;
+                    }
+                }
+            }
+            prev_draw_end = Some(draw_end);
+        }
+    }
+
+    fn draw_profile_store(
+        &mut self,
+        cx: &mut Cx2d,
+        rect: &Rect,
+        samples: &ProfileSampleStore,
+        base_y: f64,
+        label_prefix: &str,
+        time_offset: f64,
+    ) {
+        if let Some(first) = samples
+            .event
+            .iter()
+            .position(|sample| sample.end + time_offset > self.time_range.start)
+        {
+            let mut prefixed_label = String::new();
+            for i in first..samples.event.len() {
+                let sample = &samples.event[i];
+                let sample_start = sample.start + time_offset;
+                let sample_end = sample.end + time_offset;
+                if sample_start > self.time_range.end {
+                    break;
+                }
+                let color = LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32
+                    | 0xff000000;
+                self.draw_item.color = Vec4f::from_u32(color);
+                if label_prefix.is_empty() {
+                    self.draw_block(
+                        cx,
+                        &Rect {
+                            pos: rect.pos + dvec2(0.0, base_y),
+                            size: rect.size,
+                        },
+                        sample_start,
+                        sample_end,
+                        Event::name_from_u32(sample.event_u32),
+                        sample.event_meta,
+                    );
+                } else {
+                    prefixed_label.clear();
+                    prefixed_label.push_str(label_prefix);
+                    prefixed_label.push_str(Event::name_from_u32(sample.event_u32));
+                    self.draw_block(
+                        cx,
+                        &Rect {
+                            pos: rect.pos + dvec2(0.0, base_y),
+                            size: rect.size,
+                        },
+                        sample_start,
+                        sample_end,
+                        &prefixed_label,
+                        sample.event_meta,
+                    );
+                }
+            }
+        }
+
+        self.draw_item.color = Vec4f::from_u32(if label_prefix.is_empty() {
+            0x7f7f7fff
+        } else {
+            0x9f5f5fff
+        });
+        if let Some(first) = samples
+            .gpu
+            .iter()
+            .position(|sample| sample.end + time_offset > self.time_range.start)
+        {
+            for i in first..samples.gpu.len() {
+                let sample = &samples.gpu[i];
+                let sample_start = sample.start + time_offset;
+                let sample_end = sample.end + time_offset;
+                if sample_start > self.time_range.end {
+                    break;
+                }
+                self.draw_block(
+                    cx,
+                    &Rect {
+                        pos: rect.pos + dvec2(0.0, base_y + PROFILE_ROW_Y_STEP),
+                        size: rect.size,
+                    },
+                    sample_start,
+                    sample_end,
+                    if label_prefix.is_empty() {
+                        "GPU"
+                    } else {
+                        "Self GPU"
+                    },
+                    0,
+                );
+            }
+        }
+
+        self.draw_item.color = Vec4f::from_u32(if label_prefix.is_empty() {
+            0x5eb27fff
+        } else {
+            0x3f9c5fff
+        });
+        if let Some(first) = samples
+            .gc
+            .iter()
+            .position(|sample| sample.end + time_offset > self.time_range.start)
+        {
+            for i in first..samples.gc.len() {
+                let sample = &samples.gc[i];
+                let sample_start = sample.start + time_offset;
+                let sample_end = sample.end + time_offset;
+                if sample_start > self.time_range.end {
+                    break;
+                }
+                self.draw_block(
+                    cx,
+                    &Rect {
+                        pos: rect.pos + dvec2(0.0, base_y + PROFILE_ROW_Y_STEP * 2.0),
+                        size: rect.size,
+                    },
+                    sample_start,
+                    sample_end,
+                    if label_prefix.is_empty() {
+                        "GC"
+                    } else {
+                        "Self GC"
+                    },
+                    sample.heap_live,
+                );
+            }
+        }
     }
 
     fn draw_block(
@@ -249,112 +531,75 @@ impl Widget for ProfilerEventChart {
         let mut label = String::new();
 
         let rect = cx.turtle().rect();
-        if let Some((_build_id, pss)) = bm.current_profile_store() {
+        let app_samples = bm.current_profile_store().map(|(_, samples)| samples);
+        let self_samples = bm.self_profile_store();
+
+        let has_app_samples = app_samples.map_or(false, Self::has_samples);
+        let has_self_samples = Self::has_samples(self_samples);
+        let latest_app_end = app_samples.and_then(Self::latest_sample_end);
+        let latest_self_end = if has_self_samples {
+            Self::latest_sample_end(self_samples)
+        } else {
+            None
+        };
+
+        // App and studio samples use different local time origins; align self to app's latest.
+        // Keep this offset fixed while paused, so the self lane doesn't jitter.
+        if self.follow_live {
+            if let (Some(app_end), Some(self_end)) = (latest_app_end, latest_self_end) {
+                self.self_time_offset = Some(app_end - self_end);
+            }
+        }
+        let self_time_offset = self.self_time_offset.unwrap_or_else(|| {
+            match (latest_app_end, latest_self_end) {
+                (Some(app_end), Some(self_end)) => app_end - self_end,
+                _ => 0.0,
+            }
+        });
+
+        if has_app_samples || has_self_samples {
             if self.follow_live {
-                let latest_event_end = pss.event.last().map(|sample| sample.end);
-                let latest_gpu_end = pss.gpu.last().map(|sample| sample.end);
-                let latest_gc_end = pss.gc.last().map(|sample| sample.end);
-                let latest_sample_end = [latest_event_end, latest_gpu_end, latest_gc_end]
-                    .into_iter()
-                    .flatten()
-                    .max_by(|a, b| a.total_cmp(b));
+                let latest_sample_end = latest_app_end.or_else(|| {
+                    latest_self_end.map(|self_end| self_end + self_time_offset)
+                });
                 if let Some(latest_sample_end) = latest_sample_end {
                     self.sync_live_window(latest_sample_end);
                 }
             }
 
-            let range_len = self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS);
-            let scale = rect.size.x / range_len;
+            self.draw_time_grid(cx, &rect, &mut label);
+            let self_base_y = if has_app_samples {
+                SELF_PROFILE_ROW_OFFSET_Y
+            } else {
+                0.0
+            };
 
-            let mut step_size = 0.008;
-            while range_len / step_size > rect.size.x / 80.0 {
-                step_size *= 2.0;
-            }
-
-            while range_len / step_size < rect.size.x / 80.0 {
-                step_size /= 2.0;
-            }
-
-            let mut iter =
-                (self.time_range.start / step_size).floor() * step_size - self.time_range.start;
-            while iter < range_len {
-                let xpos = iter * scale;
-                let pos = dvec2(xpos, 0.0) + rect.pos;
-                self.draw_line.draw_abs(
+            if has_app_samples {
+                if let Some(app_samples) = app_samples {
+                    self.draw_frame_gap_markers(cx, &rect, app_samples, 0.0, &mut label);
+                    self.draw_time.draw_abs(cx, rect.pos + dvec2(4.0, 2.0), "App");
+                    self.draw_profile_store(cx, &rect, app_samples, 0.0, "", 0.0);
+                }
+            } else if has_self_samples {
+                self.draw_frame_gap_markers(
                     cx,
-                    Rect {
-                        pos,
-                        size: dvec2(3.0, rect.size.y),
-                    },
+                    &rect,
+                    self_samples,
+                    self_time_offset,
+                    &mut label,
                 );
-                label.clear();
-                write!(&mut label, "{:.3}s", (iter + self.time_range.start)).unwrap();
-                self.draw_time.draw_abs(cx, pos + dvec2(2.0, 2.0), &label);
-                iter += step_size;
             }
-
-            if let Some(first) = pss.event.iter().position(|v| v.end > self.time_range.start) {
-                // lets draw the time lines and time text
-                for i in first..pss.event.len() {
-                    let sample = &pss.event[i];
-                    if sample.start > self.time_range.end {
-                        break;
-                    }
-                    let color = LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32
-                        | 0xff000000;
-                    self.draw_item.color = Vec4f::from_u32(color);
-                    self.draw_block(
-                        cx,
-                        &rect,
-                        sample.start,
-                        sample.end,
-                        Event::name_from_u32(sample.event_u32),
-                        sample.event_meta,
-                    );
-                }
-            }
-
-            self.draw_item.color = Vec4f::from_u32(0x7f7f7fff);
-            if let Some(first) = pss.gpu.iter().position(|v| v.end > self.time_range.start) {
-                // lets draw the time lines and time text
-                for i in first..pss.gpu.len() {
-                    let sample = &pss.gpu[i];
-                    if sample.start > self.time_range.end {
-                        break;
-                    }
-                    self.draw_block(
-                        cx,
-                        &Rect {
-                            pos: rect.pos + dvec2(0.0, 25.0),
-                            size: rect.size,
-                        },
-                        sample.start,
-                        sample.end,
-                        "GPU",
-                        0,
-                    );
-                }
-            }
-
-            self.draw_item.color = Vec4f::from_u32(0x5eb27fff);
-            if let Some(first) = pss.gc.iter().position(|v| v.end > self.time_range.start) {
-                for i in first..pss.gc.len() {
-                    let sample = &pss.gc[i];
-                    if sample.start > self.time_range.end {
-                        break;
-                    }
-                    self.draw_block(
-                        cx,
-                        &Rect {
-                            pos: rect.pos + dvec2(0.0, 50.0),
-                            size: rect.size,
-                        },
-                        sample.start,
-                        sample.end,
-                        "GC",
-                        sample.heap_live,
-                    );
-                }
+            if has_self_samples {
+                self.draw_time
+                    .draw_abs(cx, rect.pos + dvec2(4.0, self_base_y + 2.0), "Self");
+                self.draw_profile_store(
+                    cx,
+                    &rect,
+                    self_samples,
+                    self_base_y,
+                    "Self ",
+                    self_time_offset,
+                );
             }
         }
         self.draw_bg.end(cx);
@@ -372,25 +617,35 @@ impl Widget for ProfilerEventChart {
             Hit::FingerMove(fe) => {
                 if !self.follow_live {
                     if let Some(start) = &self.time_drag {
-                    // ok so how much did we move?
-                    let moved = fe.abs_start.x - fe.abs.x;
-                    // scale this thing to the time window
-                    let scale = self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS) / fe.rect.size.x;
-                    let shift_time = moved * scale;
-                    self.time_range = start.shifted(shift_time);
-                    self.draw_bg.redraw(cx);
-                }
+                        // ok so how much did we move?
+                        let moved = fe.abs_start.x - fe.abs.x;
+                        // scale this thing to the time window
+                        let scale =
+                            self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS) / fe.rect.size.x;
+                        let shift_time = moved * scale;
+                        self.time_range = start.shifted(shift_time);
+                        self.draw_bg.redraw(cx);
+                    }
                 }
             }
             Hit::FingerScroll(e) => {
-                if !self.follow_live && e.device.is_mouse() {
+                if e.device.is_mouse() {
                     let zoom = (1.03).powf(e.scroll.y / 150.0);
-                    let scale = self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS) / e.rect.size.x;
-                    let time = scale * (e.abs.x - e.rect.pos.x) + self.time_range.start;
-                    self.time_range = TimeRange {
-                        start: (self.time_range.start - time) * zoom + time,
-                        end: (self.time_range.end - time) * zoom + time,
-                    };
+                    if self.follow_live {
+                        let window = self.current_window_seconds().max(MIN_PROFILE_WINDOW_SECONDS);
+                        let next_window = (window * zoom).max(MIN_PROFILE_WINDOW_SECONDS);
+                        self.time_range = TimeRange {
+                            start: self.time_range.end - next_window,
+                            end: self.time_range.end,
+                        };
+                    } else {
+                        let scale = self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS) / e.rect.size.x;
+                        let time = scale * (e.abs.x - e.rect.pos.x) + self.time_range.start;
+                        self.time_range = TimeRange {
+                            start: (self.time_range.start - time) * zoom + time,
+                            end: (self.time_range.end - time) * zoom + time,
+                        };
+                    }
                     self.draw_bg.redraw(cx);
                 }
             }
@@ -419,12 +674,16 @@ impl WidgetMatchEvent for Profiler {
         }
 
         if let Some(is_running) = self.check_box(cx, ids!(running_button)).changed(actions) {
+            data.build_manager.set_profiler_running(is_running);
             if let Some(mut chart) = self
                 .view
                 .widget(cx, ids!(chart))
                 .borrow_mut::<ProfilerEventChart>()
             {
                 chart.set_follow_live(cx, is_running);
+                if is_running {
+                    chart.reset_for_new_session(cx);
+                }
             }
             cx.action(AppAction::RedrawProfiler);
         }
@@ -445,25 +704,35 @@ impl Widget for Profiler {
 
         self.tmp_status_label.clear();
         self.tmp_sample_count_label.clear();
+        let self_samples = bm.self_profile_store();
         if let Some((build_id, samples)) = bm.current_profile_store() {
             let build_name = bm
                 .process_name(build_id)
                 .unwrap_or_else(|| format!("build {}", build_id.0));
             let _ = write!(
                 &mut self.tmp_status_label,
-                "Build: {} ({})",
+                "Build: {} ({}) | Self: Studio",
                 build_name, build_id.0
             );
             let _ = write!(
                 &mut self.tmp_sample_count_label,
-                "Events: {} GPU: {} GC: {}",
+                "App E: {} G: {} C: {} | Self E: {} G: {} C: {}",
                 samples.event.len(),
                 samples.gpu.len(),
-                samples.gc.len()
+                samples.gc.len(),
+                self_samples.event.len(),
+                self_samples.gpu.len(),
+                self_samples.gc.len()
             );
         } else {
-            self.tmp_status_label.push_str("Build: -");
-            self.tmp_sample_count_label.push_str("Events: 0 GPU: 0 GC: 0");
+            self.tmp_status_label.push_str("Build: - | Self: Studio");
+            let _ = write!(
+                &mut self.tmp_sample_count_label,
+                "App E: 0 G: 0 C: 0 | Self E: {} G: {} C: {}",
+                self_samples.event.len(),
+                self_samples.gpu.len(),
+                self_samples.gc.len()
+            );
         }
         self.label(cx, ids!(status_label))
             .set_text_with(|v| {
