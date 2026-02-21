@@ -1,7 +1,7 @@
 use {
     crate::{
         cx::Cx,
-        cx_api::CxOsOp,
+        cx_api::{CxOsApi, CxOsOp},
         draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
         event::Event,
         event::{TextClipboardEvent, WindowGeom, WindowGeomChangeEvent},
@@ -15,7 +15,7 @@ use {
             },
             metal::{DrawPassMode, MetalCx},
         },
-        studio::{AppToStudio, StudioToApp, StudioToAppVec},
+        studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
         web_socket::WebSocketMessage,
@@ -361,11 +361,22 @@ impl Cx {
                     self.os.stdin_timers.time_now() as f32,
                 );
 
+                let gc_start = self.seconds_since_app_start();
+                let mut gc_heap_live = None;
                 self.with_vm(|vm| {
                     if vm.heap().needs_gc() {
                         vm.gc();
+                        gc_heap_live = Some(vm.heap().gc_live_len() as u64);
                     }
                 });
+                if let Some(heap_live) = gc_heap_live {
+                    let gc_end = self.seconds_since_app_start();
+                    Cx::send_studio_message(AppToStudio::GCSample(GCSample {
+                        start: gc_start,
+                        end: gc_end,
+                        heap_live,
+                    }));
+                }
 
                 if !self.new_next_frames.is_empty()
                     || self.need_redrawing()
