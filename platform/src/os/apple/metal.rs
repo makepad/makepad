@@ -133,6 +133,18 @@ impl Cx {
                 if instances == 0 {
                     continue;
                 }
+
+                if self.passes[draw_pass_id].depth_texture.is_some() {
+                    let depth_state = if draw_call.options.depth_write {
+                        self.passes[draw_pass_id].os.mtl_depth_state_write
+                    } else {
+                        self.passes[draw_pass_id].os.mtl_depth_state_no_write
+                    };
+                    if let Some(depth_state) = depth_state {
+                        let () = unsafe { msg_send![encoder, setDepthStencilState: depth_state] };
+                    }
+                }
+
                 let render_pipeline_state = shp.render_pipeline_state.as_id();
                 unsafe {
                     let () = msg_send![encoder, setRenderPipelineState: render_pipeline_state];
@@ -550,7 +562,7 @@ impl Cx {
                 }
             }
             // create depth state
-            if self.passes[draw_pass_id].os.mtl_depth_state.is_none() {
+            if self.passes[draw_pass_id].os.mtl_depth_state_write.is_none() {
                 let desc: ObjcId = unsafe { msg_send![class!(MTLDepthStencilDescriptor), new] };
                 let () = unsafe {
                     msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]
@@ -558,7 +570,17 @@ impl Cx {
                 let () = unsafe { msg_send![desc, setDepthWriteEnabled: true] };
                 let depth_stencil_state: ObjcId =
                     unsafe { msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc] };
-                self.passes[draw_pass_id].os.mtl_depth_state = Some(depth_stencil_state);
+                self.passes[draw_pass_id].os.mtl_depth_state_write = Some(depth_stencil_state);
+            }
+            if self.passes[draw_pass_id].os.mtl_depth_state_no_write.is_none() {
+                let desc: ObjcId = unsafe { msg_send![class!(MTLDepthStencilDescriptor), new] };
+                let () = unsafe {
+                    msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]
+                };
+                let () = unsafe { msg_send![desc, setDepthWriteEnabled: false] };
+                let depth_stencil_state: ObjcId =
+                    unsafe { msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc] };
+                self.passes[draw_pass_id].os.mtl_depth_state_no_write = Some(depth_stencil_state);
             }
         }
 
@@ -567,7 +589,7 @@ impl Cx {
             msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]
         };
 
-        if let Some(depth_state) = self.passes[draw_pass_id].os.mtl_depth_state {
+        if let Some(depth_state) = self.passes[draw_pass_id].os.mtl_depth_state_write {
             let () = unsafe { msg_send![encoder, setDepthStencilState: depth_state] };
         }
 
@@ -887,7 +909,8 @@ pub struct CxOsDrawList {}
 
 #[derive(Default, Clone)]
 pub struct CxOsPass {
-    mtl_depth_state: Option<ObjcId>,
+    mtl_depth_state_write: Option<ObjcId>,
+    mtl_depth_state_no_write: Option<ObjcId>,
 }
 
 pub enum PackType {
