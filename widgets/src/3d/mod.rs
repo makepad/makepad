@@ -3,6 +3,7 @@ pub mod chart_3d;
 pub mod gltf_3d;
 pub mod grid_3d;
 pub mod scene_3d;
+pub mod view_splat;
 pub mod view_3d;
 
 pub use bar_chart_3d::*;
@@ -10,6 +11,7 @@ pub use chart_3d::*;
 pub use gltf_3d::*;
 pub use grid_3d::*;
 pub use scene_3d::*;
+pub use view_splat::*;
 pub use view_3d::*;
 
 use crate::makepad_draw::*;
@@ -20,5 +22,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     grid_3d::script_mod(vm);
     bar_chart_3d::script_mod(vm);
     gltf_3d::script_mod(vm);
+    view_splat::script_mod(vm);
     view_3d::script_mod(vm);
 }
