@@ -36,21 +36,13 @@ impl ChildProcess {
         cmd: &str,
         args: &[String],
         current_dir: PathBuf,
-        env: &[(&str, &str)],
+        env: &[(String, String)],
         aux_chan: bool,
     ) -> Result<ChildProcess, std::io::Error> {
         let (mut child, aux_chan_host_endpoint) = if aux_chan {
             let studio_addr = env
                 .iter()
-                .find_map(
-                    |(key, value)| {
-                        if *key == "STUDIO" {
-                            Some(*value)
-                        } else {
-                            None
-                        }
-                    },
-                )
+                .find_map(|(key, value)| if key == "STUDIO" { Some(value.clone()) } else { None })
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -60,8 +52,8 @@ impl ChildProcess {
             let studio_build_id = env
                 .iter()
                 .find_map(|(key, value)| {
-                    if *key == "STUDIO_BUILD_ID" {
-                        Some(*value)
+                    if key == "STUDIO_BUILD_ID" {
+                        Some(value.clone())
                     } else {
                         None
                     }
@@ -72,8 +64,10 @@ impl ChildProcess {
                         "missing STUDIO_BUILD_ID in child env",
                     )
                 })?;
-            let aux_chan_listener =
-                aux_chan::ExternalEndpointListener::new_for_studio(studio_addr, studio_build_id)?;
+            let aux_chan_listener = aux_chan::ExternalEndpointListener::new_for_studio(
+                studio_addr.as_str(),
+                studio_build_id.as_str(),
+            )?;
 
             let mut cmd_build = Command::new(cmd);
             cmd_build
