@@ -13,6 +13,10 @@ script_mod! {
     set_type_default() do #(DrawSplatPbr::script_shader(vm)){
         ..mod.draw.DrawPbr
         render_size: vec2(1024.0, 768.0)
+        focal_pixels: vec2(512.0, 384.0)
+        ndc_per_pixel: vec2(0.001953125, 0.0026041667)
+        coarse_cull_guard: 2.0
+        fast_project_mode: 0.0
         splat_std_dev: 2.8
         min_pixel_radius: 0.0
         max_pixel_radius: 512.0
@@ -22,37 +26,15 @@ script_mod! {
         dither_scale: 1.0
         v_ndc: varying(vec2f)
 
-        quat_rotate: fn(q: vec4, v: vec3) {
-            let t = 2.0 * cross(q.xyz, v);
-            return v + q.w * t + cross(q.xyz, t)
-        }
-
         vertex: fn() {
             let quad = vec2(self.geom.ny_nz_uv.z, self.geom.ny_nz_uv.w);
             let center_local = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z);
-            let scale_local = vec3(
-                max(abs(self.geom.pos_nx.w), 0.000001),
-                max(abs(self.geom.ny_nz_uv.x), 0.000001),
-                max(abs(self.geom.ny_nz_uv.y), 0.000001)
-            );
-            let q_raw = self.geom.tangent;
-            let q_len = length(q_raw);
-            let q = if q_len > 0.000001 {
-                q_raw / q_len
-            } else {
-                vec4(0.0, 0.0, 0.0, 1.0)
-            };
-
-            let axis_local_0 = self.quat_rotate(q, vec3(scale_local.x, 0.0, 0.0));
-            let axis_local_1 = self.quat_rotate(q, vec3(0.0, scale_local.y, 0.0));
-            let axis_local_2 = self.quat_rotate(q, vec3(0.0, 0.0, scale_local.z));
-
+            let axis_local_0 = vec3(self.geom.pos_nx.w, self.geom.ny_nz_uv.x, self.geom.ny_nz_uv.y);
+            let axis_local_1 = vec3(self.geom.tangent.x, self.geom.tangent.y, self.geom.tangent.z);
+            let axis_2_len = max(abs(self.geom.tangent.w), 0.000001);
             let center_world4 = self.model_matrix * vec4(center_local.x, center_local.y, center_local.z, 1.0);
             let center_world = vec3(center_world4.x, center_world4.y, center_world4.z);
-            let axis_world_0 = (self.model_matrix * vec4(axis_local_0.x, axis_local_0.y, axis_local_0.z, 0.0)).xyz;
-            let axis_world_1 = (self.model_matrix * vec4(axis_local_1.x, axis_local_1.y, axis_local_1.z, 0.0)).xyz;
-            let axis_world_2 = (self.model_matrix * vec4(axis_local_2.x, axis_local_2.y, axis_local_2.z, 0.0)).xyz;
-            let center_view4 = self.view_matrix * vec4(center_world.x, center_world.y, center_world.z, 1.0);
+            let center_view4 = self.view_matrix * center_world4;
             let center_view = center_view4.xyz;
             if center_view.z >= -0.000001 {
                 self.v_world = center_world;
@@ -69,8 +51,109 @@ script_mod! {
             let center_inv_w = 1.0 / max(abs(clip_center.w), 0.000001);
             let center_ndc = clip_center.xy * center_inv_w;
 
+            let focal = vec2(max(self.focal_pixels.x, 0.00001), max(self.focal_pixels.y, 0.00001));
+            let inv_depth = 1.0 / max(-center_view.z, 0.000001);
+            let axis0_bound = max(abs(axis_local_0.x), max(abs(axis_local_0.y), abs(axis_local_0.z)));
+            let axis1_bound = max(abs(axis_local_1.x), max(abs(axis_local_1.y), abs(axis_local_1.z)));
+            let max_scale = 1.732051 * max(axis0_bound, max(axis1_bound, axis_2_len));
+            let cull_guard = max(self.coarse_cull_guard, 0.0);
+            let ndc_guard = 1.0 + cull_guard * max(abs(center_ndc.x), abs(center_ndc.y));
+            let rough_radius_px = self.splat_std_dev * max_scale * max(focal.x, focal.y) * inv_depth * ndc_guard;
+            if rough_radius_px < self.min_pixel_radius {
+                self.v_world = center_world;
+                self.v_normal = vec3(0.0, 0.0, 1.0);
+                self.v_tangent = vec4(1.0, 0.0, 0.0, 1.0);
+                self.v_uv = vec2(0.0, 0.0);
+                self.v_ndc = vec2(4.0, 4.0);
+                self.v_color = vec4(0.0, 0.0, 0.0, 0.0);
+                self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
+                return;
+            }
+
+            let ndc_per_pixel = vec2(max(self.ndc_per_pixel.x, 0.000001), max(self.ndc_per_pixel.y, 0.000001));
+            let rough_ndc = vec2(rough_radius_px * ndc_per_pixel.x, rough_radius_px * ndc_per_pixel.y);
+            if center_ndc.x < (-1.0 - rough_ndc.x)
+                || center_ndc.x > (1.0 + rough_ndc.x)
+                || center_ndc.y < (-1.0 - rough_ndc.y)
+                || center_ndc.y > (1.0 + rough_ndc.y)
+            {
+                self.v_world = center_world;
+                self.v_normal = vec3(0.0, 0.0, 1.0);
+                self.v_tangent = vec4(1.0, 0.0, 0.0, 1.0);
+                self.v_uv = vec2(0.0, 0.0);
+                self.v_ndc = vec2(4.0, 4.0);
+                self.v_color = vec4(0.0, 0.0, 0.0, 0.0);
+                self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
+                return;
+            }
+
+            let axis_world_0 = (self.model_matrix * vec4(axis_local_0.x, axis_local_0.y, axis_local_0.z, 0.0)).xyz;
+            let axis_world_1 = (self.model_matrix * vec4(axis_local_1.x, axis_local_1.y, axis_local_1.z, 0.0)).xyz;
             let axis_view_0 = (self.view_matrix * vec4(axis_world_0.x, axis_world_0.y, axis_world_0.z, 0.0)).xyz;
             let axis_view_1 = (self.view_matrix * vec4(axis_world_1.x, axis_world_1.y, axis_world_1.z, 0.0)).xyz;
+
+            let max_radius = if self.max_pixel_radius > 0.0 { self.max_pixel_radius } else { 1000000.0 };
+            if self.fast_project_mode > 0.5 {
+                let clip_axis_0 = self.projection_matrix
+                    * (center_view4 + vec4(axis_view_0.x, axis_view_0.y, axis_view_0.z, 0.0));
+                let clip_axis_1 = self.projection_matrix
+                    * (center_view4 + vec4(axis_view_1.x, axis_view_1.y, axis_view_1.z, 0.0));
+
+                let inv_w0 = 1.0 / max(abs(clip_axis_0.w), 0.000001);
+                let inv_w1 = 1.0 / max(abs(clip_axis_1.w), 0.000001);
+                let ndc_axis_0 = clip_axis_0.xy * inv_w0 - center_ndc;
+                let ndc_axis_1 = clip_axis_1.xy * inv_w1 - center_ndc;
+
+                let mut px_axis_0 = vec2(
+                    (ndc_axis_0.x / ndc_per_pixel.x) * self.splat_std_dev,
+                    (ndc_axis_0.y / ndc_per_pixel.y) * self.splat_std_dev,
+                );
+                let mut px_axis_1 = vec2(
+                    (ndc_axis_1.x / ndc_per_pixel.x) * self.splat_std_dev,
+                    (ndc_axis_1.y / ndc_per_pixel.y) * self.splat_std_dev,
+                );
+
+                let radius_0 = length(px_axis_0);
+                let radius_1 = length(px_axis_1);
+                if radius_0 < self.min_pixel_radius && radius_1 < self.min_pixel_radius {
+                    self.v_world = center_world;
+                    self.v_normal = vec3(0.0, 0.0, 1.0);
+                    self.v_tangent = vec4(1.0, 0.0, 0.0, 1.0);
+                    self.v_uv = vec2(0.0, 0.0);
+                    self.v_ndc = vec2(4.0, 4.0);
+                    self.v_color = vec4(0.0, 0.0, 0.0, 0.0);
+                    self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
+                    return;
+                }
+
+                if radius_0 > max_radius {
+                    px_axis_0 = px_axis_0 * (max_radius / max(radius_0, 0.000001));
+                }
+                if radius_1 > max_radius {
+                    px_axis_1 = px_axis_1 * (max_radius / max(radius_1, 0.000001));
+                }
+
+                let px_offset = px_axis_0 * quad.x + px_axis_1 * quad.y;
+                let ndc = center_ndc + vec2(px_offset.x * ndc_per_pixel.x, px_offset.y * ndc_per_pixel.y);
+
+                self.v_world = center_world;
+                self.v_normal = vec3(0.0, 0.0, 1.0);
+                self.v_tangent = vec4(1.0, 0.0, 0.0, 1.0);
+                self.v_uv = quad * self.splat_std_dev;
+                self.v_ndc = ndc;
+                self.v_color = vec4(self.geom.color.x, self.geom.color.y, self.geom.color.z, self.geom.color.w);
+                self.vertex_pos = vec4(ndc.x * clip_center.w, ndc.y * clip_center.w, clip_center.z, clip_center.w);
+                return;
+            }
+
+            let axis_local_2_raw = cross(axis_local_0, axis_local_1);
+            let axis_local_2_raw_len = length(axis_local_2_raw);
+            let axis_local_2 = if axis_local_2_raw_len > 0.000001 {
+                axis_local_2_raw * (axis_2_len / axis_local_2_raw_len)
+            } else {
+                vec3(0.0, 0.0, axis_2_len)
+            };
+            let axis_world_2 = (self.model_matrix * vec4(axis_local_2.x, axis_local_2.y, axis_local_2.z, 0.0)).xyz;
             let axis_view_2 = (self.view_matrix * vec4(axis_world_2.x, axis_world_2.y, axis_world_2.z, 0.0)).xyz;
 
             let c00 = axis_view_0.x * axis_view_0.x + axis_view_1.x * axis_view_1.x + axis_view_2.x * axis_view_2.x;
@@ -79,14 +162,6 @@ script_mod! {
             let c11 = axis_view_0.y * axis_view_0.y + axis_view_1.y * axis_view_1.y + axis_view_2.y * axis_view_2.y;
             let c12 = axis_view_0.y * axis_view_0.z + axis_view_1.y * axis_view_1.z + axis_view_2.y * axis_view_2.z;
             let c22 = axis_view_0.z * axis_view_0.z + axis_view_1.z * axis_view_1.z + axis_view_2.z * axis_view_2.z;
-
-            let proj_x = self.projection_matrix * vec4(1.0, 0.0, 0.0, 0.0);
-            let proj_y = self.projection_matrix * vec4(0.0, 1.0, 0.0, 0.0);
-            let safe_render = vec2(max(self.render_size.x, 1.0), max(self.render_size.y, 1.0));
-            let focal = vec2(
-                max(abs(proj_x.x), 0.00001) * safe_render.x * 0.5,
-                max(abs(proj_y.y), 0.00001) * safe_render.y * 0.5
-            );
 
             let inv_z = 1.0 / center_view.z;
             let jx = focal.x * inv_z;
@@ -119,7 +194,6 @@ script_mod! {
             };
             let axis_1 = vec2(axis_0.y, -axis_0.x);
 
-            let max_radius = if self.max_pixel_radius > 0.0 { self.max_pixel_radius } else { 1000000.0 };
             let scale_0 = min(max_radius, self.splat_std_dev * sqrt(eigen_0));
             let scale_1 = min(max_radius, self.splat_std_dev * sqrt(eigen_1));
             if scale_0 < self.min_pixel_radius && scale_1 < self.min_pixel_radius {
@@ -133,10 +207,7 @@ script_mod! {
                 return;
             }
             let pixel_offset = axis_0 * (quad.x * scale_0) + axis_1 * (quad.y * scale_1);
-            let ndc_offset = vec2(
-                (2.0 * pixel_offset.x) / safe_render.x,
-                (2.0 * pixel_offset.y) / safe_render.y
-            );
+            let ndc_offset = vec2(pixel_offset.x * ndc_per_pixel.x, pixel_offset.y * ndc_per_pixel.y);
             let ndc = center_ndc + ndc_offset;
 
             self.v_world = center_world;
@@ -186,6 +257,10 @@ script_mod! {
     mod.widgets.ViewSplat = set_type_default() do mod.widgets.ViewSplatBase{
         draw_splat +: {
             render_size: vec2(1024.0, 768.0)
+            focal_pixels: vec2(512.0, 384.0)
+            ndc_per_pixel: vec2(0.001953125, 0.0026041667)
+            coarse_cull_guard: 2.0
+            fast_project_mode: 0.0
             splat_std_dev: 2.8
             min_pixel_radius: 0.0
             max_pixel_radius: 512.0
@@ -214,6 +289,14 @@ pub struct DrawSplatPbr {
     pub draw_super: DrawPbr,
     #[live(vec2(1024.0, 768.0))]
     pub render_size: Vec2f,
+    #[live(vec2(512.0, 384.0))]
+    pub focal_pixels: Vec2f,
+    #[live(vec2(0.001953125, 0.0026041667))]
+    pub ndc_per_pixel: Vec2f,
+    #[live(2.0)]
+    pub coarse_cull_guard: f32,
+    #[live(0.0)]
+    pub fast_project_mode: f32,
     #[live(2.8)]
     pub splat_std_dev: f32,
     #[live(0.0)]
@@ -936,8 +1019,8 @@ impl ViewSplat {
 
         let estimated = max_splats.min(scene.splats.len());
         let mut positions: Vec<[f32; 3]> = Vec::with_capacity(estimated * 4); // packed center_local xyz
-        let mut normals: Vec<[f32; 3]> = Vec::with_capacity(estimated * 4); // packed splat scale xyz (local)
-        let mut tangents: Vec<[f32; 4]> = Vec::with_capacity(estimated * 4); // packed quaternion xyzw
+        let mut normals: Vec<[f32; 3]> = Vec::with_capacity(estimated * 4); // packed local axis_0 xyz
+        let mut tangents: Vec<[f32; 4]> = Vec::with_capacity(estimated * 4); // packed local axis_1 xyz + axis_2_len
         let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(estimated * 4);
         let mut colors: Vec<[f32; 4]> = Vec::with_capacity(estimated * 4);
         let mut indices: Vec<u32> = Vec::with_capacity(estimated * 6);
@@ -949,6 +1032,19 @@ impl ViewSplat {
             [1.0_f32, 1.0_f32],
             [-1.0_f32, 1.0_f32],
         ];
+        let quat_rotate = |q: [f32; 4], v: [f32; 3]| -> [f32; 3] {
+            let qx = q[0];
+            let qy = q[1];
+            let qz = q[2];
+            let qw = q[3];
+            let tx = 2.0 * (qy * v[2] - qz * v[1]);
+            let ty = 2.0 * (qz * v[0] - qx * v[2]);
+            let tz = 2.0 * (qx * v[1] - qy * v[0]);
+            let cx = qy * tz - qz * ty;
+            let cy = qz * tx - qx * tz;
+            let cz = qx * ty - qy * tx;
+            [v[0] + qw * tx + cx, v[1] + qw * ty + cy, v[2] + qw * tz + cz]
+        };
 
         for splat in scene.splats.iter().take(max_splats) {
             let alpha = (splat.color[3] * opacity_scale).clamp(0.0, 1.0);
@@ -981,14 +1077,16 @@ impl ViewSplat {
                     [x * inv_len, y * inv_len, z * inv_len, w * inv_len]
                 }
             };
+            let axis_local_0 = quat_rotate(q, [sx, 0.0, 0.0]);
+            let axis_local_1 = quat_rotate(q, [0.0, sy, 0.0]);
 
             let splat_index = centers_local.len() as u32;
             centers_local.push(center_local);
             let base = splat_index * 4;
             for i in 0..4 {
                 positions.push(center_local);
-                normals.push([sx, sy, sz]);
-                tangents.push(q);
+                normals.push(axis_local_0);
+                tangents.push([axis_local_1[0], axis_local_1[1], axis_local_1[2], sz]);
                 uvs.push(quad_coords[i]);
                 colors.push([
                     splat.color[0].clamp(0.0, 1.0),
@@ -1072,10 +1170,15 @@ impl Widget for ViewSplat {
         apply_scene_to_draw_pbr(&mut self.draw_splat.draw_super, cx, &scene_state);
 
         let node_matrix = self.node_matrix();
-        self.draw_splat.render_size = vec2(
-            scene_state.viewport_rect.size.x.max(1.0) as f32,
-            scene_state.viewport_rect.size.y.max(1.0) as f32,
+        let render_w = scene_state.viewport_rect.size.x.max(1.0) as f32;
+        let render_h = scene_state.viewport_rect.size.y.max(1.0) as f32;
+        self.draw_splat.render_size = vec2(render_w, render_h);
+        let proj = self.draw_splat.draw_super.projection_matrix;
+        self.draw_splat.focal_pixels = vec2(
+            proj.v[0].abs().max(0.00001) * render_w * 0.5,
+            proj.v[5].abs().max(0.00001) * render_h * 0.5,
         );
+        self.draw_splat.ndc_per_pixel = vec2(2.0 / render_w.max(1.0), 2.0 / render_h.max(1.0));
         self.draw_splat.draw_super.set_depth_write(false);
         self.draw_splat.draw_super.model_matrix = node_matrix;
         let _ = self.poll_depth_sort_results();

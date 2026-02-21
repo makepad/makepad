@@ -103,10 +103,10 @@ impl Cx {
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {
-                    self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::StdinTexture);
                 }
                 CxDrawPassParent::None => {
-                    self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::StdinTexture);
                 }
             }
         }

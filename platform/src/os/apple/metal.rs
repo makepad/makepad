@@ -20,6 +20,7 @@ use {
         texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel},
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
+    std::collections::HashMap,
     std::fmt::Write,
     std::sync::atomic::{AtomicUsize, Ordering},
     std::sync::Mutex,
@@ -32,7 +33,7 @@ struct MetalGpuTimelineSync {
 }
 
 static METAL_GPU_TIMELINE_SYNC: Mutex<Option<MetalGpuTimelineSync>> = Mutex::new(None);
-static METAL_GPU_STDIN_FRAME_RANGE: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+static METAL_GPU_FRAME_RANGES: Mutex<Option<HashMap<u64, (f64, f64)>>> = Mutex::new(None);
 
 fn map_metal_gpu_times_to_app_timeline(
     raw_start: f64,
@@ -679,6 +680,9 @@ impl Cx {
         }
 
         let () = unsafe { msg_send![encoder, endEncoding] };
+        let gpu_frame_group_key = self
+            .get_pass_window_id(draw_pass_id)
+            .map(|window_id| window_id.id() as u64);
 
         match mode {
             DrawPassMode::MTKView(view) => {
@@ -694,10 +698,31 @@ impl Cx {
                     first_texture,
                     None,
                 );
-                self.commit_command_buffer(screenshot, None, command_buffer);
+                self.commit_command_buffer(
+                    screenshot,
+                    None,
+                    gpu_frame_group_key,
+                    true,
+                    command_buffer,
+                );
             }
             DrawPassMode::Texture => {
-                self.commit_command_buffer(None, None, command_buffer);
+                self.commit_command_buffer(
+                    None,
+                    None,
+                    gpu_frame_group_key,
+                    false,
+                    command_buffer,
+                );
+            }
+            DrawPassMode::StdinTexture => {
+                self.commit_command_buffer(
+                    None,
+                    None,
+                    gpu_frame_group_key,
+                    false,
+                    command_buffer,
+                );
             }
             DrawPassMode::StdinMain(stdin_frame, kind_id) => {
                 let main_texture = &self.passes[draw_pass_id].color_textures[0];
@@ -715,7 +740,13 @@ impl Cx {
                 } else {
                     None
                 };
-                self.commit_command_buffer(screenshot, Some(stdin_frame), command_buffer);
+                self.commit_command_buffer(
+                    screenshot,
+                    Some(stdin_frame),
+                    gpu_frame_group_key,
+                    true,
+                    command_buffer,
+                );
             }
             DrawPassMode::Drawable(drawable) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
@@ -729,7 +760,13 @@ impl Cx {
                     first_texture,
                     None,
                 );
-                self.commit_command_buffer(screenshot, None, command_buffer);
+                self.commit_command_buffer(
+                    screenshot,
+                    None,
+                    gpu_frame_group_key,
+                    true,
+                    command_buffer,
+                );
             }
             DrawPassMode::Resizing(drawable) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
@@ -742,7 +779,13 @@ impl Cx {
                     first_texture,
                     None,
                 );
-                self.commit_command_buffer(screenshot, None, command_buffer);
+                self.commit_command_buffer(
+                    screenshot,
+                    None,
+                    gpu_frame_group_key,
+                    true,
+                    command_buffer,
+                );
                 let () = unsafe { msg_send![command_buffer, waitUntilScheduled] };
                 let () = unsafe { msg_send![drawable, present] };
             }
@@ -804,6 +847,8 @@ impl Cx {
         &self,
         screenshot_info: Option<ScreenshotInfo>,
         stdin_frame: Option<PresentableDraw>,
+        gpu_frame_group_key: Option<u64>,
+        flush_gpu_frame_group: bool,
         command_buffer: ObjcId,
     ) {
         let screenshot_info = Mutex::new(screenshot_info);
@@ -842,30 +887,33 @@ impl Cx {
 
                     let raw_start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
                     let raw_end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
-                    let is_stdin_frame = stdin_frame.is_some();
                     if let Some(_stdin_frame) = stdin_frame {
                         #[cfg(target_os = "macos")]
                         Self::stdin_send_draw_complete(_stdin_frame);
                     }
 
-                    let raw_range = if is_stdin_frame {
-                        // In stdin-loop mode a frame can span multiple command buffers
-                        // (offscreen passes + final present). Aggregate to one frame interval:
-                        // first GPUStartTime through last GPUEndTime.
-                        if let Ok(mut frame_range) = METAL_GPU_STDIN_FRAME_RANGE.lock() {
+                    let raw_range = if let Some(group_key) = gpu_frame_group_key {
+                        // Aggregate all command buffers that belong to one presented frame
+                        // (offscreen passes + final present) into one GPU interval.
+                        if let Ok(mut frame_ranges) = METAL_GPU_FRAME_RANGES.lock() {
+                            let ranges = frame_ranges.get_or_insert_with(HashMap::new);
                             if raw_start.is_finite()
                                 && raw_end.is_finite()
                                 && raw_start > 0.0
                                 && raw_end >= raw_start
                             {
-                                if let Some((start, end)) = frame_range.as_mut() {
+                                if let Some((start, end)) = ranges.get_mut(&group_key) {
                                     *start = start.min(raw_start);
                                     *end = end.max(raw_end);
                                 } else {
-                                    *frame_range = Some((raw_start, raw_end));
+                                    ranges.insert(group_key, (raw_start, raw_end));
                                 }
                             }
-                            frame_range.take()
+                            if flush_gpu_frame_group {
+                                ranges.remove(&group_key)
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
@@ -966,6 +1014,7 @@ struct ScreenshotInfo {
 
 pub enum DrawPassMode {
     Texture,
+    StdinTexture,
     MTKView(ObjcId),
     StdinMain(PresentableDraw, usize),
     Drawable(ObjcId),
@@ -976,7 +1025,7 @@ impl DrawPassMode {
     fn is_drawable(&self) -> Option<ObjcId> {
         match self {
             Self::Drawable(obj) | Self::Resizing(obj) => Some(*obj),
-            Self::StdinMain(_, _) | Self::Texture | Self::MTKView(_) => None,
+            Self::StdinMain(_, _) | Self::Texture | Self::StdinTexture | Self::MTKView(_) => None,
         }
     }
 }
