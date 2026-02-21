@@ -26,6 +26,48 @@ use {
     std::time::Instant,
 };
 
+#[derive(Clone, Copy, Debug)]
+struct MetalGpuTimelineSync {
+    host_to_app_offset: f64,
+}
+
+static METAL_GPU_TIMELINE_SYNC: Mutex<Option<MetalGpuTimelineSync>> = Mutex::new(None);
+static METAL_GPU_STDIN_FRAME_RANGE: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+
+fn map_metal_gpu_times_to_app_timeline(
+    raw_start: f64,
+    raw_end: f64,
+    app_now: f64,
+    host_now: f64,
+) -> Option<(f64, f64)> {
+    if !(raw_start.is_finite()
+        && raw_end.is_finite()
+        && app_now.is_finite()
+        && host_now.is_finite())
+    {
+        return None;
+    }
+    if raw_start <= 0.0 || raw_end < raw_start {
+        return None;
+    }
+
+    // Apple documents GPUStartTime/GPUEndTime as host-time seconds. Calibrate that
+    // host clock to our app-relative timeline once, then apply the same offset.
+    let measured_offset = app_now - host_now;
+    let mut sync = METAL_GPU_TIMELINE_SYNC.lock().ok()?;
+    let state = sync.get_or_insert(MetalGpuTimelineSync {
+        host_to_app_offset: measured_offset,
+    });
+    if (state.host_to_app_offset - measured_offset).abs() > 0.1 {
+        state.host_to_app_offset = measured_offset;
+    }
+
+    Some((
+        raw_start + state.host_to_app_offset,
+        raw_end + state.host_to_app_offset,
+    ))
+}
+
 // IOSurface-based texture sharing (replaces XPC service approach)
 // Uses global IOSurface IDs which work across processes without needing Mach port transfer
 #[cfg(target_os = "macos")]
@@ -798,19 +840,54 @@ impl Cx {
                         );
                     }
 
-                    let start:f64 = unsafe {msg_send![command_buffer, GPUStartTime]};
-                    let end:f64 = unsafe {msg_send![command_buffer, GPUEndTime]};
+                    let raw_start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
+                    let raw_end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
+                    let is_stdin_frame = stdin_frame.is_some();
                     if let Some(_stdin_frame) = stdin_frame {
                         #[cfg(target_os = "macos")]
                         Self::stdin_send_draw_complete(_stdin_frame);
                     }
-                    // lets send off our gpu time
-                    let duration = end - start;
-                    let start = Instant::now().duration_since(start_time).as_secs_f64() - duration;
-                    let end = start + duration;
-                    Cx::send_studio_message(AppToStudio::GPUSample(GPUSample{
-                        start, end
-                    }));
+
+                    let raw_range = if is_stdin_frame {
+                        // In stdin-loop mode a frame can span multiple command buffers
+                        // (offscreen passes + final present). Aggregate to one frame interval:
+                        // first GPUStartTime through last GPUEndTime.
+                        if let Ok(mut frame_range) = METAL_GPU_STDIN_FRAME_RANGE.lock() {
+                            if raw_start.is_finite()
+                                && raw_end.is_finite()
+                                && raw_start > 0.0
+                                && raw_end >= raw_start
+                            {
+                                if let Some((start, end)) = frame_range.as_mut() {
+                                    *start = start.min(raw_start);
+                                    *end = end.max(raw_end);
+                                } else {
+                                    *frame_range = Some((raw_start, raw_end));
+                                }
+                            }
+                            frame_range.take()
+                        } else {
+                            None
+                        }
+                    } else {
+                        Some((raw_start, raw_end))
+                    };
+
+                    let app_now = Instant::now().duration_since(start_time).as_secs_f64();
+                    let host_now = unsafe { CACurrentMediaTime() };
+                    if let Some((raw_sample_start, raw_sample_end)) = raw_range {
+                        if let Some((start, end)) = map_metal_gpu_times_to_app_timeline(
+                            raw_sample_start,
+                            raw_sample_end,
+                            app_now,
+                            host_now,
+                        ) {
+                            Cx::send_studio_message(AppToStudio::GPUSample(GPUSample {
+                                start,
+                                end,
+                            }));
+                        }
+                    }
                 })
             ]
         };

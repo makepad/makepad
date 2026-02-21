@@ -121,6 +121,11 @@ extern "C" {
 
 }
 
+#[link(name = "QuartzCore", kind = "framework")]
+extern "C" {
+    pub fn CACurrentMediaTime() -> f64;
+}
+
 #[link(name = "ImageIO", kind = "framework")]
 extern "C" {
     pub static kUTTypePNG: ObjcId;
