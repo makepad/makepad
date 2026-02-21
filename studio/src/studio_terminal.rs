@@ -1500,7 +1500,6 @@ impl StudioTerminal {
         };
         let screen = terminal.screen();
         let cols = screen.cols();
-        let rows = screen.rows();
 
         let (cell_width, cell_height) = self.cell_metrics();
         let origin_x = self.viewport_rect.pos.x + self.pad_x;
@@ -1509,6 +1508,15 @@ impl StudioTerminal {
 
         let max_scroll_rows = Self::max_scroll_rows(screen);
         let top_row = self.current_scroll_rows().min(max_scroll_rows);
+        let total_virtual_rows = screen.total_rows();
+        let viewport_rows = (self.viewport_rect.size.y / cell_height).ceil().max(0.0) as usize;
+        // Draw one extra row beyond the visible viewport so a partially visible
+        // last line is not clipped out early while scrolling.
+        let draw_end_row_exclusive = top_row
+            .saturating_add(viewport_rows)
+            .saturating_add(1)
+            .min(total_virtual_rows);
+        let last_draw_row = draw_end_row_exclusive.saturating_sub(1);
 
         let palette = &terminal.palette.colors;
         let default_fg = terminal.default_fg;
@@ -1578,10 +1586,10 @@ impl StudioTerminal {
             self.draw_selection.focus = if has_focus { 1.0 } else { 0.0 };
             self.draw_selection.begin();
             for sel_row in sel_start_row..=sel_end_row {
-                if sel_row + 1 < top_row {
+                if sel_row < top_row {
                     continue;
                 }
-                if sel_row > top_row + rows + 1 {
+                if sel_row > last_draw_row {
                     break;
                 }
 
@@ -1661,10 +1669,8 @@ impl StudioTerminal {
         }
 
         // Draw cells — interleaved bg/text/decor appends to predefined layers.
-        let total_draw_rows = rows.saturating_add(1);
         self.draw_text.begin_many_instances(cx);
-        for row in 0..total_draw_rows {
-            let virtual_row = top_row + row;
+        for virtual_row in top_row..draw_end_row_exclusive {
             let row_slice = screen.row_slice_virtual(virtual_row);
             for col in 0..cols {
                 let cell = row_slice.and_then(|r| r.get(col)).unwrap_or(&blank_cell);
