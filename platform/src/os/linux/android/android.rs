@@ -317,6 +317,7 @@ impl Cx {
                     //if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
                     //crate::log!("{} {:?} {} {}", time, touch.state, touch.uid, touch.abs);
                     touch.abs /= dpi_factor;
+                    touch.radius /= dpi_factor;
                 }
                 self.fingers.process_touch_update_start(time, &touches);
                 let e = Event::TouchUpdate(TouchUpdateEvent {
@@ -1398,6 +1399,20 @@ impl Cx {
                 CxOsOp::XrDiscoverAnchor(id) => {
                     self.os.openxr.discover_anchor(id);
                 }
+                CxOsOp::FullscreenWindow(_window_id) => {
+                    self.os.fullscreen = true;
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_full_screen(env, true);
+                    }
+                }
+                CxOsOp::NormalizeWindow(_window_id) => {
+                    self.os.fullscreen = false;
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_full_screen(env, false);
+                    }
+                }
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }
@@ -1593,7 +1608,7 @@ pub struct CxOs {
     pub fullscreen: bool,
     pub(crate) start_time: Instant,
     pub(crate) timers: PollTimers,
-    pub(crate) display: Option<CxAndroidDisplay>,
+    pub display: Option<CxAndroidDisplay>,
     #[cfg(use_vulkan)]
     pub(crate) vulkan: Option<CxVulkan>,
     pub(crate) media: CxAndroidMedia,
@@ -1613,6 +1628,20 @@ impl CxOs {
 }
 
 impl CxAndroidDisplay {
+    /// Make Makepad's EGL context current (with its surface).
+    /// Required before creating shared GL contexts.
+    pub fn make_current(&self) {
+        unsafe {
+            let res = (self.libegl.eglMakeCurrent.unwrap())(
+                self.egl_display,
+                self.surface,
+                self.surface,
+                self.egl_context,
+            );
+            assert!(res != 0, "eglMakeCurrent failed in CxAndroidDisplay::make_current");
+        }
+    }
+
     #[cfg(not(use_vulkan))]
     unsafe fn destroy_surface(&mut self) {
         (self.libegl.eglMakeCurrent.unwrap())(

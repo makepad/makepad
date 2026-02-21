@@ -36,7 +36,7 @@ pub const ANDROID_SDK_URLS_33: AndroidSDKUrls = AndroidSDKUrls {
     build_tools_version: "33.0.1",
     sdk_extension: "ext4",
     platform: "android-33-ext4",
-    ndk_version_full: "25.2.9519653",
+    ndk_version_full: "28.2.13676358",
 
     platform_dl: "https://dl.google.com/android/repository/platform-33-ext4_r01.zip",
     build_tools_macos: "https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip",
@@ -48,9 +48,9 @@ pub const ANDROID_SDK_URLS_33: AndroidSDKUrls = AndroidSDKUrls {
         "https://dl.google.com/android/repository/platform-tools_r33.0.3-linux.zip",
     platform_tools_windows:
         "https://dl.google.com/android/repository/platform-tools_r33.0.3-windows.zip",
-    ndk_macos: "https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg",
-    ndk_linux: "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip",
-    ndk_windows: "https://dl.google.com/android/repository/android-ndk-r25c-windows.zip",
+    ndk_macos: "https://dl.google.com/android/repository/android-ndk-r28b-darwin.dmg",
+    ndk_linux: "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip",
+    ndk_windows: "https://dl.google.com/android/repository/android-ndk-r28b-windows.zip",
 };
 
 const URL_OPENJDK_17_0_2_WINDOWS_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_windows-x64_bin.zip";
@@ -402,7 +402,7 @@ pub fn expand_sdk(
                     ("platform-tools/AdbWinUsbApi.dll", false),
                 ],
             )?;
-            const NDK_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64";
+            const NDK_IN: &str = "android-ndk-r28b/toolchains/llvm/prebuilt/windows-x86_64";
             let NDK_OUT =
                 &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64");
 
@@ -669,9 +669,9 @@ pub fn expand_sdk(
                 urls.platform_tools_macos,
                 &[("platform-tools/adb", true)],
             )?;
-            const NDK_IN: &str =
-                "AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64";
-            let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64");
+            let ndk_host_dir = if host_os == HostOs::MacosAarch64 { "darwin-aarch64" } else { "darwin-x86_64" };
+            let NDK_IN = &format!("AndroidNDK13676358.app/Contents/NDK/toolchains/llvm/prebuilt/{ndk_host_dir}");
+            let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/{ndk_host_dir}");
 
             let toolchain_dir = copy_map(NDK_IN, NDK_OUT, "");
             let files = [(toolchain_dir.as_str(), false)];
@@ -847,7 +847,7 @@ pub fn expand_sdk(
                 urls.platform_tools_linux,
                 &[("platform-tools/adb", true)],
             )?;
-            const NDK_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64";
+            const NDK_IN: &str = "android-ndk-r28b/toolchains/llvm/prebuilt/linux-x86_64";
             let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64");
 
             // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
@@ -865,6 +865,7 @@ pub fn expand_sdk(
                     "-o", // overwrite existing files
                     src_dir.join(url_file_name).to_str().unwrap(),
                     &format!("{NDK_IN}/*"),
+                    &format!("{NDK_IN}/**/*"), // `*` alone doesn't match `/` on some Linux unzip builds
                     "-d",
                     src_dir.to_str().unwrap(),
                 ],
