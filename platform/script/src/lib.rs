@@ -5,6 +5,14 @@ pub use makepad_math;
 pub use makepad_math::makepad_micro_serde;
 pub use makepad_regex;
 pub use makepad_script_derive;
+
+#[macro_export]
+macro_rules! script_eval {
+    ($vm:expr, { $($tt:tt)* } $(,)?) => {{
+        ($vm).eval($crate::script! { $($tt)* })
+    }};
+}
+
 pub mod colorhex;
 pub mod gen_index;
 pub mod heap;
