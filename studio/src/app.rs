@@ -67,6 +67,8 @@ pub struct App {
     pub data: AppData,
     #[rust]
     pub initial_tree_loaded: bool,
+    #[rust]
+    pub manual_tree_reload_pending: bool,
 }
 
 impl App {
@@ -566,9 +568,8 @@ impl MatchEvent for App {
                 profiler.redraw(cx);
             }
             AppAction::ReloadFileTree => {
+                self.manual_tree_reload_pending = true;
                 self.data.file_system.file_client.load_file_tree();
-                self.data.build_manager.update_run_list(cx);
-                run_list.redraw(cx);
             }
             AppAction::RedrawProfiler => {
                 profiler.redraw(cx);
@@ -768,14 +769,18 @@ impl MatchEvent for App {
 
         match action.cast() {
             FileSystemAction::TreeLoaded => {
-                self.data.build_manager.update_run_list(cx);
-                run_list.redraw(cx);
                 file_tree.redraw(cx);
-                if !self.initial_tree_loaded {
-                    self.load_state(cx, 0);
-                    self.initial_tree_loaded = true;
+                if self.manual_tree_reload_pending {
+                    self.manual_tree_reload_pending = false;
+                } else {
+                    self.data.build_manager.update_run_list(cx);
+                    run_list.redraw(cx);
+                    if !self.initial_tree_loaded {
+                        self.load_state(cx, 0);
+                        self.initial_tree_loaded = true;
+                    }
+                    self.data.ai_chat_manager.init(&mut self.data.file_system);
                 }
-                self.data.ai_chat_manager.init(&mut self.data.file_system);
             }
             FileSystemAction::SnapshotImageLoaded => {
                 snapshot.redraw(cx);
