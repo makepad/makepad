@@ -5,7 +5,7 @@ use crate::LiveId;
 use crate::log::LogLevel;
 // communication enums for studio
 
-#[derive(SerBin, DeBin, Debug)]
+#[derive(SerBin, DeBin, Debug, Clone)]
 pub struct EventSample {
     pub event_u32: u32,
     pub event_meta: u64,
@@ -13,17 +13,24 @@ pub struct EventSample {
     pub end: f64,
 }
 
-#[derive(SerBin, DeBin, Debug)]
+#[derive(SerBin, DeBin, Debug, Clone)]
 pub struct GPUSample {
     pub start: f64,
     pub end: f64,
 }
 
-#[derive(SerBin, DeBin, Debug)]
+#[derive(SerBin, DeBin, Debug, Clone)]
 pub struct GCSample {
     pub start: f64,
     pub end: f64,
     pub heap_live: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum LocalProfileSample {
+    Event(EventSample),
+    GPU(GPUSample),
+    GC(GCSample),
 }
 
 #[derive(SerBin, DeBin, Debug)]

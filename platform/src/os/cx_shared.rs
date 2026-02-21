@@ -192,7 +192,7 @@ impl Cx {
 
     pub(crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
-        if Cx::has_studio_web_socket() {
+        if Cx::has_studio_web_socket() || Cx::local_profile_capture_enabled() {
             let start = self.seconds_since_app_start();
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);
