@@ -476,8 +476,14 @@ script_mod! {
                 split1 := DockSplitter{
                     axis: SplitterAxis.Vertical
                     align: SplitterAlign.FromB(200.0)
-                    a: @edit_tabs
+                    a: @top_tabs_split
                     b: @bottom_tabs_split                }
+
+                top_tabs_split := DockSplitter{
+                    axis: SplitterAxis.Horizontal
+                    align: SplitterAlign.Weighted(0.72)
+                    a: @edit_tabs
+                    b: @run_tabs                }
 
                 bottom_tabs_split := DockSplitter{
                     axis: SplitterAxis.Horizontal
@@ -491,7 +497,12 @@ script_mod! {
                 }
 
                 edit_tabs := DockTabs{
-                    tabs: [@run_first @design_first @outline_first @ai_first @edit_first]
+                    tabs: [@design_first @outline_first @ai_first @edit_first]
+                    selected: 0
+                }
+
+                run_tabs := DockTabs{
+                    tabs: [@run_first]
                     selected: 0
                 }
 

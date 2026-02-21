@@ -255,6 +255,8 @@ pub enum AppAction {
     StartRecompile,
     ReloadFileTree,
     RecompileStarted,
+    WebsocketDisconnect(LiveId),
+    WebsocketReconnect(LiveId),
     RedrawSnapshots,
     ClearLog,
     SetSnapshotMessage {
@@ -606,8 +608,31 @@ impl MatchEvent for App {
                 if let Some(mut dock) = dock.borrow_mut() {
                     for (_id, (_, item)) in dock.items().iter() {
                         if let Some(mut run_view) = item.as_run_view().borrow_mut() {
-                            run_view.recompile_started(cx);
+                            run_view.websocket_disconnect(cx);
                             run_view.resend_framebuffer(cx);
+                        }
+                    }
+                }
+            }
+            AppAction::WebsocketDisconnect(build_id) => {
+                if let Some(mut dock) = dock.borrow_mut() {
+                    for (_id, (_, item)) in dock.items().iter() {
+                        if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                            if run_view.build_id == Some(build_id) {
+                                run_view.websocket_disconnect(cx);
+                                run_view.resend_framebuffer(cx);
+                            }
+                        }
+                    }
+                }
+            }
+            AppAction::WebsocketReconnect(build_id) => {
+                if let Some(mut dock) = dock.borrow_mut() {
+                    for (_id, (_, item)) in dock.items().iter() {
+                        if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                            if run_view.build_id == Some(build_id) {
+                                run_view.ready_to_start(cx);
+                            }
                         }
                     }
                 }

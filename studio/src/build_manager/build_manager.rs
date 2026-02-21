@@ -165,8 +165,7 @@ pub struct BuildManager {
     terminal_latest_widget_dumps: HashMap<LiveId, String>,
     terminal_startup_queries: HashMap<LiveId, String>,
     terminal_startup_dump_pending: HashSet<LiveId>,
-    run_view_tick_monitor: Mutex<HashMap<LiveId, RunViewTickMonitorState>>,
-    run_view_tick_hiccup_logs: Mutex<Vec<(LiveId, String)>>,
+    recompiling_builds: HashSet<LiveId>,
 }
 
 #[derive(Default)]
@@ -217,17 +216,6 @@ struct PendingTerminalWidgetTreeDump {
 const STUDIO_TERMINAL_PATH: &str = "/$studio_terminal";
 const STUDIO_WEBSOCKET_PATH: &str = "/$studio_web_socket";
 const PROFILE_MAX_SAMPLES_PER_BUILD: usize = 16_384;
-const RUN_VIEW_TICK_HICCUP_THRESHOLD_FRAMES: f64 = 1.5;
-const RUN_VIEW_TICK_FRAME_TIME_SECONDS: f64 = 1.0 / 60.0;
-const RUN_VIEW_TICK_HICCUP_THRESHOLD_SECONDS: f64 =
-    RUN_VIEW_TICK_HICCUP_THRESHOLD_FRAMES * RUN_VIEW_TICK_FRAME_TIME_SECONDS;
-
-#[derive(Default)]
-struct RunViewTickMonitorState {
-    last_tick: Option<Instant>,
-    tick_count: u64,
-    hiccup_count: u64,
-}
 
 #[derive(Debug, Clone, SerJson, DeJson)]
 pub enum StudioTerminalRequest {
@@ -1008,70 +996,6 @@ impl BuildManager {
         cx.action(AppAction::RedrawLog);
     }
 
-    fn observe_run_view_tick_hiccup(&self, build_id: LiveId, msg: &HostToStdin) {
-        if !matches!(msg, HostToStdin::Tick) {
-            return;
-        }
-
-        let now = Instant::now();
-        let wall_clock_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|v| v.as_millis())
-            .unwrap_or(0);
-
-        let mut hiccup_line = None;
-        if let Ok(mut monitor) = self.run_view_tick_monitor.lock() {
-            let state = monitor.entry(build_id).or_default();
-            state.tick_count = state.tick_count.saturating_add(1);
-            let Some(last_tick) = state.last_tick.replace(now) else {
-                return;
-            };
-
-            let delta_seconds = now.duration_since(last_tick).as_secs_f64();
-            if delta_seconds > RUN_VIEW_TICK_HICCUP_THRESHOLD_SECONDS {
-                state.hiccup_count = state.hiccup_count.saturating_add(1);
-                hiccup_line = Some(format!(
-                    "[run-view tick-hiccup] wall_ms={} dt_ms={:.2} (~{:.2} frames @60hz) tick={} hiccup={}",
-                    wall_clock_ms,
-                    delta_seconds * 1000.0,
-                    delta_seconds / RUN_VIEW_TICK_FRAME_TIME_SECONDS,
-                    state.tick_count,
-                    state.hiccup_count
-                ));
-            }
-        }
-
-        if let Some(hiccup_line) = hiccup_line {
-            if let Ok(mut pending) = self.run_view_tick_hiccup_logs.lock() {
-                pending.push((build_id, hiccup_line));
-            }
-        }
-    }
-
-    fn flush_run_view_tick_hiccup_logs(&mut self, cx: &mut Cx) {
-        let mut drained = Vec::new();
-        if let Ok(mut pending) = self.run_view_tick_hiccup_logs.lock() {
-            if pending.is_empty() {
-                return;
-            }
-            std::mem::swap(&mut drained, &mut *pending);
-        } else {
-            return;
-        }
-
-        for (build_id, line) in drained {
-            self.log.push((
-                build_id,
-                LogItem::Bare(LogItemBare {
-                    level: LogLevel::Warning,
-                    line: line.clone(),
-                }),
-            ));
-            self.send_terminal_log(build_id, "warning", line);
-        }
-        cx.action(AppAction::RedrawLog);
-    }
-
     fn request_terminal_screenshot(
         &mut self,
         cx: &mut Cx,
@@ -1429,12 +1353,6 @@ impl BuildManager {
                 self.terminal_latest_widget_dumps.remove(&build_id);
                 self.terminal_startup_queries.remove(&build_id);
                 self.terminal_startup_dump_pending.remove(&build_id);
-                if let Ok(mut monitor) = self.run_view_tick_monitor.lock() {
-                    monitor.remove(&build_id);
-                }
-                if let Ok(mut pending) = self.run_view_tick_hiccup_logs.lock() {
-                    pending.retain(|(id, _)| *id != build_id);
-                }
                 self.clear_terminal_screenshots_for_build(build_id);
                 self.clear_terminal_widget_tree_dumps_for_build(build_id);
                 self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
@@ -1736,7 +1654,6 @@ impl BuildManager {
                 .borrow_mut()
                 .send_studio_to_app(item_id, StudioToApp::HostToStdin(msg.clone()))
             {
-                self.observe_run_view_tick_hiccup(item_id, &msg);
                 return;
             }
         }
@@ -1746,6 +1663,18 @@ impl BuildManager {
         }
 
         self.clients[0].send_cmd_with_id(item_id, BuildCmd::HostToStdin(msg.to_json()));
+    }
+
+    pub fn has_active_web_socket(&self, build_id: LiveId) -> bool {
+        if let Ok(sockets) = self.active_build_websockets.lock() {
+            sockets
+                .borrow()
+                .sockets
+                .iter()
+                .any(|socket| socket.build_id == build_id)
+        } else {
+            false
+        }
     }
 
     pub fn update_run_list(&mut self, _cx: &mut Cx) {
@@ -2069,6 +1998,7 @@ impl BuildManager {
             if !known_roots.contains(&active_build.process.root) {
                 continue;
             }
+            self.recompiling_builds.insert(*build_id);
             self.clients[0].send_cmd_with_id(*build_id, BuildCmd::Stop);
             self.clients[0].send_cmd_with_id(
                 *build_id,
@@ -2170,8 +2100,6 @@ impl BuildManager {
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, file_system: &mut FileSystem) {
-        self.flush_run_view_tick_hiccup_logs(cx);
-
         if self.profiler_running {
             for sample in Cx::take_local_profile_samples() {
                 match sample {
@@ -2302,8 +2230,11 @@ impl BuildManager {
             }
 
             while let Ok(build_id) = self.recv_studio_disconnect.try_recv() {
+                cx.action(AppAction::WebsocketDisconnect(build_id));
+                if self.recompiling_builds.contains(&build_id) {
+                    continue;
+                }
                 let had_local_process = self.running_processes.remove(&build_id).is_some();
-                self.active.builds.remove(&build_id);
                 self.remove_profile_build(build_id);
                 if let Some(web_socket_id) = self.terminal_build_owners.remove(&build_id) {
                     self.send_terminal_response(
@@ -2318,23 +2249,16 @@ impl BuildManager {
                 self.terminal_latest_widget_dumps.remove(&build_id);
                 self.terminal_startup_queries.remove(&build_id);
                 self.terminal_startup_dump_pending.remove(&build_id);
-                if let Ok(mut monitor) = self.run_view_tick_monitor.lock() {
-                    monitor.remove(&build_id);
-                }
-                if let Ok(mut pending) = self.run_view_tick_hiccup_logs.lock() {
-                    pending.retain(|(id, _)| *id != build_id);
-                }
                 self.clear_terminal_screenshots_for_build(build_id);
                 self.clear_terminal_widget_tree_dumps_for_build(build_id);
                 if had_local_process {
                     self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
                 }
-                cx.action(AppAction::DestroyRunViews {
-                    run_view_id: build_id,
-                });
             }
 
             while let Ok((build_id, msgs)) = self.recv_studio_msg.try_recv() {
+                self.recompiling_builds.remove(&build_id);
+                cx.action(AppAction::WebsocketReconnect(build_id));
                 self.ensure_active_build(build_id);
                 for msg in msgs.0 {
                     match msg {
