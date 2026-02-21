@@ -3,6 +3,9 @@ use crate::makepad_platform::*;
 script_mod! {
     use mod.math.*
     use mod.pod.*
+    use mod.text.*
+    use mod.turtle.*
+    use mod.res.*
 
     mod.themes.skeleton = {
         let theme = me
@@ -17,15 +20,15 @@ script_mod! {
         space_2: 6.
         space_3: 9.
 
-        mspace_1: {top: 3., right: 3., bottom: 3., left: 3.}
-        mspace_h_1: {top: 0., right: 3., bottom: 0., left: 3.}
-        mspace_v_1: {top: 3., right: 0., bottom: 3., left: 0.}
-        mspace_2: {top: 6., right: 6., bottom: 6., left: 6.}
-        mspace_h_2: {top: 0., right: 6., bottom: 0., left: 6.}
-        mspace_v_2: {top: 6., right: 0., bottom: 6., left: 0.}
-        mspace_3: {top: 9., right: 9., bottom: 9., left: 9.}
-        mspace_h_3: {top: 0., right: 9., bottom: 0., left: 9.}
-        mspace_v_3: {top: 9., right: 0., bottom: 9., left: 0.}
+        mspace_1: Inset{top: 3., right: 3., bottom: 3., left: 3.}
+        mspace_h_1: Inset{top: 0., right: 3., bottom: 0., left: 3.}
+        mspace_v_1: Inset{top: 3., right: 0., bottom: 3., left: 0.}
+        mspace_2: Inset{top: 6., right: 6., bottom: 6., left: 6.}
+        mspace_h_2: Inset{top: 0., right: 6., bottom: 0., left: 6.}
+        mspace_v_2: Inset{top: 6., right: 0., bottom: 6., left: 0.}
+        mspace_3: Inset{top: 9., right: 9., bottom: 9., left: 9.}
+        mspace_h_3: Inset{top: 0., right: 9., bottom: 0., left: 9.}
+        mspace_v_3: Inset{top: 9., right: 0., bottom: 9., left: 0.}
 
         data_item_height: 23.25
         data_icon_width: 15.5
@@ -261,52 +264,54 @@ script_mod! {
 
         font_label: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: res.crate("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                chinese := FontMember{res: res.crate("self:fonts/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                emoji := FontMember{res: res.crate("self:fonts/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                chinese := FontMember{res: crate_resource("self:fonts/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: crate_resource("self:fonts/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         } // TODO: LEGACY, REMOVE. REQUIRED BY RUN LIST IN STUDIO ATM
         font_regular: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: res.crate("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                chinese := FontMember{res: res.crate("self:fonts/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                emoji := FontMember{res: res.crate("self:fonts/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                chinese := FontMember{res: crate_resource("self:fonts/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: crate_resource("self:fonts/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         }
         font_bold: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: res.crate("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
-                chinese := FontMember{res: res.crate("self:fonts/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
-                emoji := FontMember{res: res.crate("self:fonts/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+                chinese := FontMember{res: crate_resource("self:fonts/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: crate_resource("self:fonts/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         }
         font_italic: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: res.crate("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
-                chinese := FontMember{res: res.crate("self:fonts/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
+                chinese := FontMember{res: crate_resource("self:fonts/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: crate_resource("self:fonts/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         }
         font_bold_italic: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: res.crate("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
-                chinese := FontMember{res: res.crate("self:fonts/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
+                chinese := FontMember{res: crate_resource("self:fonts/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: crate_resource("self:fonts/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         }
         font_code: TextStyle{
             font_size: theme.font_size_code
             font_family: FontFamily{
-                latin := FontMember{res: res.crate("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.35
         }
         font_icons: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: res.crate("self:resources/fa-solid-900.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: crate_resource("self:resources/fa-solid-900.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.2
         }

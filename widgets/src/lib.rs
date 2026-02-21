@@ -5,6 +5,7 @@ pub use makepad_draw::makepad_platform;
 pub use makepad_draw::*;
 pub use makepad_platform::log;
 pub use makepad_platform::makepad_script;
+pub use makepad_script::{ScriptValue, ScriptVm};
 
 pub use makepad_html;
 #[cfg(feature = "pdf")]
@@ -239,13 +240,28 @@ pub use crate::chart::*;
 #[cfg(target_os = "android")]
 pub use crate::video::*;
 
-pub fn script_mod(vm: &mut ScriptVm) {
+#[macro_export]
+macro_rules! script_fn {
+    ($($tt:tt)*) => {
+        |vm: &mut $crate::makepad_script::ScriptVm| -> $crate::makepad_script::ScriptValue {
+            let sb = $crate::makepad_script::script! { $($tt)* };
+            vm.eval(sb)
+        }
+    };
+}
+
+pub fn mod_theme(vm: &mut ScriptVm) {
     makepad_draw::script_mod(vm);
     makepad_platform::ime::script_mod(vm);
 
     vm.bx.heap.new_module(id!(prelude));
     vm.bx.heap.new_module(id!(themes));
     crate::theme_desktop_dark::script_mod(vm);
+    crate::theme_desktop_light::script_mod(vm);
+    crate::theme_desktop_skeleton::script_mod(vm);
+}
+
+pub fn mod_widgets(vm: &mut ScriptVm) {
     crate::animator::script_mod(vm);
     // make the prelude for our own widgets
     {
@@ -403,4 +419,22 @@ pub fn script_mod(vm: &mut ScriptVm) {
         script_mod(vm);
     }
     //crate::theme_desktop_dark::script_mod(vm);
+}
+
+pub fn script_mod_before_theme<F>(vm: &mut ScriptVm, callback: F)
+where
+    F: FnOnce(&mut ScriptVm) -> ScriptValue,
+{
+    mod_theme(vm);
+    callback(vm);
+    mod_widgets(vm);
+}
+
+pub fn script_mod(vm: &mut ScriptVm) {
+    set_theme(
+        vm,
+        script_fn! {
+            mod.theme = mod.themes.dark
+        },
+    );
 }
