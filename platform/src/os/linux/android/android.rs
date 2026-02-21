@@ -1398,6 +1398,20 @@ impl Cx {
                 CxOsOp::XrDiscoverAnchor(id) => {
                     self.os.openxr.discover_anchor(id);
                 }
+                CxOsOp::FullscreenWindow(_window_id) => {
+                    self.os.fullscreen = true;
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_full_screen(env, true);
+                    }
+                }
+                CxOsOp::NormalizeWindow(_window_id) => {
+                    self.os.fullscreen = false;
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_full_screen(env, false);
+                    }
+                }
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }
