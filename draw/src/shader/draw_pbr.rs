@@ -340,6 +340,8 @@ pub struct DrawPbr {
     #[rust]
     pub many_instances: Option<ManyInstances>,
     #[rust]
+    many_instances_mesh: Option<PbrMeshHandle>,
+    #[rust]
     pub geometry: Option<Geometry>,
     #[rust]
     pub acc_verts: Vec<f32>,
@@ -418,6 +420,14 @@ pub struct DrawPbr {
 
 impl DrawPbr {
     pub fn begin(&mut self) {
+        if self.many_instances.is_some() {
+            debug_assert!(
+                false,
+                "DrawPbr::begin called while many-instance batch is active"
+            );
+        } else {
+            self.many_instances_mesh = None;
+        }
         self.acc_verts.clear();
         self.acc_indices.clear();
         self.set_transform(Mat4f::identity());
@@ -602,6 +612,10 @@ impl DrawPbr {
 
     pub fn set_depth_forward_bias(&mut self, bias: f32) {
         self.depth_forward_bias = bias.clamp(0.0, 1.0);
+    }
+
+    pub fn set_depth_write(&mut self, depth_write: bool) {
+        self.draw_vars.options.depth_write = depth_write;
     }
 
     pub fn set_camera_state(&mut self, view: Mat4f, projection: Mat4f, camera_pos: Vec3f) {
@@ -1695,6 +1709,22 @@ impl DrawPbr {
     }
 
     pub fn draw_mesh(&mut self, cx: &mut Cx2d, mesh: PbrMeshHandle) -> Result<(), String> {
+        if self.many_instances_mesh.is_some() {
+            if self.many_instances_mesh != Some(mesh) {
+                return Err(format!(
+                    "DrawPbr many-instance batch active for mesh {:?}, requested {:?}",
+                    self.many_instances_mesh, mesh
+                ));
+            }
+            if let Some(instances) = self.many_instances.as_mut() {
+                instances
+                    .instances
+                    .extend_from_slice(self.draw_vars.as_slice());
+                return Ok(());
+            }
+            return Err("DrawPbr many-instance state invalid".to_string());
+        }
+
         let geom = self
             .meshes
             .get(mesh)
@@ -1709,6 +1739,59 @@ impl DrawPbr {
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
         Ok(())
+    }
+
+    pub fn begin_many_instances_for_mesh(
+        &mut self,
+        cx: &mut Cx2d,
+        mesh: PbrMeshHandle,
+    ) -> Result<(), String> {
+        if self.many_instances.is_some() {
+            if self.many_instances_mesh == Some(mesh) {
+                return Ok(());
+            }
+            return Err(format!(
+                "DrawPbr many-instance batch already active for mesh {:?}",
+                self.many_instances_mesh
+            ));
+        }
+
+        let geom = self
+            .meshes
+            .get(mesh)
+            .ok_or_else(|| format!("invalid mesh handle {mesh}"))?;
+        self.draw_vars.geometry_id = Some(geom.geometry_id());
+        self.apply_draw_uniforms(cx);
+        let Some(instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return Err("DrawPbr begin_many_instances failed".to_string());
+        };
+        self.many_instances = Some(instances);
+        self.many_instances_mesh = Some(mesh);
+        Ok(())
+    }
+
+    pub fn push_many_instance_with_transform(&mut self, transform: Mat4f) {
+        let prev_model = self.model_matrix;
+        self.model_matrix = transform;
+        if let Some(instances) = self.many_instances.as_mut() {
+            instances
+                .instances
+                .extend_from_slice(self.draw_vars.as_slice());
+        } else {
+            debug_assert!(
+                false,
+                "DrawPbr::push_many_instance_with_transform called without active batch"
+            );
+        }
+        self.model_matrix = prev_model;
+    }
+
+    pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
+        if let Some(instances) = self.many_instances.take() {
+            let new_area = cx.end_many_instances(instances);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+        self.many_instances_mesh = None;
     }
 
     pub fn end(&mut self, cx: &mut Cx2d) {

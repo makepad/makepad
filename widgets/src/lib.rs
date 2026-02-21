@@ -299,6 +299,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::keyboard_view::script_mod(vm);
     #[cfg(feature = "voice")]
     crate::voice_wave::script_mod(vm);
+    #[cfg(not(feature = "voice"))]
+    {
+        script_mod! {
+            use mod.widgets.View
+            mod.widgets.VoiceWave = mod.widgets.View {
+                visible: false
+            }
+        }
+        script_mod(vm);
+    }
     crate::window_menu::script_mod(vm);
     crate::nav_control::script_mod(vm);
     crate::window::script_mod(vm);

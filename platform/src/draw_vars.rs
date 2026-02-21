@@ -61,7 +61,7 @@ impl ScriptHook for DrawVars {
         if !apply.is_default() && !apply.is_animate() {
             self.compile_shader(vm, apply, value);
         }
-        // Read draw_call_group from the shader object
+        // Read draw-call level options from the shader object.
         if let Some(io_self) = value.as_object() {
             let group_value = vm
                 .bx
@@ -71,6 +71,16 @@ impl ScriptHook for DrawVars {
                 self.options.draw_call_group = id;
             } else if let Some(v) = group_value.as_f64() {
                 self.options.draw_call_group = LiveId(v as u64);
+            }
+
+            let depth_write_value = vm
+                .bx
+                .heap
+                .value(io_self, id!(depth_write).into(), NoTrap);
+            if let Some(v) = depth_write_value.as_bool() {
+                self.options.depth_write = v;
+            } else if let Some(v) = depth_write_value.as_f64() {
+                self.options.depth_write = v != 0.0;
             }
         }
         // lets fill our values

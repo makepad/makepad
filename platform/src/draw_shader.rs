@@ -22,10 +22,21 @@ use {
 // Re-export UniformBufferBindings for use in other modules
 pub use makepad_script::shader::UniformBufferBindings;
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
     pub debug_id: Option<LiveId>,
+    pub depth_write: bool,
+}
+
+impl Default for CxDrawShaderOptions {
+    fn default() -> Self {
+        Self {
+            draw_call_group: LiveId(0),
+            debug_id: None,
+            depth_write: true,
+        }
+    }
 }
 
 impl CxDrawShaderOptions {
