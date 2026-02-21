@@ -161,11 +161,13 @@ impl DrawQuad {
         self.draw(cx);
     }
 
-    pub fn new_draw_call(&self, cx: &mut Cx2d) {
+    pub fn new_draw_call(&mut self, cx: &mut Cx2d) {
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         cx.new_draw_call(&self.draw_vars);
     }
 
-    pub fn append_to_draw_call(&self, cx: &mut Cx2d) {
+    pub fn append_to_draw_call(&mut self, cx: &mut Cx2d) {
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         cx.append_to_draw_call(&self.draw_vars);
     }
 

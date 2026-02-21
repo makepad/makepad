@@ -6,6 +6,7 @@ use makepad_terminal_core::{Color, CursorShape, Pty, StyleFlags, TermKeyCode, Te
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -80,6 +81,7 @@ script_mod! {
             }
         }
         draw_text +: {
+            draw_call_group: @text
             text_style: theme.font_code
         }
         draw_cell_bg +: {
@@ -319,6 +321,53 @@ impl ScriptHook for StudioTerminal {
 }
 
 impl StudioTerminal {
+    fn debug_log_draw_list(&self, cx: &mut Cx2d) {
+        if std::env::var_os("MAKEPAD_TERM_DRAWLIST_DEBUG").is_none() {
+            return;
+        }
+        static LAST_REDRAW_ID: AtomicU64 = AtomicU64::new(0);
+        static LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+        let redraw_id = cx.redraw_id;
+        let prev = LAST_REDRAW_ID.swap(redraw_id, Ordering::Relaxed);
+        if prev == redraw_id {
+            return;
+        }
+        if LOG_COUNT.fetch_add(1, Ordering::Relaxed) > 120 {
+            return;
+        }
+
+        let Some(draw_list_id) = cx.draw_list_stack.last().copied() else {
+            return;
+        };
+        let draw_list = &cx.draw_lists[draw_list_id];
+        log!(
+            "term_drawlist redraw={} list={:?} items={}",
+            redraw_id,
+            draw_list_id,
+            draw_list.draw_items.len()
+        );
+        for i in 0..draw_list.draw_items.len() {
+            let item = &draw_list.draw_items[i];
+            if let Some(draw_call) = item.draw_call() {
+                let shader = &cx.draw_shaders[draw_call.draw_shader_id.index];
+                let instance_floats = item.instances.as_ref().map_or(0, |v| v.len());
+                log!(
+                    "  [{}] shader_idx={} shader_dbg={} append_group={} draw_call_group={} inst_floats={}",
+                    i,
+                    draw_call.draw_shader_id.index,
+                    shader.debug_id,
+                    draw_call.append_group_id,
+                    draw_call.options.draw_call_group.0,
+                    instance_floats
+                );
+            } else if let Some(sub_list_id) = item.sub_list() {
+                log!("  [{}] sub_list={:?}", i, sub_list_id);
+            } else {
+                log!("  [{}] empty", i);
+            }
+        }
+    }
+
     const OUTPUT_QUIET_DELAY: Duration = Duration::from_millis(120);
     const STREAMING_START_TICKS: u8 = 2;
     const STREAMING_START_BYTES: usize = 1024;
@@ -1798,6 +1847,7 @@ impl Widget for StudioTerminal {
         }
         self.draw_bg.draw_abs(cx, cx.turtle().rect_unscrolled());
         self.draw_terminal(cx);
+        self.debug_log_draw_list(cx);
         cx.turtle_mut()
             .set_used(self.viewport_rect.size.x.max(1.0), self.content_height());
         self.scroll_bars.end(cx);

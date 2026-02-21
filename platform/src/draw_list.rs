@@ -356,7 +356,12 @@ impl CxDrawList {
     }
 
     #[inline]
-    fn can_cross_group_barrier(target_group: u64, barrier_group: u64) -> bool {
+    fn can_cross_group_barrier(
+        target_group: u64,
+        target_draw_call_group: u64,
+        barrier_group: u64,
+        barrier_draw_call_group: u64,
+    ) -> bool {
         let target_base = Self::group_base(target_group);
         let barrier_base = Self::group_base(barrier_group);
         if target_base != barrier_base {
@@ -367,7 +372,17 @@ impl CxDrawList {
         // Only background lane draws may cross content lane barriers.
         // Letting content lane cross background barriers can reorder text under
         // newly-created background drawcalls when background batching splits.
-        target_lane == 0 && barrier_lane == 1
+        if target_lane == 0 && barrier_lane == 1 {
+            return true;
+        }
+        // Explicit non-default draw_call_group layers (seeded via new_draw_call)
+        // may cross other background-lane groups to find their own anchor call.
+        // This preserves explicit layer lock-in without re-enabling broad
+        // background/content reordering.
+        target_lane == 0
+            && barrier_lane == 0
+            && target_draw_call_group != 0
+            && target_draw_call_group != barrier_draw_call_group
     }
 
     pub fn find_appendable_drawcall(
@@ -385,6 +400,7 @@ impl CxDrawList {
             .unwrap()
             .false_compare_check();
         let target_group = draw_vars.append_group_id;
+        let target_draw_call_group = draw_vars.options.draw_call_group.0;
 
         // Walk backward in draw order and stop at hard barriers.
         // Only sibling parent lanes (background <-> content) may be crossed.
@@ -393,6 +409,12 @@ impl CxDrawList {
             let Some(draw_call) = &draw_item.draw_call() else {
                 break;
             };
+            let can_cross = Self::can_cross_group_barrier(
+                target_group,
+                target_draw_call_group,
+                draw_call.append_group_id,
+                draw_call.options.draw_call_group.0,
+            );
 
             if self.find_appendable_draw_shader_check[i] == draw_shader_check {
                 // TODO! figure out why this can happen
@@ -410,6 +432,9 @@ impl CxDrawList {
                                 "append_miss geom_mismatch shader={} at_draw_item={}",
                                 draw_call.draw_shader_id.index, i
                             ));
+                            if can_cross {
+                                continue;
+                            }
                             break;
                         }
                         let mut diff = false;
@@ -424,6 +449,9 @@ impl CxDrawList {
                                 "append_barrier uniform_diff shader={} at_draw_item={}",
                                 draw_call.draw_shader_id.index, i
                             ));
+                            if can_cross {
+                                continue;
+                            }
                             break;
                         }
 
@@ -447,6 +475,9 @@ impl CxDrawList {
                                 "append_barrier texture_diff shader={} at_draw_item={}",
                                 draw_call.draw_shader_id.index, i
                             ));
+                            if can_cross {
+                                continue;
+                            }
                             break;
                         }
                     }
@@ -455,6 +486,9 @@ impl CxDrawList {
                             "append_barrier options_diff shader={} at_draw_item={}",
                             draw_call.draw_shader_id.index, i
                         ));
+                        if can_cross {
+                            continue;
+                        }
                         break;
                     }
                     Self::append_trace_log(format!(
@@ -468,10 +502,14 @@ impl CxDrawList {
                 }
             }
 
-            if !Self::can_cross_group_barrier(target_group, draw_call.append_group_id) {
+            if !can_cross {
                 Self::append_trace_log(format!(
-                    "append_barrier group target={} barrier={} at_draw_item={}",
-                    target_group, draw_call.append_group_id, i
+                    "append_barrier group target={} target_draw_call_group={} barrier={} barrier_draw_call_group={} at_draw_item={}",
+                    target_group,
+                    target_draw_call_group,
+                    draw_call.append_group_id,
+                    draw_call.options.draw_call_group.0,
+                    i
                 ));
                 break;
             }

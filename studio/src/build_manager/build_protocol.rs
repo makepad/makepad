@@ -2,6 +2,7 @@ use crate::{
     makepad_code_editor::text::Position, makepad_live_id::LiveId, makepad_micro_serde::*,
     makepad_platform::log::LogLevel,
 };
+use std::collections::HashMap;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, SerRon, DeRon)]
 pub enum BuildTarget {
@@ -147,7 +148,7 @@ pub struct BuildCmdWrap {
 pub enum BuildCmd {
     Stop,
     Run(BuildProcess, String),
-    RunCargo(BuildProcess, Vec<String>, String),
+    RunCargo(BuildProcess, Vec<String>, String, HashMap<String, String>),
     HostToStdin(String),
 }
 
