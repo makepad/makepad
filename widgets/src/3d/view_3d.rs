@@ -1,5 +1,7 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, view::View, widget::*};
 
+use super::scene_3d::apply_draw_call_reorder_for_draw_list;
+
 script_mod! {
     use mod.prelude.widgets_internal.*
 
@@ -7,6 +9,7 @@ script_mod! {
     mod.widgets.View3D = set_type_default() do mod.widgets.View3DBase{
         width: Fill
         height: Fill
+        sort_draw_calls_by_depth: true
     }
 }
 
@@ -24,6 +27,8 @@ pub struct View3D {
     pub size_3d: Vec2f,
     #[live(false)]
     pub billboard: bool,
+    #[live(true)]
+    pub sort_draw_calls_by_depth: bool,
 }
 
 impl Widget for View3D {
@@ -32,6 +37,11 @@ impl Widget for View3D {
         // for now, forward to the 2D subtree so View3D behaves as a wrapper node.
         let cx2d = &mut Cx2d::new(cx.cx);
         self.view.draw_all(cx2d, scope);
+        if self.sort_draw_calls_by_depth {
+            if let Some(draw_list_id) = cx2d.get_current_draw_list_id() {
+                apply_draw_call_reorder_for_draw_list(cx2d, scope, draw_list_id, true);
+            }
+        }
         DrawStep::done()
     }
 }

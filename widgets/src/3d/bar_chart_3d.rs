@@ -1,6 +1,9 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-use super::scene_3d::{apply_scene_to_draw_pbr, chart_data_from_scope, scene_state_from_scope};
+use super::scene_3d::{
+    apply_scene_to_draw_pbr, chart_data_from_scope, register_last_draw_call_anchor,
+    scene_state_from_scope,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -195,13 +198,20 @@ impl Widget for BarChart3D {
             self.draw_bar.bar_height = h;
 
             let half = vec3(bar_size, bar_size, bar_size);
-            let _ = self.draw_bar.draw_rounded_cube(
+            let draw_result = self.draw_bar.draw_rounded_cube(
                 cx,
                 half,
                 corner_radius,
                 1,
                 corner_segments as usize,
             );
+            if draw_result.is_ok() {
+                let world = self
+                    .draw_bar
+                    .cur_transform
+                    .transform_vec4(vec4(0.0, h * 0.5, 0.0, 1.0));
+                register_last_draw_call_anchor(cx, scope, vec3(world.x, world.y, world.z));
+            }
             self.draw_bar.pop_matrix();
         }
 

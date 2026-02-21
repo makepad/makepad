@@ -48,7 +48,7 @@ impl Cx {
         metal_cx: &MetalCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
+        let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         let debug_dump_count = self.draw_lists[draw_list_id].debug_dump_count;
         let debug_dump = debug_dump_count > 0;
         if self.draw_lists[draw_list_id].debug_dump {
@@ -59,14 +59,19 @@ impl Cx {
             println!(
                 "=== DEBUG DUMP draw_list {:?} ({} items) repaint_id={} frames_left={} ===",
                 draw_list_id.index(),
-                draw_items_len,
+                draw_order_len,
                 self.repaint_id,
                 debug_dump_count,
             );
             self.draw_lists[draw_list_id].debug_dump_count -= 1;
         }
 
-        for draw_item_id in 0..draw_items_len {
+        for order_index in 0..draw_order_len {
+            let Some(draw_item_id) =
+                self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
+            else {
+                continue;
+            };
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id]
                 .kind
                 .sub_list()

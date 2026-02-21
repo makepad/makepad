@@ -751,8 +751,13 @@ impl CxVulkan {
         draw_list_id: DrawListId,
         seen: &mut HashSet<VulkanTextureKey>,
     ) -> Result<(), String> {
-        let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
-        for draw_item_id in 0..draw_items_len {
+        let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
+        for order_index in 0..draw_order_len {
+            let Some(draw_item_id) =
+                cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
+            else {
+                continue;
+            };
             let (sub_list_id, texture_ids) = {
                 let draw_list = &cx.draw_lists[draw_list_id];
                 let draw_item = &draw_list.draw_items[draw_item_id];
@@ -1531,8 +1536,13 @@ impl CxVulkan {
         zbias_step: f32,
         draw_stats: &mut VulkanDrawStats,
     ) -> Result<(), String> {
-        let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
-        for draw_item_id in 0..draw_items_len {
+        let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
+        for order_index in 0..draw_order_len {
+            let Some(draw_item_id) =
+                cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
+            else {
+                continue;
+            };
             let null_texture_id = cx.null_texture.texture_id();
             let null_cube_texture_id = cx.null_cube_texture.texture_id();
             draw_stats.draw_items += 1;

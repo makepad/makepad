@@ -32,8 +32,13 @@ impl DrawListExt for DrawList {
             cx.draw_lists[draw_list_id]
                 .draw_list_uniforms
                 .view_transform = *mat;
-            let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
-            for draw_item_id in 0..draw_items_len {
+            let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
+            for order_index in 0..draw_order_len {
+                let Some(draw_item_id) =
+                    cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
+                else {
+                    continue;
+                };
                 if let Some(sub_list_id) =
                     cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
                 {

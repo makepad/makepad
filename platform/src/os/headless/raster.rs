@@ -723,9 +723,14 @@ impl Cx {
     ) {
         let only_shader = std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok();
         let debug_text = std::env::var("MAKEPAD_HEADLESS_DEBUG_TEXT").is_ok();
-        let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
+        let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
 
-        for draw_item_id in 0..draw_items_len {
+        for order_index in 0..draw_order_len {
+            let Some(draw_item_id) =
+                self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
+            else {
+                continue;
+            };
             let kind_tag = match &self.draw_lists[draw_list_id].draw_items[draw_item_id].kind {
                 CxDrawKind::SubList(sub_id) => Some(*sub_id),
                 CxDrawKind::DrawCall(_) => None,
