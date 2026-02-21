@@ -657,12 +657,14 @@ impl Cx {
         }
 
         let elapsed = frame_start.elapsed();
-        eprintln!(
-            "[headless] frame render: {:.1}ms",
-            elapsed.as_secs_f64() * 1000.0
-        );
         if profile_enabled {
-            eprintln!(
+            crate::log!(
+                "[headless] frame render: {:.1}ms",
+                elapsed.as_secs_f64() * 1000.0
+            );
+        }
+        if profile_enabled {
+            crate::log!(
                 "[headless][profile] draws={} serial={} parallel={} inst={} tris={} vertex={:.1}ms raster={:.1}ms",
                 profile.draw_calls,
                 profile.serial_draw_calls,

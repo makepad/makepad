@@ -215,6 +215,7 @@ pub enum StudioTerminalRequest {
         args: Vec<String>,
         root: Option<String>,
         startup_query: Option<String>,
+        env: Option<HashMap<String, String>>,
     },
     Stop {
         build_id: u64,
@@ -467,6 +468,29 @@ fn normalize_terminal_cargo_run_args(raw_args: Vec<String>) -> Result<Vec<String
     final_args.push("--".to_string());
     final_args.extend(app_args);
     Ok(final_args)
+}
+
+fn normalize_terminal_env_map(
+    raw_env: Option<HashMap<String, String>>,
+) -> Result<HashMap<String, String>, String> {
+    let mut out = HashMap::new();
+    let Some(raw_env) = raw_env else {
+        return Ok(out);
+    };
+    for (key, value) in raw_env {
+        let key = key.trim().to_string();
+        if key.is_empty() {
+            return Err("CargoRun.env contains an empty env var name".to_string());
+        }
+        if key.contains('=') || key.contains('\0') {
+            return Err(format!(
+                "CargoRun.env contains invalid env var name '{}'",
+                key
+            ));
+        }
+        out.insert(key, value);
+    }
+    Ok(out)
 }
 
 fn cargo_run_is_release(cargo_args: &[String]) -> bool {
@@ -1290,7 +1314,8 @@ impl BuildManager {
                 args,
                 root,
                 startup_query,
-            } => match self.start_terminal_cargo_run(web_socket_id, args, root, startup_query) {
+                env,
+            } => match self.start_terminal_cargo_run(web_socket_id, args, root, startup_query, env) {
                 Ok((build_id, root, package)) => {
                     self.send_terminal_response(
                         web_socket_id,
@@ -1537,6 +1562,7 @@ impl BuildManager {
         args: Vec<String>,
         root: Option<String>,
         startup_query: Option<String>,
+        env: Option<HashMap<String, String>>,
     ) -> Result<(LiveId, String, String), String> {
         let root = if let Some(root) = root {
             root
@@ -1550,6 +1576,7 @@ impl BuildManager {
             .map_err(|_| format!("unknown root '{root}'"))?;
 
         let cargo_args = normalize_terminal_cargo_run_args(args)?;
+        let run_env = normalize_terminal_env_map(env)?;
         let build_id = self.alloc_terminal_build_id();
         let package = parse_terminal_package_name(&cargo_args)
             .unwrap_or_else(|| format!("cargo-run-{}", build_id.0));
@@ -1566,7 +1593,7 @@ impl BuildManager {
 
         self.clients[0].send_cmd_with_id(
             build_id,
-            BuildCmd::RunCargo(process.clone(), cargo_args, self.studio_addr()),
+            BuildCmd::RunCargo(process.clone(), cargo_args, self.studio_addr(), run_env),
         );
         self.running_processes.insert(build_id, process);
         self.terminal_build_owners.insert(build_id, web_socket_id);

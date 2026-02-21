@@ -21,6 +21,7 @@ use {
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
     std::fmt::Write,
+    std::sync::atomic::{AtomicUsize, Ordering},
     std::sync::Mutex,
     std::time::Instant,
 };
@@ -33,6 +34,10 @@ use crate::os::apple::apple_sys::{
 };
 
 impl Cx {
+    fn total_drawcall_log_enabled() -> bool {
+        std::env::var_os("MAKEPAD_TOTAL_DRAWCALLS_DEBUG").is_some()
+    }
+
     fn render_view(
         &mut self,
         draw_pass_id: DrawPassId,
@@ -591,6 +596,18 @@ impl Cx {
             encoder,
             &metal_cx,
         );
+        if Self::total_drawcall_log_enabled() {
+            static LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+            if LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 200 {
+                crate::log!(
+                    "total_drawcalls repaint={} pass={:?} draw_list={:?} draw_calls_done={}",
+                    self.repaint_id,
+                    draw_pass_id,
+                    draw_list_id,
+                    self.os.draw_calls_done
+                );
+            }
+        }
 
         let () = unsafe { msg_send![encoder, endEncoding] };
 

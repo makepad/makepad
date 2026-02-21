@@ -77,14 +77,28 @@ impl BuildConnection {
 
     pub fn run(&self, what: BuildProcess, cmd_id: LiveId, studio_addr: String) {
         let args = default_cargo_args_for_build_target(&what);
-        self.run_with_args(what, cmd_id, studio_addr, args);
+        self.run_with_args(what, cmd_id, studio_addr, args, HashMap::new());
     }
 
-    pub fn run_cargo(&self, what: BuildProcess, cmd_id: LiveId, studio_addr: String, args: Vec<String>) {
-        self.run_with_args(what, cmd_id, studio_addr, args);
+    pub fn run_cargo(
+        &self,
+        what: BuildProcess,
+        cmd_id: LiveId,
+        studio_addr: String,
+        args: Vec<String>,
+        extra_env: HashMap<String, String>,
+    ) {
+        self.run_with_args(what, cmd_id, studio_addr, args, extra_env);
     }
 
-    fn run_with_args(&self, what: BuildProcess, cmd_id: LiveId, studio_addr: String, args: Vec<String>) {
+    fn run_with_args(
+        &self,
+        what: BuildProcess,
+        cmd_id: LiveId,
+        studio_addr: String,
+        args: Vec<String>,
+        extra_env: HashMap<String, String>,
+    ) {
         self.stop(cmd_id);
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
@@ -107,23 +121,31 @@ impl BuildConnection {
         );
 
         let cmd_id_string = cmd_id.0.to_string();
-        let mut env = vec![("RUST_BACKTRACE", "1"), ("MAKEPAD", "lines")];
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("RUST_BACKTRACE".to_string(), "1".to_string());
+        env.insert("MAKEPAD".to_string(), "lines".to_string());
+        for (key, value) in extra_env {
+            env.insert(key, value);
+        }
         if is_in_studio && !studio_addr.trim().is_empty() {
-            env.push(("STUDIO", studio_addr.as_str()));
-            env.push(("STUDIO_BUILD_ID", cmd_id_string.as_str()));
+            env.insert("STUDIO".to_string(), studio_addr.clone());
+            env.insert("STUDIO_BUILD_ID".to_string(), cmd_id_string.clone());
         }
         if matches!(what.target, BuildTarget::Harmony) {
-            env.push(("MAKEPAD", "no_android_choreographer"));
+            env.insert("MAKEPAD".to_string(), "no_android_choreographer".to_string());
         }
 
         // Default to nightly rustc but don't overwrite any user request for a
         // specific nightly version.
         // FIXME: also apply this for overrides set using rustup override rather
         // than using an env var or as commandline argument.
-        if !env::var("RUSTUP_TOOLCHAIN").map_or(false, |toolchain| toolchain.contains("nightly")) {
-            env.push(("RUSTUP_TOOLCHAIN", "nightly"));
+        if !env.contains_key("RUSTUP_TOOLCHAIN")
+            && !env::var("RUSTUP_TOOLCHAIN").map_or(false, |toolchain| toolchain.contains("nightly"))
+        {
+            env.insert("RUSTUP_TOOLCHAIN".to_string(), "nightly".to_string());
         }
 
+        let env: Vec<(String, String)> = env.into_iter().collect();
         let process = ChildProcess::start("cargo", &args, path.to_path_buf(), &env, is_in_studio)
             .expect("Cannot start process");
 
@@ -220,8 +242,8 @@ impl BuildConnection {
                 // lets kill all other 'whats'
                 self.run(process, cmd_wrap.cmd_id, studio_addr);
             }
-            BuildCmd::RunCargo(process, args, studio_addr) => {
-                self.run_cargo(process, cmd_wrap.cmd_id, studio_addr, args);
+            BuildCmd::RunCargo(process, args, studio_addr, env) => {
+                self.run_cargo(process, cmd_wrap.cmd_id, studio_addr, args, env);
             }
             BuildCmd::Stop => {
                 // lets kill all other 'whats'

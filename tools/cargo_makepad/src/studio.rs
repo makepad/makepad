@@ -3,6 +3,7 @@ use makepad_http::websocket::{
     ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
 use makepad_micro_serde::*;
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -22,6 +23,7 @@ enum StudioTerminalRequest {
         args: Vec<String>,
         root: Option<String>,
         startup_query: Option<String>,
+        env: Option<HashMap<String, String>>,
     },
     Stop {
         build_id: u64,
@@ -111,6 +113,7 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
             args: cargo_run_args,
             root,
             startup_query: None,
+            env: None,
         };
         run_studio_json_bridge(target, vec![request.serialize_json()])
     } else {
