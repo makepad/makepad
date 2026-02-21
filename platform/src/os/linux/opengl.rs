@@ -360,14 +360,15 @@ impl Cx {
                 };
 
                 let geometry = &mut self.geometries[geometry_id];
-                if geometry.dirty
-                    || geometry.os.vb.gl_buffer.is_none()
-                    || geometry.os.ib.gl_buffer.is_none()
-                {
+                if geometry.dirty_vertices || geometry.os.vb.gl_buffer.is_none() {
                     geometry.os.vb.update_array_buffer(gl, &geometry.vertices);
-                    geometry.os.ib.update_index_buffer(gl, &geometry.indices);
-                    geometry.dirty = false;
+                    geometry.dirty_vertices = false;
                 }
+                if geometry.dirty_indices || geometry.os.ib.gl_buffer.is_none() {
+                    geometry.os.ib.update_index_buffer(gl, &geometry.indices);
+                    geometry.dirty_indices = false;
+                }
+                geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
 
                 let indices = geometry.indices.len();
 

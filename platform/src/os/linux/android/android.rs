@@ -1210,9 +1210,20 @@ impl Cx {
                 CxDrawPassParent::Window(_) => {
                     //let window = &self.windows[window_id];
                     let start = self.seconds_since_app_start();
+                    let metrics = self.collect_gpu_pass_metrics(*draw_pass_id);
                     self.draw_pass_to_window_for_active_backend(*draw_pass_id);
                     let end = self.seconds_since_app_start();
-                    Cx::send_studio_message(AppToStudio::GPUSample(GPUSample { start, end }));
+                    Cx::send_studio_message(AppToStudio::GPUSample(GPUSample {
+                        start,
+                        end,
+                        draw_calls: metrics.draw_calls,
+                        instances: metrics.instances,
+                        vertices: metrics.vertices,
+                        instance_bytes: metrics.instance_bytes,
+                        uniform_bytes: metrics.uniform_bytes,
+                        vertex_buffer_bytes: metrics.vertex_buffer_bytes,
+                        texture_bytes: metrics.texture_bytes,
+                    }));
                     self.present_window_for_active_backend();
                 }
                 CxDrawPassParent::DrawPass(_) => {

@@ -197,17 +197,21 @@ impl Cx {
 
                 let geometry = &mut self.geometries[geometry_id];
 
-                if geometry.dirty {
+                if geometry.dirty_indices {
                     geometry
                         .os
                         .geom_ibuf
                         .update_with_u32_index_data(d3d11_cx, &geometry.indices);
+                    geometry.dirty_indices = false;
+                }
+                if geometry.dirty_vertices {
                     geometry
                         .os
                         .geom_vbuf
                         .update_with_f32_vertex_data(d3d11_cx, &geometry.vertices);
-                    geometry.dirty = false;
+                    geometry.dirty_vertices = false;
                 }
+                geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
 
                 unsafe {
                     d3d11_cx.context.VSSetShader(&shp.vertex_shader, None);

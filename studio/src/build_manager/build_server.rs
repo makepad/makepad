@@ -177,6 +177,14 @@ impl BuildConnection {
             what.target,
             BuildTarget::ReleaseStudio | BuildTarget::DebugStudio
         );
+        let uses_studio_websocket = matches!(
+            what.target,
+            BuildTarget::ReleaseStudio
+                | BuildTarget::DebugStudio
+                | BuildTarget::Release
+                | BuildTarget::Debug
+                | BuildTarget::Profiler
+        );
 
         let cmd_id_string = cmd_id.0.to_string();
         let mut env: HashMap<String, String> = HashMap::new();
@@ -185,7 +193,7 @@ impl BuildConnection {
         for (key, value) in extra_env {
             env.insert(key, value);
         }
-        if is_in_studio && !studio_addr.trim().is_empty() {
+        if uses_studio_websocket && !studio_addr.trim().is_empty() {
             env.insert("STUDIO".to_string(), studio_addr.clone());
             env.insert("STUDIO_BUILD_ID".to_string(), cmd_id_string.clone());
         }
