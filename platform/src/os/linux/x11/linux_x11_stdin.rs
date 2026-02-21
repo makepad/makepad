@@ -12,7 +12,7 @@ use {
             aux_chan, HostPresentableImage, HostSwapchain, HostToStdin, LinuxSharedSoftwareBuffer,
             PollTimer, PresentableDraw, StdinToHost,
         },
-        studio::{AppToStudio, StudioToApp, StudioToAppVec},
+        studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
         texture::{Texture, TextureFormat, TextureSize},
         thread::SignalToUI,
         web_socket::WebSocketMessage,
@@ -473,6 +473,23 @@ impl Cx {
                 }
 
                 self.stdin_handle_repaint(stdin_windows);
+
+                let gc_start = self.seconds_since_app_start();
+                let mut gc_heap_live = None;
+                self.with_vm(|vm| {
+                    if vm.heap().needs_gc() {
+                        vm.gc();
+                        gc_heap_live = Some(vm.heap().gc_live_len() as u64);
+                    }
+                });
+                if let Some(heap_live) = gc_heap_live {
+                    let gc_end = self.seconds_since_app_start();
+                    Cx::send_studio_message(AppToStudio::GCSample(GCSample {
+                        start: gc_start,
+                        end: gc_end,
+                        heap_live,
+                    }));
+                }
             }
         }
     }

@@ -496,7 +496,7 @@ script_mod! {
                 }
 
                 log_tabs := DockTabs{
-                    tabs: [@log_list_tab]
+                    tabs: [@log_list_tab @profiler]
                     selected: 0
                 }
 

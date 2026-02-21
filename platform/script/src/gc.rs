@@ -713,6 +713,16 @@ impl ScriptHeap {
         false
     }
 
+    pub fn gc_live_len(&self) -> usize {
+        let objects = self.objects.len() - self.objects_free.len();
+        let strings = self.strings.len() - self.strings_free.len();
+        let arrays = self.arrays.len() - self.arrays_free.len();
+        let pods = self.pods.len() - self.pods_free.len();
+        let handles = self.handles.len() - self.handles_free.len();
+        let regexes = self.regexes.len() - self.regexes_free.len();
+        objects + strings + arrays + pods + handles + regexes
+    }
+
     pub fn free_object_if_unreffed(&mut self, ptr: ScriptObject) {
         // Check if reference is still valid (may have been freed by GC)
         if !self.objects.is_valid(ptr) {

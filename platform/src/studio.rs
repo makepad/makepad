@@ -20,6 +20,13 @@ pub struct GPUSample {
 }
 
 #[derive(SerBin, DeBin, Debug)]
+pub struct GCSample {
+    pub start: f64,
+    pub end: f64,
+    pub heap_live: u64,
+}
+
+#[derive(SerBin, DeBin, Debug)]
 pub struct StudioLogItem {
     pub file_name: String,
     pub line_start: u32,
@@ -102,6 +109,7 @@ pub enum AppToStudio {
     LogItem(StudioLogItem),
     EventSample(EventSample),
     GPUSample(GPUSample),
+    GCSample(GCSample),
     JumpToFile(JumpToFile),
     SelectInFile(SelectInFile),
     PatchFile(PatchFile),
