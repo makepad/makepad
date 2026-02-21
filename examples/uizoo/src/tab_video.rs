@@ -11,12 +11,10 @@ script_mod! {
         demos +: {
             H4{text: "Network Video (autoplay, looping)"}
             Video{
-                source: VideoDataSource.Network { url: "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"}
+                source: VideoDataSource.Network { url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"}
                 height: 240
                 width: 426
-                is_looping: true
-                hold_to_pause: true
-                autoplay: true
+                show_idle_thumbnail: true
             }
         }
     }

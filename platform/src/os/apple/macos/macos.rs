@@ -444,6 +444,7 @@ impl Cx {
                         if player.poll_frame(&mut self.textures) {
                             video_events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
                                 video_id: player.video_id,
+                                current_position_ms: player.current_position_ms(),
                             }));
                         }
                     }
@@ -787,6 +788,11 @@ impl Cx {
                         self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
                             VideoPlaybackResourcesReleasedEvent { video_id }
                         ));
+                    }
+                }
+                CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.seek_to(position_ms);
                     }
                 }
                 e => {

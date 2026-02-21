@@ -134,6 +134,7 @@ pub enum CxOsOp {
     MuteVideoPlayback(LiveId),
     UnmuteVideoPlayback(LiveId),
     CleanupVideoPlaybackResources(LiveId),
+    SeekVideoPlayback(LiveId, u64),
     UpdateVideoSurfaceTexture(LiveId),
 
     CreateWebView {
@@ -203,6 +204,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::MuteVideoPlayback(..) => write!(f, "MuteVideoPlayback"),
             Self::UnmuteVideoPlayback(..) => write!(f, "UnmuteVideoPlayback"),
             Self::CleanupVideoPlaybackResources(..) => write!(f, "CleanupVideoPlaybackResources"),
+            Self::SeekVideoPlayback(..) => write!(f, "SeekVideoPlayback"),
             Self::UpdateVideoSurfaceTexture(..) => write!(f, "UpdateVideoSurfaceTexture"),
             Self::CreateWebView { .. } => write!(f, "CreateWebView"),
             Self::UpdateWebView { .. } => write!(f, "UpdateWebView"),
@@ -908,6 +910,11 @@ impl Cx {
     pub fn cleanup_video_playback_resources(&mut self, video_id: LiveId) {
         self.platform_ops
             .push(CxOsOp::CleanupVideoPlaybackResources(video_id));
+    }
+
+    pub fn seek_video_playback(&mut self, video_id: LiveId, position_ms: u64) {
+        self.platform_ops
+            .push(CxOsOp::SeekVideoPlayback(video_id, position_ms));
     }
 
     pub fn println_resources(&self) {

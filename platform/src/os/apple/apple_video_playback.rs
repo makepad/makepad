@@ -319,6 +319,22 @@ impl AppleVideoPlayer {
         }
     }
 
+    pub fn current_position_ms(&self) -> u128 {
+        unsafe {
+            let current: CMTime = msg_send![self.player_item.as_id(), currentTime];
+            let seconds = CMTimeGetSeconds(current);
+            if seconds.is_finite() && seconds >= 0.0 { (seconds * 1000.0) as u128 } else { 0 }
+        }
+    }
+
+    pub fn seek_to(&self, position_ms: u64) {
+        unsafe {
+            let seconds = position_ms as f64 / 1000.0;
+            let time = CMTimeMakeWithSeconds(seconds, 600);
+            let _: () = msg_send![self.player.as_id(), seekToTime: time];
+        }
+    }
+
     pub fn play(&self) {
         unsafe {
             let _: () = msg_send![self.player.as_id(), play];
