@@ -97,14 +97,13 @@ fn rust_build(
     #[allow(non_snake_case)]
     let NDK_VERSION_FULL = urls.ndk_version_full;
     for android_target in android_targets {
-        let clang_filename = format!("{}33-clang", android_target.clang());
+        let clang_filename = format!("{}{}-clang", android_target.clang(), urls.sdk_version);
 
         let bin_path = |bin_filename: &str, windows_extension: &str| {
             match host_os {
             HostOs::MacosX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
-            // NOTE! The NDK version we install (33) does not have darwin-aarch64 binaries (host) so we have to use darwin-x86
-            // This automatically runs via rosetta on M1 and newer targets.
-            HostOs::MacosAarch64 => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
+            // NDK r28 ships native darwin-aarch64 prebuilt binaries.
+            HostOs::MacosAarch64 => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-aarch64/bin/{bin_filename}"),
             HostOs::WindowsX64   => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/{bin_filename}.{windows_extension}"),
             HostOs::LinuxX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64/bin/{bin_filename}"),
             _ => panic!()
@@ -509,8 +508,115 @@ fn build_unaligned_apk(
     Ok(())
 }
 
+/// Returns the NDK prebuilt host directory name for the given host OS.
+fn ndk_prebuilt_dir(host_os: HostOs) -> &'static str {
+    match host_os {
+        HostOs::MacosX64 => "darwin-x86_64",
+        HostOs::MacosAarch64 => "darwin-aarch64",
+        HostOs::WindowsX64 => "windows-x86_64",
+        HostOs::LinuxX64 => "linux-x86_64",
+        _ => panic!("Unsupported host OS"),
+    }
+}
+
+/// Scan an ELF shared library for NEEDED entries using the NDK's llvm-readelf,
+/// then bundle any non-system shared libraries found in the NDK sysroot.
+///
+/// System libraries (libc.so, libm.so, libdl.so, liblog.so, etc.) live on the
+/// device and must NOT be bundled.  We detect "NDK-provided, non-system" libs by
+/// checking whether the file exists in the sysroot's `usr/lib/<triple>/` directory
+/// (the base dir, not the API-level sub-directory which only contains OS stubs).
+fn bundle_ndk_shared_deps(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    urls: &AndroidSDKUrls,
+    android_target: &AndroidTarget,
+    so_path: &Path,
+    abi: &str,
+    build_paths: &BuildPaths,
+) -> Result<(), String> {
+    let ndk_version = urls.ndk_version_full;
+    let prebuilt = ndk_prebuilt_dir(host_os);
+
+    // Path to llvm-readelf shipped with the NDK.
+    let readelf_path = sdk_dir.join(format!(
+        "ndk/{ndk_version}/toolchains/llvm/prebuilt/{prebuilt}/bin/llvm-readelf"
+    ));
+    if !readelf_path.exists() {
+        // Gracefully skip when the NDK toolchain doesn't include llvm-readelf
+        // (e.g. a stripped SDK install).
+        return Ok(());
+    }
+
+    // Run `llvm-readelf -d <so>` to list dynamic section entries.
+    let cwd = std::env::current_dir().unwrap();
+    let output = shell_env_cap(
+        &[],
+        &cwd,
+        readelf_path.to_str().unwrap(),
+        &["-d", so_path.to_str().unwrap()],
+    )?;
+
+    // The NDK sysroot lib directory for this target triple (base dir, NOT the
+    // API-level subdirectory).  Files here that are real .so's (not linker
+    // scripts / stubs) are NDK-provided and must be shipped inside the APK.
+    let clang_triple = android_target.clang();
+    let sysroot_lib_dir = sdk_dir.join(format!(
+        "ndk/{ndk_version}/toolchains/llvm/prebuilt/{prebuilt}/sysroot/usr/lib/{clang_triple}"
+    ));
+
+    // Parse NEEDED entries from readelf output.  Each relevant line looks like:
+    //   0x0000000000000001 (NEEDED) Shared library: [libc++_shared.so]
+    for line in output.lines() {
+        if !line.contains("(NEEDED)") {
+            continue;
+        }
+        // Extract the library name between square brackets.
+        let lib_name = match line.find('[').and_then(|start| {
+            line[start + 1..].find(']').map(|end| &line[start + 1..start + 1 + end])
+        }) {
+            Some(name) => name,
+            None => continue,
+        };
+
+        let candidate = sysroot_lib_dir.join(lib_name);
+        if !candidate.exists() || !candidate.is_file() {
+            // Either a system lib (only present on device) or not a real file —
+            // nothing to bundle.
+            continue;
+        }
+
+        // Extra guard: if the same filename also exists in the API-level
+        // subdirectory it is an OS-provided stub and should NOT be bundled.
+        let api_level_stub = sysroot_lib_dir.join(urls.sdk_version.to_string()).join(lib_name);
+        if api_level_stub.exists() {
+            continue;
+        }
+
+        // Copy the NDK-provided shared library into the APK.
+        let binary_path = format!("lib/{abi}/{lib_name}");
+        let dst_lib = build_paths.out_dir.join(&binary_path);
+        cp(&candidate, &dst_lib, false)?;
+
+        shell_env_cap(
+            &[],
+            &build_paths.out_dir,
+            aapt_path(sdk_dir, urls).to_str().unwrap(),
+            &[
+                "add",
+                build_paths.dst_unaligned_apk.to_str().unwrap(),
+                &binary_path,
+            ],
+        )?;
+
+        println!("  Bundled NDK shared dep: {lib_name} (for {abi})");
+    }
+    Ok(())
+}
+
 fn add_rust_library(
     sdk_dir: &Path,
+    host_os: HostOs,
     underscore_target: &str,
     build_paths: &BuildPaths,
     android_targets: &[AndroidTarget],
@@ -546,6 +652,13 @@ fn add_rust_library(
                 (build_paths.dst_unaligned_apk.to_str().unwrap()),
                 &binary_path,
             ],
+        )?;
+
+        // Scan libmakepad.so for NEEDED shared library dependencies and bundle
+        // any that come from the NDK sysroot (e.g. libc++_shared.so).
+        bundle_ndk_shared_deps(
+            sdk_dir, host_os, urls, android_target,
+            &dst_lib, abi, build_paths,
         )?;
     }
     // for the quest variant add the precompiled openXR loader
@@ -787,6 +900,7 @@ pub fn build(
     build_unaligned_apk(sdk_dir, &build_paths, urls)?;
     let build_dir = add_rust_library(
         sdk_dir,
+        host_os,
         &underscore_build_crate,
         &build_paths,
         android_targets,

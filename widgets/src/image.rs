@@ -51,9 +51,9 @@ pub struct DrawImage {
     #[live]
     pub opacity: f32,
     #[live]
-    image_scale: Vec2f,
+    pub image_scale: Vec2f,
     #[live]
-    image_pan: Vec2f,
+    pub image_pan: Vec2f,
     #[live]
     async_load: f32,
 }
