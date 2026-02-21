@@ -116,6 +116,7 @@ impl MetalWindow {
 }
 
 const KEEP_ALIVE_COUNT: usize = 5;
+const TIMER0_DOWNSHIFT_IDLE_SECS: f64 = 0.2;
 
 impl Cx {
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
@@ -252,6 +253,7 @@ impl Cx {
             with_macos_app(|app| app.stop_timer(0));
             with_macos_app(|app| app.start_timer(0, 0.008, true));
             self.os.timer0_armed = true;
+            self.os.timer0_idle_since = None;
         }
     }
 
@@ -283,6 +285,7 @@ impl Cx {
             | MacosEvent::KeyUp(_)
             | MacosEvent::TextInput(_) => {
                 self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
+                self.os.timer0_idle_since = None;
                 self.ensure_timer0_started();
             }
             MacosEvent::Timer(te) => {
@@ -306,16 +309,31 @@ impl Cx {
                         needs_timer = true;
                     }
 
-                    // Check if we still need the timer
-                    if !needs_timer
-                        && !self.need_redrawing()
-                        && self.new_next_frames.len() == 0
-                        && !self.demo_time_repaint
-                    {
-                        self.ensure_timer0_stopped();
-                    }
                     if SignalToUI::check_and_clear_action_signal() {
                         self.handle_action_receiver();
+                        needs_timer = true;
+                    }
+
+                    if self.any_passes_dirty()
+                        || self.need_redrawing()
+                        || !self.new_next_frames.is_empty()
+                        || self.demo_time_repaint
+                    {
+                        needs_timer = true;
+                    }
+
+                    if needs_timer {
+                        self.os.timer0_idle_since = None;
+                        self.ensure_timer0_started();
+                    } else {
+                        let now = with_macos_app(|app| app.time_now());
+                        if let Some(idle_since) = self.os.timer0_idle_since {
+                            if now - idle_since >= TIMER0_DOWNSHIFT_IDLE_SECS {
+                                self.ensure_timer0_stopped();
+                            }
+                        } else {
+                            self.os.timer0_idle_since = Some(now);
+                        }
                     }
                     /*
                     if self.handle_live_edit() {
@@ -414,13 +432,16 @@ impl Cx {
                     self.call_draw_event(time_now);
                     self.mtl_compile_shaders(&metal_cx);
                 }
+                let has_dirty_passes = self.any_passes_dirty();
                 // Start timer if we have work
                 if has_next_frames
                     || needs_redrawing
+                    || has_dirty_passes
                     || self.screenshot_requests.len() > 0
                     || self.os.keep_alive_counter > 0
                     || self.demo_time_repaint
                 {
+                    self.os.timer0_idle_since = None;
                     self.ensure_timer0_started();
                 }
 
@@ -883,6 +904,8 @@ pub struct CxOs {
     pub(crate) keep_alive_counter: usize,
     /// Indicates wether the main timer is armed
     pub(crate) timer0_armed: bool,
+    /// Start time of the current idle stretch while timer0 is armed.
+    pub(crate) timer0_idle_since: Option<f64>,
     pub(crate) media: CxAppleMedia,
     pub(crate) bytes_written: usize,
     pub(crate) draw_calls_done: usize,
