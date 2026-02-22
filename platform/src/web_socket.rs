@@ -214,7 +214,12 @@ impl Cx {
                             }
                             // Keep stdin-loop control traffic low-latency (Tick/RAF/draw-complete),
                             // otherwise animation pacing becomes visibly jittery.
-                            if matches!(&message, AppToStudio::StdinToHost(_)) {
+                            if matches!(
+                                &message,
+                                AppToStudio::ReadyToStart
+                                    | AppToStudio::RequestAnimationFrame
+                                    | AppToStudio::DrawCompleteAndFlip(_)
+                            ) {
                                 collect_time = urgent_collect_time;
                             }
                             app_to_studio.0.push(message);

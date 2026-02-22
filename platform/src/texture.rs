@@ -172,7 +172,7 @@ pub enum TextureFormat {
     SharedBGRAu8 {
         width: usize,
         height: usize,
-        id: crate::cx_stdin::PresentableImageId,
+        id: crate::shared_framebuf::PresentableImageId,
         initial: bool,
     },
     #[cfg(any(target_os = "android", target_os = "linux"))]

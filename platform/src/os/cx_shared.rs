@@ -5,7 +5,7 @@ use {
         draw_pass::{CxDrawPassParent, DrawPassId},
         event::{DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TimerEvent, TriggerEvent},
         studio::{
-            AppToStudio, EventSample, StudioScreenshotResponse, StudioWidgetTreeDumpResponse,
+            AppToStudio, EventSample, ScreenshotResponse, WidgetTreeDumpResponse,
         },
     },
     std::collections::{HashMap, HashSet},
@@ -119,14 +119,14 @@ impl Cx {
         request_ids: Vec<u64>,
         width: u32,
         height: u32,
-        image: Option<Vec<u8>>,
+        png: Vec<u8>,
     ) {
         if request_ids.is_empty() {
             return;
         }
-        Cx::send_studio_message(AppToStudio::Screenshot(StudioScreenshotResponse {
+        Cx::send_studio_message(AppToStudio::Screenshot(ScreenshotResponse {
             request_ids,
-            image,
+            png,
             width,
             height,
         }));
@@ -181,7 +181,7 @@ impl Cx {
         }
         let request_ids: Vec<u64> = self.widget_tree_dump_requests.drain(..).collect();
         for request_id in request_ids {
-            Cx::send_studio_message(AppToStudio::WidgetTreeDump(StudioWidgetTreeDumpResponse {
+            Cx::send_studio_message(AppToStudio::WidgetTreeDump(WidgetTreeDumpResponse {
                 request_id,
                 dump: dump.clone(),
             }));

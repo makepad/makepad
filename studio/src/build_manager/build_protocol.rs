@@ -149,7 +149,7 @@ pub enum BuildCmd {
     Stop,
     Run(BuildProcess, String),
     RunCargo(BuildProcess, Vec<String>, String, HashMap<String, String>),
-    HostToStdin(String),
+    StudioToApp(String),
 }
 
 #[derive(Clone)]
@@ -178,11 +178,11 @@ pub struct LogItemBare {
 pub enum LogItem {
     Bare(LogItemBare),
     Location(LogItemLocation),
-    StdinToHost(String),
+    AppToStudio(String),
 }
 
 #[derive(Clone)]
 pub enum BuildClientMessage {
     LogItem(LogItem),
-    AuxChanHostEndpointCreated(crate::makepad_platform::cx_stdin::aux_chan::HostEndpoint),
+    AuxChanHostEndpointCreated(crate::makepad_platform::shared_framebuf::aux_chan::HostEndpoint),
 }

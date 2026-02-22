@@ -6,7 +6,8 @@ use crate::{
     makepad_live_id::*,
     makepad_math::dvec2,
     makepad_micro_serde::*,
-    os::cx_stdin::{HostToStdin, PollTimer, PresentableDraw, PresentableImageId, StdinToHost},
+    os::shared_framebuf::{PollTimer, PresentableDraw, PresentableImageId},
+    studio::{AppToStudio, ScreenshotResponse, StudioToApp},
     thread::SignalToUI,
     window::CxWindowPool,
 };
@@ -89,7 +90,7 @@ impl Cx {
                 if let Ok(0) | Err(_) = reader.read_line(&mut line) {
                     break;
                 }
-                match HostToStdin::deserialize_json(&line) {
+                match StudioToApp::deserialize_json(&line) {
                     Ok(msg) => {
                         if json_msg_tx.send(msg).is_err() {
                             break;
@@ -102,7 +103,7 @@ impl Cx {
             }
         });
 
-        write_stdout_msg(&StdinToHost::ReadyToStart);
+        write_stdout_msg(&AppToStudio::ReadyToStart);
         self.call_event_handler(&Event::Startup);
 
         let mut windows = Vec::<HeadlessWindowState>::new();
@@ -114,37 +115,37 @@ impl Cx {
                 Err(_) => break,
             };
             match msg {
-                HostToStdin::KeyDown(e) => self.call_event_handler(&Event::KeyDown(e)),
-                HostToStdin::KeyUp(e) => self.call_event_handler(&Event::KeyUp(e)),
-                HostToStdin::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
-                HostToStdin::TextCopy => {
+                StudioToApp::KeyDown(e) => self.call_event_handler(&Event::KeyDown(e)),
+                StudioToApp::KeyUp(e) => self.call_event_handler(&Event::KeyUp(e)),
+                StudioToApp::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
+                StudioToApp::TextCopy => {
                     let response = Rc::new(RefCell::new(None));
                     self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
                         response: response.clone(),
                     }));
                     let text = response.borrow().clone();
                     if let Some(text) = text {
-                        write_stdout_msg(&StdinToHost::SetClipboard(text));
+                        write_stdout_msg(&AppToStudio::SetClipboard(text));
                     }
                 }
-                HostToStdin::TextCut => {
+                StudioToApp::TextCut => {
                     let response = Rc::new(RefCell::new(None));
                     self.call_event_handler(&Event::TextCut(TextClipboardEvent {
                         response: response.clone(),
                     }));
                     let text = response.borrow().clone();
                     if let Some(text) = text {
-                        write_stdout_msg(&StdinToHost::SetClipboard(text));
+                        write_stdout_msg(&AppToStudio::SetClipboard(text));
                     }
                 }
-                HostToStdin::MouseDown(e) => {
+                StudioToApp::MouseDown(e) => {
                     self.fingers.process_tap_count(dvec2(e.x, e.y), e.time);
                     let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                     let mouse_down_event = e.into_event(window_id, pos);
                     self.fingers.mouse_down(mouse_down_event.button, window_id);
                     self.call_event_handler(&Event::MouseDown(mouse_down_event));
                 }
-                HostToStdin::MouseMove(e) => {
+                StudioToApp::MouseMove(e) => {
                     let (window_id, pos) =
                         if let Some((_, window_id)) = self.fingers.first_mouse_button {
                             (window_id, self.windows[window_id].window_geom.position)
@@ -155,7 +156,7 @@ impl Cx {
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
                     self.fingers.switch_captures();
                 }
-                HostToStdin::MouseUp(e) => {
+                StudioToApp::MouseUp(e) => {
                     let (window_id, pos) =
                         if let Some((_, window_id)) = self.fingers.first_mouse_button {
                             (window_id, self.windows[window_id].window_geom.position)
@@ -168,11 +169,11 @@ impl Cx {
                     self.fingers.mouse_up(button);
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
                 }
-                HostToStdin::Scroll(e) => {
+                StudioToApp::Scroll(e) => {
                     let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                     self.call_event_handler(&Event::Scroll(e.into_event(window_id, pos)));
                 }
-                HostToStdin::WindowGeomChange {
+                StudioToApp::WindowGeomChange {
                     dpi_factor,
                     left,
                     top,
@@ -208,7 +209,7 @@ impl Cx {
                     }
                     self.redraw_all();
                 }
-                HostToStdin::Swapchain(shared_swapchain) => {
+                StudioToApp::Swapchain(shared_swapchain) => {
                     let window_id = shared_swapchain.window_id;
                     while windows.len() <= window_id {
                         windows.push(Default::default());
@@ -222,7 +223,7 @@ impl Cx {
                     state.ensure_size_defaults();
                     self.redraw_all();
                 }
-                HostToStdin::Tick => {
+                StudioToApp::Tick => {
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
@@ -248,7 +249,7 @@ impl Cx {
                     }
 
                     let mut rendered = false;
-                    if self.need_redrawing() {
+                    if self.need_redrawing() && !self.screenshot_requests.is_empty() {
                         self.call_draw_event(time_now);
                         self.headless_compile_shaders();
                         rendered = self.headless_emit_frames(&mut windows, true, time_now);
@@ -258,7 +259,7 @@ impl Cx {
                         || !self.os.stdin_timers.timers.is_empty()
                         || !self.new_next_frames.is_empty()
                     {
-                        write_stdout_msg(&StdinToHost::RequestAnimationFrame);
+                        write_stdout_msg(&AppToStudio::RequestAnimationFrame);
                     }
                 }
             }
@@ -291,6 +292,15 @@ impl Cx {
             let width = fb.width as u32;
             let height = fb.height as u32;
 
+            let request_ids = if send_protocol {
+                self.take_studio_screenshot_request_ids(0)
+            } else {
+                Vec::new()
+            };
+            if send_protocol && request_ids.is_empty() {
+                continue;
+            }
+
             let rgba = fb.to_rgba8();
             let png = match encode_png_rgba(width, height, &rgba) {
                 Ok(png) => png,
@@ -319,13 +329,12 @@ impl Cx {
             }
 
             if send_protocol {
-                write_stdout_msg(&StdinToHost::PngFrame {
-                    window_id,
-                    path: png_path.to_string_lossy().into_owned(),
+                write_stdout_msg(&AppToStudio::Screenshot(ScreenshotResponse {
+                    request_ids,
+                    png,
                     width,
                     height,
-                    frame_id: state.frame_id,
-                });
+                }));
                 let target_id = if let Some(id) = state.presentable_id {
                     id
                 } else {
@@ -333,7 +342,7 @@ impl Cx {
                     state.presentable_id = Some(id);
                     id
                 };
-                write_stdout_msg(&StdinToHost::DrawCompleteAndFlip(PresentableDraw {
+                write_stdout_msg(&AppToStudio::DrawCompleteAndFlip(PresentableDraw {
                     window_id,
                     target_id,
                     width,
@@ -400,7 +409,7 @@ impl Cx {
                     window.window_geom.inner_size = inner_size;
                     window.window_geom.dpi_factor = dpi_factor;
                     if send_protocol {
-                        write_stdout_msg(&StdinToHost::CreateWindow {
+                        write_stdout_msg(&AppToStudio::CreateWindow {
                             window_id: window_id.id(),
                             kind_id: window.kind_id,
                         });
@@ -422,7 +431,7 @@ impl Cx {
                 }
                 CxOsOp::SetCursor(cursor) => {
                     if send_protocol {
-                        write_stdout_msg(&StdinToHost::SetCursor(cursor));
+                        write_stdout_msg(&AppToStudio::SetCursor(cursor));
                     }
                 }
                 CxOsOp::StartTimer {
@@ -440,7 +449,7 @@ impl Cx {
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     if send_protocol {
-                        write_stdout_msg(&StdinToHost::SetClipboard(content));
+                        write_stdout_msg(&AppToStudio::SetClipboard(content));
                     }
                 }
                 CxOsOp::Quit => {
@@ -480,7 +489,7 @@ impl CxOsApi for Cx {
     }
 }
 
-fn write_stdout_msg(msg: &StdinToHost) {
+fn write_stdout_msg(msg: &AppToStudio) {
     let _ = io::stdout().write_all(msg.to_json().as_bytes());
     let _ = io::stdout().flush();
 }

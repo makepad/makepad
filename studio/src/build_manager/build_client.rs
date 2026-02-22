@@ -10,7 +10,7 @@ use {
         },
         makepad_file_server::FileSystemRoots,
         makepad_micro_serde::*,
-        makepad_platform::{cx_stdin::aux_chan, *},
+        makepad_platform::{shared_framebuf::aux_chan, *},
     },
     std::{
         env,

@@ -1,4 +1,4 @@
-use super::super::cx_stdin::PollTimers;
+use super::super::shared_framebuf::PollTimers;
 use super::linux_media::CxLinuxMedia;
 
 use crate::{

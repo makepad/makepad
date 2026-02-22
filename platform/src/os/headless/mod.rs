@@ -4,7 +4,7 @@ mod raster;
 mod shader;
 mod virtual_gpu;
 
-use crate::os::cx_stdin::PollTimers;
+use crate::os::shared_framebuf::PollTimers;
 use crate::{
     audio::{AudioDeviceId, AudioInputFn, AudioOutputFn},
     event::HttpRequest,
@@ -156,7 +156,7 @@ impl Cx {
     pub fn share_texture_for_presentable_image(
         &mut self,
         _texture: &crate::Texture,
-    ) -> Option<crate::os::cx_stdin::LinuxOwnedImage> {
+    ) -> Option<crate::os::shared_framebuf::LinuxOwnedImage> {
         None
     }
 }

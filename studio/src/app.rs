@@ -15,8 +15,10 @@ use crate::{
     makepad_file_protocol::SearchItem,
     makepad_file_server::FileSystemRoots,
     makepad_micro_serde::*,
-    makepad_platform::os::cx_stdin::*,
-    makepad_platform::studio::{EditFile, JumpToFile, PatchFile, SelectInFile, SwapSelection},
+    makepad_platform::os::shared_framebuf::*,
+    makepad_platform::studio::{
+        AppToStudio, EditFile, JumpToFile, PatchFile, SelectInFile, SwapSelection,
+    },
     makepad_widgets::file_tree::*,
     makepad_widgets::*,
     run_view::*,
@@ -311,6 +313,9 @@ impl MatchEvent for App {
             //roots.push(("experiments".to_string(),current_dir.join("../experiments").canonicalize().unwrap()));
         }
         let roots = FileSystemRoots { roots };
+        if let Some((_, path)) = roots.roots.first() {
+            set_terminal_start_dir(path.clone());
+        }
         self.data.file_system.init(cx, roots.clone());
         self.data.build_manager.init(cx, roots);
 
@@ -700,9 +705,9 @@ impl MatchEvent for App {
         }
 
         match action.cast() {
-            BuildManagerAction::StdinToHost { build_id, msg } => {
+            BuildManagerAction::AppToStudio { build_id, msg } => {
                 match msg {
-                    StdinToHost::CreateWindow { window_id, kind_id } => {
+                    AppToStudio::CreateWindow { window_id, kind_id } => {
                         let panel_id = build_id.add(window_id as u64);
                         if let Some(name) = self.data.build_manager.process_name(build_id) {
                             let (tab_bar_id, pos) = if kind_id == 0 {
@@ -742,8 +747,8 @@ impl MatchEvent for App {
                             log_list.redraw(cx);
                         }
                     }
-                    StdinToHost::SetCursor(cursor) => cx.set_cursor(cursor),
-                    StdinToHost::ReadyToStart => {
+                    AppToStudio::SetCursor(cursor) => cx.set_cursor(cursor),
+                    AppToStudio::ReadyToStart => {
                         // lets fetch all our runviews
                         if let Some(mut dock) = dock.borrow_mut() {
                             for (_, (_, item)) in dock.items().iter() {
@@ -755,7 +760,7 @@ impl MatchEvent for App {
                             }
                         }
                     }
-                    StdinToHost::DrawCompleteAndFlip(presentable_draw) => {
+                    AppToStudio::DrawCompleteAndFlip(presentable_draw) => {
                         if let Some(mut dock) = dock.borrow_mut() {
                             for (_, (_, item)) in dock.items().iter() {
                                 if let Some(mut run_view) = item.as_run_view().borrow_mut() {
@@ -772,10 +777,10 @@ impl MatchEvent for App {
                             }
                         }
                     }
-                    StdinToHost::SetClipboard(content) => {
+                    AppToStudio::SetClipboard(content) => {
                         cx.copy_to_clipboard(&content);
                     }
-                    StdinToHost::RequestAnimationFrame => {
+                    AppToStudio::RequestAnimationFrame => {
                         // Child has pending animations, keep the run_view repainting
                         if let Some(mut dock) = dock.borrow_mut() {
                             for (_, (_, item)) in dock.items().iter() {
@@ -787,9 +792,8 @@ impl MatchEvent for App {
                             }
                         }
                     }
-                    StdinToHost::PngFrame { path, .. } => {
-                        crate::log!("headless frame written: {}", path);
-                    }
+                    AppToStudio::Screenshot(_) => {}
+                    _ => {}
                 }
             }
             BuildManagerAction::None => (),
@@ -1017,9 +1021,9 @@ impl MatchEvent for App {
         } = event;
         if *control || *logo {
             if let KeyCode::Backtick = key_code {
-                cx.action(AppAction::ClearLog);
-                cx.action(AppAction::RecompileStarted);
                 cx.action(AppAction::StartRecompile);
+                cx.action(AppAction::RecompileStarted);
+                cx.action(AppAction::ClearLog);
             } else if let KeyCode::KeyK = key_code {
                 cx.action(AppAction::ClearLog);
             } else if let KeyCode::KeyR = key_code {

@@ -1,6 +1,6 @@
 use {
     crate::{app::AppData, file_system::file_system::SnapshotImageData, makepad_widgets::*},
-    makepad_platform::studio::{StudioScreenshotRequest, StudioToApp},
+    makepad_platform::studio::{ScreenshotRequest, StudioToApp},
     std::env,
 };
 
@@ -221,7 +221,7 @@ impl Snapshot {
                 .borrow_mut()
                 .send_studio_to_app(
                     *item.0,
-                    StudioToApp::Screenshot(StudioScreenshotRequest {
+                    StudioToApp::Screenshot(ScreenshotRequest {
                         kind_id: 0,
                         request_id: self.request_id,
                     }),

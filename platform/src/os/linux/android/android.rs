@@ -24,7 +24,7 @@ use {
     crate::{
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        cx_stdin::{PollTimer, PollTimers},
+        shared_framebuf::{PollTimer, PollTimers},
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::{
