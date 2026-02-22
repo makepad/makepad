@@ -1,7 +1,7 @@
 use crate::{
     ai_chat::ai_chat_manager::AiChatManager,
     build_manager::{
-        build_manager::{BuildManager, BuildManagerAction},
+        build_manager::{AiClickVizPhase, BuildManager, BuildManagerAction},
         build_protocol::BuildProcess,
     },
     file_system::file_system::*,
@@ -794,6 +794,22 @@ impl MatchEvent for App {
                     }
                     AppToStudio::Screenshot(_) => {}
                     _ => {}
+                }
+            }
+            BuildManagerAction::AiClickViz {
+                build_id,
+                x,
+                y,
+                phase,
+            } => {
+                if let Some(mut dock) = dock.borrow_mut() {
+                    for (_, (_, item)) in dock.items().iter() {
+                        if let Some(mut run_view) = item.as_run_view().borrow_mut() {
+                            if run_view.build_id == Some(build_id) {
+                                run_view.ai_click_viz(cx, x, y, phase == AiClickVizPhase::Down);
+                            }
+                        }
+                    }
                 }
             }
             BuildManagerAction::None => (),
