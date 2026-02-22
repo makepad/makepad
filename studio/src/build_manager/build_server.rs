@@ -9,7 +9,7 @@ use {
         makepad_file_server::FileSystemRoots,
         makepad_live_id::*,
         makepad_micro_serde::*,
-        makepad_platform::cx_stdin::HostToStdin,
+        makepad_platform::studio::StudioToApp,
         makepad_platform::log::LogLevel,
     },
     std::{
@@ -96,7 +96,7 @@ impl BuildConnection {
         if !msg_json.contains("Tick") {
             return None;
         }
-        if !matches!(HostToStdin::deserialize_json(msg_json).ok()?, HostToStdin::Tick) {
+        if !matches!(StudioToApp::deserialize_json(msg_json).ok()?, StudioToApp::Tick) {
             return None;
         }
 
@@ -316,7 +316,7 @@ impl BuildConnection {
                 // lets kill all other 'whats'
                 self.stop(cmd_wrap.cmd_id);
             }
-            BuildCmd::HostToStdin(msg) => {
+            BuildCmd::StudioToApp(msg) => {
                 // ok lets fetch the running process from the cmd_id
                 // and plug this msg on the standard input as serialiser json
                 if let Ok(shared) = self.shared.read() {
@@ -537,7 +537,7 @@ pub trait MsgSender: Send {
     fn send_stdin_to_host_msg(&self, cmd_id: LiveId, line: String) {
         self.send_message(BuildClientMessageWrap {
             cmd_id,
-            message: BuildClientMessage::LogItem(LogItem::StdinToHost(line)),
+            message: BuildClientMessage::LogItem(LogItem::AppToStudio(line)),
         });
     }
 

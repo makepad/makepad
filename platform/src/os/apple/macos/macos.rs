@@ -2,7 +2,7 @@ use {
     crate::{
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        cx_stdin::PollTimers,
+        shared_framebuf::PollTimers,
         draw_pass::CxDrawPassParent,
         event::{
             Event, GameInputEventChannel, MouseButton, MouseUpEvent, NetworkResponseChannel,

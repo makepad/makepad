@@ -237,7 +237,7 @@ fn log_item_matches_filter(log_item: &LogItem, filter: &str) -> bool {
             msg.file_name.to_lowercase().contains(&filter_lower)
                 || msg.message.to_lowercase().contains(&filter_lower)
         }
-        LogItem::StdinToHost(line) => line.to_lowercase().contains(&filter_lower),
+        LogItem::AppToStudio(line) => line.to_lowercase().contains(&filter_lower),
     }
 }
 

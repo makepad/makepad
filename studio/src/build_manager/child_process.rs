@@ -1,4 +1,4 @@
-use crate::makepad_platform::cx_stdin::aux_chan;
+use crate::makepad_platform::shared_framebuf::aux_chan;
 #[cfg(target_os = "macos")]
 use std::os::unix::process::CommandExt;
 use std::{

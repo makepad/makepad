@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 
 fn main() {
     eprintln!("[test] Spawning PTY...");
-    let pty = match Pty::spawn(80, 24, None, &[]) {
+    let pty = match Pty::spawn(80, 24, None, &[], None) {
         Ok(p) => {
             eprintln!("[test] PTY spawned OK, child pid={}", p.child_pid());
             p

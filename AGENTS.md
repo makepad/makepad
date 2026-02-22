@@ -25,14 +25,29 @@
 
 ## Request Protocol (JSON Lines)
 - `{"ListBuilds":[]}`
-- `{"CargoRun":{"args":["-p","makepad-example-todo","--release"],"root":null,"startup_query":"id:todo_input"}}`
+- `{"CargoRun":{"args":["-p","makepad-example-todo","--release"],"root":null,"startup_query":"id:todo_input","env":null}}`
 - `{"Stop":{"build_id":38160721318170}}`
 - `{"WidgetTreeDump":{"build_id":38160721318170}}`
 - `{"WidgetQuery":{"build_id":38160721318170,"query":"id:todo_input"}}`
-- `{"Screenshot":{"build_id":38160721318170,"kind_id":0}}`
+- `{"Screenshot":{"build_id":38160721318170,"kind_id":0}}` (`kind_id` optional; defaults to `0`)
 - `{"Click":{"build_id":38160721318170,"x":1274,"y":342,"button":1,"auto_dump":false}}`
 - `{"TypeText":{"build_id":38160721318170,"text":"hello","replace_last":false,"was_paste":false,"auto_dump":false}}`
 - `{"Return":{"build_id":38160721318170,"auto_dump":false}}`
+- `{"StudioToApp":{"build_id":38160721318170,"msg":{"MouseMove":{"time":0.0,"x":200.0,"y":160.0,"modifiers":{"shift":false,"control":false,"alt":false,"logo":false}}}}}`
+
+## `StudioToApp` API (Updated)
+- The bridge now supports raw `StudioToApp` passthrough via `StudioTerminalRequest::StudioToApp`.
+- Current `StudioToApp` variants include:
+  - `Screenshot`, `WidgetTreeDump`, `KeepAlive`, `LiveChange`, `Swapchain`, `WindowGeomChange`, `Tick`
+  - `MouseDown`, `MouseUp`, `MouseMove`, `Scroll`
+  - `KeyDown`, `KeyUp`, `TextInput`, `TextCopy`, `TextCut`
+  - `None`, `Kill`
+- Use direct bridge requests (`Screenshot`, `WidgetTreeDump`, `Click`, `TypeText`, `Return`) for normal automation.
+- Use raw `StudioToApp` only for low-level event injection/debugging.
+
+## Response Notes (Current)
+- `StudioTerminalResponse::Screenshot` returns file metadata (`path`, `width`, `height`) and not inline PNG bytes.
+- `StudioTerminalResponse::WidgetTreeDump` returns text dump content keyed by `request_id`.
 
 ## Recommended Control Flow
 1. Start bridge process once.

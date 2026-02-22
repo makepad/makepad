@@ -88,14 +88,15 @@ impl Pty {
         rows: u16,
         shell: Option<&str>,
         env: &[(&str, &str)],
+        cwd: Option<&std::path::Path>,
     ) -> io::Result<Self> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            Self::spawn_unix(cols, rows, shell, env)
+            Self::spawn_unix(cols, rows, shell, env, cwd)
         }
         #[cfg(windows)]
         {
-            Self::spawn_windows(cols, rows, shell, env)
+            Self::spawn_windows(cols, rows, shell, env, cwd)
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
@@ -113,6 +114,7 @@ impl Pty {
         rows: u16,
         shell: Option<&str>,
         _env: &[(&str, &str)],
+        cwd: Option<&std::path::Path>,
     ) -> io::Result<Self> {
         let shell = shell
             .map(str::to_owned)
@@ -198,6 +200,11 @@ impl Pty {
         startup_info.lpAttributeList = attr_list.raw();
 
         let mut process_info = PROCESS_INFORMATION::default();
+        let cwd_wide = cwd.map(|path| wide_null_os(path.as_os_str()));
+        let cwd_ptr = cwd_wide
+            .as_ref()
+            .map(|value| PCWSTR(value.as_ptr()))
+            .unwrap_or(PCWSTR::null());
         unsafe {
             CreateProcessW(
                 PCWSTR::null(),
@@ -207,7 +214,7 @@ impl Pty {
                 false,
                 EXTENDED_STARTUPINFO_PRESENT,
                 None,
-                PCWSTR::null(),
+                cwd_ptr,
                 &startup_info.StartupInfo,
                 &mut process_info,
             )
@@ -241,6 +248,7 @@ impl Pty {
         rows: u16,
         shell: Option<&str>,
         env: &[(&str, &str)],
+        cwd: Option<&std::path::Path>,
     ) -> io::Result<Self> {
         use std::os::fd::FromRawFd;
         use std::os::unix::process::CommandExt;
@@ -263,6 +271,9 @@ impl Pty {
         cmd.env("TERM", "xterm-256color");
         for (k, v) in env {
             cmd.env(k, v);
+        }
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
         }
 
         // Make the spawned shell/session own the slave PTY as controlling terminal,
@@ -472,6 +483,12 @@ fn windows_err(err: windows::core::Error) -> io::Error {
 #[cfg(windows)]
 fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn wide_null_os(value: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(windows)]

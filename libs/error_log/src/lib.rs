@@ -153,7 +153,7 @@ pub fn log_with_level(
     );
 }
 
-#[derive(Clone, PartialEq, Eq, Copy, Debug, SerBin, DeBin)]
+#[derive(Clone, PartialEq, Eq, Copy, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum LogLevel {
     Warning,
     Error,

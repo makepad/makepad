@@ -12,7 +12,7 @@ pub mod cx_native;
 #[macro_use]
 pub mod cx_shared;
 
-pub mod cx_stdin;
+pub mod shared_framebuf;
 
 #[cfg(headless)]
 pub mod headless;

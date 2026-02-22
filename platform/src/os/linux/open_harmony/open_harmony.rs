@@ -6,7 +6,7 @@ use {
     crate::{
         cx::{Cx, OpenHarmonyParams, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        cx_stdin::{PollTimer, PollTimers},
+        shared_framebuf::{PollTimer, PollTimers},
         draw_pass::{CxDrawPassParent, DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         egl_sys::{self, LibEgl, EGL_NONE},
         event::{Event, KeyCode, KeyEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom},

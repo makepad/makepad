@@ -17,7 +17,7 @@ use {
         os::CxOs,
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
-        studio::StudioScreenshotRequest,
+        studio::ScreenshotRequest,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         web_socket::WebSocket,
         window::CxWindowPool,
@@ -118,7 +118,7 @@ pub struct Cx {
 
     pub performance_stats: PerformanceStats,
     #[allow(unused)]
-    pub(crate) screenshot_requests: Vec<StudioScreenshotRequest>,
+    pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
     pub(crate) widget_tree_dump_requests: Vec<u64>,
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches
