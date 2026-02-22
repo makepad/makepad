@@ -32,6 +32,31 @@ script_mod! {
                 return fb.mix(#4, self.inactive * 0.4)
             }
         }
+        draw_click +: {
+            dot_radius: instance(5.0)
+            dot_alpha: instance(0.0)
+            ripple_radius: instance(5.0)
+            ripple_alpha: instance(0.0)
+            color: uniform(#x00d4ff)
+            pixel: fn() {
+                if self.dot_alpha <= 0.001 && self.ripple_alpha <= 0.001 {
+                    return vec4(0.0, 0.0, 0.0, 0.0)
+                }
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let c = self.rect_size * 0.5
+                let dot_r = self.dot_radius.min(self.rect_size.x * 0.5).min(self.rect_size.y * 0.5)
+                if self.dot_alpha > 0.001 {
+                    sdf.circle(c.x, c.y, dot_r)
+                    sdf.fill(vec4(self.color.xyz, self.dot_alpha))
+                }
+                if self.ripple_alpha > 0.001 {
+                    let ripple_r = self.ripple_radius.min(self.rect_size.x * 0.5).min(self.rect_size.y * 0.5)
+                    sdf.circle(c.x, c.y, ripple_r)
+                    sdf.stroke(vec4(self.color.xyz, self.ripple_alpha), 1.5)
+                }
+                return sdf.result
+            }
+        }
         animator: Animator {
             started: {
                 default: @off
@@ -55,6 +80,21 @@ script_mod! {
                     apply: {draw_app: {inactive: 1.0}}
                 }
             }
+            click: {
+                default: @off
+                off: AnimatorState {
+                    from: {all: Snap}
+                    apply: {draw_click: {dot_radius: 5.0 dot_alpha: 0.0 ripple_radius: 5.0 ripple_alpha: 0.0}}
+                }
+                down: AnimatorState {
+                    from: {all: Snap}
+                    apply: {draw_click: {dot_radius: 5.0 dot_alpha: 0.95 ripple_radius: 5.0 ripple_alpha: 0.45}}
+                }
+                up: AnimatorState {
+                    from: {all: Forward {duration: 0.5}}
+                    apply: {draw_click: {dot_radius: 5.0 dot_alpha: 0.0 ripple_radius: 22.0 ripple_alpha: 0.0}}
+                }
+            }
         }
     }
 }
@@ -72,8 +112,12 @@ pub struct RunView {
     #[redraw]
     #[live]
     draw_app: DrawQuad,
+    #[live]
+    draw_click: DrawQuad,
     #[rust]
     last_rect: Rect,
+    #[rust]
+    click_pos: Vec2d,
     #[rust(100usize)]
     redraw_countdown: usize,
     #[rust]
@@ -227,6 +271,20 @@ impl RunView {
         self.last_rect = Default::default();
     }
 
+    pub fn ai_click_viz(&mut self, cx: &mut Cx, x: f64, y: f64, is_down: bool) {
+        let abs = dvec2(x, y);
+        if !self.last_rect.contains(abs) {
+            return;
+        }
+        self.click_pos = abs;
+        if is_down {
+            self.animator_play(cx, ids!(click.down));
+        } else {
+            self.animator_play(cx, ids!(click.up));
+        }
+        self.redraw(cx);
+    }
+
     pub fn draw_run_view(
         &mut self,
         cx: &mut Cx2d,
@@ -366,6 +424,11 @@ impl RunView {
         }
         self.last_rect = rect;
         self.draw_app.draw_abs(cx, rect);
+        let click_rect = Rect {
+            pos: self.click_pos - dvec2(28.0, 28.0),
+            size: dvec2(56.0, 56.0),
+        };
+        self.draw_click.draw_abs(cx, click_rect);
         // lets store the area
         if let Some(ab) = manager.active.builds.get_mut(&run_view_id) {
             ab.app_area.insert(self.window_id, self.draw_app.area());
@@ -395,7 +458,9 @@ impl Widget for RunView {
             .sub(self.window_id as u64);
         let manager = &scope.data.get::<AppData>().unwrap().build_manager;
 
-        self.animator_handle_event(cx, event);
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.redraw(cx);
+        }
         // lets send mouse events
         match event.hits(cx, self.draw_app.area()) {
             Hit::FingerDown(_) => {
