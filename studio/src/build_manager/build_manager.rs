@@ -13,6 +13,7 @@ use {
         makepad_platform::studio::{
             AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, LocalProfileSample,
             RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp, RemoteScroll,
+            RemoteTweakRay,
             ScreenshotRequest, ScreenshotResponse, StudioToApp, StudioToAppVec,
             WidgetTreeDumpRequest, WidgetTreeDumpResponse,
         },
@@ -718,6 +719,7 @@ impl BuildManager {
                 )
             }
             StudioToApp::MouseMove(e) => format!("MouseMove x={:.1} y={:.1}", e.x, e.y),
+            StudioToApp::TweakRay(e) => format!("TweakRay x={:.1} y={:.1}", e.x, e.y),
             StudioToApp::MouseUp(e) => {
                 format!(
                     "MouseUp x={:.1} y={:.1} button={}",
@@ -801,6 +803,7 @@ impl BuildManager {
             return match msg {
                 StudioToApp::MouseDown(_)
                 | StudioToApp::MouseMove(_)
+                | StudioToApp::TweakRay(_)
                 | StudioToApp::MouseUp(_)
                 | StudioToApp::Scroll(_) => Err(
                     "no coordinate origin available yet; request WidgetTreeDump first".to_string(),
@@ -819,6 +822,11 @@ impl BuildManager {
                 e.x = (e.x + ox) / dpi;
                 e.y = (e.y + oy) / dpi;
                 StudioToApp::MouseMove(e)
+            }
+            StudioToApp::TweakRay(mut e) => {
+                e.x = (e.x + ox) / dpi;
+                e.y = (e.y + oy) / dpi;
+                StudioToApp::TweakRay(e)
             }
             StudioToApp::MouseUp(mut e) => {
                 e.x = (e.x + ox) / dpi;
@@ -1250,7 +1258,7 @@ impl BuildManager {
             StudioTerminalRequest::StudioToApp { build_id, msg } => {
                 let build_id = LiveId(build_id);
                 let should_auto_dump =
-                    !matches!(msg, StudioToApp::MouseMove(_) | StudioToApp::Scroll(_));
+                    !matches!(msg, StudioToApp::MouseMove(_) | StudioToApp::TweakRay(_) | StudioToApp::Scroll(_));
                 if let Err(message) = self.send_terminal_host_to_stdin(
                     cx,
                     web_socket_id,
@@ -2041,13 +2049,24 @@ impl BuildManager {
                 }
             }
             Event::MouseMove(e) => {
-                // we send this one to what window exactly?
-                self.broadcast_to_stdin(StudioToApp::MouseMove(RemoteMouseMove {
-                    time: e.time,
-                    x: e.abs.x,
-                    y: e.abs.y,
-                    modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                }));
+                // RunView can route per-view mouse moves directly. Keep this as a fallback.
+                if e.handled.get().is_empty() {
+                    if e.modifiers.logo {
+                        self.broadcast_to_stdin(StudioToApp::TweakRay(RemoteTweakRay {
+                            time: e.time,
+                            x: e.abs.x,
+                            y: e.abs.y,
+                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
+                        }));
+                    } else {
+                        self.broadcast_to_stdin(StudioToApp::MouseMove(RemoteMouseMove {
+                            time: e.time,
+                            x: e.abs.x,
+                            y: e.abs.y,
+                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
+                        }));
+                    }
+                }
             }
             Event::MouseUp(e) => {
                 self.broadcast_to_stdin(StudioToApp::MouseUp(RemoteMouseUp {
@@ -2273,7 +2292,6 @@ impl BuildManager {
                                 cx.action(AppAction::RedrawProfiler)
                             }
                         }
-                        AppToStudio::FocusDesign => cx.action(AppAction::FocusDesign(build_id)),
                         AppToStudio::PatchFile(ef) => cx.action(AppAction::PatchFile(ef)),
                         AppToStudio::EditFile(ef) => cx.action(AppAction::EditFile(ef)),
                         AppToStudio::JumpToFile(jt) => {

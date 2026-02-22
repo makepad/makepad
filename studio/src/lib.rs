@@ -16,6 +16,7 @@ pub mod snapshot;
 pub mod studio_editor;
 pub mod studio_file_tree;
 pub mod studio_terminal;
+pub mod tweak_view;
 
 pub use makepad_code_editor;
 pub use makepad_widgets;
@@ -44,6 +45,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::log_list::script_mod(vm);
     crate::integration::script_mod(vm);
     crate::profiler::script_mod(vm);
+    crate::tweak_view::script_mod(vm);
     crate::run_view::script_mod(vm);
     crate::studio_editor::script_mod(vm);
     crate::studio_file_tree::script_mod(vm);

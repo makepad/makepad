@@ -2,6 +2,7 @@ use crate::{
     makepad_derive_widget::*, makepad_draw::*, makepad_script::ScriptFnRef, widget::*,
     widget_async::CxWidgetToScriptCallExt, widget_tree::CxWidgetExt,
 };
+use crate::makepad_platform::studio::{AppToStudio, TweakHitsResponse};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -10,8 +11,6 @@ script_mod! {
     mod.widgets.RootBase = #(Root::register_widget(vm))
 
     mod.widgets.Root = set_type_default() do mod.widgets.RootBase{
-        // Designer window commented out for now
-        // design_window = Designer{}
     }
 }
 
@@ -56,10 +55,6 @@ impl ScriptHook for Root {
                 for kv in vec {
                     let id = kv.key.as_id().unwrap_or(LiveId(0));
                     let cx = vm.cx_mut();
-                    // Only open design window in makepad studio
-                    if id == live_id!(design_window) && !cx.in_makepad_studio() {
-                        continue;
-                    }
                     // Only show xr_hands if XR mode is available
                     if id == live_id!(xr_hands) && !cx.os_type().has_xr_mode() {
                         continue;
@@ -143,6 +138,50 @@ impl Widget for Root {
 
         for (_id, component) in self.components.iter_mut() {
             component.handle_event(cx, event, scope);
+        }
+
+        if let Event::TweakRay(e) = event {
+            let hit_uids = e.hit_widget_uids.borrow().clone();
+            let mut resolved_rect = None;
+            let mut resolved_uid = None;
+            for uid in hit_uids.iter().copied().rev() {
+                let widget = cx.widget_tree().widget(WidgetUid(uid));
+                if widget.is_empty() {
+                    continue;
+                }
+                let area = widget.area();
+                if area.is_valid(cx) {
+                    let rect = area.rect(cx);
+                    if rect.contains(e.abs) {
+                        resolved_rect = Some(rect);
+                        resolved_uid = Some(uid);
+                        break;
+                    }
+                }
+            }
+            let dpi_factor = e.dpi_factor.max(1.0);
+            let hit_rect = resolved_rect.or(e.hit_rect.get());
+            let (left, top, width, height) = if let Some(rect) = hit_rect {
+                (
+                    rect.pos.x * dpi_factor,
+                    rect.pos.y * dpi_factor,
+                    rect.size.x * dpi_factor,
+                    rect.size.y * dpi_factor,
+                )
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            };
+            Cx::send_studio_message(AppToStudio::TweakHits(TweakHitsResponse {
+                window_id: e.window_id.id(),
+                dpi_factor,
+                ray_x: e.abs.x * dpi_factor,
+                ray_y: e.abs.y * dpi_factor,
+                left,
+                top,
+                width,
+                height,
+                widget_uids: resolved_uid.into_iter().collect(),
+            }));
         }
     }
 

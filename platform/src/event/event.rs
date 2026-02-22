@@ -8,7 +8,7 @@ use {
         draw_list::DrawListId,
         //midi::{Midi1InputData, MidiInputInfo},
         event::{
-            designer::*, drag_drop::*, finger::*, game_input::*, keyboard::*, network::*,
+            drag_drop::*, finger::*, game_input::*, keyboard::*, network::*, 
             video_playback::*, window::*, xr::*,
         },
         //makepad_live_compiler::LiveEditEvent,
@@ -150,6 +150,9 @@ pub enum Event {
     /// Do not match upon or handle this event directly; instead, use the family of
     /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit`].
     MouseMove(MouseMoveEvent),
+    /// A studio/debug-only ray cast request that probes widget hit geometry
+    /// without changing regular input/hover state.
+    TweakRay(TweakRayEvent),
     /// The raw event that occurs when the user releases a previously-pressed mouse button.
     ///
     /// Do not match upon or handle this event directly; instead, use the family of
@@ -226,7 +229,6 @@ pub enum Event {
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
 
-    DesignerPick(DesignerPickEvent),
 }
 
 impl Event {
@@ -262,6 +264,7 @@ impl Event {
 
             20 => "MouseDown",
             21 => "MouseMove",
+            59 => "TweakRay",
             22 => "MouseUp",
             23 => "TouchUpdate",
             24 => "LongPress",
@@ -304,7 +307,6 @@ impl Event {
             #[cfg(target_arch = "wasm32")]
             55 => "ToWasmMsg",
 
-            56 => "DesignerPick",
             57 => "XrLocal",
             58 => "ImeAction",
             _ => panic!(),
@@ -339,6 +341,7 @@ impl Event {
 
             Self::MouseDown(_) => 20,
             Self::MouseMove(_) => 21,
+            Self::TweakRay(_) => 59,
             Self::MouseUp(_) => 22,
             Self::TouchUpdate(_) => 23,
             Self::LongPress(_) => 24,
@@ -382,7 +385,6 @@ impl Event {
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_) => 55,
 
-            Self::DesignerPick(_) => 56,
             Self::XrLocal(_) => 57,
         }
     }
@@ -424,8 +426,6 @@ pub enum Hit {
     FingerUp(FingerUpEvent),
     FingerLongPress(FingerLongPressEvent),
 
-    DesignerPick(DesignerPickEvent),
-
     Nothing,
 }
 
@@ -440,7 +440,11 @@ pub enum DragHit {
 impl Event {
     pub fn requires_visibility(&self) -> bool {
         match self {
-            Self::MouseDown(_) | Self::MouseMove(_) | Self::TouchUpdate(_) | Self::Scroll(_) => {
+            Self::MouseDown(_)
+            | Self::MouseMove(_)
+            | Self::TweakRay(_)
+            | Self::TouchUpdate(_)
+            | Self::Scroll(_) => {
                 true
             }
             _ => false,

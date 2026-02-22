@@ -156,6 +156,12 @@ impl Cx {
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
                     self.fingers.switch_captures();
                 }
+                StudioToApp::TweakRay(e) => {
+                    let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                    let dpi_factor = self.windows[window_id].window_geom.dpi_factor.max(1.0);
+                    let tweak_ray = e.into_event(window_id, pos, dpi_factor);
+                    self.call_event_handler(&Event::TweakRay(tweak_ray));
+                }
                 StudioToApp::MouseUp(e) => {
                     let (window_id, pos) =
                         if let Some((_, window_id)) = self.fingers.first_mouse_button {
