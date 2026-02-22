@@ -463,13 +463,6 @@ impl Widget for Button {
             self.draw_bg.redraw(cx);
         }
 
-        match event.hit_designer(cx, self.draw_bg.area()) {
-            HitDesigner::DesignerPick(_e) => {
-                cx.widget_action_with_data(&self.action_data, uid, WidgetDesignAction::PickedBody)
-            }
-            _ => (),
-        }
-
         // The button only handles hits when it's visible and enabled.
         // If it's not enabled, we still show the button, but we set
         // the NotAllowed mouse cursor upon hover instead of the Hand cursor.

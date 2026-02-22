@@ -9,41 +9,18 @@ use {
         makepad_file_server::FileSystemRoots,
         makepad_live_id::*,
         makepad_micro_serde::*,
-        makepad_platform::studio::StudioToApp,
         makepad_platform::log::LogLevel,
     },
     std::{
         collections::HashMap,
         env, fmt,
         sync::{mpsc::Sender, Arc, Mutex, RwLock},
-        time::{Instant, SystemTime, UNIX_EPOCH},
     },
 };
-
-const TICK_HICCUP_THRESHOLD_FRAMES: f64 = 1.5;
-const TICK_HICCUP_FRAME_TIME_SECONDS: f64 = 1.0 / 60.0;
-const TICK_HICCUP_THRESHOLD_SECONDS: f64 =
-    TICK_HICCUP_THRESHOLD_FRAMES * TICK_HICCUP_FRAME_TIME_SECONDS;
-
-#[derive(Default)]
-struct TickMonitorState {
-    last_tick: Option<Instant>,
-    tick_count: u64,
-    hiccup_count: u64,
-}
-
-struct TickHiccupEvent {
-    wall_clock_ms: u128,
-    delta_ms: f64,
-    delta_frames_60hz: f64,
-    tick_count: u64,
-    hiccup_count: u64,
-}
 
 struct BuildServerProcess {
     stdin_sender: Mutex<Sender<ChildStdIn>>,
     line_sender: Mutex<Sender<ChildStdIO>>,
-    tick_monitor: Mutex<TickMonitorState>,
 }
 
 struct BuildServerShared {
@@ -89,41 +66,6 @@ enum StdErrState {
 }*/
 
 impl BuildConnection {
-    fn observe_tick_hiccup(
-        process: &BuildServerProcess,
-        msg_json: &str,
-    ) -> Option<TickHiccupEvent> {
-        if !msg_json.contains("Tick") {
-            return None;
-        }
-        if !matches!(StudioToApp::deserialize_json(msg_json).ok()?, StudioToApp::Tick) {
-            return None;
-        }
-
-        let now = Instant::now();
-        let wall_clock_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis();
-        let mut tick_monitor = process.tick_monitor.lock().ok()?;
-        tick_monitor.tick_count = tick_monitor.tick_count.saturating_add(1);
-
-        let Some(last_tick) = tick_monitor.last_tick.replace(now) else {
-            return None;
-        };
-
-        let delta_seconds = now.duration_since(last_tick).as_secs_f64();
-        if delta_seconds <= TICK_HICCUP_THRESHOLD_SECONDS {
-            return None;
-        }
-
-        tick_monitor.hiccup_count = tick_monitor.hiccup_count.saturating_add(1);
-        Some(TickHiccupEvent {
-            wall_clock_ms,
-            delta_ms: delta_seconds * 1000.0,
-            delta_frames_60hz: delta_seconds / TICK_HICCUP_FRAME_TIME_SECONDS,
-            tick_count: tick_monitor.tick_count,
-            hiccup_count: tick_monitor.hiccup_count,
-        })
-    }
-
     pub fn stop(&self, cmd_id: LiveId) {
         let shared = self.shared.clone();
         let mut shared = shared.write().unwrap();
@@ -220,7 +162,6 @@ impl BuildConnection {
             BuildServerProcess {
                 stdin_sender: Mutex::new(process.stdin_sender.clone()),
                 line_sender: Mutex::new(process.line_sender.clone()),
-                tick_monitor: Mutex::new(TickMonitorState::default()),
             },
         );
 
@@ -321,20 +262,6 @@ impl BuildConnection {
                 // and plug this msg on the standard input as serialiser json
                 if let Ok(shared) = self.shared.read() {
                     if let Some(v) = shared.processes.get(&cmd_wrap.cmd_id) {
-                        if let Some(hiccup) = Self::observe_tick_hiccup(v, &msg) {
-                            self.msg_sender.send_bare_message(
-                                cmd_wrap.cmd_id,
-                                LogLevel::Warning,
-                                format!(
-                                    "[tick-hiccup] wall_ms={} dt_ms={:.2} (~{:.2} frames @60hz) tick={} hiccup={}",
-                                    hiccup.wall_clock_ms,
-                                    hiccup.delta_ms,
-                                    hiccup.delta_frames_60hz,
-                                    hiccup.tick_count,
-                                    hiccup.hiccup_count
-                                ),
-                            );
-                        }
                         if let Ok(stdin_sender) = v.stdin_sender.lock() {
                             let _ = stdin_sender.send(ChildStdIn::Send(msg));
                         }

@@ -12,7 +12,7 @@ use {
         makepad_script::*,
         window::WindowId,
     },
-    std::{cell::Cell, ops::Deref},
+    std::{cell::{Cell, RefCell}, ops::Deref},
 };
 
 // Mouse events
@@ -137,6 +137,17 @@ pub struct MouseMoveEvent {
     pub modifiers: KeyModifiers,
     pub time: f64,
     pub handled: Cell<Area>,
+}
+
+#[derive(Debug)]
+pub struct TweakRayEvent {
+    pub abs: Vec2d,
+    pub window_id: WindowId,
+    pub modifiers: KeyModifiers,
+    pub time: f64,
+    pub dpi_factor: f64,
+    pub hit_widget_uids: RefCell<Vec<u64>>,
+    pub hit_rect: Cell<Option<Rect>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1474,15 +1485,6 @@ impl Event {
                         rect,
                     });
                 }
-            }
-            Event::DesignerPick(e) => {
-                let rect = area.clipped_rect(&cx);
-                if !hit_test(e.abs, &rect, &options.margin) {
-                    return Hit::Nothing;
-                }
-                // lets add our area to a handled vec?
-                // but how will we communicate the widget?
-                return Hit::DesignerPick(e.clone());
             }
             Event::XrLocal(e) => return e.hits_with_options_and_test(cx, area, options, hit_test),
             _ => (),

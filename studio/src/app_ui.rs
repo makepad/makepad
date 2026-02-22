@@ -100,7 +100,7 @@ script_mod! {
             draw_icon +: {
                 color: theme.color_label_outer
                 color_active: theme.color_label_outer_active
-                svg: crate_resource("self://resources/icons/icon_designer.svg")
+                svg: crate_resource("self://resources/icons/icon_tab_app.svg")
             }
         }
         CheckBoxCustom{
@@ -159,7 +159,7 @@ script_mod! {
     let DesignFirstTab = IconTab{
         draw_icon +: {
             color: STUDIO_PALETTE_3
-            svg: crate_resource("self://resources/icons/icon_designer.svg")
+            svg: crate_resource("self://resources/icons/icon_tab_app.svg")
         }
     }
 

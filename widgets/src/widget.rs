@@ -3,7 +3,6 @@ use {
     crate::makepad_draw::*,
     crate::widget_async::{ScriptAsyncId, ScriptAsyncResult},
     crate::widget_tree::{set_ui_root, CxWidgetExt},
-    //crate::designer_data::DesignerDataToWidget,
     std::any::TypeId,
     std::cell::RefCell,
     std::collections::BTreeMap,
@@ -25,21 +24,9 @@ impl WidgetUid {
     }
 }
 
-pub trait WidgetDesign: WidgetNode {}
-
-#[derive(Clone, Debug, Default)]
-pub enum WidgetDesignAction {
-    PickedBody,
-    #[default]
-    None,
-}
-
 pub trait WidgetNode: ScriptApply {
     fn widget_uid(&self) -> WidgetUid {
         WidgetUid(0)
-    }
-    fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign> {
-        return None;
     }
     /// Enumerate direct children for widget-tree indexing.
     fn children(&self, _visit: &mut dyn FnMut(LiveId, WidgetRef)) {}

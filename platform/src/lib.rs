@@ -92,7 +92,6 @@ pub use {
         draw_vars::DrawVars,
         event::{
             CharOffset,
-            DesignerPickEvent,
             DigitDevice,
             DragEvent,
             DragHit,
@@ -112,7 +111,6 @@ pub use {
             FullTextState,
             GameInputState,
             Hit,
-            HitDesigner,
             HitOptions,
             HoverState,
             HttpError,

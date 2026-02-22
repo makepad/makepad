@@ -2,7 +2,8 @@ use crate::{
     app::AppData,
     build_manager::build_manager::BuildManager,
     makepad_platform::os::shared_framebuf::*,
-    makepad_platform::studio::StudioToApp,
+    makepad_platform::studio::{RemoteKeyModifiers, RemoteMouseMove, RemoteTweakRay, StudioToApp, TweakHitsResponse},
+    tweak_view::TweakView,
     makepad_widgets::*,
 };
 
@@ -55,6 +56,11 @@ script_mod! {
                     sdf.stroke(vec4(self.color.xyz, self.ripple_alpha), 1.5)
                 }
                 return sdf.result
+            }
+        }
+        tweak_view: TweakView {
+            draw_vector+: {
+                ..mod.draw.DrawVector
             }
         }
         animator: Animator {
@@ -114,6 +120,8 @@ pub struct RunView {
     draw_app: DrawQuad,
     #[live]
     draw_click: DrawQuad,
+    #[live]
+    tweak_view: TweakView,
     #[rust]
     last_rect: Rect,
     #[rust]
@@ -285,6 +293,10 @@ impl RunView {
         self.redraw(cx);
     }
 
+    pub fn set_tweak_hits(&mut self, cx: &mut Cx, hits: &TweakHitsResponse) {
+        self.tweak_view.set_hits(cx, hits);
+    }
+
     pub fn draw_run_view(
         &mut self,
         cx: &mut Cx2d,
@@ -429,6 +441,7 @@ impl RunView {
             size: dvec2(56.0, 56.0),
         };
         self.draw_click.draw_abs(cx, click_rect);
+        self.tweak_view.draw_overlay(cx, rect);
         // lets store the area
         if let Some(ab) = manager.active.builds.get_mut(&run_view_id) {
             ab.app_area.insert(self.window_id, self.draw_app.area());
@@ -460,6 +473,34 @@ impl Widget for RunView {
 
         if self.animator_handle_event(cx, event).must_redraw() {
             self.redraw(cx);
+        }
+        if let Event::MouseMove(e) = event {
+            let area = self.draw_app.area();
+            if area.is_valid(cx) && area.rect(cx).contains(e.abs) {
+                e.handled.set(area);
+                if e.modifiers.logo {
+                    manager.send_host_to_stdin(
+                        run_view_id,
+                        StudioToApp::TweakRay(RemoteTweakRay {
+                            time: e.time,
+                            x: e.abs.x,
+                            y: e.abs.y,
+                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
+                        }),
+                    );
+                } else {
+                    self.tweak_view.clear(cx);
+                    manager.send_host_to_stdin(
+                        run_view_id,
+                        StudioToApp::MouseMove(RemoteMouseMove {
+                            time: e.time,
+                            x: e.abs.x,
+                            y: e.abs.y,
+                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
+                        }),
+                    );
+                }
+            }
         }
         // lets send mouse events
         match event.hits(cx, self.draw_app.area()) {
