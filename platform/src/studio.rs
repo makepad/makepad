@@ -6,6 +6,7 @@ use crate::event::{
     MouseButton,
     MouseDownEvent,
     MouseMoveEvent,
+    TweakRayEvent,
     MouseUpEvent,
     ScrollEvent,
     TextInputEvent,
@@ -14,7 +15,7 @@ use crate::makepad_math::{dvec2, Vec2d};
 use crate::makepad_micro_serde::*;
 use crate::os::shared_framebuf::{PresentableDraw, SharedSwapchain};
 use crate::window::WindowId;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 //use crate::action::*;
 use crate::log::LogLevel;
 // communication enums for studio
@@ -187,6 +188,28 @@ impl RemoteMouseMove {
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RemoteTweakRay {
+    pub time: f64,
+    pub x: f64,
+    pub y: f64,
+    pub modifiers: RemoteKeyModifiers,
+}
+
+impl RemoteTweakRay {
+    pub fn into_event(self, window_id: WindowId, pos: Vec2d, dpi_factor: f64) -> TweakRayEvent {
+        TweakRayEvent {
+            abs: dvec2(self.x - pos.x, self.y - pos.y),
+            window_id,
+            modifiers: self.modifiers.into_key_modifiers(),
+            time: self.time,
+            dpi_factor,
+            hit_widget_uids: RefCell::new(Vec::new()),
+            hit_rect: Cell::new(None),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct RemoteMouseUp {
     pub time: f64,
     pub button_raw_bits: u32,
@@ -255,7 +278,7 @@ pub enum AppToStudio {
     SwapSelection(SwapSelection),
     Screenshot(ScreenshotResponse),
     WidgetTreeDump(WidgetTreeDumpResponse),
-    FocusDesign,
+    TweakHits(TweakHitsResponse),
     CreateWindow {
         window_id: usize,
         kind_id: usize,
@@ -285,6 +308,19 @@ pub struct WidgetTreeDumpRequest {
 pub struct WidgetTreeDumpResponse {
     pub request_id: u64,
     pub dump: String,
+}
+
+#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
+pub struct TweakHitsResponse {
+    pub window_id: usize,
+    pub dpi_factor: f64,
+    pub ray_x: f64,
+    pub ray_y: f64,
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+    pub widget_uids: Vec<u64>,
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson)]
@@ -318,6 +354,7 @@ pub enum StudioToApp {
     MouseDown(RemoteMouseDown),
     MouseUp(RemoteMouseUp),
     MouseMove(RemoteMouseMove),
+    TweakRay(RemoteTweakRay),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),

@@ -749,10 +749,7 @@ impl Widget for View {
             }
         }
 
-        match event.hit_designer(cx, self.area()) {
-            HitDesigner::DesignerPick(_e) => cx.widget_action(uid, WidgetDesignAction::PickedBody),
-            _ => (),
-        }
+        event.hit_tweak_ray(self.area(), self.widget_uid());
 
         if self.visible && self.cursor.is_some() || self.animator.is_defined {
             match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
@@ -992,6 +989,20 @@ impl Widget for View {
             }
         }
         DrawStep::done()
+    }
+}
+
+trait EventTweakRayExt {
+    fn hit_tweak_ray(&self, area: Area, widget_uid: WidgetUid);
+}
+
+impl EventTweakRayExt for Event {
+    fn hit_tweak_ray(&self, area: Area, widget_uid: WidgetUid) {
+        if let Event::TweakRay(e) = self {
+            if !area.is_empty() {
+                e.hit_widget_uids.borrow_mut().push(widget_uid.0);
+            }
+        }
     }
 }
 

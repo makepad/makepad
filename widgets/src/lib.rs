@@ -128,14 +128,6 @@ pub mod chart;
 // pub mod debug_view;
 // pub mod performance_view;
 // pub mod data_binding;
-// pub mod designer;
-// pub mod designer_dummy;
-// pub mod designer_theme;
-// pub mod designer_outline_tree;
-// pub mod designer_view;
-// pub mod designer_outline;
-// pub mod designer_data;
-// pub mod designer_toolbox;
 
 pub use crate::{
     adaptive_view::*,

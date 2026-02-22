@@ -1,4 +1,3 @@
-pub mod designer;
 pub mod drag_drop;
 pub mod event;
 pub mod finger;
@@ -9,7 +8,6 @@ pub mod video_playback;
 pub mod window;
 pub mod xr;
 
-pub use designer::*;
 pub use drag_drop::*;
 pub use event::*;
 pub use finger::*;
