@@ -9,10 +9,7 @@ use {
         makepad_math::*,
         makepad_micro_serde::*,
         os::{
-            cx_stdin::{
-                HostToStdin, PresentableDraw, PresentableImageId, StdinToHost,
-                SWAPCHAIN_IMAGE_COUNT,
-            },
+            shared_framebuf::{PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
             d3d11::D3d11Cx,
             win32_app::Win32Time,
         },
@@ -44,8 +41,8 @@ pub(crate) struct StdinWindow {
 }
 
 impl Cx {
-    fn stdin_send_to_host(msg: StdinToHost) {
-        Cx::send_studio_message(AppToStudio::StdinToHost(msg));
+    fn stdin_send_to_host(msg: AppToStudio) {
+        Cx::send_studio_message(msg);
     }
 
     pub(crate) fn stdin_handle_repaint(
@@ -109,7 +106,7 @@ impl Cx {
     }
 
     pub fn stdin_event_loop(&mut self, d3d11_cx: &mut D3d11Cx) {
-        Self::stdin_send_to_host(StdinToHost::ReadyToStart);
+        Self::stdin_send_to_host(AppToStudio::ReadyToStart);
 
         let mut stdin_windows: Vec<StdinWindow> = Vec::new();
         let time = Win32Time::new();
@@ -133,7 +130,7 @@ impl Cx {
                     Ok(msgs) => {
                         for msg in msgs.0 {
                             match msg {
-                                StudioToApp::HostToStdin(msg) => self.stdin_handle_host_to_stdin(
+                                msg => self.stdin_handle_host_to_stdin(
                                     msg,
                                     d3d11_cx,
                                     &mut stdin_windows,
@@ -165,7 +162,7 @@ impl Cx {
                     }
                 },
                 WebSocketMessage::String(text) => {
-                    if let Ok(msg) = HostToStdin::deserialize_json(&text) {
+                    if let Ok(msg) = StudioToApp::deserialize_json(&text) {
                         self.stdin_handle_host_to_stdin(msg, d3d11_cx, &mut stdin_windows, &time);
                     } else if !text.trim().is_empty() {
                         crate::warning!(
@@ -186,49 +183,49 @@ impl Cx {
 
     fn stdin_handle_host_to_stdin(
         &mut self,
-        msg: HostToStdin,
+        msg: StudioToApp,
         d3d11_cx: &mut D3d11Cx,
         stdin_windows: &mut Vec<StdinWindow>,
         time: &Win32Time,
     ) {
         match msg {
-            HostToStdin::KeyDown(e) => {
+            StudioToApp::KeyDown(e) => {
                 self.call_event_handler(&Event::KeyDown(e));
             }
-            HostToStdin::KeyUp(e) => {
+            StudioToApp::KeyUp(e) => {
                 self.call_event_handler(&Event::KeyUp(e));
             }
-            HostToStdin::TextInput(e) => {
+            StudioToApp::TextInput(e) => {
                 self.call_event_handler(&Event::TextInput(e));
             }
-            HostToStdin::TextCopy => {
+            StudioToApp::TextCopy => {
                 let response = Rc::new(RefCell::new(None));
                 self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
                     response: response.clone(),
                 }));
                 let text = response.borrow().clone();
                 if let Some(text) = text {
-                    Self::stdin_send_to_host(StdinToHost::SetClipboard(text));
+                    Self::stdin_send_to_host(AppToStudio::SetClipboard(text));
                 }
             }
-            HostToStdin::TextCut => {
+            StudioToApp::TextCut => {
                 let response = Rc::new(RefCell::new(None));
                 self.call_event_handler(&Event::TextCut(TextClipboardEvent {
                     response: response.clone(),
                 }));
                 let text = response.borrow().clone();
                 if let Some(text) = text {
-                    Self::stdin_send_to_host(StdinToHost::SetClipboard(text));
+                    Self::stdin_send_to_host(AppToStudio::SetClipboard(text));
                 }
             }
-            HostToStdin::MouseDown(e) => {
+            StudioToApp::MouseDown(e) => {
                 self.fingers.process_tap_count(dvec2(e.x, e.y), e.time);
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 let mouse_down_event = e.into_event(window_id, pos);
                 self.fingers.mouse_down(mouse_down_event.button, window_id);
                 self.call_event_handler(&Event::MouseDown(mouse_down_event));
             }
-            HostToStdin::MouseMove(e) => {
+            StudioToApp::MouseMove(e) => {
                 let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button
                 {
                     (window_id, self.windows[window_id].window_geom.position)
@@ -239,7 +236,7 @@ impl Cx {
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
-            HostToStdin::MouseUp(e) => {
+            StudioToApp::MouseUp(e) => {
                 let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button
                 {
                     (window_id, self.windows[window_id].window_geom.position)
@@ -252,11 +249,11 @@ impl Cx {
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
-            HostToStdin::Scroll(e) => {
+            StudioToApp::Scroll(e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 self.call_event_handler(&Event::Scroll(e.into_event(window_id, pos)));
             }
-            HostToStdin::WindowGeomChange {
+            StudioToApp::WindowGeomChange {
                 dpi_factor,
                 left,
                 top,
@@ -272,7 +269,7 @@ impl Cx {
                 };
                 self.redraw_all();
             }
-            HostToStdin::Swapchain(new_swapchain) => {
+            StudioToApp::Swapchain(new_swapchain) => {
                 let window_id = new_swapchain.window_id;
                 let local_swapchain = LocalSwapchain {
                     presentable_images: new_swapchain.presentable_images.map(|pi| {
@@ -299,7 +296,7 @@ impl Cx {
                 self.redraw_all();
                 self.stdin_handle_platform_ops(stdin_windows);
             }
-            HostToStdin::Tick => {
+            StudioToApp::Tick => {
                 if SignalToUI::check_and_clear_ui_signal() {
                     self.handle_media_signals();
                     self.handle_script_signals();
@@ -347,7 +344,7 @@ impl Cx {
                 if has_pending_draws && d3d11_cx.is_gpu_done() {
                     for window in stdin_windows.iter_mut() {
                         if let Some(presentable_draw) = window.new_frame_being_rendered.take() {
-                            Self::stdin_send_to_host(StdinToHost::DrawCompleteAndFlip(
+                            Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(
                                 presentable_draw,
                             ));
                         }
@@ -367,7 +364,7 @@ impl Cx {
                     //let stdin_window = &mut stdin_windows[window_id.id()];
                     let window = &mut self.windows[window_id];
                     window.is_created = true;
-                    Self::stdin_send_to_host(StdinToHost::CreateWindow {
+                    Self::stdin_send_to_host(AppToStudio::CreateWindow {
                         window_id: window_id.id(),
                         kind_id: window.kind_id,
                     });
@@ -383,10 +380,10 @@ impl Cx {
                     }*/
                 }
                 CxOsOp::SetCursor(cursor) => {
-                    Self::stdin_send_to_host(StdinToHost::SetCursor(cursor));
+                    Self::stdin_send_to_host(AppToStudio::SetCursor(cursor));
                 }
                 CxOsOp::CopyToClipboard(content) => {
-                    Self::stdin_send_to_host(StdinToHost::SetClipboard(content));
+                    Self::stdin_send_to_host(AppToStudio::SetClipboard(content));
                 }
                 _ => (), /*
                          CxOsOp::CloseWindow(_window_id) => {},

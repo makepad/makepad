@@ -13,7 +13,7 @@ use {
         os::{
             apple::apple_sys::*,
             apple::apple_util::{nsstring_to_string, str_to_nsstring},
-            cx_stdin::PresentableDraw,
+            shared_framebuf::PresentableDraw,
         },
         script::vm::*,
         studio::{AppToStudio, GPUSample},
@@ -983,7 +983,7 @@ impl Cx {
                             sf.request_ids.clone(),
                             sf.width as _,
                             sf.height as _,
-                            Some(buf),
+                            buf,
                         );
                     }
 

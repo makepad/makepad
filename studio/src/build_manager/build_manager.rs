@@ -10,22 +10,16 @@ use {
         makepad_file_server::FileSystemRoots,
         makepad_micro_serde::*,
         // Using stub LiveFileChange from file_system module
-        makepad_platform::os::cx_stdin::{
-            HostToStdin, StdinKeyModifiers, StdinMouseDown, StdinMouseMove, StdinMouseUp,
-            StdinScroll, StdinToHost,
-        },
         makepad_platform::studio::{
-            AppToStudio, AppToStudioVec, DesignerComponentPosition, DesignerZoomPan, EventSample,
-            GCSample, GPUSample, LocalProfileSample, StudioScreenshotRequest,
-            StudioScreenshotResponse, StudioToApp,
-            StudioToAppVec, StudioWidgetTreeDumpRequest, StudioWidgetTreeDumpResponse,
+            AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, LocalProfileSample,
+            RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp, RemoteScroll,
+            ScreenshotRequest, ScreenshotResponse, StudioToApp, StudioToAppVec,
+            WidgetTreeDumpRequest, WidgetTreeDumpResponse,
         },
         makepad_shell::*,
         makepad_widgets::*,
     },
     makepad_http::server::*,
-    makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},
-    makepad_zune_png::PngEncoder,
     std::{
         cell::RefCell,
         collections::{hash_map, BTreeSet, HashMap, HashSet},
@@ -46,8 +40,8 @@ pub struct ActiveBuild {
     pub log_index: String,
     pub process: BuildProcess,
     pub window_tabs: HashMap<usize, LiveId>,
-    pub swapchain: HashMap<usize, Option<cx_stdin::HostSwapchain>>,
-    pub last_swapchain_with_completed_draws: HashMap<usize, Option<cx_stdin::HostSwapchain>>,
+    pub swapchain: HashMap<usize, Option<shared_framebuf::HostSwapchain>>,
+    pub last_swapchain_with_completed_draws: HashMap<usize, Option<shared_framebuf::HostSwapchain>>,
     pub app_area: HashMap<usize, Area>,
     /// Some previous value of `swapchain`, which holds the image still being
     /// the most recent to have been presented after a successful client draw,
@@ -55,10 +49,10 @@ pub struct ActiveBuild {
     ///
     /// While not strictly necessary, it can also accept *new* draws to any of
     /// its images, which allows the client to catch up a frame or two, visually.
-    pub aux_chan_host_endpoint: Option<cx_stdin::aux_chan::HostEndpoint>,
+    pub aux_chan_host_endpoint: Option<shared_framebuf::aux_chan::HostEndpoint>,
 }
 impl ActiveBuild {
-    pub fn swapchain_mut(&mut self, index: usize) -> &mut Option<cx_stdin::HostSwapchain> {
+    pub fn swapchain_mut(&mut self, index: usize) -> &mut Option<shared_framebuf::HostSwapchain> {
         match self.swapchain.entry(index) {
             hash_map::Entry::Occupied(o) => o.into_mut(),
             hash_map::Entry::Vacant(v) => v.insert(None),
@@ -67,13 +61,13 @@ impl ActiveBuild {
     pub fn last_swapchain_with_completed_draws_mut(
         &mut self,
         index: usize,
-    ) -> &mut Option<cx_stdin::HostSwapchain> {
+    ) -> &mut Option<shared_framebuf::HostSwapchain> {
         match self.last_swapchain_with_completed_draws.entry(index) {
             hash_map::Entry::Occupied(o) => o.into_mut(),
             hash_map::Entry::Vacant(v) => v.insert(None),
         }
     }
-    pub fn swapchain(&self, index: usize) -> Option<&cx_stdin::HostSwapchain> {
+    pub fn swapchain(&self, index: usize) -> Option<&shared_framebuf::HostSwapchain> {
         if let Some(e) = self.swapchain.get(&index) {
             if let Some(e) = e {
                 return Some(e);
@@ -84,7 +78,7 @@ impl ActiveBuild {
     pub fn last_swapchain_with_completed_draws(
         &mut self,
         index: usize,
-    ) -> Option<&cx_stdin::HostSwapchain> {
+    ) -> Option<&shared_framebuf::HostSwapchain> {
         if let Some(e) = self.last_swapchain_with_completed_draws.get(&index) {
             if let Some(e) = e {
                 return Some(e);
@@ -131,7 +125,7 @@ pub struct BuildManager {
     http_port: usize,
     pub clients: Vec<BuildClient>,
     running_processes: HashMap<LiveId, BuildProcess>,
-    pending_aux_chan_host_endpoints: HashMap<LiveId, cx_stdin::aux_chan::HostEndpoint>,
+    pending_aux_chan_host_endpoints: HashMap<LiveId, shared_framebuf::aux_chan::HostEndpoint>,
     pub log: Vec<(LiveId, LogItem)>,
     pub profile: HashMap<LiveId, ProfileSampleStore>,
     pub self_profile: ProfileSampleStore,
@@ -149,7 +143,6 @@ pub struct BuildManager {
     recv_terminal_msg: ToUIReceiver<TerminalToBuildManager>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
     pub tick_timer: Timer,
-    pub designer_state: DesignerState,
     pub websocket_alive_timer: Timer,
     //pub send_file_change: FromUISender<LiveFileChange>,
     pub active_build_websockets: Arc<Mutex<RefCell<ActiveBuildWebSockets>>>,
@@ -229,9 +222,9 @@ pub enum StudioTerminalRequest {
     Stop {
         build_id: u64,
     },
-    HostToStdin {
+    StudioToApp {
         build_id: u64,
-        msg: HostToStdin,
+        msg: StudioToApp,
     },
     TypeText {
         build_id: u64,
@@ -328,54 +321,6 @@ enum TerminalToBuildManager {
     },
 }
 
-#[derive(Default, SerRon, DeRon)]
-pub struct DesignerState {
-    state: HashMap<LiveId, DesignerStatePerBuildId>,
-}
-
-#[derive(Default, SerRon, DeRon)]
-pub struct DesignerStatePerBuildId {
-    selected_file: String,
-    zoom_pan: DesignerZoomPan,
-    component_positions: Vec<DesignerComponentPosition>,
-}
-
-impl DesignerState {
-    fn save_state(&self) {
-        let saved = self.serialize_ron();
-        let mut f = File::create("makepad_designer.ron").expect("Unable to create file");
-        f.write_all(saved.as_bytes()).expect("Unable to write data");
-    }
-
-    fn load_state(&mut self) {
-        if let Ok(contents) = std::fs::read_to_string("makepad_designer.ron") {
-            match DesignerState::deserialize_ron(&contents) {
-                Ok(state) => *self = state,
-                Err(e) => {
-                    crate::warning!("Failed to parse makepad_designer.ron: {:?}", e);
-                }
-            }
-        }
-    }
-
-    fn get_build_storage<F: FnOnce(&mut DesignerStatePerBuildId)>(
-        &mut self,
-        build_id: LiveId,
-        f: F,
-    ) {
-        match self.state.entry(build_id) {
-            hash_map::Entry::Occupied(mut v) => {
-                f(v.get_mut());
-            }
-            hash_map::Entry::Vacant(v) => {
-                let mut db = DesignerStatePerBuildId::default();
-                f(&mut db);
-                v.insert(db);
-            }
-        }
-    }
-}
-
 pub struct BuildBinary {
     pub open: f64,
     pub root: String,
@@ -384,9 +329,9 @@ pub struct BuildBinary {
 
 #[derive(Clone, Debug, Default)]
 pub enum BuildManagerAction {
-    StdinToHost {
+    AppToStudio {
         build_id: LiveId,
-        msg: StdinToHost,
+        msg: AppToStudio,
     },
     #[default]
     None,
@@ -751,29 +696,29 @@ impl BuildManager {
         rects
     }
 
-    fn terminal_control_log_label(msg: &HostToStdin) -> String {
+    fn terminal_control_log_label(msg: &StudioToApp) -> String {
         match msg {
-            HostToStdin::MouseDown(e) => {
+            StudioToApp::MouseDown(e) => {
                 format!(
                     "MouseDown x={:.1} y={:.1} button={}",
                     e.x, e.y, e.button_raw_bits
                 )
             }
-            HostToStdin::MouseMove(e) => format!("MouseMove x={:.1} y={:.1}", e.x, e.y),
-            HostToStdin::MouseUp(e) => {
+            StudioToApp::MouseMove(e) => format!("MouseMove x={:.1} y={:.1}", e.x, e.y),
+            StudioToApp::MouseUp(e) => {
                 format!(
                     "MouseUp x={:.1} y={:.1} button={}",
                     e.x, e.y, e.button_raw_bits
                 )
             }
-            HostToStdin::Scroll(e) => format!(
+            StudioToApp::Scroll(e) => format!(
                 "Scroll x={:.1} y={:.1} sx={:.1} sy={:.1}",
                 e.x, e.y, e.sx, e.sy
             ),
-            HostToStdin::Tick => "Tick".to_string(),
-            HostToStdin::TextCopy => "TextCopy".to_string(),
-            HostToStdin::TextCut => "TextCut".to_string(),
-            HostToStdin::TextInput(e) => {
+            StudioToApp::Tick => "Tick".to_string(),
+            StudioToApp::TextCopy => "TextCopy".to_string(),
+            StudioToApp::TextCut => "TextCut".to_string(),
+            StudioToApp::TextInput(e) => {
                 let mut text = e.input.clone();
                 if text.len() > 48 {
                     text.truncate(48);
@@ -781,10 +726,10 @@ impl BuildManager {
                 }
                 format!("TextInput {:?}", text)
             }
-            HostToStdin::KeyDown(e) => format!("KeyDown {:?}", e.key_code),
-            HostToStdin::KeyUp(e) => format!("KeyUp {:?}", e.key_code),
-            HostToStdin::Swapchain(_) => "Swapchain".to_string(),
-            HostToStdin::WindowGeomChange {
+            StudioToApp::KeyDown(e) => format!("KeyDown {:?}", e.key_code),
+            StudioToApp::KeyUp(e) => format!("KeyUp {:?}", e.key_code),
+            StudioToApp::Swapchain(_) => "Swapchain".to_string(),
+            StudioToApp::WindowGeomChange {
                 window_id,
                 dpi_factor,
                 left,
@@ -795,6 +740,14 @@ impl BuildManager {
                 "WindowGeomChange window={} left={:.1} top={:.1} width={:.1} height={:.1} dpi={:.3}",
                 window_id, left, top, width, height, dpi_factor
             ),
+            StudioToApp::Screenshot(_) => "Screenshot".to_string(),
+            StudioToApp::WidgetTreeDump(_) => "WidgetTreeDump".to_string(),
+            StudioToApp::KeepAlive => "KeepAlive".to_string(),
+            StudioToApp::LiveChange { file_name, .. } => {
+                format!("LiveChange file={}", file_name)
+            }
+            StudioToApp::None => "None".to_string(),
+            StudioToApp::Kill => "Kill".to_string(),
         }
     }
 
@@ -828,15 +781,15 @@ impl BuildManager {
     }
 
     fn translate_terminal_host_to_stdin(
-        msg: HostToStdin,
+        msg: StudioToApp,
         origin: Option<(f64, f64, f64)>,
-    ) -> Result<HostToStdin, String> {
+    ) -> Result<StudioToApp, String> {
         let Some((ox, oy, dpi)) = origin else {
             return match msg {
-                HostToStdin::MouseDown(_)
-                | HostToStdin::MouseMove(_)
-                | HostToStdin::MouseUp(_)
-                | HostToStdin::Scroll(_) => Err(
+                StudioToApp::MouseDown(_)
+                | StudioToApp::MouseMove(_)
+                | StudioToApp::MouseUp(_)
+                | StudioToApp::Scroll(_) => Err(
                     "no coordinate origin available yet; request WidgetTreeDump first".to_string(),
                 ),
                 _ => Ok(msg),
@@ -844,79 +797,28 @@ impl BuildManager {
         };
         let dpi = dpi.max(1.0);
         Ok(match msg {
-            HostToStdin::MouseDown(mut e) => {
+            StudioToApp::MouseDown(mut e) => {
                 e.x = (e.x + ox) / dpi;
                 e.y = (e.y + oy) / dpi;
-                HostToStdin::MouseDown(e)
+                StudioToApp::MouseDown(e)
             }
-            HostToStdin::MouseMove(mut e) => {
+            StudioToApp::MouseMove(mut e) => {
                 e.x = (e.x + ox) / dpi;
                 e.y = (e.y + oy) / dpi;
-                HostToStdin::MouseMove(e)
+                StudioToApp::MouseMove(e)
             }
-            HostToStdin::MouseUp(mut e) => {
+            StudioToApp::MouseUp(mut e) => {
                 e.x = (e.x + ox) / dpi;
                 e.y = (e.y + oy) / dpi;
-                HostToStdin::MouseUp(e)
+                StudioToApp::MouseUp(e)
             }
-            HostToStdin::Scroll(mut e) => {
+            StudioToApp::Scroll(mut e) => {
                 e.x = (e.x + ox) / dpi;
                 e.y = (e.y + oy) / dpi;
-                HostToStdin::Scroll(e)
+                StudioToApp::Scroll(e)
             }
             other => other,
         })
-    }
-
-    fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-        let expected = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|px| px.checked_mul(4))
-            .ok_or_else(|| "screenshot size overflow while encoding png".to_string())?;
-        if rgba.len() != expected {
-            return Err(format!(
-                "invalid rgba length for {}x{}: expected {}, got {}",
-                width,
-                height,
-                expected,
-                rgba.len()
-            ));
-        }
-
-        let options = EncoderOptions::default()
-            .set_width(width as usize)
-            .set_height(height as usize)
-            .set_depth(BitDepth::Eight)
-            .set_colorspace(ColorSpace::RGBA);
-
-        let mut encoder = PngEncoder::new(rgba, options);
-        let mut out = Vec::new();
-        encoder
-            .encode(&mut out)
-            .map_err(|err| format!("png encode failed: {err:?}"))?;
-        Ok(out)
-    }
-
-    fn bgra_to_rgba(bgra: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-        let expected = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|px| px.checked_mul(4))
-            .ok_or_else(|| "screenshot size overflow while converting pixels".to_string())?;
-        if bgra.len() != expected {
-            return Err(format!(
-                "invalid bgra length for {}x{}: expected {}, got {}",
-                width,
-                height,
-                expected,
-                bgra.len()
-            ));
-        }
-
-        let mut rgba = Vec::with_capacity(bgra.len());
-        for px in bgra.chunks_exact(4) {
-            rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-        }
-        Ok(rgba)
     }
 
     fn write_terminal_screenshot_png(
@@ -1016,7 +918,7 @@ impl BuildManager {
         let sent = if let Ok(sockets) = self.active_build_websockets.lock() {
             sockets.borrow_mut().send_studio_to_app(
                 build_id,
-                StudioToApp::Screenshot(StudioScreenshotRequest {
+                StudioToApp::Screenshot(ScreenshotRequest {
                     request_id,
                     kind_id,
                 }),
@@ -1065,7 +967,7 @@ impl BuildManager {
         let sent = if let Ok(sockets) = self.active_build_websockets.lock() {
             sockets.borrow_mut().send_studio_to_app(
                 build_id,
-                StudioToApp::WidgetTreeDump(StudioWidgetTreeDumpRequest { request_id }),
+                StudioToApp::WidgetTreeDump(WidgetTreeDumpRequest { request_id }),
             )
         } else {
             false
@@ -1091,8 +993,8 @@ impl BuildManager {
 
     fn handle_terminal_screenshot_response(
         &mut self,
-        build_id: LiveId,
-        screenshot: &StudioScreenshotResponse,
+        _build_id: LiveId,
+        screenshot: &ScreenshotResponse,
     ) {
         let pending: Vec<(u64, PendingTerminalScreenshot)> = screenshot
             .request_ids
@@ -1108,57 +1010,12 @@ impl BuildManager {
             return;
         }
 
-        let Some(image) = screenshot.image.as_deref() else {
-            for (request_id, pending_request) in pending {
-                self.send_terminal_error(
-                    pending_request.web_socket_id,
-                    format!(
-                        "screenshot request {} for build {} returned no image",
-                        request_id, build_id.0
-                    ),
-                );
-            }
-            return;
-        };
-
-        let rgba = match Self::bgra_to_rgba(image, screenshot.width, screenshot.height) {
-            Ok(rgba) => rgba,
-            Err(err) => {
-                for (_, pending_request) in pending {
-                    self.send_terminal_error(
-                        pending_request.web_socket_id,
-                        format!(
-                            "failed to convert screenshot for build {}: {err}",
-                            build_id.0
-                        ),
-                    );
-                }
-                return;
-            }
-        };
-
-        let png = match Self::encode_png_rgba(screenshot.width, screenshot.height, &rgba) {
-            Ok(png) => png,
-            Err(err) => {
-                for (_, pending_request) in pending {
-                    self.send_terminal_error(
-                        pending_request.web_socket_id,
-                        format!(
-                            "failed to encode screenshot for build {}: {err}",
-                            build_id.0
-                        ),
-                    );
-                }
-                return;
-            }
-        };
-
         for (request_id, pending_request) in pending {
             match self.write_terminal_screenshot_png(
                 pending_request.build_id,
                 pending_request.kind_id,
                 request_id,
-                &png,
+                &screenshot.png,
             ) {
                 Ok(path) => self.send_terminal_response(
                     pending_request.web_socket_id,
@@ -1179,7 +1036,7 @@ impl BuildManager {
     fn handle_terminal_widget_tree_dump_response(
         &mut self,
         build_id: LiveId,
-        dump_response: StudioWidgetTreeDumpResponse,
+        dump_response: WidgetTreeDumpResponse,
     ) {
         let Some(pending_request) = self
             .terminal_widget_tree_dump_requests
@@ -1241,7 +1098,7 @@ impl BuildManager {
         cx: &mut Cx,
         web_socket_id: u64,
         build_id: LiveId,
-        msg: HostToStdin,
+        msg: StudioToApp,
         auto_dump: bool,
     ) -> Result<(), String> {
         let origin = self.terminal_origin_for_build(cx, build_id);
@@ -1256,7 +1113,7 @@ impl BuildManager {
         let sent = if let Ok(sockets) = self.active_build_websockets.lock() {
             sockets
                 .borrow_mut()
-                .send_studio_to_app(build_id, StudioToApp::HostToStdin(msg))
+                .send_studio_to_app(build_id, msg)
         } else {
             false
         };
@@ -1377,10 +1234,10 @@ impl BuildManager {
                     );
                 }
             }
-            StudioTerminalRequest::HostToStdin { build_id, msg } => {
+            StudioTerminalRequest::StudioToApp { build_id, msg } => {
                 let build_id = LiveId(build_id);
                 let should_auto_dump =
-                    !matches!(msg, HostToStdin::MouseMove(_) | HostToStdin::Scroll(_));
+                    !matches!(msg, StudioToApp::MouseMove(_) | StudioToApp::Scroll(_));
                 if let Err(message) = self.send_terminal_host_to_stdin(
                     cx,
                     web_socket_id,
@@ -1402,7 +1259,7 @@ impl BuildManager {
                 auto_dump,
             } => {
                 let build_id = LiveId(build_id);
-                let msg = HostToStdin::TextInput(TextInputEvent {
+                let msg = StudioToApp::TextInput(TextInputEvent {
                     input: text,
                     replace_last: replace_last.unwrap_or(false),
                     was_paste: was_paste.unwrap_or(false),
@@ -1432,7 +1289,7 @@ impl BuildManager {
                 let auto_dump = auto_dump.unwrap_or(false);
                 let msgs = [
                     (
-                        HostToStdin::KeyDown(KeyEvent {
+                        StudioToApp::KeyDown(KeyEvent {
                             key_code: KeyCode::ReturnKey,
                             is_repeat: false,
                             modifiers,
@@ -1441,7 +1298,7 @@ impl BuildManager {
                         false,
                     ),
                     (
-                        HostToStdin::KeyUp(KeyEvent {
+                        StudioToApp::KeyUp(KeyEvent {
                             key_code: KeyCode::ReturnKey,
                             is_repeat: false,
                             modifiers,
@@ -1477,10 +1334,10 @@ impl BuildManager {
                 let button_raw_bits = button.unwrap_or(1);
                 let auto_dump = auto_dump.unwrap_or(false);
                 let now = Self::terminal_now();
-                let modifiers = StdinKeyModifiers::default();
+                let modifiers = RemoteKeyModifiers::default();
                 let msgs = [
                     (
-                        HostToStdin::MouseMove(StdinMouseMove {
+                        StudioToApp::MouseMove(RemoteMouseMove {
                             time: now,
                             x: x as f64,
                             y: y as f64,
@@ -1489,7 +1346,7 @@ impl BuildManager {
                         false,
                     ),
                     (
-                        HostToStdin::MouseDown(StdinMouseDown {
+                        StudioToApp::MouseDown(RemoteMouseDown {
                             button_raw_bits,
                             x: x as f64,
                             y: y as f64,
@@ -1499,7 +1356,7 @@ impl BuildManager {
                         false,
                     ),
                     (
-                        HostToStdin::MouseUp(StdinMouseUp {
+                        StudioToApp::MouseUp(RemoteMouseUp {
                             time: now + 0.01,
                             button_raw_bits,
                             x: x as f64,
@@ -1635,14 +1492,13 @@ impl BuildManager {
         self.tick_timer = cx.start_interval(0.008);
         self.roots = roots;
         self.clients = vec![BuildClient::new_with_local_server(self.roots.clone())];
-        self.designer_state.load_state();
         self.update_run_list(cx);
         self.websocket_alive_timer = cx.start_interval(1.0);
         // Set a small debounce timeout for recompilation (300ms)
         self.recompile_timeout = 0.3;
     }
 
-    pub fn send_host_to_stdin(&self, item_id: LiveId, msg: HostToStdin) {
+    pub fn send_host_to_stdin(&self, item_id: LiveId, msg: StudioToApp) {
         let runs_in_studio = self
             .active
             .builds
@@ -1652,7 +1508,7 @@ impl BuildManager {
         if let Ok(sockets) = self.active_build_websockets.lock() {
             if sockets
                 .borrow_mut()
-                .send_studio_to_app(item_id, StudioToApp::HostToStdin(msg.clone()))
+                .send_studio_to_app(item_id, msg.clone())
             {
                 return;
             }
@@ -1662,7 +1518,7 @@ impl BuildManager {
             return;
         }
 
-        self.clients[0].send_cmd_with_id(item_id, BuildCmd::HostToStdin(msg.to_json()));
+        self.clients[0].send_cmd_with_id(item_id, BuildCmd::StudioToApp(msg.to_json()));
     }
 
     pub fn has_active_web_socket(&self, build_id: LiveId) -> bool {
@@ -2044,7 +1900,7 @@ impl BuildManager {
     pub fn live_reload_needed(&mut self, live_file_change: LiveFileChange) {
         // lets send this filechange to all our stdin stuff
         /*for item_id in self.active.builds.keys() {
-            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::HostToStdin(HostToStdin::ReloadFile {
+            self.clients[0].send_cmd_with_id(*item_id, BuildCmd::StudioToApp(StudioToApp::ReloadFile {
                 file: live_file_change.file_name.clone(),
                 contents: live_file_change.content.clone()
             }.to_json()));
@@ -2092,7 +1948,7 @@ impl BuildManager {
         }
     }
 
-    pub fn broadcast_to_stdin(&mut self, msg: HostToStdin) {
+    pub fn broadcast_to_stdin(&mut self, msg: StudioToApp) {
         let build_ids: Vec<LiveId> = self.active.builds.keys().copied().collect();
         for build_id in build_ids {
             self.send_host_to_stdin(build_id, msg.clone());
@@ -2119,7 +1975,7 @@ impl BuildManager {
         }
 
         if let Some(_) = self.tick_timer.is_event(event) {
-            self.broadcast_to_stdin(HostToStdin::Tick);
+            self.broadcast_to_stdin(StudioToApp::Tick);
         }
 
         if let Some(_) = self.websocket_alive_timer.is_event(event) {
@@ -2139,12 +1995,12 @@ impl BuildManager {
                         if e.handled.get() == *area {
                             self.send_host_to_stdin(
                                 *build_id,
-                                HostToStdin::MouseDown(StdinMouseDown {
+                                StudioToApp::MouseDown(RemoteMouseDown {
                                     time: e.time,
                                     x: e.abs.x,
                                     y: e.abs.y,
                                     button_raw_bits: e.button.bits(),
-                                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers),
+                                    modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
                                 }),
                             );
                             break;
@@ -2154,31 +2010,31 @@ impl BuildManager {
             }
             Event::MouseMove(e) => {
                 // we send this one to what window exactly?
-                self.broadcast_to_stdin(HostToStdin::MouseMove(StdinMouseMove {
+                self.broadcast_to_stdin(StudioToApp::MouseMove(RemoteMouseMove {
                     time: e.time,
                     x: e.abs.x,
                     y: e.abs.y,
-                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers),
+                    modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
                 }));
             }
             Event::MouseUp(e) => {
-                self.broadcast_to_stdin(HostToStdin::MouseUp(StdinMouseUp {
+                self.broadcast_to_stdin(StudioToApp::MouseUp(RemoteMouseUp {
                     time: e.time,
                     button_raw_bits: e.button.bits(),
                     x: e.abs.x,
                     y: e.abs.y,
-                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers),
+                    modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
                 }));
             }
             Event::Scroll(e) => {
-                self.broadcast_to_stdin(HostToStdin::Scroll(StdinScroll {
+                self.broadcast_to_stdin(StudioToApp::Scroll(RemoteScroll {
                     is_mouse: e.is_mouse,
                     time: e.time,
                     x: e.abs.x,
                     y: e.abs.y,
                     sx: e.scroll.x,
                     sy: e.scroll.y,
-                    modifiers: StdinKeyModifiers::from_key_modifiers(&e.modifiers),
+                    modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
                 }));
             }
             _ => (),
@@ -2261,38 +2117,40 @@ impl BuildManager {
                 cx.action(AppAction::WebsocketReconnect(build_id));
                 self.ensure_active_build(build_id);
                 for msg in msgs.0 {
-                    match msg {
-                        AppToStudio::StdinToHost(msg) => {
-                            let auto_request_widget_tree_dump = self
-                                .terminal_startup_dump_pending
-                                .contains(&build_id)
-                                && matches!(&msg, StdinToHost::DrawCompleteAndFlip(_));
-                            cx.action(BuildManagerAction::StdinToHost { build_id, msg });
-                            if auto_request_widget_tree_dump {
-                                if let Some(web_socket_id) =
-                                    self.terminal_build_owners.get(&build_id).copied()
-                                {
-                                    let startup_query =
-                                        self.terminal_startup_queries.get(&build_id).cloned();
-                                    let emit_dump = startup_query.is_none();
-                                    if let Err(message) = self.request_terminal_widget_tree_dump(
-                                        cx,
-                                        web_socket_id,
-                                        build_id,
-                                        startup_query,
-                                        emit_dump,
-                                    ) {
-                                        self.send_terminal_error(web_socket_id, message);
-                                    } else {
-                                        self.terminal_startup_dump_pending.remove(&build_id);
-                                    }
-                                }
+                    let auto_request_widget_tree_dump = self
+                        .terminal_startup_dump_pending
+                        .contains(&build_id)
+                        && matches!(&msg, AppToStudio::DrawCompleteAndFlip(_));
+                    cx.action(BuildManagerAction::AppToStudio {
+                        build_id,
+                        msg: msg.clone(),
+                    });
+                    if auto_request_widget_tree_dump {
+                        if let Some(web_socket_id) =
+                            self.terminal_build_owners.get(&build_id).copied()
+                        {
+                            let startup_query =
+                                self.terminal_startup_queries.get(&build_id).cloned();
+                            let emit_dump = startup_query.is_none();
+                            if let Err(message) = self.request_terminal_widget_tree_dump(
+                                cx,
+                                web_socket_id,
+                                build_id,
+                                startup_query,
+                                emit_dump,
+                            ) {
+                                self.send_terminal_error(web_socket_id, message);
+                            } else {
+                                self.terminal_startup_dump_pending.remove(&build_id);
                             }
                         }
+                    }
+                    match msg {
                         AppToStudio::LogItem(item) => {
                             let terminal_level = log_level_name(item.level);
                             let terminal_line = item.message.clone();
-                            let file_name = if let Some(build) = self.active.builds.get(&build_id) {
+                            let file_name = if let Some(build) = self.active.builds.get(&build_id)
+                            {
                                 self.roots.map_path(&build.root, &item.file_name)
                             } else {
                                 self.roots.map_path("", &item.file_name)
@@ -2349,20 +2207,21 @@ impl BuildManager {
 
                             // Keep legacy snapshot path for studio snapshots.
                             if let Some(build) = self.active.builds.get(&build_id) {
-                                if let Some(image) = screenshot.image {
-                                    file_system.save_snapshot_image(
-                                        cx,
-                                        &build.root,
-                                        "qtest",
-                                        screenshot.width as _,
-                                        screenshot.height as _,
-                                        image,
-                                    )
-                                }
+                                file_system.save_snapshot_image(
+                                    cx,
+                                    &build.root,
+                                    "qtest",
+                                    screenshot.width as _,
+                                    screenshot.height as _,
+                                    screenshot.png,
+                                )
                             }
                         }
                         AppToStudio::WidgetTreeDump(dump_response) => {
-                            self.handle_terminal_widget_tree_dump_response(build_id, dump_response);
+                            self.handle_terminal_widget_tree_dump_response(
+                                build_id,
+                                dump_response,
+                            );
                         }
                         AppToStudio::EventSample(sample) => {
                             if self.profiler_running {
@@ -2395,54 +2254,7 @@ impl BuildManager {
                             // alright now what do we do
                             cx.action(AppAction::SwapSelection(ss));
                         }
-                        AppToStudio::DesignerComponentMoved(mv) => {
-                            self.designer_state.get_build_storage(build_id, |bs| {
-                                if let Some(v) =
-                                    bs.component_positions.iter_mut().find(|v| v.id == mv.id)
-                                {
-                                    *v = mv;
-                                } else {
-                                    bs.component_positions.push(mv);
-                                }
-                            });
-                            self.designer_state.save_state();
-                        }
-                        AppToStudio::DesignerZoomPan(zp) => {
-                            self.designer_state.get_build_storage(build_id, |bs| {
-                                bs.zoom_pan = zp;
-                            });
-                            self.designer_state.save_state();
-                        }
-                        AppToStudio::DesignerStarted => {
-                            // send the app the select file init message
-                            if let Ok(d) = self.active_build_websockets.lock() {
-                                if let Some(bs) = self.designer_state.state.get(&build_id) {
-                                    let data = StudioToAppVec(vec![
-                                        StudioToApp::DesignerLoadState {
-                                            zoom_pan: bs.zoom_pan.clone(),
-                                            positions: bs.component_positions.clone(),
-                                        },
-                                        StudioToApp::DesignerSelectFile {
-                                            file_name: bs.selected_file.clone(),
-                                        },
-                                    ])
-                                    .serialize_bin();
-
-                                    for socket in d.borrow_mut().sockets.iter_mut() {
-                                        if socket.build_id == build_id {
-                                            let _ = socket.sender.send(data.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        AppToStudio::DesignerFileSelected { file_name } => {
-                            // alright now what. lets
-                            self.designer_state.get_build_storage(build_id, |bs| {
-                                bs.selected_file = file_name;
-                            });
-                            self.designer_state.save_state();
-                        }
+                        _ => {}
                     }
                 }
             }
@@ -2509,7 +2321,7 @@ impl BuildManager {
                         cx.action(AppAction::RedrawLog)
                         //editor_state.messages.push(wrap.msg);
                     }
-                    BuildClientMessage::LogItem(LogItem::StdinToHost(line)) => {
+                    BuildClientMessage::LogItem(LogItem::AppToStudio(line)) => {
                         // stdin-loop control traffic moved to websocket messages.
                         // Any stdout lines in this channel are plain log output.
                         let line = line.trim();

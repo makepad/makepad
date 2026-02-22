@@ -5,9 +5,10 @@ use crate::makepad_widgets::*;
 use makepad_terminal_core::{Color, CursorShape, Pty, StyleFlags, TermKeyCode, Terminal};
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 script_mod! {
@@ -93,6 +94,16 @@ script_mod! {
         draw_cursor +: {
         }
     }
+}
+
+static TERMINAL_START_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_terminal_start_dir(path: PathBuf) {
+    let _ = TERMINAL_START_DIR.set(path);
+}
+
+fn terminal_start_dir() -> Option<PathBuf> {
+    TERMINAL_START_DIR.get().cloned()
 }
 
 #[derive(Script, ScriptHook)]
@@ -1053,6 +1064,7 @@ impl StudioTerminal {
         self.pty_spawn_rx = Some(rx);
         self.pty_spawn_in_flight = true;
 
+        let start_dir = terminal_start_dir();
         if std::thread::Builder::new()
             .name("studio-pty-spawn".to_string())
             .spawn(move || {
@@ -1061,7 +1073,7 @@ impl StudioTerminal {
                     ("TERM_PROGRAM", "makepad-studio"),
                     ("TERM_PROGRAM_VERSION", "0.1"),
                 ];
-                let _ = tx.send(Pty::spawn(80, 24, None, &child_env));
+                let _ = tx.send(Pty::spawn(80, 24, None, &child_env, start_dir.as_deref()));
             })
             .is_err()
         {

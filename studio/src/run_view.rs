@@ -1,5 +1,8 @@
 use crate::{
-    app::AppData, build_manager::build_manager::BuildManager, makepad_platform::os::cx_stdin::*,
+    app::AppData,
+    build_manager::build_manager::BuildManager,
+    makepad_platform::os::shared_framebuf::*,
+    makepad_platform::studio::StudioToApp,
     makepad_widgets::*,
 };
 
@@ -119,7 +122,7 @@ impl RunView {
             // (or the previous one, before any draws on the current one),
             // and look them up by their unique IDs, to avoid rendering
             // different textures than the ones the client just drew to.
-            let mut try_present_through = |swapchain: &Option<cx_stdin::HostSwapchain>| {
+            let mut try_present_through = |swapchain: &Option<shared_framebuf::HostSwapchain>| {
                 let swapchain = swapchain.as_ref()?;
                 let drawn = swapchain.get_image(presentable_draw.target_id)?;
 
@@ -246,7 +249,7 @@ impl RunView {
         if self.last_rect != rect {
             manager.send_host_to_stdin(
                 run_view_id,
-                HostToStdin::WindowGeomChange {
+                StudioToApp::WindowGeomChange {
                     window_id: self.window_id,
                     dpi_factor,
                     left: rect.pos.x,
@@ -329,25 +332,25 @@ impl RunView {
                 );
 
                 let swapchain = v.swapchain_mut(self.window_id).get_or_insert_with(|| {
-                    cx_stdin::HostSwapchain::new(self.window_id, alloc_width, alloc_height, cx)
+                    shared_framebuf::HostSwapchain::new(self.window_id, alloc_width, alloc_height, cx)
                 });
 
                 // Create shared swapchain for cross-process serialization
                 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-                let shared_swapchain = match cx_stdin::SharedSwapchain::from_host_swapchain(
+                let shared_swapchain = match shared_framebuf::SharedSwapchain::from_host_swapchain(
                     swapchain,
                     cx,
                     &aux_chan_host_endpoint,
                 ) {
                     Ok(shared_swapchain) => shared_swapchain,
-                    Err(cx_stdin::SharedSwapchainCreateError::AuxChannelSend(err)) => {
+                    Err(shared_framebuf::SharedSwapchainCreateError::AuxChannelSend(err)) => {
                         crate::error!(
                             "Linux RunView aux channel send failed: {err:?}; disabling shared texture path"
                         );
                         v.aux_chan_host_endpoint = None;
                         return;
                     }
-                    Err(cx_stdin::SharedSwapchainCreateError::SoftwareFallback(err)) => {
+                    Err(shared_framebuf::SharedSwapchainCreateError::SoftwareFallback(err)) => {
                         crate::error!("Linux RunView software fallback setup failed: {err:?}");
                         v.aux_chan_host_endpoint = None;
                         return;
@@ -355,10 +358,10 @@ impl RunView {
                 };
                 #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
                 let shared_swapchain =
-                    cx_stdin::SharedSwapchain::from_host_swapchain(swapchain, cx);
+                    shared_framebuf::SharedSwapchain::from_host_swapchain(swapchain, cx);
 
                 // Inform the client about the new swapchain it *should* use
-                manager.send_host_to_stdin(run_view_id, HostToStdin::Swapchain(shared_swapchain));
+                manager.send_host_to_stdin(run_view_id, StudioToApp::Swapchain(shared_swapchain));
             }
         }
         self.last_rect = rect;
@@ -399,19 +402,19 @@ impl Widget for RunView {
                 cx.set_key_focus(self.draw_app.area());
             }
             Hit::TextInput(e) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::TextInput(e));
+                manager.send_host_to_stdin(run_view_id, StudioToApp::TextInput(e));
             }
             Hit::KeyDown(e) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyDown(e));
+                manager.send_host_to_stdin(run_view_id, StudioToApp::KeyDown(e));
             }
             Hit::KeyUp(e) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::KeyUp(e));
+                manager.send_host_to_stdin(run_view_id, StudioToApp::KeyUp(e));
             }
             Hit::TextCopy(_) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::TextCopy);
+                manager.send_host_to_stdin(run_view_id, StudioToApp::TextCopy);
             }
             Hit::TextCut(_) => {
-                manager.send_host_to_stdin(run_view_id, HostToStdin::TextCut);
+                manager.send_host_to_stdin(run_view_id, StudioToApp::TextCut);
             }
             _ => (),
         }

@@ -12,7 +12,7 @@ use {
         event::*,
         makepad_math::Vec2d,
         opengl_cx::OpenglCx,
-        os::cx_stdin::{LinuxOwnedImage, LinuxOwnedImagePlane},
+        os::shared_framebuf::{LinuxOwnedImage, LinuxOwnedImagePlane},
         texture::{CxTexture, Texture},
         window::WindowId,
     },

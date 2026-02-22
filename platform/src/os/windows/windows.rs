@@ -572,5 +572,5 @@ pub struct CxOs {
     pub(crate) network_response: NetworkResponseChannel,
     pub(crate) game_input_events: GameInputEventChannel,
     pub(crate) windows_game_input: Option<WindowsGameInput>,
-    //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
+    //pub (crate) new_frame_being_rendered: Option<crate::shared_framebuf::PresentableDraw>,
 }

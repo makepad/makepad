@@ -1,18 +1,10 @@
 #![allow(dead_code)]
 use {
     crate::{
-        area::Area,
-        cursor::MouseCursor,
         cx::Cx,
-        event::{
-            KeyEvent, KeyModifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-            ScrollEvent, TextInputEvent, TimerEvent,
-        },
-        makepad_math::{dvec2, Vec2d},
+        event::TimerEvent,
         makepad_micro_serde::*,
-        window::WindowId,
     },
-    std::cell::Cell,
     std::collections::HashMap,
 };
 
@@ -970,166 +962,7 @@ pub mod aux_chan {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinKeyModifiers {
-    pub shift: bool,
-    pub control: bool,
-    pub alt: bool,
-    pub logo: bool,
-}
-
-impl StdinKeyModifiers {
-    pub fn into_key_modifiers(&self) -> KeyModifiers {
-        KeyModifiers {
-            shift: self.shift,
-            control: self.control,
-            alt: self.alt,
-            logo: self.logo,
-        }
-    }
-    pub fn from_key_modifiers(km: &KeyModifiers) -> Self {
-        Self {
-            shift: km.shift,
-            control: km.control,
-            alt: km.alt,
-            logo: km.logo,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinMouseDown {
-    pub button_raw_bits: u32,
-    pub x: f64,
-    pub y: f64,
-    pub time: f64,
-    pub modifiers: StdinKeyModifiers,
-}
-
-impl StdinMouseDown {
-    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseDownEvent {
-        MouseDownEvent {
-            abs: dvec2(self.x - pos.x, self.y - pos.y),
-            button: MouseButton::from_bits_retain(self.button_raw_bits),
-            window_id,
-            modifiers: self.modifiers.into_key_modifiers(),
-            time: self.time,
-            handled: Cell::new(Area::Empty),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinMouseMove {
-    pub time: f64,
-    pub x: f64,
-    pub y: f64,
-    pub modifiers: StdinKeyModifiers,
-}
-
-impl StdinMouseMove {
-    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseMoveEvent {
-        MouseMoveEvent {
-            abs: dvec2(self.x - pos.x, self.y - pos.y),
-            window_id,
-            modifiers: self.modifiers.into_key_modifiers(),
-            time: self.time,
-            handled: Cell::new(Area::Empty),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinMouseUp {
-    pub time: f64,
-    pub button_raw_bits: u32,
-    pub x: f64,
-    pub y: f64,
-    pub modifiers: StdinKeyModifiers,
-}
-
-#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinTextInput {
-    pub time: f64,
-    pub window_id: usize,
-    pub raw_button: usize,
-    pub x: f64,
-    pub y: f64,
-}
-
-impl StdinMouseUp {
-    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseUpEvent {
-        MouseUpEvent {
-            abs: dvec2(self.x - pos.x, self.y - pos.y),
-            button: MouseButton::from_bits_retain(self.button_raw_bits),
-            window_id,
-            modifiers: self.modifiers.into_key_modifiers(),
-            time: self.time,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinScroll {
-    pub time: f64,
-    pub sx: f64,
-    pub sy: f64,
-    pub x: f64,
-    pub y: f64,
-    pub is_mouse: bool,
-    pub modifiers: StdinKeyModifiers,
-}
-
-impl StdinScroll {
-    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> ScrollEvent {
-        ScrollEvent {
-            abs: dvec2(self.x - pos.x, self.y - pos.y),
-            scroll: dvec2(self.sx, self.sy),
-            window_id,
-            modifiers: self.modifiers.into_key_modifiers(),
-            handled_x: Cell::new(false),
-            handled_y: Cell::new(false),
-            is_mouse: self.is_mouse,
-            time: self.time,
-        }
-    }
-}
-
-#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum HostToStdin {
-    Swapchain(SharedSwapchain),
-    WindowGeomChange {
-        dpi_factor: f64,
-        window_id: usize,
-        // HACK(eddyb) `DVec` (like `WindowGeom`'s `inner_size` field) can't
-        // be used here due to it not implementing (de)serialization traits.
-        left: f64,
-        top: f64,
-        width: f64,
-        height: f64,
-    },
-    Tick,
-    /*
-    Tick{
-        buffer_id: u64,
-        frame: u64,
-        time: f64,
-    },
-    */
-    MouseDown(StdinMouseDown),
-    MouseUp(StdinMouseUp),
-    MouseMove(StdinMouseMove),
-    KeyDown(KeyEvent),
-    KeyUp(KeyEvent),
-    TextInput(TextInputEvent),
-    TextCopy,
-    TextCut,
-    Scroll(StdinScroll),
-    /*ReloadFile{
-        file:String,
-        contents:String
-    },*/
-}
+pub use crate::studio::{AppToStudio, StudioToApp};
 
 /// After a successful client-side draw, all the host needs to know, so it can
 /// present the result, is the swapchain image used, and the sub-area within
@@ -1158,44 +991,6 @@ impl WindowKindId {
             2 => Self::Outline,
             _ => panic!(),
         }
-    }
-}
-
-#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum StdinToHost {
-    CreateWindow {
-        window_id: usize,
-        kind_id: usize,
-    },
-    ReadyToStart,
-    RequestAnimationFrame,
-    SetCursor(MouseCursor),
-    SetClipboard(String),
-    // the client is done drawing, and the texture is completely updated
-    DrawCompleteAndFlip(PresentableDraw),
-    // headless backend emits PNG snapshots through this message.
-    PngFrame {
-        window_id: usize,
-        path: String,
-        width: u32,
-        height: u32,
-        frame_id: u64,
-    },
-}
-
-impl StdinToHost {
-    pub fn to_json(&self) -> String {
-        let mut json = self.serialize_json();
-        json.push('\n');
-        json
-    }
-}
-
-impl HostToStdin {
-    pub fn to_json(&self) -> String {
-        let mut json = self.serialize_json();
-        json.push('\n');
-        json
     }
 }
 
