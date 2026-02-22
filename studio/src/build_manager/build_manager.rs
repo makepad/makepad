@@ -333,8 +333,21 @@ pub enum BuildManagerAction {
         build_id: LiveId,
         msg: AppToStudio,
     },
+    AiClickViz {
+        build_id: LiveId,
+        x: f64,
+        y: f64,
+        phase: AiClickVizPhase,
+    },
     #[default]
     None,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AiClickVizPhase {
+    #[default]
+    Down,
+    Up,
 }
 
 // Cross-platform
@@ -773,7 +786,7 @@ impl BuildManager {
                         .get(&build_id)
                         .copied()
                         .unwrap_or(1.0);
-                    return Some((rect.pos.x * dpi, rect.pos.y * dpi, dpi.max(1.0)));
+                    return Some((rect.pos.x, rect.pos.y, dpi.max(1.0)));
                 }
             }
         }
@@ -1331,6 +1344,19 @@ impl BuildManager {
                 auto_dump,
             } => {
                 let build_id = LiveId(build_id);
+                let origin = self.terminal_origin_for_build(cx, build_id);
+                let draw_adjusted = if let Some((ox, oy, dpi)) = origin {
+                    let dpi = dpi.max(1.0);
+                    (((x as f64) + ox) / dpi, ((y as f64) + oy) / dpi)
+                } else {
+                    (x as f64, y as f64)
+                };
+                cx.action(BuildManagerAction::AiClickViz {
+                    build_id,
+                    x: draw_adjusted.0,
+                    y: draw_adjusted.1,
+                    phase: AiClickVizPhase::Down,
+                });
                 let button_raw_bits = button.unwrap_or(1);
                 let auto_dump = auto_dump.unwrap_or(false);
                 let now = Self::terminal_now();
@@ -1381,6 +1407,12 @@ impl BuildManager {
                         break;
                     }
                 }
+                cx.action(BuildManagerAction::AiClickViz {
+                    build_id,
+                    x: draw_adjusted.0,
+                    y: draw_adjusted.1,
+                    phase: AiClickVizPhase::Up,
+                });
             }
             StudioTerminalRequest::Screenshot { build_id, kind_id } => {
                 let build_id = LiveId(build_id);
