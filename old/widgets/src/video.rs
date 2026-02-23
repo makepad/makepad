@@ -124,7 +124,7 @@ pub struct Video {
     video_texture: Option<Texture>,
     #[rust]
     video_texture_handle: Option<u32>,
-    /// Requires [`show_thumbnail_before_playback`] to be `true`.
+    /// Requires [`show_idle_thumbnail`] to be `true`.
     #[live]
     thumbnail_source: Option<LiveDependency>,
     #[rust]
@@ -147,7 +147,7 @@ pub struct Video {
     audio_state: AudioState,
     /// Whether to show the provided thumbnail when the video has not yet started playing.
     #[live(false)]
-    show_thumbnail_before_playback: bool,
+    show_idle_thumbnail: bool,
 
     // Actions
     #[rust(false)]
@@ -364,7 +364,7 @@ impl LiveHook for Video {
         self.draw_bg
             .set_uniform(cx, ids!(target_size), &[target_w as f32, target_h as f32]);
 
-        if self.show_thumbnail_before_playback {
+        if self.show_idle_thumbnail {
             self.load_thumbnail_image(cx);
             self.draw_bg.set_uniform(cx, ids!(show_thumbnail), &[1.0]);
         }

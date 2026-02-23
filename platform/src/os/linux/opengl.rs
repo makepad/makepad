@@ -2296,7 +2296,9 @@ impl CxTexture {
                         ptr::null(),
                     );
                 },
-                _ => panic!(),
+                _ => {
+                    crate::error!("Unsupported texture pixel format for OpenGL render target allocation");
+                },
             }
             unsafe {
                 (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);

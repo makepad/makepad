@@ -18,6 +18,8 @@ mod apple_resources;
 pub mod apple_classes;
 pub mod apple_game_input;
 pub mod apple_media;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod apple_video_playback;
 #[cfg(target_os = "macos")]
 pub mod audio_tap;
 pub mod audio_unit;

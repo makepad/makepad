@@ -227,6 +227,7 @@ pub const kCMVideoCodecType_JPEG_OpenDML: u32 = four_char_as_u32("dmb1");
 pub const kCMPixelFormat_8IndexedGray_WhiteIsZero: u32 = 0x00000028;
 pub const kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange: u32 = four_char_as_u32("420v");
 pub const kCVPixelFormatType_420YpCbCr8BiPlanarFullRange: u32 = four_char_as_u32("420f");
+pub const kCVPixelFormatType_32BGRA: u32 = four_char_as_u32("BGRA");
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -269,6 +270,8 @@ pub type CVImageBufferRef = CVBufferRef;
 pub type CVPixelBufferRef = CVImageBufferRef;
 pub type CVPixelBufferLockFlags = u64;
 pub type CVReturn = i32;
+pub type CVMetalTextureCacheRef = *mut c_void;
+pub type CVMetalTextureRef = *mut c_void;
 
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {
@@ -277,6 +280,8 @@ extern "C" {
     ) -> CMVideoDimensions;
     pub fn CMFormatDescriptionGetMediaSubType(desc: CMFormatDescriptionRef) -> u32;
     pub fn CMSampleBufferGetImageBuffer(sbuf: CMSampleBufferRef) -> CVImageBufferRef;
+    pub fn CMTimeMakeWithSeconds(seconds: f64, preferredTimescale: i32) -> CMTime;
+    pub fn CMTimeGetSeconds(time: CMTime) -> f64;
 }
 
 #[link(name = "CoreVideo", kind = "framework")]
@@ -298,6 +303,30 @@ extern "C" {
     pub fn CVPixelBufferGetHeight(pixelBuffer: CVPixelBufferRef) -> usize;
     pub fn CVPixelBufferGetBytesPerRow(pixelBuffer: CVPixelBufferRef) -> usize;
     pub fn CVPixelBufferIsPlanar(pixelBuffer: CVPixelBufferRef) -> bool;
+
+    pub fn CVMetalTextureCacheCreate(
+        allocator: *mut c_void,
+        cacheAttributes: *mut c_void,
+        metalDevice: ObjcId,
+        textureAttributes: *mut c_void,
+        cacheOut: *mut CVMetalTextureCacheRef,
+    ) -> CVReturn;
+
+    pub fn CVMetalTextureCacheCreateTextureFromImage(
+        allocator: *mut c_void,
+        textureCache: CVMetalTextureCacheRef,
+        sourceImage: CVImageBufferRef,
+        textureAttributes: *mut c_void,
+        pixelFormat: u64,
+        width: usize,
+        height: usize,
+        planeIndex: usize,
+        textureOut: *mut CVMetalTextureRef,
+    ) -> CVReturn;
+
+    pub fn CVMetalTextureGetTexture(texture: CVMetalTextureRef) -> ObjcId;
+
+    pub fn CVMetalTextureCacheFlush(textureCache: CVMetalTextureCacheRef, options: u64);
 }
 
 // Foundation
@@ -1394,7 +1423,7 @@ extern "C" {
     pub fn IOSurfaceDecrementUseCount(surface: IOSurfaceRef);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     pub fn CFRelease(cf: *const c_void);
