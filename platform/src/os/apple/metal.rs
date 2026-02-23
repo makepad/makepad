@@ -20,6 +20,12 @@ use {
         texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel},
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
+    makepad_zune_png::{
+        makepad_zune_core::{
+            bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions,
+        },
+        PngEncoder,
+    },
     std::collections::HashMap,
     std::fmt::Write,
     std::sync::atomic::{AtomicUsize, Ordering},
@@ -61,6 +67,33 @@ static METAL_GPU_TIMELINE_SYNC: Mutex<Option<MetalGpuTimelineSync>> = Mutex::new
 static METAL_GPU_FRAME_RANGES: Mutex<Option<HashMap<u64, (f64, f64)>>> = Mutex::new(None);
 static METAL_GPU_FRAME_COUNTERS: Mutex<Option<HashMap<u64, GpuSampleCounters>>> =
     Mutex::new(None);
+
+fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "metal screenshot size overflow".to_string())?;
+    if rgba.len() != expected {
+        return Err(format!(
+            "metal screenshot expected {} RGBA bytes, got {}",
+            expected,
+            rgba.len()
+        ));
+    }
+
+    let options = EncoderOptions::default()
+        .set_width(width as usize)
+        .set_height(height as usize)
+        .set_depth(BitDepth::Eight)
+        .set_colorspace(ColorSpace::RGBA);
+
+    let mut encoder = PngEncoder::new(rgba, options);
+    let mut out = Vec::new();
+    encoder
+        .encode(&mut out)
+        .map_err(|err| format!("metal screenshot png encode failed: {err:?}"))?;
+    Ok(out)
+}
 
 fn map_metal_gpu_times_to_app_timeline(
     raw_start: f64,
@@ -963,15 +996,14 @@ impl Cx {
                 addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
                     // alright lets grab a texture if need be
                     if let Some(sf) = &*screenshot_info.lock().unwrap(){
-                        let mut buf = Vec::new();
-                        buf.resize(sf.width * sf.height * 4, 0u8);
+                        let mut bgra = vec![0u8; sf.width * sf.height * 4];
                         let region = MTLRegion {
                             origin: MTLOrigin {x: 0, y: 0, z: 0},
                             size: MTLSize {width: sf.width as u64, height: sf.height as u64, depth: 1}
                         };
                         let _:() = unsafe{msg_send![
                             sf.texture,
-                            getBytes: buf.as_ptr()
+                            getBytes: bgra.as_mut_ptr()
                             bytesPerRow: sf.width *4
                             bytesPerImage: sf.width * sf.height * 4
                             fromRegion: region
@@ -979,11 +1011,24 @@ impl Cx {
                             slice: 0
                         ]};
                         let () = msg_send![sf.texture, release];
+
+                        // Metal readback for BGRA8 textures returns BGRA bytes. Convert to RGBA
+                        // before PNG encoding so AppToStudio::Screenshot always transports PNG bytes.
+                        for px in bgra.chunks_exact_mut(4) {
+                            px.swap(0, 2);
+                        }
+                        let png = match encode_png_rgba(sf.width as u32, sf.height as u32, &bgra) {
+                            Ok(png) => png,
+                            Err(err) => {
+                                crate::error!("{}", err);
+                                Vec::new()
+                            }
+                        };
                         Cx::send_studio_screenshot_response(
                             sf.request_ids.clone(),
                             sf.width as _,
                             sf.height as _,
-                            buf,
+                            png,
                         );
                     }
 
