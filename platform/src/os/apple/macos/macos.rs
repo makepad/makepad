@@ -662,6 +662,20 @@ impl Cx {
                         metal_window.cocoa_window.hide();
                     }
                 }
+                CxOsOp::HideWindowButtons(window_id) => {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        metal_window.cocoa_window.set_window_buttons_visible(false);
+                    }
+                }
+                CxOsOp::ShowWindowButtons(window_id) => {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        metal_window.cocoa_window.set_window_buttons_visible(true);
+                    }
+                }
                 CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(self).pos + pos;
                     metal_windows.iter_mut().for_each(|w| {
