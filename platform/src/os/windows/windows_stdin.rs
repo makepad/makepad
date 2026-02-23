@@ -254,15 +254,15 @@ impl Cx {
             }
             StudioToApp::WindowGeomChange {
                 dpi_factor,
-                left,
-                top,
+                left: _left,
+                top: _top,
                 width,
                 height,
                 window_id,
             } => {
                 self.windows[CxWindowPool::from_usize(window_id)].window_geom = WindowGeom {
                     dpi_factor,
-                    position: dvec2(left, top),
+                    position: dvec2(0.0, 0.0),
                     inner_size: dvec2(width, height),
                     ..Default::default()
                 };

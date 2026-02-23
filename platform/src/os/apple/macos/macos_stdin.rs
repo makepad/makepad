@@ -250,8 +250,8 @@ impl Cx {
             }
             StudioToApp::WindowGeomChange {
                 dpi_factor,
-                left,
-                top,
+                left: _left,
+                top: _top,
                 width,
                 height,
                 window_id,
@@ -260,7 +260,7 @@ impl Cx {
                 if self.windows.is_valid(window_id) {
                     let old_geom = self.windows[window_id].window_geom.clone();
                     let new_geom = WindowGeom {
-                        position: dvec2(left, top),
+                        position: dvec2(0.0, 0.0),
                         dpi_factor,
                         inner_size: dvec2(width, height),
                         ..Default::default()
