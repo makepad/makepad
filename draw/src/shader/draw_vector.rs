@@ -46,18 +46,20 @@ script_mod! {
             let shifted = pos + self.draw_list.view_shift;
             self.v_world = shifted;
 
-            // Early clip rejection: merge both clip rects (in local space), single check
+            // Early clip rejection in local space.
             let cr = self.geom.clip_radius;
-            let clip = vec4(
-                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
-                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
-                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
-                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
-            );
-            if pos.x + cr < clip.x || pos.y + cr < clip.y
-                || pos.x - cr > clip.z || pos.y - cr > clip.w {
-                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
-                return
+            if cr > 0.0 {
+                let clip = vec4(
+                    max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                    max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                    min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                    min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+                );
+                if pos.x + cr < clip.x || pos.y + cr < clip.y
+                    || pos.x - cr > clip.z || pos.y - cr > clip.w {
+                    self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
+                    return
+                }
             }
 
             let world = self.draw_list.view_transform * vec4(
