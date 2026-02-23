@@ -4,8 +4,7 @@ use {
         cx_api::{CxOsApi, CxOsOp},
         draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
         event::Event,
-        event::{TextClipboardEvent, WindowGeom, WindowGeomChangeEvent},
-        makepad_live_id::*,
+        event::{WindowGeom, WindowGeomChangeEvent},
         makepad_math::*,
         makepad_micro_serde::*,
         os::{
@@ -18,7 +17,7 @@ use {
         web_socket::WebSocketMessage,
         window::CxWindowPool,
     },
-    std::{cell::RefCell, rc::Rc},
+
 };
 
 /// Local swapchain for client-side texture management
@@ -178,52 +177,20 @@ impl Cx {
         stdin_windows: &mut Vec<StdinWindow>,
     ) -> bool {
         match msg {
-            StudioToApp::KeyDown(e) => {
-                self.call_event_handler(&Event::KeyDown(e));
-            }
-            StudioToApp::KeyUp(e) => {
-                self.call_event_handler(&Event::KeyUp(e));
-            }
-            StudioToApp::TextInput(e) => {
-                self.call_event_handler(&Event::TextInput(e));
-            }
-            StudioToApp::TextCopy => {
-                let response = Rc::new(RefCell::new(None));
-                self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
-                    response: response.clone(),
-                }));
-                let text = response.borrow().clone();
-                if let Some(text) = text {
-                    Self::stdin_send_to_host(AppToStudio::SetClipboard(text));
-                }
-            }
-            StudioToApp::TextCut => {
-                let response = Rc::new(RefCell::new(None));
-                self.call_event_handler(&Event::TextCut(TextClipboardEvent {
-                    response: response.clone(),
-                }));
-                let text = response.borrow().clone();
-                if let Some(text) = text {
-                    Self::stdin_send_to_host(AppToStudio::SetClipboard(text));
-                }
-            }
-            StudioToApp::MouseDown(e) => {
-                self.fingers.process_tap_count(dvec2(e.x, e.y), e.time);
+            // Mouse events: resolve window_id from coordinates (stdin mode
+            // supports multiple virtual windows).
+            StudioToApp::MouseDown(ref e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
-                let mouse_down_event = e.into_event(window_id, pos);
-                self.fingers.mouse_down(mouse_down_event.button, window_id);
-                self.call_event_handler(&Event::MouseDown(mouse_down_event));
+                return self.dispatch_studio_msg(msg, window_id, pos);
             }
-            StudioToApp::MouseMove(e) => {
+            StudioToApp::MouseMove(ref e) => {
                 let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button
                 {
                     (window_id, self.windows[window_id].window_geom.position)
                 } else {
                     self.windows.window_id_contains(dvec2(e.x, e.y))
                 };
-                self.call_event_handler(&Event::MouseMove(e.into_event(window_id, pos)));
-                self.fingers.cycle_hover_area(live_id!(mouse).into());
-                self.fingers.switch_captures();
+                return self.dispatch_studio_msg(msg, window_id, pos);
             }
             StudioToApp::TweakRay(e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
@@ -231,23 +198,20 @@ impl Cx {
                 let tweak_ray = e.into_event(window_id, pos, dpi_factor);
                 self.call_event_handler(&Event::TweakRay(tweak_ray));
             }
-            StudioToApp::MouseUp(e) => {
+            StudioToApp::MouseUp(ref e) => {
                 let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button
                 {
                     (window_id, self.windows[window_id].window_geom.position)
                 } else {
                     self.windows.window_id_contains(dvec2(e.x, e.y))
                 };
-                let mouse_up_event = e.into_event(window_id, pos);
-                let button = mouse_up_event.button;
-                self.call_event_handler(&Event::MouseUp(mouse_up_event));
-                self.fingers.mouse_up(button);
-                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                return self.dispatch_studio_msg(msg, window_id, pos);
             }
-            StudioToApp::Scroll(e) => {
+            StudioToApp::Scroll(ref e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
-                self.call_event_handler(&Event::Scroll(e.into_event(window_id, pos)));
+                return self.dispatch_studio_msg(msg, window_id, pos);
             }
+            // Stdin-specific: window geometry and swapchain management.
             StudioToApp::WindowGeomChange {
                 dpi_factor,
                 left: _left,
@@ -374,19 +338,14 @@ impl Cx {
                     Self::stdin_send_to_host(AppToStudio::RequestAnimationFrame);
                 }
             }
-            StudioToApp::Screenshot(request) => {
-                self.screenshot_requests.push(request);
-            }
-            StudioToApp::WidgetTreeDump(request) => {
-                self.send_studio_widget_tree_dump_response(request.request_id);
-            }
-            StudioToApp::KeepAlive => {}
-            StudioToApp::Kill => {
-                self.call_event_handler(&Event::Shutdown);
-                return true;
-            }
-            other @ (StudioToApp::LiveChange { .. } | StudioToApp::None) => {
-                self.action(other);
+            // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
+            // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.
+            other => {
+                return self.dispatch_studio_msg(
+                    other,
+                    CxWindowPool::id_zero(),
+                    dvec2(0.0, 0.0),
+                );
             }
         }
         false

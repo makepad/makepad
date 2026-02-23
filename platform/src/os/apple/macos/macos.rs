@@ -318,6 +318,7 @@ impl Cx {
                         self.handle_action_receiver();
                         needs_timer = true;
                     }
+                    self.poll_control_channel();
 
                     if self.any_passes_dirty()
                         || self.need_redrawing()
