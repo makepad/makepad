@@ -3,12 +3,19 @@ use {
         cx::Cx,
         cx_api::CxOsApi,
         draw_pass::{CxDrawPassParent, DrawPassId},
-        event::{DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TimerEvent, TriggerEvent},
+        event::{
+            DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TextClipboardEvent, TimerEvent,
+            TriggerEvent,
+        },
+        makepad_live_id::{live_id, LiveId},
         studio::{
-            AppToStudio, EventSample, ScreenshotResponse, WidgetTreeDumpResponse,
+            AppToStudio, EventSample, ScreenshotResponse, StudioToApp,
+            WidgetTreeDumpResponse,
         },
     },
+    std::cell::RefCell,
     std::collections::{HashMap, HashSet},
+    std::rc::Rc,
 };
 
 impl Cx {
@@ -186,6 +193,142 @@ impl Cx {
                 dump: dump.clone(),
             }));
         }
+    }
+
+    /// Dispatch a StudioToApp message as an event. Handles input, clipboard,
+    /// screenshot, widget dump, and kill. Returns true on Kill (caller should
+    /// shut down). Callers handle stdin-specific variants (Swapchain,
+    /// WindowGeomChange, Tick) before delegating here.
+    pub fn dispatch_studio_msg(
+        &mut self,
+        msg: StudioToApp,
+        window_id: crate::window::WindowId,
+        pos: crate::makepad_math::DVec2,
+    ) -> bool {
+        match msg {
+            StudioToApp::MouseDown(e) => {
+                let event = e.into_event(window_id, pos);
+                self.fingers.process_tap_count(event.abs, event.time);
+                self.fingers.mouse_down(event.button, window_id);
+                self.call_event_handler(&Event::MouseDown(event));
+            }
+            StudioToApp::MouseMove(e) => {
+                self.call_event_handler(&Event::MouseMove(e.into_event(window_id, pos)));
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.fingers.switch_captures();
+            }
+            StudioToApp::MouseUp(e) => {
+                let event = e.into_event(window_id, pos);
+                let button = event.button;
+                self.call_event_handler(&Event::MouseUp(event));
+                self.fingers.mouse_up(button);
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+            }
+            StudioToApp::Scroll(e) => {
+                self.call_event_handler(&Event::Scroll(e.into_event(window_id, pos)));
+            }
+            StudioToApp::KeyDown(e) => {
+                self.keyboard.process_key_down(e.clone());
+                self.call_event_handler(&Event::KeyDown(e));
+            }
+            StudioToApp::KeyUp(e) => {
+                self.keyboard.process_key_up(e.clone());
+                self.call_event_handler(&Event::KeyUp(e));
+            }
+            StudioToApp::TextInput(e) => {
+                self.call_event_handler(&Event::TextInput(e));
+            }
+            StudioToApp::TextCopy => {
+                let response = Rc::new(RefCell::new(None));
+                self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
+                    response: response.clone(),
+                }));
+                let text = response.borrow().clone();
+                if let Some(text) = text {
+                    Cx::send_studio_message(AppToStudio::SetClipboard(text));
+                }
+            }
+            StudioToApp::TextCut => {
+                let response = Rc::new(RefCell::new(None));
+                self.call_event_handler(&Event::TextCut(TextClipboardEvent {
+                    response: response.clone(),
+                }));
+                let text = response.borrow().clone();
+                if let Some(text) = text {
+                    Cx::send_studio_message(AppToStudio::SetClipboard(text));
+                }
+            }
+            StudioToApp::Screenshot(request) => {
+                self.screenshot_requests.push(request);
+            }
+            StudioToApp::WidgetTreeDump(request) => {
+                self.send_studio_widget_tree_dump_response(request.request_id);
+            }
+            StudioToApp::Kill => {
+                self.call_event_handler(&Event::Shutdown);
+                return true;
+            }
+            StudioToApp::KeepAlive | StudioToApp::None => {}
+            other @ StudioToApp::LiveChange { .. } => {
+                self.action(other);
+            }
+            // Stdin-specific: Tick, Swapchain, WindowGeomChange are handled
+            // by callers before delegating here. In windowed mode they are
+            // no-ops (the native event loop handles them).
+            StudioToApp::Tick
+            | StudioToApp::Swapchain(_)
+            | StudioToApp::WindowGeomChange { .. }
+            | StudioToApp::TweakRay(_) => {}
+        }
+        false
+    }
+
+    /// Drain the global control channel and dispatch each message as an event.
+    /// Must be called from the event loop (not from inside an event handler).
+    pub fn poll_control_channel(&mut self) {
+        use crate::makepad_math::dvec2;
+        use crate::web_socket::CONTROL_CHANNEL;
+        use crate::window::CxWindowPool;
+        let msgs: Vec<StudioToApp> = {
+            let lock = CONTROL_CHANNEL.lock().unwrap();
+            if let Some(rx) = lock.as_ref() {
+                rx.try_iter().collect()
+            } else {
+                return;
+            }
+        };
+        let window_id = CxWindowPool::id_zero();
+        let pos = dvec2(0.0, 0.0);
+        for msg in msgs {
+            self.dispatch_studio_msg(msg, window_id, pos);
+        }
+    }
+
+    // Same logic as headless::raster::encode_png_rgba which is behind
+    // cfg(headless) and unavailable to the windowed backend.
+    #[allow(dead_code)]
+    pub fn encode_rgba_as_png(
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        use makepad_zune_png::{
+            makepad_zune_core::{
+                bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions,
+            },
+            PngEncoder,
+        };
+        let options = EncoderOptions::default()
+            .set_width(width as usize)
+            .set_height(height as usize)
+            .set_depth(BitDepth::Eight)
+            .set_colorspace(ColorSpace::RGBA);
+        let mut encoder = PngEncoder::new(rgba, options);
+        let mut out = Vec::new();
+        encoder
+            .encode(&mut out)
+            .map_err(|err| format!("png encode failed: {err:?}"))?;
+        Ok(out)
     }
 
     // event handler wrappers

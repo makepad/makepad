@@ -175,14 +175,10 @@ impl Cx {
             );
             return;
         }
-        let row_len = width as usize * 4;
-        let mut flipped = vec![0u8; expected_len];
-        for y in 0..height as usize {
-            let src = y * row_len;
-            let dst = (height as usize - 1 - y) * row_len;
-            flipped[dst..dst + row_len].copy_from_slice(&pixels[src..src + row_len]);
-        }
-
+        // Upload pixels without row-flip.  OpenGL FBO content has
+        // bottom-left origin; the RunView shader flips Y when sampling
+        // (via the y_flip instance), keeping both the DMA-buf and
+        // software-fallback paths consistent.
         let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
         opengl_cx.make_current();
 
@@ -205,7 +201,7 @@ impl Cx {
                 height as i32,
                 gl_sys::RGBA,
                 gl_sys::UNSIGNED_BYTE,
-                flipped.as_ptr() as *const c_void,
+                pixels.as_ptr() as *const c_void,
             );
             (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
         }

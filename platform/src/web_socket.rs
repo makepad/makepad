@@ -59,7 +59,10 @@ pub(crate) static WEB_SOCKET_THREAD_SENDER: Mutex<Option<Sender<WebSocketThreadM
     Mutex::new(None);
 pub(crate) static WEB_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HAS_STUDIO_WEB_SOCKET: AtomicBool = AtomicBool::new(false);
+pub(crate) static STUDIO_STDOUT_MODE: AtomicBool = AtomicBool::new(false);
 pub(crate) static LOCAL_PROFILE_CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
+pub(crate) static CONTROL_CHANNEL: Mutex<Option<Receiver<crate::studio::StudioToApp>>> =
+    Mutex::new(None);
 pub(crate) static LOCAL_PROFILE_SAMPLES: Mutex<Vec<LocalProfileSample>> = Mutex::new(Vec::new());
 const LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT: usize = 16_384;
 
@@ -71,6 +74,23 @@ impl Drop for WebSocket {
 impl Cx {
     pub fn has_studio_web_socket() -> bool {
         HAS_STUDIO_WEB_SOCKET.load(Ordering::SeqCst)
+    }
+
+    /// Enable stdout mode for studio messages. When enabled,
+    /// `send_studio_message` writes JSON lines to stdout instead of
+    /// the websocket. Also sets `HAS_STUDIO_WEB_SOCKET` so that
+    /// internal code paths (screenshots, widget dumps, event profiling)
+    /// remain active.
+    pub fn set_studio_stdout_mode(enabled: bool) {
+        STUDIO_STDOUT_MODE.store(enabled, Ordering::SeqCst);
+        HAS_STUDIO_WEB_SOCKET.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Set a control channel for receiving StudioToApp messages.
+    /// Messages are polled by the event loop and dispatched as events.
+    /// The sender should call `SignalToUI::set_ui_signal()` after sending.
+    pub fn set_control_channel(rx: Receiver<crate::studio::StudioToApp>) {
+        *CONTROL_CHANNEL.lock().unwrap() = Some(rx);
     }
 
     pub fn local_profile_capture_enabled() -> bool {
@@ -305,6 +325,12 @@ impl Cx {
 
     pub fn send_studio_message(msg: AppToStudio) {
         Self::capture_local_profile_sample(&msg);
+        if STUDIO_STDOUT_MODE.load(Ordering::SeqCst) {
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(msg.to_json().as_bytes());
+            let _ = std::io::stdout().flush();
+            return;
+        }
         if !Cx::has_studio_web_socket() {
             return;
         }

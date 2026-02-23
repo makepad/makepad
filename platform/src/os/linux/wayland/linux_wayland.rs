@@ -285,6 +285,7 @@ impl WaylandCx {
                     if SignalToUI::check_and_clear_action_signal() {
                         cx.handle_action_receiver();
                     }
+                    cx.poll_control_channel();
                     cx.handle_networking_events();
                 } else {
                     cx.handle_script_timer(&e);
