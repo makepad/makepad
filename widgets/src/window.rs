@@ -1,13 +1,9 @@
-use crate::{
-    desktop_button::DesktopButtonWidgetExt,
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    nav_control::NavControl,
-    view::*,
-    widget::*,
-};
 #[cfg(feature = "voice")]
 use crate::voice_wave::VoiceWaveWidgetExt;
+use crate::{
+    desktop_button::DesktopButtonWidgetExt, makepad_derive_widget::*, makepad_draw::*,
+    nav_control::NavControl, view::*, widget::*,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*

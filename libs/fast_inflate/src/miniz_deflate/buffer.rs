@@ -31,8 +31,7 @@ pub struct HashBuffers {
     pub hash: Box<[u16; LZ_DICT_SIZE]>,
 }
 
-impl HashBuffers {
-}
+impl HashBuffers {}
 
 impl Default for HashBuffers {
     fn default() -> HashBuffers {

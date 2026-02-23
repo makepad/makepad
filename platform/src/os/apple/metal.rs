@@ -21,9 +21,7 @@ use {
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
     makepad_zune_png::{
-        makepad_zune_core::{
-            bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions,
-        },
+        makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},
         PngEncoder,
     },
     std::collections::HashMap,
@@ -65,8 +63,7 @@ impl GpuSampleCounters {
 
 static METAL_GPU_TIMELINE_SYNC: Mutex<Option<MetalGpuTimelineSync>> = Mutex::new(None);
 static METAL_GPU_FRAME_RANGES: Mutex<Option<HashMap<u64, (f64, f64)>>> = Mutex::new(None);
-static METAL_GPU_FRAME_COUNTERS: Mutex<Option<HashMap<u64, GpuSampleCounters>>> =
-    Mutex::new(None);
+static METAL_GPU_FRAME_COUNTERS: Mutex<Option<HashMap<u64, GpuSampleCounters>>> = Mutex::new(None);
 
 fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let expected = (width as usize)
@@ -219,9 +216,9 @@ impl Cx {
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    let instance_bytes =
-                        (draw_item.instances.as_ref().unwrap().len() * std::mem::size_of::<f32>())
-                            as u64;
+                    let instance_bytes = (draw_item.instances.as_ref().unwrap().len()
+                        * std::mem::size_of::<f32>())
+                        as u64;
                     self.os.bytes_written = self
                         .os
                         .bytes_written
@@ -278,10 +275,8 @@ impl Cx {
 
                 if geometry.dirty_vertices || geometry.os.vertex_buffer.inner.is_none() {
                     let bytes = (geometry.vertices.len() * std::mem::size_of::<f32>()) as u64;
-                    self.os.vertex_buffer_bytes_uploaded = self
-                        .os
-                        .vertex_buffer_bytes_uploaded
-                        .saturating_add(bytes);
+                    self.os.vertex_buffer_bytes_uploaded =
+                        self.os.vertex_buffer_bytes_uploaded.saturating_add(bytes);
                     geometry
                         .os
                         .vertex_buffer
@@ -290,10 +285,8 @@ impl Cx {
                 }
                 if geometry.dirty_indices || geometry.os.index_buffer.inner.is_none() {
                     let bytes = (geometry.indices.len() * std::mem::size_of::<u32>()) as u64;
-                    self.os.vertex_buffer_bytes_uploaded = self
-                        .os
-                        .vertex_buffer_bytes_uploaded
-                        .saturating_add(bytes);
+                    self.os.vertex_buffer_bytes_uploaded =
+                        self.os.vertex_buffer_bytes_uploaded.saturating_add(bytes);
                     geometry.os.index_buffer.update(metal_cx, &geometry.indices);
                     geometry.dirty_indices = false;
                 }
@@ -363,8 +356,8 @@ impl Cx {
                     if let Some(id) = shp.pass_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
-                        uniform_bytes_uploaded =
-                            uniform_bytes_uploaded.saturating_add((pass_uniforms.len() * 4 * 2) as u64);
+                        uniform_bytes_uploaded = uniform_bytes_uploaded
+                            .saturating_add((pass_uniforms.len() * 4 * 2) as u64);
                     }
                     if let Some(id) = shp.draw_list_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
@@ -427,10 +420,8 @@ impl Cx {
                         cxtexture.update_shared_texture(metal_cx.device);
                     } else if cxtexture.format.is_vec() {
                         let texture_bytes = cxtexture.update_vec_texture(metal_cx);
-                        self.os.texture_bytes_uploaded = self
-                            .os
-                            .texture_bytes_uploaded
-                            .saturating_add(texture_bytes);
+                        self.os.texture_bytes_uploaded =
+                            self.os.texture_bytes_uploaded.saturating_add(texture_bytes);
                     }
 
                     if let Some(texture) = cxtexture.os.texture.as_ref() {
@@ -735,7 +726,11 @@ impl Cx {
                     unsafe { msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc] };
                 self.passes[draw_pass_id].os.mtl_depth_state_write = Some(depth_stencil_state);
             }
-            if self.passes[draw_pass_id].os.mtl_depth_state_no_write.is_none() {
+            if self.passes[draw_pass_id]
+                .os
+                .mtl_depth_state_no_write
+                .is_none()
+            {
                 let desc: ObjcId = unsafe { msg_send![class!(MTLDepthStencilDescriptor), new] };
                 let () = unsafe {
                     msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]
@@ -804,13 +799,11 @@ impl Cx {
         }
 
         let () = unsafe { msg_send![encoder, endEncoding] };
-        let gpu_frame_group_key = self
-            .get_pass_window_id(draw_pass_id)
-            .map(|window_id| {
-                // Group GPU timing by (window, repaint_id) so we don't merge ranges
-                // across multiple frames that happen to complete out-of-order.
-                (window_id.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.repaint_id
-            });
+        let gpu_frame_group_key = self.get_pass_window_id(draw_pass_id).map(|window_id| {
+            // Group GPU timing by (window, repaint_id) so we don't merge ranges
+            // across multiple frames that happen to complete out-of-order.
+            (window_id.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.repaint_id
+        });
 
         match mode {
             DrawPassMode::MTKView(view) => {
@@ -1197,15 +1190,18 @@ impl Cx {
         width: usize,
         height: usize,
     ) -> (Texture, *mut std::ffi::c_void, u32) {
-        use crate::texture::TextureFormat;
         use crate::shared_framebuf::PresentableImageId;
+        use crate::texture::TextureFormat;
 
-        let texture = Texture::new_with_format(self, TextureFormat::SharedBGRAu8 {
-            width,
-            height,
-            id: PresentableImageId::alloc(),
-            initial: true,
-        });
+        let texture = Texture::new_with_format(
+            self,
+            TextureFormat::SharedBGRAu8 {
+                width,
+                height,
+                id: PresentableImageId::alloc(),
+                initial: true,
+            },
+        );
         let cxtexture = &mut self.textures[texture.texture_id()];
         let iosurface_id = cxtexture.update_shared_texture(self.os.metal_device.unwrap());
         let iosurface_ref = cxtexture.os.iosurface.unwrap_or(std::ptr::null_mut());
@@ -1616,7 +1612,11 @@ impl MetalBuffer {
                 };
                 if !dst.is_null() {
                     unsafe {
-                        std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, dst as *mut u8, len);
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr() as *const u8,
+                            dst as *mut u8,
+                            len,
+                        );
                     }
                     #[cfg(target_os = "macos")]
                     unsafe {
@@ -1966,8 +1966,9 @@ impl CxTexture {
         let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
         let _: () =
             unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
-        let _: () =
-            unsafe { msg_send![descriptor.as_id(), setUsage: (MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64)] };
+        let _: () = unsafe {
+            msg_send![descriptor.as_id(), setUsage: (MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64)]
+        };
         let _: () = unsafe {
             msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]
         };
@@ -2023,8 +2024,9 @@ impl CxTexture {
         let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
         let _: () =
             unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
-        let _: () =
-            unsafe { msg_send![descriptor.as_id(), setUsage: (MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64)] };
+        let _: () = unsafe {
+            msg_send![descriptor.as_id(), setUsage: (MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64)]
+        };
         let _: () =
             unsafe { msg_send![descriptor.as_id(), setPixelFormat: MTLPixelFormat::BGRA8Unorm] };
 

@@ -44,7 +44,11 @@ fn with_studio_build_id(studio_http: String) -> String {
     }
 
     let normalized = studio_http.trim_end_matches('/').to_string();
-    if normalized.rsplit('/').next().is_some_and(|part| part == build_id) {
+    if normalized
+        .rsplit('/')
+        .next()
+        .is_some_and(|part| part == build_id)
+    {
         return normalized;
     }
     if normalized.contains("/$studio_web_socket/") {

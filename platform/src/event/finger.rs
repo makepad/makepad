@@ -12,7 +12,10 @@ use {
         makepad_script::*,
         window::WindowId,
     },
-    std::{cell::{Cell, RefCell}, ops::Deref},
+    std::{
+        cell::{Cell, RefCell},
+        ops::Deref,
+    },
 };
 
 // Mouse events

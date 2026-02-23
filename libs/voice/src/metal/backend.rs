@@ -143,9 +143,7 @@ pub(crate) fn try_flash_attn_f32_cross_kv_cache(
     if !metal_requested() {
         return None;
     }
-    imp::try_flash_attn_f32_cross_kv_cache(
-        layer, q, k_cross, v_cross, n_q, n_kv, n_head, d, scale,
-    )
+    imp::try_flash_attn_f32_cross_kv_cache(layer, q, k_cross, v_cross, n_q, n_kv, n_head, d, scale)
 }
 
 pub(crate) fn try_add_f32(
@@ -363,9 +361,7 @@ pub(crate) fn try_encoder_stack_f32(
     if !metal_requested() {
         return None;
     }
-    imp::try_encoder_stack_f32(
-        x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b,
-    )
+    imp::try_encoder_stack_f32(x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -417,7 +413,14 @@ pub(crate) fn try_decoder_cross_ffn_step_f32(
         return None;
     }
     imp::try_decoder_cross_ffn_step_f32(
-        layer_idx, x, n_state, n_head, k_cross, v_cross, n_audio_ctx, layer,
+        layer_idx,
+        x,
+        n_state,
+        n_head,
+        k_cross,
+        v_cross,
+        n_audio_ctx,
+        layer,
     )
 }
 
@@ -440,7 +443,18 @@ pub(crate) fn try_decoder_self_cross_ffn_step_f32(
         return None;
     }
     imp::try_decoder_self_cross_ffn_step_f32(
-        layer_idx, x, q_self, k_all, v_all, n_kv, n_state, n_head, k_cross, v_cross, n_audio_ctx, layer,
+        layer_idx,
+        x,
+        q_self,
+        k_all,
+        v_all,
+        n_kv,
+        n_state,
+        n_head,
+        k_cross,
+        v_cross,
+        n_audio_ctx,
+        layer,
     )
 }
 
@@ -1482,8 +1496,8 @@ mod imp {
 
     fn flash_attn_vec_smem_bytes(dk: usize, dv: usize, nsg: i32) -> usize {
         let ncpsg = OP_FLASH_ATTN_EXT_VEC_NCPSG as usize;
-        let words = (pad_to(dk, 128) + 4 * ncpsg + 2 * pad_to(dv, 128))
-            .saturating_mul(nsg.max(1) as usize);
+        let words =
+            (pad_to(dk, 128) + 4 * ncpsg + 2 * pad_to(dv, 128)).saturating_mul(nsg.max(1) as usize);
         pad_to(words.saturating_mul(std::mem::size_of::<f32>() / 2), 16)
     }
 
@@ -1770,7 +1784,8 @@ mod imp {
 
             let (has_bfloat, has_tensor) = metal_compile_feature_macros(device);
             if has_bfloat || has_tensor {
-                let prep_obj: ObjcId = unsafe { msg_send![class!(NSMutableDictionary), dictionary] };
+                let prep_obj: ObjcId =
+                    unsafe { msg_send![class!(NSMutableDictionary), dictionary] };
                 if !prep_obj.is_null() {
                     if has_bfloat {
                         let key_obj = str_to_nsstring_owned("GGML_METAL_HAS_BF16");
@@ -1854,11 +1869,16 @@ mod imp {
                     options: MTL_RESOURCE_OPTIONS_STORAGE_MODE_PRIVATE
                 ]
             };
-            unsafe { StrongId::from_owned(obj) }
-                .ok_or_else(|| format!("newBufferWithLength(private) failed for {} bytes", byte_len))
+            unsafe { StrongId::from_owned(obj) }.ok_or_else(|| {
+                format!("newBufferWithLength(private) failed for {} bytes", byte_len)
+            })
         }
 
-        fn get_or_create_scratch_buffer(&mut self, kind: u8, need_bytes: usize) -> Result<ObjcId, String> {
+        fn get_or_create_scratch_buffer(
+            &mut self,
+            kind: u8,
+            need_bytes: usize,
+        ) -> Result<ObjcId, String> {
             let need_bytes = need_bytes.max(1);
             let is_private = matches!(
                 kind,
@@ -1997,7 +2017,11 @@ mod imp {
             Ok(mask_id)
         }
 
-        fn copy_f32_buffer_contents(&self, buffer: ObjcId, elems: usize) -> Result<Vec<f32>, String> {
+        fn copy_f32_buffer_contents(
+            &self,
+            buffer: ObjcId,
+            elems: usize,
+        ) -> Result<Vec<f32>, String> {
             let byte_len = elems
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| "overflow computing f32 copy byte length".to_string())?;
@@ -2300,16 +2324,8 @@ mod imp {
                 unsafe {
                     std::ptr::write_bytes(dst_k, 0u8, total_bytes);
                     std::ptr::write_bytes(dst_v, 0u8, total_bytes);
-                    std::ptr::copy_nonoverlapping(
-                        k_cross.as_ptr() as *const u8,
-                        dst_k,
-                        copy_bytes,
-                    );
-                    std::ptr::copy_nonoverlapping(
-                        v_cross.as_ptr() as *const u8,
-                        dst_v,
-                        copy_bytes,
-                    );
+                    std::ptr::copy_nonoverlapping(k_cross.as_ptr() as *const u8, dst_k, copy_bytes);
+                    std::ptr::copy_nonoverlapping(v_cross.as_ptr() as *const u8, dst_v, copy_bytes);
                 }
 
                 (k_buf, v_buf)
@@ -2701,12 +2717,9 @@ mod imp {
                     length: std::mem::size_of::<KArgsMulMvExt>() as u64
                     atIndex: 0u64
                 ];
-                let _: () =
-                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
 
                 let tgs = MTLSize {
                     width: ((ne01 + r0ptg - 1) / r0ptg) as u64,
@@ -2799,12 +2812,9 @@ mod imp {
                     length: std::mem::size_of::<KArgsMulMm>() as u64
                     atIndex: 0u64
                 ];
-                let _: () =
-                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
                 let _: () = msg_send![
                     encoder,
                     setThreadgroupMemoryLength: pipeline_smem as u64
@@ -2919,12 +2929,9 @@ mod imp {
                     length: std::mem::size_of::<KArgsMulMv>() as u64
                     atIndex: 0u64
                 ];
-                let _: () =
-                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
 
                 if smem > 0 {
                     let _: () = msg_send![
@@ -3031,10 +3038,8 @@ mod imp {
                     length: std::mem::size_of::<KArgsUnary>() as u64
                     atIndex: 0u64
                 ];
-                let _: () =
-                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 2u64];
 
                 if is_cnt {
                     let n = if is_c4 { shape.numel / 4 } else { shape.numel };
@@ -3253,12 +3258,9 @@ mod imp {
                     length: std::mem::size_of::<KArgsBin>() as u64
                     atIndex: 0u64
                 ];
-                let _: () =
-                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
 
                 if is_rb {
                     let n = if is_c4 {
@@ -3375,14 +3377,10 @@ mod imp {
                     length: std::mem::size_of::<KArgsNorm>() as u64
                     atIndex: 0u64
                 ];
-                let _: () =
-                    msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: src1_0_id offset: 0u64 atIndex: 2u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: src1_1_id offset: 0u64 atIndex: 3u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 4u64];
+                let _: () = msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: src1_0_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: src1_1_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 4u64];
                 let _: () = msg_send![
                     encoder,
                     setThreadgroupMemoryLength: pipeline_smem as u64
@@ -3476,10 +3474,8 @@ mod imp {
                     length: std::mem::size_of::<KArgsIm2Col>() as u64
                     atIndex: 0u64
                 ];
-                let _: () =
-                    msg_send![encoder, setBuffer: src_id offset: 0u64 atIndex: 1u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: src_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 2u64];
 
                 let tgs = MTLSize {
                     width: ic_i32 as u64,
@@ -3570,10 +3566,8 @@ mod imp {
                 ];
                 let _: () = msg_send![encoder, setBuffer: k_id offset: 0u64 atIndex: 1u64];
                 let _: () = msg_send![encoder, setBuffer: v_id offset: 0u64 atIndex: 2u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 3u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: pad_id offset: 0u64 atIndex: 4u64];
+                let _: () = msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: pad_id offset: 0u64 atIndex: 4u64];
 
                 let tgs = MTLSize {
                     width: ncpsg as u64,
@@ -3648,10 +3642,8 @@ mod imp {
                     length: std::mem::size_of::<KArgsFlashAttnExtBlk>() as u64
                     atIndex: 0u64
                 ];
-                let _: () =
-                    msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 1u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: blk_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: blk_id offset: 0u64 atIndex: 2u64];
 
                 let nblk1 = ((ne01 + nqptg - 1) / nqptg) as u64;
                 let nblk0 = ((ne30 + ncpsg - 1) / ncpsg) as u64;
@@ -3781,27 +3773,8 @@ mod imp {
 
             if has_kvpad {
                 self.dispatch_flash_attn_ext_pad(
-                    k_id,
-                    v_id,
-                    mask_id,
-                    pad_id,
-                    has_mask,
-                    ncpsg,
-                    ne11,
-                    ne02,
-                    1,
-                    nb11,
-                    nb12,
-                    nb13,
-                    nb21,
-                    nb22,
-                    nb23,
-                    ne31,
-                    ne32,
-                    ne33,
-                    nb31,
-                    nb32,
-                    nb33,
+                    k_id, v_id, mask_id, pad_id, has_mask, ncpsg, ne11, ne02, 1, nb11, nb12, nb13,
+                    nb21, nb22, nb23, ne31, ne32, ne33, nb31, nb32, nb33,
                 )?;
             }
             if has_mask {
@@ -3919,16 +3892,11 @@ mod imp {
                 let _: () = msg_send![encoder, setBuffer: q_id offset: 0u64 atIndex: 1u64];
                 let _: () = msg_send![encoder, setBuffer: k_id offset: 0u64 atIndex: 2u64];
                 let _: () = msg_send![encoder, setBuffer: v_id offset: 0u64 atIndex: 3u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 4u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: sinks_id offset: 0u64 atIndex: 5u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: pad_id offset: 0u64 atIndex: 6u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: blk_id offset: 0u64 atIndex: 7u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 8u64];
+                let _: () = msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 4u64];
+                let _: () = msg_send![encoder, setBuffer: sinks_id offset: 0u64 atIndex: 5u64];
+                let _: () = msg_send![encoder, setBuffer: pad_id offset: 0u64 atIndex: 6u64];
+                let _: () = msg_send![encoder, setBuffer: blk_id offset: 0u64 atIndex: 7u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 8u64];
                 let _: () = msg_send![
                     encoder,
                     setThreadgroupMemoryLength: pipeline_smem as u64
@@ -3965,7 +3933,8 @@ mod imp {
         ) -> Result<(), String> {
             let base = "kernel_flash_attn_ext_vec_reduce";
             let name = format!("{}_dv={}_nwg={}", base, d, nwg);
-            let d_i32 = i32::try_from(d).map_err(|_| format!("d too large for vec reduce: {}", d))?;
+            let d_i32 =
+                i32::try_from(d).map_err(|_| format!("d too large for vec reduce: {}", d))?;
             let constants = [
                 FunctionConstant {
                     idx: FC_FLASH_ATTN_EXT_VEC_REDUCE + 0,
@@ -4143,27 +4112,8 @@ mod imp {
 
             if has_kvpad {
                 self.dispatch_flash_attn_ext_pad(
-                    k_id,
-                    v_id,
-                    mask_id,
-                    pad_id,
-                    has_mask,
-                    ncpsg,
-                    ne11,
-                    ne02,
-                    1,
-                    nb11,
-                    nb12,
-                    nb13,
-                    nb21,
-                    nb22,
-                    nb23,
-                    ne31,
-                    ne32,
-                    ne33,
-                    nb31,
-                    nb32,
-                    nb33,
+                    k_id, v_id, mask_id, pad_id, has_mask, ncpsg, ne11, ne02, 1, nb11, nb12, nb13,
+                    nb21, nb22, nb23, ne31, ne32, ne33, nb31, nb32, nb33,
                 )?;
             }
 
@@ -4281,7 +4231,8 @@ mod imp {
             let out_id = if nwg == 1 {
                 dst_id
             } else {
-                tmp_id.ok_or_else(|| "flash-attn vec requires tmp buffer when nwg > 1".to_string())?
+                tmp_id
+                    .ok_or_else(|| "flash-attn vec requires tmp buffer when nwg > 1".to_string())?
             };
 
             let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
@@ -4296,13 +4247,10 @@ mod imp {
                 let _: () = msg_send![encoder, setBuffer: q_id offset: 0u64 atIndex: 1u64];
                 let _: () = msg_send![encoder, setBuffer: k_id offset: 0u64 atIndex: 2u64];
                 let _: () = msg_send![encoder, setBuffer: v_id offset: 0u64 atIndex: 3u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 4u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: sinks_id offset: 0u64 atIndex: 5u64];
+                let _: () = msg_send![encoder, setBuffer: mask_id offset: 0u64 atIndex: 4u64];
+                let _: () = msg_send![encoder, setBuffer: sinks_id offset: 0u64 atIndex: 5u64];
                 let _: () = msg_send![encoder, setBuffer: pad_id offset: 0u64 atIndex: 6u64];
-                let _: () =
-                    msg_send![encoder, setBuffer: out_id offset: 0u64 atIndex: 7u64];
+                let _: () = msg_send![encoder, setBuffer: out_id offset: 0u64 atIndex: 7u64];
 
                 let _: () = msg_send![
                     encoder,
@@ -4330,9 +4278,8 @@ mod imp {
             self.end_command_encoder(encoder_handles)?;
 
             if nwg > 1 {
-                let tmp_id = tmp_id.ok_or_else(|| {
-                    "flash-attn vec requires tmp buffer when nwg > 1".to_string()
-                })?;
+                let tmp_id = tmp_id
+                    .ok_or_else(|| "flash-attn vec requires tmp buffer when nwg > 1".to_string())?;
                 self.dispatch_flash_attn_ext_vec_reduce_f32(tmp_id, dst_id, nrows, d, nwg)?;
             }
 
@@ -4421,8 +4368,15 @@ mod imp {
             let kv_type = Src0Type::F32;
             let kv_elem_bytes = flash_attn_kv_elem_bytes(kv_type)?;
             let use_vec = flash_attn_use_vec(n_q, d);
-            let pad_bytes =
-                flash_attn_ext_extra_pad_bytes(n_q, n_kv, n_head, d, kv_elem_bytes, params.has_mask, use_vec)?;
+            let pad_bytes = flash_attn_ext_extra_pad_bytes(
+                n_q,
+                n_kv,
+                n_head,
+                d,
+                kv_elem_bytes,
+                params.has_mask,
+                use_vec,
+            )?;
             let pad_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_PAD, pad_bytes)?;
 
             if use_vec {
@@ -4609,8 +4563,16 @@ mod imp {
             let (k_id, v_id) =
                 self.ensure_cross_kv_layer(layer, n_state, n_kv, k_cross, v_cross)?;
             let q_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(q))?;
-            let out_buf =
-                self.flash_attn_f32_from_buffers(q_buf.as_id(), k_id, v_id, n_q, n_kv, n_head, d, scale)?;
+            let out_buf = self.flash_attn_f32_from_buffers(
+                q_buf.as_id(),
+                k_id,
+                v_id,
+                n_q,
+                n_kv,
+                n_head,
+                d,
+                scale,
+            )?;
             self.read_f32_buffer(out_buf.as_id(), q_need)
         }
 
@@ -4654,7 +4616,17 @@ mod imp {
             mask_id: Option<ObjcId>,
         ) -> Result<StrongId, String> {
             self.flash_attn_f32_from_buffers_with_params_typed(
-                q_id, k_id, v_id, n_q, n_kv, n_head, d, scale, params, mask_id, Src0Type::F32,
+                q_id,
+                k_id,
+                v_id,
+                n_q,
+                n_kv,
+                n_head,
+                d,
+                scale,
+                params,
+                mask_id,
+                Src0Type::F32,
             )
         }
 
@@ -4685,11 +4657,20 @@ mod imp {
             let dst_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_OUT, out_bytes)?;
 
             let use_vec = flash_attn_use_vec(n_q, d);
-            let pad_bytes =
-                flash_attn_ext_extra_pad_bytes(n_q, n_kv, n_head, d, kv_elem_bytes, params.has_mask, use_vec)?;
+            let pad_bytes = flash_attn_ext_extra_pad_bytes(
+                n_q,
+                n_kv,
+                n_head,
+                d,
+                kv_elem_bytes,
+                params.has_mask,
+                use_vec,
+            )?;
             let pad_id = self.get_or_create_scratch_buffer(SCRATCH_FLASH_PAD, pad_bytes)?;
             let mask_buf_id = if params.has_mask {
-                mask_id.ok_or_else(|| "flash-attn requested mask but no mask buffer was provided".to_string())?
+                mask_id.ok_or_else(|| {
+                    "flash-attn requested mask but no mask buffer was provided".to_string()
+                })?
             } else {
                 q_id
             };
@@ -5129,8 +5110,10 @@ mod imp {
             let ln_shape = shape4_from_row_major(&[n_state], 4)?;
 
             // Attention sub-block
-            let attn_ln_w_id = self.get_or_create_cached_f32_buffer(attn_ln_w, tag_base.wrapping_add(0))?;
-            let attn_ln_b_id = self.get_or_create_cached_f32_buffer(attn_ln_b, tag_base.wrapping_add(1))?;
+            let attn_ln_w_id =
+                self.get_or_create_cached_f32_buffer(attn_ln_w, tag_base.wrapping_add(0))?;
+            let attn_ln_b_id =
+                self.get_or_create_cached_f32_buffer(attn_ln_b, tag_base.wrapping_add(1))?;
             let norm_bytes = x_shape
                 .numel
                 .checked_mul(std::mem::size_of::<f32>())
@@ -5236,8 +5219,10 @@ mod imp {
             )?;
 
             // FFN sub-block
-            let mlp_ln_w_id = self.get_or_create_cached_f32_buffer(mlp_ln_w, tag_base.wrapping_add(9))?;
-            let mlp_ln_b_id = self.get_or_create_cached_f32_buffer(mlp_ln_b, tag_base.wrapping_add(10))?;
+            let mlp_ln_w_id =
+                self.get_or_create_cached_f32_buffer(mlp_ln_w, tag_base.wrapping_add(9))?;
+            let mlp_ln_b_id =
+                self.get_or_create_cached_f32_buffer(mlp_ln_b, tag_base.wrapping_add(10))?;
             let norm1_id = self.get_or_create_scratch_buffer(SCRATCH_ENC_NORM1, norm_bytes)?;
             self.dispatch_norm_f32(
                 attn_res_buf.as_id(),
@@ -5642,8 +5627,16 @@ mod imp {
                         return Err("decoder kv buffer contents returned null".to_string());
                     }
                     unsafe {
-                        std::ptr::copy_nonoverlapping(src_k.as_ptr(), dst_k.add(offset), copy_bytes);
-                        std::ptr::copy_nonoverlapping(src_v.as_ptr(), dst_v.add(offset), copy_bytes);
+                        std::ptr::copy_nonoverlapping(
+                            src_k.as_ptr(),
+                            dst_k.add(offset),
+                            copy_bytes,
+                        );
+                        std::ptr::copy_nonoverlapping(
+                            src_v.as_ptr(),
+                            dst_v.add(offset),
+                            copy_bytes,
+                        );
                     }
                     if let Some(entry) = ctx.decoder_kv_layers.get_mut(&layer_idx) {
                         entry.len_rows = n_kv;
@@ -5703,8 +5696,10 @@ mod imp {
                 let (k_cross_id, v_cross_id) =
                     ctx.ensure_cross_kv_layer(layer_idx, n_state, n_audio_ctx, k_cross, v_cross)?;
 
-                let cross_ln_w_id = ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 214)?;
-                let cross_ln_b_id = ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 215)?;
+                let cross_ln_w_id =
+                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 214)?;
+                let cross_ln_b_id =
+                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 215)?;
                 let norm_bytes = n_state
                     .checked_mul(std::mem::size_of::<f32>())
                     .ok_or_else(|| "overflow computing decoder norm bytes".to_string())?;
@@ -5880,8 +5875,10 @@ mod imp {
                     ctx.ensure_cross_kv_layer(layer_idx, n_state, n_audio_ctx, k_cross, v_cross)?;
 
                 // Cross-attention block
-                let cross_ln_w_id = ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 200)?;
-                let cross_ln_b_id = ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 201)?;
+                let cross_ln_w_id =
+                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 200)?;
+                let cross_ln_b_id =
+                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 201)?;
                 let norm_bytes = n_state
                     .checked_mul(std::mem::size_of::<f32>())
                     .ok_or_else(|| "overflow computing decoder norm bytes".to_string())?;
@@ -6345,82 +6342,32 @@ mod imp {
                 (
                     "mul_mv_ext",
                     self.dispatch_mul_mv_ext(
-                        src0,
-                        src0_id,
-                        src1_id,
-                        dst_id,
-                        ne00,
-                        ne01,
-                        ne10,
-                        ne11,
-                        nb00,
-                        nb01,
-                        nb10,
-                        nb11,
-                        ne0,
-                        ne1,
+                        src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
+                        nb11, ne0, ne1,
                     ),
                 )
             } else if used_mul_mm {
                 match self.dispatch_mul_mm(
-                    src0,
-                    src0_id,
-                    src1_id,
-                    dst_id,
-                    ne00,
-                    ne01,
-                    nb01,
-                    1,
-                    nb10,
-                    nb11,
-                    ne0,
-                    ne1,
+                    src0, src0_id, src1_id, dst_id, ne00, ne01, nb01, 1, nb10, nb11, ne0, ne1,
                 ) {
                     Ok(()) => ("mul_mm", Ok(())),
-                    Err(e) => (
-                        "mul_mv",
-                        {
-                            eprintln!(
+                    Err(e) => ("mul_mv", {
+                        eprintln!(
                                 "[voice][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
                                 src0, e
                             );
-                            self.dispatch_mul_mv(
-                                src0,
-                                src0_id,
-                                src1_id,
-                                dst_id,
-                                ne00,
-                                ne01,
-                                ne10,
-                                ne11,
-                                nb00,
-                                nb01,
-                                nb10,
-                                nb11,
-                                ne0,
-                                ne1,
-                            )
-                        },
-                    ),
+                        self.dispatch_mul_mv(
+                            src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01,
+                            nb10, nb11, ne0, ne1,
+                        )
+                    }),
                 }
             } else {
                 (
                     "mul_mv",
                     self.dispatch_mul_mv(
-                        src0,
-                        src0_id,
-                        src1_id,
-                        dst_id,
-                        ne00,
-                        ne01,
-                        ne10,
-                        ne11,
-                        nb00,
-                        nb01,
-                        nb10,
-                        nb11,
-                        ne0,
-                        ne1,
+                        src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
+                        nb11, ne0, ne1,
                     ),
                 )
             };

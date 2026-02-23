@@ -9,8 +9,7 @@ use {
         },
         makepad_live_id::{live_id, LiveId},
         studio::{
-            AppToStudio, EventSample, ScreenshotResponse, StudioToApp,
-            WidgetTreeDumpResponse,
+            AppToStudio, EventSample, ScreenshotResponse, StudioToApp, WidgetTreeDumpResponse,
         },
     },
     std::cell::RefCell,
@@ -307,11 +306,7 @@ impl Cx {
     // Same logic as headless::raster::encode_png_rgba which is behind
     // cfg(headless) and unavailable to the windowed backend.
     #[allow(dead_code)]
-    pub fn encode_rgba_as_png(
-        width: u32,
-        height: u32,
-        rgba: &[u8],
-    ) -> Result<Vec<u8>, String> {
+    pub fn encode_rgba_as_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
         use makepad_zune_png::{
             makepad_zune_core::{
                 bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions,

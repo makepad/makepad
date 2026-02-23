@@ -573,7 +573,9 @@ fn bundle_ndk_shared_deps(
         }
         // Extract the library name between square brackets.
         let lib_name = match line.find('[').and_then(|start| {
-            line[start + 1..].find(']').map(|end| &line[start + 1..start + 1 + end])
+            line[start + 1..]
+                .find(']')
+                .map(|end| &line[start + 1..start + 1 + end])
         }) {
             Some(name) => name,
             None => continue,
@@ -588,7 +590,9 @@ fn bundle_ndk_shared_deps(
 
         // Extra guard: if the same filename also exists in the API-level
         // subdirectory it is an OS-provided stub and should NOT be bundled.
-        let api_level_stub = sysroot_lib_dir.join(urls.sdk_version.to_string()).join(lib_name);
+        let api_level_stub = sysroot_lib_dir
+            .join(urls.sdk_version.to_string())
+            .join(lib_name);
         if api_level_stub.exists() {
             continue;
         }
@@ -657,8 +661,13 @@ fn add_rust_library(
         // Scan libmakepad.so for NEEDED shared library dependencies and bundle
         // any that come from the NDK sysroot (e.g. libc++_shared.so).
         bundle_ndk_shared_deps(
-            sdk_dir, host_os, urls, android_target,
-            &dst_lib, abi, build_paths,
+            sdk_dir,
+            host_os,
+            urls,
+            android_target,
+            &dst_lib,
+            abi,
+            build_paths,
         )?;
     }
     // for the quest variant add the precompiled openXR loader
@@ -814,7 +823,10 @@ fn add_font_assets_dir_to_apk(
             .extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_ascii_lowercase());
-        if !matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc" | "woff" | "woff2")) {
+        if !matches!(
+            ext.as_deref(),
+            Some("ttf" | "otf" | "ttc" | "woff" | "woff2")
+        ) {
             continue;
         }
         cp(&source_dir.join(path), &dst_dir.join(path), false)?;

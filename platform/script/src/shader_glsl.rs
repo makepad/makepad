@@ -23,12 +23,7 @@ struct GlslPackedField {
 }
 
 impl ShaderOutput {
-    pub fn glsl_create_vertex_shader(
-        &self,
-        vm: &ScriptVm,
-        shared_defs: &str,
-        out: &mut String,
-    ) {
+    pub fn glsl_create_vertex_shader(&self, vm: &ScriptVm, shared_defs: &str, out: &mut String) {
         let geometry_fields = self.glsl_collect_geometry_fields(vm);
         let instance_fields = self.glsl_collect_instance_fields(vm);
         let varying_fields = self.glsl_collect_varying_pack_fields(vm);
@@ -49,12 +44,7 @@ impl ShaderOutput {
         self.glsl_write_vertex_main(vm, &geometry_fields, &instance_fields, &varying_fields, out);
     }
 
-    pub fn glsl_create_fragment_shader(
-        &self,
-        vm: &ScriptVm,
-        shared_defs: &str,
-        out: &mut String,
-    ) {
+    pub fn glsl_create_fragment_shader(&self, vm: &ScriptVm, shared_defs: &str, out: &mut String) {
         let varying_fields = self.glsl_collect_varying_pack_fields(vm);
         let varying_slots = varying_fields
             .last()
@@ -185,7 +175,10 @@ impl ShaderOutput {
         instance_fields: &[GlslPackedField],
         out: &mut String,
     ) {
-        for (idx, format) in Self::glsl_collect_chunk_formats(geometry_fields).iter().enumerate() {
+        for (idx, format) in Self::glsl_collect_chunk_formats(geometry_fields)
+            .iter()
+            .enumerate()
+        {
             writeln!(
                 out,
                 "in {} packed_geometry_{};",
@@ -194,7 +187,10 @@ impl ShaderOutput {
             )
             .ok();
         }
-        for (idx, format) in Self::glsl_collect_chunk_formats(instance_fields).iter().enumerate() {
+        for (idx, format) in Self::glsl_collect_chunk_formats(instance_fields)
+            .iter()
+            .enumerate()
+        {
             writeln!(
                 out,
                 "in {} packed_instance_{};",
@@ -205,7 +201,12 @@ impl ShaderOutput {
         }
     }
 
-    fn glsl_write_varying_interface(&self, varying_slots: usize, is_vertex: bool, out: &mut String) {
+    fn glsl_write_varying_interface(
+        &self,
+        varying_slots: usize,
+        is_vertex: bool,
+        out: &mut String,
+    ) {
         let qualifier = if is_vertex { "out" } else { "in" };
         for idx in 0..Self::glsl_num_packed_vec4s(varying_slots) {
             writeln!(out, "{} vec4 packed_varying_{};", qualifier, idx).ok();
@@ -216,8 +217,12 @@ impl ShaderOutput {
         for io in &self.io {
             if let ShaderIoKind::FragmentOutput(index) = io.kind {
                 let type_name = self.glsl_type_name_from_ty(vm, io.ty);
-                writeln!(out, "layout(location = {}) out {} _mp_frag_{};", index, type_name, index)
-                    .ok();
+                writeln!(
+                    out,
+                    "layout(location = {}) out {} _mp_frag_{};",
+                    index, type_name, index
+                )
+                .ok();
             }
         }
     }
@@ -445,7 +450,12 @@ impl ShaderOutput {
         }
     }
 
-    fn glsl_unpack_expr_for_field(&self, vm: &ScriptVm, field: &GlslPackedField, prefix: &str) -> String {
+    fn glsl_unpack_expr_for_field(
+        &self,
+        vm: &ScriptVm,
+        field: &GlslPackedField,
+        prefix: &str,
+    ) -> String {
         let scalars = (0..field.slots)
             .map(|slot| Self::glsl_packed_component(prefix, field.offset + slot))
             .collect::<Vec<_>>();
@@ -475,7 +485,10 @@ impl ShaderOutput {
         out: &mut String,
     ) {
         let pod_ty = vm.bx.heap.pod_type_ref(field.ty);
-        if let ScriptPodTy::Struct { fields: sub_fields, .. } = &pod_ty.ty {
+        if let ScriptPodTy::Struct {
+            fields: sub_fields, ..
+        } = &pod_ty.ty
+        {
             let scalars = (0..field.slots)
                 .map(|slot| Self::glsl_packed_component(prefix, field.offset + slot))
                 .collect::<Vec<_>>();
@@ -489,7 +502,12 @@ impl ShaderOutput {
                     &scalars,
                     &mut scalar_index,
                 );
-                writeln!(out, "    {}.{} = {};", field.name, sub_field_name, value_expr).ok();
+                writeln!(
+                    out,
+                    "    {}.{} = {};",
+                    field.name, sub_field_name, value_expr
+                )
+                .ok();
             }
         } else {
             let value_expr = self.glsl_unpack_expr_for_field(vm, field, prefix);
@@ -544,15 +562,21 @@ impl ShaderOutput {
                 let mut comps = Vec::with_capacity(dims);
                 let elem_ty = vec_ty.elem_ty();
                 for _ in 0..dims {
-                    let scalar = Self::glsl_take_scalar_or_zero(scalars, scalar_index, source_format);
-                    comps.push(Self::glsl_convert_scalar_expr(source_format, &elem_ty, &scalar));
+                    let scalar =
+                        Self::glsl_take_scalar_or_zero(scalars, scalar_index, source_format);
+                    comps.push(Self::glsl_convert_scalar_expr(
+                        source_format,
+                        &elem_ty,
+                        &scalar,
+                    ));
                 }
                 format!("{}({})", self.glsl_type_name_inline(ty), comps.join(", "))
             }
             ScriptPodTy::Mat(mat_ty) => {
                 let mut comps = Vec::new();
                 for _ in 0..mat_ty.dim() {
-                    let scalar = Self::glsl_take_scalar_or_zero(scalars, scalar_index, source_format);
+                    let scalar =
+                        Self::glsl_take_scalar_or_zero(scalars, scalar_index, source_format);
                     comps.push(Self::glsl_convert_scalar_expr(
                         source_format,
                         &ScriptPodTy::F32,
@@ -643,7 +667,11 @@ impl ShaderOutput {
         }
     }
 
-    fn glsl_convert_scalar_expr(source: GlslPackedFormat, target: &ScriptPodTy, expr: &str) -> String {
+    fn glsl_convert_scalar_expr(
+        source: GlslPackedFormat,
+        target: &ScriptPodTy,
+        expr: &str,
+    ) -> String {
         match source {
             GlslPackedFormat::Float => match target {
                 ScriptPodTy::F32 | ScriptPodTy::F16 => expr.to_string(),
@@ -765,7 +793,8 @@ impl ShaderOutput {
 
     fn glsl_type_name_from_ty(&self, vm: &ScriptVm, ty: ScriptPodType) -> String {
         let mut out = String::new();
-        self.backend.pod_type_name_from_ty(&vm.bx.heap, ty, &mut out);
+        self.backend
+            .pod_type_name_from_ty(&vm.bx.heap, ty, &mut out);
         out
     }
 

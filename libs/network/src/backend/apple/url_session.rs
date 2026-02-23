@@ -1,19 +1,33 @@
 use {
     crate::{
-        event::{HttpError, HttpRequest, HttpResponse, NetworkResponse, NetworkResponseItem},
-        makepad_live_id::*,
-        makepad_objc_sys::{objc_block, objc_block_invoke},
-        os::{
-            apple::apple_classes::get_apple_class_global,
-            //cocoa_app::{MacosApp, get_macos_class_global},
-            apple::apple_sys::*,
-            apple_util::{nsstring_to_string, str_to_nsstring},
+        types::{
+            HttpError, HttpRequest, HttpResponse, NetworkResponse, NetworkResponseItem,
+            WebSocketMessage,
         },
-        thread::SignalToUI,
-        web_socket::WebSocketMessage,
     },
-    std::{ptr, sync::mpsc::Sender, sync::Arc},
+    makepad_apple_sys::{objc_block, objc_block_invoke},
+    makepad_apple_sys::*,
+    std::{ptr, sync::mpsc::Sender, sync::Arc, sync::Once},
 };
+
+struct UrlSessionClasses {
+    web_socket_delegate: *const Class,
+    url_session_delegate: *const Class,
+    url_session_data_delegate: *const Class,
+}
+
+fn get_url_session_classes() -> &'static UrlSessionClasses {
+    static INIT: Once = Once::new();
+    static mut CLASSES: *const UrlSessionClasses = ptr::null();
+    INIT.call_once(|| unsafe {
+        CLASSES = Box::into_raw(Box::new(UrlSessionClasses {
+            web_socket_delegate: define_web_socket_delegate(),
+            url_session_delegate: define_url_session_delegate(),
+            url_session_data_delegate: define_url_session_data_delegate(),
+        }));
+    });
+    unsafe { &*CLASSES }
+}
 
 pub fn define_web_socket_delegate() -> *const Class {
     extern "C" fn did_open_with_protocol(
@@ -22,7 +36,7 @@ pub fn define_web_socket_delegate() -> *const Class {
         _web_socket_task: ObjcId,
         _open_with_protocol: ObjcId,
     ) {
-        crate::log!("DID OPEN WITH PROTOCOL");
+        let _ = (_web_socket_task, _open_with_protocol);
         //let sender_box: u64 = *this.get_ivar("sender_box");
         // TODO send Open and Close websocket messages
         // lets turn t
@@ -35,7 +49,7 @@ pub fn define_web_socket_delegate() -> *const Class {
         _code: usize,
         _reason: ObjcId,
     ) {
-        crate::log!("DID CLOSE WITH CODE");
+        let _ = (_web_socket_task, _code, _reason);
     }
 
     let superclass = class!(NSObject);
@@ -59,8 +73,8 @@ pub fn define_web_socket_delegate() -> *const Class {
 
 struct UrlSessionDataDelegateContext {
     sender: Sender<NetworkResponseItem>,
-    request_id: LiveId,
-    metadata_id: LiveId,
+    request_id: u64,
+    metadata_id: u64,
 }
 
 pub fn define_url_session_data_delegate() -> *const Class {
@@ -225,7 +239,7 @@ unsafe fn make_ns_request(request: &HttpRequest) -> ObjcId {
     let mut ns_request: ObjcId = msg_send![class!(NSMutableURLRequest), alloc];
 
     ns_request = msg_send![ns_request, initWithURL: url];
-    let () = msg_send![ns_request, setHTTPMethod: str_to_nsstring(&request.method.to_string())];
+    let () = msg_send![ns_request, setHTTPMethod: str_to_nsstring(&request.method.as_str())];
 
     for (key, values) in request.headers.iter() {
         for value in values {
@@ -300,7 +314,7 @@ impl OsWebSocket {
                     class!(NSURLSessionConfiguration),
                     defaultSessionConfiguration
                 ];
-                let deleg: ObjcId = msg_send![get_apple_class_global().url_session_delegate, new];
+                let deleg: ObjcId = msg_send![get_url_session_classes().url_session_delegate, new];
                 msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: deleg delegateQueue:nil]
             } else {
                 msg_send![class!(NSURLSession), sharedSession]
@@ -309,7 +323,7 @@ impl OsWebSocket {
             //let session  = self.ns_url_session.unwrap();
             let data_task: ObjcId = msg_send![session, webSocketTaskWithRequest: ns_request];
             let web_socket_delegate_instance: ObjcId =
-                msg_send![get_apple_class_global().web_socket_delegate, new];
+                msg_send![get_url_session_classes().web_socket_delegate, new];
 
             let () = msg_send![data_task, setMaximumMessageSize:5*1024*1024];
 
@@ -323,7 +337,7 @@ impl OsWebSocket {
                         let error_str: String =
                             nsstring_to_string(msg_send![error, localizedDescription]);
                         rx_sender.send(WebSocketMessage::Error(error_str)).unwrap();
-                        SignalToUI::set_ui_signal();
+
                         return;
                     }
                     let ty: usize = msg_send![message, type];
@@ -335,13 +349,13 @@ impl OsWebSocket {
                         let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
                         let message = WebSocketMessage::Binary(data_bytes.to_vec());
                         rx_sender.send(message).unwrap();
-                        SignalToUI::set_ui_signal();
+
                     } else {
                         // string
                         let string: ObjcId = msg_send![message, string];
                         let message = WebSocketMessage::String(nsstring_to_string(string));
                         rx_sender.send(message).unwrap();
-                        SignalToUI::set_ui_signal();
+
                     }
                     set_message_receive_handler(data_task.clone(), rx_sender.clone())
                 });
@@ -360,7 +374,7 @@ impl OsWebSocket {
 }
 
 struct HttpReq {
-    request_id: LiveId,
+    request_id: u64,
     data_task: RcObjcId,
 }
 
@@ -370,7 +384,7 @@ pub struct AppleHttpRequests {
 }
 
 impl AppleHttpRequests {
-    pub fn cancel_http_request(&mut self, request_id: LiveId) {
+    pub fn cancel_http_request(&mut self, request_id: u64) {
         self.requests.retain(|v| {
             if v.request_id == request_id {
                 unsafe {
@@ -396,7 +410,7 @@ impl AppleHttpRequests {
 
     pub fn make_http_request(
         &mut self,
-        request_id: LiveId,
+        request_id: u64,
         request: HttpRequest,
         networking_sender: Sender<NetworkResponseItem>,
     ) {
@@ -411,7 +425,7 @@ impl AppleHttpRequests {
                     class!(NSURLSessionConfiguration),
                     defaultSessionConfiguration
                 ];
-                let deleg: ObjcId = msg_send![get_apple_class_global().url_session_delegate, new];
+                let deleg: ObjcId = msg_send![get_url_session_classes().url_session_delegate, new];
                 msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: deleg delegateQueue:nil]
             } else {
                 let config: ObjcId = msg_send![
@@ -432,7 +446,7 @@ impl AppleHttpRequests {
                     sender: networking_sender,
                 })) as u64;
                 let url_session_data_delegate_instance: ObjcId =
-                    msg_send![get_apple_class_global().url_session_data_delegate, new];
+                    msg_send![get_url_session_classes().url_session_data_delegate, new];
 
                 (*url_session_data_delegate_instance).set_ivar("context_box", context_box);
 
@@ -469,7 +483,7 @@ impl AppleHttpRequests {
                         let mut response = HttpResponse::new(
                             request.metadata_id,
                             response_code,
-                            "".to_string(),
+                            Default::default(),
                             Some(data_bytes.to_vec()),
                         );
 

@@ -181,7 +181,8 @@ impl WhisperState {
                 // Get logits for last token
                 let prev_token = if result_tokens.is_empty() {
                     // Use last logits from prompt decode
-                    let token = sample_greedy(last_logits, vocab, params, &result_tokens, has_ts, 0);
+                    let token =
+                        sample_greedy(last_logits, vocab, params, &result_tokens, has_ts, 0);
                     result_tokens.push(token);
                     if token.id == vocab.token_eot {
                         break;

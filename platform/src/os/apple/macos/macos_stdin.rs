@@ -1,23 +1,20 @@
-use {
-    crate::{
-        cx::Cx,
-        cx_api::{CxOsApi, CxOsOp},
-        draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
-        event::Event,
-        event::{WindowGeom, WindowGeomChangeEvent},
-        makepad_math::*,
-        makepad_micro_serde::*,
-        os::{
-            shared_framebuf::{PollTimer, PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
-            metal::{DrawPassMode, MetalCx},
-        },
-        studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
-        texture::{Texture, TextureFormat},
-        thread::SignalToUI,
-        web_socket::WebSocketMessage,
-        window::CxWindowPool,
+use crate::{
+    cx::Cx,
+    cx_api::{CxOsApi, CxOsOp},
+    draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
+    event::Event,
+    event::{WindowGeom, WindowGeomChangeEvent},
+    makepad_math::*,
+    makepad_micro_serde::*,
+    os::{
+        metal::{DrawPassMode, MetalCx},
+        shared_framebuf::{PollTimer, PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
     },
-
+    studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
+    texture::{Texture, TextureFormat},
+    thread::SignalToUI,
+    web_socket::WebSocketMessage,
+    window::CxWindowPool,
 };
 
 /// Local swapchain for client-side texture management
@@ -131,11 +128,7 @@ impl Cx {
                 WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {
                     Ok(msgs) => {
                         for msg in msgs.0 {
-                            if self.stdin_handle_host_to_stdin(
-                                msg,
-                                metal_cx,
-                                &mut stdin_windows,
-                            ) {
+                            if self.stdin_handle_host_to_stdin(msg, metal_cx, &mut stdin_windows) {
                                 return;
                             }
                         }
@@ -341,11 +334,7 @@ impl Cx {
             // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
             // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.
             other => {
-                return self.dispatch_studio_msg(
-                    other,
-                    CxWindowPool::id_zero(),
-                    dvec2(0.0, 0.0),
-                );
+                return self.dispatch_studio_msg(other, CxWindowPool::id_zero(), dvec2(0.0, 0.0));
             }
         }
         false

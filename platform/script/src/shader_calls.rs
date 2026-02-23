@@ -1442,10 +1442,20 @@ impl ShaderFnCompiler {
                             write!(s, "{}.sample(_s{}, {})", texture_expr, sampler_idx, coord).ok();
                         }
                         ShaderBackend::Wgsl => {
-                            write!(s, "textureSample({}, _s{}, {})", texture_expr, sampler_idx, coord).ok();
+                            write!(
+                                s,
+                                "textureSample({}, _s{}, {})",
+                                texture_expr, sampler_idx, coord
+                            )
+                            .ok();
                         }
                         ShaderBackend::Hlsl => {
-                            write!(s, "{}.SampleLevel(_s{}, {}, 0.0)", texture_expr, sampler_idx, coord).ok();
+                            write!(
+                                s,
+                                "{}.SampleLevel(_s{}, {}, 0.0)",
+                                texture_expr, sampler_idx, coord
+                            )
+                            .ok();
                         }
                         ShaderBackend::Rust => {
                             write!(s, "{}.sample({})", texture_expr, coord).ok();
@@ -1465,7 +1475,12 @@ impl ShaderFnCompiler {
                     method_id,
                     suggest_from_live_ids(
                         method_id,
-                        &[id!(sample), id!(sample_as_bgra), id!(sample_video), id!(size)]
+                        &[
+                            id!(sample),
+                            id!(sample_as_bgra),
+                            id!(sample_video),
+                            id!(size)
+                        ]
                     )
                 );
             }

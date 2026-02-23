@@ -206,10 +206,10 @@ impl Widget for BarChart3D {
                 corner_segments as usize,
             );
             if draw_result.is_ok() {
-                let world = self
-                    .draw_bar
-                    .cur_transform
-                    .transform_vec4(vec4(0.0, h * 0.5, 0.0, 1.0));
+                let world =
+                    self.draw_bar
+                        .cur_transform
+                        .transform_vec4(vec4(0.0, h * 0.5, 0.0, 1.0));
                 register_last_draw_call_anchor(cx, scope, vec3(world.x, world.y, world.z));
             }
             self.draw_bar.pop_matrix();
