@@ -45,8 +45,8 @@ impl OsWebSocket {
     ) -> OsWebSocket {
         let split = request.split_url();
         let is_tls = match split.proto {
-            "ws" => false,
-            "wss" => true,
+            "ws" | "http" => false,
+            "wss" | "https" => true,
             _ => {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(
                     "unsupported websocket scheme: {}",
