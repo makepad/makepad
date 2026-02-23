@@ -1338,60 +1338,6 @@ impl WidgetTree {
             h: i64,
         }
 
-        let mut origin_and_dpi = None;
-        for node in inner.nodes.iter() {
-            let area = node.widget.area();
-            if !area.is_valid(cx) {
-                continue;
-            }
-            let Some(draw_list_id) = area.draw_list_id() else {
-                continue;
-            };
-            let Some(mut draw_pass_id) = cx.draw_lists[draw_list_id].draw_pass_id else {
-                continue;
-            };
-
-            loop {
-                match cx.passes[draw_pass_id].parent {
-                    CxDrawPassParent::DrawPass(next_pass_id) => {
-                        draw_pass_id = next_pass_id;
-                    }
-                    CxDrawPassParent::Window(window_id) => {
-                        let window = &cx.windows[window_id];
-                        if !window.is_created {
-                            break;
-                        }
-                        let window_geom = &window.window_geom;
-                        if window_geom.inner_size.x <= 0.0 || window_geom.inner_size.y <= 0.0 {
-                            break;
-                        }
-                        let dpi = window_geom.dpi_factor.max(1.0);
-                        origin_and_dpi = Some((
-                            window_geom.position.x * dpi,
-                            window_geom.position.y * dpi,
-                            dpi,
-                        ));
-                        break;
-                    }
-                    _ => break,
-                }
-            }
-
-            if origin_and_dpi.is_some() {
-                break;
-            }
-        }
-
-        let (origin_x, origin_y, dpi) = if let Some(v) = origin_and_dpi {
-            v
-        } else {
-            // Fall back to legacy behavior when no valid area/pass can be resolved yet.
-            let (window_id, _) = cx.windows.window_id_contains(dvec2(-1.0e9, -1.0e9));
-            let window_geom = &cx.windows[window_id].window_geom;
-            let dpi = window_geom.dpi_factor.max(1.0);
-            (window_geom.position.x * dpi, window_geom.position.y * dpi, dpi)
-        };
-
         let mut dump_nodes = Vec::new();
         let mut dock_tabs_rows = Vec::<DockTabsRow>::new();
         let mut dock_tab_rows = Vec::<DockTabRow>::new();
@@ -1405,10 +1351,10 @@ impl WidgetTree {
             let area = node.widget.area();
             if area.is_valid(cx) {
                 let rect = area.rect(cx);
-                let x = (rect.pos.x * dpi).round() as i64;
-                let y = (rect.pos.y * dpi).round() as i64;
-                let w = (rect.size.x * dpi).round() as i64;
-                let h = (rect.size.y * dpi).round() as i64;
+                let x = rect.pos.x.round() as i64;
+                let y = rect.pos.y.round() as i64;
+                let w = rect.size.x.round() as i64;
+                let h = rect.size.y.round() as i64;
                 if w > 0 && h > 0 {
                     let id_named = has_live_id_name(id);
                     let id_token = live_id_token(id);
@@ -1433,10 +1379,10 @@ impl WidgetTree {
                 let dock_id = live_id_token(id);
                 let dock_dump = dock.compact_dump(cx);
                 for tabs in dock_dump.tabs {
-                    let x = (tabs.rect.pos.x * dpi).round() as i64;
-                    let y = (tabs.rect.pos.y * dpi).round() as i64;
-                    let w = (tabs.rect.size.x * dpi).round() as i64;
-                    let h = (tabs.rect.size.y * dpi).round() as i64;
+                    let x = tabs.rect.pos.x.round() as i64;
+                    let y = tabs.rect.pos.y.round() as i64;
+                    let w = tabs.rect.size.x.round() as i64;
+                    let h = tabs.rect.size.y.round() as i64;
                     if w <= 0 || h <= 0 {
                         continue;
                     }
@@ -1455,10 +1401,10 @@ impl WidgetTree {
                     });
                 }
                 for tab in dock_dump.tab_headers {
-                    let x = (tab.rect.pos.x * dpi).round() as i64;
-                    let y = (tab.rect.pos.y * dpi).round() as i64;
-                    let w = (tab.rect.size.x * dpi).round() as i64;
-                    let h = (tab.rect.size.y * dpi).round() as i64;
+                    let x = tab.rect.pos.x.round() as i64;
+                    let y = tab.rect.pos.y.round() as i64;
+                    let w = tab.rect.size.x.round() as i64;
+                    let h = tab.rect.size.y.round() as i64;
                     if w <= 0 || h <= 0 {
                         continue;
                     }
@@ -1484,13 +1430,8 @@ impl WidgetTree {
 
         let mut out = String::new();
         let _ = writeln!(&mut out, "W3 {}", dump_nodes.len());
-        let _ = writeln!(
-            &mut out,
-            "O {} {} {}",
-            origin_x.round() as i64,
-            origin_y.round() as i64,
-            (dpi * 1000.0).round() as i64
-        );
+        // Keep the origin metadata line for protocol compatibility.
+        let _ = writeln!(&mut out, "O 0 0 1000");
         for (new_index, node) in dump_nodes.iter().enumerate() {
             let mut parent = node.parent;
             let mut parent_index = -1i64;

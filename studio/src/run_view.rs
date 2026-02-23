@@ -280,7 +280,7 @@ impl RunView {
     }
 
     pub fn ai_click_viz(&mut self, cx: &mut Cx, x: f64, y: f64, is_down: bool) {
-        let abs = dvec2(x, y);
+        let abs = dvec2(self.last_rect.pos.x + x, self.last_rect.pos.y + y);
         if !self.last_rect.contains(abs) {
             return;
         }
@@ -322,8 +322,8 @@ impl RunView {
                 StudioToApp::WindowGeomChange {
                     window_id: self.window_id,
                     dpi_factor,
-                    left: rect.pos.x,
-                    top: rect.pos.y,
+                    left: 0.0,
+                    top: 0.0,
                     width: rect.size.x,
                     height: rect.size.y,
                 },
@@ -476,29 +476,34 @@ impl Widget for RunView {
         }
         if let Event::MouseMove(e) = event {
             let area = self.draw_app.area();
-            if area.is_valid(cx) && area.rect(cx).contains(e.abs) {
-                e.handled.set(area);
-                if e.modifiers.logo {
-                    manager.send_host_to_stdin(
-                        run_view_id,
-                        StudioToApp::TweakRay(RemoteTweakRay {
-                            time: e.time,
-                            x: e.abs.x,
-                            y: e.abs.y,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        }),
-                    );
-                } else {
-                    self.tweak_view.clear(cx);
-                    manager.send_host_to_stdin(
-                        run_view_id,
-                        StudioToApp::MouseMove(RemoteMouseMove {
-                            time: e.time,
-                            x: e.abs.x,
-                            y: e.abs.y,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        }),
-                    );
+            if area.is_valid(cx) {
+                let rect = area.rect(cx);
+                if rect.contains(e.abs) {
+                    let local_x = e.abs.x - rect.pos.x;
+                    let local_y = e.abs.y - rect.pos.y;
+                    e.handled.set(area);
+                    if e.modifiers.logo {
+                        manager.send_host_to_stdin(
+                            run_view_id,
+                            StudioToApp::TweakRay(RemoteTweakRay {
+                                time: e.time,
+                                x: local_x,
+                                y: local_y,
+                                modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
+                            }),
+                        );
+                    } else {
+                        self.tweak_view.clear(cx);
+                        manager.send_host_to_stdin(
+                            run_view_id,
+                            StudioToApp::MouseMove(RemoteMouseMove {
+                                time: e.time,
+                                x: local_x,
+                                y: local_y,
+                                modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
+                            }),
+                        );
+                    }
                 }
             }
         }
