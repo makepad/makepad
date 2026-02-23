@@ -67,6 +67,7 @@ impl BuildManager {
         file_system: &mut FileSystem,
         pending_terminal_logs: &mut Vec<(LiveId, String, String)>,
     ) {
+        let mut needs_redraw_profiler = false;
         while let Ok((build_id, msgs)) = self.recv_studio_msg.try_recv() {
             self.recompiling_builds.remove(&build_id);
             cx.action(AppAction::WebsocketReconnect(build_id));
@@ -76,10 +77,21 @@ impl BuildManager {
                     .terminal_startup_dump_pending
                     .contains(&build_id)
                     && matches!(&msg, AppToStudio::DrawCompleteAndFlip(_));
-                cx.action(BuildManagerAction::AppToStudio {
-                    build_id,
-                    msg: msg.clone(),
-                });
+                if matches!(
+                    &msg,
+                    AppToStudio::CreateWindow { .. }
+                        | AppToStudio::SetCursor(_)
+                        | AppToStudio::ReadyToStart
+                        | AppToStudio::DrawCompleteAndFlip(_)
+                        | AppToStudio::SetClipboard(_)
+                        | AppToStudio::RequestAnimationFrame
+                        | AppToStudio::TweakHits(_)
+                ) {
+                    cx.action(BuildManagerAction::AppToStudio {
+                        build_id,
+                        msg: msg.clone(),
+                    });
+                }
                 if auto_request_widget_tree_dump {
                     if let Some(web_socket_id) = self.terminal_build_owners.get(&build_id).copied() {
                         let startup_query = self.terminal_startup_queries.get(&build_id).cloned();
@@ -173,19 +185,19 @@ impl BuildManager {
                     AppToStudio::EventSample(sample) => {
                         if self.profiler_running {
                             self.push_event_profile_sample(build_id, sample);
-                            cx.action(AppAction::RedrawProfiler)
+                            needs_redraw_profiler = true;
                         }
                     }
                     AppToStudio::GPUSample(sample) => {
                         if self.profiler_running {
                             self.push_gpu_profile_sample(build_id, sample);
-                            cx.action(AppAction::RedrawProfiler)
+                            needs_redraw_profiler = true;
                         }
                     }
                     AppToStudio::GCSample(sample) => {
                         if self.profiler_running {
                             self.push_gc_profile_sample(build_id, sample);
-                            cx.action(AppAction::RedrawProfiler)
+                            needs_redraw_profiler = true;
                         }
                     }
                     AppToStudio::PatchFile(ef) => cx.action(AppAction::PatchFile(ef)),
@@ -202,6 +214,9 @@ impl BuildManager {
                     _ => {}
                 }
             }
+        }
+        if needs_redraw_profiler {
+            cx.action(AppAction::RedrawProfiler);
         }
     }
 
