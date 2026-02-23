@@ -48,7 +48,8 @@ script_mod! {
 
             // Early clip rejection in local space.
             let cr = self.geom.clip_radius;
-            if cr > 0.0 {
+            let is_shadow = self.geom.stroke_mult < -0.5;
+            if cr > 0.0 && !is_shadow {
                 let clip = vec4(
                     max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
                     max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
@@ -213,8 +214,12 @@ script_mod! {
                 min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
                 min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
             );
-            if local.x < clip.x || local.y < clip.y
-                || local.x > clip.z || local.y > clip.w {
+            let clip_pad =
+                if self.v_stroke_mult < -1.5 { self.v_stroke_dist * 3.0 } // shape shadow
+                else if self.v_stroke_mult < -0.5 { self.v_param5 * 3.0 } // rect shadow
+                else { 0.0 };
+            if local.x < (clip.x - clip_pad) || local.y < (clip.y - clip_pad)
+                || local.x > (clip.z + clip_pad) || local.y > (clip.w + clip_pad) {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
             // geometry shadow mode: stroke_mult == -2.0
