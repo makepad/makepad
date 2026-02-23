@@ -55,6 +55,7 @@ script_mod! {
                 @tSlider
                 @tSlidesView
                 @tTextInput
+                @tVideo
                 @tView
             ]
             selected: 0
@@ -91,6 +92,7 @@ script_mod! {
         tSlider := DockTab{name: "Slider" template: @PermanentTab kind: @TabSlider}
         tSlidesView := DockTab{name: "SlidesView" template: @PermanentTab kind: @TabSlidesView}
         tTextInput := DockTab{name: "TextInput" template: @PermanentTab kind: @TabTextInput}
+        tVideo := DockTab{name: "Video" template: @PermanentTab kind: @TabVideo}
         tView := DockTab{name: "View" template: @PermanentTab kind: @TabView}
 
         TabOverview := UIZooTab{WidgetsOverview{}}
@@ -117,6 +119,7 @@ script_mod! {
         TabSlider := UIZooTab{DemoSlider{}}
         TabSlidesView := UIZooTab{DemoSlidesView{}}
         TabTextInput := UIZooTab{DemoTextInput{}}
+        TabVideo := UIZooTab{DemoVideo{}}
         TabView := UIZooTab{DemoView{}}
     }
 
@@ -167,6 +170,7 @@ impl App {
         crate::tab_slider::script_mod(vm);
         crate::tab_slidesview::script_mod(vm);
         crate::tab_textinput::script_mod(vm);
+        crate::tab_video::script_mod(vm);
         crate::tab_view::script_mod(vm);
         crate::tab_widgetsoverview::script_mod(vm);
         App::from_script_mod(vm, self::script_mod)

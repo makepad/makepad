@@ -7,6 +7,10 @@ use {
         event::{
             Event, GameInputEventChannel, MouseButton, MouseUpEvent, NetworkResponseChannel,
             WindowGeom,
+            video_playback::{
+                VideoPlaybackPreparedEvent, VideoTextureUpdatedEvent,
+                VideoPlaybackResourcesReleasedEvent,
+            },
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -15,6 +19,7 @@ use {
                 apple_classes::init_apple_classes_global,
                 apple_game_input::AppleGameInput,
                 apple_sys::*,
+                apple_video_playback::AppleVideoPlayer,
                 macos::{
                     macos_app::{init_macos_app_global, with_macos_app, MacosApp},
                     macos_event::MacosEvent,
@@ -31,7 +36,7 @@ use {
         window::{CxWindowPool, WindowId},
     },
     makepad_objc_sys::{msg_send, objc_block, sel, sel_impl},
-    std::{cell::RefCell, rc::Rc, time::Instant},
+    std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant},
 };
 
 #[derive(Clone)]
@@ -318,6 +323,7 @@ impl Cx {
                         || self.need_redrawing()
                         || !self.new_next_frames.is_empty()
                         || self.demo_time_repaint
+                        || !self.os.video_players.is_empty()
                     {
                         needs_timer = true;
                     }
@@ -422,6 +428,31 @@ impl Cx {
                 }
             }
             MacosEvent::Paint => {
+                // Poll video players for new frames and preparation status
+                let has_video_players = !self.os.video_players.is_empty();
+                if has_video_players {
+                    let mut video_events = Vec::new();
+                    for (_video_id, player) in self.os.video_players.iter_mut() {
+                        if let Some((width, height, duration)) = player.check_prepared() {
+                            video_events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
+                                video_id: player.video_id,
+                                video_width: width,
+                                video_height: height,
+                                duration,
+                            }));
+                        }
+                        if player.poll_frame(&mut self.textures) {
+                            video_events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                                video_id: player.video_id,
+                                current_position_ms: player.current_position_ms(),
+                            }));
+                        }
+                    }
+                    for event in video_events {
+                        self.call_event_handler(&event);
+                    }
+                }
+
                 let has_next_frames = self.new_next_frames.len() != 0;
                 let time_now = with_macos_app(|app| app.time_now());
                 if has_next_frames {
@@ -440,6 +471,7 @@ impl Cx {
                     || self.screenshot_requests.len() > 0
                     || self.os.keep_alive_counter > 0
                     || self.demo_time_repaint
+                    || has_video_players
                 {
                     self.os.timer0_idle_since = None;
                     self.ensure_timer0_started();
@@ -712,6 +744,57 @@ impl Cx {
                 } => {
                     self.handle_permission_request(permission, request_id);
                 }
+                CxOsOp::PrepareVideoPlayback(video_id, source, _gl_handle, texture_id, autoplay, should_loop) => {
+                    let player = AppleVideoPlayer::new(
+                        metal_cx.device,
+                        video_id,
+                        texture_id,
+                        source,
+                        autoplay,
+                        should_loop,
+                    );
+                    self.os.video_players.insert(video_id, player);
+                    // Keep timer alive so we can poll for video frames
+                    self.ensure_timer0_started();
+                }
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.play();
+                    }
+                }
+                CxOsOp::PauseVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.pause();
+                    }
+                }
+                CxOsOp::ResumeVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.resume();
+                    }
+                }
+                CxOsOp::MuteVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.mute();
+                    }
+                }
+                CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.unmute();
+                    }
+                }
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    if let Some(mut player) = self.os.video_players.remove(&video_id) {
+                        player.cleanup();
+                        self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id }
+                        ));
+                    }
+                }
+                CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.seek_to(position_ms);
+                    }
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
@@ -922,4 +1005,5 @@ pub struct CxOs {
     pub metal_device: Option<ObjcId>,
     pub(crate) game_input_events: GameInputEventChannel,
     pub(crate) apple_game_input: Option<AppleGameInput>,
+    pub(crate) video_players: HashMap<LiveId, AppleVideoPlayer>,
 }

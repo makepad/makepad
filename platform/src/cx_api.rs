@@ -18,7 +18,7 @@ use {
         makepad_live_id::*,
         makepad_math::{Rect, Vec2d},
         makepad_script::value::ScriptHandle,
-        texture::Texture,
+        texture::{Texture, TextureId},
         window::WindowId,
     },
     std::{
@@ -127,13 +127,14 @@ pub enum CxOsOp {
         request_id: LiveId,
     },
 
-    PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool),
+    PrepareVideoPlayback(LiveId, VideoSource, u32, TextureId, bool, bool),
     BeginVideoPlayback(LiveId),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
     MuteVideoPlayback(LiveId),
     UnmuteVideoPlayback(LiveId),
     CleanupVideoPlaybackResources(LiveId),
+    SeekVideoPlayback(LiveId, u64),
     UpdateVideoSurfaceTexture(LiveId),
 
     CreateWebView {
@@ -203,6 +204,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::MuteVideoPlayback(..) => write!(f, "MuteVideoPlayback"),
             Self::UnmuteVideoPlayback(..) => write!(f, "UnmuteVideoPlayback"),
             Self::CleanupVideoPlaybackResources(..) => write!(f, "CleanupVideoPlaybackResources"),
+            Self::SeekVideoPlayback(..) => write!(f, "SeekVideoPlayback"),
             Self::UpdateVideoSurfaceTexture(..) => write!(f, "UpdateVideoSurfaceTexture"),
             Self::CreateWebView { .. } => write!(f, "CreateWebView"),
             Self::UpdateWebView { .. } => write!(f, "UpdateWebView"),
@@ -869,6 +871,7 @@ impl Cx {
         video_id: LiveId,
         source: VideoSource,
         external_texture_id: u32,
+        texture_id: TextureId,
         autoplay: bool,
         should_loop: bool,
     ) {
@@ -876,6 +879,7 @@ impl Cx {
             video_id,
             source,
             external_texture_id,
+            texture_id,
             autoplay,
             should_loop,
         ));
@@ -906,6 +910,11 @@ impl Cx {
     pub fn cleanup_video_playback_resources(&mut self, video_id: LiveId) {
         self.platform_ops
             .push(CxOsOp::CleanupVideoPlaybackResources(video_id));
+    }
+
+    pub fn seek_video_playback(&mut self, video_id: LiveId, position_ms: u64) {
+        self.platform_ops
+            .push(CxOsOp::SeekVideoPlayback(video_id, position_ms));
     }
 
     pub fn println_resources(&self) {
