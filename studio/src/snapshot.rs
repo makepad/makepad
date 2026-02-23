@@ -32,7 +32,7 @@ script_mod! {
 
             draw_icon +: {
                 color: theme.color_u_4
-                svg_file: crate_resource("self://resources/icons/icon_run.svg")
+                svg: crate_resource("self://resources/icons/icon_run.svg")
             }
             icon_walk: Walk{ width: 9. }
         }

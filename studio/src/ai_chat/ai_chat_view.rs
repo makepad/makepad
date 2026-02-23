@@ -109,7 +109,7 @@ script_mod! {
                         text: ""
                         draw_icon +: {
                             color: theme.color_u_4
-                            svg_file: crate_resource("self://resources/icons/icon_run.svg")
+                            svg: crate_resource("self://resources/icons/icon_run.svg")
                         }
                         icon_walk: Walk{ width: 9. }
                     }
@@ -126,7 +126,7 @@ script_mod! {
                         }
                         draw_icon +: {
                             color: theme.color_u_4
-                            svg_file: crate_resource("self://resources/icons/icon_copy.svg")
+                            svg: crate_resource("self://resources/icons/icon_copy.svg")
                         }
                     }
                 }
@@ -177,7 +177,7 @@ script_mod! {
                     icon_walk: Walk{ width: 10. }
                     draw_icon +: {
                         color: theme.color_label_outer
-                        svg_file: crate_resource("self://resources/icons/icon_auto.svg")
+                        svg: crate_resource("self://resources/icons/icon_auto.svg")
                     }
                 }
 
@@ -218,7 +218,7 @@ script_mod! {
                     draw_bg +: { color_focus: #0000 }
                     padding: theme.mspace_1
                     draw_icon +: {
-                        svg_file: crate_resource("self://resources/icons/icon_history_rew.svg")
+                        svg: crate_resource("self://resources/icons/icon_history_rew.svg")
                     }
                     icon_walk: Walk{ width: 5. }
                 }
@@ -236,7 +236,7 @@ script_mod! {
                     padding: theme.mspace_1
                     draw_bg +: { color_focus: #0000 }
                     draw_icon +: {
-                        svg_file: crate_resource("self://resources/icons/icon_history_ff.svg")
+                        svg: crate_resource("self://resources/icons/icon_history_ff.svg")
                     }
                     icon_walk: Walk{ width: 5. }
                 }
@@ -246,7 +246,7 @@ script_mod! {
                     text: ""
                     draw_bg +: { color_focus: #0000 }
                     draw_icon +: {
-                        svg_file: crate_resource("self://resources/icons/icon_del.svg")
+                        svg: crate_resource("self://resources/icons/icon_del.svg")
                     }
                     icon_walk: Walk{ width: 10. }
                 }
@@ -258,7 +258,7 @@ script_mod! {
                     draw_bg +: { color_focus: #0000 }
                     draw_icon +: {
                         color: theme.color_error
-                        svg_file: crate_resource("self://resources/icons/icon_times.svg")
+                        svg: crate_resource("self://resources/icons/icon_times.svg")
                     }
                     icon_walk: Walk{ width: 10. }
                 }
