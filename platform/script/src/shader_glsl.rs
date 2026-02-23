@@ -736,6 +736,9 @@ impl ShaderOutput {
             TextureType::TextureCubeArray => "samplerCubeArray",
             TextureType::TextureDepth => "sampler2D",
             TextureType::TextureDepthArray => "sampler2DArray",
+            #[cfg(target_arch = "wasm32")]
+            TextureType::TextureVideo => "sampler2D",
+            #[cfg(not(target_arch = "wasm32"))]
             TextureType::TextureVideo => "samplerExternalOES",
         }
     }

@@ -1,4 +1,3 @@
-use std::time::Instant;
 use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl},
     image_cache::ImageCacheImpl, makepad_derive_widget::*, makepad_draw::*,
@@ -378,7 +377,7 @@ pub struct Video {
     seek_cooldown: u32,
     /// Manual double-tap tracking (fallback for unreliable platform tap_count on touch).
     #[rust]
-    last_tap_time: Option<Instant>,
+    last_tap_time: Option<f64>,
     #[rust]
     last_tap_abs: DVec2,
 
@@ -789,6 +788,12 @@ impl Video {
         if self.mute && self.audio_state != AudioState::Muted {
             cx.mute_video_playback(self.id);
         }
+
+        if self.autoplay {
+            cx.begin_video_playback(self.id);
+            self.playback_state = PlaybackState::Playing;
+            self.draw_bg.set_uniform(cx, id!(show_thumbnail), &[0.0]);
+        }
     }
 
     fn controls_interactable(&self) -> bool {
@@ -798,9 +803,9 @@ impl Video {
     /// Manual double-tap detection as a fallback for unreliable platform tap_count on touch.
     /// Returns true if a double-tap is detected, and clears the tracking state.
     /// Otherwise records this tap for future detection.
-    fn check_double_tap(&mut self, abs: DVec2) -> bool {
+    fn check_double_tap(&mut self, abs: DVec2, time: f64) -> bool {
         if let Some(last_time) = self.last_tap_time {
-            let elapsed = last_time.elapsed().as_secs_f64();
+            let elapsed = time - last_time;
             let dx = abs.x - self.last_tap_abs.x;
             let dy = abs.y - self.last_tap_abs.y;
             let dist = (dx * dx + dy * dy).sqrt();
@@ -809,7 +814,7 @@ impl Video {
                 return true;
             }
         }
-        self.last_tap_time = Some(Instant::now());
+        self.last_tap_time = Some(time);
         self.last_tap_abs = abs;
         false
     }
@@ -844,7 +849,7 @@ impl Video {
                     self.last_tap_time = None;
                     true
                 } else {
-                    self.check_double_tap(fe.abs)
+                    self.check_double_tap(fe.abs, fe.time)
                 };
 
                 // Double-tap on video area: seek forward/backward
@@ -1304,6 +1309,11 @@ impl Video {
             PlaybackState::Paused => self.resume_playback(cx),
             PlaybackState::Unprepared => {
                 self.begin_playback(cx);
+            }
+            PlaybackState::Preparing => {
+                // Preparation in progress — mark autoplay so playback starts
+                // as soon as preparation completes.
+                self.autoplay = true;
             }
             PlaybackState::Prepared => {
                 cx.begin_video_playback(self.id);
