@@ -154,8 +154,17 @@ impl BuildConnection {
         }
 
         let env: Vec<(String, String)> = env.into_iter().collect();
-        let process = ChildProcess::start("cargo", &args, path.to_path_buf(), &env, is_in_studio)
-            .expect("Cannot start process");
+        let mut process = match ChildProcess::start("cargo", &args, path.to_path_buf(), &env, is_in_studio) {
+            Ok(p) => p,
+            Err(err) => {
+                msg_sender.send_bare_message(
+                    cmd_id,
+                    LogLevel::Error,
+                    format!("Cannot start process: {err}"),
+                );
+                return;
+            }
+        };
 
         shared.write().unwrap().processes.insert(
             cmd_id,
@@ -165,21 +174,9 @@ impl BuildConnection {
             },
         );
 
-        // HACK(eddyb) do this first, as there is no way to actually send the
-        // initial swapchain to the client at all, unless we have this first
-        // (thankfully sending this before we ever read from the client means
-        // it will definitely arrive before C->H ReadyToStart triggers anything)
-        if is_in_studio {
-            msg_sender.send_message(BuildClientMessageWrap {
-                cmd_id,
-                message: BuildClientMessage::AuxChanHostEndpointCreated(
-                    process.aux_chan_host_endpoint.clone().unwrap(),
-                ),
-            });
-        }
-
         // let mut stderr_state = StdErrState::First;
         //let stdin_sender = process.stdin_sender.clone();
+        let mut aux_chan_listener = process.aux_chan_listener.take();
         std::thread::spawn(move || {
             // lets create a BuildProcess and run it
             while let Ok(line) = process.line_receiver.recv() {
@@ -212,7 +209,29 @@ impl BuildConnection {
                     }
                     ChildStdIO::StdErr(line) => {
                         if line.trim().starts_with("Running ") {
-                            msg_sender.send_bare_message(cmd_id, LogLevel::Wait, line);
+                            msg_sender.send_bare_message(cmd_id, LogLevel::Wait, line.clone());
+                            // Accept aux channel here, after cargo finishes
+                            // compiling and the binary starts. Accepting at
+                            // spawn time would hit the 10s timeout in
+                            // accept_host_endpoint for any build longer than
+                            // that.
+                            if let Some(listener) = aux_chan_listener.take() {
+                                match listener.accept_host_endpoint() {
+                                    Ok(endpoint) => {
+                                        msg_sender.send_message(BuildClientMessageWrap {
+                                            cmd_id,
+                                            message: BuildClientMessage::AuxChanHostEndpointCreated(endpoint),
+                                        });
+                                    }
+                                    Err(err) => {
+                                        msg_sender.send_bare_message(
+                                            cmd_id,
+                                            LogLevel::Error,
+                                            format!("aux-channel connect failed: {err}"),
+                                        );
+                                    }
+                                }
+                            }
                         } else if line.trim().starts_with("Compiling ") {
                             msg_sender.send_bare_message(cmd_id, LogLevel::Wait, line);
                         } else if line
