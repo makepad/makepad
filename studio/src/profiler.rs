@@ -109,6 +109,7 @@ script_mod! {
         chart_scroll := ScrollYView {
             width: Fill
             height: Fill
+            scroll_bars.ignore_scroll_input: true
             flow: Down
             chart := mod.widgets.ProfilerEventChart {}
         }
@@ -250,6 +251,40 @@ impl ProfilerEventChart {
         } else {
             let _ = write!(label, "-{:.2}s", abs_seconds);
         }
+    }
+
+    fn graph_plot_range_with_edges<T, F>(
+        &self,
+        samples: &[T],
+        time_offset: f64,
+        mut sample_end: F,
+    ) -> Option<(usize, usize)>
+    where
+        F: FnMut(&T) -> f64,
+    {
+        if samples.is_empty() {
+            return None;
+        }
+
+        let mut first_visible = None;
+        let mut first_after_visible = None;
+        for (index, sample) in samples.iter().enumerate() {
+            let end = sample_end(sample) + time_offset;
+            if first_visible.is_none() && end >= self.time_range.start {
+                first_visible = Some(index);
+            }
+            if end > self.time_range.end {
+                first_after_visible = Some(index);
+                break;
+            }
+        }
+
+        let first_visible = first_visible?;
+        let start = first_visible.saturating_sub(1);
+        let end = first_after_visible
+            .map(|index| (index + 1).min(samples.len()))
+            .unwrap_or(samples.len());
+        Some((start, end))
     }
 
     fn draw_time_grid(&mut self, cx: &mut Cx2d, rect: &Rect, label: &mut String) {
@@ -599,16 +634,14 @@ impl ProfilerEventChart {
 
         self.draw_vector.set_color(0.95, 0.64, 0.12, 1.0);
         let mut is_first = true;
-        for sample in &samples.gpu {
+        let Some((plot_start, plot_end)) =
+            self.graph_plot_range_with_edges(&samples.gpu, time_offset, |sample| sample.end)
+        else {
+            return;
+        };
+        for sample in &samples.gpu[plot_start..plot_end] {
             let sample_end = sample.end + time_offset;
-            if sample_end < self.time_range.start {
-                continue;
-            }
-            if sample_end > self.time_range.end {
-                break;
-            }
-            let xpos =
-                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let xpos = rect.pos.x + (sample_end - self.time_range.start) * x_scale;
             let ypos = metric_to_y((sample.end - sample.start).max(0.0) * 1000.0);
             if is_first {
                 self.draw_vector.move_to(xpos as f32, ypos);
@@ -680,18 +713,17 @@ impl ProfilerEventChart {
         self.draw_time
             .draw_abs(cx, graph_rect.pos + dvec2(4.0, 2.0), label);
 
+        let Some((plot_start, plot_end)) =
+            self.graph_plot_range_with_edges(&samples.gpu, time_offset, |sample| sample.end)
+        else {
+            return;
+        };
+
         self.draw_vector.set_color(0.95, 0.64, 0.12, 1.0);
         let mut is_first = true;
-        for sample in &samples.gpu {
+        for sample in &samples.gpu[plot_start..plot_end] {
             let sample_end = sample.end + time_offset;
-            if sample_end < self.time_range.start {
-                continue;
-            }
-            if sample_end > self.time_range.end {
-                break;
-            }
-            let xpos =
-                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let xpos = rect.pos.x + (sample_end - self.time_range.start) * x_scale;
             let ypos = metric_to_y(sample.draw_calls);
             if is_first {
                 self.draw_vector.move_to(xpos as f32, ypos);
@@ -706,16 +738,9 @@ impl ProfilerEventChart {
 
         self.draw_vector.set_color(0.26, 0.65, 0.96, 1.0);
         is_first = true;
-        for sample in &samples.gpu {
+        for sample in &samples.gpu[plot_start..plot_end] {
             let sample_end = sample.end + time_offset;
-            if sample_end < self.time_range.start {
-                continue;
-            }
-            if sample_end > self.time_range.end {
-                break;
-            }
-            let xpos =
-                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let xpos = rect.pos.x + (sample_end - self.time_range.start) * x_scale;
             let ypos = metric_to_y(sample.instances);
             if is_first {
                 self.draw_vector.move_to(xpos as f32, ypos);
@@ -731,16 +756,9 @@ impl ProfilerEventChart {
         // "vertices" already contains vertex_count * instance_count from backend.
         self.draw_vector.set_color(0.40, 0.73, 0.42, 1.0);
         is_first = true;
-        for sample in &samples.gpu {
+        for sample in &samples.gpu[plot_start..plot_end] {
             let sample_end = sample.end + time_offset;
-            if sample_end < self.time_range.start {
-                continue;
-            }
-            if sample_end > self.time_range.end {
-                break;
-            }
-            let xpos =
-                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let xpos = rect.pos.x + (sample_end - self.time_range.start) * x_scale;
             let ypos = metric_to_y(sample.vertices);
             if is_first {
                 self.draw_vector.move_to(xpos as f32, ypos);
@@ -833,18 +851,17 @@ impl ProfilerEventChart {
         self.draw_time
             .draw_abs(cx, graph_rect.pos + dvec2(4.0, 2.0), label);
 
+        let Some((plot_start, plot_end)) =
+            self.graph_plot_range_with_edges(&samples.gpu, time_offset, |sample| sample.end)
+        else {
+            return;
+        };
+
         self.draw_vector.set_color(0.94, 0.56, 0.01, 1.0);
         let mut is_first = true;
-        for sample in &samples.gpu {
+        for sample in &samples.gpu[plot_start..plot_end] {
             let sample_end = sample.end + time_offset;
-            if sample_end < self.time_range.start {
-                continue;
-            }
-            if sample_end > self.time_range.end {
-                break;
-            }
-            let xpos =
-                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let xpos = rect.pos.x + (sample_end - self.time_range.start) * x_scale;
             let ypos = metric_to_y(sample.instance_bytes);
             if is_first {
                 self.draw_vector.move_to(xpos as f32, ypos);
@@ -859,16 +876,9 @@ impl ProfilerEventChart {
 
         self.draw_vector.set_color(0.26, 0.65, 0.96, 1.0);
         is_first = true;
-        for sample in &samples.gpu {
+        for sample in &samples.gpu[plot_start..plot_end] {
             let sample_end = sample.end + time_offset;
-            if sample_end < self.time_range.start {
-                continue;
-            }
-            if sample_end > self.time_range.end {
-                break;
-            }
-            let xpos =
-                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let xpos = rect.pos.x + (sample_end - self.time_range.start) * x_scale;
             let ypos = metric_to_y(sample.uniform_bytes);
             if is_first {
                 self.draw_vector.move_to(xpos as f32, ypos);
@@ -883,16 +893,9 @@ impl ProfilerEventChart {
 
         self.draw_vector.set_color(0.40, 0.73, 0.42, 1.0);
         is_first = true;
-        for sample in &samples.gpu {
+        for sample in &samples.gpu[plot_start..plot_end] {
             let sample_end = sample.end + time_offset;
-            if sample_end < self.time_range.start {
-                continue;
-            }
-            if sample_end > self.time_range.end {
-                break;
-            }
-            let xpos =
-                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let xpos = rect.pos.x + (sample_end - self.time_range.start) * x_scale;
             let ypos = metric_to_y(sample.vertex_buffer_bytes);
             if is_first {
                 self.draw_vector.move_to(xpos as f32, ypos);
@@ -907,16 +910,9 @@ impl ProfilerEventChart {
 
         self.draw_vector.set_color(0.93, 0.25, 0.48, 1.0);
         is_first = true;
-        for sample in &samples.gpu {
+        for sample in &samples.gpu[plot_start..plot_end] {
             let sample_end = sample.end + time_offset;
-            if sample_end < self.time_range.start {
-                continue;
-            }
-            if sample_end > self.time_range.end {
-                break;
-            }
-            let xpos =
-                rect.pos.x + (sample_end - self.time_range.start).clamp(0.0, range_len) * x_scale;
+            let xpos = rect.pos.x + (sample_end - self.time_range.start) * x_scale;
             let ypos = metric_to_y(sample.texture_bytes);
             if is_first {
                 self.draw_vector.move_to(xpos as f32, ypos);

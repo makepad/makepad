@@ -15,10 +15,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_STUDIO_HOST_PORT: &str = "127.0.0.1:8001";
-const DEFAULT_STUDIO_PATH: &str = "/$studio_terminal";
+const DEFAULT_STUDIO_REMOTE_PATH: &str = "/$studio_remote";
 
 #[derive(Debug, Clone, SerJson, DeJson)]
-enum StudioTerminalRequest {
+enum StudioRemoteRequest {
     CargoRun {
         args: Vec<String>,
         root: Option<String>,
@@ -31,10 +31,10 @@ enum StudioTerminalRequest {
 }
 
 fn show_studio_help() {
-    eprintln!("Studio websocket bridge");
+    eprintln!("Studio websocket remote");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  cargo makepad studio [terminal|bridge] [--studio=IP:PORT]");
+    eprintln!("  cargo makepad studio [terminal|studio_remote] [--studio=IP:PORT]");
     eprintln!("  cargo makepad studio run [--studio=IP:PORT] [--root=ROOT] [cargo run args]");
     eprintln!();
     eprintln!("Examples:");
@@ -58,7 +58,7 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
     let mut index = 0usize;
     if let Some(first) = args.first() {
         match first.as_str() {
-            "terminal" | "bridge" => {
+            "terminal" | "studio_remote" => {
                 index = 1;
             }
             "run" => {
@@ -109,15 +109,15 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
 
     let target = resolve_host_port(studio)?;
     if mode_run {
-        let request = StudioTerminalRequest::CargoRun {
+        let request = StudioRemoteRequest::CargoRun {
             args: cargo_run_args,
             root,
             startup_query: None,
             env: None,
         };
-        run_studio_json_bridge(target, vec![request.serialize_json()])
+        run_studio_remote(target, vec![request.serialize_json()])
     } else {
-        run_studio_json_bridge(target, Vec::new())
+        run_studio_remote(target, Vec::new())
     }
 }
 
@@ -151,7 +151,7 @@ fn resolve_host_port(studio_override: Option<String>) -> Result<(String, u16), S
     Ok((host.to_string(), port))
 }
 
-fn run_studio_json_bridge(
+fn run_studio_remote(
     target: (String, u16),
     initial_messages: Vec<String>,
 ) -> Result<(), String> {
@@ -173,7 +173,7 @@ fn run_studio_json_bridge(
 
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: SxJdXBRtW7Q4awLDhflO0Q==\r\n\r\n",
-        DEFAULT_STUDIO_PATH, host_header
+        DEFAULT_STUDIO_REMOTE_PATH, host_header
     );
     write_all_no_error(&mut stream, request.as_bytes())
         .map_err(|e| format!("failed to write websocket handshake request: {e}"))?;
@@ -211,11 +211,11 @@ fn run_studio_json_bridge(
                             continue;
                         }
                         if let Err(err) = JsonValue::deserialize_json(text) {
-                            eprintln!("studio bridge: invalid json request: {err:?}");
+                            eprintln!("studio remote: invalid json request: {err:?}");
                             continue;
                         }
                         if let Err(err) = send_text_frame(&write_stream, text) {
-                            eprintln!("studio bridge: failed to send websocket text frame: {err}");
+                            eprintln!("studio remote: failed to send websocket text frame: {err}");
                             break;
                         }
                     }
@@ -296,17 +296,17 @@ fn parse_incoming_frames(
                 let _ = out.write_all(b"\n");
                 let _ = out.flush();
             } else {
-                eprintln!("studio bridge: ignoring non-utf8 binary websocket message");
+                eprintln!("studio remote: ignoring non-utf8 binary websocket message");
             }
         }
         Ok(ServerWebSocketMessage::Close) => {
             is_done.store(true, Ordering::Relaxed);
         }
         Err(ServerWebSocketError::OpcodeNotSupported(opcode)) => {
-            eprintln!("studio bridge: websocket opcode not supported: {opcode}");
+            eprintln!("studio remote: websocket opcode not supported: {opcode}");
         }
         Err(ServerWebSocketError::TextNotUTF8(_)) => {
-            eprintln!("studio bridge: non-utf8 text websocket message");
+            eprintln!("studio remote: non-utf8 text websocket message");
         }
     });
     Ok(())

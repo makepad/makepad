@@ -1,9 +1,9 @@
-# Studio Bridge Runbook
+# Studio Remote Runbook
 
 ## Execution Policy
-- Visual UI programs must be launched and controlled through the Makepad Studio bridge protocol.
+- Visual UI programs must be launched and controlled through the Makepad Studio remote protocol.
 - Command-line-only tasks (builds, tests, linting, file ops, grep/ripgrep, etc.) can be run directly in the shell.
-- Prefer bridge control for any workflow that needs screenshots, widget queries, clicks, typing, or runtime UI inspection.
+- Prefer studio remote control for any workflow that needs screenshots, widget queries, clicks, typing, or runtime UI inspection.
 
 ## Task Title Marker
 - For every new task, emit a short one/two-word title marker in the terminal output stream.
@@ -13,11 +13,11 @@
 
 ## Assumptions
 - Studio is started manually by the user.
-- Bridge target is `ip:port` only (no `http://`, no `ws://`), normally `127.0.0.1:8001`.
+- Studio remote target is `ip:port` only (no `http://`, no `ws://`), normally `127.0.0.1:8001`.
   - Use `127.0.0.1:8002` only if Studio reports fallback because `8001` is occupied.
-- Keep one persistent bridge process for the whole interaction.
+- Keep one persistent studio remote process for the whole interaction.
 
-## Start Bridge
+## Start Studio Remote
 - Command:
   - `cargo run -p cargo-makepad --release -- studio --studio=127.0.0.1:8001`
 - Send newline-delimited JSON requests on stdin.
@@ -36,21 +36,21 @@
 - `{"StudioToApp":{"build_id":38160721318170,"msg":{"MouseMove":{"time":0.0,"x":200.0,"y":160.0,"modifiers":{"shift":false,"control":false,"alt":false,"logo":false}}}}}`
 
 ## `StudioToApp` API (Updated)
-- The bridge now supports raw `StudioToApp` passthrough via `StudioTerminalRequest::StudioToApp`.
+- The studio remote protocol now supports raw `StudioToApp` passthrough via `StudioRemoteRequest::StudioToApp`.
 - Current `StudioToApp` variants include:
   - `Screenshot`, `WidgetTreeDump`, `KeepAlive`, `LiveChange`, `Swapchain`, `WindowGeomChange`, `Tick`
   - `MouseDown`, `MouseUp`, `MouseMove`, `Scroll`
   - `KeyDown`, `KeyUp`, `TextInput`, `TextCopy`, `TextCut`
   - `None`, `Kill`
-- Use direct bridge requests (`Screenshot`, `WidgetTreeDump`, `Click`, `TypeText`, `Return`) for normal automation.
+- Use direct studio remote requests (`Screenshot`, `WidgetTreeDump`, `Click`, `TypeText`, `Return`) for normal automation.
 - Use raw `StudioToApp` only for low-level event injection/debugging.
 
 ## Response Notes (Current)
-- `StudioTerminalResponse::Screenshot` returns file metadata (`path`, `width`, `height`) and not inline PNG bytes.
-- `StudioTerminalResponse::WidgetTreeDump` returns text dump content keyed by `request_id`.
+- `StudioRemoteResponse::Screenshot` returns file metadata (`path`, `width`, `height`) and not inline PNG bytes.
+- `StudioRemoteResponse::WidgetTreeDump` returns text dump content keyed by `request_id`.
 
 ## Recommended Control Flow
-1. Start bridge process once.
+1. Start studio remote process once.
 2. `CargoRun` and wait for `Started`.
 3. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
 4. For text input, click field first, then send text, then return.
