@@ -8,8 +8,8 @@ use {
         makepad_math::*,
         makepad_micro_serde::*,
         os::{
-            shared_framebuf::{PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
             d3d11::D3d11Cx,
+            shared_framebuf::{PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
             win32_app::Win32Time,
         },
         studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
@@ -148,12 +148,8 @@ impl Cx {
                 },
                 WebSocketMessage::String(text) => {
                     if let Ok(msg) = StudioToApp::deserialize_json(&text) {
-                        if self.stdin_handle_host_to_stdin(
-                            msg,
-                            d3d11_cx,
-                            &mut stdin_windows,
-                            &time,
-                        ) {
+                        if self.stdin_handle_host_to_stdin(msg, d3d11_cx, &mut stdin_windows, &time)
+                        {
                             return;
                         }
                     } else if !text.trim().is_empty() {
@@ -317,11 +313,7 @@ impl Cx {
             // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
             // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.
             other => {
-                return self.dispatch_studio_msg(
-                    other,
-                    CxWindowPool::id_zero(),
-                    dvec2(0.0, 0.0),
-                );
+                return self.dispatch_studio_msg(other, CxWindowPool::id_zero(), dvec2(0.0, 0.0));
             }
         }
         false

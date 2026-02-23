@@ -49,9 +49,9 @@ pub mod nav_control;
 #[cfg(feature = "voice")]
 pub mod voice_wave;
 pub mod window;
+pub mod window_menu;
 #[cfg(feature = "voice")]
 mod window_voice_input;
-pub mod window_menu;
 
 pub mod drop_down;
 pub mod popup_menu;
@@ -230,7 +230,6 @@ pub use crate::widgets_3d::*;
 pub use crate::chart::*;
 
 pub use crate::video::*;
-
 
 pub fn theme_mod(vm: &mut ScriptVm) {
     makepad_draw::script_mod(vm);

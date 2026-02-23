@@ -151,10 +151,7 @@ fn resolve_host_port(studio_override: Option<String>) -> Result<(String, u16), S
     Ok((host.to_string(), port))
 }
 
-fn run_studio_remote(
-    target: (String, u16),
-    initial_messages: Vec<String>,
-) -> Result<(), String> {
+fn run_studio_remote(target: (String, u16), initial_messages: Vec<String>) -> Result<(), String> {
     let (host, port) = target;
     let host_header = format!("{host}:{port}");
     let addr = host_header.clone();

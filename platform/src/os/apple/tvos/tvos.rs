@@ -13,7 +13,7 @@ use {
                     tvos_app::{get_tvos_app_global, init_tvos_app_global, TvosApp},
                     tvos_event::TvosEvent,
                 },
-                url_session::AppleHttpRequests,
+                http::AppleHttpRequests,
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,

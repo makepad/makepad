@@ -2,15 +2,14 @@ use {
     crate::{
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        shared_framebuf::PollTimers,
         draw_pass::CxDrawPassParent,
         event::{
+            video_playback::{
+                VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
+                VideoTextureUpdatedEvent,
+            },
             Event, GameInputEventChannel, MouseButton, MouseUpEvent, NetworkResponseChannel,
             WindowGeom,
-            video_playback::{
-                VideoPlaybackPreparedEvent, VideoTextureUpdatedEvent,
-                VideoPlaybackResourcesReleasedEvent,
-            },
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -25,13 +24,14 @@ use {
                     macos_event::MacosEvent,
                     macos_window::MacosWindow,
                 },
-                url_session::AppleHttpRequests,
+                http::AppleHttpRequests,
             },
             apple_media::CxAppleMedia,
             cx_native::EventFlow,
             metal::{DrawPassMode, MetalCx},
         },
         permission::Permission,
+        shared_framebuf::PollTimers,
         thread::SignalToUI,
         window::{CxWindowPool, WindowId},
     },
@@ -435,18 +435,22 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         if let Some((width, height, duration)) = player.check_prepared() {
-                            video_events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
-                                video_id: player.video_id,
-                                video_width: width,
-                                video_height: height,
-                                duration,
-                            }));
+                            video_events.push(Event::VideoPlaybackPrepared(
+                                VideoPlaybackPreparedEvent {
+                                    video_id: player.video_id,
+                                    video_width: width,
+                                    video_height: height,
+                                    duration,
+                                },
+                            ));
                         }
                         if player.poll_frame(&mut self.textures) {
-                            video_events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
-                                video_id: player.video_id,
-                                current_position_ms: player.current_position_ms(),
-                            }));
+                            video_events.push(Event::VideoTextureUpdated(
+                                VideoTextureUpdatedEvent {
+                                    video_id: player.video_id,
+                                    current_position_ms: player.current_position_ms(),
+                                },
+                            ));
                         }
                     }
                     for event in video_events {
@@ -759,7 +763,14 @@ impl Cx {
                 } => {
                     self.handle_permission_request(permission, request_id);
                 }
-                CxOsOp::PrepareVideoPlayback(video_id, source, _gl_handle, texture_id, autoplay, should_loop) => {
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _gl_handle,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                ) => {
                     let player = AppleVideoPlayer::new(
                         metal_cx.device,
                         video_id,
@@ -801,7 +812,7 @@ impl Cx {
                     if let Some(mut player) = self.os.video_players.remove(&video_id) {
                         player.cleanup();
                         self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
-                            VideoPlaybackResourcesReleasedEvent { video_id }
+                            VideoPlaybackResourcesReleasedEvent { video_id },
                         ));
                     }
                 }

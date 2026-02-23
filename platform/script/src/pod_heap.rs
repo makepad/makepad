@@ -447,7 +447,10 @@ impl ScriptHeap {
         _trap: ScriptTrap,
     ) -> ScriptValue {
         let _pod = &self.pods[pod];
-        println!("pod_heap::set_pod_field - Want to set pod field {}, but not impplemented", field);
+        println!(
+            "pod_heap::set_pod_field - Want to set pod field {}, but not impplemented",
+            field
+        );
         NIL
     }
 

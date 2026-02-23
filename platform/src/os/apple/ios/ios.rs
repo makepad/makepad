@@ -4,11 +4,11 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
-            Event, KeyEvent, NetworkResponseChannel, TextInputEvent, TextRangeReplaceEvent,
             video_playback::{
-                VideoPlaybackPreparedEvent, VideoTextureUpdatedEvent,
-                VideoPlaybackResourcesReleasedEvent,
+                VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
+                VideoTextureUpdatedEvent,
             },
+            Event, KeyEvent, NetworkResponseChannel, TextInputEvent, TextRangeReplaceEvent,
         },
         makepad_live_id::*,
         makepad_objc_sys::objc_block,
@@ -21,7 +21,7 @@ use {
                     ios_app::{self, init_ios_app_global, with_ios_app, IosApp},
                     ios_event::IosEvent,
                 },
-                url_session::AppleHttpRequests,
+                http::AppleHttpRequests,
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
@@ -240,18 +240,22 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         if let Some((width, height, duration)) = player.check_prepared() {
-                            video_events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
-                                video_id: player.video_id,
-                                video_width: width,
-                                video_height: height,
-                                duration,
-                            }));
+                            video_events.push(Event::VideoPlaybackPrepared(
+                                VideoPlaybackPreparedEvent {
+                                    video_id: player.video_id,
+                                    video_width: width,
+                                    video_height: height,
+                                    duration,
+                                },
+                            ));
                         }
                         if player.poll_frame(&mut self.textures) {
-                            video_events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
-                                video_id: player.video_id,
-                                current_position_ms: player.current_position_ms(),
-                            }));
+                            video_events.push(Event::VideoTextureUpdated(
+                                VideoTextureUpdatedEvent {
+                                    video_id: player.video_id,
+                                    current_position_ms: player.current_position_ms(),
+                                },
+                            ));
                         }
                     }
                     for event in video_events {
@@ -412,7 +416,14 @@ impl Cx {
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }
-                CxOsOp::PrepareVideoPlayback(video_id, source, _gl_handle, texture_id, autoplay, should_loop) => {
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _gl_handle,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                ) => {
                     let player = AppleVideoPlayer::new(
                         metal_cx.device,
                         video_id,
@@ -452,7 +463,7 @@ impl Cx {
                     if let Some(mut player) = self.os.video_players.remove(&video_id) {
                         player.cleanup();
                         self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
-                            VideoPlaybackResourcesReleasedEvent { video_id }
+                            VideoPlaybackResourcesReleasedEvent { video_id },
                         ));
                     }
                 }

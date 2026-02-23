@@ -140,7 +140,10 @@ impl BuildConnection {
             env.insert("STUDIO_BUILD_ID".to_string(), cmd_id_string.clone());
         }
         if matches!(what.target, BuildTarget::Harmony) {
-            env.insert("MAKEPAD".to_string(), "no_android_choreographer".to_string());
+            env.insert(
+                "MAKEPAD".to_string(),
+                "no_android_choreographer".to_string(),
+            );
         }
 
         // Default to nightly rustc but don't overwrite any user request for a
@@ -148,23 +151,25 @@ impl BuildConnection {
         // FIXME: also apply this for overrides set using rustup override rather
         // than using an env var or as commandline argument.
         if !env.contains_key("RUSTUP_TOOLCHAIN")
-            && !env::var("RUSTUP_TOOLCHAIN").map_or(false, |toolchain| toolchain.contains("nightly"))
+            && !env::var("RUSTUP_TOOLCHAIN")
+                .map_or(false, |toolchain| toolchain.contains("nightly"))
         {
             env.insert("RUSTUP_TOOLCHAIN".to_string(), "nightly".to_string());
         }
 
         let env: Vec<(String, String)> = env.into_iter().collect();
-        let mut process = match ChildProcess::start("cargo", &args, path.to_path_buf(), &env, is_in_studio) {
-            Ok(p) => p,
-            Err(err) => {
-                msg_sender.send_bare_message(
-                    cmd_id,
-                    LogLevel::Error,
-                    format!("Cannot start process: {err}"),
-                );
-                return;
-            }
-        };
+        let mut process =
+            match ChildProcess::start("cargo", &args, path.to_path_buf(), &env, is_in_studio) {
+                Ok(p) => p,
+                Err(err) => {
+                    msg_sender.send_bare_message(
+                        cmd_id,
+                        LogLevel::Error,
+                        format!("Cannot start process: {err}"),
+                    );
+                    return;
+                }
+            };
 
         shared.write().unwrap().processes.insert(
             cmd_id,
@@ -220,7 +225,9 @@ impl BuildConnection {
                                     Ok(endpoint) => {
                                         msg_sender.send_message(BuildClientMessageWrap {
                                             cmd_id,
-                                            message: BuildClientMessage::AuxChanHostEndpointCreated(endpoint),
+                                            message: BuildClientMessage::AuxChanHostEndpointCreated(
+                                                endpoint,
+                                            ),
                                         });
                                     }
                                     Err(err) => {

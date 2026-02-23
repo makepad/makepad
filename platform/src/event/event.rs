@@ -8,8 +8,8 @@ use {
         draw_list::DrawListId,
         //midi::{Midi1InputData, MidiInputInfo},
         event::{
-            drag_drop::*, finger::*, game_input::*, keyboard::*, network::*, 
-            video_playback::*, window::*, xr::*,
+            drag_drop::*, finger::*, game_input::*, keyboard::*, network::*, video_playback::*,
+            window::*, xr::*,
         },
         //makepad_live_compiler::LiveEditEvent,
         makepad_live_id::LiveId,
@@ -228,7 +228,6 @@ pub enum Event {
 
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
-
 }
 
 impl Event {
@@ -444,9 +443,7 @@ impl Event {
             | Self::MouseMove(_)
             | Self::TweakRay(_)
             | Self::TouchUpdate(_)
-            | Self::Scroll(_) => {
-                true
-            }
+            | Self::Scroll(_) => true,
             _ => false,
         }
     }

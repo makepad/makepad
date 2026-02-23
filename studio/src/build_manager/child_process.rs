@@ -42,7 +42,13 @@ impl ChildProcess {
         let (mut child, aux_chan_listener) = if aux_chan {
             let studio_addr = env
                 .iter()
-                .find_map(|(key, value)| if key == "STUDIO" { Some(value.clone()) } else { None })
+                .find_map(|(key, value)| {
+                    if key == "STUDIO" {
+                        Some(value.clone())
+                    } else {
+                        None
+                    }
+                })
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,

@@ -142,7 +142,11 @@ impl ShaderOutput {
         }
         writeln!(out, "}};").ok();
 
-        writeln!(out, "inline IoInstance _mp_decode_instance(constant IoInstanceRaw &raw) {{").ok();
+        writeln!(
+            out,
+            "inline IoInstance _mp_decode_instance(constant IoInstanceRaw &raw) {{"
+        )
+        .ok();
         writeln!(out, "    IoInstance out_instance;").ok();
         for io in &self.io {
             if let ShaderIoKind::DynInstance = io.kind {
@@ -313,7 +317,11 @@ impl ShaderOutput {
         writeln!(out, ") {{").ok();
 
         writeln!(out, "    Io _io;").ok();
-        writeln!(out, "    IoInstance _inst = _mp_decode_instance(i_raw[iid]);").ok();
+        writeln!(
+            out,
+            "    IoInstance _inst = _mp_decode_instance(i_raw[iid]);"
+        )
+        .ok();
         writeln!(out, "    _io.vb = vb;").ok();
         writeln!(out, "    _io.i = &_inst;").ok();
         writeln!(out, "    _io.u = u;").ok();
@@ -442,7 +450,11 @@ impl ShaderOutput {
         writeln!(out, ") {{").ok();
 
         writeln!(out, "    Io _io;").ok();
-        writeln!(out, "    IoInstance _inst = _mp_decode_instance(i_raw[v._iid]);").ok();
+        writeln!(
+            out,
+            "    IoInstance _inst = _mp_decode_instance(i_raw[v._iid]);"
+        )
+        .ok();
         writeln!(out, "    _io.vb = vb;").ok();
         writeln!(out, "    _io.i = &_inst;").ok();
         writeln!(out, "    _io.u = u;").ok();

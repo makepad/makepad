@@ -6,7 +6,7 @@ script_mod! {
     use mod.text.*
     use mod.turtle.*
     use mod.res.*
-    
+
 
     mod.themes.light = {
         let theme = me

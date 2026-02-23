@@ -4,7 +4,7 @@ use std::sync::{Mutex, OnceLock};
 use makepad_git::{
     apply_pack_and_checkout, build_info_refs_request, build_ls_refs_head_request,
     build_upload_pack_request, extract_pack_from_response, parse_info_refs_response,
-    parse_ls_refs_head_response, GitHttpMethod, GitHttpRequest, GitHttpResponse, GitError,
+    parse_ls_refs_head_response, GitError, GitHttpMethod, GitHttpRequest, GitHttpResponse,
     HttpSyncHooks, ObjectId, RemoteHead, Repository,
 };
 use makepad_widgets::*;
@@ -22,7 +22,7 @@ script_mod! {
     let GitLogList = #(GitLogList::register_widget(vm)) {
         width: Fill
         height: Fill
-        
+
         list := PortalList {
             width: Fill
             height: Fill
@@ -246,7 +246,10 @@ fn event_logs() -> &'static Mutex<Vec<String>> {
 }
 
 fn event_log_snapshot() -> Vec<String> {
-    event_logs().lock().map(|logs| logs.clone()).unwrap_or_default()
+    event_logs()
+        .lock()
+        .map(|logs| logs.clone())
+        .unwrap_or_default()
 }
 
 fn push_event_log(line: String) {
@@ -366,7 +369,10 @@ impl App {
         self.phase = SyncPhase::AwaitLsRefs;
         self.send_git_request(cx, request);
         self.set_status(cx, "Polling remote HEAD hash...");
-        self.log_event(cx, "Poll: requesting remote HEAD hash (protocol v2 ls-refs)");
+        self.log_event(
+            cx,
+            "Poll: requesting remote HEAD hash (protocol v2 ls-refs)",
+        );
     }
 
     fn checkout_http(&mut self, cx: &mut Cx) {
@@ -440,13 +446,8 @@ impl App {
             None
         };
 
-        let upload_req = build_upload_pack_request(
-            REMOTE_URL,
-            parsed.oid,
-            &parsed.capabilities,
-            &have,
-            depth,
-        )?;
+        let upload_req =
+            build_upload_pack_request(REMOTE_URL, parsed.oid, &parsed.capabilities, &have, depth)?;
 
         self.pending_remote_head = Some(parsed.clone());
         self.phase = SyncPhase::AwaitUploadPack;
@@ -524,7 +525,10 @@ impl App {
             );
             self.log_event(
                 cx,
-                format!("No update: remote HEAD is still {}", Self::short_oid(&parsed.oid)),
+                format!(
+                    "No update: remote HEAD is still {}",
+                    Self::short_oid(&parsed.oid)
+                ),
             );
             return Ok(());
         }
@@ -680,7 +684,10 @@ impl MatchEvent for App {
         self.ui
             .label(cx, ids!(dest_value))
             .set_text(cx, &Self::destination_display_path());
-        self.set_detail(cx, "Polling GitHub every 30 seconds using HTTPS git endpoints.");
+        self.set_detail(
+            cx,
+            "Polling GitHub every 30 seconds using HTTPS git endpoints.",
+        );
         self.log_event(cx, format!("Startup: remote {}", REMOTE_URL));
         self.log_event(
             cx,
@@ -741,7 +748,10 @@ impl MatchEvent for App {
         if self.phase == SyncPhase::AwaitUploadPack {
             self.set_detail(
                 cx,
-                &format!("Downloading pack: {} / {} bytes", progress.loaded, progress.total),
+                &format!(
+                    "Downloading pack: {} / {} bytes",
+                    progress.loaded, progress.total
+                ),
             );
         }
     }

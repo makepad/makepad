@@ -128,7 +128,7 @@ impl PhysicsView {
         let grid = 5;
         let half = 0.5f32;
         let spacing = 1.1f32;
-        for y in 0..grid*2 {
+        for y in 0..grid * 2 {
             for x in 0..grid {
                 for z in 0..grid {
                     ops.push(PhysicsOp::SpawnDynamic {

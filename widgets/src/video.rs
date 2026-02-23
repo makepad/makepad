@@ -1,10 +1,12 @@
-use std::time::Instant;
 use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl},
-    image_cache::ImageCacheImpl, makepad_derive_widget::*, makepad_draw::*,
-    makepad_platform::event::video_playback::*, widget::*,
+    image_cache::ImageCacheImpl,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    makepad_platform::event::video_playback::*,
+    widget::*,
 };
-
+use std::time::Instant;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -849,7 +851,8 @@ impl Video {
 
                 // Double-tap on video area: seek forward/backward
                 // Only when actively playing/paused (not when center play button is showing)
-                if self.show_controls && is_double_tap
+                if self.show_controls
+                    && is_double_tap
                     && !self.should_show_center_play()
                     && !(self.controls_interactable() && self.hit_test_controls(cx, fe.abs))
                 {
@@ -884,7 +887,10 @@ impl Video {
                     self.toggle_play_pause(cx);
                 } else if self.controls_interactable() && self.hit_test_controls_click(cx, fe.abs) {
                     // Control click handled
-                } else if self.show_controls && fe.tap_count < 2 && !self.hit_test_controls(cx, fe.abs) {
+                } else if self.show_controls
+                    && fe.tap_count < 2
+                    && !self.hit_test_controls(cx, fe.abs)
+                {
                     // Single tap outside controls bar: toggle pinned visibility
                     self.controls_visible = !self.controls_visible;
                     if self.controls_visible {
@@ -1054,7 +1060,10 @@ impl Video {
     fn should_show_center_play(&self) -> bool {
         matches!(
             self.playback_state,
-            PlaybackState::Unprepared | PlaybackState::Preparing | PlaybackState::Prepared | PlaybackState::Completed
+            PlaybackState::Unprepared
+                | PlaybackState::Preparing
+                | PlaybackState::Prepared
+                | PlaybackState::Completed
         )
     }
 
@@ -1073,21 +1082,27 @@ impl Video {
         let btn_y = video_rect.pos.y + (video_rect.size.y - btn_size) * 0.5;
 
         // Draw semi-transparent circle background
-        self.draw_center_play_bg.draw_abs(cx, Rect {
-            pos: dvec2(btn_x, btn_y),
-            size: dvec2(btn_size, btn_size),
-        });
+        self.draw_center_play_bg.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(btn_x, btn_y),
+                size: dvec2(btn_size, btn_size),
+            },
+        );
 
         // Measure the glyph to center it precisely within the circle
         let glyph = "\u{f04b}"; // fa-play
-        let laid_out = self.draw_center_play_icon.layout(cx, 0.0, 0.0, None, false, Align::default(), glyph);
+        let laid_out =
+            self.draw_center_play_icon
+                .layout(cx, 0.0, 0.0, None, false, Align::default(), glyph);
         let glyph_w = laid_out.size_in_lpxs.width as f64;
         let glyph_h = laid_out.size_in_lpxs.height as f64;
         // Nudge right by 2px — play triangles are geometrically centered but
         // perceptually look left-shifted due to the pointed right edge.
         let icon_x = btn_x + (btn_size - glyph_w) * 0.5 + 2.0;
         let icon_y = btn_y + (btn_size - glyph_h) * 0.5;
-        self.draw_center_play_icon.draw_abs(cx, dvec2(icon_x, icon_y), glyph);
+        self.draw_center_play_icon
+            .draw_abs(cx, dvec2(icon_x, icon_y), glyph);
     }
 
     fn draw_controls(&mut self, cx: &mut Cx2d) {
@@ -1100,20 +1115,29 @@ impl Video {
         let bar_y = video_rect.pos.y + video_rect.size.y - ch;
 
         // Begin the controls bar as a layout at absolute position (bottom of video)
-        self.draw_controls_bg.begin(cx, Walk {
-            abs_pos: Some(dvec2(video_rect.pos.x, bar_y)),
-            width: Size::Fixed(video_rect.size.x),
-            height: Size::Fixed(ch),
-            ..Walk::default()
-        }, Layout {
-            flow: Flow::right(),
-            align: Align { x: 0.0, y: 0.5 },
-            spacing: 8.0,
-            padding: Inset { left: 8.0, right: 12.0, top: 0.0, bottom: 0.0 },
-            clip_x: true,
-            clip_y: true,
-            ..Layout::default()
-        });
+        self.draw_controls_bg.begin(
+            cx,
+            Walk {
+                abs_pos: Some(dvec2(video_rect.pos.x, bar_y)),
+                width: Size::Fixed(video_rect.size.x),
+                height: Size::Fixed(ch),
+                ..Walk::default()
+            },
+            Layout {
+                flow: Flow::right(),
+                align: Align { x: 0.0, y: 0.5 },
+                spacing: 8.0,
+                padding: Inset {
+                    left: 8.0,
+                    right: 12.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                clip_x: true,
+                clip_y: true,
+                ..Layout::default()
+            },
+        );
 
         let icon_walk = Walk::fit();
 
@@ -1123,13 +1147,19 @@ impl Video {
         } else {
             "\u{f04b}" // fa-play
         };
-        self.draw_play_icon.draw_walk(cx, Walk {
-            width: Size::Fixed(14.0),
-            ..icon_walk
-        }, Align::default(), play_glyph);
+        self.draw_play_icon.draw_walk(
+            cx,
+            Walk {
+                width: Size::Fixed(14.0),
+                ..icon_walk
+            },
+            Align::default(),
+            play_glyph,
+        );
 
         // Restart icon (FontAwesome)
-        self.draw_restart_icon.draw_walk(cx, icon_walk, Align::default(), "\u{f048}"); // fa-backward-step
+        self.draw_restart_icon
+            .draw_walk(cx, icon_walk, Align::default(), "\u{f048}"); // fa-backward-step
 
         // Volume icon (FontAwesome)
         let volume_glyph = if self.audio_state == AudioState::Muted {
@@ -1137,18 +1167,31 @@ impl Video {
         } else {
             "\u{f028}" // fa-volume-up
         };
-        self.draw_volume_icon.draw_walk(cx, Walk {
-            width: Size::Fixed(14.0),
-            ..icon_walk
-        }, Align::default(), volume_glyph);
+        self.draw_volume_icon.draw_walk(
+            cx,
+            Walk {
+                width: Size::Fixed(14.0),
+                ..icon_walk
+            },
+            Align::default(),
+            volume_glyph,
+        );
 
         // Progress bar track (Fill width to take remaining space)
-        self.draw_progress_bg.draw_walk(cx, Walk {
-            width: Size::fill(),
-            height: Size::Fixed(4.0),
-            margin: Inset { left: 0.0, right: 4.0, top: 0.0, bottom: 0.0 },
-            ..Walk::default()
-        });
+        self.draw_progress_bg.draw_walk(
+            cx,
+            Walk {
+                width: Size::fill(),
+                height: Size::Fixed(4.0),
+                margin: Inset {
+                    left: 0.0,
+                    right: 4.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                ..Walk::default()
+            },
+        );
 
         // Time text (fixed width so fill doesn't consume its space)
         let time_text = format!(
@@ -1156,11 +1199,16 @@ impl Video {
             Self::format_time_ms(self.current_position_ms),
             Self::format_time_ms(self.total_duration),
         );
-        self.draw_time_text.draw_walk(cx, Walk {
-            width: Size::Fixed(80.0),
-            height: Size::fit(),
-            ..Walk::default()
-        }, Align::default(), &time_text);
+        self.draw_time_text.draw_walk(
+            cx,
+            Walk {
+                width: Size::Fixed(80.0),
+                height: Size::fit(),
+                ..Walk::default()
+            },
+            Align::default(),
+            &time_text,
+        );
 
         self.draw_controls_bg.end(cx);
 
@@ -1173,19 +1221,25 @@ impl Video {
                 0.0
             };
             let fill_w = progress_rect.size.x * progress.min(1.0);
-            self.draw_progress_fill.draw_abs(cx, Rect {
-                pos: progress_rect.pos,
-                size: dvec2(fill_w, progress_rect.size.y),
-            });
+            self.draw_progress_fill.draw_abs(
+                cx,
+                Rect {
+                    pos: progress_rect.pos,
+                    size: dvec2(fill_w, progress_rect.size.y),
+                },
+            );
 
             let thumb_size = 10.0;
-            self.draw_progress_thumb.draw_abs(cx, Rect {
-                pos: dvec2(
-                    progress_rect.pos.x + fill_w - thumb_size * 0.5,
-                    progress_rect.pos.y + (progress_rect.size.y - thumb_size) * 0.5,
-                ),
-                size: dvec2(thumb_size, thumb_size),
-            });
+            self.draw_progress_thumb.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(
+                        progress_rect.pos.x + fill_w - thumb_size * 0.5,
+                        progress_rect.pos.y + (progress_rect.size.y - thumb_size) * 0.5,
+                    ),
+                    size: dvec2(thumb_size, thumb_size),
+                },
+            );
         }
     }
 
@@ -1212,11 +1266,18 @@ impl Video {
             video_rect.pos.x + video_rect.size.x * 0.25 - indicator_size * 0.5
         };
 
-        self.draw_seek_indicator.set_uniform(cx, id!(direction), &[self.seek_indicator_direction as f32]);
-        self.draw_seek_indicator.draw_abs(cx, Rect {
-            pos: dvec2(center_x, center_y),
-            size: dvec2(indicator_size, indicator_size),
-        });
+        self.draw_seek_indicator.set_uniform(
+            cx,
+            id!(direction),
+            &[self.seek_indicator_direction as f32],
+        );
+        self.draw_seek_indicator.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(center_x, center_y),
+                size: dvec2(indicator_size, indicator_size),
+            },
+        );
     }
 
     fn seek_to_position_from_x(&mut self, cx: &mut Cx, abs_x: f64) {
@@ -1245,16 +1306,20 @@ impl Video {
 
     fn hit_test_controls(&self, cx: &Cx, abs: Vec2d) -> bool {
         let bar_rect = self.draw_controls_bg.area().rect(cx);
-        abs.x >= bar_rect.pos.x && abs.x <= bar_rect.pos.x + bar_rect.size.x
-            && abs.y >= bar_rect.pos.y && abs.y <= bar_rect.pos.y + bar_rect.size.y
+        abs.x >= bar_rect.pos.x
+            && abs.x <= bar_rect.pos.x + bar_rect.size.x
+            && abs.y >= bar_rect.pos.y
+            && abs.y <= bar_rect.pos.y + bar_rect.size.y
     }
 
     fn hit_test_progress_bar(&self, cx: &Cx, abs: Vec2d) -> bool {
         let bar_rect = self.draw_controls_bg.area().rect(cx);
         let progress_rect = self.draw_progress_bg.area().rect(cx);
         // Use full bar height for easier click target, but progress bar x range
-        abs.y >= bar_rect.pos.y && abs.y <= bar_rect.pos.y + bar_rect.size.y
-            && abs.x >= progress_rect.pos.x && abs.x <= progress_rect.pos.x + progress_rect.size.x
+        abs.y >= bar_rect.pos.y
+            && abs.y <= bar_rect.pos.y + bar_rect.size.y
+            && abs.x >= progress_rect.pos.x
+            && abs.x <= progress_rect.pos.x + progress_rect.size.x
     }
 
     fn hit_test_controls_click(&mut self, cx: &mut Cx, abs: Vec2d) -> bool {

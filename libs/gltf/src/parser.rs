@@ -1,7 +1,4 @@
-use crate::{
-    document::GltfDocument,
-    error::GltfError,
-};
+use crate::{document::GltfDocument, error::GltfError};
 use makepad_micro_serde::DeJson;
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
@@ -32,18 +29,23 @@ pub fn is_glb_bytes(bytes: &[u8]) -> bool {
 }
 
 pub fn parse_gltf_json(json: &str) -> Result<GltfDocument, GltfError> {
-    let document = <GltfDocument as DeJson>::deserialize_json_lenient(json).map_err(GltfError::Json)?;
+    let document =
+        <GltfDocument as DeJson>::deserialize_json_lenient(json).map_err(GltfError::Json)?;
     validate_document(&document)?;
     Ok(document)
 }
 
 pub fn parse_glb_bytes(bytes: &[u8]) -> Result<ParsedGlb, GltfError> {
     if bytes.len() < 12 {
-        return Err(GltfError::InvalidGlb("header is shorter than 12 bytes".to_string()));
+        return Err(GltfError::InvalidGlb(
+            "header is shorter than 12 bytes".to_string(),
+        ));
     }
     let magic = read_u32(bytes, 0)?;
     if magic != GLB_MAGIC {
-        return Err(GltfError::InvalidGlb("bad magic, expected 'glTF'".to_string()));
+        return Err(GltfError::InvalidGlb(
+            "bad magic, expected 'glTF'".to_string(),
+        ));
     }
 
     let version = read_u32(bytes, 4)?;
@@ -167,14 +169,22 @@ pub fn validate_document(document: &GltfDocument) -> Result<(), GltfError> {
             ensure_index(&format!("nodes[{node_i}].mesh"), mesh_index, mesh_count)?;
         }
         if let Some(camera_index) = node.camera {
-            ensure_index(&format!("nodes[{node_i}].camera"), camera_index, camera_count)?;
+            ensure_index(
+                &format!("nodes[{node_i}].camera"),
+                camera_index,
+                camera_count,
+            )?;
         }
         if let Some(skin_index) = node.skin {
             ensure_index(&format!("nodes[{node_i}].skin"), skin_index, skin_count)?;
         }
         if let Some(children) = &node.children {
             for &child_index in children {
-                ensure_index(&format!("nodes[{node_i}].children"), child_index, node_count)?;
+                ensure_index(
+                    &format!("nodes[{node_i}].children"),
+                    child_index,
+                    node_count,
+                )?;
             }
         }
     }
@@ -252,9 +262,7 @@ pub fn validate_document(document: &GltfDocument) -> Result<(), GltfError> {
         if let Some(pbr) = &material.pbr_metallic_roughness {
             if let Some(info) = &pbr.base_color_texture {
                 ensure_index(
-                    &format!(
-                        "materials[{material_i}].pbrMetallicRoughness.baseColorTexture.index"
-                    ),
+                    &format!("materials[{material_i}].pbrMetallicRoughness.baseColorTexture.index"),
                     info.index,
                     texture_count,
                 )?;

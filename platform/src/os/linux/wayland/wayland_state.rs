@@ -43,9 +43,9 @@ use wayland_protocols::{
 };
 
 use crate::{
-    cx_native::EventFlow, event::ScrollEvent, event::WindowGeom,
-    select_timer::SelectTimers, wayland::wayland_app::WaylandApp, x11::xlib_event::XlibEvent,
-    KeyCode, WindowCloseRequestedEvent, WindowGeomChangeEvent, WindowId, WindowMovedEvent,
+    cx_native::EventFlow, event::ScrollEvent, event::WindowGeom, select_timer::SelectTimers,
+    wayland::wayland_app::WaylandApp, x11::xlib_event::XlibEvent, KeyCode,
+    WindowCloseRequestedEvent, WindowGeomChangeEvent, WindowId, WindowMovedEvent,
 };
 
 use super::opengl_wayland::WaylandWindow;
@@ -170,7 +170,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     state.wm_base = Some(wm_base);
                 }
                 "wl_seat" => {
-                    let seat = wl_registry.bind::<wl_seat::WlSeat, _, _>(name, version.min(5), qhandle, ());
+                    let seat = wl_registry.bind::<wl_seat::WlSeat, _, _>(
+                        name,
+                        version.min(5),
+                        qhandle,
+                        (),
+                    );
                     state.seat = Some(seat);
                     state.ensure_data_device(qhandle);
                 }
@@ -780,21 +785,45 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         .map(|w| w.window_geom.inner_size);
                     if let Some(ws) = window_size {
                         let edge = if pos.x < 10.0 && pos.y < 10.0 {
-                            Some((xdg_toplevel::ResizeEdge::TopLeft, wp_cursor_shape_device_v1::Shape::NwResize))
+                            Some((
+                                xdg_toplevel::ResizeEdge::TopLeft,
+                                wp_cursor_shape_device_v1::Shape::NwResize,
+                            ))
                         } else if pos.x < 10.0 && pos.y >= ws.y - 10.0 {
-                            Some((xdg_toplevel::ResizeEdge::BottomLeft, wp_cursor_shape_device_v1::Shape::SwResize))
+                            Some((
+                                xdg_toplevel::ResizeEdge::BottomLeft,
+                                wp_cursor_shape_device_v1::Shape::SwResize,
+                            ))
                         } else if pos.x < 5.0 {
-                            Some((xdg_toplevel::ResizeEdge::Left, wp_cursor_shape_device_v1::Shape::WResize))
+                            Some((
+                                xdg_toplevel::ResizeEdge::Left,
+                                wp_cursor_shape_device_v1::Shape::WResize,
+                            ))
                         } else if pos.x >= ws.x - 10.0 && pos.y < 10.0 {
-                            Some((xdg_toplevel::ResizeEdge::TopRight, wp_cursor_shape_device_v1::Shape::NeResize))
+                            Some((
+                                xdg_toplevel::ResizeEdge::TopRight,
+                                wp_cursor_shape_device_v1::Shape::NeResize,
+                            ))
                         } else if pos.x >= ws.x - 10.0 && pos.y >= ws.y - 10.0 {
-                            Some((xdg_toplevel::ResizeEdge::BottomRight, wp_cursor_shape_device_v1::Shape::SeResize))
+                            Some((
+                                xdg_toplevel::ResizeEdge::BottomRight,
+                                wp_cursor_shape_device_v1::Shape::SeResize,
+                            ))
                         } else if pos.x >= ws.x - 5.0 {
-                            Some((xdg_toplevel::ResizeEdge::Right, wp_cursor_shape_device_v1::Shape::EResize))
+                            Some((
+                                xdg_toplevel::ResizeEdge::Right,
+                                wp_cursor_shape_device_v1::Shape::EResize,
+                            ))
                         } else if pos.y < 5.0 {
-                            Some((xdg_toplevel::ResizeEdge::Top, wp_cursor_shape_device_v1::Shape::NResize))
+                            Some((
+                                xdg_toplevel::ResizeEdge::Top,
+                                wp_cursor_shape_device_v1::Shape::NResize,
+                            ))
                         } else if pos.y >= ws.y - 5.0 {
-                            Some((xdg_toplevel::ResizeEdge::Bottom, wp_cursor_shape_device_v1::Shape::SResize))
+                            Some((
+                                xdg_toplevel::ResizeEdge::Bottom,
+                                wp_cursor_shape_device_v1::Shape::SResize,
+                            ))
                         } else {
                             None
                         };
@@ -810,7 +839,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                 if let (Some(cursor_dev), Some(serial)) =
                                     (state.cursor_shape.as_ref(), state.pointer_serial)
                                 {
-                                    cursor_dev.set_shape(serial, wp_cursor_shape_device_v1::Shape::Default);
+                                    cursor_dev.set_shape(
+                                        serial,
+                                        wp_cursor_shape_device_v1::Shape::Default,
+                                    );
                                 }
                             }
                             state.last_resize_edge = None;
@@ -917,17 +949,19 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                     }
                 }
             }
-            wl_pointer::Event::Axis { time: _, axis, value } => {
-                match axis {
-                    WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                        state.scroll_accumulator.y += value;
-                    }
-                    WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                        state.scroll_accumulator.x += value;
-                    }
-                    _ => {}
+            wl_pointer::Event::Axis {
+                time: _,
+                axis,
+                value,
+            } => match axis {
+                WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
+                    state.scroll_accumulator.y += value;
                 }
-            }
+                WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
+                    state.scroll_accumulator.x += value;
+                }
+                _ => {}
+            },
             wl_pointer::Event::AxisSource { axis_source } => {
                 state.scroll_is_wheel = axis_source == WEnum::Value(wl_pointer::AxisSource::Wheel);
             }
@@ -960,9 +994,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 state.scroll_is_wheel = false;
             }
             wl_pointer::Event::AxisStop { time: _, axis: _ } => {}
-            wl_pointer::Event::AxisDiscrete { axis: _, discrete: _ } => {}
-            wl_pointer::Event::AxisValue120 { axis: _, value120: _ } => {}
-            wl_pointer::Event::AxisRelativeDirection { axis: _, direction: _ } => {}
+            wl_pointer::Event::AxisDiscrete {
+                axis: _,
+                discrete: _,
+            } => {}
+            wl_pointer::Event::AxisValue120 {
+                axis: _,
+                value120: _,
+            } => {}
+            wl_pointer::Event::AxisRelativeDirection {
+                axis: _,
+                direction: _,
+            } => {}
             _ => {}
         }
     }

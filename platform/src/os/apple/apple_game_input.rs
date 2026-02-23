@@ -9,7 +9,7 @@ use crate::{
         runtime::{nil, ObjcId, Sel, BOOL, YES},
         sel, sel_impl,
     },
-    os::{apple::apple_sys::*, apple::apple_util::*},
+    os::apple::apple_sys::*,
 };
 
 pub struct AppleGameInput {

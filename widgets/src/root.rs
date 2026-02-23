@@ -1,8 +1,8 @@
+use crate::makepad_platform::studio::{AppToStudio, TweakHitsResponse};
 use crate::{
     makepad_derive_widget::*, makepad_draw::*, makepad_script::ScriptFnRef, widget::*,
     widget_async::CxWidgetToScriptCallExt, widget_tree::CxWidgetExt,
 };
-use crate::makepad_platform::studio::{AppToStudio, TweakHitsResponse};
 
 script_mod! {
     use mod.prelude.widgets_internal.*

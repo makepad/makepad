@@ -1,23 +1,21 @@
-use {
-    crate::{
-        cx::Cx,
-        cx_api::CxOsOp,
-        draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
-        event::{Event, WindowGeom, WindowGeomChangeEvent},
-        gl_sys,
-        makepad_math::*,
-        makepad_micro_serde::*,
-        os::shared_framebuf::{
-            aux_chan, HostPresentableImage, HostSwapchain, LinuxSharedSoftwareBuffer, PollTimer,
-            PresentableDraw,
-        },
-        studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
-        texture::{Texture, TextureFormat, TextureSize},
-        thread::SignalToUI,
-        web_socket::WebSocketMessage,
-        window::CxWindowPool,
-        CxOsApi,
+use crate::{
+    cx::Cx,
+    cx_api::CxOsOp,
+    draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
+    event::{Event, WindowGeom, WindowGeomChangeEvent},
+    gl_sys,
+    makepad_math::*,
+    makepad_micro_serde::*,
+    os::shared_framebuf::{
+        aux_chan, HostPresentableImage, HostSwapchain, LinuxSharedSoftwareBuffer, PollTimer,
+        PresentableDraw,
     },
+    studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
+    texture::{Texture, TextureFormat, TextureSize},
+    thread::SignalToUI,
+    web_socket::WebSocketMessage,
+    window::CxWindowPool,
+    CxOsApi,
 };
 
 #[derive(Default)]
@@ -300,9 +298,11 @@ impl Cx {
                     || old_geom.position != new_geom.position
                 {
                     self.redraw_all();
-                    self.call_event_handler(&Event::WindowGeomChange(
-                        WindowGeomChangeEvent { window_id, new_geom, old_geom },
-                    ));
+                    self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                        window_id,
+                        new_geom,
+                        old_geom,
+                    }));
                 }
             }
             StudioToApp::Swapchain(new_swapchain) => {
@@ -462,11 +462,7 @@ impl Cx {
             // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
             // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.
             other => {
-                return self.dispatch_studio_msg(
-                    other,
-                    CxWindowPool::id_zero(),
-                    dvec2(0.0, 0.0),
-                );
+                return self.dispatch_studio_msg(other, CxWindowPool::id_zero(), dvec2(0.0, 0.0));
             }
         }
         false

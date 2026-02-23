@@ -620,7 +620,9 @@ impl ShaderFnCompiler {
             Varying => Some(SHADER_IO_VARYING),
             VertexBuffer => Some(SHADER_IO_VERTEX_BUFFER),
             VertexPosition => Some(SHADER_IO_VERTEX_POSITION),
-            FragmentOutput(index) => Some(ShaderIoType(SHADER_IO_FRAGMENT_OUTPUT_0.0 + *index as u32)),
+            FragmentOutput(index) => {
+                Some(ShaderIoType(SHADER_IO_FRAGMENT_OUTPUT_0.0 + *index as u32))
+            }
             RustInstance => Some(SHADER_IO_RUST_INSTANCE),
             Uniform => Some(SHADER_IO_DYN_UNIFORM),
             DynInstance => Some(SHADER_IO_DYN_INSTANCE),
@@ -1017,7 +1019,9 @@ impl ShaderFnCompiler {
                     let mut resolved_prefix = prefix;
                     if let Some(existing) = output.io.iter().find(|io| io.name == field_id) {
                         if !Self::shader_io_kind_matches(&existing.kind, &kind) {
-                            if let Some(existing_io_type) = Self::shader_io_type_from_kind(&existing.kind) {
+                            if let Some(existing_io_type) =
+                                Self::shader_io_type_from_kind(&existing.kind)
+                            {
                                 // Keep expression generation in lockstep with the already-registered IO entry.
                                 // This prevents backend code from referencing undeclared members.
                                 let (existing_kind, existing_prefix) = output

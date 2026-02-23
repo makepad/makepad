@@ -223,9 +223,9 @@ impl Cx {
                 .saturating_add(index_count.saturating_mul(instance_count as u64));
 
             if draw_call.instance_dirty {
-                metrics.instance_bytes = metrics
-                    .instance_bytes
-                    .saturating_add((draw_item.instances.as_ref().map_or(0usize, Vec::len) * 4) as u64);
+                metrics.instance_bytes = metrics.instance_bytes.saturating_add(
+                    (draw_item.instances.as_ref().map_or(0usize, Vec::len) * 4) as u64,
+                );
             }
 
             // OpenGL/Android fallback estimate: count per-draw uniform uploads for VS+FS.
@@ -253,7 +253,10 @@ impl Cx {
 
             for texture in draw_call.texture_slots.iter().flatten() {
                 let texture_id = texture.texture_id();
-                if uploaded_textures.iter().any(|existing| *existing == texture_id) {
+                if uploaded_textures
+                    .iter()
+                    .any(|existing| *existing == texture_id)
+                {
                     continue;
                 }
                 uploaded_textures.push(texture_id);
@@ -756,7 +759,10 @@ impl CxDrawList {
     ) -> &mut CxDrawItem {
         Self::append_trace_log(format!(
             "append_new shader={} group={} draw_call_group={} items_before={}",
-            draw_vars.draw_shader_id.map(|v| v.index).unwrap_or(usize::MAX),
+            draw_vars
+                .draw_shader_id
+                .map(|v| v.index)
+                .unwrap_or(usize::MAX),
             draw_vars.append_group_id,
             draw_vars.options.draw_call_group.0,
             self.draw_items.len()

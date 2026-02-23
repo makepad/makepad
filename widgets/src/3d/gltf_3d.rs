@@ -1,9 +1,7 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 use std::{path::PathBuf, rc::Rc};
 
-use super::scene_3d::{
-    apply_scene_to_draw_pbr, register_draw_call_anchor, scene_state_from_scope,
-};
+use super::scene_3d::{apply_scene_to_draw_pbr, register_draw_call_anchor, scene_state_from_scope};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -70,7 +68,9 @@ enum ResourceResolve {
 impl Gltf3D {
     fn resource_metadata_by_handle(cx: &mut Cx, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
         let resources = cx.script_data.resources.resources.borrow();
-        let resource = resources.iter().find(|resource| resource.handle == handle)?;
+        let resource = resources
+            .iter()
+            .find(|resource| resource.handle == handle)?;
         Some((PathBuf::from(&resource.abs_path), resource.is_error()))
     }
 
@@ -126,9 +126,9 @@ impl Gltf3D {
                 abs_path,
                 data,
             } => {
-                let _ = self
-                    .draw_pbr
-                    .load_default_env_equirect_from_bytes(cx, &data, Some(&abs_path));
+                let _ =
+                    self.draw_pbr
+                        .load_default_env_equirect_from_bytes(cx, &data, Some(&abs_path));
                 self.loaded_env_handle = Some(handle);
             }
             ResourceResolve::Error { handle } => {

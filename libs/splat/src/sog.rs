@@ -70,10 +70,14 @@ impl DecodedImage {
             .checked_mul(4)
             .and_then(|offset| offset.checked_add(channel))
             .ok_or_else(|| {
-                SplatError::InvalidData("image channel index overflow while decoding SOG".to_string())
+                SplatError::InvalidData(
+                    "image channel index overflow while decoding SOG".to_string(),
+                )
             })?;
         self.rgba.get(byte_index).copied().ok_or_else(|| {
-            SplatError::InvalidData("image channel index out of bounds while decoding SOG".to_string())
+            SplatError::InvalidData(
+                "image channel index out of bounds while decoding SOG".to_string(),
+            )
         })
     }
 }
@@ -188,11 +192,7 @@ pub fn load_sog_from_bytes(bytes: &[u8]) -> Result<SplatScene, SplatError> {
     }
 
     if let Some(shn_meta) = &meta.sh_n {
-        scene.higher_order_sh = Some(decode_higher_order_sh(
-            shn_meta,
-            &files,
-            meta.count,
-        )?);
+        scene.higher_order_sh = Some(decode_higher_order_sh(shn_meta, &files, meta.count)?);
     }
 
     scene.recompute_bounds();

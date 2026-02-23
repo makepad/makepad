@@ -200,7 +200,9 @@ impl ProfilerEventChart {
     }
 
     fn sync_live_window(&mut self, latest_sample_end: f64) {
-        let window = self.current_window_seconds().max(MIN_PROFILE_WINDOW_SECONDS);
+        let window = self
+            .current_window_seconds()
+            .max(MIN_PROFILE_WINDOW_SECONDS);
         self.time_range = if latest_sample_end <= window {
             TimeRange {
                 start: 0.0,
@@ -376,7 +378,8 @@ impl ProfilerEventChart {
                     if xpos - last_label_x > 84.0 {
                         label.clear();
                         let _ = write!(label, "{:.1}ms gap", gap * 1000.0);
-                        self.draw_time.draw_abs(cx, dvec2(xpos + 3.0, rect.pos.y + 14.0), label);
+                        self.draw_time
+                            .draw_abs(cx, dvec2(xpos + 3.0, rect.pos.y + 14.0), label);
                         last_label_x = xpos;
                     }
                 }
@@ -407,8 +410,8 @@ impl ProfilerEventChart {
                 if sample_start > self.time_range.end {
                     break;
                 }
-                let color = LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32
-                    | 0xff000000;
+                let color =
+                    LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32 | 0xff000000;
                 self.draw_item.color = Vec4f::from_u32(color);
                 if label_prefix.is_empty() {
                     self.draw_block(
@@ -615,7 +618,11 @@ impl ProfilerEventChart {
         let _ = write!(
             label,
             "{} GPU frametime (max {:.2} ms, 120Hz {:.2} ms)",
-            if label_prefix.is_empty() { "App" } else { "Self" },
+            if label_prefix.is_empty() {
+                "App"
+            } else {
+                "Self"
+            },
             max_ms,
             FRAME_BUDGET_120HZ_SECONDS * 1000.0
         );
@@ -707,7 +714,11 @@ impl ProfilerEventChart {
         let _ = write!(
             label,
             "{} GPU counts (max {})",
-            if label_prefix.is_empty() { "App" } else { "Self" },
+            if label_prefix.is_empty() {
+                "App"
+            } else {
+                "Self"
+            },
             max_count
         );
         self.draw_time
@@ -773,11 +784,7 @@ impl ProfilerEventChart {
 
         let legend_top = graph_rect.pos.y + 14.0;
         let legend_x = graph_rect.pos.x + 6.0;
-        let legend = [
-            (0xfff18f01, "D"),
-            (0xff42a5f5, "I"),
-            (0xff66bb6a, "VxI"),
-        ];
+        let legend = [(0xfff18f01, "D"), (0xff42a5f5, "I"), (0xff66bb6a, "VxI")];
         for (i, (color, ch)) in legend.iter().enumerate() {
             let x = legend_x + i as f64 * 28.0;
             self.draw_item.color = Vec4f::from_u32(*color);
@@ -845,7 +852,11 @@ impl ProfilerEventChart {
         let _ = write!(
             label,
             "{} GPU upload bytes (max {:.1} KB)",
-            if label_prefix.is_empty() { "App" } else { "Self" },
+            if label_prefix.is_empty() {
+                "App"
+            } else {
+                "Self"
+            },
             max_bytes as f64 / 1024.0
         );
         self.draw_time
@@ -1053,18 +1064,17 @@ impl Widget for ProfilerEventChart {
                 self.self_time_offset = Some(app_end - self_end);
             }
         }
-        let self_time_offset = self.self_time_offset.unwrap_or_else(|| {
-            match (latest_app_end, latest_self_end) {
-                (Some(app_end), Some(self_end)) => app_end - self_end,
-                _ => 0.0,
-            }
-        });
+        let self_time_offset =
+            self.self_time_offset
+                .unwrap_or_else(|| match (latest_app_end, latest_self_end) {
+                    (Some(app_end), Some(self_end)) => app_end - self_end,
+                    _ => 0.0,
+                });
 
         if has_app_samples || has_self_samples {
             if self.follow_live {
-                let latest_sample_end = latest_app_end.or_else(|| {
-                    latest_self_end.map(|self_end| self_end + self_time_offset)
-                });
+                let latest_sample_end = latest_app_end
+                    .or_else(|| latest_self_end.map(|self_end| self_end + self_time_offset));
                 if let Some(latest_sample_end) = latest_sample_end {
                     self.sync_live_window(latest_sample_end);
                 }
@@ -1081,28 +1091,15 @@ impl Widget for ProfilerEventChart {
             if has_app_samples {
                 if let Some(app_samples) = app_samples {
                     self.draw_frame_gap_markers(cx, &rect, app_samples, 0.0, &mut label);
-                    self.draw_time.draw_abs(cx, rect.pos + dvec2(4.0, 2.0), "App");
+                    self.draw_time
+                        .draw_abs(cx, rect.pos + dvec2(4.0, 2.0), "App");
                     self.draw_profile_store(cx, &rect, app_samples, 0.0, "", 0.0);
-                    self.draw_gpu_frametime_graph(
-                        cx,
-                        &rect,
-                        app_samples,
-                        0.0,
-                        "",
-                        0.0,
-                        &mut label,
-                    );
+                    self.draw_gpu_frametime_graph(cx, &rect, app_samples, 0.0, "", 0.0, &mut label);
                     self.draw_gpu_counts_graph(cx, &rect, app_samples, 0.0, "", 0.0, &mut label);
                     self.draw_gpu_upload_graph(cx, &rect, app_samples, 0.0, "", 0.0, &mut label);
                 }
             } else if has_self_samples {
-                self.draw_frame_gap_markers(
-                    cx,
-                    &rect,
-                    self_samples,
-                    self_time_offset,
-                    &mut label,
-                );
+                self.draw_frame_gap_markers(cx, &rect, self_samples, self_time_offset, &mut label);
             }
             if has_self_samples {
                 self.draw_time
@@ -1175,14 +1172,17 @@ impl Widget for ProfilerEventChart {
                 if e.device.is_mouse() {
                     let zoom = (1.03).powf(e.scroll.y / 150.0);
                     if self.follow_live {
-                        let window = self.current_window_seconds().max(MIN_PROFILE_WINDOW_SECONDS);
+                        let window = self
+                            .current_window_seconds()
+                            .max(MIN_PROFILE_WINDOW_SECONDS);
                         let next_window = (window * zoom).max(MIN_PROFILE_WINDOW_SECONDS);
                         self.time_range = TimeRange {
                             start: self.time_range.end - next_window,
                             end: self.time_range.end,
                         };
                     } else {
-                        let scale = self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS) / e.rect.size.x;
+                        let scale =
+                            self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS) / e.rect.size.x;
                         let time = scale * (e.abs.x - e.rect.pos.x) + self.time_range.start;
                         self.time_range = TimeRange {
                             start: (self.time_range.start - time) * zoom + time,
@@ -1277,21 +1277,18 @@ impl Widget for Profiler {
                 self_samples.gc.len()
             );
         }
-        self.label(cx, ids!(status_label))
-            .set_text_with(|v| {
-                v.clear();
-                v.push_str(&self.tmp_status_label);
-            });
-        self.label(cx, ids!(sample_count_label))
-            .set_text_with(|v| {
-                v.clear();
-                v.push_str(&self.tmp_sample_count_label);
-            });
-        self.label(cx, ids!(window_label))
-            .set_text_with(|v| {
-                v.clear();
-                v.push_str(if running { "Live" } else { "Paused" });
-            });
+        self.label(cx, ids!(status_label)).set_text_with(|v| {
+            v.clear();
+            v.push_str(&self.tmp_status_label);
+        });
+        self.label(cx, ids!(sample_count_label)).set_text_with(|v| {
+            v.clear();
+            v.push_str(&self.tmp_sample_count_label);
+        });
+        self.label(cx, ids!(window_label)).set_text_with(|v| {
+            v.clear();
+            v.push_str(if running { "Live" } else { "Paused" });
+        });
 
         self.view.draw_walk_all(cx, scope, walk);
         DrawStep::done()
