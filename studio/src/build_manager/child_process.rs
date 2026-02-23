@@ -16,7 +16,7 @@ pub struct ChildProcess {
     pub stdin_sender: Sender<ChildStdIn>,
     pub line_sender: Sender<ChildStdIO>,
     pub line_receiver: Receiver<ChildStdIO>,
-    pub aux_chan_host_endpoint: Option<aux_chan::HostEndpoint>,
+    pub aux_chan_listener: Option<aux_chan::ExternalEndpointListener>,
 }
 
 pub enum ChildStdIO {
@@ -39,7 +39,7 @@ impl ChildProcess {
         env: &[(String, String)],
         aux_chan: bool,
     ) -> Result<ChildProcess, std::io::Error> {
-        let (mut child, aux_chan_host_endpoint) = if aux_chan {
+        let (mut child, aux_chan_listener) = if aux_chan {
             let studio_addr = env
                 .iter()
                 .find_map(|(key, value)| if key == "STUDIO" { Some(value.clone()) } else { None })
@@ -82,16 +82,8 @@ impl ChildProcess {
             }
 
             prepare_child_process_stdio_isolation(&mut cmd_build);
-            let mut child = cmd_build.spawn()?;
-            let aux_chan_host_endpoint = match aux_chan_listener.accept_host_endpoint() {
-                Ok(endpoint) => endpoint,
-                Err(err) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(err);
-                }
-            };
-            (child, Some(aux_chan_host_endpoint))
+            let child = cmd_build.spawn()?;
+            (child, Some(aux_chan_listener))
         } else {
             let mut cmd_build = Command::new(cmd);
             cmd_build
@@ -180,7 +172,7 @@ impl ChildProcess {
             line_sender,
             child,
             line_receiver,
-            aux_chan_host_endpoint,
+            aux_chan_listener,
         })
     }
 
