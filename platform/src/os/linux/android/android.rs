@@ -842,7 +842,11 @@ impl Cx {
         // Video updates
         let to_dispatch = self.get_video_updates();
         for video_id in to_dispatch {
-            let e = Event::VideoTextureUpdated(VideoTextureUpdatedEvent { video_id });
+            let current_position_ms = unsafe {
+                let env = attach_jni_env();
+                android_jni::to_java_get_video_position(env, video_id) as u128
+            };
+            let e = Event::VideoTextureUpdated(VideoTextureUpdatedEvent { video_id, current_position_ms });
             self.call_event_handler(&e);
         }
 
@@ -1344,6 +1348,7 @@ impl Cx {
                     video_id,
                     source,
                     external_texture_id,
+                    _texture_id,
                     autoplay,
                     should_loop,
                 ) => unsafe {
@@ -1380,6 +1385,10 @@ impl Cx {
                 CxOsOp::CleanupVideoPlaybackResources(video_id) => unsafe {
                     let env = attach_jni_env();
                     android_jni::to_java_cleanup_video_playback_resources(env, video_id);
+                },
+                CxOsOp::SeekVideoPlayback(video_id, position_ms) => unsafe {
+                    let env = attach_jni_env();
+                    android_jni::to_java_seek_video_playback(env, video_id, position_ms);
                 },
                 CxOsOp::XrStartPresenting => {
                     self.os.ignore_destroy = true;

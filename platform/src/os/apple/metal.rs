@@ -1581,7 +1581,7 @@ struct MetalBufferInner {
 
 #[derive(Default)]
 pub struct CxOsTexture {
-    texture: Option<RcObjcId>,
+    pub(crate) texture: Option<RcObjcId>,
     #[cfg(target_os = "macos")]
     iosurface: Option<IOSurfaceRef>,
     #[cfg(target_os = "macos")]
@@ -1596,6 +1596,7 @@ fn texture_pixel_to_mtl_pixel(pix: &TexturePixel) -> MTLPixelFormat {
         TexturePixel::RGu8 => MTLPixelFormat::RG8Unorm,
         TexturePixel::Rf32 => MTLPixelFormat::R32Float,
         TexturePixel::D32 => MTLPixelFormat::Depth32Float,
+        TexturePixel::VideoRGB => MTLPixelFormat::BGRA8Unorm,
     }
 }
 impl CxTexture {

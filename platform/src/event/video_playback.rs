@@ -14,6 +14,7 @@ pub struct VideoPlaybackPreparedEvent {
 #[derive(Clone, Debug)]
 pub struct VideoTextureUpdatedEvent {
     pub video_id: LiveId,
+    pub current_position_ms: u128,
 }
 
 #[derive(Clone, Debug, PartialEq)]

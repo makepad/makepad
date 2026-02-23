@@ -1256,6 +1256,21 @@ public class MakepadActivity
         }
     }
 
+    public void seekVideoPlayback(long videoId, long positionMs) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            runnable.seekToPosition(positionMs);
+        }
+    }
+
+    public long getVideoPlaybackPosition(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            return runnable.getCurrentPositionMs();
+        }
+        return 0;
+    }
+
     public void cleanupVideoPlaybackResources(long videoId) {
         VideoPlayerRunnable runnable = mVideoPlayerRunnables.remove(videoId);
         if(runnable != null) {

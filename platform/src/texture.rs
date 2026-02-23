@@ -175,7 +175,6 @@ pub enum TextureFormat {
         id: crate::shared_framebuf::PresentableImageId,
         initial: bool,
     },
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     VideoRGB,
 }
 
@@ -224,7 +223,6 @@ impl std::fmt::Debug for TextureFormat {
                 f,
                 "TextureFormat::SharedBGRAu8(width:{width},height:{height})"
             ),
-            #[cfg(any(target_os = "android", target_os = "linux"))]
             TextureFormat::VideoRGB => write!(f, "TextureFormat::VideoRGB"),
         }
     }
@@ -348,7 +346,6 @@ pub(crate) enum TexturePixel {
     RGu8,
     Rf32,
     D32,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     VideoRGB,
 }
 
@@ -461,7 +458,6 @@ impl CxTexture {
         false
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     #[allow(unused)]
     pub(crate) fn alloc_video(&mut self) -> bool {
         if let Some(alloc) = self.format.as_video_alloc() {
@@ -511,7 +507,6 @@ impl TextureFormat {
     }
 
     pub fn is_video(&self) -> bool {
-        #[cfg(any(target_os = "android", target_os = "linux"))]
         if let Self::VideoRGB = self {
             return true;
         }
@@ -629,7 +624,6 @@ impl TextureFormat {
         }
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     #[allow(unused)]
     pub(crate) fn as_video_alloc(&self) -> Option<TextureAlloc> {
         match self {
@@ -658,11 +652,7 @@ impl TextureFormat {
 
     #[allow(unused)]
     fn is_compatible_with(&self, other: &Self) -> bool {
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        {
-            return !(self.is_video() ^ other.is_video());
-        }
-        true
+        !(self.is_video() ^ other.is_video())
     }
 }
 

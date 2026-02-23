@@ -147,6 +147,18 @@ public class VideoPlayer {
         }
     }
 
+    public void seekToPosition(long positionMs) {
+        if (mMediaPlayer != null) {
+            mMediaPlayer.seekTo((int) positionMs);
+        }
+    }
+
+    public long getCurrentPositionMs() {
+        if (mMediaPlayer != null && mIsPrepared) {
+            return (long) mMediaPlayer.getCurrentPosition();
+        }
+        return 0;
+    }
 
     public void stopAndCleanup() {
         // stop and release MediaPlayer

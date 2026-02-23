@@ -1176,6 +1176,27 @@ pub unsafe fn to_java_unmute_video_playback(env: *mut jni_sys::JNIEnv, video_id:
     ndk_utils::call_void_method!(env, get_activity(), "unmuteVideoPlayback", "(J)V", video_id);
 }
 
+pub unsafe fn to_java_seek_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, position_ms: u64) {
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "seekVideoPlayback",
+        "(JJ)V",
+        video_id,
+        position_ms as jni_sys::jlong
+    );
+}
+
+pub unsafe fn to_java_get_video_position(env: *mut jni_sys::JNIEnv, video_id: LiveId) -> i64 {
+    ndk_utils::call_long_method!(
+        env,
+        get_activity(),
+        "getVideoPlaybackPosition",
+        "(J)J",
+        video_id
+    )
+}
+
 pub unsafe fn to_java_cleanup_video_playback_resources(
     env: *mut jni_sys::JNIEnv,
     video_id: LiveId,

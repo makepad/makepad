@@ -3,13 +3,20 @@ use {
         cx::{Cx, IosParams, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
-        event::{Event, KeyEvent, NetworkResponseChannel, TextInputEvent, TextRangeReplaceEvent},
+        event::{
+            Event, KeyEvent, NetworkResponseChannel, TextInputEvent, TextRangeReplaceEvent,
+            video_playback::{
+                VideoPlaybackPreparedEvent, VideoTextureUpdatedEvent,
+                VideoPlaybackResourcesReleasedEvent,
+            },
+        },
         makepad_live_id::*,
         makepad_objc_sys::objc_block,
         os::{
             apple::{
                 apple_sys::*,
                 apple_util::*,
+                apple_video_playback::AppleVideoPlayer,
                 ios::{
                     ios_app::{self, init_ios_app_global, with_ios_app, IosApp},
                     ios_event::IosEvent,
@@ -27,6 +34,7 @@ use {
     },
     std::{
         cell::RefCell,
+        collections::HashMap,
         rc::Rc,
         sync::mpsc::{channel, Receiver, Sender},
         time::Instant,
@@ -227,6 +235,30 @@ impl Cx {
                 self.redraw_all();
             }
             IosEvent::Paint => {
+                // Poll video players for new frames and preparation status
+                if !self.os.video_players.is_empty() {
+                    let mut video_events = Vec::new();
+                    for (_video_id, player) in self.os.video_players.iter_mut() {
+                        if let Some((width, height, duration)) = player.check_prepared() {
+                            video_events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
+                                video_id: player.video_id,
+                                video_width: width,
+                                video_height: height,
+                                duration,
+                            }));
+                        }
+                        if player.poll_frame(&mut self.textures) {
+                            video_events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                                video_id: player.video_id,
+                                current_position_ms: player.current_position_ms(),
+                            }));
+                        }
+                    }
+                    for event in video_events {
+                        self.call_event_handler(&event);
+                    }
+                }
+
                 let time_now = with_ios_app(|app| app.time_now());
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(time_now);
@@ -298,6 +330,7 @@ impl Cx {
             || self.new_next_frames.len() != 0
             || paint_dirty
             || self.demo_time_repaint
+            || !self.os.video_players.is_empty()
         {
             EventFlow::Poll
         } else {
@@ -305,7 +338,7 @@ impl Cx {
         }
     }
 
-    fn handle_platform_ops(&mut self, _metal_cx: &MetalCx) {
+    fn handle_platform_ops(&mut self, metal_cx: &MetalCx) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -378,6 +411,55 @@ impl Cx {
                 }
                 CxOsOp::SetCursor(_) => {
                     // no need
+                }
+                CxOsOp::PrepareVideoPlayback(video_id, source, _gl_handle, texture_id, autoplay, should_loop) => {
+                    let player = AppleVideoPlayer::new(
+                        metal_cx.device,
+                        video_id,
+                        texture_id,
+                        source,
+                        autoplay,
+                        should_loop,
+                    );
+                    self.os.video_players.insert(video_id, player);
+                }
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.play();
+                    }
+                }
+                CxOsOp::PauseVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.pause();
+                    }
+                }
+                CxOsOp::ResumeVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.resume();
+                    }
+                }
+                CxOsOp::MuteVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.mute();
+                    }
+                }
+                CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.unmute();
+                    }
+                }
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    if let Some(mut player) = self.os.video_players.remove(&video_id) {
+                        player.cleanup();
+                        self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id }
+                        ));
+                    }
+                }
+                CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.seek_to(position_ms);
+                    }
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
@@ -560,6 +642,7 @@ pub struct CxOs {
     pub(crate) http_requests: AppleHttpRequests,
     pub(crate) permission_response: PermissionResultChannel,
     pub(crate) apple_game_input: Option<crate::os::apple::apple_game_input::AppleGameInput>,
+    pub(crate) video_players: HashMap<LiveId, AppleVideoPlayer>,
 }
 
 pub struct PermissionResultChannel {

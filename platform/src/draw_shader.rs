@@ -282,13 +282,19 @@ impl DrawShaderInputs {
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsMetal => {
+                // Metal struct alignment rules:
+                // float (1 slot): 4-byte aligned (1-float)
+                // float2 (2 slots): 8-byte aligned (2-float)
+                // float3/float4 (3-4 slots): 16-byte aligned (4-float)
+                // larger (matrices, arrays): 16-byte aligned (4-float)
                 let aligned_slots = if slots == 3 { 4 } else { slots };
-                if aligned_slots > 4 {
-                    if (self.total_slots & 3) != 0 {
-                        self.total_slots += 4 - (self.total_slots & 3);
-                    }
-                } else if (self.total_slots & 3) + aligned_slots > 4 {
-                    self.total_slots += 4 - (self.total_slots & 3);
+                let alignment = match aligned_slots {
+                    1 => 1,
+                    2 => 2,
+                    _ => 4,
+                };
+                if self.total_slots % alignment != 0 {
+                    self.total_slots += alignment - (self.total_slots % alignment);
                 }
                 self.inputs.push(DrawShaderInput {
                     id,

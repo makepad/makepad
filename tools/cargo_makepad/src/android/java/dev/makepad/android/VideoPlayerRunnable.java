@@ -38,6 +38,14 @@ public class VideoPlayerRunnable implements Runnable {
         mVideoPlayer.unmute();
     }
 
+    public void seekToPosition(long positionMs) {
+        mVideoPlayer.seekToPosition(positionMs);
+    }
+
+    public long getCurrentPositionMs() {
+        return mVideoPlayer.getCurrentPositionMs();
+    }
+
     public void cleanupVideoPlaybackResources() {
         mVideoPlayer.stopAndCleanup();
         mVideoPlayer = null;
