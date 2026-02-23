@@ -1138,6 +1138,34 @@ impl Cx {
     pub fn share_texture_for_presentable_image(&mut self, _texture: &Texture) -> u32 {
         0
     }
+
+    /// Create an IOSurface-backed texture for embedding Servo's CGL rendering
+    /// in Makepad's Metal pipeline. Returns the Makepad Texture handle, the
+    /// IOSurfaceRef pointer (for CGL binding), and the IOSurface ID.
+    ///
+    /// The IOSurface is created by Makepad and owned by the returned Texture.
+    /// The caller (Servo's MacosRenderingContext) binds to the same IOSurface
+    /// via CGLTexImageIOSurface2D for zero-copy cross-API rendering.
+    #[cfg(target_os = "macos")]
+    pub fn create_iosurface_render_texture(
+        &mut self,
+        width: usize,
+        height: usize,
+    ) -> (Texture, *mut std::ffi::c_void, u32) {
+        use crate::texture::TextureFormat;
+        use crate::shared_framebuf::PresentableImageId;
+
+        let texture = Texture::new_with_format(self, TextureFormat::SharedBGRAu8 {
+            width,
+            height,
+            id: PresentableImageId::alloc(),
+            initial: true,
+        });
+        let cxtexture = &mut self.textures[texture.texture_id()];
+        let iosurface_id = cxtexture.update_shared_texture(self.os.metal_device.unwrap());
+        let iosurface_ref = cxtexture.os.iosurface.unwrap_or(std::ptr::null_mut());
+        (texture, iosurface_ref, iosurface_id)
+    }
 }
 
 #[derive(Clone)]
@@ -1894,7 +1922,7 @@ impl CxTexture {
         let _: () =
             unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
         let _: () =
-            unsafe { msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget] };
+            unsafe { msg_send![descriptor.as_id(), setUsage: (MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64)] };
         let _: () = unsafe {
             msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]
         };
@@ -1951,7 +1979,7 @@ impl CxTexture {
         let _: () =
             unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
         let _: () =
-            unsafe { msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget] };
+            unsafe { msg_send![descriptor.as_id(), setUsage: (MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64)] };
         let _: () =
             unsafe { msg_send![descriptor.as_id(), setPixelFormat: MTLPixelFormat::BGRA8Unorm] };
 
