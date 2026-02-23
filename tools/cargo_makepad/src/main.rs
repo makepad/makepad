@@ -2,7 +2,6 @@ mod android;
 mod apple;
 mod check;
 mod open_harmony;
-mod remote;
 mod studio;
 mod utils;
 mod wasm;
@@ -16,7 +15,6 @@ pub use makepad_http;
 pub use makepad_shell;
 pub use makepad_wasm_strip;
 use open_harmony::*;
-use remote::*;
 use studio::*;
 use wasm::*;
 
@@ -118,16 +116,10 @@ fn show_help() {
     println!();
     println!("    linux apt-get-install-makepad-deps           Call apt-get install with all dependencies needed for makepad.");
     println!();
-    println!("Remote commands:");
-    println!();
-    println!("    remote --server [--port PORT] [--all]        Start remote execution server");
-    println!("    remote <ip:port> cargo <args...>             Sync changed files and run cargo remotely");
-    println!("    remote <ip:port> shell <command...>          Run remote shell command (requires --all on server)");
-    println!();
     println!("Studio commands:");
     println!();
     println!(
-        "    studio [options]                              Start newline-JSON websocket bridge"
+        "    studio [options]                              Start newline-JSON studio remote websocket"
     );
     println!("    studio terminal [options]                     Same as 'studio' (explicit mode)");
     println!("    studio run [options] [cargo run args]         Ask Studio to start a cargo run child");
@@ -168,7 +160,6 @@ fn main() -> Result<(), Cow<'static, str>> {
         "apple" => handle_apple(&args[1..]),
         "ohos" => handle_open_harmony(&args[1..]),
         "check" => handle_check(&args[1..]),
-        "remote" => handle_remote(&args[1..]),
         "studio" => handle_studio(&args[1..]),
         unsupported => {
             show_help();

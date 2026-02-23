@@ -1,4 +1,4 @@
-const STUDIO_TERMINAL_PATH: &str = "/$studio_terminal";
+const STUDIO_REMOTE_PATH: &str = "/$studio_remote";
 const STUDIO_WEBSOCKET_PATH: &str = "/$studio_web_socket";
 
 // Cross-platform
@@ -42,19 +42,19 @@ impl BuildManager {
             }
             let had_local_process = self.running_processes.remove(&build_id).is_some();
             self.remove_profile_build(build_id);
-            if let Some(web_socket_id) = self.terminal_build_owners.remove(&build_id) {
-                self.send_terminal_response(
+            if let Some(web_socket_id) = self.studio_remote_build_owners.remove(&build_id) {
+                self.send_studio_remote_response(
                     web_socket_id,
-                    StudioTerminalResponse::Stopped {
+                    StudioRemoteResponse::Stopped {
                         build_id: build_id.0,
                     },
                 );
             }
-            self.terminal_latest_widget_dumps.remove(&build_id);
-            self.terminal_startup_queries.remove(&build_id);
-            self.terminal_startup_dump_pending.remove(&build_id);
-            self.clear_terminal_screenshots_for_build(build_id);
-            self.clear_terminal_widget_tree_dumps_for_build(build_id);
+            self.studio_remote_latest_widget_dumps.remove(&build_id);
+            self.studio_remote_startup_queries.remove(&build_id);
+            self.studio_remote_startup_dump_pending.remove(&build_id);
+            self.clear_studio_remote_screenshots_for_build(build_id);
+            self.clear_studio_remote_widget_tree_dumps_for_build(build_id);
             if had_local_process {
                 self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
             }
@@ -65,7 +65,7 @@ impl BuildManager {
         &mut self,
         cx: &mut Cx,
         file_system: &mut FileSystem,
-        pending_terminal_logs: &mut Vec<(LiveId, String, String)>,
+        pending_studio_remote_logs: &mut Vec<(LiveId, String, String)>,
     ) {
         let mut needs_redraw_profiler = false;
         while let Ok((build_id, msgs)) = self.recv_studio_msg.try_recv() {
@@ -74,7 +74,7 @@ impl BuildManager {
             self.ensure_active_build(build_id);
             for msg in msgs.0 {
                 let auto_request_widget_tree_dump = self
-                    .terminal_startup_dump_pending
+                    .studio_remote_startup_dump_pending
                     .contains(&build_id)
                     && matches!(&msg, AppToStudio::DrawCompleteAndFlip(_));
                 if matches!(
@@ -93,26 +93,26 @@ impl BuildManager {
                     });
                 }
                 if auto_request_widget_tree_dump {
-                    if let Some(web_socket_id) = self.terminal_build_owners.get(&build_id).copied() {
-                        let startup_query = self.terminal_startup_queries.get(&build_id).cloned();
+                    if let Some(web_socket_id) = self.studio_remote_build_owners.get(&build_id).copied() {
+                        let startup_query = self.studio_remote_startup_queries.get(&build_id).cloned();
                         let emit_dump = startup_query.is_none();
-                        if let Err(message) = self.request_terminal_widget_tree_dump(
+                        if let Err(message) = self.request_studio_remote_widget_tree_dump(
                             cx,
                             web_socket_id,
                             build_id,
                             startup_query,
                             emit_dump,
                         ) {
-                            self.send_terminal_error(web_socket_id, message);
+                            self.send_studio_remote_error(web_socket_id, message);
                         } else {
-                            self.terminal_startup_dump_pending.remove(&build_id);
+                            self.studio_remote_startup_dump_pending.remove(&build_id);
                         }
                     }
                 }
                 match msg {
                     AppToStudio::LogItem(item) => {
-                        let terminal_level = log_level_name(item.level);
-                        let terminal_line = item.message.clone();
+                        let studio_remote_level = log_level_name(item.level);
+                        let studio_remote_line = item.message.clone();
                         let file_name = if let Some(build) = self.active.builds.get(&build_id) {
                             self.roots.map_path(&build.root, &item.file_name)
                         } else {
@@ -157,15 +157,15 @@ impl BuildManager {
                                 explanation: item.explanation,
                             }),
                         ));
-                        pending_terminal_logs.push((
+                        pending_studio_remote_logs.push((
                             build_id,
-                            terminal_level.to_string(),
-                            terminal_line,
+                            studio_remote_level.to_string(),
+                            studio_remote_line,
                         ));
                         cx.action(AppAction::RedrawLog)
                     }
                     AppToStudio::Screenshot(screenshot) => {
-                        self.handle_terminal_screenshot_response(build_id, &screenshot);
+                        self.handle_studio_remote_screenshot_response(build_id, &screenshot);
 
                         // Keep legacy snapshot path for studio snapshots.
                         if let Some(build) = self.active.builds.get(&build_id) {
@@ -180,7 +180,7 @@ impl BuildManager {
                         }
                     }
                     AppToStudio::WidgetTreeDump(dump_response) => {
-                        self.handle_terminal_widget_tree_dump_response(build_id, dump_response);
+                        self.handle_studio_remote_widget_tree_dump_response(build_id, dump_response);
                     }
                     AppToStudio::EventSample(sample) => {
                         if self.profiler_running {
@@ -263,7 +263,7 @@ impl BuildManager {
 
         let studio_sender = self.recv_studio_msg.sender();
         let studio_disconnect_sender = self.recv_studio_disconnect.sender();
-        let terminal_sender = self.recv_terminal_msg.sender();
+        let studio_remote_sender = self.recv_studio_remote_msg.sender();
         let active_build_websockets = self.active_build_websockets.clone();
         std::thread::spawn(move || {
             // TODO fix this proper:
@@ -304,7 +304,7 @@ impl BuildManager {
             ];
             enum SocketKind {
                 App(LiveId),
-                Terminal,
+                StudioRemote,
             }
             let mut socket_kinds: HashMap<u64, SocketKind> = HashMap::new();
             while let Ok(message) = rx_request.recv() {
@@ -314,9 +314,9 @@ impl BuildManager {
                         response_sender,
                         headers,
                     } => {
-                        if headers.path == STUDIO_TERMINAL_PATH {
-                            socket_kinds.insert(web_socket_id, SocketKind::Terminal);
-                            let _ = terminal_sender.send(TerminalToBuildManager::Connected {
+                        if headers.path == STUDIO_REMOTE_PATH {
+                            socket_kinds.insert(web_socket_id, SocketKind::StudioRemote);
+                            let _ = studio_remote_sender.send(StudioRemoteSocket::Connected {
                                 web_socket_id,
                                 sender: response_sender,
                             });
@@ -353,9 +353,9 @@ impl BuildManager {
                                         let _ = studio_disconnect_sender.send(build_id);
                                     }
                                 }
-                                SocketKind::Terminal => {
-                                    let _ = terminal_sender
-                                        .send(TerminalToBuildManager::Disconnected { web_socket_id });
+                                SocketKind::StudioRemote => {
+                                    let _ = studio_remote_sender
+                                        .send(StudioRemoteSocket::Disconnected { web_socket_id });
                                 }
                             }
                         }
@@ -371,20 +371,20 @@ impl BuildManager {
                         response_sender,
                         string,
                     } => {
-                        if matches!(socket_kinds.get(&web_socket_id), Some(SocketKind::Terminal)) {
-                            match StudioTerminalRequest::deserialize_json(&string) {
+                        if matches!(socket_kinds.get(&web_socket_id), Some(SocketKind::StudioRemote)) {
+                            match StudioRemoteRequest::deserialize_json(&string) {
                                 Ok(request) => {
-                                    let _ = terminal_sender.send(TerminalToBuildManager::Request {
+                                    let _ = studio_remote_sender.send(StudioRemoteSocket::Request {
                                         web_socket_id,
                                         request,
                                     });
                                 }
                                 Err(err) => {
                                     let message =
-                                        format!("invalid terminal request: {err:?} json={string}");
-                                    BuildManager::send_terminal_response_to_sender(
+                                        format!("invalid studio_remote request: {err:?} json={string}");
+                                    BuildManager::send_studio_remote_response_to_sender(
                                         &response_sender,
-                                        StudioTerminalResponse::Error {
+                                        StudioRemoteResponse::Error {
                                             message: message.clone(),
                                         },
                                     );
