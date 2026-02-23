@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 fn log_mul_mat_requested() -> bool {
     crate::settings::LOG_METAL_MUL_MAT
 }

@@ -205,26 +205,38 @@ impl DrawVars {
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
             self.dyn_instance_slots = mapping.instances.total_slots;
 
-            let mut os_shader_id = None;
-
-            #[cfg(use_vulkan)]
-            if let Some(vk_shader) = compiled_vulkan_shader.clone() {
-                let cx = vm.host.cx_mut();
-                for (shader_index, os_shader) in cx.draw_shaders.os_shaders.iter_mut().enumerate() {
-                    if os_shader.in_vertex == vertex && os_shader.in_pixel == fragment {
-                        os_shader.vulkan_shader = Some(vk_shader.clone());
-                        os_shader_id = Some(shader_index);
-                        break;
+            let os_shader_id = {
+                #[cfg(use_vulkan)]
+                {
+                    if let Some(vk_shader) = compiled_vulkan_shader.clone() {
+                        let cx = vm.host.cx_mut();
+                        let mut os_shader_id = None;
+                        for (shader_index, os_shader) in
+                            cx.draw_shaders.os_shaders.iter_mut().enumerate()
+                        {
+                            if os_shader.in_vertex == vertex && os_shader.in_pixel == fragment {
+                                os_shader.vulkan_shader = Some(vk_shader.clone());
+                                os_shader_id = Some(shader_index);
+                                break;
+                            }
+                        }
+                        if os_shader_id.is_none() {
+                            let mut os_shader =
+                                CxOsDrawShader::new(cx.os.gl(), &vertex, &fragment, &cx.os_type);
+                            os_shader.vulkan_shader = Some(vk_shader);
+                            os_shader_id = Some(cx.draw_shaders.os_shaders.len());
+                            cx.draw_shaders.os_shaders.push(os_shader);
+                        }
+                        os_shader_id
+                    } else {
+                        None
                     }
                 }
-                if os_shader_id.is_none() {
-                    let mut os_shader =
-                        CxOsDrawShader::new(cx.os.gl(), &vertex, &fragment, &cx.os_type);
-                    os_shader.vulkan_shader = Some(vk_shader);
-                    os_shader_id = Some(cx.draw_shaders.os_shaders.len());
-                    cx.draw_shaders.os_shaders.push(os_shader);
+                #[cfg(not(use_vulkan))]
+                {
+                    None
                 }
-            }
+            };
 
             let cx = vm.host.cx_mut();
             let index = cx.draw_shaders.shaders.len();
