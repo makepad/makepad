@@ -597,6 +597,7 @@ fn texture_pixel_to_dx11_pixel(pix: &TexturePixel) -> DXGI_FORMAT {
         TexturePixel::RGu8 => DXGI_FORMAT_R8G8_UNORM,
         TexturePixel::Rf32 => DXGI_FORMAT_R32_FLOAT,
         TexturePixel::D32 => DXGI_FORMAT_D32_FLOAT,
+        TexturePixel::VideoRGB => DXGI_FORMAT_B8G8R8A8_UNORM, // video not supported on Windows; fallback value
     }
 }
 
