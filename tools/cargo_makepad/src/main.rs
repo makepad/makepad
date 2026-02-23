@@ -3,6 +3,7 @@ mod apple;
 mod check;
 mod open_harmony;
 mod studio;
+mod tunnel;
 mod utils;
 mod wasm;
 
@@ -16,6 +17,7 @@ pub use makepad_shell;
 pub use makepad_wasm_strip;
 use open_harmony::*;
 use studio::*;
+use tunnel::*;
 use wasm::*;
 
 fn show_help() {
@@ -116,6 +118,12 @@ fn show_help() {
     println!();
     println!("    linux apt-get-install-makepad-deps           Call apt-get install with all dependencies needed for makepad.");
     println!();
+    println!("Tunnel commands:");
+    println!();
+    println!("    tunnel --server [--port PORT] [--all]        Start tunnel execution server");
+    println!("    tunnel <ip:port> cargo <args...>             Sync changed files and run cargo through tunnel");
+    println!("    tunnel <ip:port> shell <command...>          Run remote shell command (requires --all on server)");
+    println!();
     println!("Studio commands:");
     println!();
     println!(
@@ -160,6 +168,7 @@ fn main() -> Result<(), Cow<'static, str>> {
         "apple" => handle_apple(&args[1..]),
         "ohos" => handle_open_harmony(&args[1..]),
         "check" => handle_check(&args[1..]),
+        "tunnel" => handle_tunnel(&args[1..]),
         "studio" => handle_studio(&args[1..]),
         unsupported => {
             show_help();
