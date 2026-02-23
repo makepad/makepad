@@ -76,18 +76,6 @@ script_mod! {
                         }
                     }
                     Hr{}
-                    View{
-                        width: Fill height: Fit padding: 16 flow: Down spacing: 8
-                        Label{text: "Video Test" draw_text.color: #xddd draw_text.text_style: theme.font_bold{font_size: 14}}
-                        Video{
-                            source: VideoDataSource.Network { url: "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"}
-                            height: 240
-                            width: Fill
-                            is_looping: true
-                            autoplay: true
-                        }
-                    }
-                    Hr{}
                     results_view := ScrollYView{
                         width: Fill height: Fill padding: 16 flow: Down spacing: 10
                         new_batch: true
