@@ -32,7 +32,9 @@ pub struct BuildClient {
 impl BuildClient {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn send_cmd_with_id(&self, cmd_id: LiveId, cmd: BuildCmd) {
-        self.cmd_sender.send(BuildCmdWrap { cmd_id, cmd }).unwrap();
+        if let Err(err) = self.cmd_sender.send(BuildCmdWrap { cmd_id, cmd }) {
+            crate::log!("build server channel closed, dropping command: {:?}", err.0.cmd);
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
