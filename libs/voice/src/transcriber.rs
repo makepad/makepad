@@ -1,4 +1,5 @@
 use crate::{Segment, WhisperModel, WhisperParams, WhisperState};
+#[allow(unused_imports)]
 use std::path::Path;
 
 const DEFAULT_MODEL_PATH: &str = "ggml-large-v3-turbo.bin";

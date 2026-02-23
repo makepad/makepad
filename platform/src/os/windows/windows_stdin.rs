@@ -129,27 +129,13 @@ impl Cx {
                 WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {
                     Ok(msgs) => {
                         for msg in msgs.0 {
-                            match msg {
-                                msg => self.stdin_handle_host_to_stdin(
-                                    msg,
-                                    d3d11_cx,
-                                    &mut stdin_windows,
-                                    &time,
-                                ),
-                                StudioToApp::Screenshot(request) => {
-                                    self.screenshot_requests.push(request);
-                                }
-                                StudioToApp::WidgetTreeDump(request) => {
-                                    self.send_studio_widget_tree_dump_response(request.request_id);
-                                }
-                                StudioToApp::KeepAlive => {}
-                                StudioToApp::Kill => {
-                                    self.call_event_handler(&Event::Shutdown);
-                                    return;
-                                }
-                                other => {
-                                    self.action(other);
-                                }
+                            if self.stdin_handle_host_to_stdin(
+                                msg,
+                                d3d11_cx,
+                                &mut stdin_windows,
+                                &time,
+                            ) {
+                                return;
                             }
                         }
                         self.handle_actions();
@@ -163,7 +149,14 @@ impl Cx {
                 },
                 WebSocketMessage::String(text) => {
                     if let Ok(msg) = StudioToApp::deserialize_json(&text) {
-                        self.stdin_handle_host_to_stdin(msg, d3d11_cx, &mut stdin_windows, &time);
+                        if self.stdin_handle_host_to_stdin(
+                            msg,
+                            d3d11_cx,
+                            &mut stdin_windows,
+                            &time,
+                        ) {
+                            return;
+                        }
                     } else if !text.trim().is_empty() {
                         crate::warning!(
                             "Ignoring unexpected studio websocket text: {}",
@@ -187,7 +180,7 @@ impl Cx {
         d3d11_cx: &mut D3d11Cx,
         stdin_windows: &mut Vec<StdinWindow>,
         time: &Win32Time,
-    ) {
+    ) -> bool {
         match msg {
             StudioToApp::KeyDown(e) => {
                 self.call_event_handler(&Event::KeyDown(e));
@@ -357,7 +350,22 @@ impl Cx {
                     }
                 }
             }
+            StudioToApp::Screenshot(request) => {
+                self.screenshot_requests.push(request);
+            }
+            StudioToApp::WidgetTreeDump(request) => {
+                self.send_studio_widget_tree_dump_response(request.request_id);
+            }
+            StudioToApp::KeepAlive => {}
+            StudioToApp::Kill => {
+                self.call_event_handler(&Event::Shutdown);
+                return true;
+            }
+            other @ (StudioToApp::LiveChange { .. } | StudioToApp::None) => {
+                self.action(other);
+            }
         }
+        false
     }
 
     fn stdin_handle_platform_ops(&mut self, stdin_windows: &mut Vec<StdinWindow>) {
