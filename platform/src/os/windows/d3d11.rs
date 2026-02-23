@@ -827,36 +827,40 @@ impl D3d11Buffer {
         &mut self,
         d3d11_cx: &D3d11Cx,
         buffer_desc: &D3D11_BUFFER_DESC,
-        sub_data: &D3D11_SUBRESOURCE_DATA,
         len_slots: usize,
         data: *const std::ffi::c_void,
     ) {
-        if self.last_size == len_slots {
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            let p_mapped: *mut _ = &mut mapped;
-            unsafe {
-                d3d11_cx
-                    .context
-                    .Map(
-                        self.buffer.as_ref().unwrap(),
-                        0,
-                        D3D11_MAP_WRITE_DISCARD,
-                        0,
-                        Some(p_mapped),
-                    )
-                    .unwrap();
-
-                std::ptr::copy_nonoverlapping(data, mapped.pData, len_slots * 4);
-                d3d11_cx.context.Unmap(self.buffer.as_ref().unwrap(), 0);
-            }
-        } else {
-            self.last_size = len_slots;
+        // Keep original churn behavior (replace when size changes), but avoid
+        // leaking the old COM buffer by creating into a temporary out variable.
+        if self.buffer.is_none() || self.last_size != len_slots {
+            let mut exact_desc = *buffer_desc;
+            exact_desc.ByteWidth = (len_slots * 4) as u32;
+            let mut new_buffer = None;
             unsafe {
                 d3d11_cx
                     .device
-                    .CreateBuffer(buffer_desc, Some(sub_data), Some(&mut self.buffer))
+                    .CreateBuffer(&exact_desc, None, Some(&mut new_buffer))
                     .unwrap()
-            }
+            };
+            self.last_size = len_slots;
+            self.buffer = new_buffer;
+        }
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        let p_mapped: *mut _ = &mut mapped;
+        unsafe {
+            d3d11_cx
+                .context
+                .Map(
+                    self.buffer.as_ref().unwrap(),
+                    0,
+                    D3D11_MAP_WRITE_DISCARD,
+                    0,
+                    Some(p_mapped),
+                )
+                .unwrap();
+            std::ptr::copy_nonoverlapping(data, mapped.pData, len_slots * 4);
+            d3d11_cx.context.Unmap(self.buffer.as_ref().unwrap(), 0);
         }
     }
 
@@ -876,12 +880,7 @@ impl D3d11Buffer {
             StructureByteStride: 0,
         };
 
-        let sub_data = D3D11_SUBRESOURCE_DATA {
-            pSysMem: data,
-            SysMemPitch: 0,
-            SysMemSlicePitch: 0,
-        };
-        self.create_buffer_or_update(d3d11_cx, &buffer_desc, &sub_data, len_slots, data);
+        self.create_buffer_or_update(d3d11_cx, &buffer_desc, len_slots, data);
     }
 
     pub fn update_with_u32_index_data(&mut self, d3d11_cx: &D3d11Cx, data: &[u32]) {
@@ -915,11 +914,6 @@ impl D3d11Buffer {
             }
             return self.update_with_f32_constant_data(d3d11_cx, &new_data);
         }
-        let sub_data = D3D11_SUBRESOURCE_DATA {
-            pSysMem: data.as_ptr() as *const _,
-            SysMemPitch: 0,
-            SysMemSlicePitch: 0,
-        };
         let len_slots = data.len();
 
         let buffer_desc = D3D11_BUFFER_DESC {
@@ -937,7 +931,7 @@ impl D3d11Buffer {
             )
             .as_ptr() as *const _
         };
-        self.create_buffer_or_update(d3d11_cx, &buffer_desc, &sub_data, len_slots, data);
+        self.create_buffer_or_update(d3d11_cx, &buffer_desc, len_slots, data);
     }
 }
 
@@ -1340,12 +1334,14 @@ impl CxOsPass {
                 BlendOpAlpha: D3D11_BLEND_OP_ADD,
                 RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
             };
+            let mut blend_state = None;
             unsafe {
                 d3d11_cx
                     .device
-                    .CreateBlendState(&blend_desc, Some(&mut self.blend_state))
+                    .CreateBlendState(&blend_desc, Some(&mut blend_state))
                     .unwrap()
             }
+            self.blend_state = blend_state;
         }
 
         if self.raster_state.is_none() {
@@ -1361,12 +1357,14 @@ impl CxOsPass {
                 ScissorEnable: FALSE,
                 SlopeScaledDepthBias: 0.0,
             };
+            let mut raster_state = None;
             unsafe {
                 d3d11_cx
                     .device
-                    .CreateRasterizerState(&raster_desc, Some(&mut self.raster_state))
+                    .CreateRasterizerState(&raster_desc, Some(&mut raster_state))
                     .unwrap()
             }
+            self.raster_state = raster_state;
         }
 
         if self.depth_stencil_state.is_none() {
@@ -1390,12 +1388,14 @@ impl CxOsPass {
                     StencilFunc: D3D11_COMPARISON_ALWAYS,
                 },
             };
+            let mut depth_stencil_state = None;
             unsafe {
                 d3d11_cx
                     .device
-                    .CreateDepthStencilState(&ds_desc, Some(&mut self.depth_stencil_state))
+                    .CreateDepthStencilState(&ds_desc, Some(&mut depth_stencil_state))
                     .unwrap()
             }
+            self.depth_stencil_state = depth_stencil_state;
         }
 
         unsafe {

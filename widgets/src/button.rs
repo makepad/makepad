@@ -49,7 +49,7 @@ script_mod! {
             }
         }
 
-        icon_walk: Walk{width: theme.font_size_p, height: Fit}
+        icon_walk: Walk{width: 22.0, height: Fit}
 
         draw_bg +: {
             hover: instance(0.0)

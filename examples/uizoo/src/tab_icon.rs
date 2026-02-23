@@ -18,7 +18,7 @@ script_mod! {
             H4{text: "IconGradientX"}
             IconGradientX{
                 icon_walk: Walk{width: 100.}
-                draw_icon +: {svg: crate_resource("self:resources/Icon_Reload.svg")}
+                draw_icon +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
             }
 
             Hr{}
@@ -38,7 +38,7 @@ script_mod! {
                 }
                 draw_bg +: {color: uniform(#f00)}
                 draw_icon +: {
-                    svg: crate_resource("self:resources/Icon_Reload.svg")
+                    svg: crate_resource("self:resources/Icon_Favorite.svg")
                     color: #f0f
                     color_2: #ff0
                 }
