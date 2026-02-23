@@ -605,7 +605,9 @@ fn run_depth_sort_worker(
 impl ViewSplat {
     fn resource_metadata_by_handle(cx: &mut Cx, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
         let resources = cx.script_data.resources.resources.borrow();
-        let resource = resources.iter().find(|resource| resource.handle == handle)?;
+        let resource = resources
+            .iter()
+            .find(|resource| resource.handle == handle)?;
         Some((PathBuf::from(&resource.abs_path), resource.is_error()))
     }
 
@@ -829,8 +831,10 @@ impl ViewSplat {
             self.depth_sort_last_camera_pos = Some(scene_state.camera_pos);
             self.depth_sort_last_camera_forward =
                 Some(Self::camera_forward_from_view(&scene_state.view));
-            self.depth_sort_last_depth_plane =
-                Some(Self::depth_plane_from_view_and_model(&view_matrix, &model_matrix));
+            self.depth_sort_last_depth_plane = Some(Self::depth_plane_from_view_and_model(
+                &view_matrix,
+                &model_matrix,
+            ));
         } else {
             self.depth_sort_thread_started = false;
             self.depth_sort_scene_uploaded_generation = 0;
@@ -1043,7 +1047,11 @@ impl ViewSplat {
             let cx = qy * tz - qz * ty;
             let cy = qz * tx - qx * tz;
             let cz = qx * ty - qy * tx;
-            [v[0] + qw * tx + cx, v[1] + qw * ty + cy, v[2] + qw * tz + cz]
+            [
+                v[0] + qw * tx + cx,
+                v[1] + qw * ty + cy,
+                v[2] + qw * tz + cz,
+            ]
         };
 
         for splat in scene.splats.iter().take(max_splats) {
@@ -1143,7 +1151,6 @@ impl ViewSplat {
             ),
         )
     }
-
 }
 
 impl Widget for ViewSplat {

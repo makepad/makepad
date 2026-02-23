@@ -1,5 +1,8 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, view::View, widget::*,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    view::View,
+    widget::*,
     window_voice_input::{VoiceInjectEvent, WindowVoiceInput},
 };
 
@@ -211,7 +214,11 @@ impl VoiceWave {
         let x = v.clamp(-1.0, 1.0);
         let mag = x.abs();
         let y = ((1.0 + DISPLAY_MU * mag).ln() / (1.0 + DISPLAY_MU).ln()).clamp(0.0, 1.0);
-        if x < 0.0 { -y } else { y }
+        if x < 0.0 {
+            -y
+        } else {
+            y
+        }
     }
 
     fn gain_from_ref(reference_level: f32) -> f32 {
@@ -458,8 +465,11 @@ impl VoiceWave {
         let state = self.voice_input.visual_state();
         self.set_voice_active(cx, state.voice_active);
         self.set_submit_flash(cx, state.submit_flash);
-        if self.animating || state.voice_active || state.submit_flash
-            || state.pending_wave || state.pending_inject
+        if self.animating
+            || state.voice_active
+            || state.submit_flash
+            || state.pending_wave
+            || state.pending_inject
         {
             self.voice_input.request_next_frame(cx);
         }
@@ -482,7 +492,10 @@ impl VoiceWave {
         if let Event::PermissionResult(result) = event {
             if self.voice_input.handle_permission_result(cx, result) {
                 self.sync_mic_state(cx);
-                cx.widget_action(uid, VoiceWaveAction::RecordVoice(self.voice_input.is_enabled()));
+                cx.widget_action(
+                    uid,
+                    VoiceWaveAction::RecordVoice(self.voice_input.is_enabled()),
+                );
             }
         }
         if let Event::Signal = event {
@@ -581,7 +594,13 @@ impl VoiceWaveRef {
 
     /// Handle voice actions from the actions queue, injecting text/enter events
     /// into the given view. Returns `Some(enabled)` when voice recording state changed.
-    pub fn handle_actions(&self, cx: &mut Cx, actions: &Actions, view: &mut View, scope: &mut Scope) -> Option<bool> {
+    pub fn handle_actions(
+        &self,
+        cx: &mut Cx,
+        actions: &Actions,
+        view: &mut View,
+        scope: &mut Scope,
+    ) -> Option<bool> {
         let mut result = None;
         for action in actions.filter_widget_actions_cast::<VoiceWaveAction>(self.widget_uid()) {
             match action {

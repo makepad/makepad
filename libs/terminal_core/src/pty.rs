@@ -11,16 +11,18 @@ use std::{
 use windows::{
     core::{PCWSTR, PWSTR},
     Win32::{
-        Foundation::{CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT},
+        Foundation::{
+            CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+        },
         Security::SECURITY_ATTRIBUTES,
         System::{
-            Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole},
+            Console::{ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON},
             Pipes::CreatePipe,
             Threading::{
-                CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-                InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-                PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
+                CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
                 TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+                EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
             },
         },
     },
@@ -651,18 +653,17 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
     let mut offset = 0usize;
     while offset < data.len() {
         let n = unsafe {
-            libc_ffi::write(
-                fd,
-                data[offset..].as_ptr() as *const _,
-                data.len() - offset,
-            )
+            libc_ffi::write(fd, data[offset..].as_ptr() as *const _, data.len() - offset)
         };
         if n > 0 {
             offset += n as usize;
             continue;
         }
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "PTY write returned 0"));
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "PTY write returned 0",
+            ));
         }
 
         let err = io::Error::last_os_error();

@@ -21,8 +21,8 @@ pub use diff::{
 };
 pub use error::GitError;
 pub use http_sync::{
-    apply_pack_and_checkout, build_info_refs_request, build_upload_pack_request,
-    build_ls_refs_head_request, extract_pack_from_response, parse_info_refs_response,
+    apply_pack_and_checkout, build_info_refs_request, build_ls_refs_head_request,
+    build_upload_pack_request, extract_pack_from_response, parse_info_refs_response,
     parse_ls_refs_head_response, GitHttpMethod, GitHttpRequest, GitHttpResponse, HttpSyncHooks,
     HttpSyncReport, NoopHttpSyncHooks, RemoteHead,
 };

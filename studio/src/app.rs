@@ -186,7 +186,9 @@ impl App {
                                 .data
                                 .build_manager
                                 .binary_root_name_to_id(&process.root, &process.binary)
-                                .or_else(|| self.data.build_manager.binary_name_to_id(&process.binary))
+                                .or_else(|| {
+                                    self.data.build_manager.binary_name_to_id(&process.binary)
+                                })
                             {
                                 self.data.build_manager.start_active_build(
                                     cx,

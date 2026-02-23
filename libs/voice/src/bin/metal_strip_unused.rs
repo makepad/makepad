@@ -343,8 +343,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let stripped_blocks = render_with_keep(&original, &blocks, &keep);
-    let mut keep_names: HashSet<String> =
-        TURBO_KERNEL_KEEP.iter().map(|name| (*name).to_string()).collect();
+    let mut keep_names: HashSet<String> = TURBO_KERNEL_KEEP
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
     for (block, keep_block) in blocks.iter().zip(keep.iter()) {
         if *keep_block {
             keep_names.insert(block.name.clone());

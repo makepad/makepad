@@ -27,6 +27,8 @@ workspace.members = [
     "libs/pdf_parse",
     "libs/regex",
     "libs/svg",
+    "libs/apple_sys",
+    "libs/network",
     "platform/script/test",
     "widgets/test",
     "studio",

@@ -655,7 +655,13 @@ fn collect_node_draw_objects(
         })?;
 
         for (primitive_index, primitive) in mesh.primitives.iter().enumerate() {
-            let Some((mesh_handle, local_bounds_min, local_bounds_max, local_centroid, local_vertex_count)) = mesh_info_by_primitive
+            let Some((
+                mesh_handle,
+                local_bounds_min,
+                local_bounds_max,
+                local_centroid,
+                local_vertex_count,
+            )) = mesh_info_by_primitive
                 .get(&(mesh_index, primitive_index))
                 .copied()
             else {
@@ -850,9 +856,12 @@ fn compute_scene_center(draw_objects: &[GltfDrawObject]) -> Vec3f {
             0.5 * (object.local_bounds_min.y + object.local_bounds_max.y),
             0.5 * (object.local_bounds_min.z + object.local_bounds_max.z),
         );
-        let world = object
-            .world_transform
-            .transform_vec4(vec4(local_center.x, local_center.y, local_center.z, 1.0));
+        let world = object.world_transform.transform_vec4(vec4(
+            local_center.x,
+            local_center.y,
+            local_center.z,
+            1.0,
+        ));
         let weight = object.local_vertex_count.max(1) as f32;
         weighted_sum += vec3(world.x, world.y, world.z) * weight;
         total_weight += weight;

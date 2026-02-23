@@ -24,7 +24,6 @@ use {
     crate::{
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        shared_framebuf::{PollTimer, PollTimers},
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::{
@@ -57,6 +56,7 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         os::cx_native::EventFlow,
+        shared_framebuf::{PollTimer, PollTimers},
         studio::{AppToStudio, GPUSample},
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
@@ -706,8 +706,7 @@ impl Cx {
                 let composition = if composing_start >= 0 && composing_end >= 0 {
                     let comp_start =
                         CharOffset::from_utf16_index(&full_text, composing_start as usize);
-                    let comp_end =
-                        CharOffset::from_utf16_index(&full_text, composing_end as usize);
+                    let comp_end = CharOffset::from_utf16_index(&full_text, composing_end as usize);
                     Some(comp_start..comp_end)
                 } else {
                     None
@@ -846,7 +845,10 @@ impl Cx {
                 let env = attach_jni_env();
                 android_jni::to_java_get_video_position(env, video_id) as u128
             };
-            let e = Event::VideoTextureUpdated(VideoTextureUpdatedEvent { video_id, current_position_ms });
+            let e = Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                video_id,
+                current_position_ms,
+            });
             self.call_event_handler(&e);
         }
 
@@ -1282,17 +1284,13 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.timers.timers.remove(&timer_id);
                 }
-                CxOsOp::ShowTextIME(_area, _pos, config) => {
-                    unsafe {
-                        android_jni::to_java_configure_keyboard(&config);
-                        android_jni::to_java_show_keyboard(true);
-                    }
-                }
-                CxOsOp::HideTextIME => {
-                    unsafe {
-                        android_jni::to_java_show_keyboard(false);
-                    }
-                }
+                CxOsOp::ShowTextIME(_area, _pos, config) => unsafe {
+                    android_jni::to_java_configure_keyboard(&config);
+                    android_jni::to_java_show_keyboard(true);
+                },
+                CxOsOp::HideTextIME => unsafe {
+                    android_jni::to_java_show_keyboard(false);
+                },
                 CxOsOp::SyncImeState {
                     text,
                     selection,
@@ -1658,7 +1656,10 @@ impl CxAndroidDisplay {
                 self.surface,
                 self.egl_context,
             );
-            assert!(res != 0, "eglMakeCurrent failed in CxAndroidDisplay::make_current");
+            assert!(
+                res != 0,
+                "eglMakeCurrent failed in CxAndroidDisplay::make_current"
+            );
         }
     }
 

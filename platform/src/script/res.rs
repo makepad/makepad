@@ -170,10 +170,8 @@ impl Cx {
                             res.data = CxScriptResourceData::Loaded(Rc::new(data));
                         }
                         Err(e) => {
-                            res.data = CxScriptResourceData::Error(format!(
-                                "Failed to read file: {}",
-                                e
-                            ));
+                            res.data =
+                                CxScriptResourceData::Error(format!("Failed to read file: {}", e));
                         }
                     }
                     continue;

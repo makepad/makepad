@@ -197,8 +197,8 @@ fn build_speech_bridge(target_os: &str) {
                 "IPHONEOS_DEPLOYMENT_TARGET"
             }
         };
-        let deployment = env::var(deployment_key)
-            .unwrap_or_else(|_| IOS_DEPLOYMENT_TARGET_DEFAULT.to_string());
+        let deployment =
+            env::var(deployment_key).unwrap_or_else(|_| IOS_DEPLOYMENT_TARGET_DEFAULT.to_string());
         println!("cargo:rustc-link-arg=-miphoneos-version-min={}", deployment);
     }
 

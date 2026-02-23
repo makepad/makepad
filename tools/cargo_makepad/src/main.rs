@@ -130,10 +130,14 @@ fn show_help() {
         "    studio [options]                              Start newline-JSON studio remote websocket"
     );
     println!("    studio terminal [options]                     Same as 'studio' (explicit mode)");
-    println!("    studio run [options] [cargo run args]         Ask Studio to start a cargo run child");
+    println!(
+        "    studio run [options] [cargo run args]         Ask Studio to start a cargo run child"
+    );
     println!("    [options]:");
     println!("       --studio=127.0.0.1:8001                   Studio server ip:port");
-    println!("       --root=<ROOT>                             Studio root name (for 'studio run')");
+    println!(
+        "       --root=<ROOT>                             Studio root name (for 'studio run')"
+    );
     println!("                                                 (or set STUDIO=127.0.0.1:8001)");
     println!();
     println!();

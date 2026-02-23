@@ -1228,7 +1228,6 @@ impl ParamsOxide {
             local_buf: Box::default(),
         }
     }
-
 }
 
 pub(crate) struct LZOxide {
@@ -2123,11 +2122,7 @@ fn compress_inner(
 /// # Notes
 /// This function may be removed or moved to the `miniz_oxide_c_api` in the future.
 pub fn create_comp_flags_from_zip_params(level: i32, window_bits: i32, strategy: i32) -> u32 {
-    let num_probes = (if level >= 0 {
-        cmp::min(10, level)
-    } else {
-        6
-    }) as usize;
+    let num_probes = (if level >= 0 { cmp::min(10, level) } else { 6 }) as usize;
     let greedy = if level <= 3 {
         TDEFL_GREEDY_PARSING_FLAG
     } else {
@@ -2180,11 +2175,7 @@ mod test {
     fn compress_output() {
         assert_eq!(
             DEFAULT_FLAGS,
-            create_comp_flags_from_zip_params(
-                4,
-                15,
-                CompressionStrategy::Default as i32
-            )
+            create_comp_flags_from_zip_params(4, 15, CompressionStrategy::Default as i32)
         );
 
         let slice = [

@@ -187,8 +187,7 @@ pub type NativeSetterFn =
 /// Generic method dispatch: called with (vm, args_object, method).
 /// The args object has `self` set and all call arguments collected.
 /// Used when a type has no specific method registered but has a catch-all call handler.
-pub type NativeCallFn =
-    Box<dyn Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue + 'static>;
+pub type NativeCallFn = Box<dyn Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue + 'static>;
 pub type NativeFn = Box<dyn Fn(&mut ScriptVm, ScriptObject) -> ScriptValue + 'static>;
 
 #[derive(Default)]

@@ -1,15 +1,12 @@
 use {
     crate::{
-        makepad_live_id::LiveId,
-        makepad_error_log::*,
         event::video_playback::VideoSource,
+        makepad_error_log::*,
+        makepad_live_id::LiveId,
         os::apple::apple_sys::*,
-        texture::{TextureId, TextureAlloc, TexturePixel, TextureCategory, CxTexturePool},
+        texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel},
     },
-    std::{
-        ffi::c_void,
-        ptr::NonNull,
-    },
+    std::{ffi::c_void, ptr::NonNull},
 };
 
 pub struct AppleVideoPlayer {
@@ -123,7 +120,8 @@ impl AppleVideoPlayer {
             }
             VideoSource::InMemory(data) => {
                 // Write data to a temporary file (deleted on cleanup)
-                let tmp_path = std::env::temp_dir().join(format!("makepad_video_{}.mp4", LiveId::unique().0));
+                let tmp_path =
+                    std::env::temp_dir().join(format!("makepad_video_{}.mp4", LiveId::unique().0));
                 let tmp_path_str = tmp_path.to_string_lossy().to_string();
                 std::fs::write(&tmp_path, data.as_ref()).unwrap_or_else(|e| {
                     error!("Failed to write video to temp file: {}", e);
@@ -239,7 +237,9 @@ impl AppleVideoPlayer {
             return false;
         }
 
-        unsafe { self.check_looping(); }
+        unsafe {
+            self.check_looping();
+        }
 
         unsafe {
             let current_time: CMTime = msg_send![self.player_item.as_id(), currentTime];
@@ -283,7 +283,10 @@ impl AppleVideoPlayer {
             CFRelease(pixel_buffer as *const c_void);
 
             if status != 0 {
-                error!("CVMetalTextureCacheCreateTextureFromImage failed: {}", status);
+                error!(
+                    "CVMetalTextureCacheCreateTextureFromImage failed: {}",
+                    status
+                );
                 return false;
             }
 
@@ -305,9 +308,7 @@ impl AppleVideoPlayer {
 
             // Swap the backing MTLTexture in the Makepad texture pool
             let cxtexture = &mut textures[self.texture_id];
-            cxtexture.os.texture = Some(RcObjcId::from_owned(
-                NonNull::new(mtl_texture).unwrap()
-            ));
+            cxtexture.os.texture = Some(RcObjcId::from_owned(NonNull::new(mtl_texture).unwrap()));
             cxtexture.alloc = Some(TextureAlloc {
                 width,
                 height,
@@ -323,7 +324,11 @@ impl AppleVideoPlayer {
         unsafe {
             let current: CMTime = msg_send![self.player_item.as_id(), currentTime];
             let seconds = CMTimeGetSeconds(current);
-            if seconds.is_finite() && seconds >= 0.0 { (seconds * 1000.0) as u128 } else { 0 }
+            if seconds.is_finite() && seconds >= 0.0 {
+                (seconds * 1000.0) as u128
+            } else {
+                0
+            }
         }
     }
 
@@ -369,7 +374,8 @@ impl AppleVideoPlayer {
             let _: () = msg_send![self.player.as_id(), pause];
 
             // Remove video output from player item
-            let _: () = msg_send![self.player_item.as_id(), removeOutput: self.video_output.as_id()];
+            let _: () =
+                msg_send![self.player_item.as_id(), removeOutput: self.video_output.as_id()];
 
             // Release CVMetalTexture
             if !self.cv_texture.is_null() {

@@ -669,9 +669,16 @@ pub fn expand_sdk(
                 urls.platform_tools_macos,
                 &[("platform-tools/adb", true)],
             )?;
-            let ndk_host_dir = if host_os == HostOs::MacosAarch64 { "darwin-aarch64" } else { "darwin-x86_64" };
-            let NDK_IN = &format!("AndroidNDK13676358.app/Contents/NDK/toolchains/llvm/prebuilt/{ndk_host_dir}");
-            let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/{ndk_host_dir}");
+            let ndk_host_dir = if host_os == HostOs::MacosAarch64 {
+                "darwin-aarch64"
+            } else {
+                "darwin-x86_64"
+            };
+            let NDK_IN = &format!(
+                "AndroidNDK13676358.app/Contents/NDK/toolchains/llvm/prebuilt/{ndk_host_dir}"
+            );
+            let NDK_OUT =
+                &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/{ndk_host_dir}");
 
             let toolchain_dir = copy_map(NDK_IN, NDK_OUT, "");
             let files = [(toolchain_dir.as_str(), false)];

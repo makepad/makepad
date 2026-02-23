@@ -1240,12 +1240,8 @@ impl TextInput {
             self.input_mode
         };
         match effective_mode {
-            InputMode::Ascii => {
-                input.chars().filter(|c| c.is_ascii()).collect()
-            }
-            InputMode::Numeric => {
-                input.chars().filter(|c| c.is_ascii_digit()).collect()
-            }
+            InputMode::Ascii => input.chars().filter(|c| c.is_ascii()).collect(),
+            InputMode::Numeric => input.chars().filter(|c| c.is_ascii_digit()).collect(),
             InputMode::Decimal => {
                 let mut contains_dot = if is_set_text {
                     false
@@ -1266,15 +1262,12 @@ impl TextInput {
                     })
                     .collect()
             }
-            InputMode::Tel => {
-                input
-                    .chars()
-                    .filter(|c| {
-                        c.is_ascii_digit()
-                            || matches!(c, '+' | '-' | ' ' | '(' | ')' | '*' | '#')
-                    })
-                    .collect()
-            }
+            InputMode::Tel => input
+                .chars()
+                .filter(|c| {
+                    c.is_ascii_digit() || matches!(c, '+' | '-' | ' ' | '(' | ')' | '*' | '#')
+                })
+                .collect(),
             InputMode::Text | InputMode::Url | InputMode::Email | InputMode::Search => {
                 input.to_string()
             }
@@ -1876,8 +1869,7 @@ impl Widget for TextInput {
                     };
 
                     if let Some(composition_range) = &full_state.composition {
-                        self.composition_start =
-                            composition_range.start.to_byte_index(&self.text);
+                        self.composition_start = composition_range.start.to_byte_index(&self.text);
                         self.composition_end = composition_range.end.to_byte_index(&self.text);
                     } else {
                         self.composition_start = 0;
@@ -2083,16 +2075,10 @@ impl Widget for TextInput {
                     ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
                         cx.hide_text_ime();
                         cx.set_key_focus(Area::Empty);
-                        cx.widget_action(
-                            uid,
-                            TextInputAction::Returned(self.text.clone(), mods),
-                        );
+                        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
                     }
                     ImeAction::Next | ImeAction::Previous => {
-                        cx.widget_action(
-                            uid,
-                            TextInputAction::Returned(self.text.clone(), mods),
-                        );
+                        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
                     }
                     ImeAction::Unspecified | ImeAction::None => {}
                 }

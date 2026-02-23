@@ -91,20 +91,22 @@ pub fn decode(
 
         // Q, K, V projections.
         let (q, k_new, v_new) = if crate::metal_backend::is_requested() && n_tokens == 1 {
-            if let Some((q_data, k_data, v_data)) = crate::metal_backend::try_decoder_self_qkv_step_f32(
-                &cur.data,
-                n_state,
-                &layer.attn_ln_0_w.data,
-                &layer.attn_ln_0_b.data,
-                &layer.attn_q_w.data,
-                layer.attn_q_w.ggml_type,
-                &layer.attn_q_b.data,
-                &layer.attn_k_w.data,
-                layer.attn_k_w.ggml_type,
-                &layer.attn_v_w.data,
-                layer.attn_v_w.ggml_type,
-                &layer.attn_v_b.data,
-            ) {
+            if let Some((q_data, k_data, v_data)) =
+                crate::metal_backend::try_decoder_self_qkv_step_f32(
+                    &cur.data,
+                    n_state,
+                    &layer.attn_ln_0_w.data,
+                    &layer.attn_ln_0_b.data,
+                    &layer.attn_q_w.data,
+                    layer.attn_q_w.ggml_type,
+                    &layer.attn_q_b.data,
+                    &layer.attn_k_w.data,
+                    layer.attn_k_w.ggml_type,
+                    &layer.attn_v_w.data,
+                    layer.attn_v_w.ggml_type,
+                    &layer.attn_v_b.data,
+                )
+            {
                 (
                     Tensor {
                         data: q_data,
@@ -129,7 +131,8 @@ pub fn decode(
                 )
             }
         } else {
-            let normed = Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
+            let normed =
+                Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
             (
                 Tensor::linear_raw(&normed, &layer.attn_q_w, &layer.attn_q_b),
                 Tensor::matmul_raw(&normed, &layer.attn_k_w),
@@ -177,107 +180,29 @@ pub fn decode(
         }
 
         let attn_out = if crate::metal_backend::is_requested() && n_tokens == 1 {
-                crate::metal_backend::try_flash_attn_f32_self_kv_cache(
-                    il,
+            crate::metal_backend::try_flash_attn_f32_self_kv_cache(
+                il,
+                &q.data,
+                k_all,
+                v_all,
+                n_kv,
+                n_head,
+                n_state_head,
+                scale,
+            )
+            .or_else(|| {
+                crate::metal_backend::try_flash_attn_f32_packed(
                     &q.data,
                     k_all,
                     v_all,
+                    n_tokens,
                     n_kv,
                     n_head,
                     n_state_head,
                     scale,
                 )
-                .or_else(|| {
-                    crate::metal_backend::try_flash_attn_f32_packed(
-                        &q.data,
-                        k_all,
-                        v_all,
-                        n_tokens,
-                        n_kv,
-                        n_head,
-                        n_state_head,
-                        scale,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    let mut attn_out = vec![0.0f32; n_tokens * n_state];
-                    let out_ptr = SendPtr::new(attn_out.as_mut_ptr());
-                    let q_data = &q.data;
-                    parallel_for(n_head, |h| {
-                        let h_off = h * n_state_head;
-                        let mut qh = vec![0.0f32; n_tokens * n_state_head];
-                        let mut kh = vec![0.0f32; n_kv * n_state_head];
-                        let mut vh = vec![0.0f32; n_kv * n_state_head];
-                        for i in 0..n_tokens {
-                            qh[i * n_state_head..(i + 1) * n_state_head].copy_from_slice(
-                                &q_data[i * n_state + h_off..i * n_state + h_off + n_state_head],
-                            );
-                        }
-                        for j in 0..n_kv {
-                            kh[j * n_state_head..(j + 1) * n_state_head].copy_from_slice(
-                                &k_all[j * n_state + h_off..j * n_state + h_off + n_state_head],
-                            );
-                            vh[j * n_state_head..(j + 1) * n_state_head].copy_from_slice(
-                                &v_all[j * n_state + h_off..j * n_state + h_off + n_state_head],
-                            );
-                        }
-
-                        // Q @ K^T with causal mask
-                        let mut scores = vec![f32::NEG_INFINITY; n_tokens * n_kv];
-                        for i in 0..n_tokens {
-                            let q_row = &qh[i * n_state_head..(i + 1) * n_state_head];
-                            let q_pos = n_past + i;
-                            for j in 0..n_kv.min(q_pos + 1) {
-                                let k_row = &kh[j * n_state_head..(j + 1) * n_state_head];
-                                scores[i * n_kv + j] = Tensor::dot_f32(q_row, k_row) * scale;
-                            }
-                        }
-
-                        // Softmax per query
-                        for i in 0..n_tokens {
-                            let row = &mut scores[i * n_kv..(i + 1) * n_kv];
-                            let max_val = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                            let mut sum = 0.0f32;
-                            for v in row.iter_mut() {
-                                if *v > f32::NEG_INFINITY {
-                                    *v = (*v - max_val).exp();
-                                } else {
-                                    *v = 0.0;
-                                }
-                                sum += *v;
-                            }
-                            if sum > 0.0 {
-                                let inv = 1.0 / sum;
-                                for v in row.iter_mut() {
-                                    *v *= inv;
-                                }
-                            }
-                        }
-
-                        // scores @ V with transposed V
-                        let mut vh_t = vec![0.0f32; n_state_head * n_kv];
-                        for j in 0..n_kv {
-                            for d in 0..n_state_head {
-                                vh_t[d * n_kv + j] = vh[j * n_state_head + d];
-                            }
-                        }
-                        for i in 0..n_tokens {
-                            let s_row = &scores[i * n_kv..(i + 1) * n_kv];
-                            for d in 0..n_state_head {
-                                let v_col = &vh_t[d * n_kv..(d + 1) * n_kv];
-                                let out_idx = i * n_state + h_off + d;
-                                debug_assert!(out_idx < n_tokens * n_state);
-                                unsafe {
-                                    // Safe: each parallel head writes to a disjoint [h_off, h_off+n_state_head)
-                                    // slice in every token row, and out_idx is bounds-checked above.
-                                    *out_ptr.ptr().add(out_idx) = Tensor::dot_f32(s_row, v_col);
-                                }
-                            }
-                        }
-                    });
-                    attn_out
-                })
-            } else {
+            })
+            .unwrap_or_else(|| {
                 let mut attn_out = vec![0.0f32; n_tokens * n_state];
                 let out_ptr = SendPtr::new(attn_out.as_mut_ptr());
                 let q_data = &q.data;
@@ -346,13 +271,91 @@ pub fn decode(
                             let out_idx = i * n_state + h_off + d;
                             debug_assert!(out_idx < n_tokens * n_state);
                             unsafe {
-                                // Safe: per-head writes are disjoint; index bounds asserted above.
+                                // Safe: each parallel head writes to a disjoint [h_off, h_off+n_state_head)
+                                // slice in every token row, and out_idx is bounds-checked above.
                                 *out_ptr.ptr().add(out_idx) = Tensor::dot_f32(s_row, v_col);
                             }
                         }
                     }
                 });
                 attn_out
+            })
+        } else {
+            let mut attn_out = vec![0.0f32; n_tokens * n_state];
+            let out_ptr = SendPtr::new(attn_out.as_mut_ptr());
+            let q_data = &q.data;
+            parallel_for(n_head, |h| {
+                let h_off = h * n_state_head;
+                let mut qh = vec![0.0f32; n_tokens * n_state_head];
+                let mut kh = vec![0.0f32; n_kv * n_state_head];
+                let mut vh = vec![0.0f32; n_kv * n_state_head];
+                for i in 0..n_tokens {
+                    qh[i * n_state_head..(i + 1) * n_state_head].copy_from_slice(
+                        &q_data[i * n_state + h_off..i * n_state + h_off + n_state_head],
+                    );
+                }
+                for j in 0..n_kv {
+                    kh[j * n_state_head..(j + 1) * n_state_head].copy_from_slice(
+                        &k_all[j * n_state + h_off..j * n_state + h_off + n_state_head],
+                    );
+                    vh[j * n_state_head..(j + 1) * n_state_head].copy_from_slice(
+                        &v_all[j * n_state + h_off..j * n_state + h_off + n_state_head],
+                    );
+                }
+
+                // Q @ K^T with causal mask
+                let mut scores = vec![f32::NEG_INFINITY; n_tokens * n_kv];
+                for i in 0..n_tokens {
+                    let q_row = &qh[i * n_state_head..(i + 1) * n_state_head];
+                    let q_pos = n_past + i;
+                    for j in 0..n_kv.min(q_pos + 1) {
+                        let k_row = &kh[j * n_state_head..(j + 1) * n_state_head];
+                        scores[i * n_kv + j] = Tensor::dot_f32(q_row, k_row) * scale;
+                    }
+                }
+
+                // Softmax per query
+                for i in 0..n_tokens {
+                    let row = &mut scores[i * n_kv..(i + 1) * n_kv];
+                    let max_val = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let mut sum = 0.0f32;
+                    for v in row.iter_mut() {
+                        if *v > f32::NEG_INFINITY {
+                            *v = (*v - max_val).exp();
+                        } else {
+                            *v = 0.0;
+                        }
+                        sum += *v;
+                    }
+                    if sum > 0.0 {
+                        let inv = 1.0 / sum;
+                        for v in row.iter_mut() {
+                            *v *= inv;
+                        }
+                    }
+                }
+
+                // scores @ V with transposed V
+                let mut vh_t = vec![0.0f32; n_state_head * n_kv];
+                for j in 0..n_kv {
+                    for d in 0..n_state_head {
+                        vh_t[d * n_kv + j] = vh[j * n_state_head + d];
+                    }
+                }
+                for i in 0..n_tokens {
+                    let s_row = &scores[i * n_kv..(i + 1) * n_kv];
+                    for d in 0..n_state_head {
+                        let v_col = &vh_t[d * n_kv..(d + 1) * n_kv];
+                        let out_idx = i * n_state + h_off + d;
+                        debug_assert!(out_idx < n_tokens * n_state);
+                        unsafe {
+                            // Safe: per-head writes are disjoint; index bounds asserted above.
+                            *out_ptr.ptr().add(out_idx) = Tensor::dot_f32(s_row, v_col);
+                        }
+                    }
+                }
+            });
+            attn_out
         };
 
         let attn_result = Tensor {

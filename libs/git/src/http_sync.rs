@@ -218,7 +218,9 @@ pub fn parse_info_refs_response(
                 }
 
                 let Some(space_pos) = line.iter().position(|b| *b == b' ') else {
-                    return Err(GitError::InvalidRef("invalid ref advertisement line".to_string()));
+                    return Err(GitError::InvalidRef(
+                        "invalid ref advertisement line".to_string(),
+                    ));
                 };
 
                 let oid_hex = str::from_utf8(&line[..space_pos])
@@ -240,8 +242,9 @@ pub fn parse_info_refs_response(
                     }
                 }
 
-                let ref_name = str::from_utf8(ref_name_part)
-                    .map_err(|_| GitError::InvalidRef("invalid ref name in info/refs".to_string()))?;
+                let ref_name = str::from_utf8(ref_name_part).map_err(|_| {
+                    GitError::InvalidRef("invalid ref name in info/refs".to_string())
+                })?;
 
                 refs_map.insert(ref_name.to_string(), oid);
             }
@@ -469,7 +472,9 @@ pub fn apply_pack_and_checkout(
     pack_data: &[u8],
     hooks: &mut dyn HttpSyncHooks,
 ) -> Result<HttpSyncReport, GitError> {
-    let old_head = Repository::open(dst).ok().and_then(|repo| repo.head_oid().ok());
+    let old_head = Repository::open(dst)
+        .ok()
+        .and_then(|repo| repo.head_oid().ok());
 
     ensure_repo_layout(dst, remote_url)?;
 
@@ -477,11 +482,7 @@ pub fn apply_pack_and_checkout(
     let imported_objects = if pack_data.is_empty() {
         0
     } else {
-        import_pack_to_loose(
-            &dst.join(".git"),
-            pack_data,
-            existing_repo.as_mut(),
-        )?
+        import_pack_to_loose(&dst.join(".git"), pack_data, existing_repo.as_mut())?
     };
 
     let mut repo = Repository::open(dst)?;
@@ -542,7 +543,10 @@ fn ensure_repo_layout(dst: &Path, remote_url: &str) -> Result<(), GitError> {
     fs::create_dir_all(git_dir.join("refs/tags"))?;
 
     if !git_dir.join("HEAD").exists() {
-        refs::update_head(&git_dir, &RefTarget::Symbolic("refs/heads/main".to_string()))?;
+        refs::update_head(
+            &git_dir,
+            &RefTarget::Symbolic("refs/heads/main".to_string()),
+        )?;
     }
 
     write_basic_config(&git_dir, remote_url)?;
@@ -566,18 +570,9 @@ struct ParsedPackEntry {
 
 #[derive(Debug, Clone)]
 enum ParsedPackEntryKind {
-    Full {
-        kind: ObjectKind,
-        data: Vec<u8>,
-    },
-    DeltaOfs {
-        base_offset: u64,
-        delta: Vec<u8>,
-    },
-    DeltaRef {
-        base_oid: ObjectId,
-        delta: Vec<u8>,
-    },
+    Full { kind: ObjectKind, data: Vec<u8> },
+    DeltaOfs { base_offset: u64, delta: Vec<u8> },
+    DeltaRef { base_oid: ObjectId, delta: Vec<u8> },
 }
 
 #[derive(Debug, Clone)]
@@ -818,7 +813,10 @@ fn import_pack_to_loose(
     Ok(parsed.len())
 }
 
-fn decompress_object_data(input: &[u8], expected_size: usize) -> Result<(Vec<u8>, usize), GitError> {
+fn decompress_object_data(
+    input: &[u8],
+    expected_size: usize,
+) -> Result<(Vec<u8>, usize), GitError> {
     let mut out = vec![0u8; expected_size];
     let (consumed, written) = makepad_fast_inflate::zlib_decompress(input, &mut out)
         .map_err(|e| GitError::CorruptPack(format!("zlib decompress failed: {}", e)))?;
@@ -1143,7 +1141,9 @@ fn read_u32_be(data: &[u8], offset: usize) -> Result<u32, GitError> {
 fn write_pkt_line(out: &mut Vec<u8>, payload: &[u8]) -> Result<(), GitError> {
     let total_len = payload.len() + 4;
     if total_len > 0xffff {
-        return Err(GitError::InvalidRef("pkt-line payload too large".to_string()));
+        return Err(GitError::InvalidRef(
+            "pkt-line payload too large".to_string(),
+        ));
     }
     out.extend_from_slice(format!("{:04x}", total_len).as_bytes());
     out.extend_from_slice(payload);
@@ -1282,7 +1282,10 @@ mod tests {
         };
 
         let head = parse_info_refs_response(&response, None).unwrap();
-        assert_eq!(head.oid.to_hex(), "0123456789012345678901234567890123456789");
+        assert_eq!(
+            head.oid.to_hex(),
+            "0123456789012345678901234567890123456789"
+        );
         assert_eq!(head.ref_name.as_deref(), Some("refs/heads/main"));
         assert_eq!(head.etag.as_deref(), Some("\"abc\""));
     }
@@ -1304,7 +1307,10 @@ mod tests {
         };
 
         let head = parse_ls_refs_head_response(&response).unwrap();
-        assert_eq!(head.oid.to_hex(), "0123456789012345678901234567890123456789");
+        assert_eq!(
+            head.oid.to_hex(),
+            "0123456789012345678901234567890123456789"
+        );
         assert_eq!(head.ref_name.as_deref(), Some("refs/heads/main"));
     }
 

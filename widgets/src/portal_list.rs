@@ -1555,9 +1555,10 @@ impl Widget for PortalList {
         if self.is_selecting {
             let clear_selection_autoscroll = match event {
                 Event::MouseUp(_) => true,
-                Event::TouchUpdate(e) => e.touches.iter().any(|touch| {
-                    matches!(touch.state, TouchState::Stop | TouchState::Stable)
-                }),
+                Event::TouchUpdate(e) => e
+                    .touches
+                    .iter()
+                    .any(|touch| matches!(touch.state, TouchState::Stop | TouchState::Stable)),
                 Event::Scroll(_) => cx.fingers.first_mouse_button.is_none(),
                 _ => false,
             };

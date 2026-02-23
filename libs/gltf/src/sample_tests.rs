@@ -6,7 +6,8 @@ use std::{
 };
 
 fn sample_models_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/gltf/resources/glTF-Sample-Models")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/gltf/resources/glTF-Sample-Models")
 }
 
 fn collect_gltf_paths(root: &Path) -> io::Result<Vec<PathBuf>> {
@@ -96,7 +97,9 @@ fn loads_all_gltf_sample_models_if_available() {
             Ok(_) => {
                 loaded_ok += 1;
             }
-            Err(GltfError::Validation(msg)) if msg.starts_with("unsupported glTF asset version") => {
+            Err(GltfError::Validation(msg))
+                if msg.starts_with("unsupported glTF asset version") =>
+            {
                 skipped_unsupported_version += 1;
             }
             Err(GltfError::Unsupported(_)) => {
@@ -175,7 +178,8 @@ fn decodes_triangle_primitives_from_all_gltf_2_samples_if_available() {
         for mesh_index in 0..loaded.document.meshes_slice().len() {
             let primitive_count = loaded.document.meshes_slice()[mesh_index].primitives.len();
             for primitive_index in 0..primitive_count {
-                let primitive = &loaded.document.meshes_slice()[mesh_index].primitives[primitive_index];
+                let primitive =
+                    &loaded.document.meshes_slice()[mesh_index].primitives[primitive_index];
                 if primitive.mode() != GLTF_MODE_TRIANGLES {
                     skipped_non_triangles += 1;
                     continue;

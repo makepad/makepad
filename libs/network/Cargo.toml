@@ -1,0 +1,28 @@
+[package]
+name = "makepad-network"
+version = "1.0.0"
+edition = "2021"
+description = "Networking runtime for Makepad UI and CLI apps"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-http = { path = "../http", version = "1.0.0" }
+
+[target.'cfg(windows)'.dependencies.makepad-futures-legacy]
+path = "../futures_legacy"
+version = "1.0.0"
+
+[target.'cfg(windows)'.dependencies.windows]
+path = "../windows/windows-rs"
+version = "0.62.2"
+features = [
+    "Foundation_Collections",
+    "Storage",
+    "Storage_Streams",
+    "Web_Http",
+    "Web_Http_Headers",
+    "Win32_System_WinRT",
+]
+
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
+makepad-apple-sys = { path = "../apple_sys", version = "1.0.0" }

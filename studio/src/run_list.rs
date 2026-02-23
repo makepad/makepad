@@ -201,7 +201,10 @@ impl RunList {
 
             let cb = item.check_box(cx, ids!(check));
             cb.set_text(name);
-            cb.set_active(cx, build_manager.any_binary_active(&binary.root, &binary.name));
+            cb.set_active(
+                cx,
+                build_manager.any_binary_active(&binary.root, &binary.name),
+            );
             cb.set_action_data(ActionData::RunMain { binary_id });
 
             item.draw_all(cx, &mut Scope::empty());

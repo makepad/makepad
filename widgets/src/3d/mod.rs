@@ -3,16 +3,16 @@ pub mod chart_3d;
 pub mod gltf_3d;
 pub mod grid_3d;
 pub mod scene_3d;
-pub mod view_splat;
 pub mod view_3d;
+pub mod view_splat;
 
 pub use bar_chart_3d::*;
 pub use chart_3d::*;
 pub use gltf_3d::*;
 pub use grid_3d::*;
 pub use scene_3d::*;
-pub use view_splat::*;
 pub use view_3d::*;
+pub use view_splat::*;
 
 use crate::makepad_draw::*;
 

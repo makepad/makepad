@@ -13,8 +13,7 @@ use {
         makepad_platform::studio::{
             AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, LocalProfileSample,
             RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp, RemoteScroll,
-            RemoteTweakRay,
-            ScreenshotRequest, ScreenshotResponse, StudioToApp, StudioToAppVec,
+            RemoteTweakRay, ScreenshotRequest, ScreenshotResponse, StudioToApp, StudioToAppVec,
             WidgetTreeDumpRequest, WidgetTreeDumpResponse,
         },
         makepad_shell::*,
@@ -371,20 +370,16 @@ impl BuildManager {
                     }
                 }
                 Err(err) => {
-                    crate::warning!(
-                        "run list discovery failed for root {}: {}",
-                        root_name,
-                        err
-                    );
+                    crate::warning!("run list discovery failed for root {}: {}", root_name, err);
                 }
             }
         }
     }
 
     pub fn any_binary_active(&self, root: &str, binary: &str) -> bool {
-        self.running_processes.values().any(|process| {
-            process.root == root && process.binary == binary
-        })
+        self.running_processes
+            .values()
+            .any(|process| process.root == root && process.binary == binary)
     }
 
     pub fn item_id_active(&self, item_id: LiveId) -> bool {
@@ -429,7 +424,10 @@ impl BuildManager {
     }
 
     fn push_event_profile_sample(&mut self, build_id: LiveId, mut sample: EventSample) {
-        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        let origin = self
+            .profile_time_origin
+            .entry(build_id)
+            .or_insert(sample.start);
         sample.start -= *origin;
         sample.end -= *origin;
         if sample.end < sample.start {
@@ -443,7 +441,10 @@ impl BuildManager {
     }
 
     fn push_gpu_profile_sample(&mut self, build_id: LiveId, mut sample: GPUSample) {
-        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        let origin = self
+            .profile_time_origin
+            .entry(build_id)
+            .or_insert(sample.start);
         sample.start -= *origin;
         sample.end -= *origin;
         if sample.end < sample.start {
@@ -457,7 +458,10 @@ impl BuildManager {
     }
 
     fn push_gc_profile_sample(&mut self, build_id: LiveId, mut sample: GCSample) {
-        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        let origin = self
+            .profile_time_origin
+            .entry(build_id)
+            .or_insert(sample.start);
         sample.start -= *origin;
         sample.end -= *origin;
         if sample.end < sample.start {
@@ -471,11 +475,8 @@ impl BuildManager {
     }
 
     fn push_self_event_profile_sample(&mut self, mut sample: EventSample) {
-        let (start, end) = Self::rebase_sample_range(
-            sample.start,
-            sample.end,
-            &mut self.self_profile_time_origin,
-        );
+        let (start, end) =
+            Self::rebase_sample_range(sample.start, sample.end, &mut self.self_profile_time_origin);
         sample.start = start;
         sample.end = end;
         self.self_profile.event.push(sample);
@@ -483,11 +484,8 @@ impl BuildManager {
     }
 
     fn push_self_gpu_profile_sample(&mut self, mut sample: GPUSample) {
-        let (start, end) = Self::rebase_sample_range(
-            sample.start,
-            sample.end,
-            &mut self.self_profile_time_origin,
-        );
+        let (start, end) =
+            Self::rebase_sample_range(sample.start, sample.end, &mut self.self_profile_time_origin);
         sample.start = start;
         sample.end = end;
         self.self_profile.gpu.push(sample);
@@ -495,11 +493,8 @@ impl BuildManager {
     }
 
     fn push_self_gc_profile_sample(&mut self, mut sample: GCSample) {
-        let (start, end) = Self::rebase_sample_range(
-            sample.start,
-            sample.end,
-            &mut self.self_profile_time_origin,
-        );
+        let (start, end) =
+            Self::rebase_sample_range(sample.start, sample.end, &mut self.self_profile_time_origin);
         sample.start = start;
         sample.end = end;
         self.self_profile.gc.push(sample);
@@ -1051,14 +1046,11 @@ impl BuildManager {
         };
         let item_id = process.as_id();
         if self.running_processes.contains_key(&item_id)
-            || self
-                .running_processes
-                .values()
-                .any(|running| {
-                    running.root == process.root
-                        && running.binary == process.binary
-                        && running.target == process.target
-                })
+            || self.running_processes.values().any(|running| {
+                running.root == process.root
+                    && running.binary == process.binary
+                    && running.target == process.target
+            })
         {
             return;
         }
@@ -1134,7 +1126,7 @@ impl BuildManager {
                 (running.root == process.root
                     && running.binary == process.binary
                     && running.target == process.target)
-                .then_some(*build_id)
+                    .then_some(*build_id)
             })
             .collect();
 

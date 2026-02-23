@@ -6,9 +6,9 @@ use crate::makepad_draw::{
 };
 use makepad_voice::{Segment, VoiceTranscribeParams, VoiceTranscriber};
 use std::collections::VecDeque;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -84,13 +84,7 @@ impl Default for WindowVoiceInput {
             text_signal.clone(),
         )));
         let capture_enabled = Arc::new(AtomicBool::new(false));
-        spawn_voice_worker(
-            audio_rx,
-            control_rx,
-            text_tx,
-            wave_tx,
-            text_signal.clone(),
-        );
+        spawn_voice_worker(audio_rx, control_rx, text_tx, wave_tx, text_signal.clone());
         // Keep the backend warm once per app lifetime: worker/model/threadpools stay alive
         // and are not restarted on mic toggles.
         let _ = control_tx.send(VoiceControlMessage::Preload);
@@ -510,15 +504,19 @@ impl CaptureCallbackState {
             for sample in &mut self.mono_scratch {
                 *sample /= channel_count;
             }
-            self.downsampler
-                .push(source_sample_rate, &self.mono_scratch, &mut self.resampled_scratch);
+            self.downsampler.push(
+                source_sample_rate,
+                &self.mono_scratch,
+                &mut self.resampled_scratch,
+            );
         }
 
         if self.resampled_scratch.is_empty() {
             return;
         }
 
-        self.pending_16k.extend(self.resampled_scratch.iter().copied());
+        self.pending_16k
+            .extend(self.resampled_scratch.iter().copied());
         while self.pending_16k.len() >= VOICE_AUDIO_PACKET_SAMPLES {
             let mut chunk = Vec::with_capacity(VOICE_AUDIO_PACKET_SAMPLES);
             for _ in 0..VOICE_AUDIO_PACKET_SAMPLES {
@@ -642,7 +640,10 @@ fn spawn_voice_worker(
                     }
                     pending_samples.extend(audio_chunk);
                     if !saw_speech_since_flush {
-                        trim_pending_to_recent(&mut pending_samples, VOICE_TRANSCRIBE_PREROLL_SAMPLES);
+                        trim_pending_to_recent(
+                            &mut pending_samples,
+                            VOICE_TRANSCRIBE_PREROLL_SAMPLES,
+                        );
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -671,11 +672,7 @@ fn spawn_voice_worker(
                 if !flush_on_pause && !flush_on_idle {
                     break;
                 }
-                let flush_reason = if flush_on_pause {
-                    "pause"
-                } else {
-                    "idle"
-                };
+                let flush_reason = if flush_on_pause { "pause" } else { "idle" };
 
                 let flush_len = pending_samples.len();
 

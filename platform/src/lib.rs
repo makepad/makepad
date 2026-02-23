@@ -26,7 +26,6 @@ mod draw_vars;
 
 mod area;
 pub mod component;
-pub mod ime;
 mod component_list;
 mod component_map;
 mod cursor;
@@ -35,6 +34,7 @@ pub mod event;
 mod geometry;
 mod gpu_info;
 mod id_pool;
+pub mod ime;
 mod macos_menu;
 mod performance_stats;
 pub mod permission;
@@ -49,6 +49,14 @@ pub mod audio_stream;
 pub mod file_dialogs;
 
 mod media_api;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos"
+))]
+mod network_bridge;
 
 pub mod ui_runner;
 
@@ -154,13 +162,13 @@ pub use {
             XrState,
             XrUpdateEvent,
         },
+        game_input::*,
+        geometry::{Geometry, GeometryId},
+        gpu_info::GpuPerformance,
         ime::{
             AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
             TextInputConfig,
         },
-        game_input::*,
-        geometry::{Geometry, GeometryId},
-        gpu_info::GpuPerformance,
         macos_menu::MacosMenu,
         media_api::CxMediaApi,
         midi::*,

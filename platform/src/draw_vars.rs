@@ -73,10 +73,7 @@ impl ScriptHook for DrawVars {
                 self.options.draw_call_group = LiveId(v as u64);
             }
 
-            let depth_write_value = vm
-                .bx
-                .heap
-                .value(io_self, id!(depth_write).into(), NoTrap);
+            let depth_write_value = vm.bx.heap.value(io_self, id!(depth_write).into(), NoTrap);
             if let Some(v) = depth_write_value.as_bool() {
                 self.options.depth_write = v;
             } else if let Some(v) = depth_write_value.as_f64() {

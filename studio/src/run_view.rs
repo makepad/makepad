@@ -2,9 +2,11 @@ use crate::{
     app::AppData,
     build_manager::build_manager::BuildManager,
     makepad_platform::os::shared_framebuf::*,
-    makepad_platform::studio::{RemoteKeyModifiers, RemoteMouseMove, RemoteTweakRay, StudioToApp, TweakHitsResponse},
-    tweak_view::TweakView,
+    makepad_platform::studio::{
+        RemoteKeyModifiers, RemoteMouseMove, RemoteTweakRay, StudioToApp, TweakHitsResponse,
+    },
     makepad_widgets::*,
+    tweak_view::TweakView,
 };
 
 script_mod! {
@@ -208,9 +210,9 @@ impl RunView {
                     ],
                 );
                 #[cfg(target_os = "linux")]
-                self.draw_app.draw_vars.set_dyn_instance(
-                    cx, id!(y_flip), &[1.0f32],
-                );
+                self.draw_app
+                    .draw_vars
+                    .set_dyn_instance(cx, id!(y_flip), &[1.0f32]);
 
                 if !self.started {
                     self.started = true;
@@ -408,7 +410,12 @@ impl RunView {
                 );
 
                 let swapchain = v.swapchain_mut(self.window_id).get_or_insert_with(|| {
-                    shared_framebuf::HostSwapchain::new(self.window_id, alloc_width, alloc_height, cx)
+                    shared_framebuf::HostSwapchain::new(
+                        self.window_id,
+                        alloc_width,
+                        alloc_height,
+                        cx,
+                    )
                 });
 
                 // Create shared swapchain for cross-process serialization
