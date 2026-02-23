@@ -70,7 +70,7 @@ pub struct View {
     #[uid]
     uid: WidgetUid,
     #[source]
-    source: ScriptObjectRef,
+    pub source: ScriptObjectRef,
     // draw info per UI element
     #[live]
     pub draw_bg: DrawQuad,
@@ -109,7 +109,7 @@ pub struct View {
     #[live(false)]
     block_signal_event: bool,
     #[live]
-    cursor: Option<MouseCursor>,
+    pub cursor: Option<MouseCursor>,
     #[live(false)]
     capture_overload: bool,
     #[live]

@@ -217,12 +217,12 @@ pub struct Label {
     uid: WidgetUid,
     #[redraw]
     #[live]
-    draw_text: DrawText,
+    pub draw_text: DrawText,
 
     #[walk]
-    walk: Walk,
+    pub walk: Walk,
     #[live]
-    align: Align,
+    pub align: Align,
     #[live(Flow::right_wrap())]
     flow: Flow,
     #[live]
