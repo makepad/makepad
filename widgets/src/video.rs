@@ -816,13 +816,18 @@ impl Video {
 
     fn handle_gestures(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(_) => {
+            Hit::FingerHoverIn(fhe) => {
                 if self.show_controls {
                     self.controls_hover = true;
                     self.animator_play(cx, ids!(hover.on));
                 }
+                self.update_cursor(cx, fhe.abs);
+            }
+            Hit::FingerHoverOver(fhe) => {
+                self.update_cursor(cx, fhe.abs);
             }
             Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Arrow);
                 if self.show_controls {
                     self.controls_hover = false;
                     // Don't hide controls if they're pinned visible or during drag
@@ -1118,7 +1123,10 @@ impl Video {
         } else {
             "\u{f04b}" // fa-play
         };
-        self.draw_play_icon.draw_walk(cx, icon_walk, Align::default(), play_glyph);
+        self.draw_play_icon.draw_walk(cx, Walk {
+            width: Size::Fixed(14.0),
+            ..icon_walk
+        }, Align::default(), play_glyph);
 
         // Restart icon (FontAwesome)
         self.draw_restart_icon.draw_walk(cx, icon_walk, Align::default(), "\u{f048}"); // fa-backward-step
@@ -1222,6 +1230,17 @@ impl Video {
         self.current_position_ms = position_ms as u128;
         self.seek_cooldown = 5;
         self.redraw(cx);
+    }
+
+    fn update_cursor(&self, cx: &mut Cx, abs: Vec2d) {
+        if self.should_show_center_play() {
+            // Center play button visible — whole area is clickable
+            cx.set_cursor(MouseCursor::Hand);
+        } else if self.controls_interactable() && self.hit_test_controls(cx, abs) {
+            cx.set_cursor(MouseCursor::Hand);
+        } else {
+            cx.set_cursor(MouseCursor::Arrow);
+        }
     }
 
     fn hit_test_controls(&self, cx: &Cx, abs: Vec2d) -> bool {
