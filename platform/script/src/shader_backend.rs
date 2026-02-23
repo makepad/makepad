@@ -1144,6 +1144,7 @@ impl ShaderBackend {
                     // GLSL uses dFdx/dFdy natively, mod is native
                     id!(inverseSqrt) => id!(inversesqrt),
                     id!(modf) => id!(mod),
+                    id!(atan2) => id!(atan),
                     x => x,
                 }
             }
