@@ -241,9 +241,11 @@ pub fn local_clone_depth1(
                     if fe.mode == 0o120000 {
                         // Symlink
                         let blob = read_object_shared(&git_dir, &packs, &fe.oid)?;
-                        let target = std::str::from_utf8(&blob.data).unwrap_or("");
                         #[cfg(unix)]
-                        std::os::unix::fs::symlink(target, &file_path)?;
+                        {
+                            let target = std::str::from_utf8(&blob.data).unwrap_or("");
+                            std::os::unix::fs::symlink(target, &file_path)?;
+                        }
                         #[cfg(not(unix))]
                         fs::write(&file_path, &blob.data)?;
                         bytes += blob.data.len() as u64;

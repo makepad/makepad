@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::time::UNIX_EPOCH;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use crate::error::GitError;
 use crate::index::{Index, IndexEntry};
@@ -135,7 +138,7 @@ pub fn compute_status_with_options(
         } else {
             // Quick stat check: if mtime/size match the index, skip content hashing
             let metadata = fs::metadata(&file_path)?;
-            let stat_matches = metadata.mtime() as u32 == idx_entry.mtime_sec
+            let stat_matches = metadata_mtime_sec(&metadata) == idx_entry.mtime_sec
                 && metadata.len() as u32 == idx_entry.file_size;
 
             if !stat_matches {
@@ -212,7 +215,7 @@ pub fn compute_status_worktree_only_with_options(
 
         // Quick stat check: if mtime/size match the index, skip content hashing
         let metadata = fs::metadata(&file_path)?;
-        let stat_matches = metadata.mtime() as u32 == idx_entry.mtime_sec
+        let stat_matches = metadata_mtime_sec(&metadata) == idx_entry.mtime_sec
             && metadata.len() as u32 == idx_entry.file_size;
 
         if !stat_matches {
@@ -664,15 +667,15 @@ pub fn checkout_tree(
             // Create index entry
             let metadata = fs::metadata(&file_path)?;
             let ie = IndexEntry {
-                ctime_sec: metadata.mtime() as u32,
+                ctime_sec: metadata_mtime_sec(&metadata),
                 ctime_nsec: 0,
-                mtime_sec: metadata.mtime() as u32,
+                mtime_sec: metadata_mtime_sec(&metadata),
                 mtime_nsec: 0,
-                dev: metadata.dev() as u32,
-                ino: metadata.ino() as u32,
+                dev: metadata_dev(&metadata),
+                ino: metadata_ino(&metadata),
                 mode: entry.mode,
-                uid: metadata.uid(),
-                gid: metadata.gid(),
+                uid: metadata_uid(&metadata),
+                gid: metadata_gid(&metadata),
                 file_size: metadata.len() as u32,
                 oid: entry.oid,
                 flags: (path.len().min(0xFFF)) as u16,
@@ -717,15 +720,15 @@ pub fn stage_file(
     };
 
     let entry = IndexEntry {
-        ctime_sec: metadata.mtime() as u32,
+        ctime_sec: metadata_mtime_sec(&metadata),
         ctime_nsec: 0,
-        mtime_sec: metadata.mtime() as u32,
+        mtime_sec: metadata_mtime_sec(&metadata),
         mtime_nsec: 0,
-        dev: metadata.dev() as u32,
-        ino: metadata.ino() as u32,
+        dev: metadata_dev(&metadata),
+        ino: metadata_ino(&metadata),
         mode,
-        uid: metadata.uid(),
-        gid: metadata.gid(),
+        uid: metadata_uid(&metadata),
+        gid: metadata_gid(&metadata),
         file_size: metadata.len() as u32,
         oid,
         flags: (path.len().min(0xFFF)) as u16,
@@ -782,6 +785,77 @@ fn remove_empty_dirs(dir: &Path, stop: &Path) -> Result<(), std::io::Error> {
         }
     }
     Ok(())
+}
+
+fn metadata_mtime_sec(metadata: &fs::Metadata) -> u32 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs().min(u32::MAX as u64) as u32)
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn metadata_dev(metadata: &fs::Metadata) -> u32 {
+    metadata.dev() as u32
+}
+
+#[cfg(windows)]
+fn metadata_dev(metadata: &fs::Metadata) -> u32 {
+    let _ = metadata;
+    0
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_dev(_metadata: &fs::Metadata) -> u32 {
+    0
+}
+
+#[cfg(unix)]
+fn metadata_ino(metadata: &fs::Metadata) -> u32 {
+    metadata.ino() as u32
+}
+
+#[cfg(windows)]
+fn metadata_ino(metadata: &fs::Metadata) -> u32 {
+    let _ = metadata;
+    0
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_ino(_metadata: &fs::Metadata) -> u32 {
+    0
+}
+
+#[cfg(unix)]
+fn metadata_uid(metadata: &fs::Metadata) -> u32 {
+    metadata.uid()
+}
+
+#[cfg(windows)]
+fn metadata_uid(_metadata: &fs::Metadata) -> u32 {
+    0
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_uid(_metadata: &fs::Metadata) -> u32 {
+    0
+}
+
+#[cfg(unix)]
+fn metadata_gid(metadata: &fs::Metadata) -> u32 {
+    metadata.gid()
+}
+
+#[cfg(windows)]
+fn metadata_gid(_metadata: &fs::Metadata) -> u32 {
+    0
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_gid(_metadata: &fs::Metadata) -> u32 {
+    0
 }
 
 #[cfg(test)]
