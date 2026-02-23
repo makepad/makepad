@@ -364,6 +364,8 @@ impl WaylandCx {
                 }
                 CxOsOp::Deminiaturize(_window_id) => todo!(),
                 CxOsOp::HideWindow(_window_id) => todo!(),
+                CxOsOp::HideWindowButtons(_) => {},
+                CxOsOp::ShowWindowButtons(_) => {},
                 CxOsOp::MaximizeWindow(window_id) => {
                     if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
                         window.toplevel.set_maximized();

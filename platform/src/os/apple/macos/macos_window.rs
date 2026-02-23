@@ -221,6 +221,18 @@ impl MacosWindow {
         }
     }
 
+    pub fn set_window_buttons_visible(&mut self, visible: bool) {
+        unsafe {
+            let close: ObjcId = msg_send![self.window, standardWindowButton: 0u64];
+            let miniaturize: ObjcId = msg_send![self.window, standardWindowButton: 1u64];
+            let zoom: ObjcId = msg_send![self.window, standardWindowButton: 2u64];
+            let hidden = if visible { NO } else { YES };
+            let () = msg_send![close, setHidden: hidden];
+            let () = msg_send![miniaturize, setHidden: hidden];
+            let () = msg_send![zoom, setHidden: hidden];
+        }
+    }
+
     pub fn time_now(&self) -> f64 {
         with_macos_app(|app| app.time_now())
     }
