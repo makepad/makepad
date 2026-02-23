@@ -81,6 +81,8 @@ pub enum CxOsOp {
     NormalizeWindow(WindowId),
     RestoreWindow(WindowId),
     HideWindow(WindowId),
+    HideWindowButtons(WindowId),
+    ShowWindowButtons(WindowId),
     SetTopmost(WindowId, bool),
     ShowInDock(bool),
 
@@ -173,6 +175,8 @@ impl std::fmt::Debug for CxOsOp {
             Self::NormalizeWindow(..) => write!(f, "NormalizeWindow"),
             Self::RestoreWindow(..) => write!(f, "RestoreWindow"),
             Self::HideWindow(..) => write!(f, "HideWindow"),
+            Self::HideWindowButtons(..) => write!(f, "HideWindowButtons"),
+            Self::ShowWindowButtons(..) => write!(f, "ShowWindowButtons"),
             Self::SetTopmost(..) => write!(f, "SetTopmost"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
 
