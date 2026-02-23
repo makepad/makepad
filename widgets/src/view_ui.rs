@@ -673,7 +673,7 @@ script_mod! {
             scale: varying(vec2(0))
             shift: varying(vec2(0))
             vertex: fn() {
-                let dpi = self.dpi_factor
+                let dpi = self.draw_pass.dpi_factor
                 let ceil_size = ceil(self.rect_size * dpi) / dpi
                 let floor_pos = floor(self.rect_pos * dpi) / dpi
                 self.scale = self.rect_size / ceil_size
@@ -681,7 +681,7 @@ script_mod! {
                 return self.clip_and_transform_vertex(self.rect_pos self.rect_size)
             }
             pixel: fn() {
-                return sample2d_rt(self.image self.pos * self.scale + self.shift)
+                return self.image.sample(self.pos * self.scale + self.shift)
             }
         }
     }
@@ -703,7 +703,7 @@ script_mod! {
             }
 
             vertex: fn() {
-                let dpi = self.dpi_factor
+                let dpi = self.draw_pass.dpi_factor
                 let ceil_size = ceil(self.rect_size * dpi) / dpi
                 let floor_pos = floor(self.rect_pos * dpi) / dpi
                 self.scale = self.rect_size / ceil_size
@@ -721,7 +721,7 @@ script_mod! {
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0)
                     max(1.0 self.border_radius)
                 )
-                let color = sample2d_rt(self.image self.pos * self.scale + self.shift)
+                let color = self.image.sample(self.pos * self.scale + self.shift)
                 sdf.fill_keep_premul(color)
                 if self.border_size > 0.0 {
                     sdf.stroke(self.get_border_color() self.border_size)
