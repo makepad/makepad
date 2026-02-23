@@ -1129,7 +1129,10 @@ impl Video {
         } else {
             "\u{f028}" // fa-volume-up
         };
-        self.draw_volume_icon.draw_walk(cx, icon_walk, Align::default(), volume_glyph);
+        self.draw_volume_icon.draw_walk(cx, Walk {
+            width: Size::Fixed(14.0),
+            ..icon_walk
+        }, Align::default(), volume_glyph);
 
         // Progress bar track (Fill width to take remaining space)
         self.draw_progress_bg.draw_walk(cx, Walk {
