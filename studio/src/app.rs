@@ -813,6 +813,7 @@ impl MatchEvent for App {
                     run_list.redraw(cx);
                     if !self.initial_tree_loaded {
                         self.load_state(cx, 0);
+                        dock.select_tab(cx, id!(log_list_tab));
                         self.initial_tree_loaded = true;
                     }
                     self.data.ai_chat_manager.init(&mut self.data.file_system);

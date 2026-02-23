@@ -1,12 +1,12 @@
 #[derive(Clone, Copy, Debug)]
-struct PendingTerminalScreenshot {
+struct PendingStudioRemoteScreenshot {
     web_socket_id: u64,
     build_id: LiveId,
     kind_id: u32,
 }
 
 #[derive(Clone, Debug)]
-struct PendingTerminalWidgetTreeDump {
+struct PendingStudioRemoteWidgetTreeDump {
     web_socket_id: u64,
     build_id: LiveId,
     emit_dump: bool,
@@ -56,7 +56,7 @@ impl<T> UniqueIdMap<T> {
 }
 
 #[derive(Debug, Clone, SerJson, DeJson)]
-pub enum StudioTerminalRequest {
+pub enum StudioRemoteRequest {
     ListBuilds,
     CargoRun {
         args: Vec<String>,
@@ -103,9 +103,9 @@ pub enum StudioTerminalRequest {
 }
 
 #[derive(Debug, Clone, SerJson, DeJson)]
-pub enum StudioTerminalResponse {
+pub enum StudioRemoteResponse {
     Builds {
-        builds: Vec<StudioTerminalBuildInfo>,
+        builds: Vec<StudioRemoteBuildInfo>,
     },
     Started {
         build_id: u64,
@@ -144,7 +144,7 @@ pub enum StudioTerminalResponse {
 }
 
 #[derive(Debug, Clone, SerJson, DeJson)]
-pub struct StudioTerminalBuildInfo {
+pub struct StudioRemoteBuildInfo {
     pub build_id: u64,
     pub root: String,
     pub package: String,
@@ -152,7 +152,7 @@ pub struct StudioTerminalBuildInfo {
     pub has_web_socket: bool,
 }
 
-enum TerminalToBuildManager {
+enum StudioRemoteSocket {
     Connected {
         web_socket_id: u64,
         sender: mpsc::Sender<Vec<u8>>,
@@ -162,7 +162,7 @@ enum TerminalToBuildManager {
     },
     Request {
         web_socket_id: u64,
-        request: StudioTerminalRequest,
+        request: StudioRemoteRequest,
     },
 }
 
@@ -199,7 +199,7 @@ fn has_message_format_json(args: &[String]) -> bool {
     false
 }
 
-fn normalize_terminal_cargo_run_args(raw_args: Vec<String>) -> Result<Vec<String>, String> {
+fn normalize_studio_remote_cargo_run_args(raw_args: Vec<String>) -> Result<Vec<String>, String> {
     let mut args = raw_args;
     if args.first().is_some_and(|arg| arg == "run") {
         args.remove(0);
@@ -242,7 +242,7 @@ fn normalize_terminal_cargo_run_args(raw_args: Vec<String>) -> Result<Vec<String
     Ok(final_args)
 }
 
-fn normalize_terminal_env_map(
+fn normalize_studio_remote_env_map(
     raw_env: Option<HashMap<String, String>>,
 ) -> Result<HashMap<String, String>, String> {
     let mut out = HashMap::new();
@@ -278,7 +278,7 @@ fn cargo_run_is_release(cargo_args: &[String]) -> bool {
     run_args[..split_index].iter().any(|arg| arg == "--release")
 }
 
-fn parse_terminal_package_name(cargo_args: &[String]) -> Option<String> {
+fn parse_studio_remote_package_name(cargo_args: &[String]) -> Option<String> {
     let run_args = if cargo_args.first().is_some_and(|arg| arg == "run") {
         &cargo_args[1..]
     } else {
@@ -308,11 +308,11 @@ fn parse_terminal_package_name(cargo_args: &[String]) -> Option<String> {
 }
 
 impl BuildManager {
-    fn alloc_terminal_build_id(&mut self) -> LiveId {
+    fn alloc_studio_remote_build_id(&mut self) -> LiveId {
         loop {
-            self.terminal_build_counter = self.terminal_build_counter.wrapping_add(1);
-            let build_id = LiveId::from_str("studio-terminal")
-                .bytes_append(&self.terminal_build_counter.to_be_bytes());
+            self.studio_remote_build_counter = self.studio_remote_build_counter.wrapping_add(1);
+            let build_id = LiveId::from_str("studio_remote")
+                .bytes_append(&self.studio_remote_build_counter.to_be_bytes());
             if !self.running_processes.contains_key(&build_id)
                 && !self.active.builds.contains_key(&build_id)
             {
@@ -321,23 +321,23 @@ impl BuildManager {
         }
     }
 
-    fn clear_terminal_screenshots_for_socket(&mut self, web_socket_id: u64) {
-        self.terminal_screenshot_requests
+    fn clear_studio_remote_screenshots_for_socket(&mut self, web_socket_id: u64) {
+        self.studio_remote_screenshot_requests
             .retain(|_, pending| pending.web_socket_id != web_socket_id);
     }
 
-    fn clear_terminal_screenshots_for_build(&mut self, build_id: LiveId) {
-        self.terminal_screenshot_requests
+    fn clear_studio_remote_screenshots_for_build(&mut self, build_id: LiveId) {
+        self.studio_remote_screenshot_requests
             .retain(|_, pending| pending.build_id != build_id);
     }
 
-    fn clear_terminal_widget_tree_dumps_for_socket(&mut self, web_socket_id: u64) {
-        self.terminal_widget_tree_dump_requests
+    fn clear_studio_remote_widget_tree_dumps_for_socket(&mut self, web_socket_id: u64) {
+        self.studio_remote_widget_tree_dump_requests
             .retain(|_, pending| pending.web_socket_id != web_socket_id);
     }
 
-    fn clear_terminal_widget_tree_dumps_for_build(&mut self, build_id: LiveId) {
-        self.terminal_widget_tree_dump_requests
+    fn clear_studio_remote_widget_tree_dumps_for_build(&mut self, build_id: LiveId) {
+        self.studio_remote_widget_tree_dump_requests
             .retain(|_, pending| pending.build_id != build_id);
     }
 
@@ -381,7 +381,7 @@ impl BuildManager {
         rects
     }
 
-    fn terminal_control_log_label(msg: &StudioToApp) -> String {
+    fn studio_remote_control_log_label(msg: &StudioToApp) -> String {
         match msg {
             StudioToApp::MouseDown(e) => {
                 format!(
@@ -453,7 +453,7 @@ impl BuildManager {
         }
     }
 
-    fn write_terminal_screenshot_png(
+    fn write_studio_remote_screenshot_png(
         &self,
         build_id: LiveId,
         kind_id: u32,
@@ -461,7 +461,7 @@ impl BuildManager {
         png: &[u8],
     ) -> Result<PathBuf, String> {
         let mut dir = std::env::temp_dir();
-        dir.push("makepad_studio_terminal");
+        dir.push("makepad_studio_remote");
         std::fs::create_dir_all(&dir).map_err(|err| {
             format!(
                 "failed to create screenshot temp dir {}: {err}",
@@ -483,26 +483,26 @@ impl BuildManager {
         Ok(path)
     }
 
-    fn send_terminal_response_to_sender(
+    fn send_studio_remote_response_to_sender(
         sender: &mpsc::Sender<Vec<u8>>,
-        response: StudioTerminalResponse,
+        response: StudioRemoteResponse,
     ) {
         let _ = sender.send(response.serialize_json().into_bytes());
     }
 
-    fn send_terminal_response(&self, web_socket_id: u64, response: StudioTerminalResponse) {
-        if let Some(sender) = self.terminal_sockets.get(&web_socket_id) {
-            Self::send_terminal_response_to_sender(sender, response);
+    fn send_studio_remote_response(&self, web_socket_id: u64, response: StudioRemoteResponse) {
+        if let Some(sender) = self.studio_remote_sockets.get(&web_socket_id) {
+            Self::send_studio_remote_response_to_sender(sender, response);
         }
     }
 
-    fn send_terminal_log(&self, build_id: LiveId, level: &str, line: String) {
-        let Some(web_socket_id) = self.terminal_build_owners.get(&build_id).copied() else {
+    fn send_studio_remote_log(&self, build_id: LiveId, level: &str, line: String) {
+        let Some(web_socket_id) = self.studio_remote_build_owners.get(&build_id).copied() else {
             return;
         };
-        self.send_terminal_response(
+        self.send_studio_remote_response(
             web_socket_id,
-            StudioTerminalResponse::Log {
+            StudioRemoteResponse::Log {
                 build_id: build_id.0,
                 level: level.to_string(),
                 line,
@@ -510,18 +510,18 @@ impl BuildManager {
         );
     }
 
-    fn send_terminal_error(&self, web_socket_id: u64, message: impl Into<String>) {
-        self.send_terminal_response(
+    fn send_studio_remote_error(&self, web_socket_id: u64, message: impl Into<String>) {
+        self.send_studio_remote_response(
             web_socket_id,
-            StudioTerminalResponse::Error {
+            StudioRemoteResponse::Error {
                 message: message.into(),
             },
         );
     }
 
-    fn log_terminal_bridge_event(&mut self, cx: &mut Cx, line: String) {
+    fn log_studio_remote_bridge_event(&mut self, cx: &mut Cx, line: String) {
         self.log.push((
-            LiveId::from_str("studio_terminal_bridge"),
+            LiveId::from_str("studio_remote_bridge"),
             LogItem::Bare(LogItemBare {
                 level: LogLevel::Log,
                 line,
@@ -530,15 +530,15 @@ impl BuildManager {
         cx.action(AppAction::RedrawLog);
     }
 
-    fn request_terminal_screenshot(
+    fn request_studio_remote_screenshot(
         &mut self,
         cx: &mut Cx,
         web_socket_id: u64,
         build_id: LiveId,
         kind_id: u32,
     ) -> Result<(), String> {
-        let request_id = self.terminal_screenshot_requests.insert_unique(
-            PendingTerminalScreenshot {
+        let request_id = self.studio_remote_screenshot_requests.insert_unique(
+            PendingStudioRemoteScreenshot {
                 web_socket_id,
                 build_id,
                 kind_id,
@@ -558,16 +558,16 @@ impl BuildManager {
         };
 
         if sent {
-            self.log_terminal_bridge_event(
+            self.log_studio_remote_bridge_event(
                 cx,
                 format!(
-                    "studio_terminal -> child build={} Screenshot request_id={} kind_id={}",
+                    "studio_remote -> child build={} Screenshot request_id={} kind_id={}",
                     build_id.0, request_id, kind_id
                 ),
             );
             Ok(())
         } else {
-            self.terminal_screenshot_requests.remove(&request_id);
+            self.studio_remote_screenshot_requests.remove(&request_id);
             Err(format!(
                 "build {} has no active studio websocket connection",
                 build_id.0
@@ -575,7 +575,7 @@ impl BuildManager {
         }
     }
 
-    fn request_terminal_widget_tree_dump(
+    fn request_studio_remote_widget_tree_dump(
         &mut self,
         cx: &mut Cx,
         web_socket_id: u64,
@@ -583,8 +583,8 @@ impl BuildManager {
         startup_query: Option<String>,
         emit_dump: bool,
     ) -> Result<(), String> {
-        let request_id = self.terminal_widget_tree_dump_requests.insert_unique(
-            PendingTerminalWidgetTreeDump {
+        let request_id = self.studio_remote_widget_tree_dump_requests.insert_unique(
+            PendingStudioRemoteWidgetTreeDump {
                 web_socket_id,
                 build_id,
                 emit_dump,
@@ -602,16 +602,16 @@ impl BuildManager {
         };
 
         if sent {
-            self.log_terminal_bridge_event(
+            self.log_studio_remote_bridge_event(
                 cx,
                 format!(
-                    "studio_terminal -> child build={} WidgetTreeDump request_id={}",
+                    "studio_remote -> child build={} WidgetTreeDump request_id={}",
                     build_id.0, request_id
                 ),
             );
             Ok(())
         } else {
-            self.terminal_widget_tree_dump_requests.remove(&request_id);
+            self.studio_remote_widget_tree_dump_requests.remove(&request_id);
             Err(format!(
                 "build {} has no active studio websocket connection",
                 build_id.0
@@ -619,16 +619,16 @@ impl BuildManager {
         }
     }
 
-    fn handle_terminal_screenshot_response(
+    fn handle_studio_remote_screenshot_response(
         &mut self,
         _build_id: LiveId,
         screenshot: &ScreenshotResponse,
     ) {
-        let pending: Vec<(u64, PendingTerminalScreenshot)> = screenshot
+        let pending: Vec<(u64, PendingStudioRemoteScreenshot)> = screenshot
             .request_ids
             .iter()
             .filter_map(|request_id| {
-                self.terminal_screenshot_requests
+                self.studio_remote_screenshot_requests
                     .remove(request_id)
                     .map(|pending| (*request_id, pending))
             })
@@ -639,15 +639,15 @@ impl BuildManager {
         }
 
         for (request_id, pending_request) in pending {
-            match self.write_terminal_screenshot_png(
+            match self.write_studio_remote_screenshot_png(
                 pending_request.build_id,
                 pending_request.kind_id,
                 request_id,
                 &screenshot.png,
             ) {
-                Ok(path) => self.send_terminal_response(
+                Ok(path) => self.send_studio_remote_response(
                     pending_request.web_socket_id,
-                    StudioTerminalResponse::Screenshot {
+                    StudioRemoteResponse::Screenshot {
                         build_id: pending_request.build_id.0,
                         request_id,
                         kind_id: pending_request.kind_id,
@@ -656,25 +656,25 @@ impl BuildManager {
                         height: screenshot.height,
                     },
                 ),
-                Err(err) => self.send_terminal_error(pending_request.web_socket_id, err),
+                Err(err) => self.send_studio_remote_error(pending_request.web_socket_id, err),
             }
         }
     }
 
-    fn handle_terminal_widget_tree_dump_response(
+    fn handle_studio_remote_widget_tree_dump_response(
         &mut self,
         build_id: LiveId,
         dump_response: WidgetTreeDumpResponse,
     ) {
         let Some(pending_request) = self
-            .terminal_widget_tree_dump_requests
+            .studio_remote_widget_tree_dump_requests
             .remove(&dump_response.request_id)
         else {
             return;
         };
 
         if pending_request.build_id != build_id {
-            self.send_terminal_error(
+            self.send_studio_remote_error(
                 pending_request.web_socket_id,
                 format!(
                     "widget tree dump request {} expected build {}, got {}",
@@ -685,12 +685,12 @@ impl BuildManager {
         }
 
         let dump = dump_response.dump;
-        self.terminal_latest_widget_dumps
+        self.studio_remote_latest_widget_dumps
             .insert(build_id, dump.clone());
         if pending_request.emit_dump {
-            self.send_terminal_response(
+            self.send_studio_remote_response(
                 pending_request.web_socket_id,
-                StudioTerminalResponse::WidgetTreeDump {
+                StudioRemoteResponse::WidgetTreeDump {
                     build_id: pending_request.build_id.0,
                     request_id: dump_response.request_id,
                     dump: dump.clone(),
@@ -699,9 +699,9 @@ impl BuildManager {
         }
         if let Some(query) = pending_request.startup_query {
             let rects = Self::query_widget_dump_rects(&dump, &query);
-            self.send_terminal_response(
+            self.send_studio_remote_response(
                 pending_request.web_socket_id,
-                StudioTerminalResponse::WidgetQuery {
+                StudioRemoteResponse::WidgetQuery {
                     build_id: pending_request.build_id.0,
                     query,
                     rects,
@@ -710,14 +710,14 @@ impl BuildManager {
         }
     }
 
-    fn terminal_now() -> f64 {
+    fn studio_remote_now() -> f64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|v| v.as_secs_f64())
             .unwrap_or(0.0)
     }
 
-    fn send_terminal_host_to_stdin(
+    fn send_studio_remote_to_app(
         &mut self,
         cx: &mut Cx,
         web_socket_id: u64,
@@ -725,7 +725,7 @@ impl BuildManager {
         msg: StudioToApp,
         auto_dump: bool,
     ) -> Result<(), String> {
-        let msg_label = Self::terminal_control_log_label(&msg);
+        let msg_label = Self::studio_remote_control_log_label(&msg);
         let sent = if let Ok(sockets) = self.active_build_websockets.lock() {
             sockets.borrow_mut().send_studio_to_app(build_id, msg)
         } else {
@@ -737,28 +737,28 @@ impl BuildManager {
                 build_id.0
             ));
         }
-        self.log_terminal_bridge_event(
+        self.log_studio_remote_bridge_event(
             cx,
-            format!("studio_terminal -> child build={} {}", build_id.0, msg_label),
+            format!("studio_remote -> child build={} {}", build_id.0, msg_label),
         );
         if auto_dump {
-            self.request_terminal_widget_tree_dump(cx, web_socket_id, build_id, None, true)?;
+            self.request_studio_remote_widget_tree_dump(cx, web_socket_id, build_id, None, true)?;
         }
         Ok(())
     }
 
-    fn handle_terminal_request(
+    fn handle_studio_remote_request(
         &mut self,
         cx: &mut Cx,
         web_socket_id: u64,
-        request: StudioTerminalRequest,
+        request: StudioRemoteRequest,
     ) {
         match request {
-            StudioTerminalRequest::ListBuilds => {
+            StudioRemoteRequest::ListBuilds => {
                 let mut build_ids: BTreeSet<LiveId> = BTreeSet::new();
                 build_ids.extend(self.running_processes.keys().copied());
                 build_ids.extend(self.active.builds.keys().copied());
-                let builds: Vec<StudioTerminalBuildInfo> = build_ids
+                let builds: Vec<StudioRemoteBuildInfo> = build_ids
                     .into_iter()
                     .map(|build_id| {
                         let process = self
@@ -776,7 +776,7 @@ impl BuildManager {
                         } else {
                             false
                         };
-                        StudioTerminalBuildInfo {
+                        StudioRemoteBuildInfo {
                             build_id: build_id.0,
                             root,
                             package,
@@ -785,18 +785,18 @@ impl BuildManager {
                         }
                     })
                     .collect();
-                self.send_terminal_response(web_socket_id, StudioTerminalResponse::Builds { builds });
+                self.send_studio_remote_response(web_socket_id, StudioRemoteResponse::Builds { builds });
             }
-            StudioTerminalRequest::CargoRun {
+            StudioRemoteRequest::CargoRun {
                 args,
                 root,
                 startup_query,
                 env,
-            } => match self.start_terminal_cargo_run(web_socket_id, args, root, startup_query, env) {
+            } => match self.start_studio_remote_cargo_run(web_socket_id, args, root, startup_query, env) {
                 Ok((build_id, root, package)) => {
-                    self.send_terminal_response(
+                    self.send_studio_remote_response(
                         web_socket_id,
-                        StudioTerminalResponse::Started {
+                        StudioRemoteResponse::Started {
                             build_id: build_id.0,
                             root,
                             package,
@@ -804,23 +804,23 @@ impl BuildManager {
                     );
                 }
                 Err(message) => {
-                    self.send_terminal_response(
+                    self.send_studio_remote_response(
                         web_socket_id,
-                        StudioTerminalResponse::Error { message },
+                        StudioRemoteResponse::Error { message },
                     );
                 }
             },
-            StudioTerminalRequest::Stop { build_id } => {
+            StudioRemoteRequest::Stop { build_id } => {
                 let build_id = LiveId(build_id);
                 let removed_running = self.running_processes.remove(&build_id).is_some();
                 let removed_active = self.active.builds.remove(&build_id).is_some();
                 self.remove_profile_build(build_id);
-                self.terminal_build_owners.remove(&build_id);
-                self.terminal_latest_widget_dumps.remove(&build_id);
-                self.terminal_startup_queries.remove(&build_id);
-                self.terminal_startup_dump_pending.remove(&build_id);
-                self.clear_terminal_screenshots_for_build(build_id);
-                self.clear_terminal_widget_tree_dumps_for_build(build_id);
+                self.studio_remote_build_owners.remove(&build_id);
+                self.studio_remote_latest_widget_dumps.remove(&build_id);
+                self.studio_remote_startup_queries.remove(&build_id);
+                self.studio_remote_startup_dump_pending.remove(&build_id);
+                self.clear_studio_remote_screenshots_for_build(build_id);
+                self.clear_studio_remote_widget_tree_dumps_for_build(build_id);
                 self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
                 if removed_active {
                     cx.action(AppAction::DestroyRunViews {
@@ -828,38 +828,38 @@ impl BuildManager {
                     });
                 }
                 if removed_running || removed_active {
-                    self.send_terminal_response(
+                    self.send_studio_remote_response(
                         web_socket_id,
-                        StudioTerminalResponse::Stopped {
+                        StudioRemoteResponse::Stopped {
                             build_id: build_id.0,
                         },
                     );
                 } else {
-                    self.send_terminal_response(
+                    self.send_studio_remote_response(
                         web_socket_id,
-                        StudioTerminalResponse::Error {
+                        StudioRemoteResponse::Error {
                             message: format!("unknown build id {}", build_id.0),
                         },
                     );
                 }
             }
-            StudioTerminalRequest::StudioToApp { build_id, msg } => {
+            StudioRemoteRequest::StudioToApp { build_id, msg } => {
                 let build_id = LiveId(build_id);
                 let should_auto_dump = !matches!(
                     msg,
                     StudioToApp::MouseMove(_) | StudioToApp::TweakRay(_) | StudioToApp::Scroll(_)
                 );
-                if let Err(message) = self.send_terminal_host_to_stdin(
+                if let Err(message) = self.send_studio_remote_to_app(
                     cx,
                     web_socket_id,
                     build_id,
                     msg,
                     should_auto_dump,
                 ) {
-                    self.send_terminal_error(web_socket_id, format!("build {}: {message}", build_id.0));
+                    self.send_studio_remote_error(web_socket_id, format!("build {}: {message}", build_id.0));
                 }
             }
-            StudioTerminalRequest::TypeText {
+            StudioRemoteRequest::TypeText {
                 build_id,
                 text,
                 replace_last,
@@ -873,22 +873,22 @@ impl BuildManager {
                     was_paste: was_paste.unwrap_or(false),
                     ..Default::default()
                 });
-                if let Err(message) = self.send_terminal_host_to_stdin(
+                if let Err(message) = self.send_studio_remote_to_app(
                     cx,
                     web_socket_id,
                     build_id,
                     msg,
                     auto_dump.unwrap_or(false),
                 ) {
-                    self.send_terminal_error(web_socket_id, format!("build {}: {message}", build_id.0));
+                    self.send_studio_remote_error(web_socket_id, format!("build {}: {message}", build_id.0));
                 }
             }
-            StudioTerminalRequest::Return {
+            StudioRemoteRequest::Return {
                 build_id,
                 auto_dump,
             } => {
                 let build_id = LiveId(build_id);
-                let now = Self::terminal_now();
+                let now = Self::studio_remote_now();
                 let modifiers = KeyModifiers::default();
                 let auto_dump = auto_dump.unwrap_or(false);
                 let msgs = [
@@ -913,14 +913,14 @@ impl BuildManager {
                 ];
                 for (msg, auto_dump) in msgs {
                     if let Err(message) =
-                        self.send_terminal_host_to_stdin(cx, web_socket_id, build_id, msg, auto_dump)
+                        self.send_studio_remote_to_app(cx, web_socket_id, build_id, msg, auto_dump)
                     {
-                        self.send_terminal_error(web_socket_id, format!("build {}: {message}", build_id.0));
+                        self.send_studio_remote_error(web_socket_id, format!("build {}: {message}", build_id.0));
                         break;
                     }
                 }
             }
-            StudioTerminalRequest::Click {
+            StudioRemoteRequest::Click {
                 build_id,
                 x,
                 y,
@@ -936,7 +936,7 @@ impl BuildManager {
                 });
                 let button_raw_bits = button.unwrap_or(1);
                 let auto_dump = auto_dump.unwrap_or(false);
-                let now = Self::terminal_now();
+                let now = Self::studio_remote_now();
                 let modifiers = RemoteKeyModifiers::default();
                 let msgs = [
                     (
@@ -971,9 +971,9 @@ impl BuildManager {
                 ];
                 for (msg, auto_dump) in msgs {
                     if let Err(message) =
-                        self.send_terminal_host_to_stdin(cx, web_socket_id, build_id, msg, auto_dump)
+                        self.send_studio_remote_to_app(cx, web_socket_id, build_id, msg, auto_dump)
                     {
-                        self.send_terminal_error(web_socket_id, format!("build {}: {message}", build_id.0));
+                        self.send_studio_remote_error(web_socket_id, format!("build {}: {message}", build_id.0));
                         break;
                     }
                 }
@@ -984,26 +984,26 @@ impl BuildManager {
                     phase: AiClickVizPhase::Up,
                 });
             }
-            StudioTerminalRequest::Screenshot { build_id, kind_id } => {
+            StudioRemoteRequest::Screenshot { build_id, kind_id } => {
                 let build_id = LiveId(build_id);
                 if let Err(message) =
-                    self.request_terminal_screenshot(cx, web_socket_id, build_id, kind_id.unwrap_or(0))
+                    self.request_studio_remote_screenshot(cx, web_socket_id, build_id, kind_id.unwrap_or(0))
                 {
-                    self.send_terminal_error(web_socket_id, message);
+                    self.send_studio_remote_error(web_socket_id, message);
                 }
             }
-            StudioTerminalRequest::WidgetTreeDump { build_id } => {
+            StudioRemoteRequest::WidgetTreeDump { build_id } => {
                 let build_id = LiveId(build_id);
                 if let Err(message) =
-                    self.request_terminal_widget_tree_dump(cx, web_socket_id, build_id, None, true)
+                    self.request_studio_remote_widget_tree_dump(cx, web_socket_id, build_id, None, true)
                 {
-                    self.send_terminal_error(web_socket_id, message);
+                    self.send_studio_remote_error(web_socket_id, message);
                 }
             }
-            StudioTerminalRequest::WidgetQuery { build_id, query } => {
+            StudioRemoteRequest::WidgetQuery { build_id, query } => {
                 let build_id = LiveId(build_id);
-                let Some(dump) = self.terminal_latest_widget_dumps.get(&build_id) else {
-                    self.send_terminal_error(
+                let Some(dump) = self.studio_remote_latest_widget_dumps.get(&build_id) else {
+                    self.send_studio_remote_error(
                         web_socket_id,
                         format!(
                             "build {} has no cached widget tree yet; wait for startup dump",
@@ -1013,9 +1013,9 @@ impl BuildManager {
                     return;
                 };
                 let rects = Self::query_widget_dump_rects(dump, &query);
-                self.send_terminal_response(
+                self.send_studio_remote_response(
                     web_socket_id,
-                    StudioTerminalResponse::WidgetQuery {
+                    StudioRemoteResponse::WidgetQuery {
                         build_id: build_id.0,
                         query,
                         rects,
@@ -1025,7 +1025,7 @@ impl BuildManager {
         }
     }
 
-    fn start_terminal_cargo_run(
+    fn start_studio_remote_cargo_run(
         &mut self,
         web_socket_id: u64,
         args: Vec<String>,
@@ -1044,10 +1044,10 @@ impl BuildManager {
             .find_root(&root)
             .map_err(|_| format!("unknown root '{root}'"))?;
 
-        let cargo_args = normalize_terminal_cargo_run_args(args)?;
-        let run_env = normalize_terminal_env_map(env)?;
-        let build_id = self.alloc_terminal_build_id();
-        let package = parse_terminal_package_name(&cargo_args)
+        let cargo_args = normalize_studio_remote_cargo_run_args(args)?;
+        let run_env = normalize_studio_remote_env_map(env)?;
+        let build_id = self.alloc_studio_remote_build_id();
+        let package = parse_studio_remote_package_name(&cargo_args)
             .unwrap_or_else(|| format!("cargo-run-{}", build_id.0));
         let target = if cargo_run_is_release(&cargo_args) {
             BuildTarget::ReleaseStudio
@@ -1065,49 +1065,49 @@ impl BuildManager {
             BuildCmd::RunCargo(process.clone(), cargo_args, self.studio_addr(), run_env),
         );
         self.running_processes.insert(build_id, process);
-        self.terminal_build_owners.insert(build_id, web_socket_id);
-        self.terminal_startup_dump_pending.insert(build_id);
+        self.studio_remote_build_owners.insert(build_id, web_socket_id);
+        self.studio_remote_startup_dump_pending.insert(build_id);
         if let Some(query) = startup_query.map(|q| q.trim().to_string()) {
             if !query.is_empty() {
-                self.terminal_startup_queries.insert(build_id, query);
+                self.studio_remote_startup_queries.insert(build_id, query);
             }
         }
         Ok((build_id, root, package))
     }
 
-    fn handle_terminal_signal_messages(&mut self, cx: &mut Cx) {
-        while let Ok(msg) = self.recv_terminal_msg.try_recv() {
+    fn handle_studio_remote_socket(&mut self, cx: &mut Cx) {
+        while let Ok(msg) = self.recv_studio_remote_msg.try_recv() {
             match msg {
-                TerminalToBuildManager::Connected {
+                StudioRemoteSocket::Connected {
                     web_socket_id,
                     sender,
                 } => {
-                    self.terminal_sockets.insert(web_socket_id, sender);
+                    self.studio_remote_sockets.insert(web_socket_id, sender);
                 }
-                TerminalToBuildManager::Disconnected { web_socket_id } => {
-                    self.terminal_sockets.remove(&web_socket_id);
+                StudioRemoteSocket::Disconnected { web_socket_id } => {
+                    self.studio_remote_sockets.remove(&web_socket_id);
                     let owned_builds: Vec<LiveId> = self
-                        .terminal_build_owners
+                        .studio_remote_build_owners
                         .iter()
                         .filter_map(|(build_id, owner)| {
                             (*owner == web_socket_id).then_some(*build_id)
                         })
                         .collect();
-                    self.terminal_build_owners
+                    self.studio_remote_build_owners
                         .retain(|_, owner| *owner != web_socket_id);
                     for build_id in owned_builds {
-                        self.terminal_latest_widget_dumps.remove(&build_id);
-                        self.terminal_startup_queries.remove(&build_id);
-                        self.terminal_startup_dump_pending.remove(&build_id);
+                        self.studio_remote_latest_widget_dumps.remove(&build_id);
+                        self.studio_remote_startup_queries.remove(&build_id);
+                        self.studio_remote_startup_dump_pending.remove(&build_id);
                     }
-                    self.clear_terminal_screenshots_for_socket(web_socket_id);
-                    self.clear_terminal_widget_tree_dumps_for_socket(web_socket_id);
+                    self.clear_studio_remote_screenshots_for_socket(web_socket_id);
+                    self.clear_studio_remote_widget_tree_dumps_for_socket(web_socket_id);
                 }
-                TerminalToBuildManager::Request {
+                StudioRemoteSocket::Request {
                     web_socket_id,
                     request,
                 } => {
-                    self.handle_terminal_request(cx, web_socket_id, request);
+                    self.handle_studio_remote_request(cx, web_socket_id, request);
                 }
             }
         }
