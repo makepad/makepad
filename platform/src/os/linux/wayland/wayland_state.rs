@@ -953,14 +953,22 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 time: _,
                 axis,
                 value,
-            } => match axis {
-                WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                    state.scroll_accumulator.y += value;
+            } => {
+                // Wayland axis values use motion-event coordinates: positive
+                // vertical = downward on screen = content slides down = viewport
+                // moves UP. Makepad's internal convention is positive = viewport
+                // moves DOWN (matching X11 button mapping and macOS after its
+                // negation of scrollingDeltaY). Negate to align conventions,
+                // same as winit does for the same reason.
+                match axis {
+                    WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
+                        state.scroll_accumulator.y -= value;
+                    }
+                    WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
+                        state.scroll_accumulator.x -= value;
+                    }
+                    _ => {}
                 }
-                WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                    state.scroll_accumulator.x += value;
-                }
-                _ => {}
             },
             wl_pointer::Event::AxisSource { axis_source } => {
                 state.scroll_is_wheel = axis_source == WEnum::Value(wl_pointer::AxisSource::Wheel);
