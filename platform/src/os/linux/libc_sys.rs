@@ -21,7 +21,7 @@ pub type time_t = c_ulong;
 pub type suseconds_t = c_ulong;
 
 type c_int = std::os::raw::c_int;
-//type c_uint =  std::os::raw::c_uint;
+type c_uint = std::os::raw::c_uint;
 type c_long = std::os::raw::c_long;
 type c_ulong = std::os::raw::c_ulong;
 type c_void = std::os::raw::c_void;
@@ -40,6 +40,8 @@ pub const PROT_READ: c_int = 1;
 pub const PROT_WRITE: c_int = 2;
 pub const MAP_SHARED: c_int = 1;
 pub const MAP_PRIVATE: c_int = 2;
+pub const MAP_FAILED: *mut c_void = !0 as *mut c_void;
+pub const MFD_CLOEXEC: c_uint = 1;
 
 #[repr(C)]
 pub struct fd_set {
@@ -80,6 +82,8 @@ extern "C" {
         offset: off_t,
     ) -> *mut c_void;
     pub fn munmap(addr: *mut c_void, length: size_t) -> c_int;
+    pub fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
+    pub fn ftruncate(fd: c_int, length: off_t) -> c_int;
     pub fn read(fd: c_int, buf: *mut c_void, count: size_t) -> c_int;
     pub fn write(fd: c_int, buf: *const c_void, count: size_t) -> c_int;
     pub fn syscall(num: c_long, ...) -> c_long;

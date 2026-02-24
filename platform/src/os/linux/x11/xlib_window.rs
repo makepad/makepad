@@ -197,6 +197,9 @@ impl XlibWindow {
                 );
             }
 
+            // Set window icon via _NET_WM_ICON
+            Self::set_x11_icon(display, window);
+
             // Map the window to the screen
             x11_sys::XMapWindow(display, window);
             x11_sys::XFlush(display);
@@ -239,6 +242,37 @@ impl XlibWindow {
                 self.maximize();
             }
         }
+    }
+
+    /// Set `_NET_WM_ICON` from the default Makepad icon (RGBA8 → ARGB u32 array).
+    unsafe fn set_x11_icon(display: *mut x11_sys::Display, window: c_ulong) {
+        let icon = crate::window_icon::default_window_icon();
+        let buf = match icon.buffers.first() {
+            Some(b) => b,
+            None => return,
+        };
+        // _NET_WM_ICON format: [width, height, pixel_data...] as u32 ARGB
+        let pixel_count = (buf.width * buf.height) as usize;
+        let mut data: Vec<c_ulong> = Vec::with_capacity(2 + pixel_count);
+        data.push(buf.width as c_ulong);
+        data.push(buf.height as c_ulong);
+        for chunk in buf.data.chunks_exact(4) {
+            let r = chunk[0] as c_ulong;
+            let g = chunk[1] as c_ulong;
+            let b = chunk[2] as c_ulong;
+            let a = chunk[3] as c_ulong;
+            data.push((a << 24) | (r << 16) | (g << 8) | b);
+        }
+        x11_sys::XChangeProperty(
+            display,
+            window,
+            get_xlib_app_global().atoms.net_wm_icon,
+            get_xlib_app_global().atoms.cardinal,
+            32,
+            x11_sys::PropModeReplace as i32,
+            data.as_ptr() as *const u8,
+            data.len() as i32,
+        );
     }
 
     fn restore_or_maximize(&self, add_remove: c_long) {

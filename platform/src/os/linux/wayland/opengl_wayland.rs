@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use std::fs::File;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 
 use crate::egl_sys::{EGLNativeWindowType, EGLSurface, NativeWindowType};
 use crate::makepad_math::Vec2d;
@@ -17,6 +17,9 @@ use wayland_protocols::xdg::decoration::zv1::client::{
 };
 use wayland_protocols::xdg::shell;
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::toplevel_icon::v1::client::{
+    xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1,
+};
 
 use crate::opengl_cx::OpenglCx;
 use crate::wayland::wayland_state::WaylandState;
@@ -45,11 +48,14 @@ impl WaylandWindow {
         decoration_manager: Option<&zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
         scale_manager: Option<&wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
         viewporter: Option<&wp_viewporter::WpViewporter>,
+        icon_manager: Option<&xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1>,
+        shm: Option<&wl_shm::WlShm>,
         qhandle: &QueueHandle<WaylandState>,
         opengl_cx: &OpenglCx,
         inner_size: Vec2d,
         position: Option<Vec2d>,
         title: &str,
+        app_id: &str,
         is_fullscreen: bool,
     ) -> WaylandWindow {
         // Checked "downcast" of the EGL platform display to a X11 display.
@@ -63,7 +69,10 @@ impl WaylandWindow {
         let shell_surface = wm_base.get_xdg_surface(&base_surface, qhandle, window_id);
         let toplevel = shell_surface.get_toplevel(qhandle, window_id);
         toplevel.set_title(String::from(title));
-        toplevel.set_app_id("Makepad".to_owned());
+        toplevel.set_app_id(app_id.to_owned());
+
+        // Set window icon via xdg-toplevel-icon-v1 if compositor supports it
+        Self::set_wayland_icon(icon_manager, shm, &toplevel, qhandle);
 
         let decoration = decoration_manager.map(|manager| {
             let decoration = manager.get_toplevel_decoration(&toplevel, qhandle, ());
@@ -116,6 +125,95 @@ impl WaylandWindow {
             egl_surface,
         }
     }
+    /// Set the toplevel icon via xdg-toplevel-icon-v1 protocol using shm pixel data.
+    /// Silently skips if the compositor does not support the protocol.
+    fn set_wayland_icon(
+        icon_manager: Option<&xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1>,
+        shm: Option<&wl_shm::WlShm>,
+        toplevel: &xdg_toplevel::XdgToplevel,
+        qhandle: &QueueHandle<WaylandState>,
+    ) {
+        let (icon_manager, shm) = match (icon_manager, shm) {
+            (Some(im), Some(s)) => (im, s),
+            _ => return, // compositor doesn't support the protocol
+        };
+
+        let icon_data = crate::window_icon::default_window_icon();
+        let buf = match icon_data.buffers.first() {
+            Some(b) => b,
+            None => return,
+        };
+
+        let width = buf.width as usize;
+        let height = buf.height as usize;
+        // Convert RGBA8 to ARGB8888 (Wayland native byte order)
+        let pixel_count = width * height;
+        let shm_size = pixel_count * 4;
+
+        // Create anonymous shm file
+        let name = std::ffi::CString::new("makepad-icon").unwrap();
+        let fd = unsafe {
+            crate::libc_sys::memfd_create(name.as_ptr(), crate::libc_sys::MFD_CLOEXEC)
+        };
+        if fd < 0 {
+            return;
+        }
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        if unsafe { crate::libc_sys::ftruncate(fd.as_raw_fd(), shm_size as i64) } != 0 {
+            return;
+        }
+
+        // mmap and write ARGB data
+        let map = unsafe {
+            crate::libc_sys::mmap(
+                std::ptr::null_mut(),
+                shm_size as crate::libc_sys::size_t,
+                crate::libc_sys::PROT_READ | crate::libc_sys::PROT_WRITE,
+                crate::libc_sys::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        };
+        if map == crate::libc_sys::MAP_FAILED {
+            return;
+        }
+        let dst = unsafe { std::slice::from_raw_parts_mut(map as *mut u8, shm_size) };
+        for i in 0..pixel_count {
+            let r = buf.data[i * 4];
+            let g = buf.data[i * 4 + 1];
+            let b = buf.data[i * 4 + 2];
+            let a = buf.data[i * 4 + 3];
+            // ARGB8888 in native byte order
+            let argb = u32::from_ne_bytes([b, g, r, a]);
+            dst[i * 4..i * 4 + 4].copy_from_slice(&argb.to_ne_bytes());
+        }
+        unsafe {
+            crate::libc_sys::munmap(map, shm_size as crate::libc_sys::size_t);
+        }
+
+        // Create wl_shm_pool and wl_buffer
+        let pool = shm.create_pool(fd.as_fd(), shm_size as i32, qhandle, ());
+        let wl_buf = pool.create_buffer(
+            0,
+            width as i32,
+            height as i32,
+            (width * 4) as i32,
+            wl_shm::Format::Argb8888,
+            qhandle,
+            (),
+        );
+
+        // Create icon, add buffer, set on toplevel
+        let icon = icon_manager.create_icon(qhandle, ());
+        icon.add_buffer(&wl_buf, buf.scale);
+        icon_manager.set_icon(toplevel, Some(&icon));
+
+        // The icon object and buffer can be destroyed after set_icon
+        icon.destroy();
+        pool.destroy();
+        // wl_buf kept alive until compositor reads it (destroyed on drop)
+    }
+
     pub fn resize_buffers(&mut self) -> bool {
         let cal_size = Vec2d {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,

@@ -145,6 +145,7 @@ impl WindowHandle {
         cxwindow.create_title = "Makepad".to_string();
         cxwindow.create_inner_size = None;
         cxwindow.create_position = None;
+        cxwindow.create_app_id = "Makepad".to_string();
         cx.platform_ops
             .push(CxOsOp::CreateWindow(window.window_id()));
         window
@@ -289,11 +290,32 @@ impl WindowHandle {
     }
 }
 
+/// A single RGBA8 pixel buffer for a window icon. Must be square.
+#[derive(Clone, Debug)]
+pub struct WindowIconBuffer {
+    pub width: u32,
+    pub height: u32,
+    pub scale: i32,
+    /// Row-major RGBA8 pixel data. Length must be `width * height * 4`.
+    pub data: Vec<u8>,
+}
+
+/// Window icon descriptor with optional name and one or more pixel buffers.
+#[derive(Clone, Debug, Default)]
+pub struct WindowIcon {
+    /// Optional human-readable name (used as Wayland `app_id` when set).
+    pub name: Option<String>,
+    /// Pixel buffers at various sizes/scales.
+    pub buffers: Vec<WindowIconBuffer>,
+}
+
 #[derive(Clone, Default)]
 pub struct CxWindow {
     pub create_title: String,
     pub create_position: Option<Vec2d>,
     pub create_inner_size: Option<Vec2d>,
+    pub create_icon: Option<WindowIcon>,
+    pub create_app_id: String,
     pub kind_id: usize,
     pub dpi_override: Option<f64>,
     pub os_dpi_factor: Option<f64>,
