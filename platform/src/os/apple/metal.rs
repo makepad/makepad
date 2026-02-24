@@ -2201,7 +2201,6 @@ impl CglRenderBridge {
                 share: CGLContextObj,
                 ctx: *mut CGLContextObj,
             ) -> i32;
-            fn CGLSetCurrentContext(ctx: CGLContextObj) -> i32;
         }
 
         unsafe {
@@ -2284,20 +2283,14 @@ impl CglRenderBridge {
         const GL_RGBA: u32 = 0x1908;
         const GL_BGRA: u32 = 0x80E1;
         const GL_UNSIGNED_INT_8_8_8_8_REV: u32 = 0x8367;
-        const GL_FRAMEBUFFER: u32 = 0x8D40;
-        const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
 
         type GLuint = u32;
-        type GLint = i32;
         type GLenum = u32;
         type GLsizei = i32;
 
         // Load GL functions via dlsym
         type GlGenTexturesFn = unsafe extern "C" fn(GLsizei, *mut GLuint);
         type GlBindTextureFn = unsafe extern "C" fn(GLenum, GLuint);
-        type GlGenFramebuffersFn = unsafe extern "C" fn(GLsizei, *mut GLuint);
-        type GlBindFramebufferFn = unsafe extern "C" fn(GLenum, GLuint);
-        type GlFramebufferTexture2DFn = unsafe extern "C" fn(GLenum, GLenum, GLenum, GLuint, GLint);
 
         extern "C" {
             fn CGLTexImageIOSurface2D(
