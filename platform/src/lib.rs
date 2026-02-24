@@ -1,5 +1,6 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
 pub mod os;
+pub mod gl_render_bridge;
 
 #[macro_use]
 pub mod log;
@@ -73,6 +74,8 @@ pub use makepad_network;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
 pub use makepad_script::trap;
+
+pub use crate::gl_render_bridge::{GlApi, GlRenderBridge};
 
 pub use {
     crate::{
