@@ -38,6 +38,8 @@ pub enum MenuItem {
 pub struct WindowMenu {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[redraw]

@@ -215,6 +215,8 @@ pub enum LabelAction {
 pub struct Label {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[redraw]
     #[live]
     pub draw_text: DrawText,

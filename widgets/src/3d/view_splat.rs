@@ -317,6 +317,8 @@ pub struct DrawSplatPbr {
 pub struct ViewSplat {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[layout]

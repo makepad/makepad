@@ -48,6 +48,8 @@ script_mod! {
 pub struct Icon {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[redraw]
     #[live]
     draw_bg: DrawQuad,

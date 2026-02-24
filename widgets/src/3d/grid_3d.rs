@@ -59,6 +59,8 @@ script_mod! {
 pub struct Grid3D {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[layout]
