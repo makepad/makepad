@@ -8,6 +8,8 @@ use {
 
 use super::http::{make_ns_request, url_session_delegate_class};
 
+const WEB_SOCKET_DELEGATE_CLASS_NAME: &str = "MakepadNSURLSessionWebSocketDelegate";
+
 fn web_socket_delegate_class() -> *const Class {
     static INIT: Once = Once::new();
     static mut CLASS: *const Class = ptr::null();
@@ -35,8 +37,17 @@ pub fn define_web_socket_delegate() -> *const Class {
     ) {
     }
 
+    if let Some(existing) = Class::get(WEB_SOCKET_DELEGATE_CLASS_NAME) {
+        return existing as *const Class;
+    }
+
     let superclass = class!(NSObject);
-    let mut decl = ClassDecl::new("NSURLSessionWebSocketDelegate", superclass).unwrap();
+    let Some(mut decl) = ClassDecl::new(WEB_SOCKET_DELEGATE_CLASS_NAME, superclass) else {
+        if let Some(existing) = Class::get(WEB_SOCKET_DELEGATE_CLASS_NAME) {
+            return existing as *const Class;
+        }
+        return superclass as *const Class;
+    };
     unsafe {
         decl.add_method(
             sel!(webSocketTask: didOpenWithProtocol:),

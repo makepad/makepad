@@ -1,348 +1,619 @@
 use makepad_widgets::*;
 
 app_main!(App);
+
 script_mod! {
     use mod.prelude.widgets.*
-    #(App::script_api(vm)){
+    use mod.std
+    use mod.net
+    use mod.fs
+    use mod.edmx
+    
+    let self_ip = "10.0.0.112"
+    let comfy_ip = "10.0.0.165:8000"
+    let openai_base = "http://127.0.0.1:8080"
+    let prompt_path = "/Users/admin/prompt.txt"
+    let auto_seconds = 60
+
+    let Display = {mac:"" ip:"" landscape:false prompt:"empty"}.freeze_api()
+    let displays = [
+        Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.182" landscape:false}
+        Display{mac:"28:07:08:2C:D9:42" ip:"10.0.0.198" landscape:true}
+        Display{mac:"B0-f2-f6-60-f6-e1" ip:"10.0.0.204" landscape:true}
+        Display{mac:"04:E4:B6:F4:1D:DC" ip:"10.0.0.124" landscape:true}
+    ]
+
+    let models = {
+        flux:{
+            file: "./examples/comfyui/flux_dev_full_text_to_image.json"
+            sampler: "31"
+            image: "27"
+            prompt: "41"
+            save: "9"
+            width: 1600
+            height: 896
+        }
+        qwen:{
+            file: "./examples/comfyui/image_qwen_image.json"
+            sampler: "3"
+            image: "58"
+            prompt: "6"
+            save:"60"
+            width: 1664
+            height: 928
+        }
     }
+
+    let model = models.flux
+    let display_iter = 0
+    let is_running = false
+    let auto_enabled = false
+    let auto_timer = nil
+    let messages = []
+    let current_content_json = "{}"
+    let current_image_data = []
+
+    fn ui_log(line){
+        let old = ui.log_view.text()
+        if old == "" ui.log_view.set_text(line)
+        else ui.log_view.set_text(old + "\n" + line)
+    }
+
+    fn set_status(text){
+        ui.status_value.set_text(text)
+        ui_log(text)
+    }
+
+    fn set_progress(text){
+        ui.progress_value.set_text(text)
+    }
+
+    fn set_display(text){
+        ui.display_value.set_text(text)
+    }
+
+    fn set_last_prompt(text){
+        ui.last_prompt_view.set_text(text)
+    }
+
+    fn refresh_auto_button(){
+        if auto_enabled ui.toggle_auto_btn.set_text("Pause Auto")
+        else ui.toggle_auto_btn.set_text("Resume Auto")
+    }
+
+    fn default_prompt_json(){
+        "{\n  \"system\": \"You are an image prompt assistant.\",\n  \"prompt\": \"\",\n  \"clear\": false\n}"
+    }
+
+    fn load_prompt_into_ui(){
+        let prompt_text = ok{fs.read(prompt_path)}
+        if prompt_text == nil prompt_text = default_prompt_json()
+        ui.prompt_input.set_text(prompt_text)
+        set_status("Prompt loaded from prompt.txt")
+    }
+
+    fn save_prompt_from_ui(){
+        let prompt_text = ui.prompt_input.text()
+        fs.write(prompt_path prompt_text)
+        set_status("Prompt saved to prompt.txt")
+    }
+
+    fn start_auto_loop(){
+        if auto_enabled return
+        auto_enabled = true
+        auto_timer = std.start_interval(auto_seconds) do fn{
+            post()
+        }
+        refresh_auto_button()
+        set_status("Auto loop started")
+    }
+
+    fn stop_auto_loop(){
+        if !auto_enabled return
+        auto_enabled = false
+        if auto_timer != nil std.stop_timer(auto_timer)
+        auto_timer = nil
+        refresh_auto_button()
+        set_status("Auto loop paused")
+    }
+
+    fn sleep_seconds(seconds){
+        let promise = std.promise()
+        std.start_timeout(seconds, || promise.resolve(true))
+        promise.await()
+    }
+
+    fn openai_completion(messages){
+        let promise = std.promise()
+        let req = net.HttpRequest{
+            url: openai_base + "/v1/chat/completions"
+            method: net.HttpMethod.POST
+            headers:{"Content-Type": "application/json"}
+            is_streaming: true
+            body:{
+                max_tokens: 1000
+                stream: true
+                messages
+            }.to_json()
+        }
+        net.http_request(req) do net.HttpEvents{
+            let total = ""
+            on_stream:fn(res){
+                for split in res.body.to_string().split("\n\n"){
+                    let o = split.parse_json()
+                    ok{
+                        total += o.data.choices[0].delta.content
+                    }
+                }
+            }
+            on_complete: || promise.resolve(total.trim())
+            on_error: |e| {
+                set_status("OpenAI completion error")
+                ~e
+                promise.resolve("")
+            }
+        }
+        promise
+    }
+
+    fn comfy_image_download(image){
+        let promise = std.promise()
+        let filename = ("" + image.filename).url_encode()
+        let subfolder = ("" + image.subfolder).url_encode()
+        let image_type = ("" + image.type).url_encode()
+        let req = net.HttpRequest{
+            url: "http://" + comfy_ip + "/view?"+
+            "filename=" + filename+
+            "&subfolder=" + subfolder+
+            "&type=" + image_type
+            method: net.HttpMethod.GET
+        }
+        net.http_request(req) do net.HttpEvents{
+            on_response: |res| promise.resolve(res.body)
+            on_error: |e| {
+                set_status("Comfy image download error")
+                ~e
+                promise.resolve(nil)
+            }
+        }
+        promise
+    }
+
+    fn comfy_last_image(prompt_id, model){
+        let promise = std.promise()
+        let req = net.HttpRequest{
+            url: "http://"+comfy_ip+"/history/"+prompt_id
+            method: net.HttpMethod.GET
+        }
+        net.http_request(req) do net.HttpEvents{
+            on_response: |res| {
+                let data = ok{res.body.parse_json()}
+                let image = ok{data[prompt_id].outputs[model.save].images[0]}
+                promise.resolve(image)
+            }
+            on_error: |e| {
+                set_status("Comfy history error")
+                ~e
+                promise.resolve(nil)
+            }
+        }
+        promise
+    }
+
+    fn connect_comfy_websocket(model){
+        let task = std.task()
+        net.web_socket("ws://"+comfy_ip+"/ws?clientId=8a327a3e4961419ea7386c542f0ea491") do net.WebSocketEvents{
+            on_string:fn(str){
+                let msg = ok{str.parse_json()}
+                if msg == nil return
+                if ok{msg.data.nodes[model.sampler].state == "running"}
+                    task.emit(@progress ok{msg.data.nodes[model.sampler].value})
+                if ok{msg.data.nodes[model.save].state == "finished"}{
+                    let prompt_id = ok{msg.data.nodes[model.save].prompt_id}
+                    task.emit(@done, prompt_id)
+                }
+            }
+            on_error:fn(e){
+                set_status("Comfy websocket error")
+                ~e
+                task.emit(@error, e)
+            }
+            on_closed:fn(){
+                task.emit(@closed)
+            }
+        }
+        task
+    }
+
+    fn comfy_render(prompt, display, model){
+        let promise = std.promise()
+        let flow = fs.read(model.file).parse_json()
+
+        let prompt_style = ok{prompt.style_and_keywords}
+        if prompt_style == nil prompt_style = ""
+        let prompt_visual = ok{prompt.visual_description}
+        if prompt_visual == nil prompt_visual = ""
+
+        flow[model.prompt].inputs.clip_l = prompt_style
+        flow[model.prompt].inputs.t5xxl = prompt_visual
+
+        flow[model.sampler].inputs.seed = std.random_u32()
+        flow[model.image].inputs.width =
+        if display.landscape model.width else model.height
+        flow[model.image].inputs.height =
+        if display.landscape model.height else model.width
+
+        let req = net.HttpRequest{
+            url: "http://" + comfy_ip + "/prompt"
+            method: net.HttpMethod.POST
+            body:{prompt:flow client_id:"8a327a3e4961419ea7386c542f0ea491"}.to_json()
+        }
+        net.http_request(req) do net.HttpEvents{
+            on_response: |res| promise.resolve(ok{res.body.parse_json().prompt_id})
+            on_error: |e| {
+                set_status("Comfy render request error")
+                ui_log("Comfy /prompt network error: " + ("" + e))
+                ~e
+                promise.resolve(nil)
+            }
+        }
+        promise
+    }
+
+    fn http_response(headers, displays){
+        if headers.path == "/content.json"{
+            return net.HttpServerResponse{
+                header: "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
+                body: current_content_json
+            }
+        }
+        if headers.path == "/image"{
+            if current_image_data.len() > 0{
+                return net.HttpServerResponse{
+                    header: "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n"
+                    body: current_image_data
+                }
+            }
+            return net.HttpServerResponse{
+                header: "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\n"
+                body: "No image"
+            }
+        }
+
+        let idx = headers.search.to_f64()
+        net.HttpServerResponse{
+            header:"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+            body: if idx.is_number()
+                displays[idx].prompt
+            else
+                mod.edmx.http_body
+        }
+    }
+
+    let http_server = net.http_server(net.HttpServerOptions{
+        listen:"0.0.0.0:8081"
+    }, net.HttpServerEvents{
+        on_get: |headers| http_response(headers, displays)
+    })
+
+    let comfy_socket = connect_comfy_websocket(model)
+
+    fn post(){
+        if is_running {
+            ui_log("Run ignored: already running")
+            return false
+        }
+
+        is_running = true
+        ui.run_now_btn.set_text("Running...")
+
+        let prompt_source = ui.prompt_input.text()
+        let prompt = ok{prompt_source.parse_json()}
+        if prompt == nil {
+            set_status("Invalid prompt JSON in editor")
+            is_running = false
+            ui.run_now_btn.set_text("Run Now")
+            return false
+        }
+
+        fs.write(prompt_path prompt_source)
+
+        let system_text = ok{prompt.system}
+        if system_text == nil system_text = ""
+        else system_text = system_text.trim()
+
+        let user_text = ok{prompt.prompt}
+        if user_text == nil {
+            set_status("Missing prompt.prompt in prompt JSON")
+            is_running = false
+            ui.run_now_btn.set_text("Run Now")
+            return false
+        }
+        user_text = ("" + user_text).trim()
+        if user_text == "" {
+            set_status("prompt.prompt is empty")
+            is_running = false
+            ui.run_now_btn.set_text("Run Now")
+            return false
+        }
+
+        let clear_prompt = ok{prompt.clear} == true
+
+        if messages.len() > 40 messages.clear()
+        if clear_prompt || messages.len() == 0{
+            messages.clear()
+            messages.push({content:system_text role:"user"})
+            messages.push({content:user_text role:"user"})
+        }
+        else{
+            messages[0] = {content:system_text role:"user"}
+            messages.push({content:user_text role:"user"})
+        }
+
+        let display = displays[display_iter % displays.len()]
+        display_iter += 1
+        set_display(display.ip + "  " + display.mac)
+
+        set_status("Generating image prompt")
+        let image_prompt_text = openai_completion(messages).await()
+        if image_prompt_text == nil || ("" + image_prompt_text).trim() == ""{
+            set_status("AI returned empty prompt")
+            is_running = false
+            ui.run_now_btn.set_text("Run Now")
+            return false
+        }
+
+        messages.push({content:image_prompt_text role:"assistant"})
+        comfy_socket.queue.clear()
+
+        let image_prompt =
+            ("" + image_prompt_text)
+            .strip_prefix("```json")
+            .strip_suffix("```")
+            .parse_json()
+        if image_prompt == nil{
+            set_status("AI did not return JSON prompt")
+            ui_log("AI raw response:\n" + image_prompt_text)
+            is_running = false
+            ui.run_now_btn.set_text("Run Now")
+            return false
+        }
+
+        let visual_description = ok{image_prompt.visual_description}
+        let style_keywords = ok{image_prompt.style_and_keywords}
+        if visual_description == nil visual_description = ""
+        else visual_description = ("" + visual_description).trim()
+        if style_keywords == nil style_keywords = ""
+        else style_keywords = ("" + style_keywords).trim()
+        set_last_prompt(visual_description + "\n" + style_keywords)
+
+        set_status("Submitting job to ComfyUI")
+        let prompt_id = comfy_render(image_prompt display model).await()
+        if prompt_id == nil {
+            set_status("Comfy render request failed")
+            is_running = false
+            ui.run_now_btn.set_text("Run Now")
+            return false
+        }
+
+        set_status("Rendering in ComfyUI")
+        let event_prompt_id = prompt_id
+        loop{
+            let event = comfy_socket.next()
+            if event == nil {
+                set_status("Comfy websocket closed")
+                is_running = false
+                ui.run_now_btn.set_text("Run Now")
+                return false
+            }
+            if event[0] == @progress{
+                set_progress("" + event[1])
+            }
+            if event[0] == @done{
+                event_prompt_id = event[1]
+                break
+            }
+            if event[0] == @error || event[0] == @closed{
+                set_status("Comfy websocket error")
+                is_running = false
+                ui.run_now_btn.set_text("Run Now")
+                return false
+            }
+        }
+
+        set_status("Fetching image from ComfyUI")
+        let image = comfy_last_image(event_prompt_id, model).await()
+        if image == nil {
+            set_status("Comfy history returned no image")
+            is_running = false
+            ui.run_now_btn.set_text("Run Now")
+            return false
+        }
+        if ok{image.filename} == nil || ok{image.subfolder} == nil || ok{image.type} == nil{
+            set_status("Comfy history returned invalid image payload")
+            is_running = false
+            ui.run_now_btn.set_text("Run Now")
+            return false
+        }
+
+        set_status("Downloading image")
+        let data = comfy_image_download(image).await()
+        if data == nil {
+            set_status("Failed to download ComfyUI image")
+            is_running = false
+            ui.run_now_btn.set_text("Run Now")
+            return false
+        }
+        set_status("Uploading to EMDX " + display.ip)
+        current_image_data = data
+        let file_id = "EDMX" + std.random_u32() + std.random_u32()
+        current_content_json = mod.edmx.build_content_json(self_ip, "8081", file_id, current_image_data.len())
+        let content_url = "http://" + self_ip + ":8081/content.json"
+        let upload_result = edmx.upload_image(display, content_url, sleep_seconds)
+        if upload_result == nil || ok{upload_result.is_ok} != true {
+            let err = ok{upload_result.error}
+            if err == nil err = "EDMX upload failed"
+            set_status("" + err)
+            is_running = false
+            ui.run_now_btn.set_text("Run Now")
+            return false
+        }
+
+        let set_prompt =
+            (if visual_description == nil "" else visual_description)
+            + " - "
+            + (if style_keywords == nil "" else style_keywords)
+        display.prompt = set_prompt
+
+        set_status("Done")
+        is_running = false
+        ui.run_now_btn.set_text("Run Now")
+        true
+    }
+
+    let app = startup() do #(App::script_component(vm)){
+        ui: Root{
+            on_startup: ||{
+                let _keep_http_alive = http_server
+                set_status("Starting ComfyUI dashboard")
+                set_display("-")
+                set_last_prompt("")
+                refresh_auto_button()
+                load_prompt_into_ui()
+                start_auto_loop()
+                post()
+            }
+
+            main_window := Window{
+                window.inner_size: vec2(980, 760)
+                body +: {
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 10
+                    padding: 12
+
+                    RoundedView{
+                        width: Fill
+                        height: Fit
+                        padding: 14
+                        draw_bg.color: #223344
+                        draw_bg.radius: 8.0
+                        flow: Down
+                        spacing: 6
+
+                        Label{text: "ComfyUI + EMDX" draw_text.color: #fff draw_text.text_style.font_size: 14}
+                        Label{text: "Edit prompt.json text, run now, or leave auto loop enabled." draw_text.color: #c8d0d8 draw_text.text_style.font_size: 10}
+                    }
+
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+
+                        load_prompt_btn := ButtonFlat{
+                            text: "Load prompt.txt"
+                            on_click: || load_prompt_into_ui()
+                        }
+                        save_prompt_btn := ButtonFlat{
+                            text: "Save prompt.txt"
+                            on_click: || save_prompt_from_ui()
+                        }
+                        run_now_btn := Button{
+                            text: "Run Now"
+                            on_click: || post()
+                        }
+                        toggle_auto_btn := ButtonFlat{
+                            text: "Pause Auto"
+                            on_click: || {
+                                if auto_enabled stop_auto_loop()
+                                else start_auto_loop()
+                            }
+                        }
+                    }
+
+                    prompt_input := TextInput{
+                        width: Fill
+                        height: 140
+                        is_multiline: true
+                        empty_text: "{ \"system\": \"...\", \"prompt\": \"...\", \"clear\": false }"
+                    }
+
+                    RoundedView{
+                        width: Fill
+                        height: Fit
+                        padding: 10
+                        draw_bg.color: #1f232b
+                        draw_bg.radius: 6.0
+                        flow: Down
+                        spacing: 6
+
+                        View{width: Fill height: Fit flow: Right spacing: 8
+                            Label{text: "Status:" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
+                            status_value := Label{text: "Idle" draw_text.color: #ffffff draw_text.text_style.font_size: 10}
+                        }
+                        View{width: Fill height: Fit flow: Right spacing: 8
+                            Label{text: "Progress:" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
+                            progress_value := Label{text: "-" draw_text.color: #ffffff draw_text.text_style.font_size: 10}
+                        }
+                        View{width: Fill height: Fit flow: Right spacing: 8
+                            Label{text: "Display:" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
+                            display_value := Label{text: "-" draw_text.color: #ffffff draw_text.text_style.font_size: 10}
+                        }
+                    }
+
+                    Label{text: "Last prompt sent" draw_text.color: #c8d0d8 draw_text.text_style.font_size: 10}
+                    last_prompt_view := TextInput{
+                        width: Fill
+                        height: 56
+                        is_multiline: true
+                        is_read_only: true
+                        empty_text: "No prompt yet"
+                    }
+
+                    Label{text: "Activity log" draw_text.color: #c8d0d8 draw_text.text_style.font_size: 10}
+                    log_scroller := ScrollYView{
+                        width: Fill
+                        height: Fill
+                        show_bg: false
+                        log_view := TextInput{
+                            width: Fill
+                            height: Fit
+                            is_multiline: true
+                            is_read_only: true
+                            empty_text: "Logs will appear here"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    app
 }
 
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
         crate::makepad_widgets::script_mod(vm);
+        crate::edmx::register_socket_extensions(vm);
+        crate::edmx::script_mod(vm);
         App::from_script_mod(vm, script_mod)
     }
 }
 
 #[derive(Script, ScriptHook)]
 pub struct App {
-    #[new]
-    window: WindowHandle,
-    #[new]
-    pass: DrawPass,
-    #[new]
-    depth_texture: Texture,
-    // #[script] draw_quad: DrawQuad,
-    #[new]
-    main_draw_list: DrawList2d,
+    #[live]
+    ui: WidgetRef,
 }
 
 impl MatchEvent for App {
-    fn handle_startup(&mut self, cx: &mut Cx) {
-        let code = script! {
-            use mod.net
-            use mod.fs
-            use mod.std
-            use mod.run
-
-            let self_ip = "10.0.0.112"
-            let comfy_ip = "10.0.0.165:8000"
-            let openai_base = "http://127.0.0.1:8080"
-            let Display = {mac:"" ip:"" landscape:false prompt:"empty"}.freeze_api()
-            let displays = [
-                Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.182" landscape:false} // left
-                Display{mac:"28:07:08:2C:D9:42" ip:"10.0.0.198" landscape:true} // table
-                Display{mac:"B0-f2-f6-60-f6-e1" ip:"10.0.0.204" landscape:true} // door
-                Display{mac:"04:E4:B6:F4:1D:DC" ip:"10.0.0.124" landscape:true} // side
-            ]
-
-            fn openai_completion(messages){
-                let promise = std.promise()
-                let req = net.HttpRequest{
-                    url: openai_base + "/v1/chat/completions"
-                    method: net.HttpMethod.POST
-                    headers:{"Content-Type": "application/json"}
-                    is_streaming: true,
-                    body:{
-                        max_tokens: 1000
-                        stream: true
-                        messages
-                    }.to_json()
-                }
-                let total = ""
-                net.http_request(req) do net.HttpEvents{
-                    on_stream:fn(res){
-                        for split in res.body.to_string().split("\n\n"){
-                            let o = split.parse_json();
-                            ok{
-                                total += o.data.choices[0].delta.content
-                            }
-                        }
-                    }
-                    on_complete: || promise.resolve(total.trim())
-                    on_error: |e| ~e
-                }
-                promise
-            }
-
-            fn comfy_image_download(image){
-                let promise = std.promise()
-                let req = net.HttpRequest{
-                    url: "http://" + comfy_ip + "/view?"+
-                    "filename=" + image.filename+
-                    "&subfolder=" + image.subfolder+
-                    "&type=" + image.type
-                    method: net.HttpMethod.GET
-                }
-                net.http_request(req) do net.HttpEvents{
-                    on_response: |res| promise.resolve(res.body)
-                    on_error: |e| ~e
-                }
-                promise
-            }
-
-            fn comfy_last_image(prompt_id, model){
-                let promise = std.promise()
-                let req = net.HttpRequest{
-                    url: "http://"+comfy_ip+"/history/"+prompt_id
-                    method: net.HttpMethod.GET
-                }
-                net.http_request(req) do net.HttpEvents{
-                    on_response: |res| {
-                        let data = res.body.parse_json()
-                        let image = ok{data[prompt_id].outputs[model.save].images[0]}
-                        promise.resolve(image)
-                    }
-                    on_error: |e| ~e
-                }
-                promise
-            }
-
-            let models = {
-                flux:{
-                    file: "./examples/comfyui/flux_dev_full_text_to_image.json"
-                    sampler: "31"
-                    image: "27"
-                    prompt: "41"
-                    save: "9"
-                    width: 1600
-                    height: 900
-                }
-                qwen:{
-                    file: "./examples/comfyui/image_qwen_image.json"
-                    sampler: "3"
-                    image: "58"
-                    prompt: "6"
-                    save:"60"
-                    width: 1664
-                    height: 928
-                }
-            }
-
-            fn connect_comfy_websocket(model){
-                let task = std.task()
-                net.web_socket("ws://"+comfy_ip+"/ws?clientId=8a327a3e4961419ea7386c542f0ea491") do net.WebSocketEvents{
-                    on_string:fn(str){
-                        let str = str.parse_json()
-                        if ok{str.data.nodes[model.sampler].state == "running"}
-                        task.emit(@progress str.data.nodes[model.sampler].value)
-                        if ok{str.data.nodes[model.save].state == "finished"}{
-                            let prompt_id = str.data.nodes[model.save].prompt_id;
-                            task.emit(@done, prompt_id)
-                        }
-                    }
-                    on_error:fn(e){
-                        std.println(e)
-                    }
-                };
-                task
-            }
-
-            fn comfy_render(prompt, display, model){
-                let promise = std.promise()
-                std.println("Rendering AI: ");
-                let flow = fs.read(model.file).parse_json()
-
-                flow[model.prompt].inputs.clip_l = prompt.style_and_keywords
-                flow[model.prompt].inputs.t5xxl = prompt.visual_description
-
-                flow[model.sampler].inputs.seed = std.random_u32()
-                flow[model.image].inputs.width =
-                if display.landscape model.width else model.height
-                flow[model.image].inputs.height =
-                if display.landscape model.height else model.width
-                ~flow.to_json()
-                let req = net.HttpRequest{
-                    url: "http://" + comfy_ip + "/prompt"
-                    method: net.HttpMethod.POST
-                    body:{prompt:flow client_id:"8a327a3e4961419ea7386c542f0ea491"}.to_json()
-                }
-                net.http_request(req) do net.HttpEvents{
-                    on_response: |res| promise.resolve(ok{res.body.parse_json().prompt_id})
-                }
-                promise
-            }
-
-            fn eink_upload_image(display, path){
-                let promise = std.promise()
-                std.println("Uploading image: "+display.mac+" "+display.ip+" "+path)
-                run.child(run.ChildCmd{
-                    cmd: "node"
-                    args: [
-                        "/usr/local/lib/node_modules/@weejewel/samsung-emdx/bin/index.mjs" "show-image"
-                        "--mac" display.mac
-                        "--host" display.ip
-                        "--local-ip" self_ip
-                        "--pin" "123456"
-                        "--image" path
-                    ]
-                }) do run.ChildEvents{
-                    on_stdout: |s| {}
-                    on_stderr: |s| std.println(s)
-                    on_term: || task.resolve()
-                }
-                task
-            }
-
-            // main application flow
-
-            std.random_seed()
-
-            let model = models.flux;
-
-            let web_socket = connect_comfy_websocket(model)
-
-            let display_iter = 0
-            let messages = []
-
-            let http_body = "
-            <body onclick='document.documentElement.requestFullscreen()' ondblclick='location.reload()' style='margin:0;padding:20;background:#fff;color:#000;display:flex;height:100vh;overflow:hidden'>
-            <b id='d' style='font:5vw sans-serif'></b>
-            <script>
-            u = location.origin + location.pathname + '?' + location.pathname.slice(1);
-            f = () => {
-                fetch(u)
-                .then(r => r.ok ? r.text() : null)
-                .then(t => { if (t !== null) d.innerText = t })
-                .catch(e => 0)
-                .finally(() => setTimeout(f, 1000));
-            };
-            f();
-            </script>
-            </body>
-            "
-
-            let http_server = net.http_server(net.HttpServerOptions{
-                listen:"0.0.0.0:8081"
-            }, net.HttpServerEvents{
-                on_get: |headers|{
-                    let idx = headers.search.to_f64()
-                    net.HttpServerResponse{
-                        header:"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
-                        body: if idx.is_number()
-                            displays[idx].prompt
-                        else
-                            http_body
-                    }
-
-                }
-            })
-
-
-            fn post(){
-                // handle AI prompt messages
-
-                let prompt = fs.read("/Users/admin/prompt.txt").parse_json();
-
-                if messages.len() > 40 messages.clear()
-                if prompt.clear || messages.len() == 0{
-                    messages.clear()
-                    messages.push({content:prompt.system.trim() role:"user"})
-                    messages.push({content:prompt.prompt.trim() role:"user"})
-                }
-                else{
-                    messages[0] = {content:prompt.system.trim() role:"user"}
-                    messages.push({content:prompt.prompt.trim() role:"user"})
-                }
-                // rotate displays
-
-                let display = displays[display_iter % displays.len()]
-                display_iter += 1
-                let image_prompt = openai_completion(messages).await()
-                /*
-                let image_prompt = {
-                    visual_description:prompt.prompt,
-                    style_and_keywords:prompt.prompt
-                }*/
-
-                // put the answer back in the messages array
-                messages.push({content:image_prompt role:"assistant"})
-
-                // flush the websocket queue
-                web_socket.queue.clear()
-
-                let image_prompt = image_prompt.strip_prefix("```json").strip_suffix("```").parse_json();
-
-                std.println("Rendering prompt: "+image_prompt.visual_description+" keywords: "+image_prompt.style_and_keywords)
-
-                let prompt_id = comfy_render(image_prompt display model).await()
-                // this loop needs some more features like match or a for loop with array destructuring'
-                loop{
-                    let d = web_socket.next();
-                    if d[0] == @progress std.println("Progress: "+d[1])
-                    if d[0] == @done {
-                        prompt_id = d[1];break
-                    }
-                }
-                std.println("Fetching last image from comfy");
-                let image = comfy_last_image(prompt_id, model).await()
-                // fetch the image from comfy
-                let data = comfy_image_download(image).await()
-                let path = "/Users/admin/makepad/makepad/local/eink.png"
-                fs.write(path data)
-
-                std.println("Uploading to " + display.ip)
-                eink_upload_image(display path).await()
-                let set_prompt = image_prompt.visual_description + " - " + image_prompt.style_and_keywords
-                let set_display = display
-                std.println("DONE!")
-                std.start_timeout(17, || set_display.prompt = set_prompt)
-            }
-
-            std.start_interval(60) do fn{
-                post()
-            }
-            post()
-        };
-        cx.eval(code);
-
-        self.window.set_pass(cx, &self.pass);
-        self.depth_texture = Texture::new_with_format(
-            cx,
-            TextureFormat::DepthD32 {
-                size: TextureSize::Auto,
-                initial: true,
-            },
-        );
-        self.pass
-            .set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
-        self.pass
-            .set_window_clear_color(cx, vec4(0.0, 0.0, 1.0, 0.0));
-    }
-
-    fn handle_draw_2d(&mut self, cx: &mut Cx2d) {
-        if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
-            return;
-        }
-
-        cx.begin_pass(&self.pass, None);
-        self.main_draw_list.begin_always(cx);
-
-        let size = cx.current_pass_size();
-        cx.begin_root_turtle(size, Layout::flow_down());
-
-        // draw things here
-
-        cx.end_pass_sized_turtle();
-        self.main_draw_list.end(cx);
-        cx.end_pass(&self.pass);
-    }
-
     fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let _ = self.match_event_with_draw_2d(cx, event);
+        self.match_event(cx, event);
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

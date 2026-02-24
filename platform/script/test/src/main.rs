@@ -2522,6 +2522,40 @@ pub fn main() {
         assert(live_obj.important == 42)
         assert(live_obj.data == [1, 2, 3])
         assert(live_arr == [10, 20, 30, 40, 50])
+
+        // Test 11: Static containers are fully immutable
+        let static_state = {status: "boot", nested: {v: 1}}
+        gc.set_static(static_state)
+        try static_state.status = "state1" assert(true) ok assert(false)
+        try static_state.extra = 10 assert(true) ok assert(false)
+        try static_state.nested.v = 2 assert(true) ok assert(false)
+        try static_state.delete("status") assert(true) ok assert(false)
+        assert(static_state.status == "boot")
+        assert(static_state.nested.v == 1)
+
+        let static_arr = [1, 2, 3]
+        gc.set_static(static_arr)
+        try static_arr.push(4) assert(true) ok assert(false)
+        try static_arr.pop() assert(true) ok assert(false)
+        try static_arr.remove(0) assert(true) ok assert(false)
+        try static_arr.clear() assert(true) ok assert(false)
+        try static_arr[0] = 9 assert(true) ok assert(false)
+        assert(static_arr == [1, 2, 3])
+
+        gc.run()
+        assert(static_state.status == "boot")
+        assert(static_arr == [1, 2, 3])
+
+        // Test 12: Objects with string keys must survive GC key marking
+        let by_string_key = {"style_and_keywords": "ok", "visual_description": "scene"}
+        gc.run()
+        assert(by_string_key.style_and_keywords == "ok")
+        assert(by_string_key.visual_description == "scene")
+
+        let parsed = "{\"style_and_keywords\":\"ok2\",\"visual_description\":\"scene2\"}".parse_json()
+        gc.run()
+        assert(parsed.style_and_keywords == "ok2")
+        assert(parsed.visual_description == "scene2")
     };
 
     vm.eval(gc_test);
