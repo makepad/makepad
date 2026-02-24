@@ -253,6 +253,15 @@ fn normalize_dependency_file_path(path: &str) -> Option<String> {
     Some(stack.join("/"))
 }
 
+fn script_value_to_u8_bytes(vm: &mut ScriptVm, value: ScriptValue) -> Option<Vec<u8>> {
+    if let Some(array) = value.as_array() {
+        if let ScriptArrayStorage::U8(data) = vm.bx.heap.array_storage(array) {
+            return Some(data.clone());
+        }
+    }
+    None
+}
+
 pub fn script_mod(vm: &mut ScriptVm) {
     let res = vm.new_module(id!(res));
     let res_type = vm.new_handle_type(id_lut!(res));
@@ -492,6 +501,44 @@ pub fn script_mod(vm: &mut ScriptVm) {
             }
 
             script_err_type_mismatch!(vm.trap(), "invalid res arg type")
+        },
+    );
+
+    // res.binary_resource(bytes_u8_array)
+    // Creates an in-memory resource directly from bytes.
+    vm.add_method(
+        res,
+        id_lut!(binary_resource),
+        script_args_def!(data = NIL),
+        move |vm, args| {
+            let data = script_value!(vm, args.data);
+            let Some(bytes) = script_value_to_u8_bytes(vm, data) else {
+                return script_err_type_mismatch!(
+                    vm.trap(),
+                    "binary_resource expects a U8 byte array"
+                );
+            };
+
+            let cx = vm.host.cx_mut();
+            let handle_gc = CxScriptResourceGc {
+                resources: cx.script_data.resources.resources.clone(),
+                handle: ScriptHandle::ZERO,
+            };
+            let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+
+            cx.script_data
+                .resources
+                .resources
+                .borrow_mut()
+                .push(CxScriptResource {
+                    abs_path: format!("binary://{}", LiveId::unique().0),
+                    dependency_path: None,
+                    web_url: None,
+                    data: CxScriptResourceData::Loaded(Rc::new(bytes)),
+                    handle,
+                });
+
+            handle.into()
         },
     );
 }

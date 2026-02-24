@@ -1,9 +1,11 @@
 use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl},
     image_cache::*,
+    makepad_script::ScriptArrayStorage,
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
+    widget_async::ScriptAsyncResult,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -178,6 +180,65 @@ impl Image {
 }
 
 impl Widget for Image {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(set_src) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    if value.is_nil() {
+                        vm.with_cx_mut(|cx| {
+                            self.src = None;
+                            self.src_loaded = false;
+                            self.texture = None;
+                            self.async_image_path = None;
+                            self.async_image_size = None;
+                            self.redraw(cx);
+                        });
+                    } else if let Some(handle) = value.as_handle() {
+                        let handle_ref = vm.bx.heap.new_handle_ref(handle);
+                        vm.with_cx_mut(|cx| {
+                            self.src = Some(handle_ref);
+                            self.src_loaded = false;
+                            self.texture = None;
+                            self.async_image_path = None;
+                            self.async_image_size = None;
+                            self.redraw(cx);
+                        });
+                    }
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        if method == live_id!(load_image_from_data_async) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    if let Some(data_array) = value.as_array() {
+                        if let ScriptArrayStorage::U8(data) = vm.bx.heap.array_storage(data_array) {
+                            let path = PathBuf::from(format!(
+                                "script_image_data://{}",
+                                LiveId::unique().0
+                            ));
+                            let bytes = Arc::new(data.clone());
+                            vm.with_cx_mut(|cx| {
+                                let _ = self.load_image_from_data_async(cx, &path, bytes);
+                            });
+                        }
+                    }
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
