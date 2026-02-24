@@ -7,6 +7,7 @@ app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
+    use mod.widgets.*
     let TestDraw = #(TestDraw::register_widget(vm)) {
         width: 250
         height: 150
@@ -238,12 +239,11 @@ script_mod! {
             Hr{}
 
             Label{text: "Tooltip Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            Label{text: "Click buttons to show tooltips, click elsewhere to hide" draw_text.color: #888 draw_text.text_style.font_size: 10}
+            Label{text: "Click button to show tooltip, click elsewhere to hide" draw_text.color: #888 draw_text.text_style.font_size: 10}
 
             View{width: Fill height: Fit flow: Right spacing: 10}
-            tooltip_btn1 := Button{text: "Show Tooltip 1"}
-            tooltip_btn2 := Button{text: "Show Tooltip 2"}
-            tooltip_btn3 := ButtonFlat{text: "Show Help Tip"}
+            normal_tooltip_button := Button{text: "Show Normal Tooltip"}
+            callout_tooltip_button := Button{text: "Show Callout Tooltip"}
 
             Hr{}
 
@@ -256,7 +256,8 @@ script_mod! {
         }
 
         // Tooltip overlay
-        buttons_tooltip := Tooltip{}
+        normal_tooltip := Tooltip{}
+        callout_tooltip := CalloutTooltip{}
 
         // Popup notification overlay
         popup_notif := PopupNotification{
@@ -1595,15 +1596,28 @@ impl MatchEvent for App {
         }
 
         // Tooltip demo - show tooltips on button click
-        if self.ui.button(cx, ids!(tooltip_btn1)).clicked(actions) {
-            log!("Showing tooltip 1");
-            self.ui
-                .tooltip(cx, ids!(buttons_tooltip))
-                .show_with_options(
-                    cx,
-                    dvec2(350.0, 280.0),
-                    "This is the standard button. Click it to perform the primary action.",
-                );
+        if self.ui.button(cx, ids!(normal_tooltip_button)).clicked(actions) {
+            log!("Showing normal tooltip");
+            self.ui.tooltip(cx, ids!(normal_tooltip)).show_with_options(
+                cx,
+                dvec2(350.0, 280.0),
+                "This is the tooltip 1 button. Click it to perform the primary action.",
+            );
+        }
+        let callout_tooltip_button = self.ui.button(cx, ids!(callout_tooltip_button));
+        if callout_tooltip_button.clicked(actions) {
+            log!("Showing callout tooltip");
+            self.ui.callout_tooltip(cx, ids!(callout_tooltip)).show_with_options(
+                cx,
+                "This is a fancy callout tooltip. Here is more very long text just to check the wrapping logic to ensure that it still works",
+                callout_tooltip_button.area().rect(cx),
+                CalloutTooltipOptions {
+                    position: TooltipPosition::Right,
+                    text_color: vec4(1.0, 0.0, 0.0, 1.0), // red
+                    bg_color: vec4(0.0, 1.0, 0.0, 1.0), // green
+                    ..Default::default()
+                }
+            );
         }
 
         // Popup notification demo

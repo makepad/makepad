@@ -107,6 +107,7 @@ pub mod page_flip;
 pub mod popup_notification;
 pub mod slides_view;
 pub mod tooltip;
+pub mod callout_tooltip;
 pub mod video;
 
 pub mod command_text_input;
@@ -184,6 +185,7 @@ pub use crate::{
 
     text_input::*,
     tooltip::*,
+    callout_tooltip::*,
     // Navigation and panels
     touch_gesture::*,
     turtle_step::*,
@@ -335,6 +337,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::expandable_panel::script_mod(vm);
     crate::modal::script_mod(vm);
     crate::tooltip::script_mod(vm);
+    crate::callout_tooltip::script_mod(vm);
     crate::popup_notification::script_mod(vm);
     crate::video::script_mod(vm);
     crate::page_flip::script_mod(vm);
