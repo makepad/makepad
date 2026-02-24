@@ -15,6 +15,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct View3D {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     view: View,
     #[live(vec3(0.0, 0.0, 0.0))]

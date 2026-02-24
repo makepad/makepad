@@ -994,6 +994,8 @@ fn nice_ticks(min: f64, max: f64, target_count: usize) -> Vec<f64> {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct CandlestickChart {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     chart_view: ChartView,
     #[rust]
@@ -1176,6 +1178,8 @@ fn draw_point_chart_grid(chart_view: &mut ChartView, cx: &mut Cx2d, vp: &ChartVi
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct LineChart {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     chart_view: ChartView,
     #[rust]
@@ -1236,6 +1240,8 @@ impl Widget for LineChart {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct BarChart {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     chart_view: ChartView,
     #[rust]
@@ -1296,6 +1302,8 @@ impl Widget for BarChart {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct AreaChart {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     chart_view: ChartView,
     #[rust]
@@ -1361,6 +1369,8 @@ impl Widget for AreaChart {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ScatterChart {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     chart_view: ChartView,
     #[rust]
@@ -1414,6 +1424,8 @@ impl Widget for ScatterChart {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct OhlcChart {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     chart_view: ChartView,
     #[rust]

@@ -243,6 +243,8 @@ struct ListState {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Markdown {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     pub text_flow: TextFlow,
     #[live]
@@ -651,6 +653,8 @@ impl MarkdownRef {
 
 #[derive(Script, ScriptHook, Widget)]
 struct MarkdownLink {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     link: LinkLabel,
     #[live]

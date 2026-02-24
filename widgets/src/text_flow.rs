@@ -560,6 +560,8 @@ impl SelectionTracker {
 pub struct TextFlow {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[live]
     pub draw_text: DrawText,
     #[live]
