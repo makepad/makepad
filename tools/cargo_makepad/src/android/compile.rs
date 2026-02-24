@@ -327,6 +327,10 @@ fn compile_java(
                 .to_str()
                 .unwrap()),
             (makepad_java_classes_dir
+                .join("MakepadSocketStream.java")
+                .to_str()
+                .unwrap()),
+            (makepad_java_classes_dir
                 .join("MakepadWebSocket.java")
                 .to_str()
                 .unwrap()),
@@ -395,6 +399,10 @@ fn build_dex(
                 .unwrap()),
             (compiled_java_classes_dir
                 .join("MakepadNetwork.class")
+                .to_str()
+                .unwrap()),
+            (compiled_java_classes_dir
+                .join("MakepadSocketStream.class")
                 .to_str()
                 .unwrap()),
             (compiled_java_classes_dir

@@ -3,7 +3,6 @@ use super::linux_media::CxLinuxMedia;
 
 use crate::{
     cx::Cx,
-    event::Event,
     opengl_cx::OpenglCx,
     CxOsApi, OpenUrlInPlace,
 };

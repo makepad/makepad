@@ -1,5 +1,6 @@
 // stripped mac core foundation + core audio + metal layer only whats needed
 
+#![cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
