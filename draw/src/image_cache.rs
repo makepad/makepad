@@ -356,6 +356,13 @@ fn detect_image_format(data: &[u8]) -> Option<&'static str> {
 }
 
 fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Option<&'static str> {
+    // Prefer magic-byte detection over file extensions so in-memory/binary
+    // resources decode correctly even when their synthetic path has no extension.
+    if let Some(format) = detect_image_format(data) {
+        return Some(format);
+    }
+
+    // Keep extension fallback for edge cases where headers are unavailable.
     let ext = image_path
         .extension()
         .and_then(|s| s.to_str())
@@ -364,7 +371,7 @@ fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Opt
         Some("jpg") | Some("jpeg") => Some("jpg"),
         Some("png") => Some("png"),
         Some("webp") => Some("webp"),
-        _ => detect_image_format(data),
+        _ => None,
     }
 }
 

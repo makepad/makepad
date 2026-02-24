@@ -63,22 +63,39 @@ pub fn script_mod(vm: &mut ScriptVm) {
         x
     }
 
+    fn fresh_seed() -> u64 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut seed = (nanos >> 64) as u64 ^ (nanos as u64);
+        seed ^= std::process::id() as u64;
+        if seed == 0 {
+            seed = 0x9e37_79b9_7f4a_7c15;
+        }
+        seed
+    }
+
+    fn ensure_seeded(cx: &mut Cx) {
+        if cx.script_data.random_seed == 0 {
+            cx.script_data.random_seed = fresh_seed();
+        }
+    }
+
     vm.add_method(
         std,
         id_lut!(random_seed),
         script_args_def!(),
         |vm, _args| {
-            let start = SystemTime::now();
-            let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap();
-            let nanos = since_the_epoch.as_nanos();
             let cx = vm.cx_mut();
-            cx.script_data.random_seed = (nanos >> 64) as u64 ^ (nanos as u64);
+            cx.script_data.random_seed = fresh_seed();
             NIL
         },
     );
 
     vm.add_method(std, id_lut!(random), script_args_def!(), |vm, _args| {
         let cx = vm.cx_mut();
+        ensure_seeded(cx);
         let seed = cx.script_data.random_seed;
         let seed = next_hash(&seed.to_ne_bytes());
         cx.script_data.random_seed = seed;
@@ -87,6 +104,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
     vm.add_method(std, id_lut!(random_u32), script_args_def!(), |vm, _args| {
         let cx = vm.cx_mut();
+        ensure_seeded(cx);
         let seed = cx.script_data.random_seed;
         let seed = next_hash(&seed.to_ne_bytes());
         cx.script_data.random_seed = seed;

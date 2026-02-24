@@ -14,7 +14,6 @@ script_mod! {
     let openai_base = "http://127.0.0.1:8080"
     let prompt_path = "/Users/admin/prompt.txt"
     let auto_seconds = 60
-
     let Display = {mac:"" ip:"" landscape:false prompt:"empty"}.freeze_api()
     let displays = [
         Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.182" landscape:false}
@@ -74,6 +73,15 @@ script_mod! {
 
     fn set_last_prompt(text){
         ui.last_prompt_view.set_text(text)
+    }
+
+    fn set_preview_path(text){
+        ui.preview_path_value.set_text(text)
+    }
+
+    fn set_preview_image(bytes){
+        ui.preview_image.load_image_from_data_async(bytes)
+        set_preview_path("binary data (" + bytes.len() + " bytes)")
     }
 
     fn refresh_auto_button(){
@@ -143,10 +151,13 @@ script_mod! {
                     let o = split.parse_json()
                     ok{
                         total += o.data.choices[0].delta.content
+                        set_last_prompt(total)
                     }
                 }
             }
-            on_complete: || promise.resolve(total.trim())
+            on_complete: || {
+                promise.resolve(total.trim())
+            }
             on_error: |e| {
                 set_status("OpenAI completion error")
                 ~e
@@ -205,10 +216,13 @@ script_mod! {
         net.web_socket("ws://"+comfy_ip+"/ws?clientId=8a327a3e4961419ea7386c542f0ea491") do net.WebSocketEvents{
             on_string:fn(str){
                 let msg = ok{str.parse_json()}
-                if msg == nil return
-                if ok{msg.data.nodes[model.sampler].state == "running"}
-                    task.emit(@progress ok{msg.data.nodes[model.sampler].value})
+                if msg == nil return;
+                if ok{msg.type == "execution_start"}
+                    task.emit(@progress ok{0.0})
+                if ok{msg.type == "progress"}
+                    task.emit(@progress ok{msg.data.value/msg.data.max})
                 if ok{msg.data.nodes[model.save].state == "finished"}{
+                    task.emit(@progress ok{1.0})
                     let prompt_id = ok{msg.data.nodes[model.save].prompt_id}
                     task.emit(@done, prompt_id)
                 }
@@ -262,36 +276,61 @@ script_mod! {
 
     fn http_response(headers, displays){
         if headers.path == "/content.json"{
+            std.println("Content.json loaded")
+            let body = current_content_json
             return net.HttpServerResponse{
-                header: "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
-                body: current_content_json
+                header:
+                    "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: application/json; charset=utf-8\r\n" +
+                    "Content-Length: " + body.len() + "\r\n" +
+                    "Connection: close\r\n\r\n"
+                body: body
             }
         }
         if headers.path == "/image"{
             if current_image_data.len() > 0{
+                std.println("Uploading image")
+                let body = current_image_data
                 return net.HttpServerResponse{
-                    header: "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n"
-                    body: current_image_data
+                    header:
+                        "HTTP/1.1 200 OK\r\n" +
+                        "Content-Type: image/png\r\n" +
+                        "Accept-Ranges: bytes\r\n" +
+                        "Cache-Control: public, max-age=0\r\n" +
+                        "Content-Length: " + body.len() + "\r\n" +
+                        "Connection: close\r\n\r\n"
+                    body: body
                 }
             }
+            let body = "No image"
             return net.HttpServerResponse{
-                header: "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\n"
-                body: "No image"
+                header:
+                    "HTTP/1.1 404 Not Found\r\n" +
+                    "Content-Type: text/plain; charset=utf-8\r\n" +
+                    "Content-Length: " + body.len() + "\r\n" +
+                    "Connection: close\r\n\r\n"
+                body: body
             }
         }
 
         let idx = headers.search.to_f64()
-        net.HttpServerResponse{
-            header:"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
-            body: if idx.is_number()
+        let body =
+            if idx.is_number()
                 displays[idx].prompt
             else
                 mod.edmx.http_body
+        net.HttpServerResponse{
+            header:
+                "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: text/html; charset=utf-8\r\n" +
+                "Content-Length: " + body.len() + "\r\n" +
+                "Connection: close\r\n\r\n"
+            body: body
         }
     }
 
     let http_server = net.http_server(net.HttpServerOptions{
-        listen:"0.0.0.0:8081"
+        listen:"0.0.0.0:3000"
     }, net.HttpServerEvents{
         on_get: |headers| http_response(headers, displays)
     })
@@ -356,18 +395,7 @@ script_mod! {
 
         set_status("Generating image prompt")
         let image_prompt_text = openai_completion(messages).await()
-        if image_prompt_text == nil || ("" + image_prompt_text).trim() == ""{
-            set_status("AI returned empty prompt")
-            is_running = false
-            ui.run_now_btn.set_text("Run Now")
-            return false
-        }
-
-        messages.push({content:image_prompt_text role:"assistant"})
-        comfy_socket.queue.clear()
-
-        let image_prompt =
-            ("" + image_prompt_text)
+        let image_prompt = image_prompt_text
             .strip_prefix("```json")
             .strip_suffix("```")
             .parse_json()
@@ -378,6 +406,9 @@ script_mod! {
             ui.run_now_btn.set_text("Run Now")
             return false
         }
+
+        messages.push({content:image_prompt_text role:"assistant"})
+        comfy_socket.queue.clear()
 
         let visual_description = ok{image_prompt.visual_description}
         let style_keywords = ok{image_prompt.style_and_keywords}
@@ -403,7 +434,7 @@ script_mod! {
                 return false
             }
             if event[0] == @progress{
-                set_progress("" + event[1])
+                set_progress("" + (event[1] * 100) + "%")
             }
             if event[0] == @done{
                 event_prompt_id = event[1]
@@ -443,9 +474,10 @@ script_mod! {
         
         set_status("Uploading to EMDX " + display.ip)
         current_image_data = data
+        set_preview_image(current_image_data)
         let file_id = "EDMX" + std.random_u32() + std.random_u32()
-        current_content_json = mod.edmx.build_content_json(self_ip, "8081", file_id, current_image_data.len())
-        let content_url = "http://" + self_ip + ":8081/content.json"
+        current_content_json = mod.edmx.build_content_json(self_ip, "3000", file_id, current_image_data.len())
+        let content_url = "http://" + self_ip + ":3000/content.json"
         let upload_result = edmx.upload_image(display, content_url, sleep_seconds)
         if upload_result == nil || ok{upload_result.is_ok} != true {
             let err = ok{upload_result.error}
@@ -471,6 +503,7 @@ script_mod! {
                 set_status("Starting ComfyUI dashboard")
                 set_display("-")
                 set_last_prompt("")
+                set_preview_path("-")
                 refresh_auto_button()
                 load_prompt_into_ui()
                 start_auto_loop()
@@ -501,81 +534,123 @@ script_mod! {
 
                     View{
                         width: Fill
-                        height: Fit
+                        height: Fill
                         flow: Right
-                        spacing: 8
+                        spacing: 10
 
-                        load_prompt_btn := ButtonFlat{
-                            text: "Load prompt.txt"
-                            on_click: || load_prompt_into_ui()
-                        }
-                        save_prompt_btn := ButtonFlat{
-                            text: "Save prompt.txt"
-                            on_click: || save_prompt_from_ui()
-                        }
-                        run_now_btn := Button{
-                            text: "Run Now"
-                            on_click: || post()
-                        }
-                        toggle_auto_btn := ButtonFlat{
-                            text: "Pause Auto"
-                            on_click: || {
-                                if auto_enabled stop_auto_loop()
-                                else start_auto_loop()
+                        View{
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            spacing: 10
+
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+
+                                load_prompt_btn := ButtonFlat{
+                                    text: "Load prompt.txt"
+                                    on_click: || load_prompt_into_ui()
+                                }
+                                save_prompt_btn := ButtonFlat{
+                                    text: "Save prompt.txt"
+                                    on_click: || save_prompt_from_ui()
+                                }
+                                run_now_btn := Button{
+                                    text: "Run Now"
+                                    on_click: || post()
+                                }
+                                toggle_auto_btn := ButtonFlat{
+                                    text: "Pause Auto"
+                                    on_click: || {
+                                        if auto_enabled stop_auto_loop()
+                                        else start_auto_loop()
+                                    }
+                                }
+                            }
+
+                            prompt_input := TextInput{
+                                width: Fill
+                                height: 140
+                                is_multiline: true
+                                empty_text: "{ \"system\": \"...\", \"prompt\": \"...\", \"clear\": false }"
+                            }
+
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 10
+                                draw_bg.color: #1f232b
+                                draw_bg.radius: 6.0
+                                flow: Down
+                                spacing: 6
+
+                                View{width: Fill height: Fit flow: Right spacing: 8
+                                    Label{text: "Status:" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
+                                    status_value := Label{text: "Idle" draw_text.color: #ffffff draw_text.text_style.font_size: 10}
+                                }
+                                View{width: Fill height: Fit flow: Right spacing: 8
+                                    Label{text: "Progress:" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
+                                    progress_value := Label{text: "-" draw_text.color: #ffffff draw_text.text_style.font_size: 10}
+                                }
+                                View{width: Fill height: Fit flow: Right spacing: 8
+                                    Label{text: "Display:" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
+                                    display_value := Label{text: "-" draw_text.color: #ffffff draw_text.text_style.font_size: 10}
+                                }
+                            }
+
+                            Label{text: "Last prompt sent" draw_text.color: #c8d0d8 draw_text.text_style.font_size: 10}
+                            last_prompt_view := TextInput{
+                                width: Fill
+                                height: 56
+                                is_multiline: true
+                                is_read_only: true
+                                empty_text: "No prompt yet"
+                            }
+
+                            Label{text: "Activity log" draw_text.color: #c8d0d8 draw_text.text_style.font_size: 10}
+                            log_scroller := ScrollYView{
+                                width: Fill
+                                height: Fill
+                                show_bg: false
+                                log_view := TextInput{
+                                    width: Fill
+                                    height: Fit
+                                    is_multiline: true
+                                    is_read_only: true
+                                    empty_text: "Logs will appear here"
+                                }
                             }
                         }
-                    }
 
-                    prompt_input := TextInput{
-                        width: Fill
-                        height: 140
-                        is_multiline: true
-                        empty_text: "{ \"system\": \"...\", \"prompt\": \"...\", \"clear\": false }"
-                    }
+                        View{
+                            width: 320
+                            height: Fill
+                            flow: Down
+                            spacing: 8
 
-                    RoundedView{
-                        width: Fill
-                        height: Fit
-                        padding: 10
-                        draw_bg.color: #1f232b
-                        draw_bg.radius: 6.0
-                        flow: Down
-                        spacing: 6
+                            Label{text: "Current uploaded image" draw_text.color: #c8d0d8 draw_text.text_style.font_size: 10}
+                            RoundedView{
+                                width: Fill
+                                height: Fill
+                                padding: 10
+                                draw_bg.color: #1f232b
+                                draw_bg.radius: 6.0
+                                flow: Down
+                                spacing: 6
 
-                        View{width: Fill height: Fit flow: Right spacing: 8
-                            Label{text: "Status:" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
-                            status_value := Label{text: "Idle" draw_text.color: #ffffff draw_text.text_style.font_size: 10}
-                        }
-                        View{width: Fill height: Fit flow: Right spacing: 8
-                            Label{text: "Progress:" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
-                            progress_value := Label{text: "-" draw_text.color: #ffffff draw_text.text_style.font_size: 10}
-                        }
-                        View{width: Fill height: Fit flow: Right spacing: 8
-                            Label{text: "Display:" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
-                            display_value := Label{text: "-" draw_text.color: #ffffff draw_text.text_style.font_size: 10}
-                        }
-                    }
-
-                    Label{text: "Last prompt sent" draw_text.color: #c8d0d8 draw_text.text_style.font_size: 10}
-                    last_prompt_view := TextInput{
-                        width: Fill
-                        height: 56
-                        is_multiline: true
-                        is_read_only: true
-                        empty_text: "No prompt yet"
-                    }
-
-                    Label{text: "Activity log" draw_text.color: #c8d0d8 draw_text.text_style.font_size: 10}
-                    log_scroller := ScrollYView{
-                        width: Fill
-                        height: Fill
-                        show_bg: false
-                        log_view := TextInput{
-                            width: Fill
-                            height: Fit
-                            is_multiline: true
-                            is_read_only: true
-                            empty_text: "Logs will appear here"
+                                preview_image := Image{
+                                    width: Fill
+                                    height: Fill
+                                    fit: ImageFit.Smallest
+                                }
+                                View{width: Fill height: Fit flow: Right spacing: 8
+                                    Label{text: "File:" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
+                                    preview_path_value := Label{text: "-" draw_text.color: #ffffff draw_text.text_style.font_size: 10}
+                                }
+                            }
                         }
                     }
                 }
