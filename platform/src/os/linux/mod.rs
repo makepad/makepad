@@ -55,9 +55,10 @@ pub mod pulse_audio;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod pulse_sys;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
+#[allow(dead_code)]
 mod socket_stream;
 
-#[cfg(not(target_os = "android"))]
+#[cfg(target_os = "android")]
 pub mod android;
 
 #[cfg(target_os = "android")]
