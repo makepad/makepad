@@ -1332,12 +1332,12 @@ impl Widget for TextInput {
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
                 let trap = vm.bx.threads.cur().trap.pass();
-                let str_val = vm.bx.heap.vec_value(args_obj, 0, trap);
-                let new_text = vm
-                    .bx
-                    .heap
-                    .string_mut_self_with(str_val, |_, s| s.to_string());
-                if let Some(new_text) = new_text {
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    let new_text = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(value, out);
+                        out.to_string()
+                    });
                     vm.with_cx_mut(|cx| {
                         self.set_text(cx, &new_text);
                     });
