@@ -1,14 +1,17 @@
 use super::android_jni;
 use crate::makepad_live_id::LiveId;
 use crate::makepad_network::{
-    EventSink, HttpError, HttpRequest, HttpResponse, NetworkBackend, NetworkError,
-    NetworkResponse, ServerWebSocketMessage, ServerWebSocketMessageFormat,
-    ServerWebSocketMessageHeader, WebSocketMessage, WebSocketParser, WsMessage, WsSend,
+    AndroidSocketStream, AndroidSocketStreamFactory, EventSink, HttpError, HttpRequest,
+    HttpResponse, NetworkBackend, NetworkError, NetworkResponse, ServerWebSocketMessage,
+    ServerWebSocketMessageFormat, ServerWebSocketMessageHeader, WebSocketMessage, WebSocketParser,
+    WsMessage, WsSend,
 };
 use std::collections::HashMap;
+use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::time::Duration;
 
 struct PendingHttp {
     public_request_id: LiveId,
@@ -30,6 +33,133 @@ struct PendingWs {
 struct AndroidWebSocket {
     _sender_ref: Arc<Box<(u64, Sender<WebSocketMessage>)>>,
     java_socket_id: LiveId,
+}
+
+fn io_other(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, msg.into())
+}
+
+struct AndroidSocketStreamFactoryImpl;
+
+struct AndroidSocketStreamImpl {
+    socket_id: LiveId,
+    is_shutdown: bool,
+}
+
+impl Drop for AndroidSocketStreamImpl {
+    fn drop(&mut self) {
+        if !self.is_shutdown {
+            unsafe {
+                android_jni::to_java_socket_stream_close(self.socket_id);
+            }
+            self.is_shutdown = true;
+        }
+    }
+}
+
+impl AndroidSocketStreamFactory for AndroidSocketStreamFactoryImpl {
+    fn connect(
+        &self,
+        host: &str,
+        port: &str,
+        use_tls: bool,
+        ignore_ssl_cert: bool,
+    ) -> io::Result<Box<dyn AndroidSocketStream>> {
+        let port = port
+            .parse::<u16>()
+            .map_err(|_| io_other(format!("invalid port for android socket stream: {port}")))?;
+        let socket_id = LiveId::unique();
+
+        let opened = unsafe {
+            android_jni::to_java_socket_stream_open(
+                socket_id,
+                host,
+                port as i32,
+                use_tls,
+                ignore_ssl_cert,
+            )
+        };
+        if !opened {
+            return Err(io_other(
+                "android platform socket stream open failed on Java side",
+            ));
+        }
+
+        Ok(Box::new(AndroidSocketStreamImpl {
+            socket_id,
+            is_shutdown: false,
+        }))
+    }
+}
+
+fn timeout_to_ms(timeout: Option<Duration>) -> i32 {
+    match timeout {
+        Some(value) => value.as_millis().min(i32::MAX as u128) as i32,
+        None => 0,
+    }
+}
+
+impl AndroidSocketStream for AndroidSocketStreamImpl {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        unsafe {
+            android_jni::to_java_socket_stream_set_read_timeout(
+                self.socket_id,
+                timeout_to_ms(timeout),
+            );
+        }
+        Ok(())
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        unsafe {
+            android_jni::to_java_socket_stream_set_write_timeout(
+                self.socket_id,
+                timeout_to_ms(timeout),
+            );
+        }
+        Ok(())
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let Some(data) =
+            (unsafe { android_jni::to_java_socket_stream_read(self.socket_id, buf.len() as i32) })
+        else {
+            return Ok(0);
+        };
+        let read_len = data.len().min(buf.len());
+        buf[..read_len].copy_from_slice(&data[..read_len]);
+        Ok(read_len)
+    }
+
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let written =
+            unsafe { android_jni::to_java_socket_stream_write(self.socket_id, buf.to_vec()) };
+        if written < 0 {
+            Err(io_other("android platform socket stream write failed"))
+        } else {
+            Ok(written as usize)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        if self.is_shutdown {
+            return;
+        }
+        unsafe {
+            android_jni::to_java_socket_stream_close(self.socket_id);
+        }
+        self.is_shutdown = true;
+    }
 }
 
 impl Drop for AndroidWebSocket {
@@ -306,8 +436,12 @@ impl NetworkBackend for AndroidNetworkShimBackend {
                 .ws
                 .lock()
                 .map_err(|_| NetworkError::backend("android shim websocket lock poisoned"))?;
-            state.internal_to_public.insert(internal_socket_id, socket_id);
-            state.parsers.insert(internal_socket_id, WebSocketParser::new());
+            state
+                .internal_to_public
+                .insert(internal_socket_id, socket_id);
+            state
+                .parsers
+                .insert(internal_socket_id, WebSocketParser::new());
             state.by_public.insert(
                 socket_id,
                 PendingWs {
@@ -332,10 +466,9 @@ impl NetworkBackend for AndroidNetworkShimBackend {
                         socket_id,
                         message: WsMessage::Binary(data),
                     },
-                    WebSocketMessage::Error(message) => NetworkResponse::WsError {
-                        socket_id,
-                        message,
-                    },
+                    WebSocketMessage::Error(message) => {
+                        NetworkResponse::WsError { socket_id, message }
+                    }
                 };
                 if sink.emit(event).is_err() {
                     break;
@@ -397,6 +530,9 @@ pub(crate) fn install_network_backend_shim() {
         let backend = Arc::new(AndroidNetworkShimBackend::new());
         let _ = SHIM_BACKEND.set(backend.clone());
         crate::makepad_network::register_android_backend_shim(backend);
+        crate::makepad_network::register_android_socket_stream_factory_shim(Arc::new(
+            AndroidSocketStreamFactoryImpl,
+        ));
     });
 }
 
@@ -410,13 +546,7 @@ pub(crate) fn try_handle_http_response(
     let Some(backend) = shim_backend() else {
         return false;
     };
-    backend.handle_http_response(
-        internal_request_id,
-        metadata_id,
-        status_code,
-        headers,
-        body,
-    )
+    backend.handle_http_response(internal_request_id, metadata_id, status_code, headers, body)
 }
 
 pub(crate) fn try_handle_http_error(

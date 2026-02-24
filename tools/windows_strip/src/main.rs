@@ -1,9 +1,7 @@
 use makepad_rust_tokenizer::{live_id, Cursor, Delim, FullToken, LiveId, State};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    env,
-    fs,
-    io,
+    env, fs, io,
     path::{Path, PathBuf},
 };
 
@@ -228,7 +226,11 @@ fn is_hash(tokens: &[TokenWithString], index: usize) -> bool {
     token_is_punct(tokens, index, live_id!(#))
 }
 
-fn find_matching_delim(tokens: &[TokenWithString], open_index: usize, delim: Delim) -> Option<usize> {
+fn find_matching_delim(
+    tokens: &[TokenWithString],
+    open_index: usize,
+    delim: Delim,
+) -> Option<usize> {
     let mut depth = 0usize;
     for i in open_index..tokens.len() {
         match tokens[i].token {
@@ -303,7 +305,7 @@ fn load_enabled_windows_features(platform_cargo_toml: &Path) -> HashSet<String> 
     let Ok(source) = fs::read_to_string(platform_cargo_toml) else {
         return features;
     };
-    
+
     let mut in_windows_dep = false;
     let mut in_features = false;
     for line in source.lines() {
@@ -516,7 +518,10 @@ fn cfg_expr_is_enabled(expr: &str, enabled_features: &HashSet<String>) -> bool {
     parser.parse_expr().unwrap_or(true)
 }
 
-fn item_enabled_for_features(tokens: &[TokenWithString], enabled_features: &HashSet<String>) -> bool {
+fn item_enabled_for_features(
+    tokens: &[TokenWithString],
+    enabled_features: &HashSet<String>,
+) -> bool {
     let mut index = 0usize;
     while is_hash(tokens, index) {
         let Some(TokenWithString {
@@ -582,7 +587,10 @@ fn find_item_end(tokens: &[TokenWithString], start: usize) -> Option<usize> {
     None
 }
 
-fn extract_keyword_and_name(tokens: &[TokenWithString], start: usize) -> (Option<String>, Option<String>) {
+fn extract_keyword_and_name(
+    tokens: &[TokenWithString],
+    start: usize,
+) -> (Option<String>, Option<String>) {
     let mut i = start;
     if ident_eq(tokens, i, "pub") {
         i += 1;
@@ -629,14 +637,10 @@ fn extract_keyword_and_name(tokens: &[TokenWithString], start: usize) -> (Option
 
     let keyword = token_ident(tokens, i).map(|v| v.to_string());
     let name = match keyword.as_deref() {
-        Some("fn")
-        | Some("const")
-        | Some("type")
-        | Some("struct")
-        | Some("union")
-        | Some("enum")
-        | Some("trait")
-        | Some("mod") => token_ident(tokens, i + 1).map(|v| v.to_string()),
+        Some("fn") | Some("const") | Some("type") | Some("struct") | Some("union")
+        | Some("enum") | Some("trait") | Some("mod") => {
+            token_ident(tokens, i + 1).map(|v| v.to_string())
+        }
         _ => None,
     };
 
@@ -954,7 +958,9 @@ fn parse_module_data(
 
     for entry in entries.values_mut() {
         let mut seen = HashSet::new();
-        entry.snippets.retain(|(_, snippet)| seen.insert(snippet.clone()));
+        entry
+            .snippets
+            .retain(|(_, snippet)| seen.insert(snippet.clone()));
         entry.snippets.sort_by_key(|(order, _)| *order);
     }
 
@@ -1003,8 +1009,8 @@ fn fallback_extract_entry(
             if !item_enabled_for_features(&item.tokens, enabled_features) {
                 continue;
             }
-            let mut include = item.name.as_deref() == Some(symbol_name)
-                && item.keyword.as_deref() != Some("mod");
+            let mut include =
+                item.name.as_deref() == Some(symbol_name) && item.keyword.as_deref() != Some("mod");
             if !include && item.name.is_none() {
                 let idents = if item.keyword.as_deref() == Some("impl") {
                     collect_idents(header_tokens(&item.tokens))
@@ -1216,8 +1222,8 @@ fn fallback_extract_entry(
         if !item_enabled_for_features(&item.tokens, enabled_features) {
             continue;
         }
-        let mut include = item.name.as_deref() == Some(symbol_name)
-            && item.keyword.as_deref() != Some("mod");
+        let mut include =
+            item.name.as_deref() == Some(symbol_name) && item.keyword.as_deref() != Some("mod");
         if !include && item.name.is_none() {
             let idents = if item.keyword.as_deref() == Some("impl") {
                 collect_idents(header_tokens(&item.tokens))
@@ -1231,7 +1237,12 @@ fn fallback_extract_entry(
         }
 
         let snippet = tokens_to_string(&item.tokens);
-        deps.extend(analyze_deps(&item.tokens, module, module_names, child_modules));
+        deps.extend(analyze_deps(
+            &item.tokens,
+            module,
+            module_names,
+            child_modules,
+        ));
         snippets.push((usize::MAX / 2 + item.order, snippet));
     }
     if snippets.is_empty() {
@@ -1249,7 +1260,8 @@ fn fallback_extract_entry(
     let struct_pattern = format!("struct {}", symbol_name);
     for (_, snippet) in &mut snippets {
         let trimmed = snippet.trim_start();
-        let is_struct = trimmed.starts_with(&pub_struct_pattern) || trimmed.starts_with(&struct_pattern);
+        let is_struct =
+            trimmed.starts_with(&pub_struct_pattern) || trimmed.starts_with(&struct_pattern);
         let has_attrs = trimmed.starts_with("#[");
         if !is_struct || has_attrs {
             continue;
@@ -1630,7 +1642,10 @@ fn resolve_windows_source_input() -> PathBuf {
 
 fn resolve_windows_source_and_mod_root(windows_source: &Path) -> (PathBuf, PathBuf) {
     if windows_source.join("src/Windows").is_dir() {
-        return (windows_source.to_path_buf(), windows_source.join("src/Windows"));
+        return (
+            windows_source.to_path_buf(),
+            windows_source.join("src/Windows"),
+        );
     }
     if windows_source.join("Windows").is_dir() {
         let source_root = windows_source
@@ -1659,7 +1674,10 @@ fn resolve_windows_source_and_mod_root(windows_source: &Path) -> (PathBuf, PathB
     );
 }
 
-fn resolve_sibling_crate_source(windows_source_root: &Path, crate_spec: VendoredCrate) -> Option<PathBuf> {
+fn resolve_sibling_crate_source(
+    windows_source_root: &Path,
+    crate_spec: VendoredCrate,
+) -> Option<PathBuf> {
     let Some(parent) = windows_source_root.parent() else {
         return None;
     };
@@ -1693,7 +1711,10 @@ fn copy_tree(src_root: &Path, dst_root: &Path) -> io::Result<()> {
         let entry = entry?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if matches!(name_str.as_ref(), ".cargo-ok" | ".cargo_vcs_info.json" | "Cargo.lock") {
+        if matches!(
+            name_str.as_ref(),
+            ".cargo-ok" | ".cargo_vcs_info.json" | "Cargo.lock"
+        ) {
             continue;
         }
         let src_path = entry.path();
@@ -1789,16 +1810,16 @@ fn set_manifest_dependency_path(manifest: &mut String, section_name: &str, path:
     }
 
     if !saw_section {
-        panic!("missing dependency section [{}] in Cargo.toml", section_name);
+        panic!(
+            "missing dependency section [{}] in Cargo.toml",
+            section_name
+        );
     }
 
     *manifest = out;
 }
 
-fn replace_windows_std_feature_block(
-    manifest: &mut String,
-    include_future_std: bool,
-) {
+fn replace_windows_std_feature_block(manifest: &mut String, include_future_std: bool) {
     let old_std_feature = "std = [\n    \"windows-collections/std\",\n    \"windows-core/std\",\n    \"windows-future/std\",\n    \"windows-numerics/std\",\n]\n";
     let mut new_std_feature = String::from("std = [\n    \"windows-core/std\",\n");
     if include_future_std {
@@ -2030,7 +2051,11 @@ fn insert_snippet(node: &mut ModuleNode, module: &[String], order: usize, snippe
     }
 }
 
-fn enqueue_symbol(queue: &mut VecDeque<SymbolRef>, enqueued: &mut HashSet<SymbolRef>, symbol: SymbolRef) {
+fn enqueue_symbol(
+    queue: &mut VecDeque<SymbolRef>,
+    enqueued: &mut HashSet<SymbolRef>,
+    symbol: SymbolRef,
+) {
     if enqueued.insert(symbol.clone()) {
         queue.push_back(symbol);
     }
@@ -2101,9 +2126,7 @@ fn impl_for_target_name(header: &[TokenWithString]) -> Option<String> {
     while i < header.len() {
         if ident_eq(header, i, "for") {
             i += 1;
-            while i < header.len()
-                && (is_ampersand(header, i) || ident_eq(header, i, "mut"))
-            {
+            while i < header.len() && (is_ampersand(header, i) || ident_eq(header, i, "mut")) {
                 i += 1;
             }
             let (path, _) = parse_ident_path(header, i);
@@ -2176,7 +2199,8 @@ fn collect_generated_impl_method_usage(source: &str, usage: &mut MethodUsage) {
             let Some(open_index) = open_index else {
                 continue;
             };
-            let Some(close_index) = find_matching_delim(&item.tokens, open_index, Delim::Brace) else {
+            let Some(close_index) = find_matching_delim(&item.tokens, open_index, Delim::Brace)
+            else {
                 continue;
             };
             let body = tokens_to_string(&item.tokens[open_index + 1..close_index]);
@@ -2228,11 +2252,7 @@ fn public_function_name(item_tokens: &[TokenWithString]) -> Option<String> {
     token_ident(item_tokens, i + 1).map(|v| v.to_string())
 }
 
-fn method_used_for_target(
-    target: &str,
-    method: &str,
-    used_methods: &MethodUsage,
-) -> bool {
+fn method_used_for_target(target: &str, method: &str, used_methods: &MethodUsage) -> bool {
     if used_methods.global_methods.contains(method) {
         return true;
     }
@@ -2349,7 +2369,9 @@ fn strip_impl_item_methods(item: &RawItem, used_methods: &MethodUsage) -> String
             if !include {
                 continue;
             }
-            for called in collect_called_impl_methods(&body_item.tokens, &target, &available_methods) {
+            for called in
+                collect_called_impl_methods(&body_item.tokens, &target, &available_methods)
+            {
                 if kept_methods.insert(called) {
                     changed = true;
                 }
@@ -2396,7 +2418,9 @@ fn strip_unused_impl_methods(source: &str, used_methods: &MethodUsage) -> String
                 .iter()
                 .position(|token| matches!(token.token, FullToken::Open(Delim::Brace)));
             if let Some(open_index) = open_index {
-                if let Some(close_index) = find_matching_delim(&item.tokens, open_index, Delim::Brace) {
+                if let Some(close_index) =
+                    find_matching_delim(&item.tokens, open_index, Delim::Brace)
+                {
                     let body = tokens_to_string(&item.tokens[open_index + 1..close_index]);
                     let stripped_body = strip_unused_impl_methods(&body, used_methods);
                     out.push_str(&tokens_to_string(&item.tokens[..=open_index]));
@@ -2484,6 +2508,9 @@ fn main() {
     enabled_features.extend(load_enabled_windows_features(Path::new(
         "./libs/terminal_core/Cargo.toml",
     )));
+    enabled_features.extend(load_enabled_windows_features(Path::new(
+        "./libs/network/Cargo.toml",
+    )));
 
     let mut explicit_imports = HashSet::new();
     let mut glob_imports: Vec<(Vec<String>, HashSet<String>)> = Vec::new();
@@ -2507,6 +2534,20 @@ fn main() {
         explicit_imports.extend(file_explicit);
         glob_imports.extend(file_globs);
         collect_method_usage_from_file(terminal_pty_path, &mut used_methods);
+    }
+    let network_windows_src_dir = Path::new("./libs/network/src/backend/windows");
+    if network_windows_src_dir.is_dir() {
+        for entry in fs::read_dir(network_windows_src_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) != Some("rs") {
+                continue;
+            }
+            let (file_explicit, file_globs) = collect_imports_from_file(&path);
+            explicit_imports.extend(file_explicit);
+            glob_imports.extend(file_globs);
+            collect_method_usage_from_file(&path, &mut used_methods);
+        }
     }
 
     let mut module_cache: HashMap<Vec<String>, Option<ModuleData>> = HashMap::new();
@@ -2562,11 +2603,9 @@ fn main() {
         }
 
         let module_key = symbol.module.clone();
-        let module_data = module_cache
-            .entry(module_key)
-            .or_insert_with(|| {
-                parse_module_data(&symbol.module, &windows_mod_root, &enabled_features)
-            });
+        let module_data = module_cache.entry(module_key).or_insert_with(|| {
+            parse_module_data(&symbol.module, &windows_mod_root, &enabled_features)
+        });
         let Some(module_data) = module_data.as_mut() else {
             continue;
         };
