@@ -934,6 +934,8 @@ impl XlibApp {
 pub struct XlibAtoms {
     pub clipboard: x11_sys::Atom,
     pub net_wm_moveresize: x11_sys::Atom,
+    pub net_wm_icon: x11_sys::Atom,
+    pub cardinal: x11_sys::Atom,
     pub wm_delete_window: x11_sys::Atom,
     pub wm_protocols: x11_sys::Atom,
     pub wm_class: x11_sys::Atom,
@@ -958,6 +960,16 @@ impl XlibAtoms {
                 net_wm_moveresize: x11_sys::XInternAtom(
                     display,
                     "_NET_WM_MOVERESIZE\0".as_ptr() as *const _,
+                    0,
+                ),
+                net_wm_icon: x11_sys::XInternAtom(
+                    display,
+                    "_NET_WM_ICON\0".as_ptr() as *const _,
+                    0,
+                ),
+                cardinal: x11_sys::XInternAtom(
+                    display,
+                    "CARDINAL\0".as_ptr() as *const _,
                     0,
                 ),
                 wm_delete_window: x11_sys::XInternAtom(

@@ -144,6 +144,19 @@ fn generate_xdg(protocols: &Path) -> io::Result<String> {
         &generate_client_module(&protocols.join("stable/xdg-shell/xdg-shell.xml"), &[])?,
         4,
     ));
+    out.push_str("}\n\n");
+
+    out.push_str("#[cfg(feature = \"staging\")]\n");
+    out.push_str("pub mod toplevel_icon {\n");
+    out.push_str("    pub mod v1 {\n");
+    out.push_str(&indent(
+        &generate_client_module(
+            &protocols.join("staging/xdg-toplevel-icon/xdg-toplevel-icon-v1.xml"),
+            &["crate::xdg::shell"],
+        )?,
+        8,
+    ));
+    out.push_str("    }\n");
     out.push_str("}\n");
 
     Ok(out)

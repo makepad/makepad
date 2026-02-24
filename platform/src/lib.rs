@@ -41,6 +41,7 @@ pub mod permission;
 pub mod studio;
 mod texture;
 mod window;
+mod window_icon;
 
 pub mod web_socket;
 
@@ -168,7 +169,8 @@ pub use {
         ui_runner::*,
         video::*,
         web_socket::{WebSocket, WebSocketMessage},
-        window::{CxWindowPool, ScriptWindowHandle, WindowHandle, WindowId},
+        window::{CxWindowPool, ScriptWindowHandle, WindowHandle, WindowIcon, WindowIconBuffer, WindowId},
+        window_icon::default_window_icon,
     },
     app_main::*,
     arc_string_mut::ArcStringMut,

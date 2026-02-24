@@ -39,6 +39,9 @@ use wayland_protocols::{
         self,
         decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1},
         shell::client::{xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base},
+        toplevel_icon::v1::client::{
+            xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1,
+        },
     },
 };
 
@@ -64,6 +67,7 @@ pub(crate) struct WaylandState {
     pub(crate) compositor: Option<wl_compositor::WlCompositor>,
     pub(crate) wm_base: Option<xdg_wm_base::XdgWmBase>,
     pub(crate) seat: Option<wl_seat::WlSeat>,
+    pub(crate) shm: Option<wl_shm::WlShm>,
     pub(crate) data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
     pub(crate) data_device: Option<wl_data_device::WlDataDevice>,
     pub(crate) clipboard_source: Option<wl_data_source::WlDataSource>,
@@ -80,6 +84,7 @@ pub(crate) struct WaylandState {
     pub(crate) pointer_serial: Option<u32>,
     pub(crate) keyboard_serial: Option<u32>,
     pub(crate) decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
+    pub(crate) icon_manager: Option<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1>,
     pub(crate) windows: Vec<WaylandWindow>,
     pub(crate) current_window: Option<WindowId>,
     pub(crate) modifiers: KeyModifiers,
@@ -106,6 +111,7 @@ impl WaylandState {
             compositor: None,
             wm_base: None,
             seat: None,
+            shm: None,
             data_device_manager: None,
             data_device: None,
             clipboard_source: None,
@@ -119,6 +125,7 @@ impl WaylandState {
             cursor_shape: None,
             pointer: None,
             decoration_manager: None,
+            icon_manager: None,
             scale_manager: None,
             viewporter: None,
             windows: Vec::new(),
@@ -219,6 +226,21 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     let viewporter =
                         wl_registry.bind::<wp_viewporter::WpViewporter, _, _>(name, 1, qhandle, ());
                     state.viewporter = Some(viewporter);
+                }
+                "wl_shm" => {
+                    let shm =
+                        wl_registry.bind::<wl_shm::WlShm, _, _>(name, 1, qhandle, ());
+                    state.shm = Some(shm);
+                }
+                "xdg_toplevel_icon_manager_v1" => {
+                    let icon_manager = wl_registry
+                        .bind::<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, _, _>(
+                        name,
+                        1,
+                        qhandle,
+                        (),
+                    );
+                    state.icon_manager = Some(icon_manager);
                 }
                 "zwp_text_input_manager_v3" => {
                     let text_input_manager = wl_registry
@@ -1034,7 +1056,24 @@ delegate_noop!(WaylandState: ignore wp_fractional_scale_manager_v1::WpFractional
 delegate_noop!(WaylandState: ignore wl_compositor::WlCompositor);
 delegate_noop!(WaylandState: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
 delegate_noop!(WaylandState: ignore zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1);
+delegate_noop!(WaylandState: ignore xdg_toplevel_icon_v1::XdgToplevelIconV1);
+delegate_noop!(WaylandState: ignore wl_shm::WlShm);
+delegate_noop!(WaylandState: ignore wl_shm_pool::WlShmPool);
+delegate_noop!(WaylandState: ignore wl_buffer::WlBuffer);
 // delegate_noop!(WaylandState: ignore xdg_positioner::XdgPositioner);
+
+impl Dispatch<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1,
+        _event: xdg_toplevel_icon_manager_v1::Event,
+        _: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // icon_size events are informational; we ignore them for now
+    }
+}
 
 impl WaylandState {
     fn ensure_data_device(&mut self, qhandle: &QueueHandle<Self>) {

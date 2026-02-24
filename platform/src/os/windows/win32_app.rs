@@ -44,9 +44,9 @@ use {
                         DispatchMessageW, GetMessageW, IsGUIThread, IsProcessDPIAware, KillTimer,
                         LoadCursorW, LoadIconW, PeekMessageW, RegisterClassExW, SetCursor,
                         SetTimer, ShowCursor, TranslateMessage, CS_HREDRAW, CS_OWNDC, CS_VREDRAW,
-                        IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL,
-                        IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, PM_REMOVE,
-                        WM_QUIT, WNDCLASSEXW,
+                        HICON, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO,
+                        IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
+                        IDI_WINLOGO, PM_REMOVE, WM_QUIT, WNDCLASSEXW,
                     },
                 },
             },
@@ -152,21 +152,16 @@ impl Win32Time {
 impl Win32App {
     pub fn new(event_callback: Box<dyn FnMut(Win32Event) -> EventFlow>) -> Win32App {
         let window_class_name = encode_wide("MakepadWindow\0");
+        let icon = Self::create_default_icon();
         let class = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
             lpfnWndProc: Some(Win32Window::window_class_proc),
             hInstance: unsafe { GetModuleHandleW(None).unwrap().into() },
-            hIcon: unsafe { LoadIconW(None, IDI_WINLOGO).unwrap() }, //h_icon,
+            hIcon: icon,
             lpszClassName: PCWSTR(window_class_name.as_ptr()),
             hbrBackground: unsafe { CreateSolidBrush(COLORREF(0x3f3f3f3f)) },
-            ..Default::default() /*
-                                 cbClsExtra: 0,
-                                 cbWndExtra: 0,
-                                 hCursor: Default::default(), //unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
-                                 hbrBackground: Default::default(),
-                                 lpszMenuName: PCWSTR::null(),
-                                 hIconSm: Default::default(),*/
+            ..Default::default()
         };
 
         unsafe {
@@ -194,6 +189,62 @@ impl Win32App {
         win32_app.dpi_functions.become_dpi_aware();
 
         win32_app
+    }
+
+    /// Create an HICON from RGBA8 pixel data. Returns the default system icon on failure.
+    fn create_icon_from_rgba(width: u32, height: u32, rgba: &[u8]) -> HICON {
+        use crate::windows::Win32::UI::WindowsAndMessaging::HICON;
+        // CreateIcon expects AND mask (1bpp) + XOR mask (color).
+        // We use CreateIcon with nWidth, nHeight, cPlanes=1, cBitsPixel=32.
+        // The XOR mask is BGRA pixel data, the AND mask is all zeros (fully opaque).
+        let pixel_count = (width * height) as usize;
+        let mut bgra = Vec::with_capacity(pixel_count * 4);
+        for chunk in rgba.chunks_exact(4) {
+            bgra.push(chunk[2]); // B
+            bgra.push(chunk[1]); // G
+            bgra.push(chunk[0]); // R
+            bgra.push(chunk[3]); // A
+        }
+        // AND mask: all zeros = fully opaque (1 bit per pixel, rows padded to 16-bit)
+        let and_stride = ((width + 15) / 16) * 2;
+        let and_mask = vec![0u8; (and_stride * height) as usize];
+
+        windows_core::link!("user32.dll" "system" fn CreateIcon(
+            hinstance: *mut core::ffi::c_void,
+            n_width: i32,
+            n_height: i32,
+            c_planes: u8,
+            c_bits_pixel: u8,
+            lp_and_bits: *const u8,
+            lp_xor_bits: *const u8
+        ) -> HICON);
+
+        unsafe {
+            let hicon = CreateIcon(
+                core::ptr::null_mut(),
+                width as i32,
+                height as i32,
+                1,
+                32,
+                and_mask.as_ptr(),
+                bgra.as_ptr(),
+            );
+            if hicon.0.is_null() {
+                LoadIconW(None, IDI_WINLOGO).unwrap()
+            } else {
+                hicon
+            }
+        }
+    }
+
+    /// Create the default Makepad icon for the window class.
+    fn create_default_icon() -> HICON {
+        let icon = crate::window_icon::default_window_icon();
+        if let Some(buf) = icon.buffers.first() {
+            Self::create_icon_from_rgba(buf.width, buf.height, &buf.data)
+        } else {
+            unsafe { LoadIconW(None, IDI_WINLOGO).unwrap() }
+        }
     }
 
     pub fn event_loop() {
