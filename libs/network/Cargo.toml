@@ -22,7 +22,11 @@ version = "1.0.0"
 path = "../windows/windows-rs"
 version = "0.62.2"
 features = [
+    "Foundation",
     "Foundation_Collections",
+    "Networking",
+    "Networking_Sockets",
+    "Security_Cryptography_Certificates",
     "Storage",
     "Storage_Streams",
     "Web_Http",

@@ -7,6 +7,13 @@ use crate::types::{HttpRequest, NetworkError, NetworkResponse, WsSend};
 
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "android")]
+pub(crate) use self::android::connect_platform_socket_stream;
+#[cfg(target_os = "android")]
+pub use self::android::{
+    clear_platform_backend, clear_platform_socket_factory, register_platform_backend,
+    register_platform_socket_factory, PlatformSocketFactory, PlatformSocketStream,
+};
 #[cfg(any(target_os = "ios", target_os = "macos", target_os = "tvos"))]
 pub mod apple;
 #[cfg(target_os = "linux")]

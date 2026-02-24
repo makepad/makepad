@@ -10,10 +10,9 @@ pub const fn four_char_as_u32(s: &str) -> u32 {
 }
 pub use {
     makepad_objc_sys::{
-        objc_block, objc_block_invoke,
         class,
         declare::{ClassDecl, ProtocolDecl},
-        msg_send,
+        msg_send, objc_block, objc_block_invoke,
         runtime::{nil, Class, ObjcId, Object, Protocol, Sel, BOOL, NO, YES},
         sel, sel_impl, Encode, Encoding,
     },
@@ -1454,10 +1453,84 @@ extern "C" {
     pub fn IOSurfaceDecrementUseCount(surface: IOSurfaceRef);
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     pub fn CFRelease(cf: *const c_void);
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub type SSLContextRef = *mut c_void;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub type SSLConnectionRef = *mut c_void;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub type SSLProtocolSide = u32;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub type SSLConnectionType = u32;
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub const kSSLClientSide: SSLProtocolSide = 1;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub const kSSLStreamType: SSLConnectionType = 0;
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub const errSSLWouldBlock: OSStatus = -9803;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub const errSSLClosedGraceful: OSStatus = -9805;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub const errSSLClosedAbort: OSStatus = -9806;
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub type SSLReadFunc = Option<
+    unsafe extern "C" fn(
+        connection: SSLConnectionRef,
+        data: *mut c_void,
+        data_len: *mut usize,
+    ) -> OSStatus,
+>;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub type SSLWriteFunc = Option<
+    unsafe extern "C" fn(
+        connection: SSLConnectionRef,
+        data: *const c_void,
+        data_len: *mut usize,
+    ) -> OSStatus,
+>;
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[link(name = "Security", kind = "framework")]
+extern "C" {
+    pub fn SSLCreateContext(
+        alloc: *const c_void,
+        protocol_side: SSLProtocolSide,
+        connection_type: SSLConnectionType,
+    ) -> SSLContextRef;
+    pub fn SSLSetIOFuncs(
+        context: SSLContextRef,
+        read_func: SSLReadFunc,
+        write_func: SSLWriteFunc,
+    ) -> OSStatus;
+    pub fn SSLSetConnection(context: SSLContextRef, connection: SSLConnectionRef) -> OSStatus;
+    pub fn SSLSetPeerDomainName(
+        context: SSLContextRef,
+        peer_name: *const c_void,
+        peer_name_len: usize,
+    ) -> OSStatus;
+    pub fn SSLSetEnableCertVerify(context: SSLContextRef, enable: bool) -> OSStatus;
+    pub fn SSLHandshake(context: SSLContextRef) -> OSStatus;
+    pub fn SSLRead(
+        context: SSLContextRef,
+        data: *mut c_void,
+        data_len: usize,
+        processed: *mut usize,
+    ) -> OSStatus;
+    pub fn SSLWrite(
+        context: SSLContextRef,
+        data: *const c_void,
+        data_len: usize,
+        processed: *mut usize,
+    ) -> OSStatus;
+    pub fn SSLClose(context: SSLContextRef) -> OSStatus;
 }
 
 #[cfg(target_os = "macos")]
