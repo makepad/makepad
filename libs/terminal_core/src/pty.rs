@@ -102,7 +102,7 @@ impl Pty {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
-            let _ = (cols, rows, shell, env);
+            let _ = (cols, rows, shell, env, cwd);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "PTY not implemented for this platform",
@@ -676,14 +676,6 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-fn write_all_fd(_fd: i32, _data: &[u8]) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "PTY not implemented for this platform",
-    ))
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

@@ -226,6 +226,7 @@ impl Cx {
         self.start_studio_websocket(studio_http);
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
         loop {
             let response = self.net.recv().ok()?;

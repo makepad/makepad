@@ -29,8 +29,6 @@ use {
         event::{
             keyboard::{CharOffset, FullTextState, ImeAction, ImeActionEvent},
             Event,
-            HttpError,
-            HttpResponse,
             KeyCode,
             KeyEvent,
             KeyModifiers,
@@ -52,6 +50,8 @@ use {
             WindowGeomChangeEvent,
         },
         gpu_info::GpuPerformance,
+        HttpError,
+        HttpResponse,
         makepad_live_id::*,
         makepad_math::*,
         os::cx_native::EventFlow,
@@ -64,8 +64,9 @@ use {
         window::CxWindowPool,
     },
     jni_sys::jobject,
-    makepad_network::server_web_socket::WebSocketParser as WebSocketImpl,
-    makepad_network::server_web_socket::ServerWebSocketMessage as WebSocketMessageImpl,
+    makepad_network::{
+        ServerWebSocketMessage as WebSocketMessageImpl, WebSocketParser as WebSocketImpl,
+    },
     std::cell::RefCell,
     std::collections::HashMap,
     std::ffi::CString,
@@ -461,7 +462,7 @@ impl Cx {
             } => {
                 let out = vec![NetworkResponse::HttpResponse {
                     request_id: LiveId(request_id),
-                    response: HttpResponse::new(
+                    response: HttpResponse::from_header_string(
                         LiveId(metadata_id),
                         status_code,
                         headers,
