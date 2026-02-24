@@ -3,6 +3,8 @@ use crate::script::res::*;
 use crate::script::run::*;
 use crate::script::task::*;
 use crate::script::timer::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 #[derive(Default)]
 pub struct CxScriptData {
@@ -12,6 +14,7 @@ pub struct CxScriptData {
     pub resources: CxScriptResources,
     pub child_processes: Vec<CxScriptChildProcess>,
     pub web_sockets: Vec<CxScriptWebSocket>,
+    pub socket_streams: Rc<RefCell<Vec<CxScriptSocketStream>>>,
     pub http_requests: Vec<CxScriptHttp>,
     pub http_servers: Vec<CxScriptHttpServer>,
 }

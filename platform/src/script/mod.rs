@@ -23,5 +23,4 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::script::res::script_mod(vm);
     crate::script::draw::script_mod(vm);
     crate::script::event::script_mod(vm);
-    crate::script::helper::script_mod(vm);
 }

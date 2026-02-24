@@ -244,6 +244,16 @@ pub fn theme_mod(vm: &mut ScriptVm) {
     crate::theme_desktop_light::script_mod(vm);
     crate::theme_desktop_skeleton::script_mod(vm);
     script_eval!(vm, {
+        mod.helper = {
+            startup: |v|{
+                mod.res.load_all_resources()
+                mod.gc.set_static(mod.prelude.widgets_header);
+                mod.gc.set_static(mod.prelude.widgets_internal);
+                mod.gc.set_static(mod.prelude.widgets);
+                v
+            }
+        }
+        
         mod.prelude.widgets_header = {
             ..mod.res,
             ..mod.helper,
