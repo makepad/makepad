@@ -15,6 +15,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct KeyboardView {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     view: View,
     #[redraw]

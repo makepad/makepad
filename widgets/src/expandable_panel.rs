@@ -27,6 +27,8 @@ pub enum ExpandablePanelAction {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ExpandablePanel {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     view: View,
     #[rust]

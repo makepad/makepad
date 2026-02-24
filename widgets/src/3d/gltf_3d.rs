@@ -22,6 +22,8 @@ script_mod! {
 pub struct Gltf3D {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[layout]

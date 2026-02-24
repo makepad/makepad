@@ -57,6 +57,8 @@ pub struct DrawBarPbr {
 pub struct BarChart3D {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[layout]

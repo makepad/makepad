@@ -32,6 +32,8 @@ pub struct WidgetItem {
 pub struct FlatList {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[layout]

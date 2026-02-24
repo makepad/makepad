@@ -201,6 +201,8 @@ pub enum TrimWhitespaceInText {
 
 #[derive(Script, Widget)]
 pub struct Html {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     pub text_flow: TextFlow,
     #[live]
