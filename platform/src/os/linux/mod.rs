@@ -51,8 +51,6 @@ pub mod linux_media;
 pub mod select_timer;
 
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
-pub mod http;
-#[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod pulse_audio;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod pulse_sys;
@@ -60,9 +58,6 @@ pub mod pulse_sys;
 mod socket_stream;
 
 #[cfg(not(target_os = "android"))]
-mod web_socket;
-
-#[cfg(target_os = "android")]
 pub mod android;
 
 #[cfg(target_os = "android")]
@@ -87,9 +82,3 @@ pub(crate) use self::android::android_midi::{OsMidiInput, OsMidiOutput};
 
 //#[cfg(target_env="ohos")]
 //pub(crate) use self::open_harmony::oh_media::{OsMidiInput, OsMidiOutput};
-
-#[cfg(not(target_os = "android"))]
-pub(crate) use web_socket::OsWebSocket;
-
-#[cfg(target_os = "android")]
-pub(crate) use self::android::android_web_socket::OsWebSocket;

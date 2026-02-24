@@ -3,7 +3,7 @@ use {
         cx::{Cx, IosParams, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
-        event::{Event, NetworkResponseChannel},
+        event::Event,
         //makepad_live_id::*,
         os::{
             apple::apple_sys::*,
@@ -13,7 +13,6 @@ use {
                     tvos_app::{get_tvos_app_global, init_tvos_app_global, TvosApp},
                     tvos_event::TvosEvent,
                 },
-                http::AppleHttpRequests,
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
@@ -114,15 +113,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
-        let mut out = Vec::new();
-        while let Ok(item) = self.os.network_response.receiver.try_recv() {
-            self.os.http_requests.handle_response_item(&item);
-            out.push(item);
-        }
-        if out.len() > 0 {
-            self.handle_script_network_events(&out);
-            self.call_event_handler(&Event::NetworkResponses(out))
-        }
+        self.dispatch_network_runtime_events();
     }
 
     fn tvos_event_callback(&mut self, event: TvosEvent, metal_cx: &mut MetalCx) -> EventFlow {
@@ -232,14 +223,10 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    self.os.http_requests.make_http_request(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    self.os.http_requests.cancel_http_request(request_id);
+                    let _ = self.net.http_cancel(request_id);
                 }
                 // Mobile-only ops; no-op on tvOS
                 CxOsOp::SyncImeState { .. } => {}
@@ -309,7 +296,5 @@ pub struct CxOs {
     pub(crate) uniform_bytes_uploaded: u64,
     pub(crate) vertex_buffer_bytes_uploaded: u64,
     pub(crate) texture_bytes_uploaded: u64,
-    pub(crate) network_response: NetworkResponseChannel,
-    pub(crate) http_requests: AppleHttpRequests,
     pub(crate) apple_game_input: Option<crate::os::apple::apple_game_input::AppleGameInput>,
 }

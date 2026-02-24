@@ -24,7 +24,7 @@ impl State {
     }
 }
 
-pub struct ServerWebSocket {
+pub struct WebSocketParser {
     head: [u8; 8],
     head_expected: usize,
     head_written: usize,
@@ -152,7 +152,7 @@ impl ServerWebSocketMessageHeader {
     }
 }
 
-impl ServerWebSocket {
+impl WebSocketParser {
     pub fn new() -> Self {
         Self {
             head: [0u8; 8],
@@ -179,7 +179,7 @@ impl ServerWebSocket {
                     ServerWebSocketMessageFormat::Text,
                     false,
                 );
-                ServerWebSocket::build_message(header, &data.to_string().into_bytes())
+                WebSocketParser::build_message(header, &data.to_string().into_bytes())
             }
             ServerWebSocketMessage::Binary(data) => {
                 let header = ServerWebSocketMessageHeader::from_len(
@@ -187,7 +187,7 @@ impl ServerWebSocket {
                     ServerWebSocketMessageFormat::Binary,
                     false,
                 );
-                ServerWebSocket::build_message(header, &data)
+                WebSocketParser::build_message(header, &data)
             }
             _ => panic!(),
         }
@@ -372,7 +372,7 @@ impl ServerWebSocket {
     }
 }
 
-impl Default for ServerWebSocket {
+impl Default for WebSocketParser {
     fn default() -> Self {
         Self::new()
     }

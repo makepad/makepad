@@ -454,24 +454,36 @@ impl AiBackend for ClaudeBackend {
 
         if let Event::NetworkResponses(responses) = event {
             for response in responses {
-                if !self.in_flight.contains_key(&response.request_id) {
+                let request_id = match response {
+                    NetworkResponse::HttpResponse { request_id, .. }
+                    | NetworkResponse::HttpStreamChunk { request_id, .. }
+                    | NetworkResponse::HttpStreamComplete { request_id, .. }
+                    | NetworkResponse::HttpError { request_id, .. }
+                    | NetworkResponse::HttpProgress { request_id, .. } => *request_id,
+                    NetworkResponse::WsOpened { .. }
+                    | NetworkResponse::WsMessage { .. }
+                    | NetworkResponse::WsClosed { .. }
+                    | NetworkResponse::WsError { .. } => continue,
+                };
+
+                if !self.in_flight.contains_key(&request_id) {
                     continue;
                 }
 
-                match &response.response {
-                    NetworkResponse::HttpStreamResponse(res) => {
+                match response {
+                    NetworkResponse::HttpStreamChunk { response: res, .. } => {
                         log!("Claude: Got stream response, status: {:?}", res.status_code);
                         if let Some(data) = res.get_string_body() {
                             log!(
                                 "Claude: Stream data (first 500 chars): {}",
                                 &data.chars().take(500).collect::<String>()
                             );
-                            ai_events.extend(self.process_stream_data(response.request_id, &data));
+                            ai_events.extend(self.process_stream_data(request_id, &data));
                         }
                     }
-                    NetworkResponse::HttpStreamComplete(res) => {
+                    NetworkResponse::HttpStreamComplete { response: res, .. } => {
                         log!("Claude: Stream complete, status: {:?}", res.status_code);
-                        if let Some(mut in_flight) = self.in_flight.remove(&response.request_id) {
+                        if let Some(mut in_flight) = self.in_flight.remove(&request_id) {
                             if !in_flight.accumulated_text.is_empty() {
                                 let text = std::mem::take(&mut in_flight.accumulated_text);
                                 in_flight.content_blocks.push(ContentBlock::Text { text });
@@ -506,16 +518,21 @@ impl AiBackend for ClaudeBackend {
                             });
                         }
                     }
-                    NetworkResponse::HttpRequestError(err) => {
+                    NetworkResponse::HttpError { error: err, .. } => {
                         log!("Claude: HTTP request error: {}", err.message);
-                        if let Some(in_flight) = self.in_flight.remove(&response.request_id) {
+                        if let Some(in_flight) = self.in_flight.remove(&request_id) {
                             ai_events.push(AiEvent::Error {
                                 request_id: in_flight.request_id,
                                 error: err.message.clone(),
                             });
                         }
                     }
-                    _ => {}
+                    NetworkResponse::HttpResponse { .. }
+                    | NetworkResponse::HttpProgress { .. }
+                    | NetworkResponse::WsOpened { .. }
+                    | NetworkResponse::WsMessage { .. }
+                    | NetworkResponse::WsClosed { .. }
+                    | NetworkResponse::WsError { .. } => {}
                 }
             }
         }

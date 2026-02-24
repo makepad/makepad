@@ -1,62 +1,91 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::str;
 
-pub type RequestId = u64;
-pub type SocketId = u64;
-pub type MetadataId = u64;
-pub type Headers = BTreeMap<String, Vec<String>>;
+use makepad_live_id::LiveId;
+use makepad_micro_serde::{DeJson, DeJsonErr, SerJson};
 
+#[cfg(feature = "script")]
+use makepad_script::*;
+
+#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WebSocketTransport {
+    #[cfg_attr(feature = "script", pick)]
+    #[default]
+    Auto,
+    PlainTcp,
+    Platform,
+}
+
+#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum HttpMethod {
+    #[cfg_attr(feature = "script", pick)]
     #[default]
-    Get,
-    Head,
-    Post,
-    Put,
-    Delete,
-    Connect,
-    Options,
-    Trace,
-    Patch,
+    GET,
+    HEAD,
+    POST,
+    PUT,
+    DELETE,
+    CONNECT,
+    OPTIONS,
+    TRACE,
+    PATCH,
 }
 
 impl HttpMethod {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Get => "GET",
-            Self::Head => "HEAD",
-            Self::Post => "POST",
-            Self::Put => "PUT",
-            Self::Delete => "DELETE",
-            Self::Connect => "CONNECT",
-            Self::Options => "OPTIONS",
-            Self::Trace => "TRACE",
-            Self::Patch => "PATCH",
+            Self::GET => "GET",
+            Self::HEAD => "HEAD",
+            Self::POST => "POST",
+            Self::PUT => "PUT",
+            Self::DELETE => "DELETE",
+            Self::CONNECT => "CONNECT",
+            Self::OPTIONS => "OPTIONS",
+            Self::TRACE => "TRACE",
+            Self::PATCH => "PATCH",
         }
+    }
+
+    pub fn to_string(&self) -> &str {
+        self.as_str()
     }
 }
 
+#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HttpRequest {
-    pub metadata_id: MetadataId,
+    #[cfg_attr(feature = "script", live)]
+    pub metadata_id: LiveId,
+    #[cfg_attr(feature = "script", live)]
     pub url: String,
+    #[cfg_attr(feature = "script", live)]
     pub method: HttpMethod,
-    pub headers: Headers,
+    #[cfg_attr(feature = "script", live)]
+    pub headers: BTreeMap<String, Vec<String>>,
+    #[cfg_attr(feature = "script", live)]
     pub ignore_ssl_cert: bool,
+    #[cfg_attr(feature = "script", live)]
     pub is_streaming: bool,
+    #[cfg_attr(feature = "script", live)]
     pub body: Option<Vec<u8>>,
+    #[cfg_attr(feature = "script", live)]
+    pub websocket_transport: WebSocketTransport,
 }
 
 impl HttpRequest {
     pub fn new(url: String, method: HttpMethod) -> Self {
         Self {
-            metadata_id: 0,
+            metadata_id: LiveId::empty(),
             url,
             method,
-            headers: Headers::new(),
+            headers: BTreeMap::new(),
             ignore_ssl_cert: false,
             is_streaming: false,
             body: None,
+            websocket_transport: WebSocketTransport::Auto,
         }
     }
 
@@ -95,7 +124,7 @@ impl HttpRequest {
         self.is_streaming = true;
     }
 
-    pub fn set_metadata_id(&mut self, id: MetadataId) {
+    pub fn set_metadata_id(&mut self, id: LiveId) {
         self.metadata_id = id;
     }
 
@@ -119,6 +148,19 @@ impl HttpRequest {
     pub fn set_body_string(&mut self, body: &str) {
         self.body = Some(body.as_bytes().to_vec());
     }
+
+    pub fn set_json_body<T: SerJson>(&mut self, body: T) {
+        let json_body = body.serialize_json();
+        self.body = Some(json_body.into_bytes());
+    }
+
+    pub fn set_string_body(&mut self, body: String) {
+        self.body = Some(body.into_bytes());
+    }
+
+    pub fn set_websocket_transport(&mut self, transport: WebSocketTransport) {
+        self.websocket_transport = transport;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,19 +172,24 @@ pub struct SplitUrl<'a> {
     pub hash: &'a str,
 }
 
+#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpResponse {
-    pub metadata_id: MetadataId,
+    #[cfg_attr(feature = "script", live)]
+    pub metadata_id: LiveId,
+    #[cfg_attr(feature = "script", live)]
     pub status_code: u16,
-    pub headers: Headers,
+    #[cfg_attr(feature = "script", live)]
+    pub headers: BTreeMap<String, Vec<String>>,
+    #[cfg_attr(feature = "script", live)]
     pub body: Option<Vec<u8>>,
 }
 
 impl HttpResponse {
     pub fn new(
-        metadata_id: MetadataId,
+        metadata_id: LiveId,
         status_code: u16,
-        headers: Headers,
+        headers: BTreeMap<String, Vec<String>>,
         body: Option<Vec<u8>>,
     ) -> Self {
         Self {
@@ -154,7 +201,7 @@ impl HttpResponse {
     }
 
     pub fn from_header_string(
-        metadata_id: MetadataId,
+        metadata_id: LiveId,
         status_code: u16,
         headers: String,
         body: Option<Vec<u8>>,
@@ -181,10 +228,37 @@ impl HttpResponse {
             .as_ref()
             .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
     }
+
+    pub fn get_body(&self) -> Option<&Vec<u8>> {
+        self.body.as_ref()
+    }
+
+    pub fn get_string_body(&self) -> Option<String> {
+        self.body
+            .as_ref()
+            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+    }
+
+    pub fn get_json_body<T: DeJson>(&self) -> Result<T, DeJsonErr> {
+        if let Some(body) = self.body.as_ref() {
+            let json = str::from_utf8(body).map_err(|err| DeJsonErr {
+                msg: err.to_string(),
+                line: 0,
+                col: 0,
+            })?;
+            DeJson::deserialize_json(json)
+        } else {
+            Err(DeJsonErr {
+                msg: "No body present".to_string(),
+                line: 0,
+                col: 0,
+            })
+        }
+    }
 }
 
-fn parse_headers(header_string: String) -> Headers {
-    let mut headers = Headers::new();
+fn parse_headers(header_string: String) -> BTreeMap<String, Vec<String>> {
+    let mut headers: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for line in header_string.lines() {
         if let Some((key, values)) = line.split_once(':') {
             for value in values.split(',') {
@@ -198,31 +272,22 @@ fn parse_headers(header_string: String) -> Headers {
     headers
 }
 
+#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpError {
+    #[cfg_attr(feature = "script", live)]
     pub message: String,
-    pub metadata_id: MetadataId,
+    #[cfg_attr(feature = "script", live)]
+    pub metadata_id: LiveId,
 }
 
+#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HttpProgress {
+    #[cfg_attr(feature = "script", live)]
     pub loaded: u64,
+    #[cfg_attr(feature = "script", live)]
     pub total: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetworkResponseItem {
-    pub request_id: RequestId,
-    pub response: NetworkResponse,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NetworkResponse {
-    HttpRequestError(HttpError),
-    HttpResponse(HttpResponse),
-    HttpStreamResponse(HttpResponse),
-    HttpStreamComplete(HttpResponse),
-    HttpProgress(HttpProgress),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,12 +297,6 @@ pub enum WebSocketMessage {
     String(String),
     Opened,
     Closed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct WsOpenRequest {
-    pub url: String,
-    pub headers: Headers,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -253,39 +312,39 @@ pub enum WsMessage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NetworkEvent {
+pub enum NetworkResponse {
     HttpResponse {
-        request_id: RequestId,
+        request_id: LiveId,
         response: HttpResponse,
     },
     HttpStreamChunk {
-        request_id: RequestId,
+        request_id: LiveId,
         response: HttpResponse,
     },
     HttpStreamComplete {
-        request_id: RequestId,
+        request_id: LiveId,
         response: HttpResponse,
     },
     HttpError {
-        request_id: RequestId,
+        request_id: LiveId,
         error: HttpError,
     },
     HttpProgress {
-        request_id: RequestId,
+        request_id: LiveId,
         progress: HttpProgress,
     },
     WsOpened {
-        socket_id: SocketId,
+        socket_id: LiveId,
     },
     WsMessage {
-        socket_id: SocketId,
+        socket_id: LiveId,
         message: WsMessage,
     },
     WsClosed {
-        socket_id: SocketId,
+        socket_id: LiveId,
     },
     WsError {
-        socket_id: SocketId,
+        socket_id: LiveId,
         message: String,
     },
 }
@@ -322,7 +381,7 @@ mod tests {
     #[test]
     fn split_url_resolves_default_ports() {
         let request =
-            HttpRequest::new("https://example.com/path#frag".to_string(), HttpMethod::Get);
+            HttpRequest::new("https://example.com/path#frag".to_string(), HttpMethod::GET);
         let split = request.split_url();
         assert_eq!(split.proto, "https");
         assert_eq!(split.host, "example.com");

@@ -175,16 +175,13 @@ impl Cx {
         self.call_event_handler(&Event::Startup);
 
         loop {
-            let studio_web_socket = if let Some(studio_web_socket) = &mut self.studio_web_socket {
-                studio_web_socket
-            } else {
+            if !Self::has_studio_web_socket() {
                 crate::error!("--stdin-loop mode requires a studio websocket");
                 break;
-            };
-
-            let incoming = match studio_web_socket.recv() {
-                Ok(incoming) => incoming,
-                Err(_) => break,
+            }
+            let incoming = match self.recv_studio_websocket_message() {
+                Some(incoming) => incoming,
+                None => break,
             };
 
             match incoming {
@@ -503,16 +500,10 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::open(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::cancel(request_id);
+                    let _ = self.net.http_cancel(request_id);
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     Self::stdin_send_to_host(AppToStudio::SetClipboard(content));

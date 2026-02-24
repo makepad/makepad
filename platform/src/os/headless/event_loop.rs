@@ -237,6 +237,7 @@ impl Cx {
                     if SignalToUI::check_and_clear_action_signal() {
                         self.handle_action_receiver();
                     }
+                    self.dispatch_network_runtime_events();
 
                     let timer_events = self.os.stdin_timers.get_dispatch();
                     for event in timer_events {

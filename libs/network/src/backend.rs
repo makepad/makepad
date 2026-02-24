@@ -1,9 +1,9 @@
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use crate::types::{
-    HttpRequest, NetworkError, NetworkEvent, RequestId, SocketId, WsOpenRequest, WsSend,
-};
+use makepad_live_id::LiveId;
+
+use crate::types::{HttpRequest, NetworkError, NetworkResponse, WsSend};
 
 #[cfg(target_os = "android")]
 mod android;
@@ -16,29 +16,27 @@ mod web;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-pub type WakeFn = Arc<dyn Fn() + Send + Sync>;
-
 #[derive(Clone)]
 pub struct EventSink {
-    sender: Sender<NetworkEvent>,
-    wake_fn: Arc<Mutex<Option<WakeFn>>>,
+    sender: Sender<NetworkResponse>,
+    wake_fn: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 impl EventSink {
-    pub(crate) fn new(sender: Sender<NetworkEvent>) -> Self {
+    pub(crate) fn new(sender: Sender<NetworkResponse>) -> Self {
         Self {
             sender,
             wake_fn: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub(crate) fn set_wake_fn(&self, wake_fn: Option<WakeFn>) {
+    pub(crate) fn set_wake_fn(&self, wake_fn: Option<Arc<dyn Fn() + Send + Sync>>) {
         if let Ok(mut guard) = self.wake_fn.lock() {
             *guard = wake_fn;
         }
     }
 
-    pub fn emit(&self, event: NetworkEvent) -> Result<(), NetworkError> {
+    pub fn emit(&self, event: NetworkResponse) -> Result<(), NetworkError> {
         self.sender
             .send(event)
             .map_err(|_| NetworkError::ChannelClosed)?;
@@ -58,23 +56,23 @@ impl EventSink {
 pub trait NetworkBackend: Send + Sync + 'static {
     fn http_start(
         &self,
-        request_id: RequestId,
+        request_id: LiveId,
         request: HttpRequest,
         sink: EventSink,
     ) -> Result<(), NetworkError>;
 
-    fn http_cancel(&self, request_id: RequestId) -> Result<(), NetworkError>;
+    fn http_cancel(&self, request_id: LiveId) -> Result<(), NetworkError>;
 
     fn ws_open(
         &self,
-        socket_id: SocketId,
-        request: WsOpenRequest,
+        socket_id: LiveId,
+        request: HttpRequest,
         sink: EventSink,
     ) -> Result<(), NetworkError>;
 
-    fn ws_send(&self, socket_id: SocketId, message: WsSend) -> Result<(), NetworkError>;
+    fn ws_send(&self, socket_id: LiveId, message: WsSend) -> Result<(), NetworkError>;
 
-    fn ws_close(&self, socket_id: SocketId) -> Result<(), NetworkError>;
+    fn ws_close(&self, socket_id: LiveId) -> Result<(), NetworkError>;
 }
 
 #[derive(Default)]
@@ -100,31 +98,31 @@ impl UnsupportedBackend {
 impl NetworkBackend for UnsupportedBackend {
     fn http_start(
         &self,
-        _request_id: RequestId,
+        _request_id: LiveId,
         _request: HttpRequest,
         _sink: EventSink,
     ) -> Result<(), NetworkError> {
         Err(self.unsupported())
     }
 
-    fn http_cancel(&self, _request_id: RequestId) -> Result<(), NetworkError> {
+    fn http_cancel(&self, _request_id: LiveId) -> Result<(), NetworkError> {
         Err(self.unsupported())
     }
 
     fn ws_open(
         &self,
-        _socket_id: SocketId,
-        _request: WsOpenRequest,
+        _socket_id: LiveId,
+        _request: HttpRequest,
         _sink: EventSink,
     ) -> Result<(), NetworkError> {
         Err(self.unsupported())
     }
 
-    fn ws_send(&self, _socket_id: SocketId, _message: WsSend) -> Result<(), NetworkError> {
+    fn ws_send(&self, _socket_id: LiveId, _message: WsSend) -> Result<(), NetworkError> {
         Err(self.unsupported())
     }
 
-    fn ws_close(&self, _socket_id: SocketId) -> Result<(), NetworkError> {
+    fn ws_close(&self, _socket_id: LiveId) -> Result<(), NetworkError> {
         Err(self.unsupported())
     }
 }

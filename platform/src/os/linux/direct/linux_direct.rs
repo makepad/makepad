@@ -10,7 +10,7 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
-        event::{Event, NetworkResponseChannel, TimerEvent, WindowGeom},
+        event::{Event, TimerEvent, WindowGeom},
         gpu_info::GpuPerformance,
         makepad_live_id::*,
         makepad_math::*,
@@ -65,14 +65,7 @@ impl DirectApp {
 
 impl Cx {
     pub(crate) fn handle_networking_events(&mut self) {
-        let mut out = Vec::new();
-        while let Ok(item) = self.os.network_response.receiver.try_recv() {
-            out.push(item);
-        }
-        if !out.is_empty() {
-            self.handle_script_network_events(&out);
-            self.call_event_handler(&Event::NetworkResponses(out));
-        }
+        self.dispatch_network_runtime_events();
     }
 
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
@@ -310,16 +303,10 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::open(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::cancel(request_id);
+                    let _ = self.net.http_cancel(request_id);
                 }
                 CxOsOp::Quit => {
                     return EventFlow::Exit;
@@ -395,7 +382,6 @@ impl CxOsApi for Cx {
 
 pub struct CxOs {
     pub(crate) media: CxLinuxMedia,
-    pub(crate) network_response: NetworkResponseChannel,
     pub(crate) start_time: Instant,
 }
 
@@ -404,7 +390,6 @@ impl Default for CxOs {
         Self {
             start_time: Instant::now(),
             media: Default::default(),
-            network_response: Default::default(),
         }
     }
 }

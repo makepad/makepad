@@ -8,8 +8,7 @@ use {
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
                 VideoTextureUpdatedEvent,
             },
-            Event, GameInputEventChannel, MouseButton, MouseUpEvent, NetworkResponseChannel,
-            WindowGeom,
+            Event, GameInputEventChannel, MouseButton, MouseUpEvent, WindowGeom,
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -24,7 +23,6 @@ use {
                     macos_event::MacosEvent,
                     macos_window::MacosWindow,
                 },
-                http::AppleHttpRequests,
             },
             apple_media::CxAppleMedia,
             cx_native::EventFlow,
@@ -222,15 +220,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
-        let mut out = Vec::new();
-        while let Ok(item) = self.os.network_response.receiver.try_recv() {
-            self.os.http_requests.handle_response_item(&item);
-            out.push(item);
-        }
-        if out.len() > 0 {
-            self.handle_script_network_events(&out);
-            self.call_event_handler(&Event::NetworkResponses(out))
-        }
+        self.dispatch_network_runtime_events();
     }
 
     pub(crate) fn handle_gamepad_events(&mut self) {
@@ -717,14 +707,10 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    self.os.http_requests.make_http_request(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    self.os.http_requests.cancel_http_request(request_id);
+                    let _ = self.net.http_cancel(request_id);
                 }
                 // These ops are mobile-only (soft keyboard, clipboard UI); no-op on macOS
                 CxOsOp::SyncImeState { .. } => {}
@@ -1024,10 +1010,8 @@ pub struct CxOs {
     pub(crate) uniform_bytes_uploaded: u64,
     pub(crate) vertex_buffer_bytes_uploaded: u64,
     pub(crate) texture_bytes_uploaded: u64,
-    pub(crate) network_response: NetworkResponseChannel,
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
-    pub(crate) http_requests: AppleHttpRequests,
     pub metal_device: Option<ObjcId>,
     pub(crate) game_input_events: GameInputEventChannel,
     pub(crate) apple_game_input: Option<AppleGameInput>,

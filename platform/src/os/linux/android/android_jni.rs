@@ -6,11 +6,12 @@ use {
     crate::{
         area::Area,
         cx::AndroidParams,
-        event::{HttpRequest, TouchPoint, TouchState, VideoSource},
+        event::{TouchPoint, TouchState, VideoSource},
         ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputConfig},
         makepad_live_id::*,
         makepad_math::*,
-        WebSocketMessage,
+        makepad_network::HttpRequest,
+        makepad_network::WebSocketMessage,
     },
     makepad_android_state::{get_activity, get_java_vm},
     std::ffi::c_uint,
@@ -594,10 +595,22 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
 ) {
     let headers = unsafe { jstring_to_string(env, headers) };
     let body = unsafe { java_byte_array_to_vec(env, body) };
+    let request_id = LiveId(request_id as u64);
+    let metadata_id = LiveId(metadata_id as u64);
+
+    if super::android_network::try_handle_http_response(
+        request_id,
+        metadata_id,
+        status_code as u16,
+        &headers,
+        &body,
+    ) {
+        return;
+    }
 
     send_from_java_message(FromJavaMessage::HttpResponse {
-        request_id: request_id as u64,
-        metadata_id: metadata_id as u64,
+        request_id: request_id.0,
+        metadata_id: metadata_id.0,
         status_code: status_code as u16,
         headers,
         body,
@@ -613,10 +626,16 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
     error: jni_sys::jstring,
 ) {
     let error = unsafe { jstring_to_string(env, error) };
+    let request_id = LiveId(request_id as u64);
+    let metadata_id = LiveId(metadata_id as u64);
+
+    if super::android_network::try_handle_http_error(request_id, metadata_id, &error) {
+        return;
+    }
 
     send_from_java_message(FromJavaMessage::HttpRequestError {
-        request_id: request_id as u64,
-        metadata_id: metadata_id as u64,
+        request_id: request_id.0,
+        metadata_id: metadata_id.0,
         error,
     });
 }
@@ -633,6 +652,10 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketMessage(
     }
     let message = unsafe { java_byte_array_to_vec(env, message) };
     let sender = unsafe { &*(callback as *const Box<(u64, Sender<WebSocketMessage>)>) };
+
+    if super::android_network::try_handle_websocket_message(sender.0, &message, &sender.1) {
+        return;
+    }
 
     send_from_java_message(FromJavaMessage::WebSocketMessage {
         message,
@@ -651,6 +674,10 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketClosed(
     }
     let sender = unsafe { &*(callback as *const Box<(u64, Sender<WebSocketMessage>)>) };
 
+    if super::android_network::try_handle_websocket_closed(sender.0, &sender.1) {
+        return;
+    }
+
     send_from_java_message(FromJavaMessage::WebSocketClosed {
         sender: sender.clone(),
     });
@@ -666,11 +693,16 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
     if callback == 0 {
         return;
     }
+    let error = unsafe { jstring_to_string(_env, _error) };
     //let error = unsafe { jstring_to_string(env, error) };
     let sender = unsafe { &*(callback as *const Box<(u64, Sender<WebSocketMessage>)>) };
 
+    if super::android_network::try_handle_websocket_error(sender.0, &error, &sender.1) {
+        return;
+    }
+
     send_from_java_message(FromJavaMessage::WebSocketError {
-        error: "".to_string(),
+        error,
         sender: sender.clone(),
     });
 }

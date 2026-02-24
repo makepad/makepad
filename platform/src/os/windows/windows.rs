@@ -284,14 +284,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
-        let mut out = Vec::new();
-        while let Ok(event) = self.os.network_response.receiver.try_recv() {
-            out.push(event);
-        }
-        if out.len() > 0 {
-            self.handle_script_network_events(&out);
-            self.call_event_handler(&Event::NetworkResponses(out))
-        }
+        self.dispatch_network_runtime_events();
     }
 
     pub(crate) fn handle_game_input_events(&mut self) {
@@ -432,14 +425,7 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    use crate::os::windows::http::WindowsHttpSocket;
-                    WindowsHttpSocket::open(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
-
-                    //todo!("HttpRequest not implemented yet on windows, we'll get there");
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(self).pos + pos;
@@ -571,7 +557,6 @@ pub struct CxOs {
     pub(crate) start_time: Option<Instant>,
     pub(crate) media: CxWindowsMedia,
     pub(crate) d3d11_device: Option<ID3D11Device>,
-    pub(crate) network_response: NetworkResponseChannel,
     pub(crate) game_input_events: GameInputEventChannel,
     pub(crate) windows_game_input: Option<WindowsGameInput>,
     //pub (crate) new_frame_being_rendered: Option<crate::shared_framebuf::PresentableDraw>,

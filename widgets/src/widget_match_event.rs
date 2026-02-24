@@ -56,22 +56,38 @@ pub trait WidgetMatchEvent {
         scope: &mut Scope,
     ) {
         for e in e {
-            match &e.response {
-                NetworkResponse::HttpRequestError(err) => {
-                    self.handle_http_request_error(cx, e.request_id, err, scope);
+            match e {
+                NetworkResponse::HttpError { request_id, error } => {
+                    self.handle_http_request_error(cx, *request_id, error, scope);
                 }
-                NetworkResponse::HttpResponse(res) => {
-                    self.handle_http_response(cx, e.request_id, res, scope);
+                NetworkResponse::HttpResponse {
+                    request_id,
+                    response,
+                } => {
+                    self.handle_http_response(cx, *request_id, response, scope);
                 }
-                NetworkResponse::HttpProgress(progress) => {
-                    self.handle_http_progress(cx, e.request_id, progress, scope);
+                NetworkResponse::HttpProgress {
+                    request_id,
+                    progress,
+                } => {
+                    self.handle_http_progress(cx, *request_id, progress, scope);
                 }
-                NetworkResponse::HttpStreamResponse(data) => {
-                    self.handle_http_stream(cx, e.request_id, data, scope);
+                NetworkResponse::HttpStreamChunk {
+                    request_id,
+                    response,
+                } => {
+                    self.handle_http_stream(cx, *request_id, response, scope);
                 }
-                NetworkResponse::HttpStreamComplete(res) => {
-                    self.handle_http_stream_complete(cx, e.request_id, res, scope);
+                NetworkResponse::HttpStreamComplete {
+                    request_id,
+                    response,
+                } => {
+                    self.handle_http_stream_complete(cx, *request_id, response, scope);
                 }
+                NetworkResponse::WsOpened { .. }
+                | NetworkResponse::WsMessage { .. }
+                | NetworkResponse::WsClosed { .. }
+                | NetworkResponse::WsError { .. } => {}
             }
         }
     }

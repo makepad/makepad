@@ -5,8 +5,14 @@ edition = "2021"
 description = "Networking runtime for Makepad UI and CLI apps"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+script = ["dep:makepad-script"]
+
 [dependencies]
-makepad-http = { path = "../http", version = "1.0.0" }
+makepad-live-id = { path = "../live_id", version = "1.0.0" }
+makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }
+makepad-script = { path = "../../platform/script", version = "1.0.0", optional = true }
 
 [target.'cfg(windows)'.dependencies.makepad-futures-legacy]
 path = "../futures_legacy"

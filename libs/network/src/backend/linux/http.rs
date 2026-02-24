@@ -1,6 +1,7 @@
 use super::socket_stream::SocketStream;
 
-use crate::types::{HttpError, HttpRequest, HttpResponse, NetworkResponse, NetworkResponseItem};
+use crate::types::{HttpError, HttpRequest, HttpResponse, NetworkResponse};
+use makepad_live_id::LiveId;
 use std::{
     collections::HashMap,
     io,
@@ -17,9 +18,9 @@ pub struct LinuxHttpSocket;
 
 impl LinuxHttpSocket {
     pub fn open(
-        request_id: u64,
+        request_id: LiveId,
         request: HttpRequest,
-        response_sender: Sender<NetworkResponseItem>,
+        response_sender: Sender<NetworkResponse>,
     ) {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         cancellation_map()
@@ -34,33 +35,33 @@ impl LinuxHttpSocket {
             cancellation_map().lock().unwrap().remove(&request_id);
 
             if let Err(err) = result {
-                let _ = response_sender.send(NetworkResponseItem {
+                let _ = response_sender.send(NetworkResponse::HttpError {
                     request_id,
-                    response: NetworkResponse::HttpRequestError(HttpError {
+                    error: HttpError {
                         message: err,
                         metadata_id,
-                    }),
+                    },
                 });
             }
         });
     }
 
-    pub fn cancel(request_id: u64) {
+    pub fn cancel(request_id: LiveId) {
         if let Some(flag) = cancellation_map().lock().unwrap().get(&request_id) {
             flag.store(true, Ordering::SeqCst);
         }
     }
 }
 
-fn cancellation_map() -> &'static Mutex<HashMap<u64, Arc<AtomicBool>>> {
-    static MAP: OnceLock<Mutex<HashMap<u64, Arc<AtomicBool>>>> = OnceLock::new();
+fn cancellation_map() -> &'static Mutex<HashMap<LiveId, Arc<AtomicBool>>> {
+    static MAP: OnceLock<Mutex<HashMap<LiveId, Arc<AtomicBool>>>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn run_http_request(
-    request_id: u64,
+    request_id: LiveId,
     request: &HttpRequest,
-    response_sender: &Sender<NetworkResponseItem>,
+    response_sender: &Sender<NetworkResponse>,
     cancel_flag: &AtomicBool,
 ) -> Result<(), String> {
     let split = request.split_url();
@@ -88,14 +89,14 @@ fn run_http_request(
 
     if request.is_streaming {
         if !body_prefix.is_empty() {
-            let _ = response_sender.send(NetworkResponseItem {
+            let _ = response_sender.send(NetworkResponse::HttpStreamChunk {
                 request_id,
-                response: NetworkResponse::HttpStreamResponse(HttpResponse {
+                response: HttpResponse {
                     metadata_id: request.metadata_id,
                     status_code,
                     headers: Default::default(),
                     body: Some(std::mem::take(&mut body_prefix)),
-                }),
+                },
             });
         }
 
@@ -107,14 +108,14 @@ fn run_http_request(
             match stream.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let _ = response_sender.send(NetworkResponseItem {
+                    let _ = response_sender.send(NetworkResponse::HttpStreamChunk {
                         request_id,
-                        response: NetworkResponse::HttpStreamResponse(HttpResponse {
+                        response: HttpResponse {
                             metadata_id: request.metadata_id,
                             status_code,
                             headers: Default::default(),
                             body: Some(buf[..n].to_vec()),
-                        }),
+                        },
                     });
                 }
                 Err(err)
@@ -131,14 +132,14 @@ fn run_http_request(
             }
         }
 
-        let _ = response_sender.send(NetworkResponseItem {
+        let _ = response_sender.send(NetworkResponse::HttpStreamComplete {
             request_id,
-            response: NetworkResponse::HttpStreamComplete(HttpResponse::from_header_string(
+            response: HttpResponse::from_header_string(
                 request.metadata_id,
                 status_code,
                 headers_string,
                 None,
-            )),
+            ),
         });
         stream.shutdown();
         return Ok(());
@@ -174,14 +175,14 @@ fn run_http_request(
         }
     }
 
-    let _ = response_sender.send(NetworkResponseItem {
+    let _ = response_sender.send(NetworkResponse::HttpResponse {
         request_id,
-        response: NetworkResponse::HttpResponse(HttpResponse::from_header_string(
+        response: HttpResponse::from_header_string(
             request.metadata_id,
             status_code,
             headers_string,
             Some(body),
-        )),
+        ),
     });
     Ok(())
 }

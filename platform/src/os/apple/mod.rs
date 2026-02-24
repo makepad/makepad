@@ -25,9 +25,6 @@ pub mod audio_tap;
 pub mod audio_unit;
 pub mod av_capture;
 pub mod core_midi;
-pub mod http;
-#[cfg(target_os = "macos")]
-pub mod web_socket;
 
 #[cfg(target_os = "ios")]
 pub(crate) use self::ios::*;
@@ -38,7 +35,3 @@ pub(crate) use self::metal::*;
 pub(crate) use self::tvos::*;
 
 pub(crate) use self::core_midi::{OsMidiInput, OsMidiOutput};
-#[cfg(any(target_os = "ios", target_os = "tvos"))]
-pub(crate) use self::http::OsWebSocket;
-#[cfg(target_os = "macos")]
-pub(crate) use self::web_socket::OsWebSocket;

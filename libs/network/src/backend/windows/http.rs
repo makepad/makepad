@@ -1,5 +1,6 @@
-use crate::types::{HttpRequest, HttpResponse, NetworkResponse, NetworkResponseItem};
+use crate::types::{HttpRequest, HttpResponse, NetworkResponse};
 use makepad_futures_legacy::executor;
+use makepad_live_id::LiveId;
 use std::sync::mpsc::Sender;
 
 use windows::{
@@ -16,11 +17,7 @@ use windows::{
 pub struct WindowsHttpSocket;
 
 impl WindowsHttpSocket {
-    pub fn open(
-        request_id: u64,
-        request: HttpRequest,
-        response_sender: Sender<NetworkResponseItem>,
-    ) {
+    pub fn open(request_id: LiveId, request: HttpRequest, response_sender: Sender<NetworkResponse>) {
         async fn create_request(
             request: &HttpRequest,
         ) -> windows::core::Result<HttpRequestMessage> {
@@ -66,9 +63,9 @@ impl WindowsHttpSocket {
         }
 
         async fn streaming_request(
-            request_id: u64,
+            request_id: LiveId,
             request: HttpRequest,
-            response_sender: Sender<NetworkResponseItem>,
+            response_sender: Sender<NetworkResponse>,
         ) -> windows::core::Result<()> {
             let client = HttpClient::new()?;
             let req = create_request(&request).await?;
@@ -93,34 +90,32 @@ impl WindowsHttpSocket {
                         chunk_size as usize,
                     )
                 };
-                let message = NetworkResponseItem {
+                let _ = response_sender.send(NetworkResponse::HttpStreamChunk {
                     request_id,
-                    response: NetworkResponse::HttpStreamResponse(HttpResponse {
+                    response: HttpResponse {
                         headers: Default::default(),
                         metadata_id: request.metadata_id,
                         status_code: 0,
                         body: Some(chunk.to_vec()),
-                    }),
-                };
-                let _ = response_sender.send(message);
+                    },
+                });
             }
-            let message = NetworkResponseItem {
+            let _ = response_sender.send(NetworkResponse::HttpStreamComplete {
                 request_id,
-                response: NetworkResponse::HttpStreamComplete(HttpResponse {
+                response: HttpResponse {
                     headers: Default::default(),
                     metadata_id: request.metadata_id,
                     status_code: 0,
                     body: None,
-                }),
-            };
-            let _ = response_sender.send(message);
+                },
+            });
             Ok(())
         }
 
         async fn non_streaming_request(
-            request_id: u64,
+            request_id: LiveId,
             request: HttpRequest,
-            response_sender: Sender<NetworkResponseItem>,
+            response_sender: Sender<NetworkResponse>,
         ) -> windows::core::Result<()> {
             let client = HttpClient::new()?;
             let req = create_request(&request).await?;
@@ -134,16 +129,15 @@ impl WindowsHttpSocket {
             let chunk = unsafe {
                 std::slice::from_raw_parts(byte_access.Buffer()? as *const u8, chunk_size as usize)
             };
-            let message = NetworkResponseItem {
+            let _ = response_sender.send(NetworkResponse::HttpResponse {
                 request_id,
-                response: NetworkResponse::HttpResponse(HttpResponse {
+                response: HttpResponse {
                     headers: Default::default(),
                     metadata_id: request.metadata_id,
                     status_code: 0,
                     body: Some(chunk.to_vec()),
-                }),
-            };
-            let _ = response_sender.send(message);
+                },
+            });
             Ok(())
         }
 
@@ -151,8 +145,7 @@ impl WindowsHttpSocket {
             if request.is_streaming {
                 let _ = executor::block_on(streaming_request(request_id, request, response_sender));
             } else {
-                let _ =
-                    executor::block_on(non_streaming_request(request_id, request, response_sender));
+                let _ = executor::block_on(non_streaming_request(request_id, request, response_sender));
             }
         });
     }
