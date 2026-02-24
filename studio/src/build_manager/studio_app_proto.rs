@@ -34,184 +34,232 @@ impl BuildManager {
         }
     }
 
-    fn handle_studio_disconnect_signal(&mut self, cx: &mut Cx) {
-        while let Ok(build_id) = self.recv_studio_disconnect.try_recv() {
-            cx.action(AppAction::WebsocketDisconnect(build_id));
-            if self.recompiling_builds.contains(&build_id) {
-                continue;
-            }
-            let had_local_process = self.running_processes.remove(&build_id).is_some();
-            self.remove_profile_build(build_id);
-            if let Some(web_socket_id) = self.studio_remote_build_owners.remove(&build_id) {
-                self.send_studio_remote_response(
-                    web_socket_id,
-                    StudioRemoteResponse::Stopped {
-                        build_id: build_id.0,
-                    },
-                );
-            }
-            self.studio_remote_latest_widget_dumps.remove(&build_id);
-            self.studio_remote_startup_queries.remove(&build_id);
-            self.studio_remote_startup_dump_pending.remove(&build_id);
-            self.clear_studio_remote_screenshots_for_build(build_id);
-            self.clear_studio_remote_widget_tree_dumps_for_build(build_id);
-            if had_local_process {
-                self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
-            }
-        }
-    }
-
-    fn handle_studio_signal_messages(
+    fn handle_studio_network_messages(
         &mut self,
         cx: &mut Cx,
         file_system: &mut FileSystem,
         pending_studio_remote_logs: &mut Vec<(LiveId, String, String)>,
     ) {
         let mut needs_redraw_profiler = false;
-        while let Ok((build_id, msgs)) = self.recv_studio_msg.try_recv() {
-            self.recompiling_builds.remove(&build_id);
-            cx.action(AppAction::WebsocketReconnect(build_id));
-            self.ensure_active_build(build_id);
-            for msg in msgs.0 {
-                let auto_request_widget_tree_dump = self
-                    .studio_remote_startup_dump_pending
-                    .contains(&build_id)
-                    && matches!(&msg, AppToStudio::DrawCompleteAndFlip(_));
-                if matches!(
-                    &msg,
-                    AppToStudio::CreateWindow { .. }
-                        | AppToStudio::SetCursor(_)
-                        | AppToStudio::ReadyToStart
-                        | AppToStudio::DrawCompleteAndFlip(_)
-                        | AppToStudio::SetClipboard(_)
-                        | AppToStudio::RequestAnimationFrame
-                        | AppToStudio::TweakHits(_)
-                ) {
-                    cx.action(BuildManagerAction::AppToStudio {
-                        build_id,
-                        msg: msg.clone(),
-                    });
-                }
-                if auto_request_widget_tree_dump {
-                    if let Some(web_socket_id) = self.studio_remote_build_owners.get(&build_id).copied() {
-                        let startup_query = self.studio_remote_startup_queries.get(&build_id).cloned();
-                        let emit_dump = startup_query.is_none();
-                        if let Err(message) = self.request_studio_remote_widget_tree_dump(
-                            cx,
+        while let Ok(message) = self.recv_studio_network_msg.try_recv() {
+            match message {
+                StudioNetworkMessage::AppDisconnected { build_id } => {
+                    cx.action(AppAction::WebsocketDisconnect(build_id));
+                    if self.recompiling_builds.contains(&build_id) {
+                        continue;
+                    }
+                    let had_local_process = self.running_processes.remove(&build_id).is_some();
+                    self.remove_profile_build(build_id);
+                    if let Some(web_socket_id) = self.studio_remote_build_owners.remove(&build_id)
+                    {
+                        self.send_studio_remote_response(
                             web_socket_id,
-                            build_id,
-                            startup_query,
-                            emit_dump,
-                        ) {
-                            self.send_studio_remote_error(web_socket_id, message);
-                        } else {
-                            self.studio_remote_startup_dump_pending.remove(&build_id);
-                        }
+                            StudioRemoteResponse::Stopped {
+                                build_id: build_id.0,
+                            },
+                        );
+                    }
+                    self.studio_remote_latest_widget_dumps.remove(&build_id);
+                    self.studio_remote_startup_queries.remove(&build_id);
+                    self.studio_remote_startup_dump_pending.remove(&build_id);
+                    self.clear_studio_remote_screenshots_for_build(build_id);
+                    self.clear_studio_remote_widget_tree_dumps_for_build(build_id);
+                    if had_local_process {
+                        self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
                     }
                 }
-                match msg {
-                    AppToStudio::LogItem(item) => {
-                        let studio_remote_level = log_level_name(item.level);
-                        let studio_remote_line = item.message.clone();
-                        let file_name = if let Some(build) = self.active.builds.get(&build_id) {
-                            self.roots.map_path(&build.root, &item.file_name)
-                        } else {
-                            self.roots.map_path("", &item.file_name)
-                        };
-
-                        let start = text::Position {
-                            line_index: item.line_start as usize,
-                            byte_index: item.column_start as usize,
-                        };
-                        let end = text::Position {
-                            line_index: item.line_end as usize,
-                            byte_index: item.column_end as usize,
-                        };
-                        if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
-                            match item.level {
-                                LogLevel::Warning => {
-                                    file_system.add_decoration(
-                                        file_id,
-                                        Decoration::new(0, start, end, DecorationType::Warning),
-                                    );
-                                    cx.action(AppAction::RedrawFile(file_id))
+                StudioNetworkMessage::RemoteConnected { socket } => {
+                    self.studio_remote_sockets
+                        .insert(socket.web_socket_id, socket);
+                }
+                StudioNetworkMessage::RemoteDisconnected { web_socket_id } => {
+                    self.studio_remote_sockets.remove(&web_socket_id);
+                    let owned_builds: Vec<LiveId> = self
+                        .studio_remote_build_owners
+                        .iter()
+                        .filter_map(|(build_id, owner)| {
+                            (*owner == web_socket_id).then_some(*build_id)
+                        })
+                        .collect();
+                    self.studio_remote_build_owners
+                        .retain(|_, owner| *owner != web_socket_id);
+                    for build_id in owned_builds {
+                        self.studio_remote_latest_widget_dumps.remove(&build_id);
+                        self.studio_remote_startup_queries.remove(&build_id);
+                        self.studio_remote_startup_dump_pending.remove(&build_id);
+                    }
+                    self.clear_studio_remote_screenshots_for_socket(web_socket_id);
+                    self.clear_studio_remote_widget_tree_dumps_for_socket(web_socket_id);
+                }
+                StudioNetworkMessage::RemoteRequest {
+                    web_socket_id,
+                    request,
+                } => {
+                    self.handle_studio_remote_request(cx, web_socket_id, request);
+                }
+                StudioNetworkMessage::AppToStudio { build_id, msgs } => {
+                    self.recompiling_builds.remove(&build_id);
+                    cx.action(AppAction::WebsocketReconnect(build_id));
+                    self.ensure_active_build(build_id);
+                    for msg in msgs.0 {
+                        let auto_request_widget_tree_dump = self
+                            .studio_remote_startup_dump_pending
+                            .contains(&build_id)
+                            && matches!(&msg, AppToStudio::DrawCompleteAndFlip(_));
+                        if matches!(
+                            &msg,
+                            AppToStudio::CreateWindow { .. }
+                                | AppToStudio::SetCursor(_)
+                                | AppToStudio::ReadyToStart
+                                | AppToStudio::DrawCompleteAndFlip(_)
+                                | AppToStudio::SetClipboard(_)
+                                | AppToStudio::RequestAnimationFrame
+                                | AppToStudio::TweakHits(_)
+                        ) {
+                            cx.action(BuildManagerAction::AppToStudio {
+                                build_id,
+                                msg: msg.clone(),
+                            });
+                        }
+                        if auto_request_widget_tree_dump {
+                            if let Some(web_socket_id) =
+                                self.studio_remote_build_owners.get(&build_id).copied()
+                            {
+                                let startup_query =
+                                    self.studio_remote_startup_queries.get(&build_id).cloned();
+                                let emit_dump = startup_query.is_none();
+                                if let Err(message) = self.request_studio_remote_widget_tree_dump(
+                                    cx,
+                                    web_socket_id,
+                                    build_id,
+                                    startup_query,
+                                    emit_dump,
+                                ) {
+                                    self.send_studio_remote_error(web_socket_id, message);
+                                } else {
+                                    self.studio_remote_startup_dump_pending.remove(&build_id);
                                 }
-                                LogLevel::Error => {
-                                    file_system.add_decoration(
-                                        file_id,
-                                        Decoration::new(0, start, end, DecorationType::Error),
-                                    );
-                                    cx.action(AppAction::RedrawFile(file_id))
-                                }
-                                _ => (),
                             }
                         }
-                        self.log.push((
-                            build_id,
-                            LogItem::Location(LogItemLocation {
-                                level: item.level,
-                                file_name,
-                                start,
-                                end,
-                                message: item.message,
-                                explanation: item.explanation,
-                            }),
-                        ));
-                        pending_studio_remote_logs.push((
-                            build_id,
-                            studio_remote_level.to_string(),
-                            studio_remote_line,
-                        ));
-                        cx.action(AppAction::RedrawLog)
-                    }
-                    AppToStudio::Screenshot(screenshot) => {
-                        self.handle_studio_remote_screenshot_response(build_id, &screenshot);
+                        match msg {
+                            AppToStudio::LogItem(item) => {
+                                let studio_remote_level = log_level_name(item.level);
+                                let studio_remote_line = item.message.clone();
+                                let file_name = if let Some(build) = self.active.builds.get(&build_id)
+                                {
+                                    self.roots.map_path(&build.root, &item.file_name)
+                                } else {
+                                    self.roots.map_path("", &item.file_name)
+                                };
 
-                        // Keep legacy snapshot path for studio snapshots.
-                        if let Some(build) = self.active.builds.get(&build_id) {
-                            file_system.save_snapshot_image(
-                                cx,
-                                &build.root,
-                                "qtest",
-                                screenshot.width as _,
-                                screenshot.height as _,
-                                screenshot.png,
-                            )
+                                let start = text::Position {
+                                    line_index: item.line_start as usize,
+                                    byte_index: item.column_start as usize,
+                                };
+                                let end = text::Position {
+                                    line_index: item.line_end as usize,
+                                    byte_index: item.column_end as usize,
+                                };
+                                if let Some(file_id) = file_system.path_to_file_node_id(&file_name) {
+                                    match item.level {
+                                        LogLevel::Warning => {
+                                            file_system.add_decoration(
+                                                file_id,
+                                                Decoration::new(
+                                                    0,
+                                                    start,
+                                                    end,
+                                                    DecorationType::Warning,
+                                                ),
+                                            );
+                                            cx.action(AppAction::RedrawFile(file_id))
+                                        }
+                                        LogLevel::Error => {
+                                            file_system.add_decoration(
+                                                file_id,
+                                                Decoration::new(
+                                                    0,
+                                                    start,
+                                                    end,
+                                                    DecorationType::Error,
+                                                ),
+                                            );
+                                            cx.action(AppAction::RedrawFile(file_id))
+                                        }
+                                        _ => (),
+                                    }
+                                }
+                                self.log.push((
+                                    build_id,
+                                    LogItem::Location(LogItemLocation {
+                                        level: item.level,
+                                        file_name,
+                                        start,
+                                        end,
+                                        message: item.message,
+                                        explanation: item.explanation,
+                                    }),
+                                ));
+                                pending_studio_remote_logs.push((
+                                    build_id,
+                                    studio_remote_level.to_string(),
+                                    studio_remote_line,
+                                ));
+                                cx.action(AppAction::RedrawLog)
+                            }
+                            AppToStudio::Screenshot(screenshot) => {
+                                self.handle_studio_remote_screenshot_response(build_id, &screenshot);
+
+                                // Keep legacy snapshot path for studio snapshots.
+                                if let Some(build) = self.active.builds.get(&build_id) {
+                                    file_system.save_snapshot_image(
+                                        cx,
+                                        &build.root,
+                                        "qtest",
+                                        screenshot.width as _,
+                                        screenshot.height as _,
+                                        screenshot.png,
+                                    )
+                                }
+                            }
+                            AppToStudio::WidgetTreeDump(dump_response) => {
+                                self.handle_studio_remote_widget_tree_dump_response(
+                                    build_id,
+                                    dump_response,
+                                );
+                            }
+                            AppToStudio::EventSample(sample) => {
+                                if self.profiler_running {
+                                    self.push_event_profile_sample(build_id, sample);
+                                    needs_redraw_profiler = true;
+                                }
+                            }
+                            AppToStudio::GPUSample(sample) => {
+                                if self.profiler_running {
+                                    self.push_gpu_profile_sample(build_id, sample);
+                                    needs_redraw_profiler = true;
+                                }
+                            }
+                            AppToStudio::GCSample(sample) => {
+                                if self.profiler_running {
+                                    self.push_gc_profile_sample(build_id, sample);
+                                    needs_redraw_profiler = true;
+                                }
+                            }
+                            AppToStudio::PatchFile(ef) => cx.action(AppAction::PatchFile(ef)),
+                            AppToStudio::EditFile(ef) => cx.action(AppAction::EditFile(ef)),
+                            AppToStudio::JumpToFile(jt) => {
+                                cx.action(AppAction::JumpTo(jt));
+                            }
+                            AppToStudio::SelectInFile(jt) => {
+                                cx.action(AppAction::SelectInFile(jt));
+                            }
+                            AppToStudio::SwapSelection(ss) => {
+                                cx.action(AppAction::SwapSelection(ss));
+                            }
+                            _ => {}
                         }
                     }
-                    AppToStudio::WidgetTreeDump(dump_response) => {
-                        self.handle_studio_remote_widget_tree_dump_response(build_id, dump_response);
-                    }
-                    AppToStudio::EventSample(sample) => {
-                        if self.profiler_running {
-                            self.push_event_profile_sample(build_id, sample);
-                            needs_redraw_profiler = true;
-                        }
-                    }
-                    AppToStudio::GPUSample(sample) => {
-                        if self.profiler_running {
-                            self.push_gpu_profile_sample(build_id, sample);
-                            needs_redraw_profiler = true;
-                        }
-                    }
-                    AppToStudio::GCSample(sample) => {
-                        if self.profiler_running {
-                            self.push_gc_profile_sample(build_id, sample);
-                            needs_redraw_profiler = true;
-                        }
-                    }
-                    AppToStudio::PatchFile(ef) => cx.action(AppAction::PatchFile(ef)),
-                    AppToStudio::EditFile(ef) => cx.action(AppAction::EditFile(ef)),
-                    AppToStudio::JumpToFile(jt) => {
-                        cx.action(AppAction::JumpTo(jt));
-                    }
-                    AppToStudio::SelectInFile(jt) => {
-                        cx.action(AppAction::SelectInFile(jt));
-                    }
-                    AppToStudio::SwapSelection(ss) => {
-                        cx.action(AppAction::SwapSelection(ss));
-                    }
-                    _ => {}
                 }
             }
         }
@@ -220,7 +268,7 @@ impl BuildManager {
         }
     }
 
-    pub fn start_http_server(&mut self) {
+    pub fn start_http_server(&mut self, cx: &mut Cx) {
         let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest>();
         const MAX_HTTP_PORT_RETRIES: u16 = 32;
 
@@ -230,7 +278,9 @@ impl BuildManager {
                 break;
             };
             let addr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
-            if start_http_server(HttpServer {
+            if cx
+                .net
+                .start_http_server(HttpServer {
                 listen_address: addr,
                 post_max_size: 1024 * 1024,
                 request: tx_request.clone(),
@@ -261,9 +311,7 @@ impl BuildManager {
             println!("Studio http fallback : {:?}", self.studio_http);
         }
 
-        let studio_sender = self.recv_studio_msg.sender();
-        let studio_disconnect_sender = self.recv_studio_disconnect.sender();
-        let studio_remote_sender = self.recv_studio_remote_msg.sender();
+        let studio_network_sender = self.recv_studio_network_msg.sender();
         let active_build_websockets = self.active_build_websockets.clone();
         std::thread::spawn(move || {
             // TODO fix this proper:
@@ -316,9 +364,11 @@ impl BuildManager {
                     } => {
                         if headers.path == STUDIO_REMOTE_PATH {
                             socket_kinds.insert(web_socket_id, SocketKind::StudioRemote);
-                            let _ = studio_remote_sender.send(StudioRemoteSocket::Connected {
-                                web_socket_id,
-                                sender: response_sender,
+                            let _ = studio_network_sender.send(StudioNetworkMessage::RemoteConnected {
+                                socket: StudioWebSocket {
+                                    web_socket_id,
+                                    sender: response_sender,
+                                },
                             });
                             continue;
                         }
@@ -337,9 +387,11 @@ impl BuildManager {
                             .borrow_mut()
                             .sockets
                             .push(ActiveBuildSocket {
-                                web_socket_id,
                                 build_id,
-                                sender: response_sender,
+                                socket: StudioWebSocket {
+                                    web_socket_id,
+                                    sender: response_sender,
+                                },
                             });
                     }
                     HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
@@ -350,12 +402,14 @@ impl BuildManager {
                                         matches!(kind, SocketKind::App(id) if *id == build_id)
                                     });
                                     if !still_connected {
-                                        let _ = studio_disconnect_sender.send(build_id);
+                                        let _ = studio_network_sender
+                                            .send(StudioNetworkMessage::AppDisconnected { build_id });
                                     }
                                 }
                                 SocketKind::StudioRemote => {
-                                    let _ = studio_remote_sender
-                                        .send(StudioRemoteSocket::Disconnected { web_socket_id });
+                                    let _ = studio_network_sender.send(
+                                        StudioNetworkMessage::RemoteDisconnected { web_socket_id },
+                                    );
                                 }
                             }
                         }
@@ -364,7 +418,7 @@ impl BuildManager {
                             .unwrap()
                             .borrow_mut()
                             .sockets
-                            .retain(|v| v.web_socket_id != web_socket_id);
+                            .retain(|v| v.socket.web_socket_id != web_socket_id);
                     }
                     HttpServerRequest::TextMessage {
                         web_socket_id,
@@ -374,10 +428,12 @@ impl BuildManager {
                         if matches!(socket_kinds.get(&web_socket_id), Some(SocketKind::StudioRemote)) {
                             match StudioRemoteRequest::deserialize_json(&string) {
                                 Ok(request) => {
-                                    let _ = studio_remote_sender.send(StudioRemoteSocket::Request {
-                                        web_socket_id,
-                                        request,
-                                    });
+                                    let _ = studio_network_sender.send(
+                                        StudioNetworkMessage::RemoteRequest {
+                                            web_socket_id,
+                                            request,
+                                        },
+                                    );
                                 }
                                 Err(err) => {
                                     let message =
@@ -399,7 +455,12 @@ impl BuildManager {
                     } => {
                         if let Some(SocketKind::App(id)) = socket_kinds.get(&web_socket_id) {
                             if let Ok(msg) = AppToStudioVec::deserialize_bin(&data) {
-                                let _ = studio_sender.send((*id, msg));
+                                let _ = studio_network_sender.send(
+                                    StudioNetworkMessage::AppToStudio {
+                                        build_id: *id,
+                                        msgs: msg,
+                                    },
+                                );
                             }
                         }
                     }

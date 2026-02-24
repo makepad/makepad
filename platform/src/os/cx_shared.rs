@@ -8,6 +8,7 @@ use {
             TriggerEvent,
         },
         makepad_live_id::{live_id, LiveId},
+        makepad_network::NetworkResponse,
         studio::{
             AppToStudio, EventSample, ScreenshotResponse, StudioToApp, WidgetTreeDumpResponse,
         },
@@ -104,6 +105,30 @@ impl Cx {
 
     pub(crate) fn need_redrawing(&self) -> bool {
         self.new_draw_event.will_redraw()
+    }
+
+    pub(crate) fn dispatch_network_runtime_events(&mut self) {
+        let mut responses = Vec::new();
+        while let Some(response) = self.net.try_recv() {
+            match &response {
+                NetworkResponse::WsOpened { .. }
+                | NetworkResponse::WsMessage { .. }
+                | NetworkResponse::WsClosed { .. }
+                | NetworkResponse::WsError { .. } => {
+                    self.handle_script_web_socket_event(response.clone())
+                }
+                NetworkResponse::HttpResponse { .. }
+                | NetworkResponse::HttpStreamChunk { .. }
+                | NetworkResponse::HttpStreamComplete { .. }
+                | NetworkResponse::HttpError { .. }
+                | NetworkResponse::HttpProgress { .. } => {}
+            }
+            responses.push(response);
+        }
+        if !responses.is_empty() {
+            self.handle_script_network_events(&responses);
+            self.call_event_handler(&Event::NetworkResponses(responses));
+        }
     }
 
     #[allow(dead_code)]

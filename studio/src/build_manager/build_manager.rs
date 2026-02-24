@@ -19,7 +19,7 @@ use {
         makepad_shell::*,
         makepad_widgets::*,
     },
-    makepad_http::server::*,
+    makepad_network::http_server::*,
     std::{
         cell::RefCell,
         collections::{hash_map, BTreeSet, HashMap, HashSet},
@@ -138,15 +138,13 @@ pub struct BuildManager {
     pub binaries: Vec<BuildBinary>,
     pub active: ActiveBuilds,
     pub studio_http: String,
-    pub recv_studio_msg: ToUIReceiver<(LiveId, AppToStudioVec)>,
-    pub recv_studio_disconnect: ToUIReceiver<LiveId>,
-    recv_studio_remote_msg: ToUIReceiver<StudioRemoteSocket>,
+    pub recv_studio_network_msg: ToUIReceiver<StudioNetworkMessage>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
     pub tick_timer: Timer,
     pub websocket_alive_timer: Timer,
     //pub send_file_change: FromUISender<LiveFileChange>,
     pub active_build_websockets: Arc<Mutex<RefCell<ActiveBuildWebSockets>>>,
-    studio_remote_sockets: HashMap<u64, mpsc::Sender<Vec<u8>>>,
+    studio_remote_sockets: HashMap<u64, StudioWebSocket>,
     studio_remote_build_owners: HashMap<LiveId, u64>,
     studio_remote_build_counter: u64,
     studio_remote_screenshot_requests: UniqueIdMap<PendingStudioRemoteScreenshot>,
@@ -155,6 +153,32 @@ pub struct BuildManager {
     studio_remote_startup_queries: HashMap<LiveId, String>,
     studio_remote_startup_dump_pending: HashSet<LiveId>,
     recompiling_builds: HashSet<LiveId>,
+}
+
+#[derive(Clone)]
+pub struct StudioWebSocket {
+    pub web_socket_id: u64,
+    pub sender: mpsc::Sender<Vec<u8>>,
+}
+
+pub enum StudioNetworkMessage {
+    AppToStudio {
+        build_id: LiveId,
+        msgs: AppToStudioVec,
+    },
+    AppDisconnected {
+        build_id: LiveId,
+    },
+    RemoteConnected {
+        socket: StudioWebSocket,
+    },
+    RemoteDisconnected {
+        web_socket_id: u64,
+    },
+    RemoteRequest {
+        web_socket_id: u64,
+        request: StudioRemoteRequest,
+    },
 }
 
 #[derive(Default)]
@@ -170,7 +194,7 @@ impl ActiveBuildWebSockets {
             if socket.build_id != build_id {
                 return true;
             }
-            if socket.sender.send(data.clone()).is_ok() {
+            if socket.socket.sender.send(data.clone()).is_ok() {
                 sent_any = true;
                 true
             } else {
@@ -182,9 +206,8 @@ impl ActiveBuildWebSockets {
 }
 
 pub struct ActiveBuildSocket {
-    web_socket_id: u64,
+    socket: StudioWebSocket,
     build_id: LiveId,
-    sender: mpsc::Sender<Vec<u8>>,
 }
 
 include!("studio_remote_proto.rs");
@@ -756,7 +779,7 @@ impl BuildManager {
                     content: live_file_change.content.clone(),
                 }])
                 .serialize_bin();
-                let _ = socket.sender.send(data.clone());
+                let _ = socket.socket.sender.send(data.clone());
             }
         }
     }
@@ -795,7 +818,7 @@ impl BuildManager {
             if let Ok(d) = self.active_build_websockets.lock() {
                 for socket in d.borrow_mut().sockets.iter_mut() {
                     let data = StudioToAppVec(vec![StudioToApp::KeepAlive]).serialize_bin();
-                    let _ = socket.sender.send(data.clone());
+                    let _ = socket.socket.sender.send(data.clone());
                 }
             }
         }
@@ -913,9 +936,7 @@ impl BuildManager {
         if let Event::Signal = event {
             let mut pending_studio_remote_logs: Vec<(LiveId, String, String)> = Vec::new();
             self.handle_external_ip_signal();
-            self.handle_studio_remote_socket(cx);
-            self.handle_studio_disconnect_signal(cx);
-            self.handle_studio_signal_messages(cx, file_system, &mut pending_studio_remote_logs);
+            self.handle_studio_network_messages(cx, file_system, &mut pending_studio_remote_logs);
 
             while let Ok(wrap) = self.clients[0].msg_receiver.try_recv() {
                 let log = &mut self.log;

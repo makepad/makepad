@@ -1,7 +1,11 @@
-use makepad_script::*;
 use std::io::prelude::*;
 use std::io::BufReader;
-use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
+
+#[cfg(feature = "script")]
+use makepad_script::*;
+#[cfg(feature = "script")]
+use std::net::{IpAddr, Ipv4Addr};
 
 pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
     let bytes_total = bytes.len();
@@ -61,27 +65,31 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     Some((url, search))
 }
 
-#[derive(Clone, Script, ScriptHook)]
+#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
+#[derive(Clone)]
 pub struct HttpServerHeaders {
-    #[rust(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080))]
+    #[cfg_attr(
+        feature = "script",
+        rust(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080))
+    )]
     pub addr: SocketAddr,
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub addr_text: String,
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub lines: Vec<String>,
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub verb: String,
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub path: String,
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub path_no_slash: String,
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub search: Option<String>,
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub content_length: Option<u64>,
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub accept_encoding: Option<String>,
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub sec_websocket_key: Option<String>,
 }
 

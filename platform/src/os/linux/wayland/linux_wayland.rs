@@ -419,16 +419,10 @@ impl WaylandCx {
                     request_id,
                     request,
                 } => {
-                    use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::open(
-                        request_id,
-                        request,
-                        cx.os.network_response.sender.clone(),
-                    );
+                    let _ = cx.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::cancel(request_id);
+                    let _ = cx.net.http_cancel(request_id);
                 }
                 CxOsOp::ShowTextIME(area, pos, _config) => {
                     if let Some(window) = state.current_window {

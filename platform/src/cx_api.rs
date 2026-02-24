@@ -10,10 +10,11 @@ use {
         dvec2,
         event::keyboard::CharOffset,
         event::xr::XrAnchor,
-        event::{DragItem, HttpRequest, NextFrame, Timer, Trigger, VideoSource},
+        event::{DragItem, NextFrame, Timer, Trigger, VideoSource},
         gpu_info::GpuInfo,
         ime::TextInputConfig,
         macos_menu::MacosMenu,
+        makepad_network::HttpRequest,
         makepad_futures::executor::Spawner,
         makepad_live_id::*,
         makepad_math::{Rect, Vec2d},
@@ -845,15 +846,15 @@ impl Cx {
     }
 
     pub fn http_request(&mut self, request_id: LiveId, request: HttpRequest) {
-        self.platform_ops.push(CxOsOp::HttpRequest {
-            request_id,
-            request,
-        });
+        if let Err(err) = self.net.http_start(request_id, request) {
+            crate::error!("http_request failed for {}: {}", request_id.0, err);
+        }
     }
 
     pub fn cancel_http_request(&mut self, request_id: LiveId) {
-        self.platform_ops
-            .push(CxOsOp::CancelHttpRequest { request_id });
+        if let Err(err) = self.net.http_cancel(request_id) {
+            crate::error!("cancel_http_request failed for {}: {}", request_id.0, err);
+        }
     }
     /*
         pub fn web_socket_open(&mut self, request_id: LiveId, request: HttpRequest) {

@@ -152,20 +152,6 @@ pub struct StudioRemoteBuildInfo {
     pub has_web_socket: bool,
 }
 
-enum StudioRemoteSocket {
-    Connected {
-        web_socket_id: u64,
-        sender: mpsc::Sender<Vec<u8>>,
-    },
-    Disconnected {
-        web_socket_id: u64,
-    },
-    Request {
-        web_socket_id: u64,
-        request: StudioRemoteRequest,
-    },
-}
-
 struct CompactF64(f64);
 
 impl std::fmt::Display for CompactF64 {
@@ -491,8 +477,8 @@ impl BuildManager {
     }
 
     fn send_studio_remote_response(&self, web_socket_id: u64, response: StudioRemoteResponse) {
-        if let Some(sender) = self.studio_remote_sockets.get(&web_socket_id) {
-            Self::send_studio_remote_response_to_sender(sender, response);
+        if let Some(socket) = self.studio_remote_sockets.get(&web_socket_id) {
+            Self::send_studio_remote_response_to_sender(&socket.sender, response);
         }
     }
 
@@ -1073,43 +1059,5 @@ impl BuildManager {
             }
         }
         Ok((build_id, root, package))
-    }
-
-    fn handle_studio_remote_socket(&mut self, cx: &mut Cx) {
-        while let Ok(msg) = self.recv_studio_remote_msg.try_recv() {
-            match msg {
-                StudioRemoteSocket::Connected {
-                    web_socket_id,
-                    sender,
-                } => {
-                    self.studio_remote_sockets.insert(web_socket_id, sender);
-                }
-                StudioRemoteSocket::Disconnected { web_socket_id } => {
-                    self.studio_remote_sockets.remove(&web_socket_id);
-                    let owned_builds: Vec<LiveId> = self
-                        .studio_remote_build_owners
-                        .iter()
-                        .filter_map(|(build_id, owner)| {
-                            (*owner == web_socket_id).then_some(*build_id)
-                        })
-                        .collect();
-                    self.studio_remote_build_owners
-                        .retain(|_, owner| *owner != web_socket_id);
-                    for build_id in owned_builds {
-                        self.studio_remote_latest_widget_dumps.remove(&build_id);
-                        self.studio_remote_startup_queries.remove(&build_id);
-                        self.studio_remote_startup_dump_pending.remove(&build_id);
-                    }
-                    self.clear_studio_remote_screenshots_for_socket(web_socket_id);
-                    self.clear_studio_remote_widget_tree_dumps_for_socket(web_socket_id);
-                }
-                StudioRemoteSocket::Request {
-                    web_socket_id,
-                    request,
-                } => {
-                    self.handle_studio_remote_request(cx, web_socket_id, request);
-                }
-            }
-        }
     }
 }

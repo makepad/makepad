@@ -1,4 +1,5 @@
-use makepad_http::server::*;
+use makepad_network::http_server::*;
+use makepad_network::{NetworkConfig, NetworkRuntime};
 
 use std::{
     net::SocketAddr,
@@ -8,6 +9,7 @@ use std::{
 };
 
 fn main() {
+    let net = NetworkRuntime::new(NetworkConfig::default());
     let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest> ();
     
     #[cfg(target_os = "linux")]
@@ -22,7 +24,7 @@ fn main() {
     }
     let root_path = args[1].clone();
     
-    start_http_server(HttpServer{
+    net.start_http_server(HttpServer{
         listen_address:addr,
         post_max_size: 1024*1024,
         request: tx_request
@@ -51,6 +53,9 @@ fn main() {
                 
             },
             HttpServerRequest::BinaryMessage {web_socket_id:_, response_sender:_, data:_}=>{
+                
+            }
+            HttpServerRequest::TextMessage { web_socket_id:_, response_sender:_, string:_ }=>{
                 
             }
             HttpServerRequest::Get{headers, response_sender}=>{

@@ -35,7 +35,6 @@ use {
             KeyEvent,
             KeyModifiers,
             NetworkResponse,
-            NetworkResponseItem,
             TextClipboardEvent,
             //TimerEvent,
             TextInputEvent,
@@ -65,8 +64,8 @@ use {
         window::CxWindowPool,
     },
     jni_sys::jobject,
-    makepad_http::websocket::ServerWebSocket as WebSocketImpl,
-    makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl,
+    makepad_network::server_web_socket::WebSocketParser as WebSocketImpl,
+    makepad_network::server_web_socket::ServerWebSocketMessage as WebSocketMessageImpl,
     std::cell::RefCell,
     std::collections::HashMap,
     std::ffi::CString,
@@ -460,14 +459,14 @@ impl Cx {
                 headers,
                 body,
             } => {
-                let out = vec![NetworkResponseItem {
+                let out = vec![NetworkResponse::HttpResponse {
                     request_id: LiveId(request_id),
-                    response: NetworkResponse::HttpResponse(HttpResponse::new(
+                    response: HttpResponse::new(
                         LiveId(metadata_id),
                         status_code,
                         headers,
                         Some(body),
-                    )),
+                    ),
                 }];
                 self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
@@ -479,12 +478,12 @@ impl Cx {
                 error,
                 ..
             } => {
-                let out = vec![NetworkResponseItem {
+                let out = vec![NetworkResponse::HttpError {
                     request_id: LiveId(request_id),
-                    response: NetworkResponse::HttpRequestError(HttpError {
+                    error: HttpError {
                         message: error,
                         metadata_id: LiveId(metadata_id),
-                    }),
+                    },
                 }];
                 self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
@@ -837,6 +836,8 @@ impl Cx {
         if SignalToUI::check_and_clear_action_signal() {
             self.handle_action_receiver();
         }
+
+        self.dispatch_network_runtime_events();
 
         // Video updates
         let to_dispatch = self.get_video_updates();
@@ -1445,6 +1446,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
+        super::android_network::install_network_backend_shim();
         self.package_root = Some("makepad".to_string());
     }
 

@@ -1,4 +1,5 @@
-use crate::makepad_http::server::*;
+use crate::makepad_network::http_server::*;
+use crate::makepad_network::{NetworkConfig, NetworkRuntime};
 use crate::makepad_shell::*;
 use crate::makepad_wasm_strip::*;
 use crate::utils::*;
@@ -523,6 +524,7 @@ fn decode_query_component(input: &str) -> String {
 }
 
 pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
+    let net = NetworkRuntime::new(NetworkConfig::default());
     let addr = if lan {
         SocketAddr::new("0.0.0.0".parse().unwrap(), port)
     } else {
@@ -531,7 +533,7 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
     println!("Starting webserver on http://{:?}", addr);
     let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest>();
 
-    start_http_server(HttpServer {
+    net.start_http_server(HttpServer {
         listen_address: addr,
         post_max_size: 1024 * 1024,
         request: tx_request,
