@@ -24,6 +24,12 @@ impl SocketStream {
         })
     }
 
+    pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
+        Ok(Self {
+            inner: self.inner.into_tls(host, ignore_ssl_cert)?,
+        })
+    }
+
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.inner.set_read_timeout(timeout)
     }
@@ -77,6 +83,12 @@ impl SocketStream {
         })
     }
 
+    pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
+        Ok(Self {
+            inner: self.inner.into_tls(host, ignore_ssl_cert)?,
+        })
+    }
+
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.inner.set_read_timeout(timeout)
     }
@@ -127,6 +139,12 @@ impl SocketStream {
     ) -> io::Result<Self> {
         Ok(Self {
             inner: windows_impl::SocketStream::connect(host, port, use_tls, ignore_ssl_cert)?,
+        })
+    }
+
+    pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
+        Ok(Self {
+            inner: self.inner.into_tls(host, ignore_ssl_cert)?,
         })
     }
 
@@ -184,6 +202,13 @@ impl SocketStream {
         })
     }
 
+    pub fn into_tls(self, _host: &str, _ignore_ssl_cert: bool) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "socket stream TLS upgrade is not available on this target",
+        ))
+    }
+
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.inner.set_read_timeout(timeout)
     }
@@ -229,6 +254,13 @@ impl SocketStream {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "socket stream API is not available on this target",
+        ))
+    }
+
+    pub fn into_tls(self, _host: &str, _ignore_ssl_cert: bool) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "socket stream TLS upgrade is not available on this target",
         ))
     }
 

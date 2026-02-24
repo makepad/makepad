@@ -337,6 +337,17 @@ impl SocketStream {
         }
     }
 
+    pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
+        match self {
+            SocketStream::Tls(stream) => Ok(SocketStream::Tls(stream)),
+            SocketStream::Plain(tcp_stream) => Ok(SocketStream::Tls(OpenSslStream::connect(
+                tcp_stream,
+                host,
+                !ignore_ssl_cert,
+            )?)),
+        }
+    }
+
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         match self {
             SocketStream::Plain(stream) => stream.set_read_timeout(timeout),

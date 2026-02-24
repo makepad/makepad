@@ -87,6 +87,49 @@ macro_rules! set_static_val {
     };
 }
 
+// Mark a value using split field borrows (so callers can iterate maps without snapshot Vecs)
+macro_rules! mark_value_fields {
+    ($objects:expr, $arrays:expr, $strings:expr, $pods:expr, $handles:expr, $regexes:expr, $mark_vec:expr, $val:expr) => {
+        if let Some(ptr) = $val.as_object() {
+            let object = &$objects[ptr];
+            if !object.tag.is_static() && object.tag.is_alloced() {
+                $mark_vec.push(ScriptGcMark::Object(ptr));
+            }
+        } else if let Some(ptr) = $val.as_string() {
+            if let Some(str_data) = $strings[ptr].as_mut() {
+                if !str_data.tag.is_static() {
+                    str_data.tag.set_mark();
+                }
+            }
+        } else if let Some(ptr) = $val.as_array() {
+            let array = &$arrays[ptr];
+            if !array.tag.is_static() && array.tag.is_alloced() {
+                $mark_vec.push(ScriptGcMark::Array(ptr));
+            }
+        } else if let Some(ptr) = $val.as_pod() {
+            let pod = &mut $pods[ptr];
+            if !pod.tag.is_static() && pod.tag.is_alloced() {
+                pod.tag.set_mark();
+            }
+        } else if let Some(ptr) = $val.as_handle() {
+            // Skip handle index 0 - it's the "null" handle (ScriptHandle::ZERO)
+            if ptr.index != 0 {
+                if let Some(handle_data) = $handles[ptr].as_mut() {
+                    if !handle_data.tag.is_static() {
+                        handle_data.tag.set_mark();
+                    }
+                }
+            }
+        } else if let Some(ptr) = $val.as_regex() {
+            if let Some(regex_data) = $regexes[ptr].as_mut() {
+                if !regex_data.tag.is_static() {
+                    regex_data.tag.set_mark();
+                }
+            }
+        }
+    };
+}
+
 impl ScriptHeap {
     /// Recursively mark a value and all reachable values as static (permanent).
     /// This walks the object graph similar to GC marking but sets the static flag instead.
@@ -222,85 +265,107 @@ impl ScriptHeap {
             ScriptGcMark::Object(obj) => {
                 // Check flags and set mark
                 let object = &mut self.objects[obj];
-                // Skip if already marked or static (permanent) or not allocated
-                if object.tag.is_marked() || object.tag.is_static() || !object.tag.is_alloced() {
+                // Static objects are assumed to only reference static values, so
+                // they do not need traversal during normal GC marking.
+                if object.tag.is_static() || object.tag.is_marked() || !object.tag.is_alloced() {
                     return;
                 }
                 object.tag.set_mark();
 
-                // Mark proto chain - get proto without holding borrow
-                let proto = self.objects[obj].proto;
-                self.mark_value(proto);
-
-                // Mark map entries - queue objects/arrays for later, mark primitives directly
-                for (key, map_val) in self.objects[obj].map.iter() {
-                    // Queue key if object/array (keys are typically IDs, not heap refs)
-                    if let Some(ptr) = key.as_object() {
-                        self.mark_vec.push(ScriptGcMark::Object(ptr));
-                    } else if let Some(ptr) = key.as_array() {
-                        self.mark_vec.push(ScriptGcMark::Array(ptr));
-                    }
-                    // Queue/mark value
-                    let val = map_val.value;
-                    if let Some(ptr) = val.as_object() {
-                        self.mark_vec.push(ScriptGcMark::Object(ptr));
-                    } else if let Some(ptr) = val.as_array() {
-                        self.mark_vec.push(ScriptGcMark::Array(ptr));
-                    } else if let Some(ptr) = val.as_string() {
-                        if let Some(str_data) = self.strings[ptr].as_mut() {
-                            if !str_data.tag.is_static() {
-                                str_data.tag.set_mark();
-                            }
-                        }
-                    } else if let Some(ptr) = val.as_pod() {
-                        let pod = &mut self.pods[ptr];
-                        if !pod.tag.is_static() && pod.tag.is_alloced() {
-                            pod.tag.set_mark();
-                        }
-                    } else if let Some(ptr) = val.as_handle() {
-                        if ptr.index != 0 {
-                            if let Some(handle_data) = self.handles[ptr].as_mut() {
-                                if !handle_data.tag.is_static() {
-                                    handle_data.tag.set_mark();
-                                }
-                            }
-                        }
-                    } else if let Some(ptr) = val.as_regex() {
-                        if let Some(regex_data) = self.regexes[ptr].as_mut() {
-                            if !regex_data.tag.is_static() {
-                                regex_data.tag.set_mark();
-                            }
-                        }
-                    }
+                // Mark proto/map/vec entries directly without temporary Vec snapshots.
+                let (objects, arrays, strings, pods, handles, regexes, mark_vec) = (
+                    &self.objects,
+                    &self.arrays,
+                    &mut self.strings,
+                    &mut self.pods,
+                    &mut self.handles,
+                    &mut self.regexes,
+                    &mut self.mark_vec,
+                );
+                let object = &objects[obj];
+                mark_value_fields!(
+                    objects,
+                    arrays,
+                    strings,
+                    pods,
+                    handles,
+                    regexes,
+                    mark_vec,
+                    object.proto
+                );
+                for (key, val) in object.map.iter() {
+                    mark_value_fields!(
+                        objects,
+                        arrays,
+                        strings,
+                        pods,
+                        handles,
+                        regexes,
+                        mark_vec,
+                        *key
+                    );
+                    mark_value_fields!(
+                        objects,
+                        arrays,
+                        strings,
+                        pods,
+                        handles,
+                        regexes,
+                        mark_vec,
+                        val.value
+                    );
                 }
-
-                // Mark vec entries
-                let vec_len = self.objects[obj].vec.len();
-                for i in 0..vec_len {
-                    let object = &self.objects[obj];
-                    let kv = &object.vec[i];
-                    let key = kv.key;
-                    let value = kv.value;
-                    self.mark_value(key);
-                    self.mark_value(value);
+                for kv in object.vec.iter() {
+                    mark_value_fields!(
+                        objects,
+                        arrays,
+                        strings,
+                        pods,
+                        handles,
+                        regexes,
+                        mark_vec,
+                        kv.key
+                    );
+                    mark_value_fields!(
+                        objects,
+                        arrays,
+                        strings,
+                        pods,
+                        handles,
+                        regexes,
+                        mark_vec,
+                        kv.value
+                    );
                 }
             }
             ScriptGcMark::Array(arr) => {
                 let tag = &self.arrays[arr].tag;
-                // Skip if already marked or static (permanent) or not allocated
-                if tag.is_marked() || tag.is_static() || !tag.is_alloced() {
+                if tag.is_static() || tag.is_marked() || !tag.is_alloced() {
                     return;
                 }
                 self.arrays[arr].tag.set_mark();
 
-                // Mark array values by iterating indices to avoid Vec allocation
                 if let ScriptArrayStorage::ScriptValue(values) = &self.arrays[arr].storage {
-                    let len = values.len();
-                    for i in 0..len {
-                        if let ScriptArrayStorage::ScriptValue(values) = &self.arrays[arr].storage {
-                            let v = values[i];
-                            self.mark_value(v);
-                        }
+                    let (objects, arrays, strings, pods, handles, regexes, mark_vec) = (
+                        &self.objects,
+                        &self.arrays,
+                        &mut self.strings,
+                        &mut self.pods,
+                        &mut self.handles,
+                        &mut self.regexes,
+                        &mut self.mark_vec,
+                    );
+                    for v in values.iter() {
+                        mark_value_fields!(
+                            objects,
+                            arrays,
+                            strings,
+                            pods,
+                            handles,
+                            regexes,
+                            mark_vec,
+                            *v
+                        );
                     }
                 }
             }
@@ -310,37 +375,18 @@ impl ScriptHeap {
     /// Mark a single value - adds objects/arrays to work list, marks primitives directly
     #[inline]
     fn mark_value(&mut self, val: ScriptValue) {
-        if let Some(ptr) = val.as_object() {
-            self.mark_vec.push(ScriptGcMark::Object(ptr));
-        } else if let Some(ptr) = val.as_string() {
-            if let Some(str_data) = self.strings[ptr].as_mut() {
-                if !str_data.tag.is_static() {
-                    str_data.tag.set_mark();
-                }
-            }
-        } else if let Some(ptr) = val.as_array() {
-            self.mark_vec.push(ScriptGcMark::Array(ptr));
-        } else if let Some(ptr) = val.as_pod() {
-            let pod = &mut self.pods[ptr];
-            if !pod.tag.is_static() && pod.tag.is_alloced() {
-                pod.tag.set_mark();
-            }
-        } else if let Some(ptr) = val.as_handle() {
-            // Skip handle index 0 - it's the "null" handle (ScriptHandle::ZERO)
-            if ptr.index != 0 {
-                if let Some(handle_data) = self.handles[ptr].as_mut() {
-                    if !handle_data.tag.is_static() {
-                        handle_data.tag.set_mark();
-                    }
-                }
-            }
-        } else if let Some(ptr) = val.as_regex() {
-            if let Some(regex_data) = self.regexes[ptr].as_mut() {
-                if !regex_data.tag.is_static() {
-                    regex_data.tag.set_mark();
-                }
-            }
-        }
+        let (objects, arrays, strings, pods, handles, regexes, mark_vec) = (
+            &self.objects,
+            &self.arrays,
+            &mut self.strings,
+            &mut self.pods,
+            &mut self.handles,
+            &mut self.regexes,
+            &mut self.mark_vec,
+        );
+        mark_value_fields!(
+            objects, arrays, strings, pods, handles, regexes, mark_vec, val
+        );
     }
 
     pub fn mark(&mut self, threads: &ScriptThreads, code: &ScriptCode) {
@@ -354,40 +400,51 @@ impl ScriptHeap {
         }
 
         // Mark type_defaults objects
-        for (_, obj) in &self.type_defaults {
-            self.mark_vec.push(ScriptGcMark::Object(*obj));
+        {
+            let (type_defaults, mark_vec) = (&self.type_defaults, &mut self.mark_vec);
+            for obj in type_defaults.values().copied() {
+                mark_vec.push(ScriptGcMark::Object(obj));
+            }
         }
 
         // Mark pod_types default values and objects
-        let pod_type_data: Vec<_> = self
-            .pod_types
-            .iter()
-            .map(|pt| (pt.default, pt.object))
-            .collect();
-        for (default, pod_obj) in pod_type_data {
+        for i in 0..self.pod_types.len() {
+            let (default, pod_obj) = {
+                let pod_type = &self.pod_types[i];
+                (pod_type.default, pod_type.object)
+            };
             self.mark_value(default);
             if pod_obj != ScriptObject::ZERO {
-                self.mark_vec.push(ScriptGcMark::Object(pod_obj));
+                self.mark_value(pod_obj.into());
             }
         }
 
         // Mark root_objects
-        let roots: Vec<_> = self.root_objects.borrow().keys().copied().collect();
-        for item in roots {
-            self.mark_vec.push(ScriptGcMark::Object(item));
+        {
+            let roots = self.root_objects.borrow();
+            let mark_vec = &mut self.mark_vec;
+            for item in roots.keys().copied() {
+                mark_vec.push(ScriptGcMark::Object(item));
+            }
         }
 
         // Mark root_arrays
-        let roots: Vec<_> = self.root_arrays.borrow().keys().copied().collect();
-        for item in roots {
-            self.mark_vec.push(ScriptGcMark::Array(item));
+        {
+            let roots = self.root_arrays.borrow();
+            let mark_vec = &mut self.mark_vec;
+            for item in roots.keys().copied() {
+                mark_vec.push(ScriptGcMark::Array(item));
+            }
         }
 
         // Mark root_handles directly
-        let roots: Vec<_> = self.root_handles.borrow().keys().copied().collect();
-        for item in roots {
-            if let Some(handle_data) = self.handles[item].as_mut() {
-                handle_data.tag.set_mark();
+        {
+            let roots = self.root_handles.borrow();
+            let handles = &mut self.handles;
+            for item in roots.keys().copied() {
+                if let Some(handle_data) = handles[item].as_mut() {
+                    handle_data.tag.set_mark();
+                }
             }
         }
 
@@ -400,25 +457,25 @@ impl ScriptHeap {
                 }
                 // Scopes
                 for scope in thread.scopes.iter() {
-                    self.mark_vec.push(ScriptGcMark::Object(*scope));
+                    self.mark_value((*scope).into());
                 }
                 // Method call contexts
                 for me in thread.mes.iter() {
                     match me {
                         ScriptMe::Object(obj) => {
-                            self.mark_vec.push(ScriptGcMark::Object(*obj));
+                            self.mark_value((*obj).into());
                         }
                         ScriptMe::Call { sself, args, .. } => {
                             if let Some(s) = sself {
                                 self.mark_value(*s);
                             }
-                            self.mark_vec.push(ScriptGcMark::Object(*args));
+                            self.mark_value((*args).into());
                         }
                         ScriptMe::Pod { pod, .. } => {
                             self.pods[*pod].tag.set_mark();
                         }
                         ScriptMe::Array(arr) => {
-                            self.mark_vec.push(ScriptGcMark::Array(*arr));
+                            self.mark_value((*arr).into());
                         }
                     }
                 }
@@ -465,7 +522,7 @@ impl ScriptHeap {
         // Mark ScriptNative type_table objects
         for type_map in code.native.borrow().type_table.iter() {
             for (_, obj) in type_map.iter() {
-                self.mark_vec.push(ScriptGcMark::Object(*obj));
+                self.mark_value((*obj).into());
             }
         }
 
@@ -495,6 +552,7 @@ impl ScriptHeap {
             // Skip static objects - they are permanent
             if obj.tag.is_static() {
                 obj_static += 1;
+                obj.tag.clear_mark();
                 continue;
             }
             if !obj.tag.is_marked() && obj.tag.is_alloced() {
@@ -520,6 +578,7 @@ impl ScriptHeap {
             // Skip static arrays - they are permanent
             if array.tag.is_static() {
                 arr_static += 1;
+                array.tag.clear_mark();
                 continue;
             }
             if !array.tag.is_marked() && array.tag.is_alloced() {
@@ -669,6 +728,7 @@ impl ScriptHeap {
     /// - Trigger when any heap category has grown by 2x since last GC
     /// - Use minimum thresholds to avoid GC thrashing on small heaps
     /// - Objects are weighted more heavily as they're the primary allocation type
+
     pub fn needs_gc(&self) -> bool {
         // Minimum thresholds before GC can trigger (avoid thrashing on small heaps)
         const MIN_OBJECTS: usize = 1024;

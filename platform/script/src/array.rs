@@ -84,6 +84,7 @@ impl ScriptArrayTag {
     pub const REF_DATA_MASK: u64 = 0xFF_FFFF_FFFF;
     pub const REF_KIND_MASK: u64 = 0xF << 58;
     pub const REF_KIND_APPLY_TRANSFORM: u64 = 0x6 << 58;
+    pub const IMMUTABLE_MASK: u64 = Self::FROZEN | Self::STATIC;
 
     pub fn is_alloced(&self) -> bool {
         return self.0 & Self::ALLOCED != 0;
@@ -143,6 +144,11 @@ impl ScriptArrayTag {
 
     pub fn is_static(&self) -> bool {
         self.0 & Self::STATIC != 0
+    }
+
+    #[inline(always)]
+    pub fn is_immutable(&self) -> bool {
+        self.0 & Self::IMMUTABLE_MASK != 0
     }
 
     pub fn set_dirty(&mut self) {

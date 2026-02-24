@@ -6,6 +6,9 @@ use {
     std::{ptr, ptr::NonNull, sync::mpsc::Sender, sync::Once},
 };
 
+const URL_SESSION_DATA_DELEGATE_CLASS_NAME: &str = "MakepadNSURLSessionDataDelegate";
+const URL_SESSION_DELEGATE_CLASS_NAME: &str = "MakepadNSURLSessionDelegate";
+
 struct UrlSessionDataDelegateContext {
     sender: Sender<NetworkResponse>,
     request_id: LiveId,
@@ -112,8 +115,17 @@ pub fn define_url_session_data_delegate() -> *const Class {
         }
     }
 
+    if let Some(existing) = Class::get(URL_SESSION_DATA_DELEGATE_CLASS_NAME) {
+        return existing as *const Class;
+    }
+
     let superclass = class!(NSObject);
-    let mut decl = ClassDecl::new("NSURLSessionDataDelegate", superclass).unwrap();
+    let Some(mut decl) = ClassDecl::new(URL_SESSION_DATA_DELEGATE_CLASS_NAME, superclass) else {
+        if let Some(existing) = Class::get(URL_SESSION_DATA_DELEGATE_CLASS_NAME) {
+            return existing as *const Class;
+        }
+        return superclass as *const Class;
+    };
 
     unsafe {
         decl.add_method(
@@ -156,8 +168,17 @@ pub fn define_url_session_delegate() -> *const Class {
         }
     }
 
+    if let Some(existing) = Class::get(URL_SESSION_DELEGATE_CLASS_NAME) {
+        return existing as *const Class;
+    }
+
     let superclass = class!(NSObject);
-    let mut decl = ClassDecl::new("NSURLSessionDelegate", superclass).unwrap();
+    let Some(mut decl) = ClassDecl::new(URL_SESSION_DELEGATE_CLASS_NAME, superclass) else {
+        if let Some(existing) = Class::get(URL_SESSION_DELEGATE_CLASS_NAME) {
+            return existing as *const Class;
+        }
+        return superclass as *const Class;
+    };
     unsafe {
         decl.add_method(
             sel!(URLSession: didReceiveChallenge: completionHandler:),
