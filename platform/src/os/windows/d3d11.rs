@@ -937,9 +937,9 @@ impl D3d11Buffer {
 
 #[derive(Default)]
 pub struct CxOsTexture {
-    texture: Option<ID3D11Texture2D>,
+    pub(crate) texture: Option<ID3D11Texture2D>,
     pub shared_handle: HANDLE,
-    shader_resource_view: Option<ID3D11ShaderResourceView>,
+    pub(crate) shader_resource_view: Option<ID3D11ShaderResourceView>,
     render_target_view: Option<ID3D11RenderTargetView>,
     depth_stencil_view: Option<ID3D11DepthStencilView>,
 }
