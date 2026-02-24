@@ -286,6 +286,8 @@ pub fn expand_sdk(
 
         let mount_point = &src_dir.join(&format!("mount_{url_file_name}"));
         mkdir(mount_point)?;
+        // Recover from interrupted previous runs that left the DMG mounted.
+        let _ = shell(sdk_dir, "umount", &[mount_point.to_str().unwrap()]);
 
         shell(
             src_dir,
@@ -299,18 +301,91 @@ pub fn expand_sdk(
             ],
         )?;
 
+        fn find_ndk_bundle_path(mount_point: &Path) -> Result<Option<std::path::PathBuf>, String> {
+            fn is_ndk_app(path: &Path) -> bool {
+                path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("AndroidNDK") && name.ends_with(".app"))
+            }
+
+            let mut found = Vec::new();
+            for entry in std::fs::read_dir(mount_point)
+                .map_err(|e| format!("failed to scan DMG mount {mount_point:?}: {e}"))?
+            {
+                let entry = entry
+                    .map_err(|e| format!("failed to read DMG mount entry in {mount_point:?}: {e}"))?;
+                let path = entry.path();
+                if is_ndk_app(&path) {
+                    found.push(path);
+                    continue;
+                }
+                if path.is_dir() {
+                    for nested in std::fs::read_dir(&path)
+                        .map_err(|e| format!("failed to scan nested DMG dir {path:?}: {e}"))?
+                    {
+                        let nested = nested.map_err(|e| {
+                            format!("failed to read nested DMG entry in {path:?}: {e}")
+                        })?;
+                        let nested_path = nested.path();
+                        if is_ndk_app(&nested_path) {
+                            found.push(nested_path);
+                        }
+                    }
+                }
+            }
+
+            if found.len() > 1 {
+                return Err(format!(
+                    "multiple AndroidNDK*.app bundles found in {mount_point:?}: {found:?}"
+                ));
+            }
+            Ok(found.pop())
+        }
+
+        let ndk_bundle = find_ndk_bundle_path(mount_point)?;
+
         for (file_path, exec) in files {
             let (source_path, dest_path) = if let Some((a, b)) = file_path.split_once('|') {
                 (a, b)
             } else {
                 (*file_path, *file_path)
             };
+            let mut source = mount_point.join(source_path);
+            if !source.exists() {
+                // NDK DMG bundle names vary across releases; rewrite the
+                // hardcoded `AndroidNDK*.app/...` prefix to the mounted bundle.
+                if let Some((first, rest)) = source_path.split_once('/') {
+                    if first.starts_with("AndroidNDK") && first.ends_with(".app") {
+                        if let Some(bundle) = &ndk_bundle {
+                            source = bundle.join(rest);
+                        }
+                    }
+                }
+            }
+            if !source.exists()
+                && source_path.contains("/toolchains/llvm/prebuilt/darwin-aarch64/")
+            {
+                // Some NDK DMGs only ship `darwin-x86_64` prebuilts.
+                let fallback_source_path = source_path.replace(
+                    "/toolchains/llvm/prebuilt/darwin-aarch64/",
+                    "/toolchains/llvm/prebuilt/darwin-x86_64/",
+                );
+                let mut fallback = mount_point.join(&fallback_source_path);
+                if let Some((first, rest)) = fallback_source_path.split_once('/') {
+                    if first.starts_with("AndroidNDK") && first.ends_with(".app") {
+                        if let Some(bundle) = &ndk_bundle {
+                            fallback = bundle.join(rest);
+                        }
+                    }
+                }
+                if fallback.exists() {
+                    source = fallback;
+                }
+            }
             let copy_fn = if full_ndk { shell::cp_all } else { shell::cp };
-            copy_fn(
-                &mount_point.join(source_path),
-                &sdk_dir.join(dest_path),
-                *exec,
-            )?;
+            copy_fn(&source, &sdk_dir.join(dest_path), *exec)?;
         }
         shell(sdk_dir, "umount", &[mount_point.to_str().unwrap()])?;
         Ok(())
@@ -669,37 +744,44 @@ pub fn expand_sdk(
                 urls.platform_tools_macos,
                 &[("platform-tools/adb", true)],
             )?;
-            let ndk_host_dir = if host_os == HostOs::MacosAarch64 {
-                "darwin-aarch64"
-            } else {
-                "darwin-x86_64"
-            };
-            let NDK_IN = &format!(
-                "AndroidNDK13676358.app/Contents/NDK/toolchains/llvm/prebuilt/{ndk_host_dir}"
-            );
-            let NDK_OUT =
-                &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/{ndk_host_dir}");
+            let NDK_IN = "AndroidNDK13676358.app/Contents/NDK/toolchains/llvm/prebuilt";
+            let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt");
 
             let toolchain_dir = copy_map(NDK_IN, NDK_OUT, "");
             let files = [(toolchain_dir.as_str(), false)];
             dmg_extract(4, src_dir, sdk_dir, urls.ndk_macos, &files, full_ndk)?;
-            // We copied over the entire contents of `toolchains/llvm/prebuilt/darwin-x86_64`,
-            // but we still need to make the files in `bin` actually executable.
+            // We copied over the entire contents of `toolchains/llvm/prebuilt/*`,
+            // but we still need to make each host prebuilt's `bin/*` executable.
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let bin_dir = sdk_dir.join(NDK_OUT).join("bin");
-                std::fs::read_dir(bin_dir)
-                    .expect("failed to read NDK `bin/` dir: {bin_dir:?}")
+                let prebuilt_root = sdk_dir.join(NDK_OUT);
+                std::fs::read_dir(&prebuilt_root)
+                    .expect("failed to read NDK `prebuilt/` dir: {prebuilt_root:?}")
                     .filter_map(|r| {
                         r.ok().and_then(|entry| {
                             let path = entry.path();
-                            path.is_file().then_some(path)
+                            path.is_dir().then_some(path)
                         })
                     })
-                    .for_each(|bin_file| {
-                        std::fs::set_permissions(&bin_file, PermissionsExt::from_mode(0o744))
-                            .expect("failed to set exec permissions on {bin_file:?}")
+                    .for_each(|prebuilt_dir| {
+                        let bin_dir = prebuilt_dir.join("bin");
+                        if let Ok(entries) = std::fs::read_dir(&bin_dir) {
+                            entries
+                                .filter_map(|r| {
+                                    r.ok().and_then(|entry| {
+                                        let path = entry.path();
+                                        path.is_file().then_some(path)
+                                    })
+                                })
+                                .for_each(|bin_file| {
+                                    std::fs::set_permissions(
+                                        &bin_file,
+                                        PermissionsExt::from_mode(0o744),
+                                    )
+                                    .expect("failed to set exec permissions on {bin_file:?}")
+                                });
+                        }
                     });
             }
 
