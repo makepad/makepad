@@ -381,10 +381,6 @@ script_mod! {
 
         let visual_description = ok{image_prompt.visual_description}
         let style_keywords = ok{image_prompt.style_and_keywords}
-        if visual_description == nil visual_description = ""
-        else visual_description = ("" + visual_description).trim()
-        if style_keywords == nil style_keywords = ""
-        else style_keywords = ("" + style_keywords).trim()
         set_last_prompt(visual_description + "\n" + style_keywords)
 
         set_status("Submitting job to ComfyUI")
@@ -420,7 +416,7 @@ script_mod! {
                 return false
             }
         }
-
+        
         set_status("Fetching image from ComfyUI")
         let image = comfy_last_image(event_prompt_id, model).await()
         if image == nil {
@@ -444,6 +440,7 @@ script_mod! {
             ui.run_now_btn.set_text("Run Now")
             return false
         }
+        
         set_status("Uploading to EMDX " + display.ip)
         current_image_data = data
         let file_id = "EDMX" + std.random_u32() + std.random_u32()
@@ -459,11 +456,7 @@ script_mod! {
             return false
         }
 
-        let set_prompt =
-            (if visual_description == nil "" else visual_description)
-            + " - "
-            + (if style_keywords == nil "" else style_keywords)
-        display.prompt = set_prompt
+        display.prompt = visual_description + " - " + style_keywords
 
         set_status("Done")
         is_running = false

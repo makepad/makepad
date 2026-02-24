@@ -254,6 +254,16 @@ impl AppleHttpRequests {
         networking_sender: Sender<NetworkResponse>,
     ) {
         unsafe {
+            if request.url.contains("/v1/chat/completions") {
+                if let Some(body) = request.body.as_ref() {
+                    println!(
+                        "[network debug] outgoing chat body: {}",
+                        String::from_utf8_lossy(body)
+                    );
+                } else {
+                    println!("[network debug] outgoing chat body: <none>");
+                }
+            }
             let ignore_ssl_cert = request.ignore_ssl_cert;
             let is_streaming = request.is_streaming;
             let metadata_id = request.metadata_id;
