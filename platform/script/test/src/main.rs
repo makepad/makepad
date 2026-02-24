@@ -456,6 +456,19 @@ pub fn main() {
         let x = {"key":3, x:2.0}
         assert(x.key == 3)
 
+        // OpenAI stream chunk parse sanity
+        let openai_chunk = "{\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\".\"}}],\"created\":1771967391,\"id\":\"chatcmpl-2P5VBQwKP9Ds5B70faNiVc2O9UMkxvyR\",\"model\":\"gpt-3.5-turbo\",\"system_fingerprint\":\"b6247-92f7f0a5\",\"object\":\"chat.completion.chunk\"}";
+        let openai_parsed = openai_chunk.parse_json();
+        assert(openai_parsed.choices[0].index == 0)
+        assert(openai_parsed.choices[0].delta.content == ".")
+        assert(openai_parsed.choices[0].finish_reason == nil)
+
+        // Same payload with SSE "data: " prefix
+        let openai_sse = "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\".\"}}],\"created\":1771967391,\"id\":\"chatcmpl-2P5VBQwKP9Ds5B70faNiVc2O9UMkxvyR\",\"model\":\"gpt-3.5-turbo\",\"system_fingerprint\":\"b6247-92f7f0a5\",\"object\":\"chat.completion.chunk\"}";
+        let openai_sse_parsed = openai_sse.parse_json();
+        assert(openai_sse_parsed.data.choices[0].index == 0)
+        assert(openai_sse_parsed.data.choices[0].delta.content == ".")
+
         // test callbacks and do chaining
         let f = |x, cb| cb(x)
         assert(2 == f(1) do |x| x+1)

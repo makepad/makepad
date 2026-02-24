@@ -389,9 +389,9 @@ script_mod! {
                         file_name: file_id + ".png"
                     }]
                 }]
-                name: "makepad-comfyui"
+                name: "node-samsung-emdx"
                 version: 1
-                create_time: "2026-01-01 00:00:00"
+                create_time: "2025-01-01 00:00:00"
                 id: file_id
                 program_id: "com.samsung.ios.ePaper"
                 content_type: "ImageContent"

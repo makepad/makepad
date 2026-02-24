@@ -14,6 +14,13 @@ impl ScriptHeap {
         if let Some(arr) = self.arrays_free.pop() {
             // arr already has the correct generation from gc.rs sweep
             let array = &mut self.arrays[arr];
+            // Reused array slots may come from typed buffers (U8/U16/U32/F32).
+            // New arrays must start as generic ScriptValue storage.
+            if !matches!(array.storage, ScriptArrayStorage::ScriptValue(_)) {
+                array.storage = ScriptArrayStorage::ScriptValue(Default::default());
+            } else {
+                array.storage.clear();
+            }
             array.tag.set_alloced();
             arr
         } else {
@@ -234,5 +241,34 @@ impl ScriptHeap {
         array.tag.set_dirty();
         array.storage.set_index(index, value);
         NIL
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::array::ScriptArrayStorage;
+
+    #[test]
+    fn reused_array_slot_resets_to_script_value_storage() {
+        let mut heap = ScriptHeap::default();
+
+        let typed_array = heap.new_array_from_vec_u8(vec![1, 2, 3, 4]);
+        let index = typed_array.index() as usize;
+
+        // Simulate GC sweep/free for this slot.
+        heap.arrays[typed_array].clear();
+        heap.arrays.free_slot(typed_array.index());
+        let new_gen = heap.arrays.generation(index);
+        heap.arrays_free
+            .push(ScriptArray::new(typed_array.index(), new_gen));
+
+        let reused = heap.new_array();
+        assert_eq!(reused.index(), typed_array.index());
+        assert!(matches!(
+            heap.arrays[reused].storage,
+            ScriptArrayStorage::ScriptValue(_)
+        ));
+        assert_eq!(heap.array_len(reused), 0);
     }
 }

@@ -603,7 +603,7 @@ impl ScriptHeap {
             recur.push(value);
             let array = &self.arrays[arr];
             let len = array.storage.len();
-            write!(out, "[").ok();
+            write!(out, "<{}>[", arr.index()).ok();
 
             if formatted && len > 0 {
                 out.push('\n');
