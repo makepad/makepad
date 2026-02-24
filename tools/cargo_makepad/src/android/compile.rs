@@ -94,24 +94,21 @@ fn rust_build(
     urls: &AndroidSDKUrls,
 ) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
-    #[allow(non_snake_case)]
-    let NDK_VERSION_FULL = urls.ndk_version_full;
+    let (_ndk_version, ndk_prebuilt_root) =
+        resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
     for android_target in android_targets {
         let clang_filename = format!("{}{}-clang", android_target.clang(), urls.sdk_version);
 
-        let bin_path = |bin_filename: &str, windows_extension: &str| {
-            match host_os {
-            HostOs::MacosX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-x86_64/bin/{bin_filename}"),
-            // NDK r28 ships native darwin-aarch64 prebuilt binaries.
-            HostOs::MacosAarch64 => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/darwin-aarch64/bin/{bin_filename}"),
-            HostOs::WindowsX64   => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64/bin/{bin_filename}.{windows_extension}"),
-            HostOs::LinuxX64     => format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64/bin/{bin_filename}"),
-            _ => panic!()
-        }
+        let bin_name = |bin_filename: &str, windows_extension: &str| match host_os {
+            HostOs::WindowsX64 => format!("{bin_filename}.{windows_extension}"),
+            HostOs::MacosX64 | HostOs::MacosAarch64 | HostOs::LinuxX64 => bin_filename.to_string(),
+            _ => panic!(),
         };
-        let full_clang_path = sdk_dir.join(bin_path(&clang_filename, "cmd"));
-        let full_llvm_ar_path = sdk_dir.join(bin_path("llvm-ar", "exe"));
-        let full_llvm_ranlib_path = sdk_dir.join(bin_path("llvm-ranlib", "exe"));
+        let full_clang_path = ndk_prebuilt_root.join("bin").join(bin_name(&clang_filename, "cmd"));
+        let full_llvm_ar_path = ndk_prebuilt_root.join("bin").join(bin_name("llvm-ar", "exe"));
+        let full_llvm_ranlib_path = ndk_prebuilt_root
+            .join("bin")
+            .join(bin_name("llvm-ranlib", "exe"));
 
         let toolchain = android_target.toolchain();
         let target_opt = format!("--target={toolchain}");
@@ -406,6 +403,10 @@ fn build_dex(
                 .to_str()
                 .unwrap()),
             (compiled_java_classes_dir
+                .join("MakepadSocketStream$1.class")
+                .to_str()
+                .unwrap()),
+            (compiled_java_classes_dir
                 .join("MakepadWebSocket.class")
                 .to_str()
                 .unwrap()),
@@ -517,14 +518,75 @@ fn build_unaligned_apk(
 }
 
 /// Returns the NDK prebuilt host directory name for the given host OS.
-fn ndk_prebuilt_dir(host_os: HostOs) -> &'static str {
+fn ndk_prebuilt_dir_candidates(host_os: HostOs) -> &'static [&'static str] {
     match host_os {
-        HostOs::MacosX64 => "darwin-x86_64",
-        HostOs::MacosAarch64 => "darwin-aarch64",
-        HostOs::WindowsX64 => "windows-x86_64",
-        HostOs::LinuxX64 => "linux-x86_64",
+        HostOs::MacosX64 => &["darwin-x86_64"],
+        // On Apple Silicon, older NDKs only ship darwin-x86_64 prebuilts.
+        HostOs::MacosAarch64 => &["darwin-aarch64", "darwin-x86_64"],
+        HostOs::WindowsX64 => &["windows-x86_64"],
+        HostOs::LinuxX64 => &["linux-x86_64"],
         _ => panic!("Unsupported host OS"),
     }
+}
+
+fn ndk_version_sort_key(version: &str) -> Vec<u64> {
+    version
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+fn resolve_ndk_prebuilt_root(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    preferred_version: &str,
+) -> Result<(String, PathBuf), String> {
+    let prebuilt_candidates = ndk_prebuilt_dir_candidates(host_os);
+    let ndk_root = sdk_dir.join("ndk");
+    if !ndk_root.is_dir() {
+        return Err(format!(
+            "Android NDK directory not found: {:?}. Run `cargo makepad android install-toolchain` or copy an NDK into `ndk/<version>`.",
+            ndk_root
+        ));
+    }
+
+    let mut versions = Vec::new();
+    for entry in
+        std::fs::read_dir(&ndk_root).map_err(|e| format!("failed to read {:?}: {e}", ndk_root))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read NDK entry in {:?}: {e}", ndk_root))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(version) = path.file_name().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        for prebuilt in prebuilt_candidates {
+            let prebuilt_root = path.join("toolchains/llvm/prebuilt").join(prebuilt);
+            if prebuilt_root.is_dir() {
+                versions.push((version.to_string(), prebuilt_root));
+                break;
+            }
+        }
+    }
+
+    if versions.is_empty() {
+        return Err(format!(
+            "No compatible NDK toolchain found under {:?} for host prebuilts {:?}",
+            ndk_root, prebuilt_candidates
+        ));
+    }
+
+    if let Some((version, root)) = versions
+        .iter()
+        .find(|(version, _)| version == preferred_version)
+    {
+        return Ok((version.clone(), root.clone()));
+    }
+
+    versions.sort_by(|(a, _), (b, _)| ndk_version_sort_key(b).cmp(&ndk_version_sort_key(a)));
+    Ok(versions.remove(0))
 }
 
 /// Scan an ELF shared library for NEEDED entries using the NDK's llvm-readelf,
@@ -543,13 +605,11 @@ fn bundle_ndk_shared_deps(
     abi: &str,
     build_paths: &BuildPaths,
 ) -> Result<(), String> {
-    let ndk_version = urls.ndk_version_full;
-    let prebuilt = ndk_prebuilt_dir(host_os);
+    let (_ndk_version, ndk_prebuilt_root) =
+        resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
 
     // Path to llvm-readelf shipped with the NDK.
-    let readelf_path = sdk_dir.join(format!(
-        "ndk/{ndk_version}/toolchains/llvm/prebuilt/{prebuilt}/bin/llvm-readelf"
-    ));
+    let readelf_path = ndk_prebuilt_root.join("bin/llvm-readelf");
     if !readelf_path.exists() {
         // Gracefully skip when the NDK toolchain doesn't include llvm-readelf
         // (e.g. a stripped SDK install).
@@ -569,9 +629,7 @@ fn bundle_ndk_shared_deps(
     // API-level subdirectory).  Files here that are real .so's (not linker
     // scripts / stubs) are NDK-provided and must be shipped inside the APK.
     let clang_triple = android_target.clang();
-    let sysroot_lib_dir = sdk_dir.join(format!(
-        "ndk/{ndk_version}/toolchains/llvm/prebuilt/{prebuilt}/sysroot/usr/lib/{clang_triple}"
-    ));
+    let sysroot_lib_dir = ndk_prebuilt_root.join("sysroot/usr/lib").join(clang_triple);
 
     // Parse NEEDED entries from readelf output.  Each relevant line looks like:
     //   0x0000000000000001 (NEEDED) Shared library: [libc++_shared.so]
