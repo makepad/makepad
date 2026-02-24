@@ -2163,3 +2163,182 @@ pub fn get_all_metal_devices() -> Vec<ObjcId> {
         ret
     }
 }
+
+/// CGL render bridge for macOS. Creates a standalone CGL context (GL 3.2 Core)
+/// that shares textures with Metal via IOSurface.
+#[cfg(target_os = "macos")]
+pub struct CglRenderBridge {
+    cgl_context: *mut std::ffi::c_void,
+    cgl_pixel_format: *mut std::ffi::c_void,
+    opengl_framework: *mut std::ffi::c_void,
+}
+
+#[cfg(target_os = "macos")]
+impl CglRenderBridge {
+    pub fn new() -> Self {
+        use std::ffi::c_void;
+
+        // CGL constants
+        const K_CGL_PFA_OPENGL_PROFILE: u32 = 99;
+        const K_CGL_OGL_PVERSION_3_2_CORE: u32 = 0x3200;
+        const K_CGL_PFA_COLOR_SIZE: u32 = 8;
+        const K_CGL_PFA_DEPTH_SIZE: u32 = 12;
+        const K_CGL_PFA_STENCIL_SIZE: u32 = 13;
+        const K_CGL_PFA_ACCELERATED: u32 = 73;
+        const K_CGL_PFA_DOUBLE_BUFFER: u32 = 5;
+
+        type CGLPixelFormatObj = *mut c_void;
+        type CGLContextObj = *mut c_void;
+
+        extern "C" {
+            fn CGLChoosePixelFormat(
+                attribs: *const u32,
+                pix: *mut CGLPixelFormatObj,
+                npix: *mut i32,
+            ) -> i32;
+            fn CGLCreateContext(
+                pix: CGLPixelFormatObj,
+                share: CGLContextObj,
+                ctx: *mut CGLContextObj,
+            ) -> i32;
+            fn CGLSetCurrentContext(ctx: CGLContextObj) -> i32;
+        }
+
+        unsafe {
+            let attribs: &[u32] = &[
+                K_CGL_PFA_OPENGL_PROFILE, K_CGL_OGL_PVERSION_3_2_CORE,
+                K_CGL_PFA_COLOR_SIZE, 24,
+                K_CGL_PFA_DEPTH_SIZE, 24,
+                K_CGL_PFA_STENCIL_SIZE, 8,
+                K_CGL_PFA_ACCELERATED,
+                K_CGL_PFA_DOUBLE_BUFFER,
+                0,
+            ];
+
+            let mut pix: CGLPixelFormatObj = std::ptr::null_mut();
+            let mut npix: i32 = 0;
+            let err = CGLChoosePixelFormat(attribs.as_ptr(), &mut pix, &mut npix);
+            assert!(err == 0 && !pix.is_null(), "CGLChoosePixelFormat failed: {}", err);
+
+            let mut ctx: CGLContextObj = std::ptr::null_mut();
+            let err = CGLCreateContext(pix, std::ptr::null_mut(), &mut ctx);
+            assert!(err == 0 && !ctx.is_null(), "CGLCreateContext failed: {}", err);
+
+            // Load OpenGL.framework for dlsym-based proc address lookup
+            extern "C" {
+                fn dlopen(path: *const i8, mode: i32) -> *mut c_void;
+            }
+            let framework_path = b"/System/Library/Frameworks/OpenGL.framework/OpenGL\0";
+            let opengl_framework = dlopen(framework_path.as_ptr() as *const i8, 1); // RTLD_LAZY
+            assert!(!opengl_framework.is_null(), "Failed to load OpenGL.framework");
+
+            CglRenderBridge {
+                cgl_context: ctx,
+                cgl_pixel_format: pix,
+                opengl_framework,
+            }
+        }
+    }
+
+    pub fn make_current(&self) {
+        extern "C" {
+            fn CGLSetCurrentContext(ctx: *mut std::ffi::c_void) -> i32;
+        }
+        unsafe {
+            CGLSetCurrentContext(self.cgl_context);
+        }
+    }
+
+    pub fn get_proc_address(&self, name: &str) -> *const std::ffi::c_void {
+        extern "C" {
+            fn dlsym(handle: *mut std::ffi::c_void, symbol: *const i8) -> *mut std::ffi::c_void;
+        }
+        let c_name = std::ffi::CString::new(name).unwrap();
+        unsafe { dlsym(self.opengl_framework, c_name.as_ptr()) }
+    }
+
+    pub fn gl_api(&self) -> crate::gl_render_bridge::GlApi {
+        crate::gl_render_bridge::GlApi::GL
+    }
+
+    pub fn cgl_pixel_format(&self) -> *mut std::ffi::c_void {
+        self.cgl_pixel_format
+    }
+
+    pub fn cgl_context(&self) -> *mut std::ffi::c_void {
+        self.cgl_context
+    }
+
+    /// Bind an IOSurface to a GL texture in this CGL context.
+    /// Returns the GL texture ID.
+    pub fn bind_iosurface_to_gl_texture(
+        &self,
+        iosurface_ref: *mut std::ffi::c_void,
+        width: usize,
+        height: usize,
+    ) -> u32 {
+        use std::ffi::c_void;
+
+        // GL constants for TEXTURE_RECTANGLE (macOS CGL uses rectangle textures for IOSurface)
+        const GL_TEXTURE_RECTANGLE: u32 = 0x84F5;
+        const GL_RGBA: u32 = 0x1908;
+        const GL_BGRA: u32 = 0x80E1;
+        const GL_UNSIGNED_INT_8_8_8_8_REV: u32 = 0x8367;
+        const GL_FRAMEBUFFER: u32 = 0x8D40;
+        const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
+
+        type GLuint = u32;
+        type GLint = i32;
+        type GLenum = u32;
+        type GLsizei = i32;
+
+        // Load GL functions via dlsym
+        type GlGenTexturesFn = unsafe extern "C" fn(GLsizei, *mut GLuint);
+        type GlBindTextureFn = unsafe extern "C" fn(GLenum, GLuint);
+        type GlGenFramebuffersFn = unsafe extern "C" fn(GLsizei, *mut GLuint);
+        type GlBindFramebufferFn = unsafe extern "C" fn(GLenum, GLuint);
+        type GlFramebufferTexture2DFn = unsafe extern "C" fn(GLenum, GLenum, GLenum, GLuint, GLint);
+
+        extern "C" {
+            fn CGLTexImageIOSurface2D(
+                ctx: *mut c_void,
+                target: GLenum,
+                internal_format: GLenum,
+                width: GLsizei,
+                height: GLsizei,
+                format: GLenum,
+                ty: GLenum,
+                iosurface: *mut c_void,
+                plane: GLuint,
+            ) -> i32;
+        }
+
+        unsafe {
+            let gl_gen_textures: GlGenTexturesFn =
+                std::mem::transmute(self.get_proc_address("glGenTextures"));
+            let gl_bind_texture: GlBindTextureFn =
+                std::mem::transmute(self.get_proc_address("glBindTexture"));
+
+            let mut gl_texture: GLuint = 0;
+            gl_gen_textures(1, &mut gl_texture);
+            gl_bind_texture(GL_TEXTURE_RECTANGLE, gl_texture);
+
+            let err = CGLTexImageIOSurface2D(
+                self.cgl_context,
+                GL_TEXTURE_RECTANGLE,
+                GL_RGBA,
+                width as GLsizei,
+                height as GLsizei,
+                GL_BGRA,
+                GL_UNSIGNED_INT_8_8_8_8_REV,
+                iosurface_ref,
+                0,
+            );
+            assert!(err == 0, "CGLTexImageIOSurface2D failed: {}", err);
+
+            gl_bind_texture(GL_TEXTURE_RECTANGLE, 0);
+
+            gl_texture
+        }
+    }
+}

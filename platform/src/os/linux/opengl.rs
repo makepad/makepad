@@ -2439,3 +2439,61 @@ impl OpenglBuffer {
         }
     }
 }
+
+/// EGL render bridge wrapping references to makepad's existing OpenGL context.
+pub struct EglRenderBridge {
+    egl_display: crate::egl_sys::EGLDisplay,
+    egl_config: crate::egl_sys::EGLConfig,
+    egl_context: crate::egl_sys::EGLContext,
+    egl_get_proc_address: unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_void,
+    egl_make_current: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+    ) -> u32,
+}
+
+impl EglRenderBridge {
+    pub fn new(opengl_cx: &crate::os::linux::opengl_cx::OpenglCx) -> Self {
+        Self {
+            egl_display: opengl_cx.egl_display,
+            egl_config: opengl_cx.egl_config,
+            egl_context: opengl_cx.egl_context,
+            egl_get_proc_address: opengl_cx.libegl.eglGetProcAddress.unwrap(),
+            egl_make_current: opengl_cx.libegl.eglMakeCurrent.unwrap(),
+        }
+    }
+
+    pub fn make_current(&self) {
+        unsafe {
+            (self.egl_make_current)(
+                self.egl_display,
+                std::ptr::null_mut(), // EGL_NO_SURFACE
+                std::ptr::null_mut(), // EGL_NO_SURFACE
+                self.egl_context,
+            );
+        }
+    }
+
+    pub fn get_proc_address(&self, name: &str) -> *const std::ffi::c_void {
+        let c_name = std::ffi::CString::new(name).unwrap();
+        unsafe { (self.egl_get_proc_address)(c_name.as_ptr()) as *const _ }
+    }
+
+    pub fn gl_api(&self) -> crate::gl_render_bridge::GlApi {
+        crate::gl_render_bridge::GlApi::GLES
+    }
+
+    pub fn egl_display(&self) -> *mut std::ffi::c_void {
+        self.egl_display
+    }
+
+    pub fn egl_config(&self) -> *mut std::ffi::c_void {
+        self.egl_config
+    }
+
+    pub fn egl_context(&self) -> *mut std::ffi::c_void {
+        self.egl_context
+    }
+}
