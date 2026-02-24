@@ -431,8 +431,28 @@ impl Widget for Button {
         &mut self,
         vm: &mut ScriptVm,
         method: LiveId,
-        _args: ScriptValue,
+        args: ScriptValue,
     ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        if method == live_id!(set_text) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let str_val = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let new_text = vm
+                    .bx
+                    .heap
+                    .string_mut_self_with(str_val, |_, s| s.to_string());
+                if let Some(new_text) = new_text {
+                    vm.with_cx_mut(|cx| {
+                        self.set_text(cx, &new_text);
+                    });
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
         if method == live_id!(on_click) {
             let uid = self.widget_uid();
             vm.with_cx_mut(|cx| {

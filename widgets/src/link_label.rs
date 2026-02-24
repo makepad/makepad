@@ -2,6 +2,7 @@ use crate::{
     button::{Button, ButtonAction},
     makepad_derive_widget::*,
     makepad_draw::*,
+    widget_async::ScriptAsyncResult,
     widget::*,
 };
 
@@ -225,6 +226,35 @@ pub struct LinkLabel {
 }
 
 impl Widget for LinkLabel {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(self.button.text.as_ref());
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        if method == live_id!(set_text) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let str_val = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let new_text = vm
+                    .bx
+                    .heap
+                    .string_mut_self_with(str_val, |_, s| s.to_string());
+                if let Some(new_text) = new_text {
+                    vm.with_cx_mut(|cx| {
+                        self.set_text(cx, &new_text);
+                    });
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let actions = cx.capture_actions(|cx| {
             self.button.handle_event(cx, event, scope);
