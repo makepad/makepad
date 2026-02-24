@@ -13,7 +13,7 @@ script_mod! {
         height: Fill
 
         flow: Overlay
-        align: Align{x: 0.0 y: 0.0}
+        align: Align {x: 0.0 y: 0.0}
 
         draw_bg +: {
             pixel: fn() {
@@ -21,15 +21,10 @@ script_mod! {
             }
         }
 
-        flow: Overlay
-        width: Fit
-        height: Fit
-
-        RoundedView{
+        content := RoundedView{
             width: Fit
             height: Fit
-
-            padding: 16
+            padding: 15
 
             draw_bg +: {
                 color: #fff
@@ -42,7 +37,6 @@ script_mod! {
                 width: 270
                 draw_text +: {
                     text_style: theme.font_regular{font_size: 9}
-                    //text_wrap: TextWrap.Word
                     color: #000
                 }
             }
@@ -111,14 +105,14 @@ impl Widget for Tooltip {
             | Event::MouseDown(_)
             | Event::MouseUp(_)
             | Event::Scroll(_) => {
-                // self.hide(cx);
+                self.hide(cx);
             }
             Event::TouchUpdate(TouchUpdateEvent { touches, .. }) => {
                 if touches
                     .iter()
                     .any(|tp| matches!(tp.state, event::TouchState::Start))
                 {
-                    //self.hide(cx);
+                    self.hide(cx);
                 }
             }
             _ => {}
@@ -147,7 +141,7 @@ impl Widget for Tooltip {
     }
 
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
-        self.label(cx, ids!(tooltip_label)).set_text(cx, text);
+        self.label(cx, ids!(content.tooltip_label)).set_text(cx, text);
     }
 }
 
