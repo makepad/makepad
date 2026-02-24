@@ -1,17 +1,24 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use makepad_live_id::LiveId;
+
 use crate::backend::{EventSink, NetworkBackend};
 use crate::types::{
-    Headers, HttpRequest, NetworkError, NetworkEvent, NetworkResponse, NetworkResponseItem,
-    RequestId, SocketId, WebSocketMessage as LegacyWsMessage, WsMessage, WsOpenRequest, WsSend,
+    HttpRequest, NetworkError, NetworkResponse, WebSocketMessage, WebSocketTransport, WsMessage,
+    WsSend,
 };
 
 pub mod http;
 pub mod web_socket;
 
+enum WindowsSocket {
+    Plain(crate::plain_web_socket::PlainWebSocket),
+    Platform(self::web_socket::WindowsWebSocket),
+}
+
 pub(crate) struct WindowsBackend {
-    sockets: Mutex<HashMap<SocketId, self::web_socket::OsWebSocket>>,
+    sockets: Mutex<HashMap<LiveId, WindowsSocket>>,
 }
 
 impl WindowsBackend {
@@ -25,16 +32,16 @@ impl WindowsBackend {
 impl NetworkBackend for WindowsBackend {
     fn http_start(
         &self,
-        request_id: RequestId,
+        request_id: LiveId,
         request: HttpRequest,
         sink: EventSink,
     ) -> Result<(), NetworkError> {
-        let (sender, receiver) = std::sync::mpsc::channel::<NetworkResponseItem>();
+        let (sender, receiver) = std::sync::mpsc::channel::<NetworkResponse>();
         self::http::WindowsHttpSocket::open(request_id, request, sender);
 
         std::thread::spawn(move || {
             while let Ok(item) = receiver.recv() {
-                if sink.emit(map_http_event(item)).is_err() {
+                if sink.emit(item).is_err() {
                     break;
                 }
             }
@@ -42,30 +49,28 @@ impl NetworkBackend for WindowsBackend {
         Ok(())
     }
 
-    fn http_cancel(&self, _request_id: RequestId) -> Result<(), NetworkError> {
+    fn http_cancel(&self, _request_id: LiveId) -> Result<(), NetworkError> {
         Ok(())
     }
 
     fn ws_open(
         &self,
-        socket_id: SocketId,
-        request: WsOpenRequest,
+        socket_id: LiveId,
+        request: HttpRequest,
         sink: EventSink,
     ) -> Result<(), NetworkError> {
-        let mut headers = Headers::new();
-        headers.extend(request.headers);
-        let request = HttpRequest {
-            metadata_id: 0,
-            url: request.url,
-            method: crate::types::HttpMethod::Get,
-            headers,
-            ignore_ssl_cert: false,
-            is_streaming: false,
-            body: None,
-        };
+        let use_plain = matches!(request.websocket_transport, WebSocketTransport::PlainTcp);
 
-        let (sender, receiver) = std::sync::mpsc::channel::<LegacyWsMessage>();
-        let socket = self::web_socket::OsWebSocket::open(socket_id, request, sender);
+        let (sender, receiver) = std::sync::mpsc::channel::<WebSocketMessage>();
+        let socket = if use_plain {
+            WindowsSocket::Plain(crate::plain_web_socket::PlainWebSocket::open(
+                socket_id, request, sender,
+            ))
+        } else {
+            WindowsSocket::Platform(self::web_socket::WindowsWebSocket::open(
+                socket_id, request, sender,
+            ))
+        };
 
         {
             let mut sockets = self
@@ -75,7 +80,7 @@ impl NetworkBackend for WindowsBackend {
             sockets.insert(socket_id, socket);
         }
 
-        let _ = sink.emit(NetworkEvent::WsOpened { socket_id });
+        let _ = sink.emit(NetworkResponse::WsOpened { socket_id });
         std::thread::spawn(move || {
             while let Ok(message) = receiver.recv() {
                 if sink.emit(map_ws_event(socket_id, message)).is_err() {
@@ -86,7 +91,7 @@ impl NetworkBackend for WindowsBackend {
         Ok(())
     }
 
-    fn ws_send(&self, socket_id: SocketId, message: WsSend) -> Result<(), NetworkError> {
+    fn ws_send(&self, socket_id: LiveId, message: WsSend) -> Result<(), NetworkError> {
         let mut sockets = self
             .sockets
             .lock()
@@ -94,65 +99,48 @@ impl NetworkBackend for WindowsBackend {
         let socket = sockets.get_mut(&socket_id).ok_or_else(|| {
             NetworkError::backend(format!("windows websocket {socket_id} not open"))
         })?;
-        let legacy = match message {
-            WsSend::Binary(data) => LegacyWsMessage::Binary(data),
-            WsSend::Text(data) => LegacyWsMessage::String(data),
+        let outbound = match message {
+            WsSend::Binary(data) => WebSocketMessage::Binary(data),
+            WsSend::Text(data) => WebSocketMessage::String(data),
         };
-        socket
-            .send_message(legacy)
-            .map_err(|_| NetworkError::backend("windows websocket send failed"))
+        match socket {
+            WindowsSocket::Plain(socket) => socket
+                .send_message(outbound)
+                .map_err(|_| NetworkError::backend("windows websocket send failed")),
+            WindowsSocket::Platform(socket) => socket
+                .send_message(outbound)
+                .map_err(|_| NetworkError::backend("windows websocket send failed")),
+        }
     }
 
-    fn ws_close(&self, socket_id: SocketId) -> Result<(), NetworkError> {
+    fn ws_close(&self, socket_id: LiveId) -> Result<(), NetworkError> {
         let mut sockets = self
             .sockets
             .lock()
             .map_err(|_| NetworkError::backend("windows websocket lock poisoned"))?;
-        if let Some(mut socket) = sockets.remove(&socket_id) {
-            socket.close();
+        if let Some(socket) = sockets.remove(&socket_id) {
+            match socket {
+                WindowsSocket::Plain(mut socket) => socket.close(),
+                WindowsSocket::Platform(mut socket) => socket.close(),
+            }
         }
         Ok(())
     }
 }
 
-fn map_http_event(item: NetworkResponseItem) -> NetworkEvent {
-    match item.response {
-        NetworkResponse::HttpRequestError(error) => NetworkEvent::HttpError {
-            request_id: item.request_id,
-            error,
-        },
-        NetworkResponse::HttpResponse(response) => NetworkEvent::HttpResponse {
-            request_id: item.request_id,
-            response,
-        },
-        NetworkResponse::HttpStreamResponse(response) => NetworkEvent::HttpStreamChunk {
-            request_id: item.request_id,
-            response,
-        },
-        NetworkResponse::HttpStreamComplete(response) => NetworkEvent::HttpStreamComplete {
-            request_id: item.request_id,
-            response,
-        },
-        NetworkResponse::HttpProgress(progress) => NetworkEvent::HttpProgress {
-            request_id: item.request_id,
-            progress,
-        },
-    }
-}
-
-fn map_ws_event(socket_id: SocketId, message: LegacyWsMessage) -> NetworkEvent {
+fn map_ws_event(socket_id: LiveId, message: WebSocketMessage) -> NetworkResponse {
     match message {
-        LegacyWsMessage::Error(message) => NetworkEvent::WsError { socket_id, message },
-        LegacyWsMessage::Binary(data) => NetworkEvent::WsMessage {
+        WebSocketMessage::Error(message) => NetworkResponse::WsError { socket_id, message },
+        WebSocketMessage::Binary(data) => NetworkResponse::WsMessage {
             socket_id,
             message: WsMessage::Binary(data),
         },
-        LegacyWsMessage::String(data) => NetworkEvent::WsMessage {
+        WebSocketMessage::String(data) => NetworkResponse::WsMessage {
             socket_id,
             message: WsMessage::Text(data),
         },
-        LegacyWsMessage::Opened => NetworkEvent::WsOpened { socket_id },
-        LegacyWsMessage::Closed => NetworkEvent::WsClosed { socket_id },
+        WebSocketMessage::Opened => NetworkResponse::WsOpened { socket_id },
+        WebSocketMessage::Closed => NetworkResponse::WsClosed { socket_id },
     }
 }
 

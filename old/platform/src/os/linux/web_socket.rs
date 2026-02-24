@@ -1,7 +1,7 @@
 use crate::event::HttpRequest;
 use crate::web_socket::WebSocketMessage;
-use makepad_http::utils::write_bytes_to_tcp_stream_no_error;
-use makepad_http::websocket::{
+use makepad_network::utils::write_bytes_to_tcp_stream_no_error;
+use makepad_network::websocket::{
     ServerWebSocket, ServerWebSocketMessage, ServerWebSocketMessageFormat,
     ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };

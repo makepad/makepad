@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use android::*;
 use apple::*;
 use check::*;
-pub use makepad_http;
+pub use makepad_network;
 pub use makepad_shell;
 pub use makepad_wasm_strip;
 use open_harmony::*;

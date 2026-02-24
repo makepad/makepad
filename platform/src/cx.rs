@@ -18,20 +18,22 @@ use {
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
         studio::ScreenshotRequest,
+        thread::SignalToUI,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
-        web_socket::WebSocket,
         window::CxWindowPool,
     },
     makepad_futures::{
         executor,
         executor::{Executor, Spawner},
     },
+    makepad_network::NetworkRuntime,
     makepad_script::{ScriptVm, ScriptVmBase},
     std::{
         any::{Any, TypeId},
         cell::RefCell,
         collections::{HashMap, HashSet},
         rc::Rc,
+        sync::Arc,
     },
 };
 
@@ -113,7 +115,6 @@ pub struct Cx {
     pub(crate) executor: Option<Executor>,
     pub(crate) spawner: Spawner,
 
-    pub(crate) studio_web_socket: Option<WebSocket>,
     pub(crate) studio_http: String,
 
     pub performance_stats: PerformanceStats,
@@ -131,6 +132,8 @@ pub struct Cx {
 
     pub widget_tree_ptr: *mut (),
     pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
+
+    pub net: Arc<NetworkRuntime>,
 }
 
 #[derive(Clone)]
@@ -274,6 +277,10 @@ impl Cx {
         if let Ok(mut sender) = ACTION_SENDER_GLOBAL.lock() {
             *sender = Some(action_sender);
         }
+        let net = Arc::new(NetworkRuntime::new(Default::default()));
+        net.set_wake_fn(Some(Arc::new(|| {
+            SignalToUI::set_ui_signal();
+        })));
 
         let mut vm = ScriptVm {
             host: &mut 0,
@@ -320,7 +327,6 @@ impl Cx {
             ime_area: Default::default(),
             keyboard_shift: 0.0,
             platform_ops: Default::default(),
-            studio_web_socket: None,
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
 
@@ -356,6 +362,7 @@ impl Cx {
             widget_query_invalidation_event: None,
             widget_tree_ptr: std::ptr::null_mut(),
             widget_tree_dump_callback: None,
+            net,
 
             script_vm: Some(vm.bx),
             script_data: Default::default(),

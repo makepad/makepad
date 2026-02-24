@@ -49,14 +49,6 @@ pub mod audio_stream;
 pub mod file_dialogs;
 
 mod media_api;
-#[cfg(any(
-    target_os = "linux",
-    target_os = "windows",
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "tvos"
-))]
-mod network_bridge;
 
 pub mod ui_runner;
 
@@ -76,6 +68,7 @@ pub use makepad_objc_sys;
 pub use ::windows;
 
 pub use makepad_futures;
+pub use makepad_network;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
 pub use makepad_script::trap;
@@ -121,11 +114,6 @@ pub use {
             Hit,
             HitOptions,
             HoverState,
-            HttpError,
-            HttpMethod,
-            HttpProgress,
-            HttpRequest,
-            HttpResponse,
             ImeAction,
             ImeActionEvent,
             Inset,
@@ -137,7 +125,6 @@ pub use {
             MouseDownEvent,
             MouseMoveEvent,
             MouseUpEvent,
-            NetworkResponse,
             NetworkResponsesEvent,
             NextFrame,
             NextFrameEvent,
@@ -189,7 +176,9 @@ pub use {
     component_map::ComponentMap,
     //makepad_image_formats::image,
     log::*,
-    makepad_http,
+    makepad_network::{
+        HttpError, HttpMethod, HttpProgress, HttpRequest, HttpResponse, NetworkResponse,
+    },
     makepad_math::makepad_micro_serde,
     makepad_math::*,
     makepad_script,

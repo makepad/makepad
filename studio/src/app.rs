@@ -316,7 +316,7 @@ impl MatchEvent for App {
         self.data.build_manager.init(cx, roots);
 
         //self.data.build_manager.discover_external_ip(cx);
-        self.data.build_manager.start_http_server();
+        self.data.build_manager.start_http_server(cx);
         // lets load the tabs
     }
 

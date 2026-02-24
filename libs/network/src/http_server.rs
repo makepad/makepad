@@ -1,15 +1,17 @@
 // this webserver is serving our site. Why? WHYYY. Because it was fun to write. And MUCH faster and MUCH simpler than anything else imaginable.
 
 use crate::utils::*;
-pub use crate::websocket::{
-    ServerWebSocket, ServerWebSocketMessage, ServerWebSocketMessageFormat,
+pub use crate::web_socket_parser::{
+    WebSocketParser, ServerWebSocketMessage, ServerWebSocketMessageFormat,
     ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PING_MESSAGE, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
-use makepad_script::*;
 use std::io::prelude::*;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::{mpsc, mpsc::RecvTimeoutError};
 use std::time::Duration;
+
+#[cfg(feature = "script")]
+use makepad_script::*;
 
 #[derive(Clone)]
 pub struct HttpServer {
@@ -18,11 +20,12 @@ pub struct HttpServer {
     pub post_max_size: u64,
 }
 
-#[derive(Clone, Script, ScriptHook)]
+#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
+#[derive(Clone)]
 pub struct HttpServerResponse {
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub header: String,
-    #[live]
+    #[cfg_attr(feature = "script", live)]
     pub body: Vec<u8>,
 }
 
@@ -163,7 +166,7 @@ fn handle_web_socket(
     let _ = tcp_stream.set_nodelay(true);
 
     let upgrade_response =
-        ServerWebSocket::create_upgrade_response(headers.sec_websocket_key.as_ref().unwrap());
+        WebSocketParser::create_upgrade_response(headers.sec_websocket_key.as_ref().unwrap());
 
     write_bytes_to_tcp_stream_no_error(&mut tcp_stream, upgrade_response.as_bytes());
 
@@ -212,7 +215,7 @@ fn handle_web_socket(
         return;
     };
 
-    let mut web_socket = ServerWebSocket::new();
+    let mut web_socket = WebSocketParser::new();
     loop {
         let mut data = [0u8; 65535];
         match tcp_stream.read(&mut data) {

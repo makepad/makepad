@@ -1,349 +1,176 @@
-use crate::types::{HttpRequest, WebSocketMessage};
-use makepad_http::websocket::{
-    ServerWebSocket, ServerWebSocketMessage, ServerWebSocketMessageFormat,
-    ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PONG_MESSAGE,
-};
-use std::{
-    io::{Read, Write},
-    net::{Shutdown, TcpStream},
-    sync::mpsc::{channel, Sender, TryRecvError},
-    time::{Duration, Instant},
+use {
+    crate::types::{HttpRequest, WebSocketMessage},
+    makepad_apple_sys::objc_block,
+    makepad_apple_sys::*,
+    makepad_live_id::LiveId,
+    std::{ptr, sync::mpsc::Sender, sync::Arc, sync::Once},
 };
 
-pub struct OsWebSocket {
-    sender: Option<Sender<WebSocketMessage>>,
-    stream: Option<TcpStream>,
+use super::http::{make_ns_request, url_session_delegate_class};
+
+fn web_socket_delegate_class() -> *const Class {
+    static INIT: Once = Once::new();
+    static mut CLASS: *const Class = ptr::null();
+    INIT.call_once(|| unsafe {
+        CLASS = define_web_socket_delegate();
+    });
+    unsafe { CLASS }
 }
 
-impl Drop for OsWebSocket {
-    fn drop(&mut self) {
-        self.sender.take();
-        if let Some(stream) = self.stream.take() {
-            let _ = stream.shutdown(Shutdown::Both);
-        }
+pub fn define_web_socket_delegate() -> *const Class {
+    extern "C" fn did_open_with_protocol(
+        _this: &Object,
+        _: Sel,
+        _web_socket_task: ObjcId,
+        _open_with_protocol: ObjcId,
+    ) {
     }
+
+    extern "C" fn did_close_with_code(
+        _this: &Object,
+        _: Sel,
+        _web_socket_task: ObjcId,
+        _code: usize,
+        _reason: ObjcId,
+    ) {
+    }
+
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("NSURLSessionWebSocketDelegate", superclass).unwrap();
+    unsafe {
+        decl.add_method(
+            sel!(webSocketTask: didOpenWithProtocol:),
+            did_open_with_protocol as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(webSocketTask: didCloseWithCode: reason:),
+            did_close_with_code as extern "C" fn(&Object, Sel, ObjcId, usize, ObjcId),
+        );
+    }
+    decl.register()
 }
 
-impl OsWebSocket {
+pub struct AppleWebSocket {
+    data_task: Arc<ObjcId>,
+    rx_sender: Sender<WebSocketMessage>,
+}
+
+unsafe impl Send for AppleWebSocket {}
+unsafe impl Sync for AppleWebSocket {}
+
+impl AppleWebSocket {
     pub fn send_message(&mut self, message: WebSocketMessage) -> Result<(), ()> {
-        if let Some(sender) = &mut self.sender {
-            if sender.send(message).is_err() {
-                return Err(());
-            }
-            return Ok(());
+        unsafe {
+            let rx_sender = self.rx_sender.clone();
+            let handler = objc_block!(move |error: ObjcId| {
+                if error != ptr::null_mut() {
+                    let error_str: String =
+                        nsstring_to_string(msg_send![error, localizedDescription]);
+                    let _ = rx_sender.send(WebSocketMessage::Error(error_str));
+                }
+            });
+
+            let msg: ObjcId = match &message {
+                WebSocketMessage::String(data) => {
+                    let nsstring = str_to_nsstring(data);
+                    let message: ObjcId = msg_send![class!(NSURLSessionWebSocketMessage), alloc];
+                    let () = msg_send![message, initWithString: nsstring];
+                    message
+                }
+                WebSocketMessage::Binary(data) => {
+                    let nsdata: ObjcId =
+                        msg_send![class!(NSData), dataWithBytes: data.as_ptr() length: data.len()];
+                    let message: ObjcId = msg_send![class!(NSURLSessionWebSocketMessage), alloc];
+                    let () = msg_send![message, initWithData: nsdata];
+                    message
+                }
+                WebSocketMessage::Closed => {
+                    let () = msg_send![*Arc::as_ptr(&self.data_task), cancel];
+                    return Ok(());
+                }
+                WebSocketMessage::Opened | WebSocketMessage::Error(_) => return Ok(()),
+            };
+
+            let () = msg_send![*Arc::as_ptr(&self.data_task), sendMessage: msg completionHandler: &handler];
+            Ok(())
         }
-        Err(())
     }
 
-    pub fn close(&mut self) {
-        self.sender.take();
-        if let Some(stream) = self.stream.take() {
-            let _ = stream.shutdown(Shutdown::Both);
+    pub fn close(&self) {
+        unsafe {
+            let () = msg_send![*self.data_task, cancel];
         }
     }
 
     pub fn open(
-        _socket_id: u64,
+        _socket_id: LiveId,
         request: HttpRequest,
         rx_sender: Sender<WebSocketMessage>,
-    ) -> OsWebSocket {
-        let split = request.split_url();
-        match split.proto {
-            "http" | "ws" => {}
-            "https" | "wss" => {
-                let _ = rx_sender.send(WebSocketMessage::Error(
-                    "TLS websocket is not supported by this client; use ws/http".to_string(),
-                ));
-                return OsWebSocket {
-                    sender: None,
-                    stream: None,
-                };
-            }
-            _ => {
-                let _ = rx_sender.send(WebSocketMessage::Error(format!(
-                    "unsupported websocket scheme: {}",
-                    split.proto
-                )));
-                return OsWebSocket {
-                    sender: None,
-                    stream: None,
-                };
-            }
-        }
+    ) -> AppleWebSocket {
+        unsafe {
+            let ns_request = make_ns_request(&request);
 
-        let mut stream = match TcpStream::connect(format!("{}:{}", split.host, split.port)) {
-            Ok(stream) => stream,
-            Err(err) => {
-                let _ = rx_sender.send(WebSocketMessage::Error(format!(
-                    "Error connecting websocket stream: {err}"
-                )));
-                return OsWebSocket {
-                    sender: None,
-                    stream: None,
-                };
-            }
-        };
-
-        let _ = stream.set_nodelay(true);
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
-
-        let path = if split.file.is_empty() {
-            "/".to_string()
-        } else {
-            format!("/{}", split.file)
-        };
-        let host_header = if split.port == "80" {
-            split.host.to_string()
-        } else {
-            format!("{}:{}", split.host, split.port)
-        };
-
-        let mut http_request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: SxJdXBRtW7Q4awLDhflO0Q==\r\n"
-        );
-        http_request.push_str(&request.get_headers_string());
-        http_request.push_str("\r\n");
-
-        if write_all_no_error(&mut stream, http_request.as_bytes()) {
-            let _ = rx_sender.send(WebSocketMessage::Error(
-                "Error writing request to websocket".into(),
-            ));
-            return OsWebSocket {
-                sender: None,
-                stream: None,
+            let session: ObjcId = if request.ignore_ssl_cert {
+                let config: ObjcId = msg_send![
+                    class!(NSURLSessionConfiguration),
+                    defaultSessionConfiguration
+                ];
+                let () = msg_send![config, setURLCache: nil];
+                let delegate: ObjcId = msg_send![url_session_delegate_class(), new];
+                msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: delegate delegateQueue:nil]
+            } else {
+                msg_send![class!(NSURLSession), sharedSession]
             };
-        }
 
-        let leftover = match read_websocket_handshake_response(&mut stream) {
-            Ok(leftover) => leftover,
-            Err(err) => {
-                let _ = rx_sender.send(WebSocketMessage::Error(err));
-                return OsWebSocket {
-                    sender: None,
-                    stream: None,
-                };
-            }
-        };
+            let data_task: ObjcId = msg_send![session, webSocketTaskWithRequest: ns_request];
+            let web_socket_delegate_instance: ObjcId = msg_send![web_socket_delegate_class(), new];
+            let () = msg_send![data_task, setMaximumMessageSize:5*1024*1024];
 
-        let mut io_stream = match stream.try_clone() {
-            Ok(stream) => stream,
-            Err(err) => {
-                let _ = rx_sender.send(WebSocketMessage::Error(format!(
-                    "Error cloning websocket stream: {err}"
-                )));
-                return OsWebSocket {
-                    sender: None,
-                    stream: None,
-                };
-            }
-        };
-
-        let (sender, receiver) = channel();
-        let _io_thread = std::thread::spawn(move || {
-            let mut web_socket = ServerWebSocket::new();
-            let mut done = false;
-            if !leftover.is_empty() {
-                parse_incoming(
-                    &mut web_socket,
-                    &mut io_stream,
-                    &rx_sender,
-                    &mut done,
-                    &leftover,
-                );
-            }
-
-            while !done {
-                loop {
-                    match receiver.try_recv() {
-                        Ok(msg) => {
-                            if handle_outgoing_message(&mut io_stream, msg) {
-                                done = true;
-                                break;
-                            }
+            fn set_message_receive_handler(
+                data_task_ref: Arc<ObjcId>,
+                rx_sender: Sender<WebSocketMessage>,
+            ) {
+                let data_task = data_task_ref.clone();
+                let handler = objc_block!(move |message: ObjcId, error: ObjcId| {
+                    unsafe {
+                        if error != ptr::null_mut() {
+                            let error_str: String =
+                                nsstring_to_string(msg_send![error, localizedDescription]);
+                            let _ = rx_sender.send(WebSocketMessage::Error(error_str));
+                            return;
                         }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            done = true;
-                            break;
+
+                        let message_type: usize = msg_send![message, type];
+                        if message_type == 0 {
+                            let data: ObjcId = msg_send![message, data];
+                            let bytes: *const u8 = msg_send![data, bytes];
+                            let length: usize = msg_send![data, length];
+                            let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
+                            let _ = rx_sender.send(WebSocketMessage::Binary(data_bytes.to_vec()));
+                        } else {
+                            let text: ObjcId = msg_send![message, string];
+                            let _ =
+                                rx_sender.send(WebSocketMessage::String(nsstring_to_string(text)));
                         }
                     }
+
+                    set_message_receive_handler(data_task.clone(), rx_sender.clone());
+                });
+
+                unsafe {
+                    let () = msg_send![*Arc::as_ptr(&data_task_ref), receiveMessageWithCompletionHandler: &handler];
                 }
-
-                if done {
-                    break;
-                }
-
-                let mut buffer = [0u8; 65535];
-                match io_stream.read(&mut buffer) {
-                    Ok(0) => {
-                        let _ = rx_sender.send(WebSocketMessage::Closed);
-                        done = true;
-                    }
-                    Ok(bytes_read) => parse_incoming(
-                        &mut web_socket,
-                        &mut io_stream,
-                        &rx_sender,
-                        &mut done,
-                        &buffer[0..bytes_read],
-                    ),
-                    Err(err)
-                        if matches!(
-                            err.kind(),
-                            std::io::ErrorKind::WouldBlock
-                                | std::io::ErrorKind::TimedOut
-                                | std::io::ErrorKind::Interrupted
-                        ) => {}
-                    Err(err) => {
-                        let _ = rx_sender.send(WebSocketMessage::Error(format!(
-                            "Failed to receive data: {err}"
-                        )));
-                        let _ = rx_sender.send(WebSocketMessage::Closed);
-                        done = true;
-                    }
-                }
-
             }
-            let _ = io_stream.shutdown(Shutdown::Both);
-        });
 
-        OsWebSocket {
-            sender: Some(sender),
-            stream: Some(stream),
+            let () = msg_send![data_task, setDelegate: web_socket_delegate_instance];
+            let data_task = Arc::new(data_task);
+            set_message_receive_handler(data_task.clone(), rx_sender.clone());
+            let () = msg_send![*Arc::as_ptr(&data_task), resume];
+
+            AppleWebSocket {
+                rx_sender,
+                data_task,
+            }
         }
     }
-}
-
-fn handle_outgoing_message(stream: &mut TcpStream, msg: WebSocketMessage) -> bool {
-    match msg {
-        WebSocketMessage::Binary(data) => {
-            let header = ServerWebSocketMessageHeader::from_len(
-                data.len(),
-                ServerWebSocketMessageFormat::Binary,
-                false,
-            );
-            write_all_no_error(stream, header.as_slice()) || write_all_no_error(stream, &data)
-        }
-        WebSocketMessage::String(data) => {
-            let header = ServerWebSocketMessageHeader::from_len(
-                data.len(),
-                ServerWebSocketMessageFormat::Text,
-                false,
-            );
-            write_all_no_error(stream, header.as_slice())
-                || write_all_no_error(stream, data.as_bytes())
-        }
-        WebSocketMessage::Closed => true,
-        WebSocketMessage::Opened => false,
-        WebSocketMessage::Error(_) => false,
-    }
-}
-
-fn parse_incoming(
-    web_socket: &mut ServerWebSocket,
-    stream: &mut TcpStream,
-    rx_sender: &Sender<WebSocketMessage>,
-    done: &mut bool,
-    bytes: &[u8],
-) {
-    web_socket.parse(bytes, |result| match result {
-        Ok(ServerWebSocketMessage::Ping(_)) => {
-            if write_all_no_error(stream, &SERVER_WEB_SOCKET_PONG_MESSAGE) {
-                *done = true;
-                let _ = rx_sender.send(WebSocketMessage::Error("Pong message send failed".into()));
-            }
-        }
-        Ok(ServerWebSocketMessage::Pong(_)) => {}
-        Ok(ServerWebSocketMessage::Text(text)) => {
-            if rx_sender
-                .send(WebSocketMessage::String(text.into()))
-                .is_err()
-            {
-                *done = true;
-            }
-        }
-        Ok(ServerWebSocketMessage::Binary(data)) => {
-            if rx_sender
-                .send(WebSocketMessage::Binary(data.into()))
-                .is_err()
-            {
-                *done = true;
-            }
-        }
-        Ok(ServerWebSocketMessage::Close) => {
-            let _ = rx_sender.send(WebSocketMessage::Closed);
-            *done = true;
-        }
-        Err(e) => {
-            let _ = rx_sender.send(WebSocketMessage::Error(format!(
-                "WebSocket parse error: {e:?}"
-            )));
-        }
-    });
-}
-
-fn read_websocket_handshake_response(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut data = Vec::with_capacity(4096);
-    let mut buf = [0u8; 4096];
-
-    loop {
-        if let Some(end) = find_header_end(&data) {
-            let head = String::from_utf8_lossy(&data[..end]);
-            let status_line = head.lines().next().unwrap_or_default();
-            if !(status_line.starts_with("HTTP/1.1 101") || status_line.starts_with("HTTP/1.0 101"))
-            {
-                return Err(format!(
-                    "websocket upgrade rejected: {}",
-                    status_line.trim()
-                ));
-            }
-            return Ok(data[end..].to_vec());
-        }
-
-        if Instant::now() >= deadline {
-            return Err("timeout waiting for websocket upgrade response".to_string());
-        }
-
-        match stream.read(&mut buf) {
-            Ok(0) => return Err("connection closed during websocket handshake".to_string()),
-            Ok(n) => data.extend_from_slice(&buf[..n]),
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    std::io::ErrorKind::WouldBlock
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::Interrupted
-                ) => {}
-            Err(err) => return Err(format!("failed to read websocket handshake: {err}")),
-        }
-    }
-}
-
-fn write_all_no_error(stream: &mut TcpStream, bytes: &[u8]) -> bool {
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        match stream.write(&bytes[offset..]) {
-            Ok(0) => return true,
-            Ok(n) => offset += n,
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    std::io::ErrorKind::WouldBlock
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::Interrupted
-                ) =>
-            {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            Err(_) => return true,
-        }
-    }
-    false
-}
-
-fn find_header_end(data: &[u8]) -> Option<usize> {
-    data.windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| index + 4)
 }

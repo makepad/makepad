@@ -8,6 +8,6 @@ pub mod android_jni;
 pub mod android_keycodes;
 pub mod android_media;
 pub mod android_midi;
-pub mod android_web_socket;
 pub mod ndk_sys;
 pub mod ndk_utils;
+pub mod android_network;

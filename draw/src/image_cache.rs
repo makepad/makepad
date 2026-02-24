@@ -620,21 +620,32 @@ pub fn handle_image_cache_network_responses(cx: &mut Cx, e: &NetworkResponsesEve
 
     {
         let cache = cx.get_global::<ImageCache>();
-        for item in e {
-            let Some(image_path) = cache.pending_http_requests.remove(&item.request_id) else {
-                continue;
-            };
-
-            match &item.response {
-                NetworkResponse::HttpRequestError(err) => {
+        for response in e {
+            match response {
+                NetworkResponse::HttpError {
+                    request_id,
+                    error,
+                } => {
+                    let Some(image_path) = cache.pending_http_requests.remove(request_id) else {
+                        continue;
+                    };
                     error!(
                         "image http request failed for {:?}: {}",
-                        image_path, err.message
+                        image_path, error.message
                     );
                     cache.map.remove(&image_path);
                 }
-                NetworkResponse::HttpResponse(response)
-                | NetworkResponse::HttpStreamComplete(response) => {
+                NetworkResponse::HttpResponse {
+                    request_id,
+                    response,
+                }
+                | NetworkResponse::HttpStreamComplete {
+                    request_id,
+                    response,
+                } => {
+                    let Some(image_path) = cache.pending_http_requests.remove(request_id) else {
+                        continue;
+                    };
                     if !(200..300).contains(&response.status_code) {
                         cache.map.remove(&image_path);
                         continue;
@@ -646,7 +657,12 @@ pub fn handle_image_cache_network_responses(cx: &mut Cx, e: &NetworkResponsesEve
                         cache.map.remove(&image_path);
                     }
                 }
-                NetworkResponse::HttpProgress(_) | NetworkResponse::HttpStreamResponse(_) => {}
+                NetworkResponse::HttpProgress { .. }
+                | NetworkResponse::HttpStreamChunk { .. }
+                | NetworkResponse::WsOpened { .. }
+                | NetworkResponse::WsMessage { .. }
+                | NetworkResponse::WsClosed { .. }
+                | NetworkResponse::WsError { .. } => {}
             }
         }
     }

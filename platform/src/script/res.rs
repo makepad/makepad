@@ -1,4 +1,4 @@
-use crate::event::network::HttpRequest;
+use crate::makepad_network::HttpRequest;
 use crate::script::vm::*;
 use crate::*;
 use makepad_script::id;
