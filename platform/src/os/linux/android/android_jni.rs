@@ -1102,6 +1102,111 @@ pub unsafe fn to_java_websocket_close(request_id: LiveId) {
     );
 }
 
+pub unsafe fn to_java_socket_stream_open(
+    stream_id: LiveId,
+    host: &str,
+    port: i32,
+    use_tls: bool,
+    ignore_ssl_cert: bool,
+) -> bool {
+    let env = attach_jni_env();
+    let host = CString::new(host).unwrap();
+    let host = ((**env).NewStringUTF.unwrap())(env, host.as_ptr());
+
+    let opened = ndk_utils::call_bool_method!(
+        env,
+        get_activity(),
+        "openSocketStream",
+        "(JLjava/lang/String;IZZ)Z",
+        stream_id.get_value() as jni_sys::jlong,
+        host,
+        port as jni_sys::jint,
+        use_tls as jni_sys::jboolean as std::ffi::c_uint,
+        ignore_ssl_cert as jni_sys::jboolean as std::ffi::c_uint
+    ) != 0;
+
+    (**env).DeleteLocalRef.unwrap()(env, host);
+    opened
+}
+
+pub unsafe fn to_java_socket_stream_read(stream_id: LiveId, max_bytes: i32) -> Option<Vec<u8>> {
+    let env = attach_jni_env();
+    let data = ndk_utils::call_object_method!(
+        env,
+        get_activity(),
+        "socketStreamRead",
+        "(JI)[B",
+        stream_id.get_value() as jni_sys::jlong,
+        max_bytes as jni_sys::jint
+    );
+
+    if data.is_null() {
+        return None;
+    }
+    let bytes = java_byte_array_to_vec(env, data);
+    (**env).DeleteLocalRef.unwrap()(env, data);
+    Some(bytes)
+}
+
+pub unsafe fn to_java_socket_stream_write(stream_id: LiveId, message: Vec<u8>) -> i32 {
+    let env = attach_jni_env();
+    let message_bytes = (**env).NewByteArray.unwrap()(env, message.len() as i32);
+    (**env).SetByteArrayRegion.unwrap()(
+        env,
+        message_bytes,
+        0,
+        message.len() as i32,
+        message.as_ptr() as *const jni_sys::jbyte,
+    );
+
+    let written = ndk_utils::call_int_method!(
+        env,
+        get_activity(),
+        "socketStreamWrite",
+        "(J[B)I",
+        stream_id.get_value() as jni_sys::jlong,
+        message_bytes as jni_sys::jobject
+    ) as i32;
+
+    (**env).DeleteLocalRef.unwrap()(env, message_bytes as jni_sys::jobject);
+    written
+}
+
+pub unsafe fn to_java_socket_stream_set_read_timeout(stream_id: LiveId, timeout_ms: i32) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "socketStreamSetReadTimeout",
+        "(JI)V",
+        stream_id.get_value() as jni_sys::jlong,
+        timeout_ms as jni_sys::jint
+    );
+}
+
+pub unsafe fn to_java_socket_stream_set_write_timeout(stream_id: LiveId, timeout_ms: i32) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "socketStreamSetWriteTimeout",
+        "(JI)V",
+        stream_id.get_value() as jni_sys::jlong,
+        timeout_ms as jni_sys::jint
+    );
+}
+
+pub unsafe fn to_java_socket_stream_close(stream_id: LiveId) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "closeSocketStream",
+        "(J)V",
+        stream_id.get_value() as jni_sys::jlong
+    );
+}
+
 pub fn to_java_get_audio_devices(flag: jni_sys::jlong) -> Vec<String> {
     unsafe {
         let env = attach_jni_env();

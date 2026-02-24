@@ -10,7 +10,7 @@ use crate::types::{
 };
 
 pub mod http;
-mod socket_stream;
+pub(crate) mod socket_stream;
 pub mod web_socket;
 
 enum LinuxSocket {
