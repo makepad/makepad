@@ -1,23 +1,20 @@
-use {
-    crate::{
-        cx::Cx,
-        cx_api::{CxOsApi, CxOsOp},
-        draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
-        event::Event,
-        event::{WindowGeom, WindowGeomChangeEvent},
-        makepad_math::*,
-        makepad_micro_serde::*,
-        os::{
-            shared_framebuf::{PollTimer, PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
-            metal::{DrawPassMode, MetalCx},
-        },
-        studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
-        texture::{Texture, TextureFormat},
-        thread::SignalToUI,
-        web_socket::WebSocketMessage,
-        window::CxWindowPool,
+use crate::{
+    cx::Cx,
+    cx_api::{CxOsApi, CxOsOp},
+    draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
+    event::Event,
+    event::{WindowGeom, WindowGeomChangeEvent},
+    makepad_math::*,
+    makepad_micro_serde::*,
+    os::{
+        metal::{DrawPassMode, MetalCx},
+        shared_framebuf::{PollTimer, PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
     },
-
+    studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
+    texture::{Texture, TextureFormat},
+    thread::SignalToUI,
+    web_socket::WebSocketMessage,
+    window::CxWindowPool,
 };
 
 /// Local swapchain for client-side texture management
@@ -115,27 +112,20 @@ impl Cx {
         self.call_event_handler(&Event::Startup);
 
         loop {
-            let studio_web_socket = if let Some(studio_web_socket) = &mut self.studio_web_socket {
-                studio_web_socket
-            } else {
+            if !Self::has_studio_web_socket() {
                 crate::error!("--stdin-loop mode requires a studio websocket");
                 break;
-            };
-
-            let incoming = match studio_web_socket.recv() {
-                Ok(incoming) => incoming,
-                Err(_) => break,
+            }
+            let incoming = match self.recv_studio_websocket_message() {
+                Some(incoming) => incoming,
+                None => break,
             };
 
             match incoming {
                 WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {
                     Ok(msgs) => {
                         for msg in msgs.0 {
-                            if self.stdin_handle_host_to_stdin(
-                                msg,
-                                metal_cx,
-                                &mut stdin_windows,
-                            ) {
+                            if self.stdin_handle_host_to_stdin(msg, metal_cx, &mut stdin_windows) {
                                 return;
                             }
                         }
@@ -341,11 +331,7 @@ impl Cx {
             // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
             // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.
             other => {
-                return self.dispatch_studio_msg(
-                    other,
-                    CxWindowPool::id_zero(),
-                    dvec2(0.0, 0.0),
-                );
+                return self.dispatch_studio_msg(other, CxWindowPool::id_zero(), dvec2(0.0, 0.0));
             }
         }
         false
@@ -389,14 +375,10 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    self.os.http_requests.make_http_request(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    self.os.http_requests.cancel_http_request(request_id);
+                    let _ = self.net.http_cancel(request_id);
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     Self::stdin_send_to_host(AppToStudio::SetClipboard(content));

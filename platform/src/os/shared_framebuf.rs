@@ -1,10 +1,6 @@
 #![allow(dead_code)]
 use {
-    crate::{
-        cx::Cx,
-        event::TimerEvent,
-        makepad_micro_serde::*,
-    },
+    crate::{cx::Cx, event::TimerEvent, makepad_micro_serde::*},
     std::collections::HashMap,
 };
 

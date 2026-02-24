@@ -387,6 +387,8 @@ impl NavigationStack {
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct StackNavigation {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     view: View,
 

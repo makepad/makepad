@@ -143,10 +143,56 @@ impl MacosWindow {
             if is_fullscreen {
                 self.maximize();
             }
-            // lets add an mtk_view object to our view
+
+            // Set application icon from default icon
+            Self::set_application_icon();
 
             let () = msg_send![pool, drain];
         }
+    }
+
+    /// Set the application dock icon from the default Makepad icon (RGBA8 bitmap).
+    unsafe fn set_application_icon() {
+        let icon = crate::window_icon::default_window_icon();
+        let buf = match icon.buffers.first() {
+            Some(b) => b,
+            None => return,
+        };
+        let width = buf.width as usize;
+        let height = buf.height as usize;
+
+        let bitmap_rep: ObjcId = msg_send![class!(NSBitmapImageRep), alloc];
+        let bitmap_rep: ObjcId = msg_send![bitmap_rep,
+            initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>()
+            pixelsWide: width as i64
+            pixelsHigh: height as i64
+            bitsPerSample: 8i64
+            samplesPerPixel: 4i64
+            hasAlpha: YES
+            isPlanar: NO
+            colorSpaceName: str_to_nsstring("NSDeviceRGBColorSpace")
+            bytesPerRow: (width * 4) as i64
+            bitsPerPixel: 32i64
+        ];
+        if bitmap_rep == nil {
+            return;
+        }
+
+        let bitmap_data: *mut u8 = msg_send![bitmap_rep, bitmapData];
+        if !bitmap_data.is_null() {
+            std::ptr::copy_nonoverlapping(buf.data.as_ptr(), bitmap_data, width * height * 4);
+        }
+
+        let size = NSSize {
+            width: width as f64,
+            height: height as f64,
+        };
+        let ns_image: ObjcId = msg_send![class!(NSImage), alloc];
+        let ns_image: ObjcId = msg_send![ns_image, initWithSize: size];
+        let () = msg_send![ns_image, addRepresentation: bitmap_rep];
+
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![ns_app, setApplicationIconImage: ns_image];
     }
 
     pub fn set_ime_spot(&mut self, spot: Vec2d) {

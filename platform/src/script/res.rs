@@ -1,4 +1,4 @@
-use crate::event::network::HttpRequest;
+use crate::makepad_network::HttpRequest;
 use crate::script::vm::*;
 use crate::*;
 use makepad_script::id;
@@ -170,10 +170,8 @@ impl Cx {
                             res.data = CxScriptResourceData::Loaded(Rc::new(data));
                         }
                         Err(e) => {
-                            res.data = CxScriptResourceData::Error(format!(
-                                "Failed to read file: {}",
-                                e
-                            ));
+                            res.data =
+                                CxScriptResourceData::Error(format!("Failed to read file: {}", e));
                         }
                     }
                     continue;

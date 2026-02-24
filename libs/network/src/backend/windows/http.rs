@@ -1,7 +1,6 @@
-use crate::event::HttpRequest;
-use crate::event::{HttpResponse, NetworkResponse, NetworkResponseItem};
-use crate::LiveId;
+use crate::types::{HttpRequest, HttpResponse, NetworkResponse};
 use makepad_futures_legacy::executor;
+use makepad_live_id::LiveId;
 use std::sync::mpsc::Sender;
 
 use windows::{
@@ -15,35 +14,16 @@ use windows::{
     Win32::System::WinRT::IBufferByteAccess,
 };
 
-pub struct WindowsHttpSocket {
-    //sender: Option<Sender<Vec<u8>>>
-}
+pub struct WindowsHttpSocket;
 
 impl WindowsHttpSocket {
-    /*pub fn send_message(&mut self, message:WebSocketMessage)->Result<(),()>{
-        // lets encode the message into a membuffer and send it to the write thread
-        if let Some(sender) = &mut self.sender{
-            if sender.send(message).is_err(){
-                return Err(());
-            }
-            return Ok(())
-        }
-        Err(())
-    }*/
-
-    pub fn open(
-        request_id: LiveId,
-        request: HttpRequest,
-        response_sender: Sender<NetworkResponseItem>,
-    ) {
-        // parse the url
-
+    pub fn open(request_id: LiveId, request: HttpRequest, response_sender: Sender<NetworkResponse>) {
         async fn create_request(
             request: &HttpRequest,
         ) -> windows::core::Result<HttpRequestMessage> {
             let uri = Uri::CreateUri(&request.url.to_string().into())?;
             let req = HttpRequestMessage::Create(
-                &HttpMethod::Create(&request.method.to_string().into())?,
+                &HttpMethod::Create(&request.method.as_str().into())?,
                 &uri,
             )?;
 
@@ -53,7 +33,6 @@ impl WindowsHttpSocket {
                 for value in values {
                     match key.as_str() {
                         "Content-Type" => {
-                            // need to set this on content
                             content_type = Some(value.clone());
                         }
                         _ => {
@@ -63,20 +42,15 @@ impl WindowsHttpSocket {
                 }
             }
 
-            // lets set the body
             if let Some(body) = &request.body {
                 let stream = InMemoryRandomAccessStream::new()?;
                 let writer = DataWriter::CreateDataWriter(&stream.GetOutputStreamAt(0)?)?;
-                // Write the bytes to the stream
                 writer.WriteBytes(&body)?;
                 writer.StoreAsync()?.await?;
                 writer.FlushAsync()?.await?;
-                // Reset stream position to beginning
                 stream.Seek(0)?;
 
-                // Create and set content
                 let content = HttpStreamContent::CreateFromInputStream(&stream)?;
-
                 let headers_map = content.Headers()?;
                 if let Some(content_type) = content_type {
                     headers_map.Append(&"Content-Type".into(), &content_type.into())?;
@@ -91,7 +65,7 @@ impl WindowsHttpSocket {
         async fn streaming_request(
             request_id: LiveId,
             request: HttpRequest,
-            response_sender: Sender<NetworkResponseItem>,
+            response_sender: Sender<NetworkResponse>,
         ) -> windows::core::Result<()> {
             let client = HttpClient::new()?;
             let req = create_request(&request).await?;
@@ -100,54 +74,48 @@ impl WindowsHttpSocket {
                 .await?;
 
             let input_stream = response.Content()?.ReadAsInputStreamAsync()?.await?;
-            let buffer = Buffer::Create(1024 * 1024)?; // 1MB chunks
+            let buffer = Buffer::Create(1024 * 1024)?;
             loop {
-                // Read data into buffer
                 input_stream
                     .ReadAsync(&buffer, buffer.Capacity()?, InputStreamOptions::Partial)?
                     .await?;
-                // Process the chunk of data
                 let chunk_size = buffer.Length()?;
-                // ok we got a buffer, lets emit i
                 if chunk_size == 0 {
                     break;
                 }
                 let byte_access: IBufferByteAccess = buffer.cast()?;
-                // Get pointer to the buffer's data
                 let chunk = unsafe {
                     std::slice::from_raw_parts(
                         byte_access.Buffer()? as *const u8,
                         chunk_size as usize,
                     )
                 };
-                let message = NetworkResponseItem {
-                    request_id: request_id,
-                    response: NetworkResponse::HttpStreamResponse(HttpResponse {
+                let _ = response_sender.send(NetworkResponse::HttpStreamChunk {
+                    request_id,
+                    response: HttpResponse {
                         headers: Default::default(),
                         metadata_id: request.metadata_id,
                         status_code: 0,
                         body: Some(chunk.to_vec()),
-                    }),
-                };
-                response_sender.send(message).unwrap();
+                    },
+                });
             }
-            let message = NetworkResponseItem {
-                request_id: request_id,
-                response: NetworkResponse::HttpStreamComplete(HttpResponse {
+            let _ = response_sender.send(NetworkResponse::HttpStreamComplete {
+                request_id,
+                response: HttpResponse {
                     headers: Default::default(),
                     metadata_id: request.metadata_id,
                     status_code: 0,
                     body: None,
-                }),
-            };
-            response_sender.send(message).unwrap();
+                },
+            });
             Ok(())
         }
 
         async fn non_streaming_request(
             request_id: LiveId,
             request: HttpRequest,
-            response_sender: Sender<NetworkResponseItem>,
+            response_sender: Sender<NetworkResponse>,
         ) -> windows::core::Result<()> {
             let client = HttpClient::new()?;
             let req = create_request(&request).await?;
@@ -161,27 +129,23 @@ impl WindowsHttpSocket {
             let chunk = unsafe {
                 std::slice::from_raw_parts(byte_access.Buffer()? as *const u8, chunk_size as usize)
             };
-            let message = NetworkResponseItem {
-                request_id: request_id,
-                response: NetworkResponse::HttpResponse(HttpResponse {
+            let _ = response_sender.send(NetworkResponse::HttpResponse {
+                request_id,
+                response: HttpResponse {
                     headers: Default::default(),
                     metadata_id: request.metadata_id,
                     status_code: 0,
                     body: Some(chunk.to_vec()),
-                }),
-            };
-            response_sender.send(message).unwrap();
+                },
+            });
             Ok(())
         }
 
-        // create a thread and run the request
         let _reader_thread = std::thread::spawn(move || {
             if request.is_streaming {
-                executor::block_on(streaming_request(request_id, request, response_sender))
-                    .unwrap();
+                let _ = executor::block_on(streaming_request(request_id, request, response_sender));
             } else {
-                executor::block_on(non_streaming_request(request_id, request, response_sender))
-                    .unwrap();
+                let _ = executor::block_on(non_streaming_request(request_id, request, response_sender));
             }
         });
     }

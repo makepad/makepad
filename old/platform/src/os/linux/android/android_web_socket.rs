@@ -2,7 +2,7 @@ use self::super::android_jni;
 use crate::event::HttpRequest;
 use crate::web_socket::WebSocketMessage;
 use crate::LiveId;
-use makepad_http::websocket::{
+use makepad_network::websocket::{
     ServerWebSocket, ServerWebSocketMessageFormat, ServerWebSocketMessageHeader,
 };
 use std::sync::mpsc::*;

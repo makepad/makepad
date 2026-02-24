@@ -7,6 +7,108 @@ export function init_env(env) {
     env.js_open_web_socket = (id, url_ptr, url_len) => console.error("js_open_web_socket out of context");
     env.js_web_socket_send_string = (id, str_ptr, url_len) => console.error("js_web_socket_send_string out of context");
     env.js_web_socket_send_binary = (id, bin_ptr, bin_len) => console.error("js_web_socket_send_binary out of context");
+    env.js_network_http_request = (
+        request_id_lo,
+        request_id_hi,
+        metadata_id_lo,
+        metadata_id_hi,
+        url_ptr,
+        url_len,
+        method_ptr,
+        method_len,
+        headers_ptr,
+        headers_len,
+        body_ptr,
+        body_len
+    ) => {
+        if (_wasm && _wasm._bridge && _wasm._bridge.js_network_http_request) {
+            _wasm._bridge.js_network_http_request(
+                request_id_lo,
+                request_id_hi,
+                metadata_id_lo,
+                metadata_id_hi,
+                url_ptr,
+                url_len,
+                method_ptr,
+                method_len,
+                headers_ptr,
+                headers_len,
+                body_ptr,
+                body_len
+            );
+            return;
+        }
+        console.error("js_network_http_request out of context");
+    };
+    env.js_network_http_cancel = (request_id_lo, request_id_hi) => {
+        if (_wasm && _wasm._bridge && _wasm._bridge.js_network_http_cancel) {
+            _wasm._bridge.js_network_http_cancel(request_id_lo, request_id_hi);
+            return;
+        }
+        console.error("js_network_http_cancel out of context");
+    };
+    env.js_network_ws_open = (
+        socket_id_lo,
+        socket_id_hi,
+        url_ptr,
+        url_len,
+        headers_ptr,
+        headers_len
+    ) => {
+        if (_wasm && _wasm._bridge && _wasm._bridge.js_network_ws_open) {
+            _wasm._bridge.js_network_ws_open(
+                socket_id_lo,
+                socket_id_hi,
+                url_ptr,
+                url_len,
+                headers_ptr,
+                headers_len
+            );
+            return;
+        }
+        console.error("js_network_ws_open out of context");
+    };
+    env.js_network_ws_send_binary = (
+        socket_id_lo,
+        socket_id_hi,
+        data_ptr,
+        data_len
+    ) => {
+        if (_wasm && _wasm._bridge && _wasm._bridge.js_network_ws_send_binary) {
+            _wasm._bridge.js_network_ws_send_binary(
+                socket_id_lo,
+                socket_id_hi,
+                data_ptr,
+                data_len
+            );
+            return;
+        }
+        console.error("js_network_ws_send_binary out of context");
+    };
+    env.js_network_ws_send_text = (
+        socket_id_lo,
+        socket_id_hi,
+        data_ptr,
+        data_len
+    ) => {
+        if (_wasm && _wasm._bridge && _wasm._bridge.js_network_ws_send_text) {
+            _wasm._bridge.js_network_ws_send_text(
+                socket_id_lo,
+                socket_id_hi,
+                data_ptr,
+                data_len
+            );
+            return;
+        }
+        console.error("js_network_ws_send_text out of context");
+    };
+    env.js_network_ws_close = (socket_id_lo, socket_id_hi) => {
+        if (_wasm && _wasm._bridge && _wasm._bridge.js_network_ws_close) {
+            _wasm._bridge.js_network_ws_close(socket_id_lo, socket_id_hi);
+            return;
+        }
+        console.error("js_network_ws_close out of context");
+    };
 
     return (wasm) => { _wasm = wasm };
 }

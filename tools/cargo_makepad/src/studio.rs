@@ -1,5 +1,5 @@
-use makepad_http::websocket::{
-    ServerWebSocket, ServerWebSocketError, ServerWebSocketMessage, ServerWebSocketMessageFormat,
+use makepad_network::{
+    WebSocketParser, ServerWebSocketError, ServerWebSocketMessage, ServerWebSocketMessageFormat,
     ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
 use makepad_micro_serde::*;
@@ -151,10 +151,7 @@ fn resolve_host_port(studio_override: Option<String>) -> Result<(String, u16), S
     Ok((host.to_string(), port))
 }
 
-fn run_studio_remote(
-    target: (String, u16),
-    initial_messages: Vec<String>,
-) -> Result<(), String> {
+fn run_studio_remote(target: (String, u16), initial_messages: Vec<String>) -> Result<(), String> {
     let (host, port) = target;
     let host_header = format!("{host}:{port}");
     let addr = host_header.clone();
@@ -226,7 +223,7 @@ fn run_studio_remote(
         });
     }
 
-    let mut web_socket = ServerWebSocket::new();
+    let mut web_socket = WebSocketParser::new();
     if !leftover.is_empty() {
         parse_incoming_frames(&write_stream, &mut web_socket, &is_done, &leftover)?;
     }
@@ -266,14 +263,14 @@ fn send_text_frame(stream: &Arc<Mutex<TcpStream>>, text: &str) -> io::Result<()>
         ServerWebSocketMessageFormat::Text,
         true,
     );
-    let frame = ServerWebSocket::build_message(header, text.as_bytes());
+    let frame = WebSocketParser::build_message(header, text.as_bytes());
     let mut guard = stream.lock().unwrap();
     write_all_no_error(&mut guard, &frame)
 }
 
 fn parse_incoming_frames(
     stream: &Arc<Mutex<TcpStream>>,
-    web_socket: &mut ServerWebSocket,
+    web_socket: &mut WebSocketParser,
     is_done: &Arc<AtomicBool>,
     bytes: &[u8],
 ) -> Result<(), String> {

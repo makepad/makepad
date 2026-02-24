@@ -1,7 +1,7 @@
-use crate::event::HttpRequest;
-use crate::web_socket::WebSocketMessage;
-use makepad_http::websocket::{
-    ServerWebSocket, ServerWebSocketMessage, ServerWebSocketMessageFormat,
+use crate::types::{HttpRequest, WebSocketMessage};
+use makepad_live_id::LiveId;
+use crate::web_socket_parser::{
+    WebSocketParser, ServerWebSocketMessage, ServerWebSocketMessageFormat,
     ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
 use std::{
@@ -12,19 +12,18 @@ use std::{
 
 use super::socket_stream::SocketStream;
 
-pub struct OsWebSocket {
+pub struct LinuxWebSocket {
     sender: Option<Sender<WebSocketMessage>>,
 }
 
-impl Drop for OsWebSocket {
+impl Drop for LinuxWebSocket {
     fn drop(&mut self) {
         self.sender.take();
     }
 }
 
-impl OsWebSocket {
+impl LinuxWebSocket {
     pub fn send_message(&mut self, message: WebSocketMessage) -> Result<(), ()> {
-        // lets encode the message into a membuffer and send it to the write thread
         if let Some(sender) = &mut self.sender {
             if sender.send(message).is_err() {
                 return Err(());
@@ -39,10 +38,10 @@ impl OsWebSocket {
     }
 
     pub fn open(
-        _socket_id: u64,
+        _socket_id: LiveId,
         request: HttpRequest,
         rx_sender: Sender<WebSocketMessage>,
-    ) -> OsWebSocket {
+    ) -> LinuxWebSocket {
         let split = request.split_url();
         let is_tls = match split.proto {
             "ws" | "http" => false,
@@ -52,7 +51,7 @@ impl OsWebSocket {
                     "unsupported websocket scheme: {}",
                     split.proto
                 )));
-                return OsWebSocket { sender: None };
+                return LinuxWebSocket { sender: None };
             }
         };
 
@@ -63,7 +62,7 @@ impl OsWebSocket {
                     let _ = rx_sender.send(WebSocketMessage::Error(format!(
                         "Error connecting websocket stream: {err}"
                     )));
-                    return OsWebSocket { sender: None };
+                    return LinuxWebSocket { sender: None };
                 }
             };
 
@@ -92,21 +91,21 @@ impl OsWebSocket {
             let _ = rx_sender.send(WebSocketMessage::Error(
                 "Error writing request to websocket".into(),
             ));
-            return OsWebSocket { sender: None };
+            return LinuxWebSocket { sender: None };
         }
 
         let leftover = match read_websocket_handshake_response(&mut stream) {
             Ok(leftover) => leftover,
             Err(err) => {
                 let _ = rx_sender.send(WebSocketMessage::Error(err));
-                return OsWebSocket { sender: None };
+                return LinuxWebSocket { sender: None };
             }
         };
 
         let (sender, receiver) = channel();
 
         let _io_thread = std::thread::spawn(move || {
-            let mut web_socket = ServerWebSocket::new();
+            let mut web_socket = WebSocketParser::new();
             let mut done = false;
             if !leftover.is_empty() {
                 parse_incoming(
@@ -167,12 +166,11 @@ impl OsWebSocket {
                         done = true;
                     }
                 }
-
             }
             stream.shutdown();
         });
 
-        OsWebSocket {
+        LinuxWebSocket {
             sender: Some(sender),
         }
     }
@@ -204,7 +202,7 @@ fn handle_outgoing_message(stream: &mut SocketStream, msg: WebSocketMessage) -> 
 }
 
 fn parse_incoming(
-    web_socket: &mut ServerWebSocket,
+    web_socket: &mut WebSocketParser,
     stream: &mut SocketStream,
     rx_sender: &Sender<WebSocketMessage>,
     done: &mut bool,

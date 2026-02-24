@@ -129,8 +129,12 @@ fn immediate_portal_item_lookup_test() {
     tree.refresh_from_borrowed(root.uid, |visit| root.visit(visit));
     tree.insert_child(portal.uid, id("item"), item.widget.clone());
 
-    let found = tree.find_within_from_borrowed(item.uid, &[id("button")], |visit| item.visit(visit));
-    assert!(!found.is_empty(), "item -> button should resolve immediately");
+    let found =
+        tree.find_within_from_borrowed(item.uid, &[id("button")], |visit| item.visit(visit));
+    assert!(
+        !found.is_empty(),
+        "item -> button should resolve immediately"
+    );
 }
 
 fn hammer_insert_and_lookup(iterations: usize) {
@@ -162,7 +166,12 @@ fn hammer_insert_and_lookup(iterations: usize) {
 
         if i % 64 == 0 {
             tree.refresh_from_borrowed(portal.uid, |visit| portal.visit(visit));
-            assert_found(&tree, root.uid, &[id("button")], "root -> button during hammer");
+            assert_found(
+                &tree,
+                root.uid,
+                &[id("button")],
+                "root -> button during hammer",
+            );
         }
     }
 

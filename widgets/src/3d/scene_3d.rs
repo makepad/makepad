@@ -56,14 +56,12 @@ pub fn register_draw_call_anchor(scope: &mut Scope, area: Area, world_pos: Vec3f
         Area::Instance(inst) => (Some(inst.draw_list_id), Some(inst.draw_item_id)),
         _ => (None, None),
     };
-    scope_3d
-        .draw_call_anchors
-        .push(SceneDrawCallAnchor {
-            area,
-            draw_list_id,
-            draw_item_id,
-            world_pos,
-        });
+    scope_3d.draw_call_anchors.push(SceneDrawCallAnchor {
+        area,
+        draw_list_id,
+        draw_item_id,
+        world_pos,
+    });
 }
 
 pub fn register_last_draw_call_anchor(cx: &mut Cx2d, scope: &mut Scope, world_pos: Vec3f) {
@@ -159,7 +157,10 @@ pub fn apply_draw_call_reorder_for_draw_list(
         reorder[slot] = draw_item_id;
     }
 
-    let is_identity = reorder.iter().enumerate().all(|(index, value)| *value == index);
+    let is_identity = reorder
+        .iter()
+        .enumerate()
+        .all(|(index, value)| *value == index);
     draw_list.draw_item_reorder = if is_identity { None } else { Some(reorder) };
 }
 
@@ -299,7 +300,8 @@ impl Scene3D {
 
         let distance = self.camera_distance.clamp(
             self.camera_distance_min.max(0.01),
-            self.camera_distance_max.max(self.camera_distance_min.max(0.01) + 0.01),
+            self.camera_distance_max
+                .max(self.camera_distance_min.max(0.01) + 0.01),
         );
         let yaw_angle = self.orbit_yaw + (self.time as f32) * self.spin_speed;
         let pitch_angle = self.orbit_pitch.clamp(-1.45, 1.45);
@@ -414,7 +416,8 @@ impl Widget for Scene3D {
                 };
                 self.camera_distance = (self.camera_distance * zoom_factor).clamp(
                     self.camera_distance_min.max(0.01),
-                    self.camera_distance_max.max(self.camera_distance_min.max(0.01) + 0.01),
+                    self.camera_distance_max
+                        .max(self.camera_distance_min.max(0.01) + 0.01),
                 );
                 self.area.redraw(cx);
             }

@@ -1,7 +1,7 @@
-use crate::event::HttpRequest;
-use crate::web_socket::WebSocketMessage;
-use makepad_http::websocket::{
-    ServerWebSocket, ServerWebSocketMessage, ServerWebSocketMessageFormat,
+use crate::types::{HttpRequest, WebSocketMessage};
+use makepad_live_id::LiveId;
+use crate::web_socket_parser::{
+    WebSocketParser, ServerWebSocketMessage, ServerWebSocketMessageFormat,
     ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
 use std::{
@@ -11,12 +11,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub struct OsWebSocket {
+pub struct PlainWebSocket {
     sender: Option<Sender<WebSocketMessage>>,
     stream: Option<TcpStream>,
 }
 
-impl Drop for OsWebSocket {
+impl Drop for PlainWebSocket {
     fn drop(&mut self) {
         self.sender.take();
         if let Some(stream) = self.stream.take() {
@@ -25,7 +25,7 @@ impl Drop for OsWebSocket {
     }
 }
 
-impl OsWebSocket {
+impl PlainWebSocket {
     pub fn send_message(&mut self, message: WebSocketMessage) -> Result<(), ()> {
         if let Some(sender) = &mut self.sender {
             if sender.send(message).is_err() {
@@ -44,10 +44,10 @@ impl OsWebSocket {
     }
 
     pub fn open(
-        _socket_id: u64,
+        _socket_id: LiveId,
         request: HttpRequest,
         rx_sender: Sender<WebSocketMessage>,
-    ) -> OsWebSocket {
+    ) -> PlainWebSocket {
         let split = request.split_url();
         match split.proto {
             "http" | "ws" => {}
@@ -55,7 +55,7 @@ impl OsWebSocket {
                 let _ = rx_sender.send(WebSocketMessage::Error(
                     "TLS websocket is not supported by this client; use ws/http".to_string(),
                 ));
-                return OsWebSocket {
+                return PlainWebSocket {
                     sender: None,
                     stream: None,
                 };
@@ -65,7 +65,7 @@ impl OsWebSocket {
                     "unsupported websocket scheme: {}",
                     split.proto
                 )));
-                return OsWebSocket {
+                return PlainWebSocket {
                     sender: None,
                     stream: None,
                 };
@@ -78,7 +78,7 @@ impl OsWebSocket {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(
                     "Error connecting websocket stream: {err}"
                 )));
-                return OsWebSocket {
+                return PlainWebSocket {
                     sender: None,
                     stream: None,
                 };
@@ -110,7 +110,7 @@ impl OsWebSocket {
             let _ = rx_sender.send(WebSocketMessage::Error(
                 "Error writing request to websocket".into(),
             ));
-            return OsWebSocket {
+            return PlainWebSocket {
                 sender: None,
                 stream: None,
             };
@@ -120,7 +120,7 @@ impl OsWebSocket {
             Ok(leftover) => leftover,
             Err(err) => {
                 let _ = rx_sender.send(WebSocketMessage::Error(err));
-                return OsWebSocket {
+                return PlainWebSocket {
                     sender: None,
                     stream: None,
                 };
@@ -133,7 +133,7 @@ impl OsWebSocket {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(
                     "Error cloning websocket stream: {err}"
                 )));
-                return OsWebSocket {
+                return PlainWebSocket {
                     sender: None,
                     stream: None,
                 };
@@ -142,7 +142,7 @@ impl OsWebSocket {
 
         let (sender, receiver) = channel();
         let _io_thread = std::thread::spawn(move || {
-            let mut web_socket = ServerWebSocket::new();
+            let mut web_socket = WebSocketParser::new();
             let mut done = false;
             if !leftover.is_empty() {
                 parse_incoming(
@@ -208,7 +208,7 @@ impl OsWebSocket {
             let _ = io_stream.shutdown(Shutdown::Both);
         });
 
-        OsWebSocket {
+        PlainWebSocket {
             sender: Some(sender),
             stream: Some(stream),
         }
@@ -241,7 +241,7 @@ fn handle_outgoing_message(stream: &mut TcpStream, msg: WebSocketMessage) -> boo
 }
 
 fn parse_incoming(
-    web_socket: &mut ServerWebSocket,
+    web_socket: &mut WebSocketParser,
     stream: &mut TcpStream,
     rx_sender: &Sender<WebSocketMessage>,
     done: &mut bool,

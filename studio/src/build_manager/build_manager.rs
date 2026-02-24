@@ -13,14 +13,13 @@ use {
         makepad_platform::studio::{
             AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, LocalProfileSample,
             RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp, RemoteScroll,
-            RemoteTweakRay,
-            ScreenshotRequest, ScreenshotResponse, StudioToApp, StudioToAppVec,
+            RemoteTweakRay, ScreenshotRequest, ScreenshotResponse, StudioToApp, StudioToAppVec,
             WidgetTreeDumpRequest, WidgetTreeDumpResponse,
         },
         makepad_shell::*,
         makepad_widgets::*,
     },
-    makepad_http::server::*,
+    makepad_network::http_server::*,
     std::{
         cell::RefCell,
         collections::{hash_map, BTreeSet, HashMap, HashSet},
@@ -139,15 +138,13 @@ pub struct BuildManager {
     pub binaries: Vec<BuildBinary>,
     pub active: ActiveBuilds,
     pub studio_http: String,
-    pub recv_studio_msg: ToUIReceiver<(LiveId, AppToStudioVec)>,
-    pub recv_studio_disconnect: ToUIReceiver<LiveId>,
-    recv_studio_remote_msg: ToUIReceiver<StudioRemoteSocket>,
+    pub recv_studio_network_msg: ToUIReceiver<StudioNetworkMessage>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
     pub tick_timer: Timer,
     pub websocket_alive_timer: Timer,
     //pub send_file_change: FromUISender<LiveFileChange>,
     pub active_build_websockets: Arc<Mutex<RefCell<ActiveBuildWebSockets>>>,
-    studio_remote_sockets: HashMap<u64, mpsc::Sender<Vec<u8>>>,
+    studio_remote_sockets: HashMap<u64, StudioWebSocket>,
     studio_remote_build_owners: HashMap<LiveId, u64>,
     studio_remote_build_counter: u64,
     studio_remote_screenshot_requests: UniqueIdMap<PendingStudioRemoteScreenshot>,
@@ -156,6 +153,32 @@ pub struct BuildManager {
     studio_remote_startup_queries: HashMap<LiveId, String>,
     studio_remote_startup_dump_pending: HashSet<LiveId>,
     recompiling_builds: HashSet<LiveId>,
+}
+
+#[derive(Clone)]
+pub struct StudioWebSocket {
+    pub web_socket_id: u64,
+    pub sender: mpsc::Sender<Vec<u8>>,
+}
+
+pub enum StudioNetworkMessage {
+    AppToStudio {
+        build_id: LiveId,
+        msgs: AppToStudioVec,
+    },
+    AppDisconnected {
+        build_id: LiveId,
+    },
+    RemoteConnected {
+        socket: StudioWebSocket,
+    },
+    RemoteDisconnected {
+        web_socket_id: u64,
+    },
+    RemoteRequest {
+        web_socket_id: u64,
+        request: StudioRemoteRequest,
+    },
 }
 
 #[derive(Default)]
@@ -171,7 +194,7 @@ impl ActiveBuildWebSockets {
             if socket.build_id != build_id {
                 return true;
             }
-            if socket.sender.send(data.clone()).is_ok() {
+            if socket.socket.sender.send(data.clone()).is_ok() {
                 sent_any = true;
                 true
             } else {
@@ -183,9 +206,8 @@ impl ActiveBuildWebSockets {
 }
 
 pub struct ActiveBuildSocket {
-    web_socket_id: u64,
+    socket: StudioWebSocket,
     build_id: LiveId,
-    sender: mpsc::Sender<Vec<u8>>,
 }
 
 include!("studio_remote_proto.rs");
@@ -371,20 +393,16 @@ impl BuildManager {
                     }
                 }
                 Err(err) => {
-                    crate::warning!(
-                        "run list discovery failed for root {}: {}",
-                        root_name,
-                        err
-                    );
+                    crate::warning!("run list discovery failed for root {}: {}", root_name, err);
                 }
             }
         }
     }
 
     pub fn any_binary_active(&self, root: &str, binary: &str) -> bool {
-        self.running_processes.values().any(|process| {
-            process.root == root && process.binary == binary
-        })
+        self.running_processes
+            .values()
+            .any(|process| process.root == root && process.binary == binary)
     }
 
     pub fn item_id_active(&self, item_id: LiveId) -> bool {
@@ -429,7 +447,10 @@ impl BuildManager {
     }
 
     fn push_event_profile_sample(&mut self, build_id: LiveId, mut sample: EventSample) {
-        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        let origin = self
+            .profile_time_origin
+            .entry(build_id)
+            .or_insert(sample.start);
         sample.start -= *origin;
         sample.end -= *origin;
         if sample.end < sample.start {
@@ -443,7 +464,10 @@ impl BuildManager {
     }
 
     fn push_gpu_profile_sample(&mut self, build_id: LiveId, mut sample: GPUSample) {
-        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        let origin = self
+            .profile_time_origin
+            .entry(build_id)
+            .or_insert(sample.start);
         sample.start -= *origin;
         sample.end -= *origin;
         if sample.end < sample.start {
@@ -457,7 +481,10 @@ impl BuildManager {
     }
 
     fn push_gc_profile_sample(&mut self, build_id: LiveId, mut sample: GCSample) {
-        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        let origin = self
+            .profile_time_origin
+            .entry(build_id)
+            .or_insert(sample.start);
         sample.start -= *origin;
         sample.end -= *origin;
         if sample.end < sample.start {
@@ -471,11 +498,8 @@ impl BuildManager {
     }
 
     fn push_self_event_profile_sample(&mut self, mut sample: EventSample) {
-        let (start, end) = Self::rebase_sample_range(
-            sample.start,
-            sample.end,
-            &mut self.self_profile_time_origin,
-        );
+        let (start, end) =
+            Self::rebase_sample_range(sample.start, sample.end, &mut self.self_profile_time_origin);
         sample.start = start;
         sample.end = end;
         self.self_profile.event.push(sample);
@@ -483,11 +507,8 @@ impl BuildManager {
     }
 
     fn push_self_gpu_profile_sample(&mut self, mut sample: GPUSample) {
-        let (start, end) = Self::rebase_sample_range(
-            sample.start,
-            sample.end,
-            &mut self.self_profile_time_origin,
-        );
+        let (start, end) =
+            Self::rebase_sample_range(sample.start, sample.end, &mut self.self_profile_time_origin);
         sample.start = start;
         sample.end = end;
         self.self_profile.gpu.push(sample);
@@ -495,11 +516,8 @@ impl BuildManager {
     }
 
     fn push_self_gc_profile_sample(&mut self, mut sample: GCSample) {
-        let (start, end) = Self::rebase_sample_range(
-            sample.start,
-            sample.end,
-            &mut self.self_profile_time_origin,
-        );
+        let (start, end) =
+            Self::rebase_sample_range(sample.start, sample.end, &mut self.self_profile_time_origin);
         sample.start = start;
         sample.end = end;
         self.self_profile.gc.push(sample);
@@ -761,7 +779,7 @@ impl BuildManager {
                     content: live_file_change.content.clone(),
                 }])
                 .serialize_bin();
-                let _ = socket.sender.send(data.clone());
+                let _ = socket.socket.sender.send(data.clone());
             }
         }
     }
@@ -800,7 +818,7 @@ impl BuildManager {
             if let Ok(d) = self.active_build_websockets.lock() {
                 for socket in d.borrow_mut().sockets.iter_mut() {
                     let data = StudioToAppVec(vec![StudioToApp::KeepAlive]).serialize_bin();
-                    let _ = socket.sender.send(data.clone());
+                    let _ = socket.socket.sender.send(data.clone());
                 }
             }
         }
@@ -918,9 +936,7 @@ impl BuildManager {
         if let Event::Signal = event {
             let mut pending_studio_remote_logs: Vec<(LiveId, String, String)> = Vec::new();
             self.handle_external_ip_signal();
-            self.handle_studio_remote_socket(cx);
-            self.handle_studio_disconnect_signal(cx);
-            self.handle_studio_signal_messages(cx, file_system, &mut pending_studio_remote_logs);
+            self.handle_studio_network_messages(cx, file_system, &mut pending_studio_remote_logs);
 
             while let Ok(wrap) = self.clients[0].msg_receiver.try_recv() {
                 let log = &mut self.log;
@@ -1051,14 +1067,11 @@ impl BuildManager {
         };
         let item_id = process.as_id();
         if self.running_processes.contains_key(&item_id)
-            || self
-                .running_processes
-                .values()
-                .any(|running| {
-                    running.root == process.root
-                        && running.binary == process.binary
-                        && running.target == process.target
-                })
+            || self.running_processes.values().any(|running| {
+                running.root == process.root
+                    && running.binary == process.binary
+                    && running.target == process.target
+            })
         {
             return;
         }
@@ -1134,7 +1147,7 @@ impl BuildManager {
                 (running.root == process.root
                     && running.binary == process.binary
                     && running.target == process.target)
-                .then_some(*build_id)
+                    .then_some(*build_id)
             })
             .collect();
 

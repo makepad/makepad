@@ -1,10 +1,7 @@
 use super::socket_stream::SocketStream;
 
-use crate::{
-    event::{HttpError, HttpRequest, HttpResponse, NetworkResponse, NetworkResponseItem},
-    thread::SignalToUI,
-    LiveId,
-};
+use crate::types::{HttpError, HttpRequest, HttpResponse, NetworkResponse};
+use makepad_live_id::LiveId;
 use std::{
     collections::HashMap,
     io,
@@ -23,49 +20,48 @@ impl LinuxHttpSocket {
     pub fn open(
         request_id: LiveId,
         request: HttpRequest,
-        response_sender: Sender<NetworkResponseItem>,
+        response_sender: Sender<NetworkResponse>,
     ) {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         cancellation_map()
             .lock()
             .unwrap()
-            .insert(request_id.0, cancel_flag.clone());
+            .insert(request_id, cancel_flag.clone());
 
         std::thread::spawn(move || {
             let metadata_id = request.metadata_id;
             let result = run_http_request(request_id, &request, &response_sender, &cancel_flag);
 
-            cancellation_map().lock().unwrap().remove(&request_id.0);
+            cancellation_map().lock().unwrap().remove(&request_id);
 
             if let Err(err) = result {
-                let _ = response_sender.send(NetworkResponseItem {
+                let _ = response_sender.send(NetworkResponse::HttpError {
                     request_id,
-                    response: NetworkResponse::HttpRequestError(HttpError {
+                    error: HttpError {
                         message: err,
                         metadata_id,
-                    }),
+                    },
                 });
-                SignalToUI::set_ui_signal();
             }
         });
     }
 
     pub fn cancel(request_id: LiveId) {
-        if let Some(flag) = cancellation_map().lock().unwrap().get(&request_id.0) {
+        if let Some(flag) = cancellation_map().lock().unwrap().get(&request_id) {
             flag.store(true, Ordering::SeqCst);
         }
     }
 }
 
-fn cancellation_map() -> &'static Mutex<HashMap<u64, Arc<AtomicBool>>> {
-    static MAP: OnceLock<Mutex<HashMap<u64, Arc<AtomicBool>>>> = OnceLock::new();
+fn cancellation_map() -> &'static Mutex<HashMap<LiveId, Arc<AtomicBool>>> {
+    static MAP: OnceLock<Mutex<HashMap<LiveId, Arc<AtomicBool>>>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn run_http_request(
     request_id: LiveId,
     request: &HttpRequest,
-    response_sender: &Sender<NetworkResponseItem>,
+    response_sender: &Sender<NetworkResponse>,
     cancel_flag: &AtomicBool,
 ) -> Result<(), String> {
     let split = request.split_url();
@@ -93,16 +89,15 @@ fn run_http_request(
 
     if request.is_streaming {
         if !body_prefix.is_empty() {
-            let _ = response_sender.send(NetworkResponseItem {
+            let _ = response_sender.send(NetworkResponse::HttpStreamChunk {
                 request_id,
-                response: NetworkResponse::HttpStreamResponse(HttpResponse {
+                response: HttpResponse {
                     metadata_id: request.metadata_id,
                     status_code,
                     headers: Default::default(),
                     body: Some(std::mem::take(&mut body_prefix)),
-                }),
+                },
             });
-            SignalToUI::set_ui_signal();
         }
 
         let mut buf = [0u8; 16384];
@@ -113,16 +108,15 @@ fn run_http_request(
             match stream.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let _ = response_sender.send(NetworkResponseItem {
+                    let _ = response_sender.send(NetworkResponse::HttpStreamChunk {
                         request_id,
-                        response: NetworkResponse::HttpStreamResponse(HttpResponse {
+                        response: HttpResponse {
                             metadata_id: request.metadata_id,
                             status_code,
                             headers: Default::default(),
                             body: Some(buf[..n].to_vec()),
-                        }),
+                        },
                     });
-                    SignalToUI::set_ui_signal();
                 }
                 Err(err)
                     if matches!(
@@ -138,16 +132,15 @@ fn run_http_request(
             }
         }
 
-        let _ = response_sender.send(NetworkResponseItem {
+        let _ = response_sender.send(NetworkResponse::HttpStreamComplete {
             request_id,
-            response: NetworkResponse::HttpStreamComplete(HttpResponse::new(
+            response: HttpResponse::from_header_string(
                 request.metadata_id,
                 status_code,
                 headers_string,
                 None,
-            )),
+            ),
         });
-        SignalToUI::set_ui_signal();
         stream.shutdown();
         return Ok(());
     }
@@ -182,23 +175,22 @@ fn run_http_request(
         }
     }
 
-    let _ = response_sender.send(NetworkResponseItem {
+    let _ = response_sender.send(NetworkResponse::HttpResponse {
         request_id,
-        response: NetworkResponse::HttpResponse(HttpResponse::new(
+        response: HttpResponse::from_header_string(
             request.metadata_id,
             status_code,
             headers_string,
             Some(body),
-        )),
+        ),
     });
-    SignalToUI::set_ui_signal();
     Ok(())
 }
 
 fn write_request(
     stream: &mut SocketStream,
     request: &HttpRequest,
-    split: &crate::event::SplitUrl<'_>,
+    split: &crate::types::SplitUrl<'_>,
     use_tls: bool,
 ) -> io::Result<()> {
     let path = if split.file.is_empty() {
@@ -206,7 +198,7 @@ fn write_request(
     } else {
         format!("/{}", split.file)
     };
-    let method = request.method.to_string();
+    let method = request.method.as_str();
 
     let default_port = if use_tls { "443" } else { "80" };
     let host_header = if split.port == default_port {

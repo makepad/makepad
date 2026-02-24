@@ -394,8 +394,8 @@ impl X11Cx {
                 }
                 CxOsOp::Deminiaturize(_window_id) => todo!(),
                 CxOsOp::HideWindow(_window_id) => todo!(),
-                CxOsOp::HideWindowButtons(_) => {},
-                CxOsOp::ShowWindowButtons(_) => {},
+                CxOsOp::HideWindowButtons(_) => {}
+                CxOsOp::ShowWindowButtons(_) => {}
                 CxOsOp::MaximizeWindow(window_id) => {
                     if let Some(window) =
                         opengl_windows.iter_mut().find(|w| w.window_id == window_id)
@@ -456,16 +456,10 @@ impl X11Cx {
                     request_id,
                     request,
                 } => {
-                    use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::open(
-                        request_id,
-                        request,
-                        cx.os.network_response.sender.clone(),
-                    );
+                    let _ = cx.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::cancel(request_id);
+                    let _ = cx.net.http_cancel(request_id);
                 }
                 CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(&cx).pos + pos;

@@ -4,11 +4,11 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
-            Event, KeyEvent, NetworkResponseChannel, TextInputEvent, TextRangeReplaceEvent,
             video_playback::{
-                VideoPlaybackPreparedEvent, VideoTextureUpdatedEvent,
-                VideoPlaybackResourcesReleasedEvent,
+                VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
+                VideoTextureUpdatedEvent,
             },
+            Event, KeyEvent, TextInputEvent, TextRangeReplaceEvent,
         },
         makepad_live_id::*,
         makepad_objc_sys::objc_block,
@@ -21,7 +21,6 @@ use {
                     ios_app::{self, init_ios_app_global, with_ios_app, IosApp},
                     ios_event::IosEvent,
                 },
-                url_session::AppleHttpRequests,
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
@@ -118,15 +117,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
-        let mut out = Vec::new();
-        while let Ok(item) = self.os.network_response.receiver.try_recv() {
-            self.os.http_requests.handle_response_item(&item);
-            out.push(item);
-        }
-        if out.len() > 0 {
-            self.handle_script_network_events(&out);
-            self.call_event_handler(&Event::NetworkResponses(out))
-        }
+        self.dispatch_network_runtime_events();
     }
 
     pub(crate) fn handle_permission_events(&mut self) {
@@ -240,18 +231,22 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         if let Some((width, height, duration)) = player.check_prepared() {
-                            video_events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
-                                video_id: player.video_id,
-                                video_width: width,
-                                video_height: height,
-                                duration,
-                            }));
+                            video_events.push(Event::VideoPlaybackPrepared(
+                                VideoPlaybackPreparedEvent {
+                                    video_id: player.video_id,
+                                    video_width: width,
+                                    video_height: height,
+                                    duration,
+                                },
+                            ));
                         }
                         if player.poll_frame(&mut self.textures) {
-                            video_events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
-                                video_id: player.video_id,
-                                current_position_ms: player.current_position_ms(),
-                            }));
+                            video_events.push(Event::VideoTextureUpdated(
+                                VideoTextureUpdatedEvent {
+                                    video_id: player.video_id,
+                                    current_position_ms: player.current_position_ms(),
+                                },
+                            ));
                         }
                     }
                     for event in video_events {
@@ -387,14 +382,10 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    self.os.http_requests.make_http_request(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    self.os.http_requests.cancel_http_request(request_id);
+                    let _ = self.net.http_cancel(request_id);
                 }
                 CxOsOp::ShowClipboardActions {
                     has_selection,
@@ -412,7 +403,14 @@ impl Cx {
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }
-                CxOsOp::PrepareVideoPlayback(video_id, source, _gl_handle, texture_id, autoplay, should_loop) => {
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _gl_handle,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                ) => {
                     let player = AppleVideoPlayer::new(
                         metal_cx.device,
                         video_id,
@@ -452,7 +450,7 @@ impl Cx {
                     if let Some(mut player) = self.os.video_players.remove(&video_id) {
                         player.cleanup();
                         self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
-                            VideoPlaybackResourcesReleasedEvent { video_id }
+                            VideoPlaybackResourcesReleasedEvent { video_id },
                         ));
                     }
                 }
@@ -638,8 +636,6 @@ pub struct CxOs {
     pub(crate) uniform_bytes_uploaded: u64,
     pub(crate) vertex_buffer_bytes_uploaded: u64,
     pub(crate) texture_bytes_uploaded: u64,
-    pub(crate) network_response: NetworkResponseChannel,
-    pub(crate) http_requests: AppleHttpRequests,
     pub(crate) permission_response: PermissionResultChannel,
     pub(crate) apple_game_input: Option<crate::os::apple::apple_game_input::AppleGameInput>,
     pub(crate) video_players: HashMap<LiveId, AppleVideoPlayer>,

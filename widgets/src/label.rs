@@ -1,4 +1,4 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_async::ScriptAsyncResult};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -215,6 +215,8 @@ pub enum LabelAction {
 pub struct Label {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[redraw]
     #[live]
     pub draw_text: DrawText,
@@ -242,6 +244,35 @@ pub struct Label {
 }
 
 impl Widget for Label {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        if method == live_id!(set_text) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    let new_text = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(value, out);
+                        out.to_string()
+                    });
+                    vm.with_cx_mut(|cx| {
+                        self.set_text(cx, &new_text);
+                    });
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let walk = walk.with_add_padding(self.padding);
         cx.begin_turtle(
@@ -289,6 +320,20 @@ impl Widget for Label {
 }
 
 impl LabelRef {
+    pub fn text(&self) -> String {
+        if let Some(inner) = self.borrow() {
+            inner.text()
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn set_text(&self, cx: &mut Cx, text: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_text(cx, text);
+        }
+    }
+
     pub fn hover_in(&self, actions: &Actions) -> Option<Rect> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast() {

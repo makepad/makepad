@@ -1,10 +1,11 @@
-use crate::event::network::*;
+use crate::makepad_network::{
+    http_server::{HttpServer, HttpServerRequest, HttpServerResponse},
+    utils::HttpServerHeaders,
+    HttpMethod, HttpRequest, NetworkResponse, WsMessage,
+};
 use crate::script::vm::*;
 use crate::thread::*;
-use crate::web_socket::*;
 use crate::*;
-use makepad_http::server::*;
-use makepad_http::utils::*;
 use makepad_script::id;
 use makepad_script::*;
 use std::sync::mpsc::channel;
@@ -12,7 +13,7 @@ use std::sync::mpsc::channel;
 pub struct CxScriptWebSocket {
     #[allow(unused)]
     id: LiveId,
-    socket: WebSocket,
+    socket_id: LiveId,
     events: WebSocketEvents,
 }
 
@@ -81,7 +82,6 @@ pub struct WebSocketEvents {
 
 impl Cx {
     pub(crate) fn handle_script_signals(&mut self) {
-        self.handle_script_web_sockets();
         self.handle_script_child_processes();
         self.handle_script_http_servers();
     }
@@ -246,79 +246,121 @@ impl Cx {
         }
     }
 
-    pub(crate) fn handle_script_web_sockets(&mut self) {
-        let mut i = 0;
-        while i < self.script_data.web_sockets.len() {
-            match self.script_data.web_sockets[i].socket.try_recv() {
-                Ok(WebSocketMessage::String(s)) => {
-                    if let Some(handler) =
-                        self.script_data.web_sockets[i].events.on_string.as_object()
-                    {
-                        self.with_vm_and_async(|vm| {
-                            let str = vm.bx.heap.new_string_from_str(&s);
-                            vm.call(handler.into(), &[str.into()]);
-                        })
-                    }
-                }
-                Ok(WebSocketMessage::Binary(s)) => {
-                    if let Some(handler) =
-                        self.script_data.web_sockets[i].events.on_string.as_object()
-                    {
-                        self.with_vm_and_async(|vm| {
-                            let array = vm.bx.heap.new_array_from_vec_u8(s);
-                            vm.call(handler.into(), &[array.into()]);
-                        })
-                    }
-                }
-                Ok(WebSocketMessage::Opened) => {
-                    if let Some(handler) =
-                        self.script_data.web_sockets[i].events.on_opened.as_object()
-                    {
+    pub(crate) fn handle_script_web_socket_event(&mut self, event: NetworkResponse) {
+        match event {
+            NetworkResponse::WsOpened { socket_id } => {
+                if let Some(item) = self
+                    .script_data
+                    .web_sockets
+                    .iter()
+                    .find(|item| item.socket_id == socket_id)
+                {
+                    if let Some(handler) = item.events.on_opened.as_object() {
                         self.with_vm_and_async(|vm| {
                             vm.call(handler.into(), &[]);
-                        })
+                        });
                     }
-                }
-                Ok(WebSocketMessage::Closed) => {
-                    if let Some(handler) =
-                        self.script_data.web_sockets[i].events.on_closed.as_object()
-                    {
-                        self.with_vm_and_async(|vm| {
-                            vm.call(handler.into(), &[]);
-                        })
-                    }
-                    self.script_data.web_sockets.remove(i);
-                }
-                Ok(WebSocketMessage::Error(s)) => {
-                    if let Some(handler) =
-                        self.script_data.web_sockets[i].events.on_string.as_object()
-                    {
-                        self.with_vm_and_async(|vm| {
-                            let str = vm.bx.heap.new_string_from_str(&s);
-                            vm.call(handler.into(), &[str.into()]);
-                        })
-                    }
-                    self.script_data.web_sockets.remove(i);
-                }
-                Err(_) => {
-                    i += 1;
                 }
             }
+            NetworkResponse::WsMessage { socket_id, message } => {
+                let Some(item) = self
+                    .script_data
+                    .web_sockets
+                    .iter()
+                    .find(|item| item.socket_id == socket_id)
+                else {
+                    return;
+                };
+                match message {
+                    WsMessage::Text(string) => {
+                        if let Some(handler) = item.events.on_string.as_object() {
+                            self.with_vm_and_async(|vm| {
+                                let string = vm.bx.heap.new_string_from_str(&string);
+                                vm.call(handler.into(), &[string.into()]);
+                            });
+                        }
+                    }
+                    WsMessage::Binary(data) => {
+                        if let Some(handler) = item.events.on_binary.as_object() {
+                            self.with_vm_and_async(|vm| {
+                                let data = vm.bx.heap.new_array_from_vec_u8(data);
+                                vm.call(handler.into(), &[data.into()]);
+                            });
+                        }
+                    }
+                }
+            }
+            NetworkResponse::WsClosed { socket_id } => {
+                if let Some(index) = self
+                    .script_data
+                    .web_sockets
+                    .iter()
+                    .position(|item| item.socket_id == socket_id)
+                {
+                    if let Some(handler) = self.script_data.web_sockets[index]
+                        .events
+                        .on_closed
+                        .as_object()
+                    {
+                        self.with_vm_and_async(|vm| {
+                            vm.call(handler.into(), &[]);
+                        });
+                    }
+                    self.script_data.web_sockets.remove(index);
+                }
+            }
+            NetworkResponse::WsError { socket_id, message } => {
+                if let Some(index) = self
+                    .script_data
+                    .web_sockets
+                    .iter()
+                    .position(|item| item.socket_id == socket_id)
+                {
+                    if let Some(handler) = self.script_data.web_sockets[index]
+                        .events
+                        .on_error
+                        .as_object()
+                    {
+                        self.with_vm_and_async(|vm| {
+                            let message = vm.bx.heap.new_string_from_str(&message);
+                            vm.call(handler.into(), &[message.into()]);
+                        });
+                    }
+                    self.script_data.web_sockets.remove(index);
+                }
+            }
+            NetworkResponse::HttpResponse { .. }
+            | NetworkResponse::HttpStreamChunk { .. }
+            | NetworkResponse::HttpStreamComplete { .. }
+            | NetworkResponse::HttpError { .. }
+            | NetworkResponse::HttpProgress { .. } => {}
         }
     }
 
     #[allow(unused)]
-    pub(crate) fn handle_script_network_events(&mut self, items: &[NetworkResponseItem]) {
-        for item in items {
+    pub(crate) fn handle_script_network_events(&mut self, responses: &[NetworkResponse]) {
+        for response in responses {
+            let request_id = match response {
+                NetworkResponse::HttpResponse { request_id, .. }
+                | NetworkResponse::HttpStreamChunk { request_id, .. }
+                | NetworkResponse::HttpStreamComplete { request_id, .. }
+                | NetworkResponse::HttpError { request_id, .. }
+                | NetworkResponse::HttpProgress { request_id, .. } => *request_id,
+                NetworkResponse::WsOpened { .. }
+                | NetworkResponse::WsMessage { .. }
+                | NetworkResponse::WsClosed { .. }
+                | NetworkResponse::WsError { .. } => continue,
+            };
+
             // Handle http_resource responses (resource loading via HTTP)
-            if self.script_data.resources.is_http_resource(item.request_id) {
+            if self.script_data.resources.is_http_resource(request_id) {
                 let resource_info = {
                     let handle = self
                         .script_data
                         .resources
                         .http_resources
                         .iter()
-                        .find(|r| r.request_id == item.request_id)
+                        .find(|r| r.request_id == request_id)
                         .map(|r| r.handle);
                     if let Some(handle) = handle {
                         let resources = self.script_data.resources.resources.borrow();
@@ -334,13 +376,13 @@ impl Cx {
                         "unknown resource".to_string()
                     }
                 };
-                match &item.response {
-                    NetworkResponse::HttpResponse(res) => {
+                match response {
+                    NetworkResponse::HttpResponse { response: res, .. } => {
                         if let Some(body) = res.get_body() {
                             if res.status_code >= 200 && res.status_code < 300 {
                                 self.script_data
                                     .resources
-                                    .handle_http_response(item.request_id, body.clone());
+                                    .handle_http_response(request_id, body.clone());
                             } else {
                                 crate::log!(
                                     "Script resource HTTP load failed: status={} {}",
@@ -348,7 +390,7 @@ impl Cx {
                                     resource_info
                                 );
                                 self.script_data.resources.handle_http_error(
-                                    item.request_id,
+                                    request_id,
                                     format!("HTTP error: status {}", res.status_code),
                                 );
                             }
@@ -358,20 +400,20 @@ impl Cx {
                                 resource_info
                             );
                             self.script_data.resources.handle_http_error(
-                                item.request_id,
+                                request_id,
                                 "HTTP error: empty response body".to_string(),
                             );
                         }
                         self.redraw_all();
                     }
-                    NetworkResponse::HttpRequestError(err) => {
+                    NetworkResponse::HttpError { error: err, .. } => {
                         crate::log!(
                             "Script resource HTTP request error: message={} {}",
                             err.message,
                             resource_info
                         );
                         self.script_data.resources.handle_http_error(
-                            item.request_id,
+                            request_id,
                             format!("HTTP request error: {}", err.message),
                         );
                     }
@@ -380,13 +422,13 @@ impl Cx {
                 continue;
             }
 
-            match &item.response {
-                NetworkResponse::HttpStreamResponse(res) => {
+            match response {
+                NetworkResponse::HttpStreamChunk { response: res, .. } => {
                     if let Some(s) = self
                         .script_data
                         .http_requests
                         .iter()
-                        .find(|v| v.id == item.request_id)
+                        .find(|v| v.id == request_id)
                     {
                         if let Some(handler) = s.events.on_stream.as_object() {
                             self.with_vm_and_async(|vm| {
@@ -396,12 +438,12 @@ impl Cx {
                         }
                     }
                 }
-                NetworkResponse::HttpStreamComplete(res) => {
+                NetworkResponse::HttpStreamComplete { response: res, .. } => {
                     if let Some(i) = self
                         .script_data
                         .http_requests
                         .iter()
-                        .position(|v| v.id == item.request_id)
+                        .position(|v| v.id == request_id)
                     {
                         if let Some(handler) = self.script_data.http_requests[i]
                             .events
@@ -416,12 +458,12 @@ impl Cx {
                         self.script_data.http_requests.remove(i);
                     }
                 }
-                NetworkResponse::HttpResponse(res) => {
+                NetworkResponse::HttpResponse { response: res, .. } => {
                     if let Some(i) = self
                         .script_data
                         .http_requests
                         .iter()
-                        .position(|v| v.id == item.request_id)
+                        .position(|v| v.id == request_id)
                     {
                         if let Some(handler) = self.script_data.http_requests[i]
                             .events
@@ -436,12 +478,12 @@ impl Cx {
                         self.script_data.http_requests.remove(i);
                     }
                 }
-                NetworkResponse::HttpRequestError(err) => {
+                NetworkResponse::HttpError { error: err, .. } => {
                     if let Some(i) = self
                         .script_data
                         .http_requests
                         .iter()
-                        .position(|v| v.id == item.request_id)
+                        .position(|v| v.id == request_id)
                     {
                         if let Some(handler) = self.script_data.http_requests[i]
                             .events
@@ -456,7 +498,11 @@ impl Cx {
                         self.script_data.http_requests.remove(i);
                     }
                 }
-                NetworkResponse::HttpProgress(_p) => {}
+                NetworkResponse::HttpProgress { .. }
+                | NetworkResponse::WsOpened { .. }
+                | NetworkResponse::WsMessage { .. }
+                | NetworkResponse::WsClosed { .. }
+                | NetworkResponse::WsError { .. } => {}
             }
         }
     }
@@ -505,9 +551,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 request: server_tx,
             };
 
-            start_http_server(server);
-
             let cx = vm.cx_mut();
+            cx.net.start_http_server(server);
             let id = LiveId::unique();
             cx.script_data.http_servers.push(CxScriptHttpServer {
                 id,
@@ -577,9 +622,13 @@ pub fn script_mod(vm: &mut ScriptVm) {
             // alright now what
             let cx = vm.cx_mut();
             let id = LiveId::unique();
+            if let Err(err) = cx.net.ws_open(id, request) {
+                crate::error!("script net.web_socket open failed: {err}");
+                return NIL;
+            }
             cx.script_data.web_sockets.push(CxScriptWebSocket {
-                socket: WebSocket::open(request),
                 id,
+                socket_id: id,
                 events,
             });
             id.escape()

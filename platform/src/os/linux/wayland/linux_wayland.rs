@@ -329,6 +329,11 @@ impl WaylandCx {
                     let compositor = state.compositor.as_ref().unwrap();
                     let wm_base = state.wm_base.as_ref().unwrap();
                     let window = &cx.windows[window_id];
+                    let app_id = if window.create_app_id.is_empty() {
+                        "Makepad"
+                    } else {
+                        &window.create_app_id
+                    };
                     let window = WaylandWindow::new(
                         window_id,
                         compositor,
@@ -336,11 +341,14 @@ impl WaylandCx {
                         state.decoration_manager.as_ref(),
                         state.scale_manager.as_ref(),
                         state.viewporter.as_ref(),
+                        state.icon_manager.as_ref(),
+                        state.shm.as_ref(),
                         self.qhandle.as_ref().unwrap(),
                         gl_cx,
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
                         &window.create_title,
+                        app_id,
                         window.is_fullscreen,
                     );
                     state.windows.push(window);
@@ -365,8 +373,8 @@ impl WaylandCx {
                 }
                 CxOsOp::Deminiaturize(_window_id) => todo!(),
                 CxOsOp::HideWindow(_window_id) => todo!(),
-                CxOsOp::HideWindowButtons(_) => {},
-                CxOsOp::ShowWindowButtons(_) => {},
+                CxOsOp::HideWindowButtons(_) => {}
+                CxOsOp::ShowWindowButtons(_) => {}
                 CxOsOp::MaximizeWindow(window_id) => {
                     if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
                         window.toplevel.set_maximized();
@@ -419,16 +427,10 @@ impl WaylandCx {
                     request_id,
                     request,
                 } => {
-                    use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::open(
-                        request_id,
-                        request,
-                        cx.os.network_response.sender.clone(),
-                    );
+                    let _ = cx.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    use crate::os::linux::http::LinuxHttpSocket;
-                    LinuxHttpSocket::cancel(request_id);
+                    let _ = cx.net.http_cancel(request_id);
                 }
                 CxOsOp::ShowTextIME(area, pos, _config) => {
                     if let Some(window) = state.current_window {

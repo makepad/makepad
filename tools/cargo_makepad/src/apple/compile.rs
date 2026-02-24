@@ -444,10 +444,7 @@ pub fn build(
     ];
     if matches!(apple_target.os(), AppleOs::Ios) {
         rust_env.push(("IPHONEOS_DEPLOYMENT_TARGET", IOS_DEPLOYMENT_TARGET));
-        rust_env.push((
-            "IPHONESIMULATOR_DEPLOYMENT_TARGET",
-            IOS_DEPLOYMENT_TARGET,
-        ));
+        rust_env.push(("IPHONESIMULATOR_DEPLOYMENT_TARGET", IOS_DEPLOYMENT_TARGET));
     }
     shell_env(&rust_env, &cwd, "rustup", &args_out)?;
 
@@ -520,12 +517,7 @@ pub fn run_on_sim(
         &[],
         &cwd,
         "xcrun",
-        &[
-            "simctl",
-            "install",
-            "booted",
-            &app_dir,
-        ],
+        &["simctl", "install", "booted", &app_dir],
     )?;
 
     shell_env(
@@ -757,7 +749,10 @@ fn copy_resources(
                 .extension()
                 .and_then(|ext| ext.to_str())
                 .map(|ext| ext.to_ascii_lowercase());
-            if !matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc" | "woff" | "woff2")) {
+            if !matches!(
+                ext.as_deref(),
+                Some("ttf" | "otf" | "ttc" | "woff" | "woff2")
+            ) {
                 continue;
             }
             cp(&source_dir.join(path), &dst_dir.join(path), false)?;

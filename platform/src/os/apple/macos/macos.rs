@@ -2,15 +2,13 @@ use {
     crate::{
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        shared_framebuf::PollTimers,
         draw_pass::CxDrawPassParent,
         event::{
-            Event, GameInputEventChannel, MouseButton, MouseUpEvent, NetworkResponseChannel,
-            WindowGeom,
             video_playback::{
-                VideoPlaybackPreparedEvent, VideoTextureUpdatedEvent,
-                VideoPlaybackResourcesReleasedEvent,
+                VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
+                VideoTextureUpdatedEvent,
             },
+            Event, GameInputEventChannel, MouseButton, MouseUpEvent, WindowGeom,
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -25,13 +23,13 @@ use {
                     macos_event::MacosEvent,
                     macos_window::MacosWindow,
                 },
-                url_session::AppleHttpRequests,
             },
             apple_media::CxAppleMedia,
             cx_native::EventFlow,
             metal::{DrawPassMode, MetalCx},
         },
         permission::Permission,
+        shared_framebuf::PollTimers,
         thread::SignalToUI,
         window::{CxWindowPool, WindowId},
     },
@@ -222,15 +220,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
-        let mut out = Vec::new();
-        while let Ok(item) = self.os.network_response.receiver.try_recv() {
-            self.os.http_requests.handle_response_item(&item);
-            out.push(item);
-        }
-        if out.len() > 0 {
-            self.handle_script_network_events(&out);
-            self.call_event_handler(&Event::NetworkResponses(out))
-        }
+        self.dispatch_network_runtime_events();
     }
 
     pub(crate) fn handle_gamepad_events(&mut self) {
@@ -435,18 +425,22 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         if let Some((width, height, duration)) = player.check_prepared() {
-                            video_events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
-                                video_id: player.video_id,
-                                video_width: width,
-                                video_height: height,
-                                duration,
-                            }));
+                            video_events.push(Event::VideoPlaybackPrepared(
+                                VideoPlaybackPreparedEvent {
+                                    video_id: player.video_id,
+                                    video_width: width,
+                                    video_height: height,
+                                    duration,
+                                },
+                            ));
                         }
                         if player.poll_frame(&mut self.textures) {
-                            video_events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
-                                video_id: player.video_id,
-                                current_position_ms: player.current_position_ms(),
-                            }));
+                            video_events.push(Event::VideoTextureUpdated(
+                                VideoTextureUpdatedEvent {
+                                    video_id: player.video_id,
+                                    current_position_ms: player.current_position_ms(),
+                                },
+                            ));
                         }
                     }
                     for event in video_events {
@@ -713,14 +707,10 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    self.os.http_requests.make_http_request(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    self.os.http_requests.cancel_http_request(request_id);
+                    let _ = self.net.http_cancel(request_id);
                 }
                 // These ops are mobile-only (soft keyboard, clipboard UI); no-op on macOS
                 CxOsOp::SyncImeState { .. } => {}
@@ -759,7 +749,14 @@ impl Cx {
                 } => {
                     self.handle_permission_request(permission, request_id);
                 }
-                CxOsOp::PrepareVideoPlayback(video_id, source, _gl_handle, texture_id, autoplay, should_loop) => {
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _gl_handle,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                ) => {
                     let player = AppleVideoPlayer::new(
                         metal_cx.device,
                         video_id,
@@ -801,7 +798,7 @@ impl Cx {
                     if let Some(mut player) = self.os.video_players.remove(&video_id) {
                         player.cleanup();
                         self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
-                            VideoPlaybackResourcesReleasedEvent { video_id }
+                            VideoPlaybackResourcesReleasedEvent { video_id },
                         ));
                     }
                 }
@@ -1013,10 +1010,8 @@ pub struct CxOs {
     pub(crate) uniform_bytes_uploaded: u64,
     pub(crate) vertex_buffer_bytes_uploaded: u64,
     pub(crate) texture_bytes_uploaded: u64,
-    pub(crate) network_response: NetworkResponseChannel,
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
-    pub(crate) http_requests: AppleHttpRequests,
     pub metal_device: Option<ObjcId>,
     pub(crate) game_input_events: GameInputEventChannel,
     pub(crate) apple_game_input: Option<AppleGameInput>,
