@@ -35,7 +35,7 @@ script_mod! {
             caption_label := View {
                 width: Fill height: Fill
                 align: Center
-                label := Label {text: "Makepad" margin: Inset{left: 100}}
+                label := Label {text: "Makepad"}
             }
             voice_wave := VoiceWave {}
             windows_buttons := View {
