@@ -214,12 +214,8 @@ script_mod! {
                 min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
                 min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
             );
-            let clip_pad =
-                if self.v_stroke_mult < -1.5 { self.v_stroke_dist * 3.0 } // shape shadow
-                else if self.v_stroke_mult < -0.5 { self.v_param5 * 3.0 } // rect shadow
-                else { 0.0 };
-            if local.x < (clip.x - clip_pad) || local.y < (clip.y - clip_pad)
-                || local.x > (clip.z + clip_pad) || local.y > (clip.w + clip_pad) {
+            if local.x < clip.x || local.y < clip.y
+                || local.x > clip.z || local.y > clip.w {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
             // geometry shadow mode: stroke_mult == -2.0
@@ -238,7 +234,8 @@ script_mod! {
                 let shadow_half = vec2(self.v_param2, self.v_param3);
                 let shadow_corner = self.v_param4;
                 let shadow_blur = self.v_param5;
-                let p = self.v_world - shadow_center;
+                // Shadow params are authored in local space; align with clip/local coords.
+                let p = local - shadow_center;
                 let alpha = self.shadow_rounded_rect(p, shadow_half, shadow_corner, shadow_blur);
                 return self.v_color * alpha
             }

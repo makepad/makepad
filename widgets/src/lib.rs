@@ -247,9 +247,9 @@ pub fn theme_mod(vm: &mut ScriptVm) {
         mod.helper = {
             startup: |v|{
                 mod.res.load_all_resources()
-                mod.gc.set_static(mod.prelude.widgets_header);
-                mod.gc.set_static(mod.prelude.widgets_internal);
-                mod.gc.set_static(mod.prelude.widgets);
+                //mod.gc.set_static(mod.prelude.widgets_header);
+                //mod.gc.set_static(mod.prelude.widgets_internal);
+                //mod.gc.set_static(mod.prelude.widgets);
                 v
             }
         }
