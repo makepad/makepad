@@ -30,6 +30,11 @@ script_mod! {
         // Animation time in seconds, available for custom shader effects
         svg_time: uniform(float(0.0))
 
+        // Hook to allow custom transformations on the SVG geometry (e.g. rotation)
+        transform_svg_point: fn(pos: vec2) -> vec2 {
+            return pos
+        }
+
         vertex: fn() {
             var pos = vec2(self.geom.x, self.geom.y);
             // Fill fringe outer vertices (u=0, stroke_mult>1e5) have
@@ -57,8 +62,8 @@ script_mod! {
                     }
                 }
             }
-            // Apply cached SVG transform on GPU
-            let transformed = pos * self.svg_scale + self.svg_offset;
+            // Apply cached SVG transform on GPU, then any custom hooks
+            let transformed = self.transform_svg_point(pos * self.svg_scale + self.svg_offset);
             self.v_tcoord = vec2(self.geom.u, self.geom.v);
             self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
             self.v_stroke_mult = self.geom.stroke_mult;
@@ -66,27 +71,27 @@ script_mod! {
             self.v_shape_id = self.geom.shape_id;
             self.v_param0 = self.geom.param0;
             self.v_param5 = self.geom.param5;
-            // Transform gradient geometry params by svg_scale/svg_offset
+            // Transform gradient geometry params by svg_scale/svg_offset and custom hook
             let grad_type = self.geom.param0;
             if grad_type > 0.5 && grad_type < 1.5 {
                 // Linear gradient: p1,p2 = start point, p3,p4 = end point
-                let p0 = vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset;
-                let p1 = vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset;
+                let p0 = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset);
+                let p1 = self.transform_svg_point(vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset);
                 self.v_param1 = p0.x;
                 self.v_param2 = p0.y;
                 self.v_param3 = p1.x;
                 self.v_param4 = p1.y;
             } else if grad_type > 1.5 {
                 // Radial gradient: p1,p2 = center, p3,p4 = rx, ry
-                let center = vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset;
+                let center = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset);
                 self.v_param1 = center.x;
                 self.v_param2 = center.y;
                 self.v_param3 = self.geom.param3 * self.svg_scale.x;
                 self.v_param4 = self.geom.param4 * self.svg_scale.y;
             } else if self.geom.shape_id > 0.5 {
                 // Effect shape with bbox in params: transform bbox by svg_scale/svg_offset
-                let bbox_min = vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset;
-                let bbox_max = vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset;
+                let bbox_min = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset);
+                let bbox_max = self.transform_svg_point(vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset);
                 self.v_param1 = bbox_min.x;
                 self.v_param2 = bbox_min.y;
                 self.v_param3 = bbox_max.x;
@@ -205,6 +210,9 @@ impl DrawSvg {
     }
 
     pub fn render_to_rect(&mut self, cx: &mut Cx2d, rect: &Rect, time: f32) {
+        self.draw_super.rect_pos = rect.pos.into();
+        self.draw_super.rect_size = rect.size.into();
+
         let doc = self.svg_doc.take().unwrap();
 
         let (lw, lh) = doc.logical_size();

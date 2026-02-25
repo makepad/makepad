@@ -42,6 +42,23 @@ script_mod! {
 
     mod.widgets.IconGradientX = mod.widgets.Icon{}
     mod.widgets.IconGradientY = mod.widgets.Icon{}
+
+    mod.widgets.IconRotated = mod.widgets.Icon{
+        draw_icon +: {
+            rotation_angle: uniform(0.0)
+
+            transform_svg_point: fn(pos: vec2) -> vec2 {
+                 let center = self.rect_pos + self.rect_size * 0.5;
+                 let scaled = pos - center;
+                 let cs = cos(self.rotation_angle);
+                 let sn = sin(self.rotation_angle);
+                 return vec2(
+                     scaled.x * cs - scaled.y * sn,
+                     scaled.x * sn + scaled.y * cs
+                 ) + center;
+            }
+        }
+    }
 }
 
 #[derive(Script, ScriptHook, Widget)]
