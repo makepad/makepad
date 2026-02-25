@@ -75,14 +75,20 @@ impl GlRenderBridge {
     }
 }
 
-// Cx methods: Linux/Android
-#[cfg(any(target_os = "linux", target_os = "android"))]
+// Cx methods: Linux
+#[cfg(target_os = "linux")]
 impl Cx {
     /// Create a GL rendering bridge wrapping makepad's existing EGL context.
     pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {
         let opengl_cx = self.os.opengl_cx.as_ref().expect("OpenGL context not initialized");
         GlRenderBridge {
-            inner: crate::os::linux::opengl::EglRenderBridge::new(opengl_cx),
+            inner: crate::os::linux::opengl::EglRenderBridge::new(
+                opengl_cx.egl_display,
+                opengl_cx.egl_config,
+                opengl_cx.egl_context,
+                opengl_cx.libegl.eglGetProcAddress.unwrap(),
+                opengl_cx.libegl.eglMakeCurrent.unwrap(),
+            ),
         }
     }
 
@@ -101,6 +107,41 @@ impl Cx {
     pub fn restore_gl_context(&mut self) {
         let opengl_cx = self.os.opengl_cx.as_ref().expect("OpenGL context not initialized");
         opengl_cx.make_current();
+    }
+}
+
+// Cx methods: Android
+#[cfg(target_os = "android")]
+impl Cx {
+    /// Create a GL rendering bridge wrapping makepad's existing EGL context.
+    pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {
+        let display = self.os.display.as_ref().expect("OpenGL context not initialized");
+        GlRenderBridge {
+            inner: crate::os::linux::opengl::EglRenderBridge::new(
+                display.egl_display,
+                display.egl_config,
+                display.egl_context,
+                display.libegl.eglGetProcAddress.unwrap(),
+                display.libegl.eglMakeCurrent.unwrap(),
+            ),
+        }
+    }
+
+    /// Create a texture renderable via GL and displayable by makepad.
+    /// Returns (Texture handle, GL texture ID).
+    pub fn create_gl_render_bridge_texture(
+        &mut self,
+        _bridge: &GlRenderBridge,
+        width: usize,
+        height: usize,
+    ) -> (Texture, u32) {
+        self.create_gl_render_texture(width, height)
+    }
+
+    /// Restore makepad's own GL context as current.
+    pub fn restore_gl_context(&mut self) {
+        let display = self.os.display.as_ref().expect("OpenGL context not initialized");
+        display.make_current();
     }
 }
 
