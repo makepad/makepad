@@ -219,6 +219,44 @@ impl ScriptTypeRedux {
     pub(crate) fn to_index(&self) -> usize {
         self.0 as usize
     }
+
+    pub const fn name(&self) -> &'static str {
+        match self.0 {
+            0 => "number",
+            1 => "nan",
+            7 => "bool",
+            8 => "nil",
+            9 => "color",
+            10 => "object",
+            11 => "array",
+            12 => "pod",
+            13 => "pod_type",
+            14 => "regex",
+            15 => "opcode",
+            16 => "string",
+            17 => "error",
+            18 => "id",
+            v if v >= ScriptValueType::REDUX_HANDLE_FIRST.0 => "handle",
+            _ => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for ScriptTypeRedux {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 >= ScriptValueType::REDUX_HANDLE_FIRST.0 {
+            write!(
+                f,
+                "{}({})",
+                self.name(),
+                self.0 - ScriptValueType::REDUX_HANDLE_FIRST.0
+            )
+        } else if self.name() == "unknown" {
+            write!(f, "unknown({})", self.0)
+        } else {
+            write!(f, "{}", self.name())
+        }
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]

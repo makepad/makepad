@@ -100,6 +100,13 @@ impl SocketStream {
         })
     }
 
+    pub fn into_tls(self, _host: &str, _ignore_ssl_cert: bool) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "socket stream TLS upgrade is not supported on windows yet",
+        ))
+    }
+
     pub fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
         Ok(())
     }

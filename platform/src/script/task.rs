@@ -202,6 +202,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
                                     .heap
                                     .vec_value(args, 0, vm.bx.threads.cur().trap.pass())
                             } else {
+                                // args object escapes this call by being queued; mark it so
+                                // free_object_if_unreffed(args) won't reclaim it immediately.
+                                vm.bx.heap.set_reffed(args);
                                 args.into()
                             }
                         };
