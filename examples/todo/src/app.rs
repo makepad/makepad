@@ -270,6 +270,9 @@ pub struct App {
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(cx, ids!(clear_done)).clicked(actions) {
+            script_eval!(cx,{
+                mod.value = #("TEXT")
+            });
             log!("Icon button clicked!");
         }
     }
