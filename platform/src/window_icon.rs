@@ -1,8 +1,27 @@
+use std::sync::OnceLock;
 use crate::window::{WindowIcon, WindowIconBuffer};
+
+/// Global icon override. When set, `default_window_icon()` returns this
+/// instead of the built-in "M" icon.
+static GLOBAL_ICON: OnceLock<WindowIcon> = OnceLock::new();
+
+/// Set a global window icon that all new windows will use.
+/// Must be called before the first window is created.
+pub fn set_window_icon(icon: WindowIcon) {
+    let _ = GLOBAL_ICON.set(icon);
+}
+
+/// Return the global icon override if set, otherwise the built-in "M" icon.
+pub fn default_window_icon() -> WindowIcon {
+    if let Some(icon) = GLOBAL_ICON.get() {
+        return icon.clone();
+    }
+    default_makepad_icon()
+}
 
 /// Generate the default Makepad window icon (64x64 RGBA8).
 /// A simple "M" glyph on a dark background.
-pub fn default_window_icon() -> WindowIcon {
+fn default_makepad_icon() -> WindowIcon {
     const SIZE: u32 = 64;
     let mut data = vec![0u8; (SIZE * SIZE * 4) as usize];
 
