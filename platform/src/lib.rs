@@ -173,7 +173,7 @@ pub use {
         video::*,
         web_socket::{WebSocket, WebSocketMessage},
         window::{CxWindowPool, ScriptWindowHandle, WindowHandle, WindowIcon, WindowIconBuffer, WindowId},
-        window_icon::default_window_icon,
+        window_icon::{default_window_icon, set_window_icon},
     },
     app_main::*,
     arc_string_mut::ArcStringMut,
