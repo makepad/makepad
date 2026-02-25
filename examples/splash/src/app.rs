@@ -1545,6 +1545,7 @@ script_mod! {
             main_window := Window{
                 pass.clear_color: vec4(0.3 0.3 0.3 1.0)
                 window.inner_size: vec2(1000 700)
+                window.title: "Splash Example"
                 body +: {
                     padding: 4
                     dock := AppDock{}
@@ -1596,7 +1597,11 @@ impl MatchEvent for App {
         }
 
         // Tooltip demo - show tooltips on button click
-        if self.ui.button(cx, ids!(normal_tooltip_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(normal_tooltip_button))
+            .clicked(actions)
+        {
             log!("Showing normal tooltip");
             self.ui.tooltip(cx, ids!(normal_tooltip)).show_with_options(
                 cx,
