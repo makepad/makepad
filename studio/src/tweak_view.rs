@@ -4,7 +4,6 @@ use crate::makepad_widgets::*;
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-
     mod.widgets.TweakView = #(TweakView::script_component(vm))
 }
 
