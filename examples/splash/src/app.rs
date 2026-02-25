@@ -223,7 +223,7 @@ script_mod! {
 
             Hr{}
 
-            Label{text: "Icon Only" draw_text.color: #888 draw_text.text_style.font_size: 10}
+            Label{text: "Bare Icons (with optional rotation)" draw_text.color: #888 draw_text.text_style.font_size: 10}
             View{width: Fill height: Fit flow: Right spacing: 15}
             Icon{
                 draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_file.svg")
@@ -238,7 +238,7 @@ script_mod! {
             IconRotated {
                 draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_select.svg")
                 // draw_icon.svg: crate_resource("self:resources/app_icon.svg")
-                draw_icon.color: #0f0
+                draw_icon.color: #f80
                 draw_icon.rotation_angle: 99.0
                 icon_walk: Walk{width: 32 height: 32}
             }
