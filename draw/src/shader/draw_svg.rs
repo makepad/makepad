@@ -205,6 +205,9 @@ impl DrawSvg {
     }
 
     pub fn render_to_rect(&mut self, cx: &mut Cx2d, rect: &Rect, time: f32) {
+        self.draw_super.rect_pos = rect.pos.into();
+        self.draw_super.rect_size = rect.size.into();
+
         let doc = self.svg_doc.take().unwrap();
 
         let (lw, lh) = doc.logical_size();
