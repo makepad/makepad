@@ -522,7 +522,21 @@ script_mod! {
             border_color: instance(#0000)
             border_color_2: instance(vec4(-1))
             border_inset: uniform(vec4(0.0))
-            border_radius: uniform(5.0)
+            border_radius: uniform(0.0)
+
+            radius: varying(float)
+
+            vertex: fn() {
+                let inset_size = vec2(self.border_inset.x + self.border_inset.z, self.border_inset.y + self.border_inset.w);
+                let inner_size = self.rect_size - inset_size - vec2(2.0 * self.border_size);
+
+                self.radius = self.border_radius;
+                if self.radius <= 0.0 {
+                    self.radius = min(inner_size.x, inner_size.y) * 0.5;
+                }
+
+                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            }
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -541,23 +555,12 @@ script_mod! {
                     stroke_color = mix(self.border_color self.border_color_2 dir + dither)
                 }
 
-                if self.border_radius > 0.0 {
-                    sdf.circle(
-                        self.rect_size.x * 0.5
-                        self.rect_size.y * 0.5
-                        self.border_radius
-                    )
-                }
-                else {
-                    sdf.circle(
-                        self.rect_size.x * 0.5
-                        self.rect_size.y * 0.5
-                        min(
-                            (self.rect_size.x - (self.border_inset.x + self.border_inset.z + 2.0 * self.border_size)) * 0.5
-                            (self.rect_size.y - (self.border_inset.y + self.border_inset.w + 2.0 * self.border_size)) * 0.5
-                        )
-                    )
-                }
+                // The center of the bounds is used for drawing the circle.
+                sdf.circle(
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    self.radius
+                )
 
                 sdf.fill_keep(fill_color)
 
@@ -615,7 +618,7 @@ script_mod! {
                         self.rect_size.x * 0.5
                         self.rect_size.y * 0.5
                         min(
-                            (self.rect_size.x - (self.border_inset.x + self.border_inset.z + 2.0 * self.border_size)) * 0.5
+                            (self.rect_size.x - (self.border_inset.x + self.border_inset.z + 2.0 * self.border_size)) * 0.5,
                             (self.rect_size.y - (self.border_inset.y + self.border_inset.w + 2.0 * self.border_size)) * 0.5
                         )
                     )

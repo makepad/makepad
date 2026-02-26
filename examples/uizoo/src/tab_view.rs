@@ -20,13 +20,15 @@ script_mod! {
             Hr{}
             H4{text: "Style Templates"}
             UIZooRowH{
+                height: Fit,
                 flow: Right
+                spacing: 10
 
                 SolidView{
                     width: Fit height: Fit
                     padding: theme.mspace_2
                     align: Align{x: 0.5 y: 0.5}
-                    draw_bg +: {color: uniform(theme.color_inset)}
+                    draw_bg +: {color: #F00}
                     Label{text: "SolidView"}
                 }
 
@@ -35,12 +37,58 @@ script_mod! {
                     padding: theme.mspace_2
                     align: Align{x: 0.5 y: 0.5}
                     draw_bg +: {
-                        color: uniform(theme.color_inset)
-                        border_radius: uniform(5.)
-                        border_size: uniform(2.0)
-                        border_color: uniform(#xF)
+                        color: #F00
+                        border_radius: 5.0
+                        border_size: 2.0
+                        border_color: #FFF
                     }
                     Label{text: "RoundedView"}
+                }
+
+                CircleView {
+                    width: Fit height: Fit
+                    padding: 0
+                    align: Align{x: 0.5 y: 0.5}
+                    draw_bg +: {
+                        color: #F00
+                        border_size: 2.0
+                        border_color: #FFF
+                    }
+                    Label{
+                        align: Align{x: 0.5 y: 0.5}
+                        text: "CircleView\nFit"
+                    }
+                }
+
+                CircleView {
+                    width: Fit height: Fit
+                    padding: 30
+                    align: Align{x: 0.5 y: 0.5}
+                    draw_bg +: {
+                        color: #F00
+                        border_size: 2.0
+                        border_color: #FFF
+                    }
+                    Label{
+                        align: Align{x: 0.5 y: 0.5}
+                        text: "CircleView\nFit Pad 30"
+                    }
+                }
+
+                CircleView {
+                    width: 60 height: 60
+                    padding: 0
+                    align: Align{x: 0.5 y: 0.5}
+                    draw_bg +: {
+                        color: #F00
+                        border_size: 1.0
+                        border_color: #00F
+                    }
+                    Label{
+                        width: Fill
+                        align: Align{x: 0.5 y: 0.5}
+                        text: "Circle\n60x60"
+                    }
                 }
 
                 ScrollXYView{
