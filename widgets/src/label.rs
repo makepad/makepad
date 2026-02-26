@@ -235,6 +235,10 @@ pub struct Label {
     #[live]
     text: ArcStringMut,
 
+    #[live(true)]
+    #[visible]
+    visible: bool,
+
     // Indicates if this label responds to hover events
     // It is not turned on by default because it will consume finger events
     // and prevent other widgets from receiving them, if it is not considered with care
@@ -274,6 +278,10 @@ impl Widget for Label {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
+
         let walk = walk.with_add_padding(self.padding);
         cx.begin_turtle(
             walk,
@@ -303,6 +311,10 @@ impl Widget for Label {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible && event.requires_visibility() {
+            return;
+        }
+
         let uid = self.widget_uid();
 
         if self.hover_actions_enabled {
