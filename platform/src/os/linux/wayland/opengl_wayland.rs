@@ -138,7 +138,7 @@ impl WaylandWindow {
             _ => return, // compositor doesn't support the protocol
         };
 
-        let icon_data = crate::window_icon::default_window_icon();
+        let icon_data = crate::app_icon::window_icon();
         let buf = match icon_data.buffers.first() {
             Some(b) => b,
             None => return,
