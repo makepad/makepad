@@ -12,22 +12,24 @@ pub enum VoiceBackendKind {
 
 impl VoiceBackendKind {
     pub fn default_for_platform() -> Self {
-        #[cfg(target_os = "ios")]
+        #[cfg(any(
+            all(target_os = "ios", not(force_whisper)),
+            all(target_os = "macos", not(force_whisper))
+        ))]
         {
             Self::NativeApple
         }
-        #[cfg(all(target_os = "macos", not(force_whisper)))]
-        {
-            Self::NativeApple
-        }
-        #[cfg(not(any(target_os = "ios", all(target_os = "macos", not(force_whisper)))))]
+        #[cfg(not(any(
+            all(target_os = "ios", not(force_whisper)),
+            all(target_os = "macos", not(force_whisper))
+        )))]
         {
             Self::Whisper
         }
     }
 
     pub fn from_makepad_env() -> Self {
-        #[cfg(target_os = "ios")]
+        #[cfg(all(target_os = "ios", not(force_whisper)))]
         {
             return Self::NativeApple;
         }
@@ -171,7 +173,10 @@ impl WhisperTranscriber {
 
 pub struct NativeAppleTranscriber;
 
-#[cfg(any(target_os = "ios", all(target_os = "macos", not(force_whisper))))]
+#[cfg(any(
+    all(target_os = "ios", not(force_whisper)),
+    all(target_os = "macos", not(force_whisper))
+))]
 impl NativeAppleTranscriber {
     pub fn new() -> Self {
         Self
@@ -194,7 +199,10 @@ impl NativeAppleTranscriber {
     }
 }
 
-#[cfg(not(any(target_os = "ios", all(target_os = "macos", not(force_whisper)))))]
+#[cfg(not(any(
+    all(target_os = "ios", not(force_whisper)),
+    all(target_os = "macos", not(force_whisper))
+)))]
 impl NativeAppleTranscriber {
     pub fn new() -> Self {
         Self
@@ -231,7 +239,7 @@ impl VoiceTranscriber {
     }
 
     pub fn from_makepad_env() -> Self {
-        #[cfg(target_os = "ios")]
+        #[cfg(all(target_os = "ios", not(force_whisper)))]
         {
             return Self::NativeApple(NativeAppleTranscriber::new());
         }
