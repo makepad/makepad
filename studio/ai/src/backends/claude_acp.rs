@@ -124,6 +124,9 @@ struct NewSessionResponse {
     models: Option<JsonValue>,
     #[allow(dead_code)]
     modes: Option<JsonValue>,
+    #[rename(configOptions)]
+    #[allow(dead_code)]
+    config_options: Option<JsonValue>,
 }
 
 #[derive(SerJson, Debug)]
@@ -376,7 +379,7 @@ impl ClaudeAcpAgent {
         let home = std::env::var("HOME").ok()?;
 
         let acp_base = format!(
-            "{}/Library/Application Support/Zed/external_agents/claude-code-acp",
+            "{}/Library/Application Support/Zed/external_agents/claude-agent-acp",
             home
         );
 
@@ -395,7 +398,7 @@ impl ClaudeAcpAgent {
         let version = versions.pop()?;
 
         let script_path = format!(
-            "{}/{}/node_modules/@zed-industries/claude-code-acp/dist/index.js",
+            "{}/{}/node_modules/@zed-industries/claude-agent-acp/dist/index.js",
             acp_base, version
         );
 
