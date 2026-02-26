@@ -783,6 +783,39 @@ impl<'a> ScriptVm<'a> {
             .add_method(&mut self.bx.heap, module, method, args, f)
     }
 
+    fn apply_injected_globals_to_scope(&mut self, scope_obj: ScriptObject) {
+        if self.bx.injected_globals.is_empty() {
+            return;
+        }
+        let globals: Vec<(LiveId, ScriptValue)> = self
+            .bx
+            .injected_globals
+            .iter()
+            .map(|(key, value)| (*key, *value))
+            .collect();
+        for (key, value) in globals {
+            self.bx.heap.force_value_in_map(scope_obj, key.into(), value);
+        }
+    }
+
+    fn apply_injected_globals_to_all_scopes(&mut self) {
+        if self.bx.injected_globals.is_empty() {
+            return;
+        }
+        let scope_objects: Vec<ScriptObject> = {
+            let bodies = self.bx.code.bodies.borrow();
+            bodies.iter().map(|body| body.scope.as_object()).collect()
+        };
+        for scope_obj in scope_objects {
+            self.apply_injected_globals_to_scope(scope_obj);
+        }
+    }
+
+    pub fn set_injected_global(&mut self, key: LiveId, value: ScriptValue) {
+        self.bx.injected_globals.insert(key, value);
+        self.apply_injected_globals_to_all_scopes();
+    }
+
     /// Registers a native function to be used as an apply_transform and returns its NativeId.
     /// This is used for creating objects that transform to a computed value when applied.
     pub fn add_apply_transform_fn<F>(&mut self, f: F) -> NativeId
@@ -807,6 +840,7 @@ impl<'a> ScriptVm<'a> {
         self.bx
             .heap
             .set_value_def(scope_obj, id!(mod).into(), self.bx.heap.modules.into());
+        self.apply_injected_globals_to_scope(scope_obj);
         let scope = self.bx.heap.new_object_ref(scope_obj);
         let me_obj = self.bx.heap.new_with_proto(id!(root_me).into());
         let me = self.bx.heap.new_object_ref(me_obj);
@@ -1012,6 +1046,7 @@ pub struct ScriptVmBase {
     pub code: ScriptCode,
     pub heap: ScriptHeap,
     pub threads: ScriptThreads,
+    pub injected_globals: std::collections::HashMap<LiveId, ScriptValue>,
     pub debug_trace: bool,
     pub silence_errors: bool,
 }
@@ -1023,6 +1058,7 @@ impl ScriptVmBase {
             code: ScriptCode::default(),
             threads: ScriptThreads::empty(),
             heap: ScriptHeap::empty(),
+            injected_globals: Default::default(),
             debug_trace: false,
             silence_errors: false,
         }
@@ -1051,6 +1087,7 @@ impl ScriptVmBase {
             },
             threads: ScriptThreads::new(),
             heap: heap,
+            injected_globals: Default::default(),
             debug_trace: false,
             silence_errors: false,
         }

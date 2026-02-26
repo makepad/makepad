@@ -18,6 +18,7 @@ workspace.members = [
     "examples/aichat",
     "examples/pdf",
     "examples/text_input",
+    "examples/counter",
 #    "examples/matrix",
     "libs/gltf",
     "libs/splat",
