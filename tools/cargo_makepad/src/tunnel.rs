@@ -379,6 +379,7 @@ fn handle_connection(
     })?;
 
     // Create job handle and assign the child to it
+    #[allow(unused_mut)]
     let mut job = process_group::JobHandle::new()?;
     job.assign(&child)?;
 

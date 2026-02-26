@@ -153,7 +153,7 @@ impl MacosWindow {
 
     /// Set the application dock icon from the default Makepad icon (RGBA8 bitmap).
     unsafe fn set_application_icon() {
-        let icon = crate::window_icon::default_window_icon();
+        let icon = crate::app_icon::window_icon();
         let buf = match icon.buffers.first() {
             Some(b) => b,
             None => return,

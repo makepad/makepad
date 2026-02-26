@@ -246,7 +246,7 @@ impl XlibWindow {
 
     /// Set `_NET_WM_ICON` from the default Makepad icon (RGBA8 → ARGB u32 array).
     unsafe fn set_x11_icon(display: *mut x11_sys::Display, window: c_ulong) {
-        let icon = crate::window_icon::default_window_icon();
+        let icon = crate::app_icon::window_icon();
         let buf = match icon.buffers.first() {
             Some(b) => b,
             None => return,

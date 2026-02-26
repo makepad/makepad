@@ -1,4 +1,5 @@
 use crate::makepad_shell::*;
+use makepad_toml_parser::{Toml, parse_toml};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -78,18 +79,86 @@ pub fn get_crate_dep_dirs(
     dependencies
 }
 
+pub fn get_package_binary_name(build_crate: &str) -> Option<String> {
+    let crate_dir = get_crate_dir(build_crate).ok()?;
+    let cargo_toml = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+
+    let mut in_bin = false;
+    for raw in cargo_toml.lines() {
+        let line = raw.trim();
+        if line.starts_with("[[bin]]") {
+            in_bin = true;
+            continue;
+        }
+        if line.starts_with('[') {
+            in_bin = false;
+        }
+        if in_bin && line.starts_with("name") {
+            if let Some(eq) = line.find('=') {
+                let value = line[eq + 1..].trim().trim_matches('"').to_string();
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+
+    let toml = parse_toml(&cargo_toml).ok()?;
+    if let Some(Toml::Str(pkg_name, _)) = toml.get("package.name") {
+        return Some(pkg_name.clone());
+    }
+    None
+}
+
 pub fn get_build_crate_from_args(args: &[String]) -> Result<&str, String> {
     if args.is_empty() {
-        return Err("Not enough arguments to build".into());
+        return Err("Not enough arguments to determine crate. Pass -p <crate> or --package <crate>.".into());
     }
-    if args[0] == "-p" {
-        if args.len() < 2 {
-            return Err("Not enough arguments to build".into());
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-p" || arg == "--package" {
+            if i + 1 >= args.len() {
+                return Err("Missing crate name after -p/--package".into());
+            }
+            return Ok(&args[i + 1]);
         }
-        Ok(&args[1])
-    } else {
-        Ok(&args[0])
+        if let Some(pkg) = arg.strip_prefix("--package=") {
+            if pkg.is_empty() {
+                return Err("Missing crate name in --package=<crate>".into());
+            }
+            return Ok(pkg);
+        }
+        i += 1;
     }
+
+    if let Some(first_positional) = args.iter().find(|a| !a.starts_with('-')) {
+        return Ok(first_positional);
+    }
+
+    Err("No build crate specified. Pass -p <crate> or --package <crate>.".into())
+}
+
+pub fn get_target_from_args(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--target" {
+            if i + 1 < args.len() {
+                return Some(args[i + 1].clone());
+            }
+            return None;
+        }
+        if let Some(t) = arg.strip_prefix("--target=") {
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+            return None;
+        }
+        i += 1;
+    }
+    None
 }
 
 pub fn get_profile_from_args(args: &[String]) -> String {
@@ -102,4 +171,66 @@ pub fn get_profile_from_args(args: &[String]) -> String {
         }
     }
     return "debug".to_string();
+}
+
+pub const APP_ICON_COUNT: usize = 7;
+pub const APP_ICON_IDX_512: usize = 4;
+pub const APP_ICON_IDX_1024: usize = 5;
+pub const APP_ICON_IDX_ICO: usize = 6;
+
+pub type AppIconEnv = [String; APP_ICON_COUNT];
+
+pub const APP_ICON_ENV_VARS: [&str; APP_ICON_COUNT] = [
+    "MAKEPAD_APP_ICON_32",
+    "MAKEPAD_APP_ICON_64",
+    "MAKEPAD_APP_ICON_128",
+    "MAKEPAD_APP_ICON_256",
+    "MAKEPAD_APP_ICON_512",
+    "MAKEPAD_APP_ICON_1024",
+    "MAKEPAD_APP_ICON_ICO",
+];
+
+pub fn resolve_app_icon_env(build_crate: &str) -> Result<Option<AppIconEnv>, String> {
+    let resources_dir = get_crate_dir(build_crate)?.join("resources");
+    let required_paths = [
+        resources_dir.join("icon_32.png"),
+        resources_dir.join("icon_64.png"),
+        resources_dir.join("icon_128.png"),
+        resources_dir.join("icon.ico"),
+    ];
+
+    if !required_paths.iter().all(|p| p.is_file()) {
+        for path in &required_paths {
+            if !path.is_file() {
+                eprintln!(
+                    "warning: missing {}. Add this file to include a custom app icon.",
+                    path.display()
+                );
+            }
+        }
+        return Ok(None);
+    }
+
+    let optional = |name: &str, fallback: &Path| {
+        let path = resources_dir.join(name);
+        if path.is_file() {
+            path
+        } else {
+            fallback.to_path_buf()
+        }
+    };
+
+    let icon_256 = optional("icon_256.png", &required_paths[2]);
+    let icon_512 = optional("icon_512.png", &icon_256);
+    let icon_1024 = optional("icon_1024.png", &icon_512);
+
+    Ok(Some([
+        required_paths[0].to_string_lossy().to_string(),
+        required_paths[1].to_string_lossy().to_string(),
+        required_paths[2].to_string_lossy().to_string(),
+        icon_256.to_string_lossy().to_string(),
+        icon_512.to_string_lossy().to_string(),
+        icon_1024.to_string_lossy().to_string(),
+        required_paths[3].to_string_lossy().to_string(),
+    ]))
 }
