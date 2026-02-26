@@ -1,0 +1,115 @@
+use makepad_studio_backend::{GitStatus, VirtualFs};
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+fn git_available() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@test.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@test.com")
+        .output()
+        .expect("git command failed");
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn resolves_mount_and_branch_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "fn main() {}\n").unwrap();
+    fs::create_dir_all(dir.path().join("branch/feature-ui/src")).unwrap();
+    fs::write(
+        dir.path().join("branch/feature-ui/src/lib.rs"),
+        "fn branch() {}\n",
+    )
+    .unwrap();
+
+    let mut vfs = VirtualFs::new();
+    vfs.mount("makepad", dir.path()).unwrap();
+
+    let main_root = vfs.resolve_root("makepad").unwrap();
+    assert_eq!(main_root, dir.path().canonicalize().unwrap());
+
+    let branch_root = vfs.resolve_root("makepad/@feature-ui").unwrap();
+    assert_eq!(
+        branch_root,
+        dir.path().canonicalize().unwrap().join("branch/feature-ui")
+    );
+
+    let branch_file = vfs
+        .resolve_path("makepad/@feature-ui/src/lib.rs")
+        .unwrap();
+    assert!(branch_file.ends_with("branch/feature-ui/src/lib.rs"));
+
+    let tree = vfs.load_file_tree("makepad").unwrap();
+    assert!(tree
+        .nodes
+        .iter()
+        .any(|n| n.path == "makepad" && n.name == "makepad"));
+    assert!(tree
+        .nodes
+        .iter()
+        .any(|n| n.path == "makepad/@feature-ui" && n.name == "@feature-ui"));
+    assert!(tree.nodes.iter().any(|n| n.path == "makepad/src/lib.rs"));
+    assert!(tree
+        .nodes
+        .iter()
+        .any(|n| n.path == "makepad/@feature-ui/src/lib.rs"));
+}
+
+#[test]
+fn git_statuses_are_mapped_for_tree_nodes() {
+    if !git_available() {
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("tracked.txt"), "hello\n").unwrap();
+    git(dir.path(), &["init"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-m", "initial"]);
+
+    fs::write(dir.path().join("tracked.txt"), "hello modified\n").unwrap();
+    fs::write(dir.path().join("new_untracked.txt"), "new\n").unwrap();
+
+    let mut vfs = VirtualFs::new();
+    vfs.mount("repo", dir.path()).unwrap();
+    let tree = vfs.load_file_tree("repo").unwrap();
+    let root = tree
+        .nodes
+        .iter()
+        .find(|n| n.path == "repo")
+        .expect("repo root node missing");
+    assert_eq!(root.git_status, GitStatus::Modified);
+
+    let tracked = tree
+        .nodes
+        .iter()
+        .find(|n| n.path == "repo/tracked.txt")
+        .expect("tracked node missing");
+    assert_eq!(tracked.git_status, GitStatus::Modified);
+
+    let untracked = tree
+        .nodes
+        .iter()
+        .find(|n| n.path == "repo/new_untracked.txt")
+        .expect("untracked node missing");
+    assert_eq!(untracked.git_status, GitStatus::Untracked);
+}
