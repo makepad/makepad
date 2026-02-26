@@ -36,14 +36,15 @@ script_mod! {
             }
 
             button_container := View{
-                left_button := Button{
-                    width: Fit height: 68
-                    icon_walk: Walk{width: 10 height: 68}
-                    draw_bg +: {
-                        pixel: fn() {
-                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                            return sdf.result
-                        }
+                height: Fit width: Fit
+                left_button := ButtonFlatterIcon{
+                    width: 68 height: 68
+                    icon_walk: Walk{
+                        height: 10 width: Fit
+                    }
+                    draw_icon +: {
+                        color: theme.color_label_inner
+                        svg: crate_resource("self:resources/icons/back.svg")
                     }
                 }
             }
@@ -56,7 +57,12 @@ script_mod! {
         flow: Overlay
 
         show_bg: true
-        draw_bg.color: theme.color_white
+        draw_bg +: {
+            color: instance(theme.color_bg_app)
+            pixel: fn() {
+                return Pal.premul(self.color)
+            }
+        }
 
         // Empty slot to place a generic full-screen background
         background := View{
@@ -148,6 +154,9 @@ pub struct StackNavigationView {
     offset: f64,
 
     /// Whether the stack view should take over the entire screen.
+    ///
+    /// If false, the stack view will be constrained to the size of the parent view,
+    /// and no animations will be played when navigating.
     #[live(true)]
     full_screen: bool,
 
@@ -165,9 +174,6 @@ pub struct StackNavigationView {
     /// The UID of the parent navigation.
     #[rust]
     parent_navigation_uid: Option<WidgetUid>,
-
-    #[live(true)]
-    visible: bool,
 }
 
 impl Widget for StackNavigationView {
@@ -183,10 +189,6 @@ impl Widget for StackNavigationView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if !self.visible {
-            return DrawStep::done();
-        }
-
         let abs_pos = if self.full_screen {
             // In full screen mode, position at the offset.
             Vec2d {
@@ -195,9 +197,7 @@ impl Widget for StackNavigationView {
             }
         } else {
             let parent_rect = cx.peek_walk_turtle(walk);
-
-            // Not in full screen mode, position at the parent ignoring the offset
-            // (offset ignored since we're not animating the slide-in).
+            // Non-fullscreen: ignore offset, position at parent.
             Vec2d {
                 x: parent_rect.pos.x,
                 y: parent_rect.pos.y,
@@ -213,7 +213,7 @@ impl StackNavigationView {
         if self.full_screen {
             self.animator_play(cx, ids!(slide.hide));
         } else {
-            // Cut straight into the hide state without animating the slide-out.
+            // Non-fullscreen: cut instantly (no animation).
             self.animator_cut(cx, ids!(slide.hide));
         }
 
@@ -248,7 +248,7 @@ impl StackNavigationView {
             && self.animator.in_state(cx, ids!(slide.hide))
         {
             if self.offset > self.offset_to_hide {
-                self.visible = false;
+                self.view.visible = false;
                 self.redraw(cx);
 
                 // Dispatch HideEnd with the parent navigation's UID
@@ -275,6 +275,7 @@ impl StackNavigationView {
             && self.animator.in_state(cx, ids!(slide.show))
         {
             const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
+            // Non-fullscreen: consider fully opened immediately (offset ignored in draw_walk).
             if self.offset < OPENING_OFFSET_THRESHOLD || !self.full_screen {
                 cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::ShowDone);
                 self.state = StackNavigationViewState::Active;
@@ -283,15 +284,15 @@ impl StackNavigationView {
     }
 
     fn is_animating(&self) -> bool {
-        self.animator.is_animating()
+        self.animator.is_track_animating(live_id!(slide))
     }
 }
 
 impl StackNavigationViewRef {
     pub fn show(&self, cx: &mut Cx, root_width: f64) {
         if let Some(mut inner) = self.borrow_mut() {
+            inner.view.visible = true;
             inner.offset = root_width;
-            inner.visible = true;
             inner.offset_to_hide = root_width;
             inner.animator_play(cx, ids!(slide.show));
             inner.redraw(cx);
@@ -300,7 +301,8 @@ impl StackNavigationViewRef {
 
     pub fn is_showing(&self, cx: &mut Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator.in_state(cx, ids!(slide.show)) || inner.is_animating()
+            inner.animator.in_state(cx, ids!(slide.show))
+                || inner.is_animating()
         } else {
             false
         }
@@ -385,7 +387,7 @@ impl NavigationStack {
     }
 }
 
-#[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
+#[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct StackNavigation {
     #[source]
     source: ScriptObjectRef,
@@ -397,6 +399,29 @@ pub struct StackNavigation {
 
     #[rust]
     navigation_stack: NavigationStack,
+}
+
+impl ScriptHook for StackNavigation {
+    fn on_after_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if apply.is_new() {
+            self.navigation_stack = NavigationStack::default();
+        } else if apply.is_reload() {
+            // Make sure current stack view is visible when code reloads
+            if let Some(current_entry) = self.navigation_stack.current() {
+                let stack_view_ref = self.stack_navigation_view(_vm.cx_mut(), &[current_entry.view_id]);
+                if let Some(mut inner) = stack_view_ref.borrow_mut() {
+                    inner.view.visible = true;
+                    inner.offset = 0.0;
+                };
+            }
+        }
+    }
 }
 
 impl Widget for StackNavigation {
