@@ -54,6 +54,8 @@ script_mod! {
                 @tScrollbar
                 @tSlider
                 @tSlidesView
+                @tStackNavigation
+                @tAdaptiveView
                 @tTextInput
                 @tVideo
                 @tView
@@ -91,6 +93,8 @@ script_mod! {
         tScrollbar := DockTab{name: "Scrollbar" template: @PermanentTab kind: @TabScrollbar}
         tSlider := DockTab{name: "Slider" template: @PermanentTab kind: @TabSlider}
         tSlidesView := DockTab{name: "SlidesView" template: @PermanentTab kind: @TabSlidesView}
+        tStackNavigation := DockTab{name: "StackNavigation" template: @PermanentTab kind: @TabStackNavigation}
+        tAdaptiveView := DockTab{name: "AdaptiveView" template: @PermanentTab kind: @TabAdaptiveView}
         tTextInput := DockTab{name: "TextInput" template: @PermanentTab kind: @TabTextInput}
         tVideo := DockTab{name: "Video" template: @PermanentTab kind: @TabVideo}
         tView := DockTab{name: "View" template: @PermanentTab kind: @TabView}
@@ -118,6 +122,8 @@ script_mod! {
         TabScrollbar := UIZooTab{DemoScrollBar{}}
         TabSlider := UIZooTab{DemoSlider{}}
         TabSlidesView := UIZooTab{DemoSlidesView{}}
+        TabStackNavigation := UIZooTab{DemoStackNavigation{}}
+        TabAdaptiveView := UIZooTab{DemoAdaptiveView{}}
         TabTextInput := UIZooTab{DemoTextInput{}}
         TabVideo := UIZooTab{DemoVideo{}}
         TabView := UIZooTab{DemoView{}}
@@ -169,6 +175,8 @@ impl App {
         crate::tab_scrollbar::script_mod(vm);
         crate::tab_slider::script_mod(vm);
         crate::tab_slidesview::script_mod(vm);
+        crate::tab_stacknavigation::script_mod(vm);
+        crate::tab_adaptiveview::script_mod(vm);
         crate::tab_textinput::script_mod(vm);
         crate::tab_video::script_mod(vm);
         crate::tab_view::script_mod(vm);
@@ -296,6 +304,64 @@ impl MatchEvent for App {
             self.counter += 1;
             let lbl = self.ui.label(cx, ids!(simplecheckbox_output));
             lbl.set_text(cx, &format!("{} {}", self.counter, check));
+        }
+
+        // StackNavigation demo handlers
+        let stack_nav = self.ui.stack_navigation(cx, ids!(stack_nav_demo));
+
+        if self.ui.button(cx, ids!(push_view_a)).clicked(&actions) {
+            stack_nav.push(cx, live_id!(stack_view_a));
+        }
+        if self.ui.button(cx, ids!(push_view_b)).clicked(&actions) {
+            stack_nav.push(cx, live_id!(stack_view_b));
+        }
+        if self.ui.button(cx, ids!(push_view_c)).clicked(&actions) {
+            stack_nav.push(cx, live_id!(stack_view_c));
+        }
+        if self.ui.button(cx, ids!(push_nested_from_a)).clicked(&actions) {
+            stack_nav.push(cx, live_id!(stack_view_b));
+        }
+        if self.ui.button(cx, ids!(push_nested_from_b)).clicked(&actions) {
+            stack_nav.push(cx, live_id!(stack_view_c));
+        }
+        if self.ui.button(cx, ids!(pop_to_root_btn)).clicked(&actions) {
+            stack_nav.pop_to_root(cx);
+        }
+
+        // Responsive Nav demo: desktop click handlers
+        let desktop_items = [
+            (ids!(desktop_item_1), "Settings"),
+            (ids!(desktop_item_2), "Profile"),
+            (ids!(desktop_item_3), "Notifications"),
+        ];
+        for (item_id, title) in desktop_items {
+            if let Some(_) = self.ui.view(cx, item_id).finger_down(actions) {
+                self.ui.label(cx, ids!(desktop_detail_title)).set_text(cx, title);
+                self.ui.label(cx, ids!(desktop_detail_body)).set_text(
+                    cx,
+                    &format!("{} detail content.\n\nOn Desktop, the list and detail are visible side-by-side.", title),
+                );
+            }
+        }
+
+        // Responsive Nav demo: mobile StackNavigation handlers
+        let mobile_nav = self.ui.stack_navigation(cx, ids!(mobile_nav));
+
+        let mobile_items = [
+            (ids!(mobile_item_1), "Settings"),
+            (ids!(mobile_item_2), "Profile"),
+            (ids!(mobile_item_3), "Notifications"),
+        ];
+        for (item_id, title) in mobile_items {
+            if let Some(_) = self.ui.view(cx, item_id).finger_down(actions) {
+                mobile_nav.set_title(cx, live_id!(mobile_detail_view), title);
+                self.ui.label(cx, ids!(mobile_detail_title)).set_text(cx, title);
+                self.ui.label(cx, ids!(mobile_detail_body)).set_text(
+                    cx,
+                    &format!("{} detail content.\n\nOn Mobile, this was pushed onto the navigation stack.", title),
+                );
+                mobile_nav.push(cx, live_id!(mobile_detail_view));
+            }
         }
     }
 }
