@@ -415,6 +415,7 @@ pub fn build(
     apple_target: AppleTarget,
 ) -> Result<IosBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
+    let binary_name = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
 
     let cwd = std::env::current_dir().unwrap();
     let target_opt = format!("--target={}", apple_target.toolchain());
@@ -453,7 +454,7 @@ pub fn build(
         identifier: format!("{org}.{product}").to_string(),
         display_name: product.to_string(),
         name: product.to_string(),
-        executable: build_crate.to_string(),
+        executable: binary_name.clone(),
         version: "1.0.0".to_string(),
     };
     let profile = get_profile_from_args(args);
@@ -469,10 +470,10 @@ pub fn build(
 
     let build_dir = cwd.join(format!("target/{}/{profile}/", apple_target.toolchain()));
     let src_bin = cwd.join(format!(
-        "target/{}/{profile}/{build_crate}",
+        "target/{}/{profile}/{binary_name}",
         apple_target.toolchain()
     ));
-    let dst_bin = app_dir.join(build_crate.to_string());
+    let dst_bin = app_dir.join(binary_name.clone());
 
     cp(&src_bin, &dst_bin, false)?;
 
@@ -489,17 +490,17 @@ pub fn run_on_sim(
     args: &[String],
     apple_target: AppleTarget,
 ) -> Result<(), String> {
-    if apple_args.org.is_none() || apple_args.app.is_none() {
-        return Err(
-            "Please set --org=org --app=app on the commandline inbetween ios and run-sim."
-                .to_string(),
-        );
+    if apple_args.org.is_none() {
+        return Err("Please set --org=org before run-sim.".to_string());
     }
+
+    let build_crate = get_build_crate_from_args(args)?;
+    let default_app = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
 
     let result = build(
         apple_args.stable,
         &apple_args.org.unwrap_or("orgname".to_string()),
-        &apple_args.app.unwrap_or("productname".to_string()),
+        &apple_args.app.unwrap_or(default_app),
         args,
         apple_target,
     )?;
@@ -814,9 +815,11 @@ pub fn run_on_device(
     let provision = provision.unwrap();
 
     let org = apple_args.org.unwrap();
-    let app = apple_args.app.unwrap();
 
     let build_crate = get_build_crate_from_args(args)?;
+    let default_app = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
+    let app = apple_args.app.unwrap_or(default_app);
+
     let result = build(apple_args.stable, &org, &app, args, apple_target)?;
 
     let scent = Scent {

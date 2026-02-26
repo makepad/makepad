@@ -69,7 +69,7 @@ const TOOLCHAINS: [(&'static str, BuildTy, Platform); 16] = [
     ("x86_64-pc-windows-gnu", BuildTy::Binary, Platform::Desktop),
 ];
 
-pub fn check_crate(build_crate: &str, args: &[String]) -> Result<(), String> {
+fn check_crate(build_crate: &str, args: &[String], icon_env: Option<AppIconEnv>) -> Result<(), String> {
     let crate_dir = get_crate_dir(build_crate).expect("Cant find crate dir");
 
     // lets parse the toml
@@ -121,12 +121,13 @@ pub fn check_crate(build_crate: &str, args: &[String]) -> Result<(), String> {
         let toolchain = toolchain.to_string();
         let args = args.to_vec();
         let sender = sender.clone();
+        let icon_env = icon_env.clone();
         let thread = std::thread::spawn(move || {
             if !nightly_only && !ty.nightly_only() {
-                let result = check(&toolchain, "stable", ty, &args, index);
+                let result = check(&toolchain, "stable", ty, &args, index, icon_env.clone());
                 let _ = sender.send(("stable", toolchain.clone(), ty, result));
             }
-            let result = check(&toolchain, "nightly", ty, &args, index);
+            let result = check(&toolchain, "nightly", ty, &args, index, icon_env.clone());
             let _ = sender.send(("nightly", toolchain.clone(), ty, result));
         });
         handles.push(thread);
@@ -167,17 +168,19 @@ pub fn handle_check(args: &[String]) -> Result<(), String> {
         "all" => {
             let cwd = std::env::current_dir().unwrap();
             if let Ok(build_crate) = get_build_crate_from_args(&args[1..]) {
-                return check_crate(&build_crate, &args[1..]);
+                let icon_env = resolve_app_icon_env(&build_crate)?;
+                return check_crate(&build_crate, &args[1..], icon_env);
             } else if let Err(e) = shell_env_cap(&[], &cwd, "cargo", &["run", "--bin"]) {
                 let mut after_av = false;
                 for line in e.split("\n") {
                     if after_av {
                         let binary = line.trim().to_string();
                         if binary.len() > 0 {
-                            let mut args = args[1..].to_vec();
-                            args.insert(0, binary.to_string());
-                            args.insert(0, "-p".to_string());
-                            check_crate(&binary, &args)?;
+                            let mut check_args = args[1..].to_vec();
+                            check_args.insert(0, binary.to_string());
+                            check_args.insert(0, "-p".to_string());
+                            let icon_env = resolve_app_icon_env(&binary)?;
+                            check_crate(&binary, &check_args, icon_env)?;
                         }
                     }
                     if line.contains("Available binaries:") {
@@ -199,6 +202,7 @@ fn check(
     ty: BuildTy,
     args: &[String],
     par: usize,
+    icon_env: Option<AppIconEnv>,
 ) -> (String, String, bool) {
     let toolchain = format!("--target={}", toolchain);
 
@@ -212,46 +216,46 @@ fn check(
     }
     let target_dir = format!("--target-dir=target/check_all/check{}", par);
     args_out.push(&target_dir);
+    let run = |makepad: &str, args_out: &[&str]| {
+        let mut envs = vec![("MAKEPAD", makepad)];
+        if let Some(icon) = icon_env.as_ref() {
+            for (var, value) in APP_ICON_ENV_VARS.iter().zip(icon.iter()) {
+                envs.push((var, value.as_str()));
+            }
+        }
+        shell_env_cap_split(&envs, &cwd, "rustup", args_out)
+    };
+
     match ty {
         BuildTy::Binary => {
             if branch == "stable" {
-                return shell_env_cap_split(&[("MAKEPAD", " ")], &cwd, "rustup", &args_out);
+                run(" ", &args_out)
             } else {
-                return shell_env_cap_split(&[("MAKEPAD", "lines")], &cwd, "rustup", &args_out);
+                run("lines", &args_out)
             }
         }
         BuildTy::BinaryBuildStd => {
             args_out.push("-Z");
             args_out.push("build-std=std");
             if branch == "stable" {
-                return shell_env_cap_split(&[("MAKEPAD", " ")], &cwd, "rustup", &args_out);
+                run(" ", &args_out)
             } else {
-                return shell_env_cap_split(&[("MAKEPAD", "lines")], &cwd, "rustup", &args_out);
+                run("lines", &args_out)
             }
         }
         BuildTy::Lib => {
             args_out.push("--lib");
             if branch == "stable" {
-                return shell_env_cap_split(&[("MAKEPAD", " ")], &cwd, "rustup", &args_out);
+                run(" ", &args_out)
             } else {
-                return shell_env_cap_split(&[("MAKEPAD", "lines")], &cwd, "rustup", &args_out);
+                run("lines", &args_out)
             }
         }
         BuildTy::LinuxDirect => {
             if branch == "stable" {
-                return shell_env_cap_split(
-                    &[("MAKEPAD", "linux_direct")],
-                    &cwd,
-                    "rustup",
-                    &args_out,
-                );
+                run("linux_direct", &args_out)
             } else {
-                return shell_env_cap_split(
-                    &[("MAKEPAD", "lines,linux_direct")],
-                    &cwd,
-                    "rustup",
-                    &args_out,
-                );
+                run("lines,linux_direct", &args_out)
             }
         }
     }

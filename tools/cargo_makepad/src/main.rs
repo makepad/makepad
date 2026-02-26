@@ -2,6 +2,7 @@ mod android;
 mod apple;
 mod check;
 mod open_harmony;
+mod desktop;
 mod studio;
 mod tunnel;
 mod utils;
@@ -16,6 +17,7 @@ pub use makepad_network;
 pub use makepad_shell;
 pub use makepad_wasm_strip;
 use open_harmony::*;
+use desktop::*;
 use studio::*;
 use tunnel::*;
 use wasm::*;
@@ -114,6 +116,12 @@ fn show_help() {
     println!("       --deveco-home='deveco_path'               The path of DevEco program, this parameter can also be specified by environment variable \"DEVECO_HOME\"");
     println!("       --remote='<hdcip:port>'                   Remote hdc service, this parameter can also be specified by environment variable \"HDC_REMOTE\"");
     println!();
+    println!("Desktop commands:");
+    println!();
+    println!("    desktop build <cargo args>                   Run cargo build with Makepad icon env autodetection");
+    println!("    desktop run <cargo args>                     Run cargo run with Makepad icon env autodetection");
+    println!("    desktop check <cargo args>                   Run cargo check with Makepad icon env autodetection");
+    println!();
     println!("Linux commands:");
     println!();
     println!("    linux apt-get-install-makepad-deps           Call apt-get install with all dependencies needed for makepad.");
@@ -168,6 +176,7 @@ fn main() -> Result<(), Cow<'static, str>> {
     }
     let result = match args[0].as_ref() {
         "android" => handle_android(&args[1..]),
+        "desktop" => handle_desktop(&args[1..]),
         "wasm" => handle_wasm(&args[1..]),
         "apple" => handle_apple(&args[1..]),
         "ohos" => handle_open_harmony(&args[1..]),

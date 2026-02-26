@@ -152,13 +152,14 @@ impl Win32Time {
 impl Win32App {
     pub fn new(event_callback: Box<dyn FnMut(Win32Event) -> EventFlow>) -> Win32App {
         let window_class_name = encode_wide("MakepadWindow\0");
-        let icon = Self::create_default_icon();
+        let (hicon_big, hicon_small) = Self::create_default_icons();
         let class = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
             lpfnWndProc: Some(Win32Window::window_class_proc),
             hInstance: unsafe { GetModuleHandleW(None).unwrap().into() },
-            hIcon: icon,
+            hIcon: hicon_big,
+            hIconSm: hicon_small,
             lpszClassName: PCWSTR(window_class_name.as_ptr()),
             hbrBackground: unsafe { CreateSolidBrush(COLORREF(0x3f3f3f3f)) },
             ..Default::default()
@@ -237,14 +238,29 @@ impl Win32App {
         }
     }
 
-    /// Create the default Makepad icon for the window class.
-    fn create_default_icon() -> HICON {
-        let icon = crate::window_icon::default_window_icon();
-        if let Some(buf) = icon.buffers.first() {
+    /// Create big/small default icons for the window class.
+    fn create_default_icons() -> (HICON, HICON) {
+        let icon = crate::app_icon::window_icon();
+
+        let pick = |target: u32| {
+            icon.buffers
+                .iter()
+                .min_by_key(|b| b.width.abs_diff(target))
+        };
+
+        let big = if let Some(buf) = pick(64).or_else(|| icon.buffers.first()) {
             Self::create_icon_from_rgba(buf.width, buf.height, &buf.data)
         } else {
             unsafe { LoadIconW(None, IDI_WINLOGO).unwrap() }
-        }
+        };
+
+        let small = if let Some(buf) = pick(32).or_else(|| icon.buffers.first()) {
+            Self::create_icon_from_rgba(buf.width, buf.height, &buf.data)
+        } else {
+            unsafe { LoadIconW(None, IDI_WINLOGO).unwrap() }
+        };
+
+        (big, small)
     }
 
     pub fn event_loop() {

@@ -29,7 +29,20 @@ impl AndroidVariant {
         ));
     }
 
-    fn manifest_xml(&self, label: &str, class_name: &str, url: &str, sdk_version: usize) -> String {
+    fn manifest_xml(
+        &self,
+        label: &str,
+        class_name: &str,
+        url: &str,
+        sdk_version: usize,
+        has_icon: bool,
+    ) -> String {
+        let icon_attr = if has_icon {
+            "\n                    android:icon=\"@mipmap/ic_launcher\""
+        } else {
+            ""
+        };
+
         match self {
             Self::Default => format!(
                 r#"<?xml version="1.0" encoding="utf-8"?>
@@ -37,7 +50,7 @@ impl AndroidVariant {
                 xmlns:tools="http://schemas.android.com/tools"
                 package="{url}">
                 <application
-                    android:label="{label}"
+                    android:label="{label}"{icon_attr}
                     android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
                     android:allowBackup="true"
                     android:supportsRtl="true"
@@ -113,7 +126,7 @@ impl AndroidVariant {
                 <uses-permission android:name="com.oculus.permission.USE_COLOCATION_DISCOVERY_API" />
                 
                 <application
-                    android:label="{label}"
+                    android:label="{label}"{icon_attr}
                     android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
                     android:allowBackup="true"
                     android:supportsRtl="true"

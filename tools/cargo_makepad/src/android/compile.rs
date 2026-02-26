@@ -4,6 +4,7 @@ use crate::makepad_shell::*;
 use crate::utils::*;
 use std::path::{Path, PathBuf};
 
+
 fn aapt_path(sdk_dir: &Path, urls: &AndroidSDKUrls) -> PathBuf {
     sdk_dir
         .join(BUILD_TOOLS_DIR)
@@ -43,6 +44,7 @@ fn android_jar_path(sdk_dir: &Path, urls: &AndroidSDKUrls) -> PathBuf {
 struct BuildPaths {
     tmp_dir: PathBuf,
     out_dir: PathBuf,
+    res_dir: PathBuf,
     manifest_file: PathBuf,
     java_file: PathBuf,
     java_class: PathBuf,
@@ -183,33 +185,83 @@ fn rust_build(
     Ok(())
 }
 
+fn cargo_target_dir(cwd: &Path) -> PathBuf {
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        if target_dir.is_absolute() {
+            target_dir
+        } else {
+            cwd.join(target_dir)
+        }
+    } else {
+        cwd.join("target")
+    }
+}
+
 fn prepare_build(
-    underscore_build_crate: &str,
+    build_crate: &str,
     java_url: &str,
     app_label: &str,
     variant: &AndroidVariant,
     urls: &AndroidSDKUrls,
 ) -> Result<BuildPaths, String> {
     let cwd = std::env::current_dir().unwrap();
+    let target_dir = cargo_target_dir(&cwd);
+    let underscore_build_crate = build_crate.replace('-', "_");
 
-    let tmp_dir = cwd
-        .join("target")
+    let tmp_dir = target_dir
         .join("makepad-android-apk")
         .join(&underscore_build_crate)
         .join("tmp");
-    let out_dir = cwd
-        .join("target")
+    let out_dir = target_dir
         .join("makepad-android-apk")
         .join(&underscore_build_crate)
         .join("apk");
+    let res_dir = tmp_dir.join("res");
 
-    // lets remove tmp and out dir
     let _ = rmdir(&tmp_dir);
     let _ = rmdir(&out_dir);
     mkdir(&tmp_dir)?;
     mkdir(&out_dir)?;
 
-    let manifest_xml = variant.manifest_xml(app_label, "MakepadApp", java_url, urls.sdk_version);
+    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    cp_all(&cargo_manifest_dir.join("src/android/res"), &res_dir, false)?;
+
+    let build_crate_dir = get_crate_dir(build_crate)?;
+    let app_android_res = build_crate_dir.join("resources/android/res");
+    if app_android_res.is_dir() {
+        cp_all(&app_android_res, &res_dir, false)?;
+    }
+
+    let android_icon_targets = [
+        "mipmap-mdpi",
+        "mipmap-hdpi",
+        "mipmap-xhdpi",
+        "mipmap-xxhdpi",
+        "mipmap-xxxhdpi",
+    ];
+    let has_android_icon = android_icon_targets
+        .iter()
+        .all(|d| res_dir.join(d).join("ic_launcher.png").is_file());
+    if !has_android_icon {
+        for d in android_icon_targets {
+            let p = res_dir.join(d).join("ic_launcher.png");
+            if !p.is_file() {
+                eprintln!(
+                    "warning: missing {}. Add this file to include a custom Android launcher icon.",
+                    p.display()
+                );
+            }
+        }
+    }
+
+    let manifest_xml = variant.manifest_xml(
+        app_label,
+        "MakepadApp",
+        java_url,
+        urls.sdk_version,
+        has_android_icon,
+    );
     let manifest_file = tmp_dir.join("AndroidManifest.xml");
     write_text(&manifest_file, &manifest_xml)?;
 
@@ -234,6 +286,7 @@ fn prepare_build(
     Ok(BuildPaths {
         tmp_dir,
         out_dir,
+        res_dir,
         manifest_file,
         java_file,
         java_class,
@@ -251,7 +304,6 @@ fn build_r_class(
 ) -> Result<(), String> {
     let java_home = sdk_dir.join("openjdk");
     let cwd = std::env::current_dir().unwrap();
-    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
 
     shell_env(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
@@ -264,7 +316,7 @@ fn build_r_class(
             "-I",
             (android_jar_path(sdk_dir, urls).to_str().unwrap()),
             "-S",
-            (cargo_manifest_dir.join("src/android/res").to_str().unwrap()),
+            (build_paths.res_dir.to_str().unwrap()),
             "-M",
             (build_paths.manifest_file.to_str().unwrap()),
             "-J",
@@ -493,7 +545,6 @@ fn build_unaligned_apk(
 ) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     let java_home = sdk_dir.join("openjdk");
-    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
 
     shell_env(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
@@ -509,7 +560,7 @@ fn build_unaligned_apk(
             "-M",
             (build_paths.manifest_file.to_str().unwrap()),
             "-S",
-            (cargo_manifest_dir.join("src/android/res").to_str().unwrap()),
+            (build_paths.res_dir.to_str().unwrap()),
             (build_paths.out_dir.to_str().unwrap()),
         ],
     )?;
@@ -695,6 +746,7 @@ fn add_rust_library(
     urls: &AndroidSDKUrls,
 ) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().unwrap();
+    let target_dir = cargo_target_dir(&cwd);
     let profile = get_profile_from_args(args);
     let mut build_dir = None;
     for android_target in android_targets {
@@ -706,10 +758,10 @@ fn add_rust_library(
         if profile == "debug" {
             println!("WARNING - compiling a DEBUG build of the application, this creates a very slow and big app. Try adding --release for a fast, or --profile=small for a small build.");
         }
-        let src_lib = cwd.join(format!(
-            "target/{android_target_dir}/{profile}/lib{underscore_target}.so"
+        let src_lib = target_dir.join(format!(
+            "{android_target_dir}/{profile}/lib{underscore_target}.so"
         ));
-        build_dir = Some(cwd.join(format!("target/{android_target_dir}/{profile}")));
+        build_dir = Some(target_dir.join(format!("{android_target_dir}/{profile}")));
         let dst_lib = build_paths.out_dir.join(binary_path.clone());
         cp(&src_lib, &dst_lib, false)?;
 
@@ -961,10 +1013,17 @@ pub fn build(
     urls: &AndroidSDKUrls,
 ) -> Result<BuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
-    let underscore_build_crate = build_crate.replace('-', "_");
+    let binary_name = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
+    let underscore_binary_name = binary_name.replace('-', "_");
 
-    let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_build_crate}"));
-    let app_label = app_label.unwrap_or_else(|| format!("{underscore_build_crate}"));
+    let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_binary_name}"));
+    let app_label = app_label.unwrap_or_else(|| underscore_binary_name.clone());
+
+    if let Some(icon) = resolve_app_icon_env(build_crate)? {
+        for (var, value) in APP_ICON_ENV_VARS.iter().zip(icon.iter()) {
+            std::env::set_var(var, value);
+        }
+    }
 
     rust_build(sdk_dir, host_os, args, android_targets, variant, urls)?;
     let build_paths = prepare_build(build_crate, &java_url, &app_label, variant, urls)?;
@@ -979,7 +1038,7 @@ pub fn build(
     let build_dir = add_rust_library(
         sdk_dir,
         host_os,
-        &underscore_build_crate,
+        &underscore_binary_name,
         &build_paths,
         android_targets,
         args,
