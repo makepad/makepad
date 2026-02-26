@@ -3,6 +3,9 @@ use std::ffi::c_void;
 use crate::cx::Cx;
 use crate::texture::Texture;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::os::linux::gl_sys;
+
 /// GL API type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GlApi {
@@ -75,14 +78,20 @@ impl GlRenderBridge {
     }
 }
 
-// Cx methods: Linux/Android
-#[cfg(any(target_os = "linux", target_os = "android"))]
+// Cx methods: Linux
+#[cfg(target_os = "linux")]
 impl Cx {
     /// Create a GL rendering bridge wrapping makepad's existing EGL context.
     pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {
         let opengl_cx = self.os.opengl_cx.as_ref().expect("OpenGL context not initialized");
         GlRenderBridge {
-            inner: crate::os::linux::opengl::EglRenderBridge::new(opengl_cx),
+            inner: crate::os::linux::opengl::EglRenderBridge::new(
+                opengl_cx.egl_display,
+                opengl_cx.egl_config,
+                opengl_cx.egl_context,
+                opengl_cx.libegl.eglGetProcAddress.unwrap(),
+                opengl_cx.libegl.eglMakeCurrent.unwrap(),
+            ),
         }
     }
 
@@ -97,10 +106,89 @@ impl Cx {
         self.create_gl_render_texture(width, height)
     }
 
-    /// Restore makepad's own GL context as current.
+    /// Restore makepad's GL state after external GL rendering.
+    ///
+    /// On Linux the GL render bridge shares makepad's EGL context, so external
+    /// renderers (e.g. Servo/WebRender) leave GL state dirty. This resets
+    /// bindings to defaults so makepad's renderer starts from a clean slate.
+    ///
+    /// On macOS and Windows the bridge has a separate GL context, so
+    /// `restore_gl_context` is a no-op there.
     pub fn restore_gl_context(&mut self) {
         let opengl_cx = self.os.opengl_cx.as_ref().expect("OpenGL context not initialized");
         opengl_cx.make_current();
+
+        let gl = self.os.gl();
+        unsafe {
+            (gl.glBindVertexArray)(0);
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
+            (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, 0);
+            (gl.glBindBuffer)(gl_sys::UNIFORM_BUFFER, 0);
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+            (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, 0);
+            (gl.glUseProgram)(0);
+            (gl.glActiveTexture)(gl_sys::TEXTURE0);
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+            (gl.glDisable)(gl_sys::SCISSOR_TEST);
+            (gl.glColorMask)(1, 1, 1, 1);
+            (gl.glDepthMask)(1);
+            (gl.glDisable)(gl_sys::BLEND);
+        }
+    }
+}
+
+// Cx methods: Android
+#[cfg(target_os = "android")]
+impl Cx {
+    /// Create a GL rendering bridge wrapping makepad's existing EGL context.
+    pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {
+        let display = self.os.display.as_ref().expect("OpenGL context not initialized");
+        GlRenderBridge {
+            inner: crate::os::linux::opengl::EglRenderBridge::new(
+                display.egl_display,
+                display.egl_config,
+                display.egl_context,
+                display.libegl.eglGetProcAddress.unwrap(),
+                display.libegl.eglMakeCurrent.unwrap(),
+            ),
+        }
+    }
+
+    /// Create a texture renderable via GL and displayable by makepad.
+    /// Returns (Texture handle, GL texture ID).
+    pub fn create_gl_render_bridge_texture(
+        &mut self,
+        _bridge: &GlRenderBridge,
+        width: usize,
+        height: usize,
+    ) -> (Texture, u32) {
+        self.create_gl_render_texture(width, height)
+    }
+
+    /// Restore makepad's GL state after external GL rendering.
+    ///
+    /// On Android the GL render bridge shares makepad's EGL context, so
+    /// external renderers leave GL state dirty. Same reset as Linux.
+    pub fn restore_gl_context(&mut self) {
+        let display = self.os.display.as_ref().expect("OpenGL context not initialized");
+        display.make_current();
+
+        let gl = self.os.gl();
+        unsafe {
+            (gl.glBindVertexArray)(0);
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
+            (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, 0);
+            (gl.glBindBuffer)(gl_sys::UNIFORM_BUFFER, 0);
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+            (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, 0);
+            (gl.glUseProgram)(0);
+            (gl.glActiveTexture)(gl_sys::TEXTURE0);
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+            (gl.glDisable)(gl_sys::SCISSOR_TEST);
+            (gl.glColorMask)(1, 1, 1, 1);
+            (gl.glDepthMask)(1);
+            (gl.glDisable)(gl_sys::BLEND);
+        }
     }
 }
 
