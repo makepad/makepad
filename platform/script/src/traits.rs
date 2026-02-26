@@ -334,6 +334,13 @@ where
         Self: Sized,
     {
         let value = f(vm);
+        if value.is_nil() {
+            panic!(
+                "script_mod! returned nil — the script block must end with an expression \
+                 that evaluates to the app value (e.g. add `app` as the last line after \
+                 `let app = startup() do ...{{ }}`)."
+            );
+        }
         Self::script_from_value(vm, value)
     }
 
