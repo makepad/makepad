@@ -1,0 +1,164 @@
+use crate::dispatch::StudioEvent;
+use crate::protocol::QueryId;
+use makepad_network::{start_http_server, HttpServer, HttpServerRequest, HttpServerResponse};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::mpsc::{self, Sender};
+use std::thread::JoinHandle;
+
+enum SocketRole {
+    Ui,
+    App,
+    BuildBox,
+}
+
+pub struct GatewayHandle {
+    pub listen_address: SocketAddr,
+    pub request_thread: JoinHandle<()>,
+    pub http_thread: JoinHandle<()>,
+}
+
+pub fn start_http_gateway(
+    listen_address: SocketAddr,
+    post_max_size: u64,
+    event_tx: Sender<StudioEvent>,
+) -> Result<GatewayHandle, String> {
+    let (request_tx, request_rx) = mpsc::channel::<HttpServerRequest>();
+    let http_thread = start_http_server(HttpServer {
+        listen_address,
+        request: request_tx,
+        post_max_size,
+    })
+    .ok_or_else(|| format!("failed to bind http server at {}", listen_address))?;
+
+    let request_thread = std::thread::spawn(move || {
+        let mut socket_roles = HashMap::<u64, SocketRole>::new();
+        while let Ok(request) = request_rx.recv() {
+            match request {
+                HttpServerRequest::ConnectWebSocket {
+                    web_socket_id,
+                    headers,
+                    response_sender,
+                } => {
+                    if headers.path == "/$studio_ui" {
+                        socket_roles.insert(web_socket_id, SocketRole::Ui);
+                        let _ = event_tx.send(StudioEvent::UiConnected {
+                            web_socket_id,
+                            sender: response_sender,
+                        });
+                        continue;
+                    }
+                    if let Some(build_id) = parse_app_path(&headers.path) {
+                        socket_roles.insert(web_socket_id, SocketRole::App);
+                        let _ = event_tx.send(StudioEvent::AppConnected {
+                            build_id,
+                            web_socket_id,
+                            sender: response_sender,
+                        });
+                        continue;
+                    }
+                    if headers.path == "/$studio_buildbox" {
+                        socket_roles.insert(web_socket_id, SocketRole::BuildBox);
+                        let _ = event_tx.send(StudioEvent::BuildBoxConnected {
+                            web_socket_id,
+                            sender: response_sender,
+                        });
+                        continue;
+                    }
+                    let _ = response_sender.send(Vec::new());
+                }
+                HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
+                    if let Some(role) = socket_roles.remove(&web_socket_id) {
+                        match role {
+                            SocketRole::Ui => {
+                                let _ = event_tx.send(StudioEvent::UiDisconnected { web_socket_id });
+                            }
+                            SocketRole::App => {
+                                let _ =
+                                    event_tx.send(StudioEvent::AppDisconnected { web_socket_id });
+                            }
+                            SocketRole::BuildBox => {
+                                let _ = event_tx
+                                    .send(StudioEvent::BuildBoxDisconnected { web_socket_id });
+                            }
+                        }
+                    }
+                }
+                HttpServerRequest::BinaryMessage {
+                    web_socket_id,
+                    response_sender: _,
+                    data,
+                } => match socket_roles.get(&web_socket_id) {
+                    Some(SocketRole::Ui) => {
+                        let _ = event_tx.send(StudioEvent::UiBinary { web_socket_id, data });
+                    }
+                    Some(SocketRole::App) => {
+                        let _ = event_tx.send(StudioEvent::AppBinary { web_socket_id, data });
+                    }
+                    Some(SocketRole::BuildBox) => {
+                        let _ = event_tx.send(StudioEvent::BuildBoxBinary { web_socket_id, data });
+                    }
+                    None => {}
+                },
+                HttpServerRequest::TextMessage {
+                    web_socket_id,
+                    response_sender: _,
+                    string,
+                } => match socket_roles.get(&web_socket_id) {
+                    Some(SocketRole::Ui) => {
+                        let _ = event_tx.send(StudioEvent::UiText {
+                            web_socket_id,
+                            text: string,
+                        });
+                    }
+                    Some(SocketRole::App) | Some(SocketRole::BuildBox) | None => {}
+                },
+                HttpServerRequest::Get {
+                    headers,
+                    response_sender,
+                } => {
+                    if headers.path == "/$studio_health" {
+                        let _ = response_sender.send(ok_response(b"ok".to_vec(), "text/plain"));
+                    } else {
+                        let _ = response_sender.send(not_found_response());
+                    }
+                }
+                HttpServerRequest::Post { response, .. } => {
+                    let _ = response.send(not_found_response());
+                }
+            }
+        }
+    });
+
+    Ok(GatewayHandle {
+        listen_address,
+        request_thread,
+        http_thread,
+    })
+}
+
+fn parse_app_path(path: &str) -> Option<QueryId> {
+    let rest = path.strip_prefix("/$studio_app/")?;
+    if rest.is_empty() {
+        return None;
+    }
+    rest.parse::<u64>().ok().map(QueryId)
+}
+
+fn ok_response(body: Vec<u8>, content_type: &str) -> HttpServerResponse {
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        content_type,
+        body.len()
+    );
+    HttpServerResponse { header, body }
+}
+
+fn not_found_response() -> HttpServerResponse {
+    let body = b"not found".to_vec();
+    let header = format!(
+        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    HttpServerResponse { header, body }
+}
