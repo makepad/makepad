@@ -35,7 +35,13 @@ pub struct GStreamerVideoPlayer {
     video_height: u32,
     duration_ns: i64,
     temp_file_path: Option<PathBuf>,
-    frame_count: u32,
+    /// Reusable buffer for copying pixel data from GStreamer before GL upload.
+    /// Avoids a per-frame heap allocation.
+    pixel_buf: Vec<u8>,
+    /// Dimensions of the currently allocated GL texture (0x0 = not yet allocated).
+    /// Used to choose between glTexImage2D (realloc) and glTexSubImage2D (update).
+    tex_width: usize,
+    tex_height: usize,
 }
 
 impl GStreamerVideoPlayer {
@@ -137,7 +143,9 @@ impl GStreamerVideoPlayer {
             video_height: 0,
             duration_ns: 0,
             temp_file_path,
-            frame_count: 0,
+            pixel_buf: Vec::new(),
+            tex_width: 0,
+            tex_height: 0,
         }
     }
 
@@ -165,7 +173,9 @@ impl GStreamerVideoPlayer {
             video_height: 0,
             duration_ns: 0,
             temp_file_path,
-            frame_count: 0,
+            pixel_buf: Vec::new(),
+            tex_width: 0,
+            tex_height: 0,
         }
     }
 
@@ -361,9 +371,10 @@ impl GStreamerVideoPlayer {
             let width = self.video_width as usize;
             let height = self.video_height as usize;
             let row_bytes = width * 4; // RGBA = 4 bytes per pixel
+            let packed_size = row_bytes * height;
 
             if map_info.data.is_null() || width == 0 || height == 0
-                || map_info.size < row_bytes * height
+                || map_info.size < packed_size
             {
                 (gst.gst_buffer_unmap)(buffer, &mut map_info);
                 (gst.gst_mini_object_unref)(sample as *mut GstMiniObject);
@@ -378,20 +389,18 @@ impl GStreamerVideoPlayer {
                 row_bytes
             };
 
-            // Build a tightly-packed pixel buffer for GL upload
+            // Reuse the pixel buffer to avoid per-frame allocation
+            self.pixel_buf.clear();
+            self.pixel_buf.reserve(packed_size);
             let src = std::slice::from_raw_parts(map_info.data, map_info.size);
-            let pixel_data = if stride == row_bytes {
-                // No padding — just copy the whole thing
-                src[..row_bytes * height].to_vec()
+            if stride == row_bytes {
+                self.pixel_buf.extend_from_slice(&src[..packed_size]);
             } else {
-                // Strip row padding
-                let mut packed = Vec::with_capacity(row_bytes * height);
                 for y in 0..height {
                     let row_start = y * stride;
-                    packed.extend_from_slice(&src[row_start..row_start + row_bytes]);
+                    self.pixel_buf.extend_from_slice(&src[row_start..row_start + row_bytes]);
                 }
-                packed
-            };
+            }
 
             // Done with the GStreamer buffer
             (gst.gst_buffer_unmap)(buffer, &mut map_info);
@@ -399,20 +408,25 @@ impl GStreamerVideoPlayer {
 
             // Ensure the GL texture exists
             let cxtexture = &mut textures[self.texture_id];
-            if cxtexture.os.gl_texture.is_none() {
+            let needs_alloc = if cxtexture.os.gl_texture.is_none() {
                 let mut gl_texture = std::mem::MaybeUninit::uninit();
                 (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
-                cxtexture.os.gl_texture = Some(gl_texture.assume_init());
-            }
+                let gl_texture = gl_texture.assume_init();
+                cxtexture.os.gl_texture = Some(gl_texture);
+
+                // Set texture parameters once at creation
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+                true
+            } else {
+                self.tex_width != width || self.tex_height != height
+            };
 
             let gl_texture = cxtexture.os.gl_texture.unwrap();
-
-            // Upload pixel data to GL texture
             (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
-            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
-            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
-            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
 
             // CRITICAL: Reset all pixel-store unpack parameters. The makepad renderer
             // may have set UNPACK_ROW_LENGTH to a different texture's width, causing
@@ -422,21 +436,32 @@ impl GStreamerVideoPlayer {
             (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
             (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
 
-            (gl.glTexImage2D)(
-                gl_sys::TEXTURE_2D, 0, gl_sys::RGBA as i32,
-                width as i32, height as i32, 0,
-                gl_sys::RGBA, gl_sys::UNSIGNED_BYTE,
-                pixel_data.as_ptr() as *const c_void,
-            );
-
-            self.frame_count += 1;
+            if needs_alloc {
+                // First frame or dimension change — allocate new texture storage
+                (gl.glTexImage2D)(
+                    gl_sys::TEXTURE_2D, 0, gl_sys::RGBA as i32,
+                    width as i32, height as i32, 0,
+                    gl_sys::RGBA, gl_sys::UNSIGNED_BYTE,
+                    self.pixel_buf.as_ptr() as *const c_void,
+                );
+                self.tex_width = width;
+                self.tex_height = height;
+            } else {
+                // Same dimensions — update in place (faster, no realloc)
+                (gl.glTexSubImage2D)(
+                    gl_sys::TEXTURE_2D, 0,
+                    0, 0, width as i32, height as i32,
+                    gl_sys::RGBA, gl_sys::UNSIGNED_BYTE,
+                    self.pixel_buf.as_ptr() as *const c_void,
+                );
+            }
 
             (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
 
             // Update the texture allocation metadata
             cxtexture.alloc = Some(TextureAlloc {
-                width: width as usize,
-                height: height as usize,
+                width,
+                height,
                 pixel: TexturePixel::VideoRGB,
                 category: TextureCategory::Video,
             });

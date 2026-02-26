@@ -17,7 +17,6 @@ pub type GstStructure = c_void;
 pub type GstMessage = c_void;
 pub type GObject = c_void;
 pub type GstMiniObject = c_void;
-pub type GstPad = c_void;
 
 // GLib GError — domain (GQuark/u32) + code (gint/i32) + message (*gchar)
 #[repr(C)]
@@ -29,15 +28,11 @@ pub struct GError {
 
 // GStreamer state enum values
 pub const GST_STATE_NULL: c_uint = 1;
-pub const GST_STATE_READY: c_uint = 2;
 pub const GST_STATE_PAUSED: c_uint = 3;
 pub const GST_STATE_PLAYING: c_uint = 4;
 
 // GstStateChangeReturn
 pub const GST_STATE_CHANGE_FAILURE: c_int = 0;
-pub const GST_STATE_CHANGE_SUCCESS: c_int = 1;
-pub const GST_STATE_CHANGE_ASYNC: c_int = 2;
-pub const GST_STATE_CHANGE_NO_PREROLL: c_int = 3;
 
 // GstFormat
 pub const GST_FORMAT_TIME: c_int = 3;
@@ -49,8 +44,6 @@ pub const GST_SEEK_FLAG_KEY_UNIT: c_uint = 1 << 2;
 
 // GstMessageType (bitmask)
 pub const GST_MESSAGE_ERROR: c_uint = 1 << 1;
-pub const GST_MESSAGE_EOS: c_uint = 1 << 2;
-pub const GST_MESSAGE_STATE_CHANGED: c_uint = 1 << 5;
 
 // GstMapFlags
 pub const GST_MAP_READ: c_uint = 1 << 0;
@@ -75,7 +68,6 @@ impl Default for GstMapInfo {
 
 // GstClockTime
 pub type GstClockTime = u64;
-pub const GST_CLOCK_TIME_NONE: GstClockTime = u64::MAX;
 
 pub struct LibGStreamer {
     // Keep module loaders alive so the .so files stay loaded
@@ -86,7 +78,6 @@ pub struct LibGStreamer {
 
     // libgstreamer-1.0.so.0
     pub gst_init: unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char),
-    pub gst_parse_launch: unsafe extern "C" fn(*const c_char, *mut *mut GError) -> *mut GstElement,
     pub gst_element_factory_make: unsafe extern "C" fn(*const c_char, *const c_char) -> *mut GstElement,
     pub gst_element_set_state: unsafe extern "C" fn(*mut GstElement, c_uint) -> c_int,
     pub gst_element_get_state: unsafe extern "C" fn(
@@ -100,18 +91,10 @@ pub struct LibGStreamer {
     pub gst_element_seek_simple:
         unsafe extern "C" fn(*mut GstElement, c_int, c_uint, i64) -> c_int,
     pub gst_element_get_bus: unsafe extern "C" fn(*mut GstElement) -> *mut GstBus,
-    pub gst_element_get_static_pad: unsafe extern "C" fn(*mut GstElement, *const c_char) -> *mut GstPad,
-    pub gst_element_add_pad: unsafe extern "C" fn(*mut GstElement, *mut GstPad) -> c_int,
-    pub gst_element_link_filtered: unsafe extern "C" fn(*mut GstElement, *mut GstElement, *mut GstCaps) -> c_int,
     pub gst_bus_pop_filtered: unsafe extern "C" fn(*mut GstBus, c_uint) -> *mut GstMessage,
     pub gst_message_parse_error:
         unsafe extern "C" fn(*mut GstMessage, *mut *mut GError, *mut *mut c_char),
     pub gst_object_unref: unsafe extern "C" fn(*mut c_void),
-    pub gst_bin_new: unsafe extern "C" fn(*const c_char) -> *mut GstElement,
-    pub gst_bin_add: unsafe extern "C" fn(*mut GstElement, *mut GstElement) -> c_int,
-    pub gst_bin_get_by_name: unsafe extern "C" fn(*mut GstElement, *const c_char) -> *mut GstElement,
-    pub gst_ghost_pad_new: unsafe extern "C" fn(*const c_char, *mut GstPad) -> *mut GstPad,
-    pub gst_pad_set_active: unsafe extern "C" fn(*mut GstPad, c_int) -> c_int,
     pub gst_sample_get_buffer: unsafe extern "C" fn(*mut GstSample) -> *mut GstBuffer,
     pub gst_sample_get_caps: unsafe extern "C" fn(*mut GstSample) -> *mut GstCaps,
     pub gst_buffer_map: unsafe extern "C" fn(*mut GstBuffer, *mut GstMapInfo, c_uint) -> c_int,
@@ -131,7 +114,7 @@ pub struct LibGStreamer {
     pub gst_app_sink_is_eos: unsafe extern "C" fn(*mut GstElement) -> c_int,
     pub gst_app_sink_set_caps: unsafe extern "C" fn(*mut GstElement, *const GstCaps),
 
-    // libgobject-2.0.so.0  — variadic, we call with specific signatures
+    // libgobject-2.0.so.0  — variadic, we load it once and cast to different signatures
     pub g_object_set_string:
         unsafe extern "C" fn(*mut GObject, *const c_char, *const c_char, *const c_void),
     pub g_object_set_int:
@@ -153,7 +136,6 @@ impl LibGStreamer {
 
         Some(LibGStreamer {
             gst_init: gst.get_symbol("gst_init").ok()?,
-            gst_parse_launch: gst.get_symbol("gst_parse_launch").ok()?,
             gst_element_factory_make: gst.get_symbol("gst_element_factory_make").ok()?,
             gst_element_set_state: gst.get_symbol("gst_element_set_state").ok()?,
             gst_element_get_state: gst.get_symbol("gst_element_get_state").ok()?,
@@ -161,17 +143,9 @@ impl LibGStreamer {
             gst_element_query_duration: gst.get_symbol("gst_element_query_duration").ok()?,
             gst_element_seek_simple: gst.get_symbol("gst_element_seek_simple").ok()?,
             gst_element_get_bus: gst.get_symbol("gst_element_get_bus").ok()?,
-            gst_element_get_static_pad: gst.get_symbol("gst_element_get_static_pad").ok()?,
-            gst_element_add_pad: gst.get_symbol("gst_element_add_pad").ok()?,
-            gst_element_link_filtered: gst.get_symbol("gst_element_link_filtered").ok()?,
             gst_bus_pop_filtered: gst.get_symbol("gst_bus_pop_filtered").ok()?,
             gst_message_parse_error: gst.get_symbol("gst_message_parse_error").ok()?,
             gst_object_unref: gst.get_symbol("gst_object_unref").ok()?,
-            gst_bin_new: gst.get_symbol("gst_bin_new").ok()?,
-            gst_bin_add: gst.get_symbol("gst_bin_add").ok()?,
-            gst_bin_get_by_name: gst.get_symbol("gst_bin_get_by_name").ok()?,
-            gst_ghost_pad_new: gst.get_symbol("gst_ghost_pad_new").ok()?,
-            gst_pad_set_active: gst.get_symbol("gst_pad_set_active").ok()?,
             gst_sample_get_buffer: gst.get_symbol("gst_sample_get_buffer").ok()?,
             gst_sample_get_caps: gst.get_symbol("gst_sample_get_caps").ok()?,
             gst_buffer_map: gst.get_symbol("gst_buffer_map").ok()?,
