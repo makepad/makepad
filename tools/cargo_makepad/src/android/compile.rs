@@ -1015,6 +1015,7 @@ pub fn build(
     let build_crate = get_build_crate_from_args(args)?;
     let binary_name = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
     let underscore_binary_name = binary_name.replace('-', "_");
+    let underscore_build_crate = build_crate.replace('-', "_");
 
     let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_binary_name}"));
     let app_label = app_label.unwrap_or_else(|| underscore_binary_name.clone());
@@ -1038,7 +1039,7 @@ pub fn build(
     let build_dir = add_rust_library(
         sdk_dir,
         host_os,
-        &underscore_binary_name,
+        &underscore_build_crate,
         &build_paths,
         android_targets,
         args,
