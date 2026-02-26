@@ -2455,13 +2455,26 @@ pub struct EglRenderBridge {
 }
 
 impl EglRenderBridge {
-    pub fn new(opengl_cx: &crate::os::linux::opengl_cx::OpenglCx) -> Self {
+    pub fn new(
+        egl_display: crate::egl_sys::EGLDisplay,
+        egl_config: crate::egl_sys::EGLConfig,
+        egl_context: crate::egl_sys::EGLContext,
+        egl_get_proc_address: unsafe extern "C" fn(
+            *const std::ffi::c_char,
+        ) -> *mut std::ffi::c_void,
+        egl_make_current: unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+        ) -> u32,
+    ) -> Self {
         Self {
-            egl_display: opengl_cx.egl_display,
-            egl_config: opengl_cx.egl_config,
-            egl_context: opengl_cx.egl_context,
-            egl_get_proc_address: opengl_cx.libegl.eglGetProcAddress.unwrap(),
-            egl_make_current: opengl_cx.libegl.eglMakeCurrent.unwrap(),
+            egl_display,
+            egl_config,
+            egl_context,
+            egl_get_proc_address,
+            egl_make_current,
         }
     }
 
