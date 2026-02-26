@@ -27,5 +27,7 @@ pub mod tab_slidesview;
 pub mod tab_spinner;
 pub mod tab_textinput;
 pub mod tab_video;
+pub mod tab_adaptiveview;
+pub mod tab_stacknavigation;
 pub mod tab_view;
 pub mod tab_widgetsoverview;
