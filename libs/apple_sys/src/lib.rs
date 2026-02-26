@@ -1,6 +1,6 @@
 // stripped mac core foundation + core audio + metal layer only whats needed
 
-#![cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#![cfg(any(target_os = "macos", target_os = "ios"))]
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
@@ -1430,17 +1430,17 @@ extern "C" {
 }
 
 // IOSurface framework for cross-process texture sharing
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type IOSurfaceRef = *mut c_void;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type IOSurfaceID = u32;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type mach_port_t = u32;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const MACH_PORT_NULL: mach_port_t = 0;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[link(name = "IOSurface", kind = "framework")]
 extern "C" {
     pub fn IOSurfaceCreate(properties: ObjcId) -> IOSurfaceRef;
@@ -1454,34 +1454,38 @@ extern "C" {
     pub fn IOSurfaceDecrementUseCount(surface: IOSurfaceRef);
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     pub fn CFRelease(cf: *const c_void);
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type SSLContextRef = *mut c_void;
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type SSLConnectionRef = *mut c_void;
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type SSLProtocolSide = u32;
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type SSLConnectionType = u32;
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const kSSLClientSide: SSLProtocolSide = 1;
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const kSSLStreamType: SSLConnectionType = 0;
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const errSSLWouldBlock: OSStatus = -9803;
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const errSSLClosedGraceful: OSStatus = -9805;
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const errSSLClosedAbort: OSStatus = -9806;
-
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub const errSSLServerAuthCompleted: OSStatus = -9841;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub const kSSLSessionOptionBreakOnServerAuth: i32 = 0;
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type SSLReadFunc = Option<
     unsafe extern "C" fn(
         connection: SSLConnectionRef,
@@ -1489,7 +1493,7 @@ pub type SSLReadFunc = Option<
         data_len: *mut usize,
     ) -> OSStatus,
 >;
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type SSLWriteFunc = Option<
     unsafe extern "C" fn(
         connection: SSLConnectionRef,
@@ -1498,7 +1502,7 @@ pub type SSLWriteFunc = Option<
     ) -> OSStatus,
 >;
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[link(name = "Security", kind = "framework")]
 extern "C" {
     pub fn SSLCreateContext(
@@ -1517,7 +1521,7 @@ extern "C" {
         peer_name: *const c_void,
         peer_name_len: usize,
     ) -> OSStatus;
-    pub fn SSLSetEnableCertVerify(context: SSLContextRef, enable: bool) -> OSStatus;
+    pub fn SSLSetSessionOption(context: SSLContextRef, option: i32, value: bool) -> OSStatus;
     pub fn SSLHandshake(context: SSLContextRef) -> OSStatus;
     pub fn SSLRead(
         context: SSLContextRef,

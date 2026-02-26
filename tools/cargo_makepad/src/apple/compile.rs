@@ -3,7 +3,7 @@ use crate::makepad_shell::*;
 use crate::utils::*;
 use std::path::{Path, PathBuf};
 
-const IOS_DEPLOYMENT_TARGET: &str = "26.0";
+const IOS_DEPLOYMENT_TARGET: &str = "17.0";
 
 pub struct PlistValues {
     identifier: String,
@@ -250,7 +250,7 @@ impl PlistValues {
                 <key>LSRequiresIPhoneOS</key>
                 <true/>
                 <key>MinimumOSVersion</key>
-                <string>26.0</string>
+                <string>17.0</string>
                 <key>UIApplicationSupportsIndirectInputEvents</key>
                 <true/>
                 <key>UIDeviceFamily</key>
