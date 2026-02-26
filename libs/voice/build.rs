@@ -8,7 +8,7 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let host = env::var("HOST").unwrap_or_default();
     let is_apple_host = host.contains("apple-darwin");
-    let force_whisper = env::var("MAKEPAD")
+    let mut force_whisper = env::var("MAKEPAD")
         .ok()
         .is_some_and(|configs| configs.split(['+', ',']).any(|config| config == "whisper"));
 
@@ -17,19 +17,22 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_VOICE_METAL_PRECOMPILE");
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
     println!("cargo:rerun-if-env-changed=IPHONESIMULATOR_DEPLOYMENT_TARGET");
-    if force_whisper {
-        println!("cargo:rustc-cfg=force_whisper");
-    }
 
     if target_os == "macos" {
         build_whisper_metallib();
     }
 
-    if force_whisper || !is_apple_host {
-        return;
+    if !force_whisper && is_apple_host && (target_os == "macos" || target_os == "ios") {
+        if !build_speech_bridge(&target_os) {
+            force_whisper = true;
+            println!(
+                "cargo:warning=swift speech bridge unavailable; building makepad-voice with Whisper fallback"
+            );
+        }
     }
-    if target_os == "macos" || target_os == "ios" {
-        build_speech_bridge(&target_os);
+
+    if force_whisper {
+        println!("cargo:rustc-cfg=force_whisper");
     }
 }
 
@@ -121,7 +124,7 @@ fn build_whisper_metallib() {
     );
 }
 
-fn build_speech_bridge(target_os: &str) {
+fn build_speech_bridge(target_os: &str) -> bool {
     let out_dir = env::var("OUT_DIR").unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let swift_src = format!("{}/swift/speech_bridge.swift", manifest_dir);
@@ -153,13 +156,17 @@ fn build_speech_bridge(target_os: &str) {
     swift_args.push(output_lib.clone());
     swift_args.push(swift_src);
 
-    let status = Command::new("swiftc")
-        .args(swift_args)
-        .status()
-        .expect("failed to run swiftc — is Xcode command line tools installed?");
+    let status = match Command::new("swiftc").args(swift_args).status() {
+        Ok(status) => status,
+        Err(err) => {
+            println!("cargo:warning=failed to run swiftc for speech bridge: {}", err);
+            return false;
+        }
+    };
 
     if !status.success() {
-        panic!("swiftc compilation failed");
+        println!("cargo:warning=swiftc compilation failed for speech bridge");
+        return false;
     }
 
     // Fix the @rpath issue with libswift_Concurrency.dylib BEFORE emitting any
@@ -209,10 +216,13 @@ fn build_speech_bridge(target_os: &str) {
     println!("cargo:rustc-link-lib=framework=CoreMedia");
 
     // Add Swift runtime library search paths so the linker can resolve symbols.
-    let target_info = Command::new("swiftc")
-        .args(&["-print-target-info"])
-        .output()
-        .expect("failed to get swift target info");
+    let target_info = match Command::new("swiftc").args(["-print-target-info"]).output() {
+        Ok(output) => output,
+        Err(err) => {
+            println!("cargo:warning=failed to get swift target info: {}", err);
+            return true;
+        }
+    };
 
     if target_info.status.success() {
         let info_str = String::from_utf8_lossy(&target_info.stdout);
@@ -223,6 +233,8 @@ fn build_speech_bridge(target_os: &str) {
             }
         }
     }
+
+    true
 }
 
 fn ios_swift_target_and_sdk() -> Option<(String, String)> {
