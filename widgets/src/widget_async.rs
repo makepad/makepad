@@ -157,13 +157,7 @@ pub(crate) fn update_global_ui_handle(cx: &mut Cx, root_uid: WidgetUid) {
     cx.global::<CxWidgetAsync>().global_ui_root_uid = root_uid;
     cx.with_vm(|vm| {
         let ui_handle = vm.build_ui_handle_for_uid(root_uid);
-        let scope_objects: Vec<ScriptObject> = {
-            let bodies = vm.bx.code.bodies.borrow();
-            bodies.iter().map(|body| body.scope.as_object()).collect()
-        };
-        for scope_obj in &scope_objects {
-            force_set_map_value(&mut vm.bx.heap, *scope_obj, id!(ui), ui_handle);
-        }
+        vm.set_injected_global(id!(ui), ui_handle);
     });
 }
 
