@@ -277,13 +277,14 @@ script_mod! {
                     height: Fit
                     padding: 15
                     draw_bg +: {
-                        color: uniform(#2a5)
-                        radius: uniform(8.0)
+                        color: #2a5
+                        radius: 8.0
                     }
-                    flow: Down spacing: 8
+                    flow: Down
+                    spacing: 8
 
                     Label{text: "Success!" draw_text.color: #fff draw_text.text_style.font_size: 12}
-                    Label{text: "Your changes have been saved successfully." draw_text.color: #dfd draw_text.text_style.font_size: 10}
+                    Label{width: Fill, text: "Your changes have been saved successfully." draw_text.color: #dfd draw_text.text_style.font_size: 10 draw_text.flow: Flow.Right {wrap: true} }
                 }
             }
         }
@@ -1636,6 +1637,10 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(show_popup_btn)).clicked(actions) {
             log!("Showing popup notification");
             self.ui.popup_notification(cx, ids!(popup_notif)).open(cx);
+        }
+        if self.ui.button(cx, ids!(hide_popup_btn)).clicked(actions) {
+            log!("Hiding popup notification");
+            self.ui.popup_notification(cx, ids!(popup_notif)).close(cx);
         }
 
         if let Some(value) = self.ui.check_box(cx, ids!(checkbox)).changed(actions) {
