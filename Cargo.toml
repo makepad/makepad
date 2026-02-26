@@ -34,6 +34,8 @@ workspace.members = [
     "widgets/test",
     "studio",
     "studio/ai",
+    "studio2/backend",
+    "studio2/desktop",
     "tools/cargo_makepad",
     "libs/terminal_core",
     "libs/git",

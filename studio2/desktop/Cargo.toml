@@ -1,0 +1,11 @@
+[package]
+name = "makepad-studio-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Studio2 desktop frontend"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-code-editor = { path = "../../code_editor", version = "2.0.0" }
+makepad-studio-backend = { path = "../backend", version = "0.1.0" }
