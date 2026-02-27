@@ -31,6 +31,8 @@ pub struct GlRenderBridge {
     pub(crate) inner: crate::os::windows::angle::AngleRenderBridge,
     #[cfg(target_os = "macos")]
     pub(crate) inner: crate::os::apple::metal::CglRenderBridge,
+    #[cfg(target_os = "ios")]
+    pub(crate) inner: crate::os::apple::metal::EaglRenderBridge,
 }
 
 impl GlRenderBridge {
@@ -250,5 +252,50 @@ impl Cx {
     }
 
     /// Restore makepad's own rendering context. No-op on Windows (ANGLE and D3D11 are independent).
+    pub fn restore_gl_context(&mut self) {}
+}
+
+// EAGL platform accessors (iOS)
+#[cfg(target_os = "ios")]
+impl GlRenderBridge {
+    pub fn eagl_context(&self) -> *mut c_void {
+        self.inner.eagl_context as *mut c_void
+    }
+
+    pub fn opengles_framework(&self) -> *mut c_void {
+        self.inner.opengles_framework
+    }
+}
+
+// Cx methods: iOS
+#[cfg(target_os = "ios")]
+impl Cx {
+    /// Create a GL rendering bridge with a standalone EAGL context (GLES 3.0).
+    pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {
+        GlRenderBridge {
+            inner: crate::os::apple::metal::EaglRenderBridge::new(),
+        }
+    }
+
+    /// Create a texture renderable via GL (EAGL) and displayable by makepad (Metal).
+    /// Returns (Texture handle, GL texture ID for rendering into).
+    pub fn create_gl_render_bridge_texture(
+        &mut self,
+        bridge: &GlRenderBridge,
+        width: usize,
+        height: usize,
+    ) -> (Texture, u32) {
+        bridge.inner.make_current();
+        let (texture, iosurface_ref, _iosurface_id) =
+            self.create_iosurface_render_texture(width, height);
+        let gl_texture_id = bridge.inner.bind_iosurface_to_gl_texture(
+            iosurface_ref,
+            width,
+            height,
+        );
+        (texture, gl_texture_id)
+    }
+
+    /// Restore makepad's own rendering context. No-op on iOS (EAGL and Metal are independent).
     pub fn restore_gl_context(&mut self) {}
 }

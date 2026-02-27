@@ -4,7 +4,7 @@ use {
         event::*,
         makepad_math::*,
         os::{
-            apple::{apple_sys::*, apple_util::*},
+            apple::apple_sys::*,
             cx_native::EventFlow,
             ios::{ios_delegates::*, ios_event::*, ios_text_input::*},
         },
@@ -432,6 +432,10 @@ impl IosApp {
             window_id: CxWindowPool::id_zero(),
             uid,
         }));
+    }
+
+    pub fn metal_device(&self) -> ObjcId {
+        self.metal_device
     }
 
     pub fn time_now(&self) -> f64 {

@@ -54,8 +54,9 @@ fn show_help() {
     println!(
         "    apple list                                   Lists all certificates/profiles/devices"
     );
-    println!("    apple <ios|tvos> [options] run-sim <cargo args>      Runs the project on the aarch64 simulator");
-    println!("    apple <ios|tvos> [options] run-device <cargo args>   Runs the project on a real device");
+    println!("    apple <ios|tvos> [options] build <cargo args>        Builds the project for the simulator");
+    println!("    apple <ios|tvos> [options] run-sim <cargo args>      Builds and runs on the aarch64 simulator");
+    println!("    apple <ios|tvos> [options] run-device <cargo args>   Builds and runs on a real device");
     println!(" * Note: in order for Makepad to be able to install an ios application on a real device, a provisioning");
     println!("   profile is needed. To create one, make an empty application in xcode and give it an organisation");
     println!("   name and a product name. Then, copy those exactly (without spaces/odd characters) into the below '--org' and '--app' options");

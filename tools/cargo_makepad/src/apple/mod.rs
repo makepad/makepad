@@ -1,6 +1,7 @@
 mod compile;
 mod sdk;
 use compile::*;
+use crate::utils::{get_build_crate_from_args, get_package_binary_name};
 
 #[allow(dead_code)]
 #[allow(non_camel_case_types)]
@@ -116,6 +117,26 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
                 AppleTarget::device_target(apple_os),
             ];
             sdk::rustup_toolchain_install(&toolchains)
+        }
+        "build" => {
+            let build_crate = get_build_crate_from_args(&args[1..])?;
+            let default_app = get_package_binary_name(build_crate)
+                .unwrap_or_else(|| build_crate.to_string());
+            let apple_target = AppleTarget::sim_target(apple_os);
+            let result = compile::build(
+                stable,
+                &org.unwrap_or("orgname".to_string()),
+                &app.unwrap_or(default_app),
+                &args[1..],
+                apple_target,
+            )?;
+            compile::copy_resources(
+                &result.app_dir,
+                build_crate,
+                &result.build_dir,
+                apple_target,
+            )?;
+            Ok(())
         }
         "run-device" => {
             compile::run_on_device(
