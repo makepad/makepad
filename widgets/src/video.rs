@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     image_cache::ImageCacheImpl,
     makepad_derive_widget::*,
     makepad_draw::*,

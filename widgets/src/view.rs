@@ -394,6 +394,12 @@ impl ViewRef {
         }
     }
 
+    pub fn animator_play_with(&self, cx: &mut Cx, state: &[LiveId; 2], play: Play) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.animator_play_with(cx, state, play);
+        }
+    }
+
     pub fn toggle_state(
         &self,
         cx: &mut Cx,
@@ -472,6 +478,12 @@ impl ViewSet {
     pub fn animator_play(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
             item.animator_play(cx, state);
+        }
+    }
+
+    pub fn animator_play_with(&self, cx: &mut Cx, state: &[LiveId; 2], play: Play) {
+        for item in self.iter() {
+            item.animator_play_with(cx, state, play);
         }
     }
 

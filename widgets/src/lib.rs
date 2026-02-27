@@ -131,7 +131,7 @@ pub mod chart;
 
 pub use crate::{
     adaptive_view::*,
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     // loading_spinner - no public exports
     bare_step::*,
     button::*,

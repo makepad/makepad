@@ -42,10 +42,10 @@ pub fn derive_animator_impl(input: TokenStream) -> TokenStream {
                 .stream(where_clause.clone())
                 .add("{");
 
-            tb.add("    fn animator_play_scoped(&mut self, cx: &mut Cx, state: &[LiveId;2], scope:&mut Scope) {");
+            tb.add("    fn animator_play_scoped(&mut self, cx: &mut Cx, state: &[LiveId;2], play: Option<Play>, scope:&mut Scope) {");
             tb.add("        if let Some(value) = self.")
                 .ident(&animator_field.name)
-                .add(".play(cx, state){");
+                .add(".play(cx, state, play){");
             tb.add("            cx.with_vm(|vm| self.script_apply(vm, &Apply::Animate, scope, value));");
             tb.add("        }");
             tb.add("    }");
