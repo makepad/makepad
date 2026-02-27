@@ -42,6 +42,7 @@ pub mod permission;
 pub mod studio;
 mod texture;
 mod window;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod app_icon;
 
 pub mod web_socket;
