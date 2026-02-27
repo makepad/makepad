@@ -35,6 +35,35 @@ pub fn try_with_ios_app<R>(
         .flatten()
 }
 
+pub fn define_makepad_view_controller() -> *const Class {
+    let superclass = class!(UIViewController);
+    let mut decl = ClassDecl::new("MakepadViewController", superclass).unwrap();
+
+    decl.add_ivar::<BOOL>("_prefersStatusBarHidden");
+    decl.add_ivar::<BOOL>("_prefersHomeIndicatorAutoHidden");
+
+    extern "C" fn prefers_status_bar_hidden(this: &Object, _: Sel) -> BOOL {
+        unsafe { *this.get_ivar("_prefersStatusBarHidden") }
+    }
+
+    extern "C" fn prefers_home_indicator_auto_hidden(this: &Object, _: Sel) -> BOOL {
+        unsafe { *this.get_ivar("_prefersHomeIndicatorAutoHidden") }
+    }
+
+    unsafe {
+        decl.add_method(
+            sel!(prefersStatusBarHidden),
+            prefers_status_bar_hidden as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(prefersHomeIndicatorAutoHidden),
+            prefers_home_indicator_auto_hidden as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+    }
+
+    decl.register()
+}
+
 pub fn define_ios_app_delegate() -> *const Class {
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("NSAppDelegate", superclass).unwrap();

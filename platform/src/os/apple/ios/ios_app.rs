@@ -83,6 +83,7 @@ pub struct IosTimer {
 
 pub struct IosClasses {
     pub app_delegate: *const Class,
+    pub view_controller: *const Class,
     pub mtk_view: *const Class,
     pub mtk_view_delegate: *const Class,
     pub gesture_recognizer_handler: *const Class,
@@ -98,6 +99,7 @@ impl IosClasses {
     pub fn new() -> Self {
         Self {
             app_delegate: define_ios_app_delegate(),
+            view_controller: define_makepad_view_controller(),
             mtk_view: define_mtk_view(),
             mtk_view_delegate: define_mtk_view_delegate(),
             gesture_recognizer_handler: define_gesture_recognizer_handler(),
@@ -150,6 +152,8 @@ pub struct IosApp {
     keyboard_observer_delegate: Option<ObjcId>,
     /// Cached keyboard config to avoid redundant reloadInputViews calls
     last_keyboard_config: Option<crate::ime::TextInputConfig>,
+    /// Root view controller for status bar / home indicator control
+    pub view_controller: Option<ObjcId>,
 }
 
 impl IosApp {
@@ -181,6 +185,7 @@ impl IosApp {
                 edit_menu_interaction: None,
                 keyboard_observer_delegate: None,
                 last_keyboard_config: None,
+                view_controller: None,
             }
         }
     }
@@ -219,8 +224,10 @@ impl IosApp {
             let () = msg_send!(gesture_recognizer_obj, setCancelsTouchesInView: NO);
             let () = msg_send![mtk_view_obj, addGestureRecognizer: gesture_recognizer_obj];
 
-            let view_ctrl_obj: ObjcId = msg_send![class!(UIViewController), alloc];
+            let view_ctrl_obj: ObjcId = msg_send![get_ios_class_global().view_controller, alloc];
             let view_ctrl_obj: ObjcId = msg_send![view_ctrl_obj, init];
+            (*view_ctrl_obj).set_ivar::<BOOL>("_prefersStatusBarHidden", NO);
+            (*view_ctrl_obj).set_ivar::<BOOL>("_prefersHomeIndicatorAutoHidden", NO);
 
             let () = msg_send![view_ctrl_obj, setView: mtk_view_obj];
 
@@ -284,22 +291,27 @@ impl IosApp {
             let () = msg_send![window_obj, addSubview: mtk_view_obj];
 
             let () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
+            self.view_controller = Some(view_ctrl_obj);
             let () = msg_send![window_obj, makeKeyAndVisible];
 
-            // Initialize UIEditMenuInteraction for clipboard actions
-            // Store MTKView reference in the delegate for accessing menu rect
-            (*self.edit_menu_delegate_instance).set_ivar("mtk_view", mtk_view_obj as *mut c_void);
+            // Initialize UIEditMenuInteraction for clipboard actions (iOS 16+)
+            let edit_menu_cls: ObjcId = makepad_objc_sys::runtime::objc_getClass(b"UIEditMenuInteraction\0".as_ptr() as *const _) as ObjcId;
+            if !edit_menu_cls.is_null() {
+                // Store MTKView reference in the delegate for accessing menu rect
+                (*self.edit_menu_delegate_instance).set_ivar("mtk_view", mtk_view_obj as *mut c_void);
 
-            // Create UIEditMenuInteraction with our delegate
-            let edit_menu_interaction: ObjcId = msg_send![class!(UIEditMenuInteraction), alloc];
-            let edit_menu_interaction: ObjcId = msg_send![edit_menu_interaction, initWithDelegate: self.edit_menu_delegate_instance];
+                // Create UIEditMenuInteraction with our delegate
+                let edit_menu_interaction: ObjcId = msg_send![edit_menu_cls, alloc];
+                let edit_menu_interaction: ObjcId = msg_send![edit_menu_interaction, initWithDelegate: self.edit_menu_delegate_instance];
 
-            // Add the interaction to the MTKView
-            let () = msg_send![mtk_view_obj, addInteraction: edit_menu_interaction];
+                // Add the interaction to the MTKView
+                let () = msg_send![mtk_view_obj, addInteraction: edit_menu_interaction];
+
+                self.edit_menu_interaction = Some(edit_menu_interaction);
+            }
 
             self.text_input_view = Some(text_input_view);
             self.mtk_view = Some(mtk_view_obj);
-            self.edit_menu_interaction = Some(edit_menu_interaction);
         }
     }
 
@@ -761,6 +773,18 @@ impl IosApp {
         IosApp::do_callback(IosEvent::Paint);
     }
 
+    pub fn set_fullscreen(&mut self, fullscreen: bool) {
+        if let Some(vc) = self.view_controller {
+            unsafe {
+                let val = if fullscreen { YES } else { NO };
+                (*vc).set_ivar::<BOOL>("_prefersStatusBarHidden", val);
+                (*vc).set_ivar::<BOOL>("_prefersHomeIndicatorAutoHidden", val);
+                let () = msg_send![vc, setNeedsStatusBarAppearanceUpdate];
+                let () = msg_send![vc, setNeedsUpdateOfHomeIndicatorAutoHidden];
+            }
+        }
+    }
+
     pub fn copy_to_clipboard(&self, content: &str) {
         unsafe {
             let nsstring = str_to_nsstring(content);
@@ -788,11 +812,7 @@ impl IosApp {
             .try_with(|app| {
                 if let Ok(app_ref) = app.try_borrow_mut() {
                     if let Some(ref app) = *app_ref {
-                        if let (Some(mtk_view), Some(edit_menu_interaction)) =
-                            (app.mtk_view, app.edit_menu_interaction)
-                        {
-                            return Some((mtk_view, edit_menu_interaction));
-                        }
+                        return Some((app.mtk_view, app.edit_menu_interaction));
                     }
                 }
                 None
@@ -800,7 +820,7 @@ impl IosApp {
             .ok()
             .flatten();
 
-        let Some((mtk_view, edit_menu_interaction)) = views else {
+        let Some((Some(mtk_view), edit_menu_interaction)) = views else {
             return;
         };
 
@@ -815,30 +835,39 @@ impl IosApp {
             (*mtk_view).set_ivar::<f64>("menu_rect_width", rect.size.x.max(1.0));
             (*mtk_view).set_ivar::<f64>("menu_rect_height", rect.size.y.max(1.0));
 
-            // Create configuration with source point at center of the rect
-            let source_point = NSPoint {
-                x: rect.pos.x + rect.size.x / 2.0,
-                y: rect.pos.y + rect.size.y / 2.0,
-            };
-            let config: ObjcId = msg_send![
-                class!(UIEditMenuConfiguration),
-                configurationWithIdentifier: nil
-                sourcePoint: source_point
-            ];
-
-            // Present the edit menu - this may trigger keyboard notifications,
-            // but now we're not holding any borrow so it's safe
-            let () = msg_send![edit_menu_interaction, presentEditMenuWithConfiguration: config];
+            if let Some(edit_menu_interaction) = edit_menu_interaction {
+                // iOS 16+: UIEditMenuInteraction
+                let source_point = NSPoint {
+                    x: rect.pos.x + rect.size.x / 2.0,
+                    y: rect.pos.y + rect.size.y / 2.0,
+                };
+                let config: ObjcId = msg_send![
+                    class!(UIEditMenuConfiguration),
+                    configurationWithIdentifier: nil
+                    sourcePoint: source_point
+                ];
+                let () = msg_send![edit_menu_interaction, presentEditMenuWithConfiguration: config];
+            } else {
+                // iOS 15: UIMenuController fallback
+                let menu_controller: ObjcId = msg_send![class!(UIMenuController), sharedMenuController];
+                let target_rect = NSRect {
+                    origin: NSPoint { x: rect.pos.x, y: rect.pos.y },
+                    size: NSSize { width: rect.size.x.max(1.0), height: rect.size.y.max(1.0) },
+                };
+                let () = msg_send![mtk_view, becomeFirstResponder];
+                let () = msg_send![menu_controller, setTargetRect: target_rect inView: mtk_view];
+                let () = msg_send![menu_controller, setMenuVisible: YES animated: YES];
+            }
         }
     }
 
     pub fn hide_clipboard_actions() {
         // Extract what we need first, then do ObjC calls after borrow ends
-        let interaction = IOS_APP
+        let state = IOS_APP
             .try_with(|app| {
                 if let Ok(app_ref) = app.try_borrow_mut() {
                     if let Some(ref app) = *app_ref {
-                        return app.edit_menu_interaction;
+                        return Some(app.edit_menu_interaction);
                     }
                 }
                 None
@@ -846,9 +875,18 @@ impl IosApp {
             .ok()
             .flatten();
 
-        if let Some(edit_menu_interaction) = interaction {
-            unsafe {
+        let Some(edit_menu_interaction) = state else {
+            return;
+        };
+
+        unsafe {
+            if let Some(edit_menu_interaction) = edit_menu_interaction {
+                // iOS 16+
                 let () = msg_send![edit_menu_interaction, dismissMenu];
+            } else {
+                // iOS 15: UIMenuController fallback
+                let menu_controller: ObjcId = msg_send![class!(UIMenuController), sharedMenuController];
+                let () = msg_send![menu_controller, setMenuVisible: NO animated: YES];
             }
         }
     }

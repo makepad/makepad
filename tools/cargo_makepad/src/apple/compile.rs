@@ -3,7 +3,7 @@ use crate::makepad_shell::*;
 use crate::utils::*;
 use std::path::{Path, PathBuf};
 
-const IOS_DEPLOYMENT_TARGET: &str = "17.0";
+const IOS_DEPLOYMENT_TARGET: &str = "15.0";
 
 /// Resolve the cargo target directory for apple builds.
 /// Defaults to `target/apple` to avoid invalidating desktop build caches.
@@ -157,6 +157,26 @@ pub fn parse_profiles() -> Result<ParsedProfiles, String> {
         }
     }
 
+    // Also discover devices via ios-deploy for older iOS versions (< 17)
+    if let Ok(ios_deploy_list) = shell_env_cap(&[], &cwd, "ios-deploy", &["-c", "--timeout", "3", "--no-wifi"]) {
+        for line in ios_deploy_list.split('\n') {
+            if let Some(idx) = line.find("Found ") {
+                let rest = &line[idx + "Found ".len()..];
+                if let Some(end) = rest.find(' ') {
+                    let udid = rest[..end].to_string();
+                    // Don't add if already present (devicectl UUID format differs from UDID)
+                    if !devices.iter().any(|(_, id)| id == &udid) {
+                        let name = line.split("a.k.a. '").nth(1)
+                            .and_then(|s| s.split('\'').next())
+                            .unwrap_or("iOS Device")
+                            .to_string();
+                        devices.push((name, udid));
+                    }
+                }
+            }
+        }
+    }
+
     Ok(ParsedProfiles {
         profiles,
         certs,
@@ -235,6 +255,8 @@ impl PlistValues {
                 <string>{version}</string>
                 <key>CFBundleShortVersionString</key>
                 <string>{version}</string>
+                <key>CFBundleIconName</key>
+                <string>AppIcon</string>
                 <key>UILaunchStoryboardName</key>
                 <string></string>
                 <key>CFBundleSupportedPlatforms</key>
@@ -265,7 +287,7 @@ impl PlistValues {
                 <key>LSRequiresIPhoneOS</key>
                 <true/>
                 <key>MinimumOSVersion</key>
-                <string>17.0</string>
+                <string>15.0</string>
                 <key>UIApplicationSupportsIndirectInputEvents</key>
                 <true/>
                 <key>UIDeviceFamily</key>
@@ -349,7 +371,7 @@ impl PlistValues {
             <key>DTPlatformName</key>
             <string>appletvos</string>
             <key>DTPlatformVersion</key>
-            <string>17.0</string>
+            <string>15.0</string>
             <key>DTSDKBuild</key>
             <string>21J351</string>
             <key>DTSDKName</key>
@@ -361,7 +383,7 @@ impl PlistValues {
             <key>LSRequiresIPhoneOS</key>
             <true/>
             <key>MinimumOSVersion</key>
-            <string>17.0</string>
+            <string>15.0</string>
             <key>UIDeviceFamily</key>
             <array>
             <integer>3</integer>
@@ -413,6 +435,82 @@ impl Scent {
             self.app_id, self.team_id
         )
     }
+}
+
+/// Generate and compile an Asset Catalog with AppIcon from the crate's
+/// `resources/` directory.  Requires a 1024×1024 PNG at minimum
+/// (`icon_1024.png`).  Smaller sizes are optional; iOS will scale down
+/// from the largest available.
+fn generate_app_icon_xcassets(app_dir: &Path, build_crate: &str) -> Result<bool, String> {
+    let crate_dir = get_crate_dir(build_crate)?;
+    let res = crate_dir.join("resources");
+    let icon_1024 = res.join("icon_1024.png");
+    if !icon_1024.is_file() {
+        return Ok(false);
+    }
+
+    // Build Assets.xcassets/AppIcon.appiconset/
+    let xcassets = app_dir.join("Assets.xcassets");
+    let appiconset = xcassets.join("AppIcon.appiconset");
+    mkdir(&appiconset)?;
+
+    // Copy available icon PNGs
+    let sizes: &[(&str, &str)] = &[
+        ("icon_1024.png", "icon_1024.png"),
+    ];
+    for (src_name, dst_name) in sizes {
+        let src = res.join(src_name);
+        if src.is_file() {
+            cp(&src, &appiconset.join(dst_name), false)?;
+        }
+    }
+
+    // Contents.json — iOS 12+ only needs a single 1024×1024 icon
+    let contents_json = r#"{
+  "images": [
+    {
+      "filename": "icon_1024.png",
+      "idiom": "universal",
+      "platform": "ios",
+      "size": "1024x1024"
+    }
+  ],
+  "info": {
+    "author": "cargo-makepad",
+    "version": 1
+  }
+}"#;
+    write_text(&appiconset.join("Contents.json"), contents_json)?;
+
+    // Root Contents.json for Assets.xcassets
+    write_text(
+        &xcassets.join("Contents.json"),
+        r#"{"info":{"author":"cargo-makepad","version":1}}"#,
+    )?;
+
+    // Compile with actool
+    let cwd = std::env::current_dir().unwrap();
+    shell_env_cap(
+        &[],
+        &cwd,
+        "xcrun",
+        &[
+            "actool",
+            &xcassets.to_string_lossy(),
+            "--compile",
+            &app_dir.to_string_lossy(),
+            "--platform",
+            "iphoneos",
+            "--minimum-deployment-target",
+            IOS_DEPLOYMENT_TARGET,
+            "--app-icon",
+            "AppIcon",
+            "--output-partial-info-plist",
+            &app_dir.join("actool-Info.plist").to_string_lossy(),
+        ],
+    )?;
+
+    Ok(true)
 }
 
 pub struct IosBuildResult {
@@ -486,6 +584,18 @@ pub fn build(
 
     let plist_file = app_dir.join("Info.plist");
     write_text(&plist_file, &plist.to_plist_file(apple_target.os()))?;
+
+    if matches!(apple_target.os(), AppleOs::Ios) {
+        match generate_app_icon_xcassets(&app_dir, build_crate) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("warning: no icon_1024.png in resources/. iOS app will use default icon.");
+            }
+            Err(e) => {
+                eprintln!("warning: failed to compile app icon asset catalog: {e}");
+            }
+        }
+    }
 
     let build_dir = target_dir.join(format!("{}/{profile}/", apple_target.toolchain()));
     let src_bin = target_dir.join(format!(
@@ -903,7 +1013,9 @@ pub fn run_on_device(
         let device_identifier = parsed
             .device(device_identifier)
             .expect("cannot find signing device");
-        let answer = shell_env_cap(
+
+        // Try devicectl first, fall back to ios-deploy for older iOS (< 17)
+        let devicectl_result = shell_env_cap(
             &[],
             &cwd,
             "xcrun",
@@ -916,33 +1028,64 @@ pub fn run_on_device(
                 device_identifier,
                 &app_dir,
             ],
-        )?;
-        // Parse the bundleID from the installation output and launch the app
-        let mut bundle_id = None;
-        for line in answer.split("\n") {
-            if let Some(idx) = line.find("bundleID:") {
-                bundle_id = Some(line[idx + "bundleID:".len()..].trim().to_string());
-                break;
-            }
-        }
+        );
 
-        if let Some(bundle_id) = bundle_id {
-            shell_env(
-                &[],
-                &cwd,
-                "xcrun",
-                &[
-                    "devicectl",
-                    "device",
-                    "process",
-                    "launch",
-                    "--device",
-                    device_identifier,
-                    &bundle_id,
-                ],
-            )?;
-        } else {
-            return Err(format!("Failed to find bundleID in installation output"));
+        match devicectl_result {
+            Ok(answer) => {
+                // Parse the bundleID from the installation output and launch the app
+                let mut bundle_id = None;
+                for line in answer.split("\n") {
+                    if let Some(idx) = line.find("bundleID:") {
+                        bundle_id = Some(line[idx + "bundleID:".len()..].trim().to_string());
+                        break;
+                    }
+                }
+
+                if let Some(bundle_id) = bundle_id {
+                    shell_env(
+                        &[],
+                        &cwd,
+                        "xcrun",
+                        &[
+                            "devicectl",
+                            "device",
+                            "process",
+                            "launch",
+                            "--device",
+                            device_identifier,
+                            &bundle_id,
+                        ],
+                    )?;
+                } else {
+                    return Err(format!("Failed to find bundleID in installation output"));
+                }
+            }
+            Err(_) => {
+                // devicectl failed (device too old or unavailable), try ios-deploy
+                println!("devicectl failed, falling back to ios-deploy...");
+                // ios-deploy --justlaunch exits non-zero (253) when device debug
+                // symbols are missing, but the app is still installed and launched.
+                // Use shell_env_route to show progress output directly.
+                let result = shell_env_cap(
+                    &[],
+                    &cwd,
+                    "ios-deploy",
+                    &[
+                        "--bundle",
+                        &app_dir,
+                        "--id",
+                        device_identifier,
+                        "--justlaunch",
+                    ],
+                );
+                if let Err(e) = &result {
+                    if !e.contains("Unable to locate DeviceSupport") {
+                        return Err(e.clone());
+                    }
+                    // Missing debug symbols is non-fatal — app was installed and launched
+                    println!("App installed and launched (debug symbols unavailable on this device).");
+                }
+            }
         }
     }
 
