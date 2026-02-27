@@ -8,8 +8,9 @@ use {
             Event, HttpError, HttpProgress, HttpResponse, MouseDownEvent, MouseMoveEvent,
             MouseUpEvent, NetworkResponse, NetworkResponseItem, ScrollEvent, TextClipboardEvent,
             TimerEvent, ToWasmMsgEvent, TouchUpdateEvent, VideoPlaybackCompletedEvent,
-            VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
-            VideoSource, VideoTextureUpdatedEvent, WindowGeom, WindowGeomChangeEvent,
+            VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
+            VideoPlaybackResourcesReleasedEvent, VideoSource, VideoTextureUpdatedEvent, WindowGeom,
+            WindowGeomChangeEvent,
         },
         makepad_live_id::*,
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
@@ -607,10 +608,18 @@ impl Cx {
                             });
                         }
                         VideoSource::InMemory(_) => {
-                            crate::error!("VideoSource::InMemory not supported on web");
+                            let error = "VideoSource::InMemory is not supported on web".to_string();
+                            crate::error!("{}", error);
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
                         }
                         VideoSource::Filesystem(_) => {
-                            crate::error!("VideoSource::Filesystem not supported on web");
+                            let error = "VideoSource::Filesystem is not supported on web".to_string();
+                            crate::error!("{}", error);
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
                         }
                     }
                 }

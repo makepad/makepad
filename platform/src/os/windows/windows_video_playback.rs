@@ -499,6 +499,19 @@ pub struct WindowsVideoPlayer {
 }
 
 impl WindowsVideoPlayer {
+    fn path_to_file_url(path: &str) -> String {
+        if path.starts_with("file://") {
+            return path.to_string();
+        }
+        // IMFMediaEngine::SetSource expects a URL. Normalize Windows paths.
+        let normalized = path.replace('\\', "/");
+        if normalized.starts_with('/') {
+            format!("file://{}", normalized)
+        } else {
+            format!("file:///{}", normalized)
+        }
+    }
+
     pub fn new(
         d3d11_device: &ID3D11Device,
         video_id: LiveId,
@@ -558,7 +571,8 @@ impl WindowsVideoPlayer {
                 (wide, None)
             }
             VideoSource::Filesystem(path) => {
-                let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+                let file_url = Self::path_to_file_url(path);
+                let wide: Vec<u16> = file_url.encode_utf16().chain(std::iter::once(0)).collect();
                 (wide, None)
             }
             VideoSource::InMemory(data) => {
@@ -568,7 +582,8 @@ impl WindowsVideoPlayer {
                     error!("VIDEO: failed to write temp file: {}", e);
                 }
                 let path_str = tmp_path.to_string_lossy().to_string();
-                let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+                let file_url = Self::path_to_file_url(&path_str);
+                let wide: Vec<u16> = file_url.encode_utf16().chain(std::iter::once(0)).collect();
                 (wide, Some(tmp_path))
             }
         }

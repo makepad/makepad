@@ -5,7 +5,7 @@ use {
         draw_pass::CxDrawPassParent,
         event::{
             video_playback::{
-                VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
+                VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
                 VideoPlaybackResourcesReleasedEvent, VideoTextureUpdatedEvent,
             },
             game_input::*,
@@ -553,12 +553,24 @@ impl Cx {
                         ) {
                             self.os.video_players.insert(video_id, player);
                         } else {
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent {
+                                    video_id,
+                                    error: "Failed to initialize Windows Media Foundation video playback".to_string(),
+                                },
+                            ));
                             crate::error!(
                                 "VIDEO: WindowsVideoPlayer::new failed for {:?} during PrepareVideoPlayback",
                                 video_id
                             );
                         }
                     } else {
+                        self.call_event_handler(&Event::VideoDecodingError(
+                            VideoDecodingErrorEvent {
+                                video_id,
+                                error: "D3D11 device unavailable for Windows video playback".to_string(),
+                            },
+                        ));
                         crate::error!(
                             "VIDEO: PrepareVideoPlayback skipped for {:?}: missing D3D11 device",
                             video_id

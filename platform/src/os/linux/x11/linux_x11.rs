@@ -10,8 +10,8 @@ use {
         draw_pass::CxDrawPassParent,
         event::{
             video_playback::{
-                VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
-                VideoTextureUpdatedEvent,
+                VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
+                VideoPlaybackResourcesReleasedEvent, VideoTextureUpdatedEvent,
             },
             *,
         },
@@ -574,7 +574,14 @@ impl X11Cx {
                                 cx.os.gstreamer = Some(gst);
                             }
                             None => {
-                                crate::error!("GStreamer not available — video playback disabled. Install gstreamer1.0-plugins-base and gstreamer1.0-plugins-good.");
+                                let error_msg = "GStreamer not available — install gstreamer1.0-plugins-base and gstreamer1.0-plugins-good.".to_string();
+                                crate::error!("VIDEO: {}", error_msg);
+                                cx.call_event_handler(&Event::VideoDecodingError(
+                                    VideoDecodingErrorEvent {
+                                        video_id,
+                                        error: error_msg,
+                                    },
+                                ));
                                 continue;
                             }
                         }
@@ -583,7 +590,16 @@ impl X11Cx {
                         let player = GStreamerVideoPlayer::new(
                             gst, video_id, texture_id, source, autoplay, should_loop,
                         );
-                        cx.os.video_players.insert(video_id, player);
+                        if player.is_active() {
+                            cx.os.video_players.insert(video_id, player);
+                        } else {
+                            cx.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent {
+                                    video_id,
+                                    error: "Failed to initialize Linux GStreamer playback pipeline".to_string(),
+                                },
+                            ));
+                        }
                     }
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {
