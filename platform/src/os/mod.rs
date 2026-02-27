@@ -11,6 +11,7 @@ pub mod cx_native;
 
 #[macro_use]
 pub mod cx_shared;
+pub mod system_fonts;
 
 pub mod shared_framebuf;
 
@@ -73,3 +74,5 @@ pub mod web;
 
 #[cfg(all(not(headless), target_arch = "wasm32"))]
 pub use crate::os::web::*;
+
+pub use system_fonts::*;

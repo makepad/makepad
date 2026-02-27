@@ -2,6 +2,7 @@
 pub mod apple_util;
 pub mod apple_sys;
 pub mod metal;
+pub mod system_fonts;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

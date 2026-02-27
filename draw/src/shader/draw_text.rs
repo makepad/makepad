@@ -24,6 +24,8 @@ use {
     },
     std::{borrow::Cow, cell::RefCell, rc::Rc},
 };
+#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+use std::hash::{Hash, Hasher};
 
 script_mod! {
     use mod.pod.*
@@ -832,10 +834,18 @@ impl FontFamily {
             let font_id: FontId = (member.handle.index() as u64).into();
 
             if !fonts.is_font_known(font_id) {
-                let font_data = cx
-                    .get_resource_abs_path(member.handle)
-                    .and_then(|path| builtins::get_builtin_font_data(&path))
+                let abs_path = cx.get_resource_abs_path(member.handle);
+                let font_data = abs_path
+                    .as_deref()
+                    .and_then(builtins::get_builtin_font_data)
                     .or_else(|| {
+                        #[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+                        if abs_path
+                            .as_deref()
+                            .is_some_and(is_bundled_fallback_font_path)
+                        {
+                            return None;
+                        }
                         cx.get_resource(member.handle)
                             .map(|rc| Rc::new(Cow::Owned((*rc).clone())))
                     });
@@ -857,6 +867,12 @@ impl FontFamily {
                 font_ids.push(font_id);
             }
         }
+        #[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+        {
+            for family in default_system_fallback_families() {
+                try_push_system_font(fonts, &mut font_ids, family);
+            }
+        }
 
         fonts.set_font_family_definition(
             self.to_font_family_id(),
@@ -869,6 +885,53 @@ impl FontFamily {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
         self.update_font_definitions(cx, &mut fonts);
+    }
+}
+
+#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+fn is_bundled_fallback_font_path(abs_path: &str) -> bool {
+    let filename = abs_path.rsplit('/').next().unwrap_or(abs_path);
+    matches!(filename, "LXGWWenKaiRegular.ttf" | "NotoColorEmoji.ttf")
+}
+
+#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+fn default_system_fallback_families() -> &'static [&'static str] {
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    {
+        return &["STHeiti", "Apple Color Emoji"];
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return &["Microsoft YaHei", "Segoe UI Emoji"];
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return &["Noto Sans CJK SC", "Noto Color Emoji"];
+    }
+    &[]
+}
+
+#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &str) {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "system-font".hash(&mut hasher);
+    family.hash(&mut hasher);
+    let font_id: FontId = hasher.finish().into();
+    if !fonts.is_font_known(font_id) {
+        if let Ok(system_font) = query_system_font(family) {
+            fonts.define_font(
+                font_id,
+                FontDefinition {
+                    data: Rc::new(Cow::Owned(system_font.data)),
+                    index: system_font.index,
+                    ascender_fudge_in_ems: 0.0,
+                    descender_fudge_in_ems: 0.0,
+                },
+            );
+        }
+    }
+    if fonts.is_font_known(font_id) {
+        font_ids.push(font_id);
     }
 }
 
