@@ -907,6 +907,9 @@ fn default_system_fallback_families() -> &'static [&'static str] {
 #[cfg(feature = "system-fonts")]
 fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &str) {
     let font_id = system_font_id(family);
+    if system_font_lookup_failed(font_id) {
+        return;
+    }
     if !fonts.is_font_known(font_id) {
         match query_system_font(family) {
             Ok(system_font) => {
@@ -919,15 +922,19 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
                         descender_fudge_in_ems: 0.0,
                     },
                 );
+                clear_failed_system_font_lookup(font_id);
             }
             Err(SystemFontError::Io(err)) => {
                 log!("failed to query system font '{family}': {err}");
+                record_failed_system_font_lookup(font_id);
             }
             Err(SystemFontError::NotFound) => {
                 log!("system font family '{family}' was not found");
+                record_failed_system_font_lookup(font_id);
             }
             Err(SystemFontError::Unsupported) => {
                 // Unsupported platforms use bundled fonts or leave fallback empty.
+                record_failed_system_font_lookup(font_id);
             }
         }
     }
@@ -940,6 +947,39 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
 /// Creates a deterministic ID namespace for system-font fallbacks.
 fn system_font_id(family: &str) -> FontId {
     fxhash::hash64(&("system-font", family)).into()
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_font_failed_set() -> &'static std::sync::Mutex<std::collections::HashSet<FontId>> {
+    static FAILED_SYSTEM_FONTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<FontId>>,
+    > = std::sync::OnceLock::new();
+    FAILED_SYSTEM_FONTS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_font_lookup_failed(font_id: FontId) -> bool {
+    let failed = system_font_failed_set()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    failed.contains(&font_id)
+}
+
+#[cfg(feature = "system-fonts")]
+fn record_failed_system_font_lookup(font_id: FontId) {
+    let mut failed = system_font_failed_set()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    failed.insert(font_id);
+}
+
+#[cfg(feature = "system-fonts")]
+fn clear_failed_system_font_lookup(font_id: FontId) {
+    let mut failed = system_font_failed_set()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    failed.remove(&font_id);
 }
 
 impl TextStyle {

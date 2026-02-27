@@ -6,7 +6,7 @@ pub struct LinuxSystemFontProvider;
 impl SystemFontProvider for LinuxSystemFontProvider {
     fn query_font(&self, family: &str) -> Result<SystemFontData, SystemFontError> {
         let output = Command::new("fc-match")
-            .args(["-f", "%{file}\n", family])
+            .args(["-f", "%{file}\n%{index}\n", family])
             .output()
             .map_err(|err| {
                 SystemFontError::Io(format!(
@@ -16,12 +16,20 @@ impl SystemFontProvider for LinuxSystemFontProvider {
         if !output.status.success() {
             return Err(SystemFontError::NotFound);
         }
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut lines = stdout.lines();
+        let path = lines.next().unwrap_or("").trim().to_string();
         if path.is_empty() {
             return Err(SystemFontError::NotFound);
         }
+        let index_line = lines.next().unwrap_or("").trim();
+        let index = index_line.parse::<u32>().map_err(|err| {
+            SystemFontError::Io(format!(
+                "failed to parse fc-match face index '{index_line}': {err}"
+            ))
+        })?;
         let data = std::fs::read(&path).map_err(|err| SystemFontError::Io(err.to_string()))?;
-        Ok(SystemFontData { data, index: 0 })
+        Ok(SystemFontData { data, index })
     }
 }
 
