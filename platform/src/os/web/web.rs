@@ -5,8 +5,7 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
-            Event, HttpError, HttpProgress, HttpResponse, MouseDownEvent, MouseMoveEvent,
-            MouseUpEvent, NetworkResponse, NetworkResponseItem, ScrollEvent, TextClipboardEvent,
+            Event, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent, TextClipboardEvent,
             TimerEvent, ToWasmMsgEvent, TouchUpdateEvent, VideoPlaybackCompletedEvent,
             VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent, VideoSource, VideoTextureUpdatedEvent, WindowGeom,
@@ -17,7 +16,7 @@ use {
         permission::{Permission, PermissionResult, PermissionStatus},
         thread::SignalToUI,
         window::CxWindowPool,
-        Vec2d,
+        HttpError, HttpProgress, HttpResponse, Vec2d,
     },
     std::cell::RefCell,
     std::panic,
@@ -214,7 +213,7 @@ impl Cx {
                     let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponse::HttpResponse {
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: HttpResponse::new(
+                        response: HttpResponse::from_header_string(
                             LiveId::from_lo_hi(tw.metadata_id_lo, tw.metadata_id_hi),
                             tw.status as u16,
                             tw.headers,
