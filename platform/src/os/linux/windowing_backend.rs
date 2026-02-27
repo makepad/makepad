@@ -5,7 +5,6 @@ use super::linux_video_playback::GStreamerVideoPlayer;
 
 use crate::{
     cx::Cx,
-    event::{Event, NetworkResponseChannel},
     makepad_live_id::LiveId,
     opengl_cx::OpenglCx,
     CxOsApi, OpenUrlInPlace,
