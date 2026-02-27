@@ -308,6 +308,15 @@ impl Cx {
         Err(format!("Dependency not loaded {}", path))
     }
 
+    /// Get the absolute path of a resource by ScriptHandle.
+    pub fn get_resource_abs_path(&self, handle: ScriptHandle) -> Option<String> {
+        let resources = self.script_data.resources.resources.borrow();
+        resources
+            .iter()
+            .find(|r| r.handle == handle)
+            .map(|r| r.abs_path.clone())
+    }
+
     /// Get loaded resource data by ScriptHandle
     pub fn get_resource(&self, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
         if let Some(data) = self.script_data.resources.get_data(handle) {
