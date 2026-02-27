@@ -323,8 +323,8 @@ impl NetworkBackend for WasmNetworkShimBackend {
         sink: EventSink,
     ) -> Result<(), NetworkError> {
         let internal_socket_id = self.next_internal_id();
-        let url = request.url;
         let headers_string = request.get_headers_string();
+        let url = request.url;
 
         {
             let mut state = self

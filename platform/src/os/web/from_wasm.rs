@@ -341,3 +341,59 @@ pub struct FromWasmStartAudioOutput {
 
 #[derive(FromWasm)]
 pub struct FromWasmStopAudioOutput {}
+
+// Video Playback API
+
+#[derive(FromWasm)]
+pub struct FromWasmPrepareVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+    pub texture_id: usize,
+    pub source_url: String,
+    pub autoplay: bool,
+    pub should_loop: bool,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmBeginVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmPauseVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmResumeVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmMuteVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmUnmuteVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmSeekVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+    pub position_ms_lo: u32,
+    pub position_ms_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmCleanupVideoPlaybackResources {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}

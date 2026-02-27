@@ -597,3 +597,35 @@ pub struct WAudioDevice {
 pub struct ToWasmAudioDeviceList {
     pub devices: Vec<WAudioDevice>,
 }
+
+// Video Playback API
+
+#[derive(ToWasm)]
+pub struct ToWasmVideoPlaybackPrepared {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+    pub video_width: u32,
+    pub video_height: u32,
+    pub duration_lo: u32,
+    pub duration_hi: u32,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmVideoTextureUpdated {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+    pub current_position_lo: u32,
+    pub current_position_hi: u32,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmVideoPlaybackCompleted {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmVideoPlaybackResourcesReleased {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}

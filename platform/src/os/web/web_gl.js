@@ -15,6 +15,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.xr = undefined;
     this._missing_shader_ids = new Set();
     this._gl_error_reports = new Set();
+    this.video_players = {};
     this.init_webgl_context();
 
     this.load_deps();
@@ -893,6 +894,207 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.ONE_MINUS_SRC_ALPHA,
     );
     gl.enable(gl.BLEND);
+  }
+
+  // Video Playback API
+
+  FromWasmPrepareVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let video = document.createElement("video");
+    video.crossOrigin = "anonymous";
+    video.playsInline = true;
+    video.preload = "auto";
+    video.loop = args.should_loop;
+    video.muted = args.autoplay; // Mute only if autoplay (browser requirement)
+
+    let player = {
+      video: video,
+      texture_id: args.texture_id,
+      video_id_lo: args.video_id_lo,
+      video_id_hi: args.video_id_hi,
+      playing: false,
+      texture_initialized: false,
+    };
+
+    this.video_players[key] = player;
+
+    video.addEventListener("loadedmetadata", () => {
+      let duration_ms = Math.round(video.duration * 1000);
+      this.to_wasm.ToWasmVideoPlaybackPrepared({
+        video_id_lo: args.video_id_lo,
+        video_id_hi: args.video_id_hi,
+        video_width: video.videoWidth,
+        video_height: video.videoHeight,
+        duration_lo: duration_ms & 0xFFFFFFFF,
+        duration_hi: Math.floor(duration_ms / 0x100000000),
+      });
+      this.do_wasm_pump();
+    });
+
+    video.addEventListener("ended", () => {
+      player.playing = false;
+      this.to_wasm.ToWasmVideoPlaybackCompleted({
+        video_id_lo: args.video_id_lo,
+        video_id_hi: args.video_id_hi,
+      });
+      this.do_wasm_pump();
+    });
+
+    video.addEventListener("play", () => {
+      player.playing = true;
+      this.ensure_video_animation_frame();
+    });
+
+    video.addEventListener("pause", () => {
+      player.playing = false;
+    });
+
+    video.src = args.source_url;
+
+    if (args.autoplay) {
+      video.play().catch(e => {
+        console.warn("Video autoplay failed:", e);
+      });
+    }
+  }
+
+  FromWasmBeginVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.play().catch(e => {
+        console.warn("Video play failed:", e);
+      });
+    }
+  }
+
+  FromWasmPauseVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.pause();
+    }
+  }
+
+  FromWasmResumeVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.play().catch(e => {
+        console.warn("Video resume failed:", e);
+      });
+    }
+  }
+
+  FromWasmMuteVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.muted = true;
+    }
+  }
+
+  FromWasmUnmuteVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.muted = false;
+    }
+  }
+
+  FromWasmSeekVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      let position_ms = args.position_ms_lo + args.position_ms_hi * 0x100000000;
+      player.video.currentTime = position_ms / 1000.0;
+    }
+  }
+
+  FromWasmCleanupVideoPlaybackResources(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.pause();
+      player.video.removeAttribute("src");
+      player.video.load();
+      player.playing = false;
+      delete this.video_players[key];
+
+      this.to_wasm.ToWasmVideoPlaybackResourcesReleased({
+        video_id_lo: args.video_id_lo,
+        video_id_hi: args.video_id_hi,
+      });
+      this.do_wasm_pump();
+    }
+  }
+
+  ensure_video_animation_frame() {
+    if (this.video_anim_frame_id) {
+      return;
+    }
+    this.video_anim_frame_id = window.requestAnimationFrame(() => {
+      this.video_anim_frame_id = 0;
+      this.update_video_textures();
+    });
+  }
+
+  update_video_textures() {
+    let gl = this.gl;
+    let any_playing = false;
+    let any_updated = false;
+
+    for (let key in this.video_players) {
+      let player = this.video_players[key];
+      if (!player.playing) continue;
+
+      any_playing = true;
+
+      let video = player.video;
+      if (video.readyState < 2) continue;
+
+      any_updated = true;
+
+      let gl_tex = this.textures[player.texture_id];
+      if (!gl_tex) {
+        gl_tex = gl.createTexture();
+        this.textures[player.texture_id] = gl_tex;
+      }
+
+      gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+
+      if (!player.texture_initialized) {
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        player.texture_initialized = true;
+      }
+
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        video,
+      );
+
+      let current_ms = Math.round(video.currentTime * 1000);
+      this.to_wasm.ToWasmVideoTextureUpdated({
+        video_id_lo: player.video_id_lo,
+        video_id_hi: player.video_id_hi,
+        current_position_lo: current_ms & 0xFFFFFFFF,
+        current_position_hi: Math.floor(current_ms / 0x100000000),
+      });
+    }
+
+    if (any_updated) {
+      this.do_wasm_pump();
+    }
+    if (any_playing) {
+      this.ensure_video_animation_frame();
+    }
   }
 
   init_webgl_context() {
