@@ -943,3 +943,116 @@ impl LaidoutGlyph {
         self.font.rasterize_glyph(self.id, dpx_per_em)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{BorrowedLayoutParams, LayoutOptions, Layouter, Settings, Style};
+    use crate::{
+        makepad_platform::SharedBytes,
+        text::{
+            font::FontId,
+            font_family::FontFamilyId,
+            loader::{FontDefinition, FontFamilyDefinition},
+        },
+    };
+    use std::path::PathBuf;
+
+    fn bundled_font_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources/IBMPlexSans-Text.ttf")
+    }
+
+    fn run_layout_and_raster(font_data: SharedBytes) -> (Vec<f32>, Vec<usize>, usize) {
+        let mut layouter = Layouter::new(Settings::default());
+
+        let font_id: FontId = 0xFA77_0001_u64.into();
+        let family_id: FontFamilyId = 0xFA77_0002_u64.into();
+
+        layouter.define_font(
+            font_id,
+            FontDefinition {
+                data: font_data,
+                index: 0,
+                ascender_fudge_in_ems: -0.1,
+                descender_fudge_in_ems: 0.0,
+            },
+        );
+        layouter.define_font_family(
+            family_id,
+            FontFamilyDefinition {
+                font_ids: vec![font_id],
+            },
+        );
+
+        let text = layouter.get_or_layout(BorrowedLayoutParams {
+            text: "Mapped vs owned text layout 世界 🙂\nSecond line",
+            style: Style {
+                font_family_id: family_id,
+                font_size_in_pts: 12.0,
+                color: None,
+            },
+            options: LayoutOptions {
+                first_row_indent_in_lpxs: 0.0,
+                first_row_min_line_spacing_below_in_lpxs: 0.0,
+                max_width_in_lpxs: Some(140.0),
+                wrap: true,
+                align: 0.0,
+                line_spacing_scale: 1.0,
+            },
+        });
+
+        let row_widths = text
+            .rows
+            .iter()
+            .map(|row| row.width_in_lpxs)
+            .collect::<Vec<_>>();
+        let row_glyph_counts = text
+            .rows
+            .iter()
+            .map(|row| row.glyphs.len())
+            .collect::<Vec<_>>();
+
+        let mut rasterized = 0usize;
+        for row in &text.rows {
+            for glyph in &row.glyphs {
+                if glyph.rasterize(glyph.font_size_in_lpxs).is_some() {
+                    rasterized += 1;
+                }
+            }
+        }
+
+        (row_widths, row_glyph_counts, rasterized)
+    }
+
+    #[test]
+    fn mapped_and_owned_font_bytes_have_equivalent_layout_and_rasterization() {
+        let path = bundled_font_path();
+        let mapped = SharedBytes::from_file_mmap_or_read(&path).expect("mapped load should work");
+        let owned =
+            SharedBytes::from_vec(std::fs::read(&path).expect("owned fallback should read font"));
+
+        let (mapped_widths, mapped_glyph_counts, mapped_rasterized) = run_layout_and_raster(mapped);
+        let (owned_widths, owned_glyph_counts, owned_rasterized) = run_layout_and_raster(owned);
+
+        assert_eq!(mapped_glyph_counts, owned_glyph_counts);
+        assert_eq!(mapped_rasterized, owned_rasterized);
+        assert_eq!(mapped_widths.len(), owned_widths.len());
+        for (mapped_width, owned_width) in mapped_widths.iter().zip(owned_widths.iter()) {
+            assert!(
+                (mapped_width - owned_width).abs() < 0.001,
+                "row width mismatch: mapped={mapped_width}, owned={owned_width}"
+            );
+        }
+    }
+
+    #[test]
+    fn owned_font_bytes_still_parse_and_layout() {
+        let path = bundled_font_path();
+        let owned =
+            SharedBytes::from_vec(std::fs::read(&path).expect("owned font bytes should load"));
+        assert!(matches!(owned, SharedBytes::Owned(_)));
+
+        let (_widths, glyph_counts, rasterized) = run_layout_and_raster(owned);
+        assert!(glyph_counts.iter().any(|count| *count > 0));
+        assert!(rasterized > 0);
+    }
+}

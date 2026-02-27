@@ -831,10 +831,7 @@ impl FontFamily {
             let font_id: FontId = (member.handle.index() as u64).into();
 
             if !fonts.is_font_known(font_id) {
-                let font_data = cx.get_resource(member.handle).or_else(|| {
-                    cx.load_all_script_resources();
-                    cx.get_resource(member.handle)
-                });
+                let font_data = cx.get_resource_font_bytes(member.handle);
 
                 if let Some(data) = font_data {
                     fonts.define_font(
@@ -923,7 +920,7 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
                 fonts.define_font(
                     font_id,
                     FontDefinition {
-                        data: Rc::new(system_font.data),
+                        data: system_font.data,
                         index: system_font.index,
                         ascender_fudge_in_ems: 0.0,
                         descender_fudge_in_ems: 0.0,
@@ -961,8 +958,7 @@ fn system_font_failed_set() -> &'static std::sync::Mutex<std::collections::HashS
     static FAILED_SYSTEM_FONTS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashSet<FontId>>,
     > = std::sync::OnceLock::new();
-    FAILED_SYSTEM_FONTS
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+    FAILED_SYSTEM_FONTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
 #[cfg(feature = "system-fonts")]
