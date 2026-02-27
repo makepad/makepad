@@ -6,8 +6,6 @@ use crate::{
     makepad_platform::event::video_playback::*,
     widget::*,
 };
-use std::time::Instant;
-
 script_mod! {
     use mod.prelude.widgets_internal.*
 
