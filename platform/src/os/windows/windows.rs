@@ -3,8 +3,14 @@ use {
         cx::*,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
-        event::game_input::*,
-        event::*,
+        event::{
+            video_playback::{
+                VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
+                VideoPlaybackResourcesReleasedEvent, VideoTextureUpdatedEvent,
+            },
+            game_input::*,
+            *,
+        },
         game_input::*,
         makepad_live_id::*,
         makepad_math::*,
@@ -17,6 +23,7 @@ use {
                 win32_window::Win32Window,
                 windows_game_input::WindowsGameInput,
                 windows_media::CxWindowsMedia,
+                windows_video_playback::WindowsVideoPlayer,
             },
         },
         //permission::{PermissionResult, PermissionStatus},
@@ -24,7 +31,7 @@ use {
         window::CxWindowPool,
         windows::Win32::Graphics::Direct3D11::ID3D11Device,
     },
-    std::{cell::RefCell, rc::Rc, time::Instant},
+    std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant},
 };
 
 impl Cx {
@@ -145,6 +152,48 @@ impl Cx {
                 }
             }
             Win32Event::Paint => {
+                // Poll video players for new frames
+                if !self.os.video_players.is_empty() {
+                    let mut players = std::mem::take(&mut self.os.video_players);
+                    let mut video_events = Vec::new();
+                    for (_id, player) in players.iter_mut() {
+                        if let Some((width, height, duration)) = player.check_prepared() {
+                            video_events.push(Event::VideoPlaybackPrepared(
+                                VideoPlaybackPreparedEvent {
+                                    video_id: player.video_id,
+                                    video_width: width,
+                                    video_height: height,
+                                    duration,
+                                },
+                            ));
+                        }
+                        if player.poll_frame(&mut self.textures) {
+                            video_events.push(Event::VideoTextureUpdated(
+                                VideoTextureUpdatedEvent {
+                                    video_id: player.video_id,
+                                    current_position_ms: player.current_position_ms(),
+                                },
+                            ));
+                        }
+                        if player.check_eos() {
+                            video_events.push(Event::VideoPlaybackCompleted(
+                                VideoPlaybackCompletedEvent {
+                                    video_id: player.video_id,
+                                },
+                            ));
+                        }
+                    }
+                    let needs_repaint = players.values().any(|p| p.is_playing());
+                    self.os.video_players = players;
+                    for event in video_events {
+                        self.call_event_handler(&event);
+                    }
+                    // Keep paint loop alive while any player is actively playing
+                    if needs_repaint {
+                        self.new_next_frame();
+                    }
+                }
+
                 let time_now = with_win32_app(|app| app.time_now());
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(time_now);
@@ -468,6 +517,93 @@ impl Cx {
                 CxOsOp::SyncImeState { .. } => {}
                 CxOsOp::ShowClipboardActions { .. } => {}
                 CxOsOp::HideClipboardActions => {}
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _external_texture_id,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                ) => {
+                    if self.os.video_players.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(ref device) = self.os.d3d11_device {
+                        if let Some(player) = WindowsVideoPlayer::new(
+                            device,
+                            video_id,
+                            texture_id,
+                            source,
+                            autoplay,
+                            should_loop,
+                        ) {
+                            self.os.video_players.insert(video_id, player);
+                        } else {
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent {
+                                    video_id,
+                                    error: "Failed to initialize Windows Media Foundation video playback".to_string(),
+                                },
+                            ));
+                            crate::error!(
+                                "VIDEO: WindowsVideoPlayer::new failed for {:?} during PrepareVideoPlayback",
+                                video_id
+                            );
+                        }
+                    } else {
+                        self.call_event_handler(&Event::VideoDecodingError(
+                            VideoDecodingErrorEvent {
+                                video_id,
+                                error: "D3D11 device unavailable for Windows video playback".to_string(),
+                            },
+                        ));
+                        crate::error!(
+                            "VIDEO: PrepareVideoPlayback skipped for {:?}: missing D3D11 device",
+                            video_id
+                        );
+                    }
+                }
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.play();
+                    }
+                }
+                CxOsOp::PauseVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.pause();
+                    }
+                }
+                CxOsOp::ResumeVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.resume();
+                    }
+                }
+                CxOsOp::MuteVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.mute();
+                    }
+                }
+                CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.unmute();
+                    }
+                }
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    if let Some(mut player) = self.os.video_players.remove(&video_id) {
+                        player.cleanup();
+                        self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id },
+                        ));
+                    }
+                }
+                CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.seek_to(position_ms);
+                    }
+                }
+                CxOsOp::UpdateVideoSurfaceTexture(_) => {
+                    // Android-only, no-op on Windows
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
@@ -559,5 +695,5 @@ pub struct CxOs {
     pub(crate) d3d11_device: Option<ID3D11Device>,
     pub(crate) game_input_events: GameInputEventChannel,
     pub(crate) windows_game_input: Option<WindowsGameInput>,
-    //pub (crate) new_frame_being_rendered: Option<crate::shared_framebuf::PresentableDraw>,
+    pub(crate) video_players: HashMap<LiveId, WindowsVideoPlayer>,
 }

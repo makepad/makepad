@@ -64,7 +64,7 @@ fn last_ssl_error() -> String {
         if err == 0 {
             return "unknown OpenSSL error".to_string();
         }
-        let mut buf = [0i8; 256];
+        let mut buf = [0 as c_char; 256];
         ERR_error_string_n(err, buf.as_mut_ptr(), buf.len());
         CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()
     }

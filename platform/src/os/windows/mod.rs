@@ -11,6 +11,7 @@ pub mod wasapi;
 pub mod win32_event;
 pub mod win32_window;
 pub mod windows_media;
+pub mod windows_video_playback;
 pub mod winrt_midi;
 
 //pub mod com_sys;

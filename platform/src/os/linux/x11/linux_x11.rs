@@ -1,13 +1,20 @@
 use {
     self::super::super::{
-        egl_sys, opengl_cx::OpenglCx, x11::x11_sys, x11::xlib_app::*, x11::xlib_event::*,
+        egl_sys, gstreamer_sys::LibGStreamer, linux_video_playback::GStreamerVideoPlayer,
+        opengl_cx::OpenglCx, x11::x11_sys, x11::xlib_app::*, x11::xlib_event::*,
     },
     self::super::opengl_x11::OpenglWindow,
     crate::{
         cx::{Cx, LinuxWindowParams, OsType},
         cx_api::CxOsOp,
         draw_pass::CxDrawPassParent,
-        event::*,
+        event::{
+            video_playback::{
+                VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
+                VideoPlaybackResourcesReleasedEvent, VideoTextureUpdatedEvent,
+            },
+            *,
+        },
         gpu_info::GpuPerformance,
         makepad_live_id::*,
         makepad_math::dvec2,
@@ -268,7 +275,6 @@ impl X11Cx {
             }
             XlibEvent::Timer(e) => {
                 let mut cx = self.cx.borrow_mut();
-                //println!("TIMER! {:?}", std::time::Instant::now());
                 if e.timer_id == 0 {
                     if SignalToUI::check_and_clear_ui_signal() {
                         cx.handle_media_signals();
@@ -280,6 +286,46 @@ impl X11Cx {
                     }
                     cx.poll_control_channel();
                     cx.handle_networking_events();
+
+                    // Poll video players on the timer tick (every ~8ms).
+                    if !cx.os.video_players.is_empty() {
+                        cx.os.opengl_cx.as_ref().unwrap().make_current();
+                        let gl: *const super::super::super::gl_sys::LibGl =
+                            &cx.os.opengl_cx.as_ref().unwrap().libgl;
+                        let mut players = std::mem::take(&mut cx.os.video_players);
+                        let mut video_events = Vec::new();
+                        for (_video_id, player) in players.iter_mut() {
+                            if let Some((width, height, duration)) = player.check_prepared() {
+                                video_events.push(Event::VideoPlaybackPrepared(
+                                    VideoPlaybackPreparedEvent {
+                                        video_id: player.video_id,
+                                        video_width: width,
+                                        video_height: height,
+                                        duration,
+                                    },
+                                ));
+                            }
+                            if player.poll_frame(unsafe { &*gl }, &mut cx.textures) {
+                                video_events.push(Event::VideoTextureUpdated(
+                                    VideoTextureUpdatedEvent {
+                                        video_id: player.video_id,
+                                        current_position_ms: player.current_position_ms(),
+                                    },
+                                ));
+                            }
+                            if player.check_eos() {
+                                video_events.push(Event::VideoPlaybackCompleted(
+                                    crate::event::video_playback::VideoPlaybackCompletedEvent {
+                                        video_id: player.video_id,
+                                    },
+                                ));
+                            }
+                        }
+                        cx.os.video_players = players;
+                        for event in video_events {
+                            cx.call_event_handler(&event);
+                        }
+                    }
                 } else {
                     cx.handle_script_timer(&e);
                     cx.call_event_handler(&Event::Timer(e))
@@ -503,6 +549,95 @@ impl X11Cx {
                 // Mobile-only ops (soft keyboard, clipboard UI); no-op on desktop
                 CxOsOp::SyncImeState { .. } => {}
                 CxOsOp::HideClipboardActions => {}
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _external_texture_id,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                ) => {
+                    // Skip if an active player already exists for this video_id
+                    if cx.os.video_players.get(&video_id).map_or(false, |p| p.is_active()) {
+                        continue;
+                    }
+                    // Lazy-load GStreamer
+                    if cx.os.gstreamer.is_none() {
+                        match LibGStreamer::try_load() {
+                            Some(gst) => {
+                                gst.init();
+                                cx.os.gstreamer = Some(gst);
+                            }
+                            None => {
+                                let error_msg = "GStreamer not available — install gstreamer1.0-plugins-base and gstreamer1.0-plugins-good.".to_string();
+                                crate::error!("VIDEO: {}", error_msg);
+                                cx.call_event_handler(&Event::VideoDecodingError(
+                                    VideoDecodingErrorEvent {
+                                        video_id,
+                                        error: error_msg,
+                                    },
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(ref gst) = cx.os.gstreamer {
+                        let player = GStreamerVideoPlayer::new(
+                            gst, video_id, texture_id, source, autoplay, should_loop,
+                        );
+                        if player.is_active() {
+                            cx.os.video_players.insert(video_id, player);
+                        } else {
+                            cx.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent {
+                                    video_id,
+                                    error: "Failed to initialize Linux GStreamer playback pipeline".to_string(),
+                                },
+                            ));
+                        }
+                    }
+                }
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                        player.play();
+                    }
+                }
+                CxOsOp::PauseVideoPlayback(video_id) => {
+                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                        player.pause();
+                    }
+                }
+                CxOsOp::ResumeVideoPlayback(video_id) => {
+                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                        player.resume();
+                    }
+                }
+                CxOsOp::MuteVideoPlayback(video_id) => {
+                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                        player.mute();
+                    }
+                }
+                CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                        player.unmute();
+                    }
+                }
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    if let Some(mut player) = cx.os.video_players.remove(&video_id) {
+                        player.cleanup();
+                        cx.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id },
+                        ));
+                    }
+                }
+                CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
+                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                        player.seek_to(position_ms);
+                    }
+                }
+                CxOsOp::UpdateVideoSurfaceTexture(_) => {
+                    // Not needed on Linux desktop (Android-only)
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }

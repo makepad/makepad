@@ -1436,7 +1436,10 @@ impl ShaderFnCompiler {
                     match output.backend {
                         ShaderBackend::Glsl => {
                             output.bind_texture_sampler(&texture_expr, sampler_idx);
+                            #[cfg(target_os = "android")]
                             write!(s, "sample2dOES({}, {})", texture_expr, coord).ok();
+                            #[cfg(not(target_os = "android"))]
+                            write!(s, "sample2d({}, {})", texture_expr, coord).ok();
                         }
                         ShaderBackend::Metal => {
                             write!(s, "{}.sample(_s{}, {})", texture_expr, sampler_idx, coord).ok();

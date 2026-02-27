@@ -597,7 +597,7 @@ fn texture_pixel_to_dx11_pixel(pix: &TexturePixel) -> DXGI_FORMAT {
         TexturePixel::RGu8 => DXGI_FORMAT_R8G8_UNORM,
         TexturePixel::Rf32 => DXGI_FORMAT_R32_FLOAT,
         TexturePixel::D32 => DXGI_FORMAT_D32_FLOAT,
-        TexturePixel::VideoRGB => DXGI_FORMAT_B8G8R8A8_UNORM, // video not supported on Windows; fallback value
+        TexturePixel::VideoRGB => DXGI_FORMAT_B8G8R8A8_UNORM,
     }
 }
 
@@ -752,7 +752,7 @@ impl D3d11Cx {
                 &adapter,
                 D3D_DRIVER_TYPE_UNKNOWN,
                 HMODULE(std::ptr::null_mut()),
-                D3D11_CREATE_DEVICE_FLAG(0),
+                D3D11_CREATE_DEVICE_FLAG(0x800 | 0x20), // VIDEO_SUPPORT | BGRA_SUPPORT
                 Some(&[D3D_FEATURE_LEVEL_11_0]),
                 D3D11_SDK_VERSION,
                 Some(&mut device),
