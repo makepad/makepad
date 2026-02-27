@@ -8,7 +8,11 @@ impl SystemFontProvider for LinuxSystemFontProvider {
         let output = Command::new("fc-match")
             .args(["-f", "%{file}\n", family])
             .output()
-            .map_err(|err| SystemFontError::Io(err.to_string()))?;
+            .map_err(|err| {
+                SystemFontError::Io(format!(
+                    "failed to execute fc-match (fontconfig must be installed on the system; try `apt install fontconfig` or `dnf install fontconfig`): {err}"
+                ))
+            })?;
         if !output.status.success() {
             return Err(SystemFontError::NotFound);
         }

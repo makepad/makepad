@@ -24,8 +24,6 @@ use {
     },
     std::{borrow::Cow, cell::RefCell, rc::Rc},
 };
-#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
-use std::hash::{Hash, Hasher};
 
 script_mod! {
     use mod.pod.*
@@ -835,15 +833,12 @@ impl FontFamily {
 
             if !fonts.is_font_known(font_id) {
                 let abs_path = cx.get_resource_abs_path(member.handle);
+                let abs_path = abs_path.as_deref();
                 let font_data = abs_path
-                    .as_deref()
                     .and_then(builtins::get_builtin_font_data)
                     .or_else(|| {
                         #[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
-                        if abs_path
-                            .as_deref()
-                            .is_some_and(is_bundled_fallback_font_path)
-                        {
+                        if abs_path.is_some_and(is_bundled_fallback_font_path) {
                             return None;
                         }
                         cx.get_resource(member.handle)
@@ -890,8 +885,14 @@ impl FontFamily {
 
 #[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
 fn is_bundled_fallback_font_path(abs_path: &str) -> bool {
-    let filename = abs_path.rsplit('/').next().unwrap_or(abs_path);
-    matches!(filename, "LXGWWenKaiRegular.ttf" | "NotoColorEmoji.ttf")
+    let filename = std::path::Path::new(abs_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(abs_path);
+    matches!(
+        filename,
+        builtins::LXG_WEN_KAI_REGULAR_FILENAME | builtins::NOTO_COLOR_EMOJI_FILENAME
+    )
 }
 
 #[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
@@ -926,26 +927,40 @@ fn default_system_fallback_families() -> &'static [&'static str] {
 
 #[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
 fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &str) {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    "system-font".hash(&mut hasher);
-    family.hash(&mut hasher);
-    let font_id: FontId = hasher.finish().into();
+    let font_id = system_font_id(family);
     if !fonts.is_font_known(font_id) {
-        if let Ok(system_font) = query_system_font(family) {
-            fonts.define_font(
-                font_id,
-                FontDefinition {
-                    data: Rc::new(Cow::Owned(system_font.data)),
-                    index: system_font.index,
-                    ascender_fudge_in_ems: 0.0,
-                    descender_fudge_in_ems: 0.0,
-                },
-            );
+        match query_system_font(family) {
+            Ok(system_font) => {
+                fonts.define_font(
+                    font_id,
+                    FontDefinition {
+                        data: Rc::new(Cow::Owned(system_font.data)),
+                        index: system_font.index,
+                        ascender_fudge_in_ems: 0.0,
+                        descender_fudge_in_ems: 0.0,
+                    },
+                );
+            }
+            Err(SystemFontError::Io(err)) => {
+                log!("failed to query system font '{family}': {err}");
+            }
+            Err(SystemFontError::NotFound) => {
+                log!("system font family '{family}' was not found");
+            }
+            Err(SystemFontError::Unsupported) => {
+                // Unsupported platforms use bundled fonts or leave fallback empty.
+            }
         }
     }
     if fonts.is_font_known(font_id) {
         font_ids.push(font_id);
     }
+}
+
+#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+/// Creates a deterministic ID namespace for system-font fallbacks.
+fn system_font_id(family: &str) -> FontId {
+    fxhash::hash64(&("system-font", family)).into()
 }
 
 impl TextStyle {

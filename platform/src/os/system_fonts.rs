@@ -15,6 +15,10 @@ pub trait SystemFontProvider: Send + Sync {
     fn query_font(&self, family: &str) -> Result<SystemFontData, SystemFontError>;
 }
 
+/// Query the operating system for a font by family name and return raw font data.
+///
+/// Supported on macOS/iOS/tvOS, Windows, and Linux desktop. Other targets return
+/// `SystemFontError::Unsupported`.
 #[cfg(all(not(headless), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
 pub fn query_system_font(family: &str) -> Result<SystemFontData, SystemFontError> {
     crate::os::apple::system_fonts::query_font(family)

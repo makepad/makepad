@@ -2,6 +2,10 @@ use super::loader::FontData;
 use std::borrow::Cow;
 use std::rc::Rc;
 
+/// These filenames are used for path matching even when bundled-fonts is disabled.
+pub const LXG_WEN_KAI_REGULAR_FILENAME: &str = "LXGWWenKaiRegular.ttf";
+pub const NOTO_COLOR_EMOJI_FILENAME: &str = "NotoColorEmoji.ttf";
+
 pub const IBM_PLEX_SANS_TEXT: &[u8] =
     include_bytes!("../../../widgets/resources/IBMPlexSans-Text.ttf");
 #[cfg(feature = "bundled-fonts")]
@@ -19,9 +23,9 @@ pub fn get_builtin_font_data(abs_path: &str) -> Option<FontData> {
     match filename {
         "IBMPlexSans-Text.ttf" => Some(Rc::new(Cow::Borrowed(IBM_PLEX_SANS_TEXT))),
         #[cfg(feature = "bundled-fonts")]
-        "LXGWWenKaiRegular.ttf" => Some(Rc::new(Cow::Borrowed(LXG_WEN_KAI_REGULAR))),
+        LXG_WEN_KAI_REGULAR_FILENAME => Some(Rc::new(Cow::Borrowed(LXG_WEN_KAI_REGULAR))),
         #[cfg(feature = "bundled-fonts")]
-        "NotoColorEmoji.ttf" => Some(Rc::new(Cow::Borrowed(NOTO_COLOR_EMOJI))),
+        NOTO_COLOR_EMOJI_FILENAME => Some(Rc::new(Cow::Borrowed(NOTO_COLOR_EMOJI))),
         "LiberationMono-Regular.ttf" => Some(Rc::new(Cow::Borrowed(LIBERATION_MONO_REGULAR))),
         _ => None,
     }
