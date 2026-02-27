@@ -342,6 +342,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
             if let Some(abs_path) = vm.string_with(path, |_vm, s| s.to_string()) {
                 let cx = vm.host.cx_mut();
+                let resources = cx.script_data.resources.resources.borrow();
+                if let Some(existing) = resources.iter().find(|r| r.abs_path == abs_path) {
+                    return existing.handle.into();
+                }
+                drop(resources);
+
                 let handle_gc = CxScriptResourceGc {
                     resources: cx.script_data.resources.resources.clone(),
                     handle: ScriptHandle::ZERO,
@@ -420,6 +426,13 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         }
                     };
                     if let Some(abs_path) = abs_path {
+                        let cx = vm.host.cx_mut();
+                        let resources = cx.script_data.resources.resources.borrow();
+                        if let Some(existing) = resources.iter().find(|r| r.abs_path == abs_path) {
+                            return existing.handle.into();
+                        }
+                        drop(resources);
+
                         let dependency_path = if let Some(crate_name) = crate_name {
                             normalize_dependency_file_path(file_path)
                                 .map(|file_path| format!("{}/{}", crate_name, file_path))
@@ -428,7 +441,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         };
                         let web_url = dependency_path.as_ref().map(|path| format!("/{}", path));
 
-                        let cx = vm.host.cx_mut();
                         let handle_gc = CxScriptResourceGc {
                             resources: cx.script_data.resources.resources.clone(),
                             handle: ScriptHandle::ZERO,
