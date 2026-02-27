@@ -15,7 +15,6 @@ use {
         os::{
             apple::{
                 apple_sys::*,
-                apple_util::*,
                 apple_video_playback::AppleVideoPlayer,
                 ios::{
                     ios_app::{self, init_ios_app_global, with_ios_app, IosApp},
