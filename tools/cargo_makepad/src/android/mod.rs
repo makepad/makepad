@@ -51,7 +51,7 @@ impl AndroidVariant {
                 package="{url}">
                 <application
                     android:label="{label}"{icon_attr}
-                    android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+                    android:theme="@style/MakepadAppTheme"
                     android:allowBackup="true"
                     android:supportsRtl="true"
                     android:debuggable="true"
@@ -61,7 +61,8 @@ impl AndroidVariant {
                     <activity
                     android:name=".{class_name}"
                     android:configChanges="orientation|screenSize|keyboardHidden"
-                    android:exported="true">
+                    android:exported="true"
+                    android:theme="@style/MakepadLaunchTheme">
                     <intent-filter>
                         <action android:name="android.intent.action.MAIN" />
                         <category android:name="android.intent.category.LAUNCHER" />
@@ -127,7 +128,7 @@ impl AndroidVariant {
                 
                 <application
                     android:label="{label}"{icon_attr}
-                    android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+                    android:theme="@style/MakepadAppTheme"
                     android:allowBackup="true"
                     android:supportsRtl="true"
                     android:debuggable="true"
@@ -140,7 +141,7 @@ impl AndroidVariant {
                         android:exported="true"
                         android:launchMode="singleTask"
                         android:screenOrientation="landscape"
-                        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" 
+                        android:theme="@style/MakepadLaunchTheme" 
                         >
                         <intent-filter>
                             <action android:name="android.intent.action.MAIN" />
@@ -155,7 +156,7 @@ impl AndroidVariant {
                         android:exported="true"
                         android:launchMode="singleTask"
                         android:screenOrientation="landscape"
-                        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" 
+                        android:theme="@style/MakepadLaunchTheme" 
                         >
                         <intent-filter>
                             <action android:name="android.intent.action.MAIN" />
@@ -493,5 +494,24 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             devices,
         ),
         _ => Err(format!("{} is not a valid command or option", args[0])),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AndroidVariant;
+
+    #[test]
+    fn default_manifest_uses_splash_and_app_themes() {
+        let xml = AndroidVariant::Default.manifest_xml("App", "MakepadApp", "dev.makepad.app", 33, true);
+        assert!(xml.contains("android:theme=\"@style/MakepadAppTheme\""));
+        assert!(xml.contains("android:theme=\"@style/MakepadLaunchTheme\""));
+    }
+
+    #[test]
+    fn quest_manifest_uses_splash_and_app_themes() {
+        let xml = AndroidVariant::Quest.manifest_xml("App", "MakepadApp", "dev.makepad.app", 33, true);
+        assert!(xml.contains("android:theme=\"@style/MakepadAppTheme\""));
+        assert!(xml.contains("android:theme=\"@style/MakepadLaunchTheme\""));
     }
 }
