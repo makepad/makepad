@@ -433,6 +433,11 @@ impl WindowRef {
             inner.set_fullscreen(cx);
         }
     }
+    pub fn disable_fullscreen(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.normal(cx);
+        }
+    }
     /// Configure the window's size and position, and whether it's fullscreen or not.
     ///
     /// If `fullscreen` is `true`, the window will be set to the monitor's size and the
