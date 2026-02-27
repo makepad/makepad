@@ -831,18 +831,10 @@ impl FontFamily {
             let font_id: FontId = (member.handle.index() as u64).into();
 
             if !fonts.is_font_known(font_id) {
-                let abs_path = cx.get_resource_abs_path(member.handle);
-                let abs_path = abs_path.as_deref();
-                let font_data = abs_path
-                    .and_then(builtins::get_builtin_font_data)
-                    .or_else(|| {
-                        #[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
-                        if abs_path.is_some_and(is_bundled_fallback_font_path) {
-                            return None;
-                        }
-                        cx.get_resource(member.handle)
-                            .map(|rc| Rc::new(Cow::Owned((*rc).clone())))
-                    });
+                let font_data = cx.get_resource(member.handle).or_else(|| {
+                    cx.load_all_script_resources();
+                    cx.get_resource(member.handle)
+                });
 
                 if let Some(data) = font_data {
                     fonts.define_font(
@@ -880,18 +872,6 @@ impl FontFamily {
         let mut fonts = fonts.borrow_mut();
         self.update_font_definitions(cx, &mut fonts);
     }
-}
-
-#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
-fn is_bundled_fallback_font_path(abs_path: &str) -> bool {
-    let filename = std::path::Path::new(abs_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(abs_path);
-    matches!(
-        filename,
-        builtins::LXG_WEN_KAI_REGULAR_FILENAME | builtins::NOTO_COLOR_EMOJI_FILENAME
-    )
 }
 
 #[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
@@ -933,7 +913,7 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
                 fonts.define_font(
                     font_id,
                     FontDefinition {
-                        data: Rc::new(Cow::Owned(system_font.data)),
+                        data: Rc::new(system_font.data),
                         index: system_font.index,
                         ascender_fudge_in_ems: 0.0,
                         descender_fudge_in_ems: 0.0,
