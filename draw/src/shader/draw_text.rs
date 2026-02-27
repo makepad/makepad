@@ -893,7 +893,14 @@ fn default_system_fallback_families() -> &'static [&'static str] {
 }
 
 #[cfg(feature = "system-fonts")]
+#[cfg(target_os = "android")]
+fn default_system_fallback_families() -> &'static [&'static str] {
+    &["Noto Sans CJK SC", "Noto Color Emoji"]
+}
+
+#[cfg(feature = "system-fonts")]
 #[cfg(not(any(
+    target_os = "android",
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
