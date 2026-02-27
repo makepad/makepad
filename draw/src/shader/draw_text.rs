@@ -895,19 +895,32 @@ fn is_bundled_fallback_font_path(abs_path: &str) -> bool {
 }
 
 #[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 fn default_system_fallback_families() -> &'static [&'static str] {
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
-    {
-        return &["STHeiti", "Apple Color Emoji"];
-    }
-    #[cfg(target_os = "windows")]
-    {
-        return &["Microsoft YaHei", "Segoe UI Emoji"];
-    }
-    #[cfg(target_os = "linux")]
-    {
-        return &["Noto Sans CJK SC", "Noto Color Emoji"];
-    }
+    &["STHeiti", "Apple Color Emoji"]
+}
+
+#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+#[cfg(target_os = "windows")]
+fn default_system_fallback_families() -> &'static [&'static str] {
+    &["Microsoft YaHei", "Segoe UI Emoji"]
+}
+
+#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+#[cfg(target_os = "linux")]
+fn default_system_fallback_families() -> &'static [&'static str] {
+    &["Noto Sans CJK SC", "Noto Color Emoji"]
+}
+
+#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos"
+)))]
+fn default_system_fallback_families() -> &'static [&'static str] {
     &[]
 }
 
