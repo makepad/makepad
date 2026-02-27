@@ -100,8 +100,13 @@ pub trait AnimatorImpl {
         self.animator_cut_scoped(cx, state, &mut Scope::empty())
     }
     fn animator_play(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
-        self.animator_play_scoped(cx, state, &mut Scope::empty())
+        self.animator_play_scoped(cx, state, None, &mut Scope::empty())
     }
+
+    fn animator_play_with(&mut self, cx: &mut Cx, state: &[LiveId; 2], play: Play) {
+        self.animator_play_scoped(cx, state, Some(play), &mut Scope::empty())
+    }
+
     fn animator_toggle_scoped(
         &mut self,
         cx: &mut Cx,
@@ -113,13 +118,13 @@ pub trait AnimatorImpl {
     ) {
         if is_state_1 {
             if let Animate::Yes = animate {
-                self.animator_play_scoped(cx, state1, scope)
+                self.animator_play_scoped(cx, state1, None, scope)
             } else {
                 self.animator_cut_scoped(cx, state1, scope)
             }
         } else {
             if let Animate::Yes = animate {
-                self.animator_play_scoped(cx, state2, scope)
+                self.animator_play_scoped(cx, state2, None, scope)
             } else {
                 self.animator_cut_scoped(cx, state2, scope)
             }
@@ -142,7 +147,13 @@ pub trait AnimatorImpl {
 
     // implemented by proc macro
     fn animator_cut_scoped(&mut self, cx: &mut Cx, state: &[LiveId; 2], scope: &mut Scope);
-    fn animator_play_scoped(&mut self, cx: &mut Cx, state: &[LiveId; 2], scope: &mut Scope);
+    fn animator_play_scoped(
+        &mut self,
+        cx: &mut Cx,
+        state: &[LiveId; 2],
+        play: Option<Play>,
+        scope: &mut Scope,
+    );
     fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool;
     fn animator_handle_event_scoped(
         &mut self,
@@ -349,7 +360,12 @@ impl AnimatorAction {
 
 impl Animator {
     /// Start animating to a new state
-    pub fn play(&mut self, cx: &mut Cx, state: &[LiveId; 2]) -> Option<ScriptValue> {
+    pub fn play(
+        &mut self,
+        cx: &mut Cx,
+        state: &[LiveId; 2],
+        play_override: Option<Play>,
+    ) -> Option<ScriptValue> {
         let group_id = state[0];
         let target_state_id = state[1];
 
@@ -390,6 +406,7 @@ impl Animator {
             .or_else(|| target_state.from.get(&id!(all)))
             .copied()
             .unwrap_or(Play::Forward { duration: 0.3 });
+        let play = play_override.unwrap_or(play);
 
         // Get the ease from the target state, default to Linear
         let ease = target_state.ease.unwrap_or(Ease::Linear);

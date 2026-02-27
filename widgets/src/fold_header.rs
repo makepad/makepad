@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     fold_button::FoldButtonAction,
     makepad_derive_widget::*,
     makepad_draw::*,
