@@ -399,6 +399,12 @@ impl Cx {
                 CxOsOp::CopyToClipboard(content) => {
                     with_ios_app(|app| app.copy_to_clipboard(&content));
                 }
+                CxOsOp::FullscreenWindow(_window_id) => {
+                    with_ios_app(|app| app.set_fullscreen(true));
+                }
+                CxOsOp::NormalizeWindow(_window_id) => {
+                    with_ios_app(|app| app.set_fullscreen(false));
+                }
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }

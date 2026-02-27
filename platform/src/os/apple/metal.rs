@@ -1965,10 +1965,14 @@ impl CxTexture {
                 msg_send![class!(NSNumber), numberWithUnsignedInteger: 0x42475241u64];
             let _: () = msg_send![dict, setObject: pf_val forKey: pf_key];
 
-            // Mark as global to allow cross-process lookup via IOSurfaceLookup
-            let global_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceIsGlobal");
-            let global_val: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
-            let _: () = msg_send![dict, setObject: global_val forKey: global_key];
+            // IOSurfaceIsGlobal is deprecated since iOS 11 and may cause
+            // texImageIOSurface failures on some devices. Only set on macOS.
+            #[cfg(target_os = "macos")]
+            {
+                let global_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceIsGlobal");
+                let global_val: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
+                let _: () = msg_send![dict, setObject: global_val forKey: global_key];
+            }
 
             dict
         };
@@ -1980,12 +1984,13 @@ impl CxTexture {
         }
 
         if iosurface.is_null() {
-            crate::error!("Failed to create IOSurface");
+            crate::error!("Failed to create IOSurface {}x{}", alloc.width, alloc.height);
             return 0;
         }
 
         // Get the global IOSurface ID for cross-process sharing
         let iosurface_id = unsafe { IOSurfaceGetID(iosurface) };
+
 
         // Create Metal texture descriptor
         let descriptor = RcObjcId::from_owned(
@@ -2436,32 +2441,94 @@ impl EaglRenderBridge {
         const GL_BGRA: u32 = 0x80E1;
         const GL_UNSIGNED_BYTE: u32 = 0x1401;
 
-        type GlGenTexturesFn = unsafe extern "C" fn(i32, *mut u32);
         type GlBindTextureFn = unsafe extern "C" fn(u32, u32);
 
+        // Bind IOSurface to GL texture via CVOpenGLESTextureCache.
+        // EAGLContext's texImageIOSurface: is a private API that fails on
+        // some devices (e.g. iPad mini 4 / A8). CVOpenGLESTextureCache is
+        // the public CoreVideo API that works on all iOS Metal devices.
+        extern "C" {
+            fn CVOpenGLESTextureCacheCreate(
+                allocator: *const std::ffi::c_void,
+                cache_attrs: *const std::ffi::c_void,
+                eagl_ctx: ObjcId,
+                tex_attrs: *const std::ffi::c_void,
+                cache_out: *mut *mut std::ffi::c_void,
+            ) -> i32;
+            fn CVOpenGLESTextureCacheCreateTextureFromImage(
+                allocator: *const std::ffi::c_void,
+                cache: *mut std::ffi::c_void,
+                pixel_buffer: *mut std::ffi::c_void,
+                tex_attrs: *const std::ffi::c_void,
+                target: u32,
+                internal_format: i32,
+                width: i32,
+                height: i32,
+                format: u32,
+                typ: u32,
+                plane_index: usize,
+                texture_out: *mut *mut std::ffi::c_void,
+            ) -> i32;
+            fn CVOpenGLESTextureGetName(texture: *mut std::ffi::c_void) -> u32;
+            fn CVPixelBufferCreateWithIOSurface(
+                allocator: *const std::ffi::c_void,
+                surface: *mut std::ffi::c_void,
+                pixel_buffer_attrs: *const std::ffi::c_void,
+                pixel_buffer_out: *mut *mut std::ffi::c_void,
+            ) -> i32;
+            fn CFRelease(cf: *mut std::ffi::c_void);
+        }
+
         unsafe {
-            let gl_gen_textures: GlGenTexturesFn =
-                std::mem::transmute(self.get_proc_address("glGenTextures"));
             let gl_bind_texture: GlBindTextureFn =
                 std::mem::transmute(self.get_proc_address("glBindTexture"));
 
-            let mut gl_texture: u32 = 0;
-            gl_gen_textures(1, &mut gl_texture);
+            let mut pixel_buffer: *mut std::ffi::c_void = std::ptr::null_mut();
+            let status = CVPixelBufferCreateWithIOSurface(
+                std::ptr::null(),
+                iosurface_ref,
+                std::ptr::null(),
+                &mut pixel_buffer,
+            );
+            assert!(status == 0 && !pixel_buffer.is_null(),
+                "CVPixelBufferCreateWithIOSurface failed: {}", status);
+
+            let mut texture_cache: *mut std::ffi::c_void = std::ptr::null_mut();
+            let status = CVOpenGLESTextureCacheCreate(
+                std::ptr::null(),
+                std::ptr::null(),
+                self.eagl_context,
+                std::ptr::null(),
+                &mut texture_cache,
+            );
+            assert!(status == 0 && !texture_cache.is_null(),
+                "CVOpenGLESTextureCacheCreate failed: {}", status);
+
+            let mut cv_texture: *mut std::ffi::c_void = std::ptr::null_mut();
+            let status = CVOpenGLESTextureCacheCreateTextureFromImage(
+                std::ptr::null(),
+                texture_cache,
+                pixel_buffer,
+                std::ptr::null(),
+                GL_TEXTURE_2D,
+                GL_RGBA as i32,
+                width as i32,
+                height as i32,
+                GL_BGRA,
+                GL_UNSIGNED_BYTE,
+                0,
+                &mut cv_texture,
+            );
+            assert!(status == 0 && !cv_texture.is_null(),
+                "CVOpenGLESTextureCacheCreateTextureFromImage failed: {}", status);
+
+            let gl_texture = CVOpenGLESTextureGetName(cv_texture);
             gl_bind_texture(GL_TEXTURE_2D, gl_texture);
 
-            // Use EAGLContext texImageIOSurface binding
-            let success: u8 = msg_send![
-                self.eagl_context,
-                texImageIOSurface: iosurface_ref
-                target: GL_TEXTURE_2D
-                internalFormat: GL_RGBA
-                width: width as u32
-                height: height as u32
-                format: GL_BGRA
-                type: GL_UNSIGNED_BYTE
-                plane: 0u32
-            ];
-            assert!(success != 0, "EAGLContext texImageIOSurface failed");
+            // cv_texture and texture_cache must stay alive while the GL texture
+            // is in use. Leak intentionally — a proper implementation would
+            // store them alongside the texture for cleanup.
+            CFRelease(pixel_buffer);
 
             gl_bind_texture(GL_TEXTURE_2D, 0);
 

@@ -38,7 +38,7 @@ pub(crate) fn log_with_level_makepad_platform(
     }
 
     if !Cx::has_studio_web_socket() {
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         println!(
             "{}:{}:{} - {}",
             file_name,
@@ -46,6 +46,18 @@ pub(crate) fn log_with_level_makepad_platform(
             column_start + 1,
             message
         );
+        #[cfg(target_os = "ios")]
+        {
+            extern "C" {
+                fn NSLog(fmt: crate::os::apple::apple_sys::ObjcId, ...);
+            }
+            use crate::os::apple::apple_util::str_to_nsstring;
+            let msg = format!(
+                "{}:{}:{} - {}",
+                file_name, line_start + 1, column_start + 1, message
+            );
+            unsafe { NSLog(str_to_nsstring(&msg)) };
+        }
         // if android, also log to ADB
         #[cfg(target_os = "android")]
         {
