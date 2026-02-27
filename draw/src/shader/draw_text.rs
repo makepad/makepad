@@ -5,7 +5,6 @@ use {
         draw_list_2d::ManyInstances,
         makepad_platform::*,
         text::{
-            builtins,
             color::Color,
             font::FontId,
             font_family::FontFamilyId,
@@ -22,7 +21,7 @@ use {
         turtle::*,
         turtle::{Align, Walk},
     },
-    std::{borrow::Cow, cell::RefCell, rc::Rc},
+    std::{cell::RefCell, rc::Rc},
 };
 
 script_mod! {

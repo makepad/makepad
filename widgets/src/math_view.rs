@@ -180,7 +180,7 @@ impl MathView {
         let layout_size = self.font_size as f32 * 1.75;
         let Some(layout) = latex_math::layout(
             &nodes,
-            layout_font.data(),
+            layout_font.data().as_slice(),
             layout_size,
             MathStyle::Display,
         ) else {
