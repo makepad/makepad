@@ -2372,8 +2372,8 @@ impl CglRenderBridge {
 /// that shares textures with Metal via IOSurface.
 #[cfg(target_os = "ios")]
 pub struct EaglRenderBridge {
-    eagl_context: ObjcId,
-    opengles_framework: *mut std::ffi::c_void,
+    pub(crate) eagl_context: ObjcId,
+    pub(crate) opengles_framework: *mut std::ffi::c_void,
 }
 
 #[cfg(target_os = "ios")]

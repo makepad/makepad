@@ -255,6 +255,18 @@ impl Cx {
     pub fn restore_gl_context(&mut self) {}
 }
 
+// EAGL platform accessors (iOS)
+#[cfg(target_os = "ios")]
+impl GlRenderBridge {
+    pub fn eagl_context(&self) -> *mut c_void {
+        self.inner.eagl_context as *mut c_void
+    }
+
+    pub fn opengles_framework(&self) -> *mut c_void {
+        self.inner.opengles_framework
+    }
+}
+
 // Cx methods: iOS
 #[cfg(target_os = "ios")]
 impl Cx {

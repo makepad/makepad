@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 const IOS_DEPLOYMENT_TARGET: &str = "17.0";
 
 pub struct PlistValues {
-    identifier: String,
-    display_name: String,
-    name: String,
-    executable: String,
-    version: String,
+    pub identifier: String,
+    pub display_name: String,
+    pub name: String,
+    pub executable: String,
+    pub version: String,
 }
 
 pub struct ParsedProfiles {
@@ -401,10 +401,10 @@ impl Scent {
 }
 
 pub struct IosBuildResult {
-    app_dir: PathBuf,
-    build_dir: PathBuf,
-    plist: PlistValues,
-    dst_bin: PathBuf,
+    pub app_dir: PathBuf,
+    pub build_dir: PathBuf,
+    pub plist: PlistValues,
+    pub dst_bin: PathBuf,
 }
 
 pub fn build(
@@ -720,7 +720,7 @@ impl ProvisionData {
     }
 }
 
-fn copy_resources(
+pub fn copy_resources(
     app_dir: &Path,
     build_crate: &str,
     build_dir: &Path,
