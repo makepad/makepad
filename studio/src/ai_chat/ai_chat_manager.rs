@@ -596,13 +596,24 @@ impl AiChatManager {
         // alright. lets see if we have any incoming Http things
         match event {
             Event::NetworkResponses(e) => {
-                for e in e {
+                for response in e {
+                    let request_id = match response {
+                        NetworkResponse::HttpResponse { request_id, .. }
+                        | NetworkResponse::HttpStreamChunk { request_id, .. }
+                        | NetworkResponse::HttpStreamComplete { request_id, .. }
+                        | NetworkResponse::HttpError { request_id, .. }
+                        | NetworkResponse::HttpProgress { request_id, .. } => *request_id,
+                        NetworkResponse::WsOpened { .. }
+                        | NetworkResponse::WsMessage { .. }
+                        | NetworkResponse::WsClosed { .. }
+                        | NetworkResponse::WsError { .. } => continue,
+                    };
                     // lets check our in flight queries
                     if let Some((chat_id, OpenDocument::AiChat(doc))) =
                         fs.open_documents.iter_mut().find(|(_, v)| {
                             if let OpenDocument::AiChat(v) = v {
                                 if let Some(v) = &v.in_flight {
-                                    v.request_id == e.request_id
+                                    v.request_id == request_id
                                 } else {
                                     false
                                 }
@@ -613,11 +624,11 @@ impl AiChatManager {
                     {
                         let chat_id = *chat_id;
                         let in_flight = doc.in_flight.as_ref().unwrap();
-                        match &e.response {
-                            NetworkResponse::HttpRequestError(_err) => {
+                        match response {
+                            NetworkResponse::HttpError { error: _err, .. } => {
                                 println!("HTTP ERROR {:?}", _err);
                             }
-                            NetworkResponse::HttpStreamResponse(res) => {
+                            NetworkResponse::HttpStreamChunk { response: res, .. } => {
                                 let data = res.get_string_body().unwrap();
 
                                 let mut changed = false;
@@ -707,7 +718,7 @@ impl AiChatManager {
                                     //fs.request_save_file_for_file_node_id(chat_id, false);
                                 }
                             }
-                            NetworkResponse::HttpStreamComplete(_res) => {
+                            NetworkResponse::HttpStreamComplete { .. } => {
                                 // done?..
                                 //let chat_id = res.metadata_id;
                                 // alright lets fetch the chat object

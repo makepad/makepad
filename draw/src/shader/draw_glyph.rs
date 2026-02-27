@@ -257,7 +257,11 @@ script_mod! {
         fragment: fn() {
             self.fb0 = self.pixel()
         }
-
+        
+        get_color: fn(){
+            self.color
+        }
+        
         pixel: fn() {
             if self.curve_count < 0.5 {
                 return vec4(0.0, 0.0, 0.0, 0.0)
@@ -308,7 +312,8 @@ script_mod! {
             let darken = clamp(max(px_x, px_y) * self.stem_darken, 0.0, self.stem_darken_max)
             let edge_weight = clamp(1.0 - abs(alpha_base * 2.0 - 1.0), 0.0, 1.0)
             let alpha = clamp(alpha_base + darken * edge_weight, 0.0, 1.0)
-            return vec4(self.color.rgb * self.color.a * alpha, self.color.a * alpha)
+            let color = self.get_color();
+            return vec4(color.rgb * color.a * alpha, color.a * alpha)
         }
     }
 }

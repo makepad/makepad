@@ -1,15 +1,8 @@
 use crate::area::Area;
 use crate::cursor::MouseCursor;
 use crate::event::{
-    KeyEvent,
-    KeyModifiers,
-    MouseButton,
-    MouseDownEvent,
-    MouseMoveEvent,
-    TweakRayEvent,
-    MouseUpEvent,
-    ScrollEvent,
-    TextInputEvent,
+    KeyEvent, KeyModifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
+    TextInputEvent, TweakRayEvent,
 };
 use crate::makepad_math::{dvec2, Vec2d};
 use crate::makepad_micro_serde::*;
@@ -279,10 +272,7 @@ pub enum AppToStudio {
     Screenshot(ScreenshotResponse),
     WidgetTreeDump(WidgetTreeDumpResponse),
     TweakHits(TweakHitsResponse),
-    CreateWindow {
-        window_id: usize,
-        kind_id: usize,
-    },
+    CreateWindow { window_id: usize, kind_id: usize },
     ReadyToStart,
     RequestAnimationFrame,
     SetCursor(MouseCursor),

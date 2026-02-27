@@ -613,6 +613,10 @@ impl FileSystem {
         }
 
         let path = self.file_node_path(file_id);
+        if path.is_empty() {
+            error!("Cannot open file {:?}: no path found", file_id);
+            return;
+        }
         self.file_client.send_request(FileRequest::OpenFile {
             path,
             id: file_id.0,
@@ -656,6 +660,10 @@ impl FileSystem {
     pub fn request_save_file_for_file_node_id(&mut self, file_id: LiveId, patch: bool) {
         if let Some(text) = self.file_id_as_string(file_id) {
             let path = self.file_node_path(file_id);
+            if path.is_empty() {
+                error!("Cannot save file {:?}: no path found", file_id);
+                return;
+            }
             self.file_client.send_request(FileRequest::SaveFile {
                 path: path.clone(),
                 data: text,
@@ -780,15 +788,29 @@ impl FileSystem {
     }
 
     pub fn file_node_name(&self, file_node_id: LiveId) -> String {
-        self.file_nodes.get(&file_node_id).unwrap().name.clone()
+        if let Some(file_node) = self.file_nodes.get(&file_node_id) {
+            return file_node.name.clone();
+        }
+        self.file_node_id_to_path(file_node_id)
+            .and_then(|path| path.rsplit('/').next())
+            .unwrap_or("<missing>")
+            .to_string()
     }
 
     pub fn file_node_path(&self, file_node_id: LiveId) -> String {
+        if let Some(path) = self.file_node_id_to_path(file_node_id) {
+            return path.to_string();
+        }
         let mut path = String::new();
-        let mut file_node = &self.file_nodes[file_node_id];
+        let Some(mut file_node) = self.file_nodes.get(&file_node_id) else {
+            return path;
+        };
         while let Some(edge) = &file_node.parent_edge {
             path.insert_str(0, &edge.name);
-            file_node = &self.file_nodes[edge.file_node_id];
+            let Some(parent_file_node) = self.file_nodes.get(&edge.file_node_id) else {
+                break;
+            };
+            file_node = parent_file_node;
             if file_node.parent_edge.is_some() {
                 path.insert_str(0, "/");
             }
@@ -796,7 +818,7 @@ impl FileSystem {
         path
     }
     pub fn ensure_unique_tab_names(&self, cx: &mut Cx, dock: &DockRef) {
-        fn longest_common_suffix(a: &[&str], b: &[&str]) -> Option<usize> {
+        fn longest_common_suffix(a: &[String], b: &[String]) -> Option<usize> {
             if a == b {
                 return None; // same file
             }
@@ -815,18 +837,17 @@ impl FileSystem {
             Some(count)
         }
         // Collect the path components for each open tab
-        let mut tabs: Vec<(LiveId, Vec<&str>, usize)> = Vec::new();
+        let mut tabs: Vec<(LiveId, Vec<String>, usize)> = Vec::new();
         for (&tab_id, &file_id) in &self.tab_id_to_file_node_id {
-            let mut path_components = Vec::new();
-            let mut file_node = &self.file_nodes[file_id];
-
-            while let Some(edge) = &file_node.parent_edge {
-                // Collect references to the file node names without cloning
-                path_components.push(edge.name.as_str());
-                file_node = &self.file_nodes[edge.file_node_id];
+            let mut path_components = self
+                .file_node_path(file_id)
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            if path_components.is_empty() {
+                path_components.push(format!("deleted:{:x}", file_id.0));
             }
-            // Reverse the components so they go from root to leaf
-            path_components.reverse();
 
             tabs.push((tab_id, path_components, 1));
         }

@@ -39,11 +39,14 @@ use wayland_protocols::{
         self,
         decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1},
         shell::client::{xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base},
+        toplevel_icon::v1::client::{
+            xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1,
+        },
     },
 };
 
 use crate::{
-    cx_native::EventFlow, event::WindowGeom, select_timer::SelectTimers,
+    cx_native::EventFlow, event::ScrollEvent, event::WindowGeom, select_timer::SelectTimers,
     wayland::wayland_app::WaylandApp, x11::xlib_event::XlibEvent, KeyCode,
     WindowCloseRequestedEvent, WindowGeomChangeEvent, WindowId, WindowMovedEvent,
 };
@@ -64,6 +67,7 @@ pub(crate) struct WaylandState {
     pub(crate) compositor: Option<wl_compositor::WlCompositor>,
     pub(crate) wm_base: Option<xdg_wm_base::XdgWmBase>,
     pub(crate) seat: Option<wl_seat::WlSeat>,
+    pub(crate) shm: Option<wl_shm::WlShm>,
     pub(crate) data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
     pub(crate) data_device: Option<wl_data_device::WlDataDevice>,
     pub(crate) clipboard_source: Option<wl_data_source::WlDataSource>,
@@ -80,6 +84,7 @@ pub(crate) struct WaylandState {
     pub(crate) pointer_serial: Option<u32>,
     pub(crate) keyboard_serial: Option<u32>,
     pub(crate) decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
+    pub(crate) icon_manager: Option<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1>,
     pub(crate) windows: Vec<WaylandWindow>,
     pub(crate) current_window: Option<WindowId>,
     pub(crate) modifiers: KeyModifiers,
@@ -90,8 +95,12 @@ pub(crate) struct WaylandState {
     pub(crate) xkb_cx: xkb_sys::XkbContext,
     pub(crate) text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
     pub(crate) text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
+    pub(crate) last_resize_edge: Option<xdg_toplevel::ResizeEdge>,
     event_callback: Option<Box<dyn FnMut(&mut WaylandState, XlibEvent)>>,
 
+    pub(crate) scroll_accumulator: Vec2d,
+    pub(crate) scroll_is_wheel: bool,
+    pub(crate) last_scroll_time: f64,
     pub(crate) event_flow: EventFlow,
     pub(crate) event_loop_running: bool,
 }
@@ -102,6 +111,7 @@ impl WaylandState {
             compositor: None,
             wm_base: None,
             seat: None,
+            shm: None,
             data_device_manager: None,
             data_device: None,
             clipboard_source: None,
@@ -115,6 +125,7 @@ impl WaylandState {
             cursor_shape: None,
             pointer: None,
             decoration_manager: None,
+            icon_manager: None,
             scale_manager: None,
             viewporter: None,
             windows: Vec::new(),
@@ -127,8 +138,12 @@ impl WaylandState {
             text_input: None,
             text_input_manager: None,
             last_mouse_pos: dvec2(0., 0.),
+            last_resize_edge: None,
             timers: SelectTimers::new(),
             event_callback: Some(event_callback),
+            scroll_accumulator: dvec2(0.0, 0.0),
+            scroll_is_wheel: false,
+            last_scroll_time: 0.0,
             event_flow: EventFlow::Wait,
             event_loop_running: true,
         }
@@ -162,7 +177,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     state.wm_base = Some(wm_base);
                 }
                 "wl_seat" => {
-                    let seat = wl_registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qhandle, ());
+                    let seat = wl_registry.bind::<wl_seat::WlSeat, _, _>(
+                        name,
+                        version.min(5),
+                        qhandle,
+                        (),
+                    );
                     state.seat = Some(seat);
                     state.ensure_data_device(qhandle);
                 }
@@ -206,6 +226,21 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     let viewporter =
                         wl_registry.bind::<wp_viewporter::WpViewporter, _, _>(name, 1, qhandle, ());
                     state.viewporter = Some(viewporter);
+                }
+                "wl_shm" => {
+                    let shm =
+                        wl_registry.bind::<wl_shm::WlShm, _, _>(name, 1, qhandle, ());
+                    state.shm = Some(shm);
+                }
+                "xdg_toplevel_icon_manager_v1" => {
+                    let icon_manager = wl_registry
+                        .bind::<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, _, _>(
+                        name,
+                        1,
+                        qhandle,
+                        (),
+                    );
+                    state.icon_manager = Some(icon_manager);
                 }
                 "zwp_text_input_manager_v3" => {
                     let text_input_manager = wl_registry
@@ -763,6 +798,79 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 if let Some(window_id) = state.current_window {
                     let pos = dvec2(surface_x as f64, surface_y as f64);
                     state.last_mouse_pos = pos;
+
+                    // Edge-resize detection (matches X11 backend thresholds)
+                    let window_size = state
+                        .windows
+                        .iter()
+                        .find(|w| w.window_id == window_id)
+                        .map(|w| w.window_geom.inner_size);
+                    if let Some(ws) = window_size {
+                        let edge = if pos.x < 10.0 && pos.y < 10.0 {
+                            Some((
+                                xdg_toplevel::ResizeEdge::TopLeft,
+                                wp_cursor_shape_device_v1::Shape::NwResize,
+                            ))
+                        } else if pos.x < 10.0 && pos.y >= ws.y - 10.0 {
+                            Some((
+                                xdg_toplevel::ResizeEdge::BottomLeft,
+                                wp_cursor_shape_device_v1::Shape::SwResize,
+                            ))
+                        } else if pos.x < 5.0 {
+                            Some((
+                                xdg_toplevel::ResizeEdge::Left,
+                                wp_cursor_shape_device_v1::Shape::WResize,
+                            ))
+                        } else if pos.x >= ws.x - 10.0 && pos.y < 10.0 {
+                            Some((
+                                xdg_toplevel::ResizeEdge::TopRight,
+                                wp_cursor_shape_device_v1::Shape::NeResize,
+                            ))
+                        } else if pos.x >= ws.x - 10.0 && pos.y >= ws.y - 10.0 {
+                            Some((
+                                xdg_toplevel::ResizeEdge::BottomRight,
+                                wp_cursor_shape_device_v1::Shape::SeResize,
+                            ))
+                        } else if pos.x >= ws.x - 5.0 {
+                            Some((
+                                xdg_toplevel::ResizeEdge::Right,
+                                wp_cursor_shape_device_v1::Shape::EResize,
+                            ))
+                        } else if pos.y < 5.0 {
+                            Some((
+                                xdg_toplevel::ResizeEdge::Top,
+                                wp_cursor_shape_device_v1::Shape::NResize,
+                            ))
+                        } else if pos.y >= ws.y - 5.0 {
+                            Some((
+                                xdg_toplevel::ResizeEdge::Bottom,
+                                wp_cursor_shape_device_v1::Shape::SResize,
+                            ))
+                        } else {
+                            None
+                        };
+                        if let Some((resize_edge, cursor_shape)) = edge {
+                            state.last_resize_edge = Some(resize_edge);
+                            if let (Some(cursor_dev), Some(serial)) =
+                                (state.cursor_shape.as_ref(), state.pointer_serial)
+                            {
+                                cursor_dev.set_shape(serial, cursor_shape);
+                            }
+                        } else {
+                            if state.last_resize_edge.is_some() {
+                                if let (Some(cursor_dev), Some(serial)) =
+                                    (state.cursor_shape.as_ref(), state.pointer_serial)
+                                {
+                                    cursor_dev.set_shape(
+                                        serial,
+                                        wp_cursor_shape_device_v1::Shape::Default,
+                                    );
+                                }
+                            }
+                            state.last_resize_edge = None;
+                        }
+                    }
+
                     state.do_callback(XlibEvent::MouseMove(MouseMoveEvent {
                         abs: pos,
                         window_id: window_id,
@@ -793,6 +901,20 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         match key_state {
                             WEnum::Value(ButtonState::Pressed) => {
                                 if btn == MouseButton::PRIMARY {
+                                    // Edge resize takes priority
+                                    if let Some(resize_edge) = state.last_resize_edge.take() {
+                                        if let (Some(seat), Some(window)) = (
+                                            state.seat.as_ref(),
+                                            state
+                                                .windows
+                                                .iter()
+                                                .find(|win| win.window_id == window_id),
+                                        ) {
+                                            window.toplevel.resize(seat, serial, resize_edge);
+                                            return;
+                                        }
+                                    }
+
                                     let response =
                                         Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
                                     state.do_callback(XlibEvent::WindowDragQuery(
@@ -849,13 +971,69 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                     }
                 }
             }
-            wl_pointer::Event::Axis { time, axis, value } => {}
-            wl_pointer::Event::Frame => {}
-            wl_pointer::Event::AxisSource { axis_source } => {}
-            wl_pointer::Event::AxisStop { time, axis } => {}
-            wl_pointer::Event::AxisDiscrete { axis, discrete } => {}
-            wl_pointer::Event::AxisValue120 { axis, value120 } => {}
-            wl_pointer::Event::AxisRelativeDirection { axis, direction } => {}
+            // Wayland axis values use motion-event coordinates: positive
+            // vertical = downward on screen = content slides down = viewport
+            // moves UP. Makepad's internal convention is positive = viewport
+            // moves DOWN (matching X11 button mapping and macOS after its
+            // negation of scrollingDeltaY). Negate to align conventions,
+            // same as winit does for the same reason.
+            wl_pointer::Event::Axis {
+                time: _,
+                axis,
+                value,
+            } => match axis {
+                WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
+                    state.scroll_accumulator.y -= value;
+                }
+                WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
+                    state.scroll_accumulator.x -= value;
+                }
+                _ => {}
+            },
+            wl_pointer::Event::AxisSource { axis_source } => {
+                state.scroll_is_wheel = axis_source == WEnum::Value(wl_pointer::AxisSource::Wheel);
+            }
+            wl_pointer::Event::Frame => {
+                let acc = state.scroll_accumulator;
+                if acc.x != 0.0 || acc.y != 0.0 {
+                    if let Some(window_id) = state.current_window {
+                        let time_now = state.time_now();
+                        let scroll = if state.scroll_is_wheel {
+                            let last = state.last_scroll_time;
+                            state.last_scroll_time = time_now;
+                            let speed = 1200.0 * (0.2 - 2.0 * (time_now - last)).max(0.01);
+                            dvec2(acc.x.signum() * speed, acc.y.signum() * speed)
+                        } else {
+                            acc
+                        };
+                        state.do_callback(XlibEvent::Scroll(ScrollEvent {
+                            window_id,
+                            scroll,
+                            abs: state.last_mouse_pos,
+                            modifiers: state.modifiers,
+                            is_mouse: state.scroll_is_wheel,
+                            handled_x: Cell::new(false),
+                            handled_y: Cell::new(false),
+                            time: time_now,
+                        }));
+                    }
+                }
+                state.scroll_accumulator = dvec2(0.0, 0.0);
+                state.scroll_is_wheel = false;
+            }
+            wl_pointer::Event::AxisStop { time: _, axis: _ } => {}
+            wl_pointer::Event::AxisDiscrete {
+                axis: _,
+                discrete: _,
+            } => {}
+            wl_pointer::Event::AxisValue120 {
+                axis: _,
+                value120: _,
+            } => {}
+            wl_pointer::Event::AxisRelativeDirection {
+                axis: _,
+                direction: _,
+            } => {}
             _ => {}
         }
     }
@@ -884,7 +1062,24 @@ delegate_noop!(WaylandState: ignore wp_fractional_scale_manager_v1::WpFractional
 delegate_noop!(WaylandState: ignore wl_compositor::WlCompositor);
 delegate_noop!(WaylandState: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
 delegate_noop!(WaylandState: ignore zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1);
+delegate_noop!(WaylandState: ignore xdg_toplevel_icon_v1::XdgToplevelIconV1);
+delegate_noop!(WaylandState: ignore wl_shm::WlShm);
+delegate_noop!(WaylandState: ignore wl_shm_pool::WlShmPool);
+delegate_noop!(WaylandState: ignore wl_buffer::WlBuffer);
 // delegate_noop!(WaylandState: ignore xdg_positioner::XdgPositioner);
+
+impl Dispatch<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1,
+        _event: xdg_toplevel_icon_manager_v1::Event,
+        _: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // icon_size events are informational; we ignore them for now
+    }
+}
 
 impl WaylandState {
     fn ensure_data_device(&mut self, qhandle: &QueueHandle<Self>) {

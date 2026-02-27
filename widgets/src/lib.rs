@@ -49,9 +49,9 @@ pub mod nav_control;
 #[cfg(feature = "voice")]
 pub mod voice_wave;
 pub mod window;
+pub mod window_menu;
 #[cfg(feature = "voice")]
 mod window_voice_input;
-pub mod window_menu;
 
 pub mod drop_down;
 pub mod popup_menu;
@@ -107,6 +107,7 @@ pub mod page_flip;
 pub mod popup_notification;
 pub mod slides_view;
 pub mod tooltip;
+pub mod callout_tooltip;
 pub mod video;
 
 pub mod command_text_input;
@@ -130,7 +131,7 @@ pub mod chart;
 
 pub use crate::{
     adaptive_view::*,
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     // loading_spinner - no public exports
     bare_step::*,
     button::*,
@@ -184,6 +185,7 @@ pub use crate::{
 
     text_input::*,
     tooltip::*,
+    callout_tooltip::*,
     // Navigation and panels
     touch_gesture::*,
     turtle_step::*,
@@ -231,7 +233,6 @@ pub use crate::chart::*;
 
 pub use crate::video::*;
 
-
 pub fn theme_mod(vm: &mut ScriptVm) {
     makepad_draw::script_mod(vm);
     makepad_platform::ime::script_mod(vm);
@@ -243,6 +244,16 @@ pub fn theme_mod(vm: &mut ScriptVm) {
     crate::theme_desktop_light::script_mod(vm);
     crate::theme_desktop_skeleton::script_mod(vm);
     script_eval!(vm, {
+        mod.helper = {
+            startup: |v|{
+                mod.res.load_all_resources()
+                //mod.gc.set_static(mod.prelude.widgets_header);
+                //mod.gc.set_static(mod.prelude.widgets_internal);
+                //mod.gc.set_static(mod.prelude.widgets);
+                v
+            }
+        }
+        
         mod.prelude.widgets_header = {
             ..mod.res,
             ..mod.helper,
@@ -336,6 +347,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::expandable_panel::script_mod(vm);
     crate::modal::script_mod(vm);
     crate::tooltip::script_mod(vm);
+    crate::callout_tooltip::script_mod(vm);
     crate::popup_notification::script_mod(vm);
     crate::video::script_mod(vm);
     crate::page_flip::script_mod(vm);

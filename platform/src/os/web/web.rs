@@ -171,6 +171,7 @@ impl Cx {
                         self.handle_media_signals();
                         self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
+                        self.dispatch_network_runtime_events();
                     }
                     if tw.flags & 2 != 0 {
                         self.handle_action_receiver();
@@ -211,47 +212,47 @@ impl Cx {
 
                 live_id!(ToWasmHTTPResponse) => {
                     let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseItem {
+                    network_responses.push(NetworkResponse::HttpResponse {
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpResponse(HttpResponse::new(
+                        response: HttpResponse::new(
                             LiveId::from_lo_hi(tw.metadata_id_lo, tw.metadata_id_hi),
                             tw.status as u16,
                             tw.headers,
                             Some(tw.body.into_vec_u8()),
-                        )),
+                        ),
                     });
                 }
 
                 live_id!(ToWasmHttpRequestError) => {
                     let tw = ToWasmHttpRequestError::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseItem {
+                    network_responses.push(NetworkResponse::HttpError {
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpRequestError(HttpError {
+                        error: HttpError {
                             metadata_id: LiveId::from_lo_hi(tw.metadata_id_lo, tw.metadata_id_hi),
                             message: tw.error,
-                        }),
+                        },
                     });
                 }
 
                 live_id!(ToWasmHttpResponseProgress) => {
                     let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseItem {
+                    network_responses.push(NetworkResponse::HttpProgress {
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpProgress(HttpProgress {
+                        progress: HttpProgress {
                             loaded: tw.loaded as u64,
                             total: tw.total as u64,
-                        }),
+                        },
                     });
                 }
 
                 live_id!(ToWasmHttpUploadProgress) => {
                     let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
-                    network_responses.push(NetworkResponseItem {
+                    network_responses.push(NetworkResponse::HttpProgress {
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: NetworkResponse::HttpProgress(HttpProgress {
+                        progress: HttpProgress {
                             loaded: tw.loaded as u64,
                             total: tw.total as u64,
-                        }),
+                        },
                     });
                 }
                 live_id!(ToWasmPermissionResult) => {
@@ -705,6 +706,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
+        super::web_network::install_network_backend_shim();
         self.package_root = Some(String::new());
 
         self.os.append_to_wasm_js(&[

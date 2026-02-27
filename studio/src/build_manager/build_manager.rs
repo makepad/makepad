@@ -13,14 +13,13 @@ use {
         makepad_platform::studio::{
             AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, LocalProfileSample,
             RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp, RemoteScroll,
-            RemoteTweakRay,
-            ScreenshotRequest, ScreenshotResponse, StudioToApp, StudioToAppVec,
+            RemoteTweakRay, ScreenshotRequest, ScreenshotResponse, StudioToApp, StudioToAppVec,
             WidgetTreeDumpRequest, WidgetTreeDumpResponse,
         },
         makepad_shell::*,
         makepad_widgets::*,
     },
-    makepad_http::server::*,
+    makepad_network::http_server::*,
     std::{
         cell::RefCell,
         collections::{hash_map, BTreeSet, HashMap, HashSet},
@@ -139,23 +138,47 @@ pub struct BuildManager {
     pub binaries: Vec<BuildBinary>,
     pub active: ActiveBuilds,
     pub studio_http: String,
-    pub recv_studio_msg: ToUIReceiver<(LiveId, AppToStudioVec)>,
-    pub recv_studio_disconnect: ToUIReceiver<LiveId>,
-    recv_terminal_msg: ToUIReceiver<TerminalToBuildManager>,
+    pub recv_studio_network_msg: ToUIReceiver<StudioNetworkMessage>,
     pub recv_external_ip: ToUIReceiver<SocketAddr>,
     pub tick_timer: Timer,
     pub websocket_alive_timer: Timer,
     //pub send_file_change: FromUISender<LiveFileChange>,
     pub active_build_websockets: Arc<Mutex<RefCell<ActiveBuildWebSockets>>>,
-    terminal_sockets: HashMap<u64, mpsc::Sender<Vec<u8>>>,
-    terminal_build_owners: HashMap<LiveId, u64>,
-    terminal_build_counter: u64,
-    terminal_screenshot_requests: UniqueIdMap<PendingTerminalScreenshot>,
-    terminal_widget_tree_dump_requests: UniqueIdMap<PendingTerminalWidgetTreeDump>,
-    terminal_latest_widget_dumps: HashMap<LiveId, String>,
-    terminal_startup_queries: HashMap<LiveId, String>,
-    terminal_startup_dump_pending: HashSet<LiveId>,
+    studio_remote_sockets: HashMap<u64, StudioWebSocket>,
+    studio_remote_build_owners: HashMap<LiveId, u64>,
+    studio_remote_build_counter: u64,
+    studio_remote_screenshot_requests: UniqueIdMap<PendingStudioRemoteScreenshot>,
+    studio_remote_widget_tree_dump_requests: UniqueIdMap<PendingStudioRemoteWidgetTreeDump>,
+    studio_remote_latest_widget_dumps: HashMap<LiveId, String>,
+    studio_remote_startup_queries: HashMap<LiveId, String>,
+    studio_remote_startup_dump_pending: HashSet<LiveId>,
     recompiling_builds: HashSet<LiveId>,
+}
+
+#[derive(Clone)]
+pub struct StudioWebSocket {
+    pub web_socket_id: u64,
+    pub sender: mpsc::Sender<Vec<u8>>,
+}
+
+pub enum StudioNetworkMessage {
+    AppToStudio {
+        build_id: LiveId,
+        msgs: AppToStudioVec,
+    },
+    AppDisconnected {
+        build_id: LiveId,
+    },
+    RemoteConnected {
+        socket: StudioWebSocket,
+    },
+    RemoteDisconnected {
+        web_socket_id: u64,
+    },
+    RemoteRequest {
+        web_socket_id: u64,
+        request: StudioRemoteRequest,
+    },
 }
 
 #[derive(Default)]
@@ -171,7 +194,7 @@ impl ActiveBuildWebSockets {
             if socket.build_id != build_id {
                 return true;
             }
-            if socket.sender.send(data.clone()).is_ok() {
+            if socket.socket.sender.send(data.clone()).is_ok() {
                 sent_any = true;
                 true
             } else {
@@ -183,13 +206,12 @@ impl ActiveBuildWebSockets {
 }
 
 pub struct ActiveBuildSocket {
-    web_socket_id: u64,
+    socket: StudioWebSocket,
     build_id: LiveId,
-    sender: mpsc::Sender<Vec<u8>>,
 }
 
-include!("terminal_proto.rs");
-include!("studio_proto.rs");
+include!("studio_remote_proto.rs");
+include!("studio_app_proto.rs");
 
 const PROFILE_MAX_SAMPLES_PER_BUILD: usize = 16_384;
 pub struct BuildBinary {
@@ -371,20 +393,16 @@ impl BuildManager {
                     }
                 }
                 Err(err) => {
-                    crate::warning!(
-                        "run list discovery failed for root {}: {}",
-                        root_name,
-                        err
-                    );
+                    crate::warning!("run list discovery failed for root {}: {}", root_name, err);
                 }
             }
         }
     }
 
     pub fn any_binary_active(&self, root: &str, binary: &str) -> bool {
-        self.running_processes.values().any(|process| {
-            process.root == root && process.binary == binary
-        })
+        self.running_processes
+            .values()
+            .any(|process| process.root == root && process.binary == binary)
     }
 
     pub fn item_id_active(&self, item_id: LiveId) -> bool {
@@ -429,7 +447,10 @@ impl BuildManager {
     }
 
     fn push_event_profile_sample(&mut self, build_id: LiveId, mut sample: EventSample) {
-        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        let origin = self
+            .profile_time_origin
+            .entry(build_id)
+            .or_insert(sample.start);
         sample.start -= *origin;
         sample.end -= *origin;
         if sample.end < sample.start {
@@ -443,7 +464,10 @@ impl BuildManager {
     }
 
     fn push_gpu_profile_sample(&mut self, build_id: LiveId, mut sample: GPUSample) {
-        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        let origin = self
+            .profile_time_origin
+            .entry(build_id)
+            .or_insert(sample.start);
         sample.start -= *origin;
         sample.end -= *origin;
         if sample.end < sample.start {
@@ -457,7 +481,10 @@ impl BuildManager {
     }
 
     fn push_gc_profile_sample(&mut self, build_id: LiveId, mut sample: GCSample) {
-        let origin = self.profile_time_origin.entry(build_id).or_insert(sample.start);
+        let origin = self
+            .profile_time_origin
+            .entry(build_id)
+            .or_insert(sample.start);
         sample.start -= *origin;
         sample.end -= *origin;
         if sample.end < sample.start {
@@ -471,11 +498,8 @@ impl BuildManager {
     }
 
     fn push_self_event_profile_sample(&mut self, mut sample: EventSample) {
-        let (start, end) = Self::rebase_sample_range(
-            sample.start,
-            sample.end,
-            &mut self.self_profile_time_origin,
-        );
+        let (start, end) =
+            Self::rebase_sample_range(sample.start, sample.end, &mut self.self_profile_time_origin);
         sample.start = start;
         sample.end = end;
         self.self_profile.event.push(sample);
@@ -483,11 +507,8 @@ impl BuildManager {
     }
 
     fn push_self_gpu_profile_sample(&mut self, mut sample: GPUSample) {
-        let (start, end) = Self::rebase_sample_range(
-            sample.start,
-            sample.end,
-            &mut self.self_profile_time_origin,
-        );
+        let (start, end) =
+            Self::rebase_sample_range(sample.start, sample.end, &mut self.self_profile_time_origin);
         sample.start = start;
         sample.end = end;
         self.self_profile.gpu.push(sample);
@@ -495,11 +516,8 @@ impl BuildManager {
     }
 
     fn push_self_gc_profile_sample(&mut self, mut sample: GCSample) {
-        let (start, end) = Self::rebase_sample_range(
-            sample.start,
-            sample.end,
-            &mut self.self_profile_time_origin,
-        );
+        let (start, end) =
+            Self::rebase_sample_range(sample.start, sample.end, &mut self.self_profile_time_origin);
         sample.start = start;
         sample.end = end;
         self.self_profile.gc.push(sample);
@@ -598,7 +616,7 @@ impl BuildManager {
             .cloned()
             .unwrap_or_else(|| BuildProcess {
                 root: String::new(),
-                binary: format!("remote-{}", build_id.0),
+                binary: format!("studio_remote-{}", build_id.0),
                 target: BuildTarget::ReleaseStudio,
             });
         let index = self.active.builds.len();
@@ -630,19 +648,19 @@ impl BuildManager {
         self.active.builds.remove(&build_id);
         self.running_processes.remove(&build_id);
         self.remove_profile_build(build_id);
-        if let Some(web_socket_id) = self.terminal_build_owners.remove(&build_id) {
-            self.send_terminal_response(
+        if let Some(web_socket_id) = self.studio_remote_build_owners.remove(&build_id) {
+            self.send_studio_remote_response(
                 web_socket_id,
-                StudioTerminalResponse::Stopped {
+                StudioRemoteResponse::Stopped {
                     build_id: build_id.0,
                 },
             );
         }
-        self.terminal_latest_widget_dumps.remove(&build_id);
-        self.terminal_startup_queries.remove(&build_id);
-        self.terminal_startup_dump_pending.remove(&build_id);
-        self.clear_terminal_screenshots_for_build(build_id);
-        self.clear_terminal_widget_tree_dumps_for_build(build_id);
+        self.studio_remote_latest_widget_dumps.remove(&build_id);
+        self.studio_remote_startup_queries.remove(&build_id);
+        self.studio_remote_startup_dump_pending.remove(&build_id);
+        self.clear_studio_remote_screenshots_for_build(build_id);
+        self.clear_studio_remote_widget_tree_dumps_for_build(build_id);
 
         if !self.send_kill_to_build(build_id) {
             self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
@@ -664,11 +682,11 @@ impl BuildManager {
             .collect();
         let build_ids: Vec<LiveId> = self.active.builds.keys().copied().collect();
         for build_id in build_ids {
-            self.terminal_latest_widget_dumps.remove(&build_id);
-            self.terminal_startup_queries.remove(&build_id);
-            self.terminal_startup_dump_pending.remove(&build_id);
-            self.clear_terminal_screenshots_for_build(build_id);
-            self.clear_terminal_widget_tree_dumps_for_build(build_id);
+            self.studio_remote_latest_widget_dumps.remove(&build_id);
+            self.studio_remote_startup_queries.remove(&build_id);
+            self.studio_remote_startup_dump_pending.remove(&build_id);
+            self.clear_studio_remote_screenshots_for_build(build_id);
+            self.clear_studio_remote_widget_tree_dumps_for_build(build_id);
         }
         for (build_id, active_build) in &mut self.active.builds {
             if !known_roots.contains(&active_build.process.root) {
@@ -694,12 +712,12 @@ impl BuildManager {
         }
         self.running_processes.clear();
         self.active.builds.clear();
-        self.terminal_build_owners.clear();
-        self.terminal_latest_widget_dumps.clear();
-        self.terminal_startup_queries.clear();
-        self.terminal_startup_dump_pending.clear();
-        self.terminal_screenshot_requests.clear();
-        self.terminal_widget_tree_dump_requests.clear();
+        self.studio_remote_build_owners.clear();
+        self.studio_remote_latest_widget_dumps.clear();
+        self.studio_remote_startup_queries.clear();
+        self.studio_remote_startup_dump_pending.clear();
+        self.studio_remote_screenshot_requests.clear();
+        self.studio_remote_widget_tree_dump_requests.clear();
     }
 
     pub fn clear_log(&mut self, cx: &mut Cx, dock: &DockRef, file_system: &mut FileSystem) {
@@ -761,7 +779,7 @@ impl BuildManager {
                     content: live_file_change.content.clone(),
                 }])
                 .serialize_bin();
-                let _ = socket.sender.send(data.clone());
+                let _ = socket.socket.sender.send(data.clone());
             }
         }
     }
@@ -800,7 +818,7 @@ impl BuildManager {
             if let Ok(d) = self.active_build_websockets.lock() {
                 for socket in d.borrow_mut().sockets.iter_mut() {
                     let data = StudioToAppVec(vec![StudioToApp::KeepAlive]).serialize_bin();
-                    let _ = socket.sender.send(data.clone());
+                    let _ = socket.socket.sender.send(data.clone());
                 }
             }
         }
@@ -916,19 +934,17 @@ impl BuildManager {
         }
 
         if let Event::Signal = event {
-            let mut pending_terminal_logs: Vec<(LiveId, String, String)> = Vec::new();
+            let mut pending_studio_remote_logs: Vec<(LiveId, String, String)> = Vec::new();
             self.handle_external_ip_signal();
-            self.handle_terminal_signal_messages(cx);
-            self.handle_studio_disconnect_signal(cx);
-            self.handle_studio_signal_messages(cx, file_system, &mut pending_terminal_logs);
+            self.handle_studio_network_messages(cx, file_system, &mut pending_studio_remote_logs);
 
             while let Ok(wrap) = self.clients[0].msg_receiver.try_recv() {
                 let log = &mut self.log;
                 let active = &mut self.active;
                 match wrap.message {
                     BuildClientMessage::LogItem(LogItem::Location(mut loc)) => {
-                        let terminal_level = log_level_name(loc.level);
-                        let terminal_line = loc.message.clone();
+                        let studio_remote_level = log_level_name(loc.level);
+                        let studio_remote_line = loc.message.clone();
                         loc.file_name = if let Some(build) = active.builds.get(&wrap.cmd_id) {
                             self.roots.map_path(&build.root, &loc.file_name)
                         } else {
@@ -964,22 +980,22 @@ impl BuildManager {
                             }
                         }
                         log.push((wrap.cmd_id, LogItem::Location(loc)));
-                        pending_terminal_logs.push((
+                        pending_studio_remote_logs.push((
                             wrap.cmd_id,
-                            terminal_level.to_string(),
-                            terminal_line,
+                            studio_remote_level.to_string(),
+                            studio_remote_line,
                         ));
                         cx.action(AppAction::RedrawLog)
                     }
                     BuildClientMessage::LogItem(LogItem::Bare(bare)) => {
-                        let terminal_level = log_level_name(bare.level);
-                        let terminal_line = bare.line.clone();
+                        let studio_remote_level = log_level_name(bare.level);
+                        let studio_remote_line = bare.line.clone();
                         //log!("{:?}", bare);
                         log.push((wrap.cmd_id, LogItem::Bare(bare)));
-                        pending_terminal_logs.push((
+                        pending_studio_remote_logs.push((
                             wrap.cmd_id,
-                            terminal_level.to_string(),
-                            terminal_line,
+                            studio_remote_level.to_string(),
+                            studio_remote_line,
                         ));
                         cx.action(AppAction::RedrawLog)
                         //editor_state.messages.push(wrap.msg);
@@ -996,7 +1012,7 @@ impl BuildManager {
                                     line: line.to_string(),
                                 }),
                             ));
-                            pending_terminal_logs.push((
+                            pending_studio_remote_logs.push((
                                 wrap.cmd_id,
                                 "log".to_string(),
                                 line.to_string(),
@@ -1015,8 +1031,8 @@ impl BuildManager {
                 }
             }
 
-            for (build_id, level, line) in pending_terminal_logs {
-                self.send_terminal_log(build_id, &level, line);
+            for (build_id, level, line) in pending_studio_remote_logs {
+                self.send_studio_remote_log(build_id, &level, line);
             }
         }
 
@@ -1051,14 +1067,11 @@ impl BuildManager {
         };
         let item_id = process.as_id();
         if self.running_processes.contains_key(&item_id)
-            || self
-                .running_processes
-                .values()
-                .any(|running| {
-                    running.root == process.root
-                        && running.binary == process.binary
-                        && running.target == process.target
-                })
+            || self.running_processes.values().any(|running| {
+                running.root == process.root
+                    && running.binary == process.binary
+                    && running.target == process.target
+            })
         {
             return;
         }
@@ -1097,19 +1110,19 @@ impl BuildManager {
         {
             self.running_processes.remove(&build_id);
             self.active.builds.remove(&build_id);
-            if let Some(web_socket_id) = self.terminal_build_owners.remove(&build_id) {
-                self.send_terminal_response(
+            if let Some(web_socket_id) = self.studio_remote_build_owners.remove(&build_id) {
+                self.send_studio_remote_response(
                     web_socket_id,
-                    StudioTerminalResponse::Stopped {
+                    StudioRemoteResponse::Stopped {
                         build_id: build_id.0,
                     },
                 );
             }
-            self.terminal_latest_widget_dumps.remove(&build_id);
-            self.terminal_startup_queries.remove(&build_id);
-            self.terminal_startup_dump_pending.remove(&build_id);
-            self.clear_terminal_screenshots_for_build(build_id);
-            self.clear_terminal_widget_tree_dumps_for_build(build_id);
+            self.studio_remote_latest_widget_dumps.remove(&build_id);
+            self.studio_remote_startup_queries.remove(&build_id);
+            self.studio_remote_startup_dump_pending.remove(&build_id);
+            self.clear_studio_remote_screenshots_for_build(build_id);
+            self.clear_studio_remote_widget_tree_dumps_for_build(build_id);
             self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
             if process.target.runs_in_studio() {
                 cx.action(AppAction::DestroyRunViews {
@@ -1134,26 +1147,26 @@ impl BuildManager {
                 (running.root == process.root
                     && running.binary == process.binary
                     && running.target == process.target)
-                .then_some(*build_id)
+                    .then_some(*build_id)
             })
             .collect();
 
         for build_id in matching_build_ids {
             self.running_processes.remove(&build_id);
             let _ = self.active.builds.remove(&build_id);
-            if let Some(web_socket_id) = self.terminal_build_owners.remove(&build_id) {
-                self.send_terminal_response(
+            if let Some(web_socket_id) = self.studio_remote_build_owners.remove(&build_id) {
+                self.send_studio_remote_response(
                     web_socket_id,
-                    StudioTerminalResponse::Stopped {
+                    StudioRemoteResponse::Stopped {
                         build_id: build_id.0,
                     },
                 );
             }
-            self.terminal_latest_widget_dumps.remove(&build_id);
-            self.terminal_startup_queries.remove(&build_id);
-            self.terminal_startup_dump_pending.remove(&build_id);
-            self.clear_terminal_screenshots_for_build(build_id);
-            self.clear_terminal_widget_tree_dumps_for_build(build_id);
+            self.studio_remote_latest_widget_dumps.remove(&build_id);
+            self.studio_remote_startup_queries.remove(&build_id);
+            self.studio_remote_startup_dump_pending.remove(&build_id);
+            self.clear_studio_remote_screenshots_for_build(build_id);
+            self.clear_studio_remote_widget_tree_dumps_for_build(build_id);
             self.clients[0].send_cmd_with_id(build_id, BuildCmd::Stop);
             if process.target.runs_in_studio() {
                 cx.action(AppAction::DestroyRunViews {

@@ -1,6 +1,5 @@
 use {
     super::{
-        //builtins,
         font::{Font, FontId},
         font_face::FontFace,
         font_family::{FontFamily, FontFamilyId},
@@ -11,6 +10,8 @@ use {
     },
     std::{cell::RefCell, collections::HashMap, rc::Rc},
 };
+
+pub type FontData = Rc<Vec<u8>>;
 
 #[derive(Clone, Debug)]
 pub struct Loader {
@@ -150,7 +151,7 @@ pub struct FontFamilyDefinition {
 
 #[derive(Clone, Debug)]
 pub struct FontDefinition {
-    pub data: Rc<Vec<u8>>,
+    pub data: FontData,
     pub index: u32,
     pub ascender_fudge_in_ems: f32,
     pub descender_fudge_in_ems: f32,

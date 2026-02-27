@@ -53,8 +53,8 @@ impl Chart3DData {
                 let jitter_seed = (((x * 73 + z * 151 + 41) % 997) as f32) / 997.0;
                 let noise = (jitter_seed - 0.5) * 0.08;
 
-                let normalized = (0.04 + 0.18 * ridge + 0.55 * peak_a + 0.35 * peak_b + noise)
-                    .max(0.0);
+                let normalized =
+                    (0.04 + 0.18 * ridge + 0.55 * peak_a + 0.35 * peak_b + noise).max(0.0);
                 let value = (normalized * 1035.0).max(0.0);
                 max_value = max_value.max(value);
 
@@ -130,6 +130,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Chart3D {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     scene_3d: Scene3D,
     #[rust]

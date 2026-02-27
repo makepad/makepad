@@ -441,9 +441,10 @@ impl StudioTerminal {
         let mut i = 0usize;
         while i < bytes.len() {
             if bytes[i] == b'%' && i + 2 < bytes.len() {
-                if let (Some(hi), Some(lo)) =
-                    (Self::hex_nibble(bytes[i + 1]), Self::hex_nibble(bytes[i + 2]))
-                {
+                if let (Some(hi), Some(lo)) = (
+                    Self::hex_nibble(bytes[i + 1]),
+                    Self::hex_nibble(bytes[i + 2]),
+                ) {
                     out.push((hi << 4) | lo);
                     i += 3;
                     continue;
@@ -510,8 +511,7 @@ impl StudioTerminal {
             let (prefix, rest) = marker.split_at(5);
             if prefix.eq_ignore_ascii_case("title") {
                 let mut rest = rest.trim_start();
-                if let Some(stripped) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('='))
-                {
+                if let Some(stripped) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('=')) {
                     rest = stripped.trim_start();
                 }
                 if rest.is_empty() {
@@ -635,7 +635,10 @@ impl StudioTerminal {
                     if byte == b'}' {
                         let marker = String::from_utf8_lossy(&self.title_marker_parse_buf);
                         if let Some(title) = Self::parse_tab_title_marker(marker.as_ref()) {
-                            cx.widget_action(self.widget_uid(), StudioTerminalAction::SetTabTitle(title));
+                            cx.widget_action(
+                                self.widget_uid(),
+                                StudioTerminalAction::SetTabTitle(title),
+                            );
                         } else {
                             self.emit_title_marker_literal(&mut out);
                             out.push(b'}');
@@ -1179,7 +1182,10 @@ impl StudioTerminal {
         }
 
         // Process all backlog bytes through the terminal emulator.
-        let Some(old_sb) = self.terminal.as_ref().map(|terminal| terminal.screen().scrollback_len())
+        let Some(old_sb) = self
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.screen().scrollback_len())
         else {
             return;
         };
@@ -1214,7 +1220,10 @@ impl StudioTerminal {
                     }
                 }
             }
-            (terminal.screen().scrollback_len(), terminal.modes.synchronized_update)
+            (
+                terminal.screen().scrollback_len(),
+                terminal.modes.synchronized_update,
+            )
         };
 
         let total_bytes = total;

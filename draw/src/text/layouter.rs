@@ -141,9 +141,9 @@ impl Default for Settings {
                         max_estimated_segments: 1000,
                     },
                     outline_rasterization_mode: rasterizer::OutlineRasterizationMode::Msdf,
-                    grayscale_atlas_size: Size::new(4096, 4096),
-                    color_atlas_size: Size::new(2048, 2048),
-                    msdf_atlas_size: Size::new(4096, 4096),
+                    grayscale_atlas_size: Size::new(1024, 1024),
+                    color_atlas_size: Size::new(512, 512),
+                    msdf_atlas_size: Size::new(1024, 1024),
                 },
             },
             cache_size: 4096,
@@ -251,7 +251,10 @@ impl LayoutContext {
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
                 Some(text) => self.append_text(&text),
                 None => {
-                    if self.current_row_is_empty() && !self.current_row_is_continuation() {
+                    let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
+                    if next_word.chars().all(|char| char.is_whitespace()) {
+                        self.layout_directly(fitter.pop());
+                    } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
                         self.layout_by_grapheme(fitter.pop());
                     } else {
                         self.finish_current_row(false);
@@ -414,6 +417,10 @@ impl Fitter {
 
     fn is_empty(&self) -> bool {
         self.text.is_empty()
+    }
+
+    fn next_len(&self) -> usize {
+        self.lens[0]
     }
 
     fn fit(&mut self, wrap_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {

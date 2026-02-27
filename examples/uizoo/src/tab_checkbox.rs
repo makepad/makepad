@@ -64,7 +64,7 @@ script_mod! {
                     }
 
                     draw_icon +: {
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
 
                     icon_walk: Walk{

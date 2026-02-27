@@ -137,14 +137,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
-        let mut out = Vec::new();
-        while let Ok(item) = self.os.network_response.receiver.try_recv() {
-            out.push(item);
-        }
-        if !out.is_empty() {
-            self.handle_script_network_events(&out);
-            self.call_event_handler(&Event::NetworkResponses(out));
-        }
+        self.dispatch_network_runtime_events();
     }
 }
 
@@ -179,7 +172,6 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub(crate) media: CxLinuxMedia,
-    pub(crate) network_response: NetworkResponseChannel,
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
     pub opengl_cx: Option<OpenglCx>,

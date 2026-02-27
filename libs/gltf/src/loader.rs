@@ -35,7 +35,10 @@ pub fn load_gltf_from_path(path: impl AsRef<Path>) -> Result<LoadedGltf, GltfErr
     Ok(loaded)
 }
 
-pub fn load_gltf_from_bytes(bytes: &[u8], base_dir: Option<&Path>) -> Result<LoadedGltf, GltfError> {
+pub fn load_gltf_from_bytes(
+    bytes: &[u8],
+    base_dir: Option<&Path>,
+) -> Result<LoadedGltf, GltfError> {
     if is_glb_bytes(bytes) {
         let parsed = parse_glb_bytes(bytes)?;
         let buffers = resolve_buffers(&parsed.document, base_dir, parsed.bin_chunk.as_deref())?;
@@ -135,11 +138,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn damaged_helmet_path(subpath: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-            format!(
-                "../../examples/gltf/resources/glTF-Sample-Models/2.0/DamagedHelmet/{subpath}"
-            ),
-        )
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../examples/gltf/resources/glTF-Sample-Models/2.0/DamagedHelmet/{subpath}"
+        ))
     }
 
     #[test]

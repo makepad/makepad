@@ -1,24 +1,20 @@
-use {
-    crate::{
-        cx::Cx,
-        cx_api::{CxOsApi, CxOsOp},
-        draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
-        event::Event,
-        event::{TextClipboardEvent, WindowGeom, WindowGeomChangeEvent},
-        makepad_live_id::*,
-        makepad_math::*,
-        makepad_micro_serde::*,
-        os::{
-            shared_framebuf::{PollTimer, PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
-            metal::{DrawPassMode, MetalCx},
-        },
-        studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
-        texture::{Texture, TextureFormat},
-        thread::SignalToUI,
-        web_socket::WebSocketMessage,
-        window::CxWindowPool,
+use crate::{
+    cx::Cx,
+    cx_api::{CxOsApi, CxOsOp},
+    draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
+    event::Event,
+    event::{WindowGeom, WindowGeomChangeEvent},
+    makepad_math::*,
+    makepad_micro_serde::*,
+    os::{
+        metal::{DrawPassMode, MetalCx},
+        shared_framebuf::{PollTimer, PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
     },
-    std::{cell::RefCell, rc::Rc},
+    studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
+    texture::{Texture, TextureFormat},
+    thread::SignalToUI,
+    web_socket::WebSocketMessage,
+    window::CxWindowPool,
 };
 
 /// Local swapchain for client-side texture management
@@ -116,27 +112,20 @@ impl Cx {
         self.call_event_handler(&Event::Startup);
 
         loop {
-            let studio_web_socket = if let Some(studio_web_socket) = &mut self.studio_web_socket {
-                studio_web_socket
-            } else {
+            if !Self::has_studio_web_socket() {
                 crate::error!("--stdin-loop mode requires a studio websocket");
                 break;
-            };
-
-            let incoming = match studio_web_socket.recv() {
-                Ok(incoming) => incoming,
-                Err(_) => break,
+            }
+            let incoming = match self.recv_studio_websocket_message() {
+                Some(incoming) => incoming,
+                None => break,
             };
 
             match incoming {
                 WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {
                     Ok(msgs) => {
                         for msg in msgs.0 {
-                            if self.stdin_handle_host_to_stdin(
-                                msg,
-                                metal_cx,
-                                &mut stdin_windows,
-                            ) {
+                            if self.stdin_handle_host_to_stdin(msg, metal_cx, &mut stdin_windows) {
                                 return;
                             }
                         }
@@ -178,52 +167,20 @@ impl Cx {
         stdin_windows: &mut Vec<StdinWindow>,
     ) -> bool {
         match msg {
-            StudioToApp::KeyDown(e) => {
-                self.call_event_handler(&Event::KeyDown(e));
-            }
-            StudioToApp::KeyUp(e) => {
-                self.call_event_handler(&Event::KeyUp(e));
-            }
-            StudioToApp::TextInput(e) => {
-                self.call_event_handler(&Event::TextInput(e));
-            }
-            StudioToApp::TextCopy => {
-                let response = Rc::new(RefCell::new(None));
-                self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
-                    response: response.clone(),
-                }));
-                let text = response.borrow().clone();
-                if let Some(text) = text {
-                    Self::stdin_send_to_host(AppToStudio::SetClipboard(text));
-                }
-            }
-            StudioToApp::TextCut => {
-                let response = Rc::new(RefCell::new(None));
-                self.call_event_handler(&Event::TextCut(TextClipboardEvent {
-                    response: response.clone(),
-                }));
-                let text = response.borrow().clone();
-                if let Some(text) = text {
-                    Self::stdin_send_to_host(AppToStudio::SetClipboard(text));
-                }
-            }
-            StudioToApp::MouseDown(e) => {
-                self.fingers.process_tap_count(dvec2(e.x, e.y), e.time);
+            // Mouse events: resolve window_id from coordinates (stdin mode
+            // supports multiple virtual windows).
+            StudioToApp::MouseDown(ref e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
-                let mouse_down_event = e.into_event(window_id, pos);
-                self.fingers.mouse_down(mouse_down_event.button, window_id);
-                self.call_event_handler(&Event::MouseDown(mouse_down_event));
+                return self.dispatch_studio_msg(msg, window_id, pos);
             }
-            StudioToApp::MouseMove(e) => {
+            StudioToApp::MouseMove(ref e) => {
                 let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button
                 {
                     (window_id, self.windows[window_id].window_geom.position)
                 } else {
                     self.windows.window_id_contains(dvec2(e.x, e.y))
                 };
-                self.call_event_handler(&Event::MouseMove(e.into_event(window_id, pos)));
-                self.fingers.cycle_hover_area(live_id!(mouse).into());
-                self.fingers.switch_captures();
+                return self.dispatch_studio_msg(msg, window_id, pos);
             }
             StudioToApp::TweakRay(e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
@@ -231,23 +188,20 @@ impl Cx {
                 let tweak_ray = e.into_event(window_id, pos, dpi_factor);
                 self.call_event_handler(&Event::TweakRay(tweak_ray));
             }
-            StudioToApp::MouseUp(e) => {
+            StudioToApp::MouseUp(ref e) => {
                 let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button
                 {
                     (window_id, self.windows[window_id].window_geom.position)
                 } else {
                     self.windows.window_id_contains(dvec2(e.x, e.y))
                 };
-                let mouse_up_event = e.into_event(window_id, pos);
-                let button = mouse_up_event.button;
-                self.call_event_handler(&Event::MouseUp(mouse_up_event));
-                self.fingers.mouse_up(button);
-                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                return self.dispatch_studio_msg(msg, window_id, pos);
             }
-            StudioToApp::Scroll(e) => {
+            StudioToApp::Scroll(ref e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
-                self.call_event_handler(&Event::Scroll(e.into_event(window_id, pos)));
+                return self.dispatch_studio_msg(msg, window_id, pos);
             }
+            // Stdin-specific: window geometry and swapchain management.
             StudioToApp::WindowGeomChange {
                 dpi_factor,
                 left: _left,
@@ -374,19 +328,10 @@ impl Cx {
                     Self::stdin_send_to_host(AppToStudio::RequestAnimationFrame);
                 }
             }
-            StudioToApp::Screenshot(request) => {
-                self.screenshot_requests.push(request);
-            }
-            StudioToApp::WidgetTreeDump(request) => {
-                self.send_studio_widget_tree_dump_response(request.request_id);
-            }
-            StudioToApp::KeepAlive => {}
-            StudioToApp::Kill => {
-                self.call_event_handler(&Event::Shutdown);
-                return true;
-            }
-            other @ (StudioToApp::LiveChange { .. } | StudioToApp::None) => {
-                self.action(other);
+            // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
+            // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.
+            other => {
+                return self.dispatch_studio_msg(other, CxWindowPool::id_zero(), dvec2(0.0, 0.0));
             }
         }
         false
@@ -430,14 +375,10 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    self.os.http_requests.make_http_request(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    self.os.http_requests.cancel_http_request(request_id);
+                    let _ = self.net.http_cancel(request_id);
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     Self::stdin_send_to_host(AppToStudio::SetClipboard(content));

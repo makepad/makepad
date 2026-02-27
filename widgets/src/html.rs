@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_html::*,
@@ -201,6 +201,8 @@ pub enum TrimWhitespaceInText {
 
 #[derive(Script, Widget)]
 pub struct Html {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     pub text_flow: TextFlow,
     #[live]

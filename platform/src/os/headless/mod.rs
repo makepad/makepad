@@ -7,12 +7,12 @@ mod virtual_gpu;
 use crate::os::shared_framebuf::PollTimers;
 use crate::{
     audio::{AudioDeviceId, AudioInputFn, AudioOutputFn},
-    event::HttpRequest,
     media_api::CxMediaApi,
+    makepad_network::HttpRequest,
+    makepad_network::WebSocketMessage,
     midi::{MidiData, MidiInput, MidiOutput, MidiPortId},
     thread::MessageThreadPool,
     video::{VideoFormatId, VideoInputFn, VideoInputId},
-    web_socket::WebSocketMessage,
     Cx,
 };
 use std::path::PathBuf;

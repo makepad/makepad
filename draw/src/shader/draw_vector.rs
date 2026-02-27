@@ -46,18 +46,21 @@ script_mod! {
             let shifted = pos + self.draw_list.view_shift;
             self.v_world = shifted;
 
-            // Early clip rejection: merge both clip rects (in local space), single check
+            // Early clip rejection in local space.
             let cr = self.geom.clip_radius;
-            let clip = vec4(
-                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
-                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
-                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
-                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
-            );
-            if pos.x + cr < clip.x || pos.y + cr < clip.y
-                || pos.x - cr > clip.z || pos.y - cr > clip.w {
-                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
-                return
+            let is_shadow = self.geom.stroke_mult < -0.5;
+            if cr > 0.0 && !is_shadow {
+                let clip = vec4(
+                    max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                    max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                    min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                    min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+                );
+                if pos.x + cr < clip.x || pos.y + cr < clip.y
+                    || pos.x - cr > clip.z || pos.y - cr > clip.w {
+                    self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
+                    return
+                }
             }
 
             let world = self.draw_list.view_transform * vec4(
@@ -231,7 +234,8 @@ script_mod! {
                 let shadow_half = vec2(self.v_param2, self.v_param3);
                 let shadow_corner = self.v_param4;
                 let shadow_blur = self.v_param5;
-                let p = self.v_world - shadow_center;
+                // Shadow params are authored in local space; align with clip/local coords.
+                let p = local - shadow_center;
                 let alpha = self.shadow_rounded_rect(p, shadow_half, shadow_corner, shadow_blur);
                 return self.v_color * alpha
             }

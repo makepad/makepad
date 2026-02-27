@@ -24,19 +24,15 @@ use {
     crate::{
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        shared_framebuf::{PollTimer, PollTimers},
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::{
             keyboard::{CharOffset, FullTextState, ImeAction, ImeActionEvent},
             Event,
-            HttpError,
-            HttpResponse,
             KeyCode,
             KeyEvent,
             KeyModifiers,
             NetworkResponse,
-            NetworkResponseItem,
             TextClipboardEvent,
             //TimerEvent,
             TextInputEvent,
@@ -54,9 +50,12 @@ use {
             WindowGeomChangeEvent,
         },
         gpu_info::GpuPerformance,
+        HttpError,
+        HttpResponse,
         makepad_live_id::*,
         makepad_math::*,
         os::cx_native::EventFlow,
+        shared_framebuf::{PollTimer, PollTimers},
         studio::{AppToStudio, GPUSample},
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
@@ -65,8 +64,9 @@ use {
         window::CxWindowPool,
     },
     jni_sys::jobject,
-    makepad_http::websocket::ServerWebSocket as WebSocketImpl,
-    makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl,
+    makepad_network::{
+        ServerWebSocketMessage as WebSocketMessageImpl, WebSocketParser as WebSocketImpl,
+    },
     std::cell::RefCell,
     std::collections::HashMap,
     std::ffi::CString,
@@ -460,14 +460,14 @@ impl Cx {
                 headers,
                 body,
             } => {
-                let out = vec![NetworkResponseItem {
+                let out = vec![NetworkResponse::HttpResponse {
                     request_id: LiveId(request_id),
-                    response: NetworkResponse::HttpResponse(HttpResponse::new(
+                    response: HttpResponse::from_header_string(
                         LiveId(metadata_id),
                         status_code,
                         headers,
                         Some(body),
-                    )),
+                    ),
                 }];
                 self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
@@ -479,12 +479,12 @@ impl Cx {
                 error,
                 ..
             } => {
-                let out = vec![NetworkResponseItem {
+                let out = vec![NetworkResponse::HttpError {
                     request_id: LiveId(request_id),
-                    response: NetworkResponse::HttpRequestError(HttpError {
+                    error: HttpError {
                         message: error,
                         metadata_id: LiveId(metadata_id),
-                    }),
+                    },
                 }];
                 self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
@@ -706,8 +706,7 @@ impl Cx {
                 let composition = if composing_start >= 0 && composing_end >= 0 {
                     let comp_start =
                         CharOffset::from_utf16_index(&full_text, composing_start as usize);
-                    let comp_end =
-                        CharOffset::from_utf16_index(&full_text, composing_end as usize);
+                    let comp_end = CharOffset::from_utf16_index(&full_text, composing_end as usize);
                     Some(comp_start..comp_end)
                 } else {
                     None
@@ -839,6 +838,8 @@ impl Cx {
             self.handle_action_receiver();
         }
 
+        self.dispatch_network_runtime_events();
+
         // Video updates
         let to_dispatch = self.get_video_updates();
         for video_id in to_dispatch {
@@ -846,7 +847,10 @@ impl Cx {
                 let env = attach_jni_env();
                 android_jni::to_java_get_video_position(env, video_id) as u128
             };
-            let e = Event::VideoTextureUpdated(VideoTextureUpdatedEvent { video_id, current_position_ms });
+            let e = Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                video_id,
+                current_position_ms,
+            });
             self.call_event_handler(&e);
         }
 
@@ -1282,17 +1286,13 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.timers.timers.remove(&timer_id);
                 }
-                CxOsOp::ShowTextIME(_area, _pos, config) => {
-                    unsafe {
-                        android_jni::to_java_configure_keyboard(&config);
-                        android_jni::to_java_show_keyboard(true);
-                    }
-                }
-                CxOsOp::HideTextIME => {
-                    unsafe {
-                        android_jni::to_java_show_keyboard(false);
-                    }
-                }
+                CxOsOp::ShowTextIME(_area, _pos, config) => unsafe {
+                    android_jni::to_java_configure_keyboard(&config);
+                    android_jni::to_java_show_keyboard(true);
+                },
+                CxOsOp::HideTextIME => unsafe {
+                    android_jni::to_java_show_keyboard(false);
+                },
                 CxOsOp::SyncImeState {
                     text,
                     selection,
@@ -1447,6 +1447,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
+        super::android_network::install_network_backend_shim();
         self.package_root = Some("makepad".to_string());
     }
 
@@ -1658,7 +1659,10 @@ impl CxAndroidDisplay {
                 self.surface,
                 self.egl_context,
             );
-            assert!(res != 0, "eglMakeCurrent failed in CxAndroidDisplay::make_current");
+            assert!(
+                res != 0,
+                "eglMakeCurrent failed in CxAndroidDisplay::make_current"
+            );
         }
     }
 

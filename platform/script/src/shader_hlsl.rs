@@ -80,12 +80,9 @@ impl ShaderOutput {
                 };
                 let mut field_exprs = Vec::new();
                 for field in fields {
-                    field_exprs.push(self.hlsl_reconstruct_from_scalars(
-                        vm,
-                        &field.ty,
-                        scalars,
-                        scalar_idx,
-                    ));
+                    field_exprs.push(
+                        self.hlsl_reconstruct_from_scalars(vm, &field.ty, scalars, scalar_idx),
+                    );
                 }
                 format!("consfn_{}({})", struct_name, field_exprs.join(", "))
             }
@@ -307,7 +304,8 @@ impl ShaderOutput {
                 let slots = pod_ty.ty.slots();
                 let io_name = self.backend.map_io_name(io.name);
                 if Self::hlsl_input_needs_chunks(vm, io.ty) {
-                    for (chunk_idx, chunk_slots) in Self::hlsl_slot_chunks(slots).into_iter().enumerate()
+                    for (chunk_idx, chunk_slots) in
+                        Self::hlsl_slot_chunks(slots).into_iter().enumerate()
                     {
                         writeln!(
                             out,
@@ -344,7 +342,8 @@ impl ShaderOutput {
                 let slots = pod_ty.ty.slots();
                 let io_name = self.backend.map_io_name(io.name);
                 if Self::hlsl_input_needs_chunks(vm, io.ty) {
-                    for (chunk_idx, chunk_slots) in Self::hlsl_slot_chunks(slots).into_iter().enumerate()
+                    for (chunk_idx, chunk_slots) in
+                        Self::hlsl_slot_chunks(slots).into_iter().enumerate()
                     {
                         writeln!(
                             out,
@@ -378,7 +377,8 @@ impl ShaderOutput {
                 let slots = pod_ty.ty.slots();
                 let io_name = self.backend.map_io_name(io.name);
                 if Self::hlsl_input_needs_chunks(vm, io.ty) {
-                    for (chunk_idx, chunk_slots) in Self::hlsl_slot_chunks(slots).into_iter().enumerate()
+                    for (chunk_idx, chunk_slots) in
+                        Self::hlsl_slot_chunks(slots).into_iter().enumerate()
                     {
                         writeln!(
                             out,

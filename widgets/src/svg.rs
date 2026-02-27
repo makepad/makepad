@@ -17,6 +17,8 @@ script_mod! {
 pub struct Svg {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[layout]

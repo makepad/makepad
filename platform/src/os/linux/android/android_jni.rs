@@ -6,11 +6,12 @@ use {
     crate::{
         area::Area,
         cx::AndroidParams,
-        event::{HttpRequest, TouchPoint, TouchState, VideoSource},
+        event::{TouchPoint, TouchState, VideoSource},
         ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputConfig},
         makepad_live_id::*,
         makepad_math::*,
-        WebSocketMessage,
+        makepad_network::HttpRequest,
+        makepad_network::WebSocketMessage,
     },
     makepad_android_state::{get_activity, get_java_vm},
     std::ffi::c_uint,
@@ -594,10 +595,22 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpResponse(
 ) {
     let headers = unsafe { jstring_to_string(env, headers) };
     let body = unsafe { java_byte_array_to_vec(env, body) };
+    let request_id = LiveId(request_id as u64);
+    let metadata_id = LiveId(metadata_id as u64);
+
+    if super::android_network::try_handle_http_response(
+        request_id,
+        metadata_id,
+        status_code as u16,
+        &headers,
+        &body,
+    ) {
+        return;
+    }
 
     send_from_java_message(FromJavaMessage::HttpResponse {
-        request_id: request_id as u64,
-        metadata_id: metadata_id as u64,
+        request_id: request_id.0,
+        metadata_id: metadata_id.0,
         status_code: status_code as u16,
         headers,
         body,
@@ -613,10 +626,16 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onHttpRequestError(
     error: jni_sys::jstring,
 ) {
     let error = unsafe { jstring_to_string(env, error) };
+    let request_id = LiveId(request_id as u64);
+    let metadata_id = LiveId(metadata_id as u64);
+
+    if super::android_network::try_handle_http_error(request_id, metadata_id, &error) {
+        return;
+    }
 
     send_from_java_message(FromJavaMessage::HttpRequestError {
-        request_id: request_id as u64,
-        metadata_id: metadata_id as u64,
+        request_id: request_id.0,
+        metadata_id: metadata_id.0,
         error,
     });
 }
@@ -633,6 +652,10 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketMessage(
     }
     let message = unsafe { java_byte_array_to_vec(env, message) };
     let sender = unsafe { &*(callback as *const Box<(u64, Sender<WebSocketMessage>)>) };
+
+    if super::android_network::try_handle_websocket_message(sender.0, &message, &sender.1) {
+        return;
+    }
 
     send_from_java_message(FromJavaMessage::WebSocketMessage {
         message,
@@ -651,6 +674,10 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketClosed(
     }
     let sender = unsafe { &*(callback as *const Box<(u64, Sender<WebSocketMessage>)>) };
 
+    if super::android_network::try_handle_websocket_closed(sender.0, &sender.1) {
+        return;
+    }
+
     send_from_java_message(FromJavaMessage::WebSocketClosed {
         sender: sender.clone(),
     });
@@ -666,11 +693,16 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onWebSocketError(
     if callback == 0 {
         return;
     }
+    let error = unsafe { jstring_to_string(_env, _error) };
     //let error = unsafe { jstring_to_string(env, error) };
     let sender = unsafe { &*(callback as *const Box<(u64, Sender<WebSocketMessage>)>) };
 
+    if super::android_network::try_handle_websocket_error(sender.0, &error, &sender.1) {
+        return;
+    }
+
     send_from_java_message(FromJavaMessage::WebSocketError {
-        error: "".to_string(),
+        error,
         sender: sender.clone(),
     });
 }
@@ -1070,6 +1102,111 @@ pub unsafe fn to_java_websocket_close(request_id: LiveId) {
     );
 }
 
+pub unsafe fn to_java_socket_stream_open(
+    stream_id: LiveId,
+    host: &str,
+    port: i32,
+    use_tls: bool,
+    ignore_ssl_cert: bool,
+) -> bool {
+    let env = attach_jni_env();
+    let host = CString::new(host).unwrap();
+    let host = ((**env).NewStringUTF.unwrap())(env, host.as_ptr());
+
+    let opened = ndk_utils::call_bool_method!(
+        env,
+        get_activity(),
+        "openSocketStream",
+        "(JLjava/lang/String;IZZ)Z",
+        stream_id.get_value() as jni_sys::jlong,
+        host,
+        port as jni_sys::jint,
+        use_tls as jni_sys::jboolean as std::ffi::c_uint,
+        ignore_ssl_cert as jni_sys::jboolean as std::ffi::c_uint
+    ) != 0;
+
+    (**env).DeleteLocalRef.unwrap()(env, host);
+    opened
+}
+
+pub unsafe fn to_java_socket_stream_read(stream_id: LiveId, max_bytes: i32) -> Option<Vec<u8>> {
+    let env = attach_jni_env();
+    let data = ndk_utils::call_object_method!(
+        env,
+        get_activity(),
+        "socketStreamRead",
+        "(JI)[B",
+        stream_id.get_value() as jni_sys::jlong,
+        max_bytes as jni_sys::jint
+    );
+
+    if data.is_null() {
+        return None;
+    }
+    let bytes = java_byte_array_to_vec(env, data);
+    (**env).DeleteLocalRef.unwrap()(env, data);
+    Some(bytes)
+}
+
+pub unsafe fn to_java_socket_stream_write(stream_id: LiveId, message: Vec<u8>) -> i32 {
+    let env = attach_jni_env();
+    let message_bytes = (**env).NewByteArray.unwrap()(env, message.len() as i32);
+    (**env).SetByteArrayRegion.unwrap()(
+        env,
+        message_bytes,
+        0,
+        message.len() as i32,
+        message.as_ptr() as *const jni_sys::jbyte,
+    );
+
+    let written = ndk_utils::call_int_method!(
+        env,
+        get_activity(),
+        "socketStreamWrite",
+        "(J[B)I",
+        stream_id.get_value() as jni_sys::jlong,
+        message_bytes as jni_sys::jobject
+    ) as i32;
+
+    (**env).DeleteLocalRef.unwrap()(env, message_bytes as jni_sys::jobject);
+    written
+}
+
+pub unsafe fn to_java_socket_stream_set_read_timeout(stream_id: LiveId, timeout_ms: i32) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "socketStreamSetReadTimeout",
+        "(JI)V",
+        stream_id.get_value() as jni_sys::jlong,
+        timeout_ms as jni_sys::jint
+    );
+}
+
+pub unsafe fn to_java_socket_stream_set_write_timeout(stream_id: LiveId, timeout_ms: i32) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "socketStreamSetWriteTimeout",
+        "(JI)V",
+        stream_id.get_value() as jni_sys::jlong,
+        timeout_ms as jni_sys::jint
+    );
+}
+
+pub unsafe fn to_java_socket_stream_close(stream_id: LiveId) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "closeSocketStream",
+        "(J)V",
+        stream_id.get_value() as jni_sys::jlong
+    );
+}
+
 pub fn to_java_get_audio_devices(flag: jni_sys::jlong) -> Vec<String> {
     unsafe {
         let env = attach_jni_env();
@@ -1176,7 +1313,11 @@ pub unsafe fn to_java_unmute_video_playback(env: *mut jni_sys::JNIEnv, video_id:
     ndk_utils::call_void_method!(env, get_activity(), "unmuteVideoPlayback", "(J)V", video_id);
 }
 
-pub unsafe fn to_java_seek_video_playback(env: *mut jni_sys::JNIEnv, video_id: LiveId, position_ms: u64) {
+pub unsafe fn to_java_seek_video_playback(
+    env: *mut jni_sys::JNIEnv,
+    video_id: LiveId,
+    position_ms: u64,
+) {
     ndk_utils::call_void_method!(
         env,
         get_activity(),

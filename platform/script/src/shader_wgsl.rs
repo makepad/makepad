@@ -231,10 +231,9 @@ fn wgsl_collect_chunk_formats(fields: &[WgslPackedField]) -> Vec<WgslPackedForma
 fn wgsl_to_float_scalar_expr(ty: &ScriptPodTy, expr: &str) -> String {
     match ty {
         ScriptPodTy::F32 | ScriptPodTy::F16 => expr.to_string(),
-        ScriptPodTy::U32
-        | ScriptPodTy::I32
-        | ScriptPodTy::AtomicU32
-        | ScriptPodTy::AtomicI32 => format!("f32({expr})"),
+        ScriptPodTy::U32 | ScriptPodTy::I32 | ScriptPodTy::AtomicU32 | ScriptPodTy::AtomicI32 => {
+            format!("f32({expr})")
+        }
         ScriptPodTy::Bool => format!("select(0.0, 1.0, {expr})"),
         _ => format!("f32({expr})"),
     }
@@ -372,7 +371,11 @@ fn wgsl_reconstruct_inline(
                 let scalar = wgsl_take_scalar_or_zero(scalars, scalar_index, source_format);
                 comps.push(wgsl_convert_scalar_expr(source_format, &elem_ty, &scalar));
             }
-            format!("{}({})", wgsl_type_name_inline(output, vm, ty), comps.join(", "))
+            format!(
+                "{}({})",
+                wgsl_type_name_inline(output, vm, ty),
+                comps.join(", ")
+            )
         }
         ScriptPodTy::Mat(mat_ty) => {
             let mut comps = Vec::new();
@@ -384,7 +387,11 @@ fn wgsl_reconstruct_inline(
                     &scalar,
                 ));
             }
-            format!("{}({})", wgsl_type_name_inline(output, vm, ty), comps.join(", "))
+            format!(
+                "{}({})",
+                wgsl_type_name_inline(output, vm, ty),
+                comps.join(", ")
+            )
         }
         scalar_ty => {
             let scalar = wgsl_take_scalar_or_zero(scalars, scalar_index, source_format);
@@ -443,7 +450,9 @@ fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, 
 
     let dyn_uniform_binding = 2u32;
     let uniform_bindings = output.get_uniform_buffer_bindings(&vm.bx.heap);
-    let scope_uniform_binding = uniform_bindings.scope_uniform_buffer_index.map(|v| v as u32);
+    let scope_uniform_binding = uniform_bindings
+        .scope_uniform_buffer_index
+        .map(|v| v as u32);
 
     let mut max_reserved_binding = dyn_uniform_binding;
     for io in &output.io {

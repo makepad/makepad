@@ -1,5 +1,6 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
 pub mod os;
+pub mod gl_render_bridge;
 
 #[macro_use]
 pub mod log;
@@ -26,7 +27,6 @@ mod draw_vars;
 
 mod area;
 pub mod component;
-pub mod ime;
 mod component_list;
 mod component_map;
 mod cursor;
@@ -35,12 +35,15 @@ pub mod event;
 mod geometry;
 mod gpu_info;
 mod id_pool;
+pub mod ime;
 mod macos_menu;
 mod performance_stats;
 pub mod permission;
 pub mod studio;
 mod texture;
 mod window;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+mod app_icon;
 
 pub mod web_socket;
 
@@ -68,9 +71,12 @@ pub use makepad_objc_sys;
 pub use ::windows;
 
 pub use makepad_futures;
+pub use makepad_network;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
 pub use makepad_script::trap;
+
+pub use crate::gl_render_bridge::{GlApi, GlRenderBridge};
 
 pub use {
     crate::{
@@ -113,11 +119,6 @@ pub use {
             Hit,
             HitOptions,
             HoverState,
-            HttpError,
-            HttpMethod,
-            HttpProgress,
-            HttpRequest,
-            HttpResponse,
             ImeAction,
             ImeActionEvent,
             Inset,
@@ -129,7 +130,6 @@ pub use {
             MouseDownEvent,
             MouseMoveEvent,
             MouseUpEvent,
-            NetworkResponse,
             NetworkResponsesEvent,
             NextFrame,
             NextFrameEvent,
@@ -154,13 +154,13 @@ pub use {
             XrState,
             XrUpdateEvent,
         },
+        game_input::*,
+        geometry::{Geometry, GeometryId},
+        gpu_info::GpuPerformance,
         ime::{
             AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
             TextInputConfig,
         },
-        game_input::*,
-        geometry::{Geometry, GeometryId},
-        gpu_info::GpuPerformance,
         macos_menu::MacosMenu,
         media_api::CxMediaApi,
         midi::*,
@@ -173,7 +173,7 @@ pub use {
         ui_runner::*,
         video::*,
         web_socket::{WebSocket, WebSocketMessage},
-        window::{CxWindowPool, ScriptWindowHandle, WindowHandle, WindowId},
+        window::{CxWindowPool, ScriptWindowHandle, WindowHandle, WindowIcon, WindowIconBuffer, WindowId},
     },
     app_main::*,
     arc_string_mut::ArcStringMut,
@@ -181,7 +181,9 @@ pub use {
     component_map::ComponentMap,
     //makepad_image_formats::image,
     log::*,
-    makepad_http,
+    makepad_network::{
+        HttpError, HttpMethod, HttpProgress, HttpRequest, HttpResponse, NetworkResponse,
+    },
     makepad_math::makepad_micro_serde,
     makepad_math::*,
     makepad_script,

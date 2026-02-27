@@ -1,6 +1,6 @@
 use {
     crate::{
-        animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+        animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
         makepad_derive_widget::*,
         makepad_draw::*,
         popup_menu::{PopupMenu, PopupMenuAction},

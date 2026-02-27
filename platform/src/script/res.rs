@@ -1,9 +1,10 @@
-use crate::event::network::HttpRequest;
+use crate::makepad_network::HttpRequest;
 use crate::script::vm::*;
 use crate::*;
 use makepad_script::id;
 use makepad_script::*;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::rc::Rc;
@@ -40,10 +41,22 @@ pub struct CxScriptHttpResource {
 #[derive(Default)]
 pub struct CxScriptResources {
     pub resources: Rc<RefCell<Vec<CxScriptResource>>>,
+    pub handles_by_abs_path: Rc<RefCell<HashMap<String, ScriptHandle>>>,
     pub http_resources: Vec<CxScriptHttpResource>,
 }
 
 impl CxScriptResources {
+    pub fn get_handle_by_abs_path(&self, abs_path: &str) -> Option<ScriptHandle> {
+        self.handles_by_abs_path.borrow().get(abs_path).copied()
+    }
+
+    pub fn insert_resource(&self, resource: CxScriptResource) {
+        self.handles_by_abs_path
+            .borrow_mut()
+            .insert(resource.abs_path.clone(), resource.handle);
+        self.resources.borrow_mut().push(resource);
+    }
+
     /// Get the data for a resource by handle
     pub fn get_data(&self, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
         let resources = self.resources.borrow();
@@ -170,10 +183,8 @@ impl Cx {
                             res.data = CxScriptResourceData::Loaded(Rc::new(data));
                         }
                         Err(e) => {
-                            res.data = CxScriptResourceData::Error(format!(
-                                "Failed to read file: {}",
-                                e
-                            ));
+                            res.data =
+                                CxScriptResourceData::Error(format!("Failed to read file: {}", e));
                         }
                     }
                     continue;
@@ -215,14 +226,29 @@ impl Cx {
 
 pub struct CxScriptResourceGc {
     pub resources: Rc<RefCell<Vec<CxScriptResource>>>,
+    pub handles_by_abs_path: Rc<RefCell<HashMap<String, ScriptHandle>>>,
     pub handle: ScriptHandle,
 }
 
 impl ScriptHandleGc for CxScriptResourceGc {
     fn gc(&mut self) {
-        self.resources
-            .borrow_mut()
-            .retain(|v| v.handle != self.handle)
+        let mut removed_paths = Vec::new();
+        self.resources.borrow_mut().retain(|v| {
+            if v.handle == self.handle {
+                removed_paths.push(v.abs_path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !removed_paths.is_empty() {
+            let mut handles_by_abs_path = self.handles_by_abs_path.borrow_mut();
+            for abs_path in removed_paths {
+                if handles_by_abs_path.get(&abs_path).copied() == Some(self.handle) {
+                    handles_by_abs_path.remove(&abs_path);
+                }
+            }
+        }
     }
     fn set_handle(&mut self, handle: ScriptHandle) {
         self.handle = handle
@@ -253,6 +279,15 @@ fn normalize_dependency_file_path(path: &str) -> Option<String> {
         }
     }
     Some(stack.join("/"))
+}
+
+fn script_value_to_u8_bytes(vm: &mut ScriptVm, value: ScriptValue) -> Option<Vec<u8>> {
+    if let Some(array) = value.as_array() {
+        if let ScriptArrayStorage::U8(data) = vm.bx.heap.array_storage(array) {
+            return Some(data.clone());
+        }
+    }
+    None
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {
@@ -335,23 +370,24 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
             if let Some(abs_path) = vm.string_with(path, |_vm, s| s.to_string()) {
                 let cx = vm.host.cx_mut();
+                if let Some(existing) = cx.script_data.resources.get_handle_by_abs_path(&abs_path) {
+                    return existing.into();
+                }
+
                 let handle_gc = CxScriptResourceGc {
                     resources: cx.script_data.resources.resources.clone(),
+                    handles_by_abs_path: cx.script_data.resources.handles_by_abs_path.clone(),
                     handle: ScriptHandle::ZERO,
                 };
                 let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
 
-                cx.script_data
-                    .resources
-                    .resources
-                    .borrow_mut()
-                    .push(CxScriptResource {
-                        abs_path,
-                        dependency_path: None,
-                        web_url: None,
-                        data: CxScriptResourceData::NotLoaded,
-                        handle,
-                    });
+                cx.script_data.resources.insert_resource(CxScriptResource {
+                    abs_path,
+                    dependency_path: None,
+                    web_url: None,
+                    data: CxScriptResourceData::NotLoaded,
+                    handle,
+                });
 
                 return handle.into();
             }
@@ -413,6 +449,13 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         }
                     };
                     if let Some(abs_path) = abs_path {
+                        let cx = vm.host.cx_mut();
+                        if let Some(existing) =
+                            cx.script_data.resources.get_handle_by_abs_path(&abs_path)
+                        {
+                            return existing.into();
+                        }
+
                         let dependency_path = if let Some(crate_name) = crate_name {
                             normalize_dependency_file_path(file_path)
                                 .map(|file_path| format!("{}/{}", crate_name, file_path))
@@ -421,24 +464,24 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         };
                         let web_url = dependency_path.as_ref().map(|path| format!("/{}", path));
 
-                        let cx = vm.host.cx_mut();
                         let handle_gc = CxScriptResourceGc {
                             resources: cx.script_data.resources.resources.clone(),
+                            handles_by_abs_path: cx
+                                .script_data
+                                .resources
+                                .handles_by_abs_path
+                                .clone(),
                             handle: ScriptHandle::ZERO,
                         };
                         let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
 
-                        cx.script_data
-                            .resources
-                            .resources
-                            .borrow_mut()
-                            .push(CxScriptResource {
-                                abs_path,
-                                dependency_path,
-                                web_url,
-                                data: CxScriptResourceData::NotLoaded,
-                                handle,
-                            });
+                        cx.script_data.resources.insert_resource(CxScriptResource {
+                            abs_path,
+                            dependency_path,
+                            web_url,
+                            data: CxScriptResourceData::NotLoaded,
+                            handle,
+                        });
 
                         return handle.into();
                     }
@@ -463,24 +506,25 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
             if let Some(url_string) = vm.string_with(url, |_vm, s| s.to_string()) {
                 let cx = vm.host.cx_mut();
+                if let Some(existing) = cx.script_data.resources.get_handle_by_abs_path(&url_string)
+                {
+                    return existing.into();
+                }
                 let handle_gc = CxScriptResourceGc {
                     resources: cx.script_data.resources.resources.clone(),
+                    handles_by_abs_path: cx.script_data.resources.handles_by_abs_path.clone(),
                     handle: ScriptHandle::ZERO,
                 };
                 let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
 
                 // Create the resource in Loading state
-                cx.script_data
-                    .resources
-                    .resources
-                    .borrow_mut()
-                    .push(CxScriptResource {
-                        abs_path: url_string.clone(),
-                        dependency_path: None,
-                        web_url: None,
-                        data: CxScriptResourceData::Loading,
-                        handle,
-                    });
+                cx.script_data.resources.insert_resource(CxScriptResource {
+                    abs_path: url_string.clone(),
+                    dependency_path: None,
+                    web_url: None,
+                    data: CxScriptResourceData::Loading,
+                    handle,
+                });
 
                 // Fire the HTTP request
                 let request_id = LiveId::unique();
@@ -494,6 +538,41 @@ pub fn script_mod(vm: &mut ScriptVm) {
             }
 
             script_err_type_mismatch!(vm.trap(), "invalid res arg type")
+        },
+    );
+
+    // res.binary_resource(bytes_u8_array)
+    // Creates an in-memory resource directly from bytes.
+    vm.add_method(
+        res,
+        id_lut!(binary_resource),
+        script_args_def!(data = NIL),
+        move |vm, args| {
+            let data = script_value!(vm, args.data);
+            let Some(bytes) = script_value_to_u8_bytes(vm, data) else {
+                return script_err_type_mismatch!(
+                    vm.trap(),
+                    "binary_resource expects a U8 byte array"
+                );
+            };
+
+            let cx = vm.host.cx_mut();
+            let handle_gc = CxScriptResourceGc {
+                resources: cx.script_data.resources.resources.clone(),
+                handles_by_abs_path: cx.script_data.resources.handles_by_abs_path.clone(),
+                handle: ScriptHandle::ZERO,
+            };
+            let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+
+            cx.script_data.resources.insert_resource(CxScriptResource {
+                abs_path: format!("binary://{}", LiveId::unique().0),
+                dependency_path: None,
+                web_url: None,
+                data: CxScriptResourceData::Loaded(Rc::new(bytes)),
+                handle,
+            });
+
+            handle.into()
         },
     );
 }

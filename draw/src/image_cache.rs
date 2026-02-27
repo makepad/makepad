@@ -356,6 +356,13 @@ fn detect_image_format(data: &[u8]) -> Option<&'static str> {
 }
 
 fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Option<&'static str> {
+    // Prefer magic-byte detection over file extensions so in-memory/binary
+    // resources decode correctly even when their synthetic path has no extension.
+    if let Some(format) = detect_image_format(data) {
+        return Some(format);
+    }
+
+    // Keep extension fallback for edge cases where headers are unavailable.
     let ext = image_path
         .extension()
         .and_then(|s| s.to_str())
@@ -364,7 +371,7 @@ fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Opt
         Some("jpg") | Some("jpeg") => Some("jpg"),
         Some("png") => Some("png"),
         Some("webp") => Some("webp"),
-        _ => detect_image_format(data),
+        _ => None,
     }
 }
 
@@ -620,21 +627,32 @@ pub fn handle_image_cache_network_responses(cx: &mut Cx, e: &NetworkResponsesEve
 
     {
         let cache = cx.get_global::<ImageCache>();
-        for item in e {
-            let Some(image_path) = cache.pending_http_requests.remove(&item.request_id) else {
-                continue;
-            };
-
-            match &item.response {
-                NetworkResponse::HttpRequestError(err) => {
+        for response in e {
+            match response {
+                NetworkResponse::HttpError {
+                    request_id,
+                    error,
+                } => {
+                    let Some(image_path) = cache.pending_http_requests.remove(request_id) else {
+                        continue;
+                    };
                     error!(
                         "image http request failed for {:?}: {}",
-                        image_path, err.message
+                        image_path, error.message
                     );
                     cache.map.remove(&image_path);
                 }
-                NetworkResponse::HttpResponse(response)
-                | NetworkResponse::HttpStreamComplete(response) => {
+                NetworkResponse::HttpResponse {
+                    request_id,
+                    response,
+                }
+                | NetworkResponse::HttpStreamComplete {
+                    request_id,
+                    response,
+                } => {
+                    let Some(image_path) = cache.pending_http_requests.remove(request_id) else {
+                        continue;
+                    };
                     if !(200..300).contains(&response.status_code) {
                         cache.map.remove(&image_path);
                         continue;
@@ -646,7 +664,12 @@ pub fn handle_image_cache_network_responses(cx: &mut Cx, e: &NetworkResponsesEve
                         cache.map.remove(&image_path);
                     }
                 }
-                NetworkResponse::HttpProgress(_) | NetworkResponse::HttpStreamResponse(_) => {}
+                NetworkResponse::HttpProgress { .. }
+                | NetworkResponse::HttpStreamChunk { .. }
+                | NetworkResponse::WsOpened { .. }
+                | NetworkResponse::WsMessage { .. }
+                | NetworkResponse::WsClosed { .. }
+                | NetworkResponse::WsError { .. } => {}
             }
         }
     }

@@ -7,6 +7,7 @@ app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
+    use mod.widgets.*
     let TestDraw = #(TestDraw::register_widget(vm)) {
         width: 250
         height: 150
@@ -217,33 +218,39 @@ script_mod! {
                 text: "With Icon"
                 icon_walk: Walk{width: 16 height: 16}
                 draw_icon.color: #fff
-                draw_icon.svg: crate_resource("self:../../widgets2/resources/icons/icon_file.svg")
+                draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_file.svg")
             }
 
             Hr{}
 
-            Label{text: "Icon Only" draw_text.color: #888 draw_text.text_style.font_size: 10}
+            Label{text: "Bare Icons (with optional rotation)" draw_text.color: #888 draw_text.text_style.font_size: 10}
             View{width: Fill height: Fit flow: Right spacing: 15}
-            test_icon := Icon{
-                draw_icon.svg: crate_resource("self:../../widgets2/resources/icons/icon_file.svg")
+            Icon{
+                draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_file.svg")
                 draw_icon.color: #0ff
                 icon_walk: Walk{width: 32 height: 32}
             }
             Icon{
-                draw_icon.svg: crate_resource("self:../../widgets2/resources/icons/icon_select.svg")
+                draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_select.svg")
                 draw_icon.color: #f80
+                icon_walk: Walk{width: 32 height: 32}
+            }
+            IconRotated {
+                draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_select.svg")
+                // draw_icon.svg: crate_resource("self:resources/app_icon.svg")
+                draw_icon.color: #f80
+                draw_icon.rotation_angle: 99.0
                 icon_walk: Walk{width: 32 height: 32}
             }
 
             Hr{}
 
             Label{text: "Tooltip Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            Label{text: "Click buttons to show tooltips, click elsewhere to hide" draw_text.color: #888 draw_text.text_style.font_size: 10}
+            Label{text: "Click button to show tooltip, click elsewhere to hide" draw_text.color: #888 draw_text.text_style.font_size: 10}
 
             View{width: Fill height: Fit flow: Right spacing: 10}
-            tooltip_btn1 := Button{text: "Show Tooltip 1"}
-            tooltip_btn2 := Button{text: "Show Tooltip 2"}
-            tooltip_btn3 := ButtonFlat{text: "Show Help Tip"}
+            normal_tooltip_button := Button{text: "Show Normal Tooltip"}
+            callout_tooltip_button := Button{text: "Show Callout Tooltip"}
 
             Hr{}
 
@@ -256,7 +263,8 @@ script_mod! {
         }
 
         // Tooltip overlay
-        buttons_tooltip := Tooltip{}
+        normal_tooltip := Tooltip{}
+        callout_tooltip := CalloutTooltip{}
 
         // Popup notification overlay
         popup_notif := PopupNotification{
@@ -269,13 +277,14 @@ script_mod! {
                     height: Fit
                     padding: 15
                     draw_bg +: {
-                        color: uniform(#2a5)
-                        radius: uniform(8.0)
+                        color: #2a5
+                        radius: 8.0
                     }
-                    flow: Down spacing: 8
+                    flow: Down
+                    spacing: 8
 
                     Label{text: "Success!" draw_text.color: #fff draw_text.text_style.font_size: 12}
-                    Label{text: "Your changes have been saved successfully." draw_text.color: #dfd draw_text.text_style.font_size: 10}
+                    Label{width: Fill, text: "Your changes have been saved successfully." draw_text.color: #dfd draw_text.text_style.font_size: 10 draw_text.flow: Flow.Right {wrap: true} }
                 }
             }
         }
@@ -1544,6 +1553,7 @@ script_mod! {
             main_window := Window{
                 pass.clear_color: vec4(0.3 0.3 0.3 1.0)
                 window.inner_size: vec2(1000 700)
+                window.title: "Splash Example"
                 body +: {
                     padding: 4
                     dock := AppDock{}
@@ -1595,21 +1605,42 @@ impl MatchEvent for App {
         }
 
         // Tooltip demo - show tooltips on button click
-        if self.ui.button(cx, ids!(tooltip_btn1)).clicked(actions) {
-            log!("Showing tooltip 1");
-            self.ui
-                .tooltip(cx, ids!(buttons_tooltip))
-                .show_with_options(
-                    cx,
-                    dvec2(350.0, 280.0),
-                    "This is the standard button. Click it to perform the primary action.",
-                );
+        if self
+            .ui
+            .button(cx, ids!(normal_tooltip_button))
+            .clicked(actions)
+        {
+            log!("Showing normal tooltip");
+            self.ui.tooltip(cx, ids!(normal_tooltip)).show_with_options(
+                cx,
+                dvec2(350.0, 280.0),
+                "This is the tooltip 1 button. Click it to perform the primary action.",
+            );
+        }
+        let callout_tooltip_button = self.ui.button(cx, ids!(callout_tooltip_button));
+        if callout_tooltip_button.clicked(actions) {
+            log!("Showing callout tooltip");
+            self.ui.callout_tooltip(cx, ids!(callout_tooltip)).show_with_options(
+                cx,
+                "This is a fancy callout tooltip. Here is more very long text just to check the wrapping logic to ensure that it still works",
+                callout_tooltip_button.area().rect(cx),
+                CalloutTooltipOptions {
+                    position: TooltipPosition::Right,
+                    text_color: vec4(1.0, 0.0, 0.0, 1.0), // red
+                    bg_color: vec4(0.0, 1.0, 0.0, 1.0), // green
+                    ..Default::default()
+                }
+            );
         }
 
         // Popup notification demo
         if self.ui.button(cx, ids!(show_popup_btn)).clicked(actions) {
             log!("Showing popup notification");
             self.ui.popup_notification(cx, ids!(popup_notif)).open(cx);
+        }
+        if self.ui.button(cx, ids!(hide_popup_btn)).clicked(actions) {
+            log!("Hiding popup notification");
+            self.ui.popup_notification(cx, ids!(popup_notif)).close(cx);
         }
 
         if let Some(value) = self.ui.check_box(cx, ids!(checkbox)).changed(actions) {
@@ -1754,7 +1785,6 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }

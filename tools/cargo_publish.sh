@@ -36,8 +36,8 @@ DRYRUN=${1:---dry-run}
 #echo "---- PUBLISHING makepad-futures-legacy ----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-futures-legacy
 
-#echo "---- PUBLISHING makepad-http ----" 
-#cargo publish $DRYRUN --allow-dirty -p makepad-http
+#echo "---- PUBLISHING makepad-network ----" 
+#cargo publish $DRYRUN --allow-dirty -p makepad-network
 
 #echo "---- PUBLISHING makepad-jni-sys ----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-jni-sys

@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_script::ScriptFnRef,
@@ -26,13 +26,13 @@ script_mod! {
         label_walk: Walk{width: Fit, height: Fit}
 
         draw_text +: {
-            hover: instance(0.0)
+            hover: 0.0
             down: instance(0.0)
             focus: instance(0.0)
             disabled: instance(0.0)
 
             color: theme.color_label_inner
-            color_hover: uniform(theme.color_label_inner_hover)
+            color_hover: theme.color_label_inner_hover
             color_down: uniform(theme.color_label_inner_down)
             color_focus: uniform(theme.color_label_inner_focus)
             color_disabled: uniform(theme.color_label_inner_disabled)
@@ -49,7 +49,7 @@ script_mod! {
             }
         }
 
-        icon_walk: Walk{width: Fit, height: Fit}
+        icon_walk: Walk{width: 22.0, height: Fit}
 
         draw_bg +: {
             hover: instance(0.0)
@@ -431,8 +431,28 @@ impl Widget for Button {
         &mut self,
         vm: &mut ScriptVm,
         method: LiveId,
-        _args: ScriptValue,
+        args: ScriptValue,
     ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        if method == live_id!(set_text) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    let new_text = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(value, out);
+                        out.to_string()
+                    });
+                    vm.with_cx_mut(|cx| {
+                        self.set_text(cx, &new_text);
+                    });
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
         if method == live_id!(on_click) {
             let uid = self.widget_uid();
             vm.with_cx_mut(|cx| {

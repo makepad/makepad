@@ -59,6 +59,8 @@ script_mod! {
 pub struct Grid3D {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[layout]
@@ -97,7 +99,9 @@ impl Widget for Grid3D {
             .scale_xyz(self.scale.x, self.scale.y, self.scale.z);
         self.draw_pbr.fill(self.color);
         self.draw_pbr.set_metal_roughness(0.02, 0.96);
-        let _ = self.draw_pbr.draw_surface(cx, vec2(self.size, self.size), 1, 1);
+        let _ = self
+            .draw_pbr
+            .draw_surface(cx, vec2(self.size, self.size), 1, 1);
         self.draw_pbr.pop_matrix();
         DrawStep::done()
     }

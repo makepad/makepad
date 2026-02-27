@@ -1,13 +1,9 @@
-use crate::{
-    desktop_button::DesktopButtonWidgetExt,
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    nav_control::NavControl,
-    view::*,
-    widget::*,
-};
 #[cfg(feature = "voice")]
 use crate::voice_wave::VoiceWaveWidgetExt;
+use crate::{
+    desktop_button::DesktopButtonWidgetExt, label::*, makepad_derive_widget::*, makepad_draw::*,
+    nav_control::NavControl, view::*, widget::*,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -39,7 +35,7 @@ script_mod! {
             caption_label := View {
                 width: Fill height: Fill
                 align: Center
-                label := Label {text: "Makepad" margin: Inset{left: 100}}
+                label := Label {text: "Makepad"}
             }
             voice_wave := VoiceWave {}
             windows_buttons := View {
@@ -165,6 +161,8 @@ script_mod! {
 pub struct Window {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     //#[rust] caption_size: Vec2d,
     #[live]
     last_mouse_pos: Vec2d,
@@ -284,6 +282,15 @@ impl Window {
                 // self.frame.get_view(ids!(caption_bar)).set_visible(false);
             }
             _ => (),
+        }
+
+        // Update the caption label with the window title if set
+        let title = cx.windows[self.window.handle.window_id()]
+            .create_title
+            .clone();
+        if !title.is_empty() {
+            self.label(cx, ids!(caption_label.label))
+                .set_text(cx, &title);
         }
     }
 
@@ -424,6 +431,11 @@ impl WindowRef {
     pub fn fullscreen(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_fullscreen(cx);
+        }
+    }
+    pub fn disable_fullscreen(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.normal(cx);
         }
     }
     /// Configure the window's size and position, and whether it's fullscreen or not.

@@ -13,8 +13,7 @@ const PRESET_DIR: &str = "examples/automate/local/dmx";
 const CURRENT_STATE_FILE: &str = "examples/automate/local/dmx/current.ron";
 
 pub const DMXOUTPUT_HEADER: [u8; 18] = [
-    b'A', b'r', b't', b'-', b'N', b'e', b't', b'\0',
-    0,    // opcode hi
+    b'A', b'r', b't', b'-', b'N', b'e', b't', b'\0', 0,    // opcode hi
     0x50, // opcode lo = output
     0,    // proto hi
     0xe,  // proto lo = 14
@@ -337,7 +336,12 @@ fn apply_dmx_mapping(
     dmx_f32(state.dial_1[2], dmx, &[spot1, spot2], 10);
 
     dmx_f32(state.fade[2], dmx, &[spot1, spot2], 14);
-    map_wargb(state.dial_top[2], 1.0, dmx, &[spot1 + 16 - 1, spot2 + 16 - 1]);
+    map_wargb(
+        state.dial_top[2],
+        1.0,
+        dmx,
+        &[spot1 + 16 - 1, spot2 + 16 - 1],
+    );
 
     let smoke = 300;
     let slot_len = 101.0f64;
@@ -365,7 +369,12 @@ fn apply_dmx_mapping(
 
     let uv = [500, 502, 504];
     dmx_f32(state.fade[6], dmx, &uv, 1);
-    dmx_f32(if state.tempo < 0.1 { 0.0 } else { state.tempo }, dmx, &uv, 2);
+    dmx_f32(
+        if state.tempo < 0.1 { 0.0 } else { state.tempo },
+        dmx,
+        &uv,
+        2,
+    );
     dmx_f32(if state.fade[7] > 0.5 { 1.0 } else { 0.0 }, dmx, &uv, 3);
 }
 
@@ -479,45 +488,42 @@ impl App {
             dominant,
             level * 100.0,
             if snapshot.buttons.power { "on" } else { "off" },
-            if snapshot.buttons.write_preset { "on" } else { "off" }
+            if snapshot.buttons.write_preset {
+                "on"
+            } else {
+                "off"
+            }
         )
     }
 
     fn refresh_ui(&mut self, cx: &mut Cx) {
-        self.ui
-            .label(cx, ids!(status_line))
-            .set_text(
-                cx,
-                &format!(
-                    "{} | DMX packets: {}",
-                    self.midi_ports_summary, self.snapshot.dmx_packets
-                ),
-            );
+        self.ui.label(cx, ids!(status_line)).set_text(
+            cx,
+            &format!(
+                "{} | DMX packets: {}",
+                self.midi_ports_summary, self.snapshot.dmx_packets
+            ),
+        );
         self.ui
             .label(cx, ids!(midi_ports))
             .set_text(cx, &self.midi_ports_summary);
-        self.ui
-            .label(cx, ids!(last_event))
-            .set_text(cx, &format!("Last MIDI event: {}", self.snapshot.last_event));
+        self.ui.label(cx, ids!(last_event)).set_text(
+            cx,
+            &format!("Last MIDI event: {}", self.snapshot.last_event),
+        );
         self.ui.label(cx, ids!(tempo_line)).set_text(
             cx,
-            &format!(
-                "TEMPO {}",
-                Self::cell(0, self.snapshot.state.tempo),
-            ),
+            &format!("TEMPO {}", Self::cell(0, self.snapshot.state.tempo),),
         );
-        self.ui.label(cx, ids!(top_dials)).set_text(
-            cx,
-            &Self::format_bank("TOP", &self.snapshot.state.dial_top),
-        );
-        self.ui.label(cx, ids!(fader_line)).set_text(
-            cx,
-            &Self::format_faders(&self.snapshot.state.fade),
-        );
-        self.ui.label(cx, ids!(preset_line)).set_text(
-            cx,
-            &Self::format_presets(&self.snapshot.buttons),
-        );
+        self.ui
+            .label(cx, ids!(top_dials))
+            .set_text(cx, &Self::format_bank("TOP", &self.snapshot.state.dial_top));
+        self.ui
+            .label(cx, ids!(fader_line))
+            .set_text(cx, &Self::format_faders(&self.snapshot.state.fade));
+        self.ui
+            .label(cx, ids!(preset_line))
+            .set_text(cx, &Self::format_presets(&self.snapshot.buttons));
         self.ui.label(cx, ids!(switch_line)).set_text(
             cx,
             &format!(
@@ -527,58 +533,51 @@ impl App {
                 } else {
                     "."
                 },
-                if self.snapshot.buttons.power { "X" } else { "." }
+                if self.snapshot.buttons.power {
+                    "X"
+                } else {
+                    "."
+                }
             ),
         );
-        self.ui.label(cx, ids!(channel_0)).set_text(
-            cx,
-            &Self::format_bank("CH0", self.snapshot.state.bank(0)),
-        );
-        self.ui.label(cx, ids!(channel_1)).set_text(
-            cx,
-            &Self::format_bank("CH1", self.snapshot.state.bank(1)),
-        );
-        self.ui.label(cx, ids!(channel_2)).set_text(
-            cx,
-            &Self::format_bank("CH2", self.snapshot.state.bank(2)),
-        );
-        self.ui.label(cx, ids!(channel_3)).set_text(
-            cx,
-            &Self::format_bank("CH3", self.snapshot.state.bank(3)),
-        );
-        self.ui.label(cx, ids!(channel_4)).set_text(
-            cx,
-            &Self::format_bank("CH4", self.snapshot.state.bank(4)),
-        );
-        self.ui.label(cx, ids!(channel_5)).set_text(
-            cx,
-            &Self::format_bank("CH5", self.snapshot.state.bank(5)),
-        );
-        self.ui.label(cx, ids!(channel_6)).set_text(
-            cx,
-            &Self::format_bank("CH6", self.snapshot.state.bank(6)),
-        );
-        self.ui.label(cx, ids!(channel_7)).set_text(
-            cx,
-            &Self::format_bank("CH7", self.snapshot.state.bank(7)),
-        );
-
         self.ui
-            .label(cx, ids!(dmx_info))
-            .set_text(
-                cx,
-                &format!(
-                    "Art-Net target: {} | bind: {}",
-                    ARTNET_BROADCAST_ADDR, ARTNET_BIND_ADDR
-                ),
-            );
+            .label(cx, ids!(channel_0))
+            .set_text(cx, &Self::format_bank("CH0", self.snapshot.state.bank(0)));
+        self.ui
+            .label(cx, ids!(channel_1))
+            .set_text(cx, &Self::format_bank("CH1", self.snapshot.state.bank(1)));
+        self.ui
+            .label(cx, ids!(channel_2))
+            .set_text(cx, &Self::format_bank("CH2", self.snapshot.state.bank(2)));
+        self.ui
+            .label(cx, ids!(channel_3))
+            .set_text(cx, &Self::format_bank("CH3", self.snapshot.state.bank(3)));
+        self.ui
+            .label(cx, ids!(channel_4))
+            .set_text(cx, &Self::format_bank("CH4", self.snapshot.state.bank(4)));
+        self.ui
+            .label(cx, ids!(channel_5))
+            .set_text(cx, &Self::format_bank("CH5", self.snapshot.state.bank(5)));
+        self.ui
+            .label(cx, ids!(channel_6))
+            .set_text(cx, &Self::format_bank("CH6", self.snapshot.state.bank(6)));
+        self.ui
+            .label(cx, ids!(channel_7))
+            .set_text(cx, &Self::format_bank("CH7", self.snapshot.state.bank(7)));
+
+        self.ui.label(cx, ids!(dmx_info)).set_text(
+            cx,
+            &format!(
+                "Art-Net target: {} | bind: {}",
+                ARTNET_BROADCAST_ADDR, ARTNET_BIND_ADDR
+            ),
+        );
         self.ui
             .label(cx, ids!(scene_hint))
             .set_text(cx, &Self::scene_hint(&self.snapshot));
-        self.ui.label(cx, ids!(dmx_preview)).set_text(
-            cx,
-            &Self::format_dmx_preview(&self.snapshot.dmx_preview),
-        );
+        self.ui
+            .label(cx, ids!(dmx_preview))
+            .set_text(cx, &Self::format_dmx_preview(&self.snapshot.dmx_preview));
     }
 
     fn start_dmx_bridge(&mut self, cx: &mut Cx) {

@@ -1,6 +1,6 @@
 use {
     crate::{
-        animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+        animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
         makepad_derive_widget::*,
         makepad_draw::{
             event::finger::TouchState,
@@ -1240,12 +1240,8 @@ impl TextInput {
             self.input_mode
         };
         match effective_mode {
-            InputMode::Ascii => {
-                input.chars().filter(|c| c.is_ascii()).collect()
-            }
-            InputMode::Numeric => {
-                input.chars().filter(|c| c.is_ascii_digit()).collect()
-            }
+            InputMode::Ascii => input.chars().filter(|c| c.is_ascii()).collect(),
+            InputMode::Numeric => input.chars().filter(|c| c.is_ascii_digit()).collect(),
             InputMode::Decimal => {
                 let mut contains_dot = if is_set_text {
                     false
@@ -1266,15 +1262,12 @@ impl TextInput {
                     })
                     .collect()
             }
-            InputMode::Tel => {
-                input
-                    .chars()
-                    .filter(|c| {
-                        c.is_ascii_digit()
-                            || matches!(c, '+' | '-' | ' ' | '(' | ')' | '*' | '#')
-                    })
-                    .collect()
-            }
+            InputMode::Tel => input
+                .chars()
+                .filter(|c| {
+                    c.is_ascii_digit() || matches!(c, '+' | '-' | ' ' | '(' | ')' | '*' | '#')
+                })
+                .collect(),
             InputMode::Text | InputMode::Url | InputMode::Email | InputMode::Search => {
                 input.to_string()
             }
@@ -1339,12 +1332,12 @@ impl Widget for TextInput {
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
                 let trap = vm.bx.threads.cur().trap.pass();
-                let str_val = vm.bx.heap.vec_value(args_obj, 0, trap);
-                let new_text = vm
-                    .bx
-                    .heap
-                    .string_mut_self_with(str_val, |_, s| s.to_string());
-                if let Some(new_text) = new_text {
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    let new_text = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(value, out);
+                        out.to_string()
+                    });
                     vm.with_cx_mut(|cx| {
                         self.set_text(cx, &new_text);
                     });
@@ -1876,8 +1869,7 @@ impl Widget for TextInput {
                     };
 
                     if let Some(composition_range) = &full_state.composition {
-                        self.composition_start =
-                            composition_range.start.to_byte_index(&self.text);
+                        self.composition_start = composition_range.start.to_byte_index(&self.text);
                         self.composition_end = composition_range.end.to_byte_index(&self.text);
                     } else {
                         self.composition_start = 0;
@@ -2083,16 +2075,10 @@ impl Widget for TextInput {
                     ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
                         cx.hide_text_ime();
                         cx.set_key_focus(Area::Empty);
-                        cx.widget_action(
-                            uid,
-                            TextInputAction::Returned(self.text.clone(), mods),
-                        );
+                        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
                     }
                     ImeAction::Next | ImeAction::Previous => {
-                        cx.widget_action(
-                            uid,
-                            TextInputAction::Returned(self.text.clone(), mods),
-                        );
+                        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
                     }
                     ImeAction::Unspecified | ImeAction::None => {}
                 }

@@ -41,10 +41,9 @@ impl ShaderBackend {
                             ShaderIoKind::RustInstance,
                             ShaderIoPrefix::Prefix("_io.i->"),
                         ),
-                        SHADER_IO_DYN_INSTANCE => (
-                            ShaderIoKind::DynInstance,
-                            ShaderIoPrefix::Prefix("_io.i->"),
-                        ),
+                        SHADER_IO_DYN_INSTANCE => {
+                            (ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i->"))
+                        }
                         SHADER_IO_DYN_UNIFORM => {
                             (ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u->"))
                         }
@@ -137,10 +136,9 @@ impl ShaderBackend {
                                 ShaderIoKind::RustInstance,
                                 ShaderIoPrefix::Prefix("_io.i->"),
                             ),
-                            SHADER_IO_DYN_INSTANCE => (
-                                ShaderIoKind::DynInstance,
-                                ShaderIoPrefix::Prefix("_io.i->"),
-                            ),
+                            SHADER_IO_DYN_INSTANCE => {
+                                (ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i->"))
+                            }
                             SHADER_IO_DYN_UNIFORM => {
                                 (ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u->"))
                             }
@@ -1144,6 +1142,7 @@ impl ShaderBackend {
                     // GLSL uses dFdx/dFdy natively, mod is native
                     id!(inverseSqrt) => id!(inversesqrt),
                     id!(modf) => id!(mod),
+                    id!(atan2) => id!(atan),
                     x => x,
                 }
             }

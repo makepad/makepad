@@ -186,7 +186,9 @@ impl App {
                                 .data
                                 .build_manager
                                 .binary_root_name_to_id(&process.root, &process.binary)
-                                .or_else(|| self.data.build_manager.binary_name_to_id(&process.binary))
+                                .or_else(|| {
+                                    self.data.build_manager.binary_name_to_id(&process.binary)
+                                })
                             {
                                 self.data.build_manager.start_active_build(
                                     cx,
@@ -314,7 +316,7 @@ impl MatchEvent for App {
         self.data.build_manager.init(cx, roots);
 
         //self.data.build_manager.discover_external_ip(cx);
-        self.data.build_manager.start_http_server();
+        self.data.build_manager.start_http_server(cx);
         // lets load the tabs
     }
 
@@ -813,6 +815,7 @@ impl MatchEvent for App {
                     run_list.redraw(cx);
                     if !self.initial_tree_loaded {
                         self.load_state(cx, 0);
+                        dock.select_tab(cx, id!(log_list_tab));
                         self.initial_tree_loaded = true;
                     }
                     self.data.ai_chat_manager.init(&mut self.data.file_system);

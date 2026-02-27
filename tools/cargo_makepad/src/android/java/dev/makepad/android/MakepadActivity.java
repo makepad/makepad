@@ -592,6 +592,7 @@ public class MakepadActivity
     static Handler mWebSocketsHandler;
     static HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
     static HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
+    static HashMap<Long, MakepadSocketStream> mActiveSocketStreams = new HashMap<>();
 
     // clipboard actions (ActionMode for copy/paste/cut)
     private ActionMode mActionMode;
@@ -1114,6 +1115,53 @@ public class MakepadActivity
         
         mActiveWebsocketsReaders.remove(id);
         mActiveWebsockets.remove(id);
+    }
+
+    public boolean openSocketStream(long id, String host, int port, boolean useTls, boolean ignoreSslCert) {
+        MakepadSocketStream socket = new MakepadSocketStream();
+        if (!socket.connect(host, port, useTls, ignoreSslCert)) {
+            return false;
+        }
+        mActiveSocketStreams.put(id, socket);
+        return true;
+    }
+
+    public byte[] socketStreamRead(long id, int maxBytes) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket == null) {
+            return null;
+        }
+        return socket.read(maxBytes);
+    }
+
+    public int socketStreamWrite(long id, byte[] message) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket == null) {
+            return -1;
+        }
+        return socket.write(message);
+    }
+
+    public void socketStreamSetReadTimeout(long id, int timeoutMs) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket != null) {
+            socket.setReadTimeout(timeoutMs);
+        }
+    }
+
+    public void socketStreamSetWriteTimeout(long id, int timeoutMs) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket != null) {
+            socket.setWriteTimeout(timeoutMs);
+        }
+    }
+
+    public void closeSocketStream(long id) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket != null) {
+            socket.close();
+            mActiveSocketStreams.remove(id);
+        }
     }
 
     public void webSocketConnectionDone(long id, long callback) {

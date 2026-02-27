@@ -2,8 +2,9 @@ mod android;
 mod apple;
 mod check;
 mod open_harmony;
-mod remote;
+mod desktop;
 mod studio;
+mod tunnel;
 mod utils;
 mod wasm;
 
@@ -12,12 +13,13 @@ use std::borrow::Cow;
 use android::*;
 use apple::*;
 use check::*;
-pub use makepad_http;
+pub use makepad_network;
 pub use makepad_shell;
 pub use makepad_wasm_strip;
 use open_harmony::*;
-use remote::*;
+use desktop::*;
 use studio::*;
+use tunnel::*;
 use wasm::*;
 
 fn show_help() {
@@ -52,8 +54,9 @@ fn show_help() {
     println!(
         "    apple list                                   Lists all certificates/profiles/devices"
     );
-    println!("    apple <ios|tvos> [options] run-sim <cargo args>      Runs the project on the aarch64 simulator");
-    println!("    apple <ios|tvos> [options] run-device <cargo args>   Runs the project on a real device");
+    println!("    apple <ios|tvos> [options] build <cargo args>        Builds the project for the simulator");
+    println!("    apple <ios|tvos> [options] run-sim <cargo args>      Builds and runs on the aarch64 simulator");
+    println!("    apple <ios|tvos> [options] run-device <cargo args>   Builds and runs on a real device");
     println!(" * Note: in order for Makepad to be able to install an ios application on a real device, a provisioning");
     println!("   profile is needed. To create one, make an empty application in xcode and give it an organisation");
     println!("   name and a product name. Then, copy those exactly (without spaces/odd characters) into the below '--org' and '--app' options");
@@ -114,26 +117,36 @@ fn show_help() {
     println!("       --deveco-home='deveco_path'               The path of DevEco program, this parameter can also be specified by environment variable \"DEVECO_HOME\"");
     println!("       --remote='<hdcip:port>'                   Remote hdc service, this parameter can also be specified by environment variable \"HDC_REMOTE\"");
     println!();
+    println!("Desktop commands:");
+    println!();
+    println!("    desktop build <cargo args>                   Run cargo build with Makepad icon env autodetection");
+    println!("    desktop run <cargo args>                     Run cargo run with Makepad icon env autodetection");
+    println!("    desktop check <cargo args>                   Run cargo check with Makepad icon env autodetection");
+    println!();
     println!("Linux commands:");
     println!();
     println!("    linux apt-get-install-makepad-deps           Call apt-get install with all dependencies needed for makepad.");
     println!();
-    println!("Remote commands:");
+    println!("Tunnel commands:");
     println!();
-    println!("    remote --server [--port PORT] [--all]        Start remote execution server");
-    println!("    remote <ip:port> cargo <args...>             Sync changed files and run cargo remotely");
-    println!("    remote <ip:port> shell <command...>          Run remote shell command (requires --all on server)");
+    println!("    tunnel --server [--port PORT] [--all]        Start tunnel execution server");
+    println!("    tunnel <ip:port> cargo <args...>             Sync changed files and run cargo through tunnel");
+    println!("    tunnel <ip:port> shell <command...>          Run remote shell command (requires --all on server)");
     println!();
     println!("Studio commands:");
     println!();
     println!(
-        "    studio [options]                              Start newline-JSON websocket bridge"
+        "    studio [options]                              Start newline-JSON studio remote websocket"
     );
     println!("    studio terminal [options]                     Same as 'studio' (explicit mode)");
-    println!("    studio run [options] [cargo run args]         Ask Studio to start a cargo run child");
+    println!(
+        "    studio run [options] [cargo run args]         Ask Studio to start a cargo run child"
+    );
     println!("    [options]:");
     println!("       --studio=127.0.0.1:8001                   Studio server ip:port");
-    println!("       --root=<ROOT>                             Studio root name (for 'studio run')");
+    println!(
+        "       --root=<ROOT>                             Studio root name (for 'studio run')"
+    );
     println!("                                                 (or set STUDIO=127.0.0.1:8001)");
     println!();
     println!();
@@ -164,11 +177,12 @@ fn main() -> Result<(), Cow<'static, str>> {
     }
     let result = match args[0].as_ref() {
         "android" => handle_android(&args[1..]),
+        "desktop" => handle_desktop(&args[1..]),
         "wasm" => handle_wasm(&args[1..]),
         "apple" => handle_apple(&args[1..]),
         "ohos" => handle_open_harmony(&args[1..]),
         "check" => handle_check(&args[1..]),
-        "remote" => handle_remote(&args[1..]),
+        "tunnel" => handle_tunnel(&args[1..]),
         "studio" => handle_studio(&args[1..]),
         unsupported => {
             show_help();

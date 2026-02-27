@@ -1,4 +1,4 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_async::ScriptAsyncResult};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -215,14 +215,16 @@ pub enum LabelAction {
 pub struct Label {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[redraw]
     #[live]
-    draw_text: DrawText,
+    pub draw_text: DrawText,
 
     #[walk]
-    walk: Walk,
+    pub walk: Walk,
     #[live]
-    align: Align,
+    pub align: Align,
     #[live(Flow::right_wrap())]
     flow: Flow,
     #[live]
@@ -233,6 +235,10 @@ pub struct Label {
     #[live]
     text: ArcStringMut,
 
+    #[live(true)]
+    #[visible]
+    visible: bool,
+
     // Indicates if this label responds to hover events
     // It is not turned on by default because it will consume finger events
     // and prevent other widgets from receiving them, if it is not considered with care
@@ -242,7 +248,40 @@ pub struct Label {
 }
 
 impl Widget for Label {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        if method == live_id!(set_text) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    let new_text = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(value, out);
+                        out.to_string()
+                    });
+                    vm.with_cx_mut(|cx| {
+                        self.set_text(cx, &new_text);
+                    });
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
+
         let walk = walk.with_add_padding(self.padding);
         cx.begin_turtle(
             walk,
@@ -272,6 +311,10 @@ impl Widget for Label {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible && event.requires_visibility() {
+            return;
+        }
+
         let uid = self.widget_uid();
 
         if self.hover_actions_enabled {
@@ -289,6 +332,20 @@ impl Widget for Label {
 }
 
 impl LabelRef {
+    pub fn text(&self) -> String {
+        if let Some(inner) = self.borrow() {
+            inner.text()
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn set_text(&self, cx: &mut Cx, text: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_text(cx, text);
+        }
+    }
+
     pub fn hover_in(&self, actions: &Actions) -> Option<Rect> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast() {

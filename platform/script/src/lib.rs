@@ -9,7 +9,7 @@ pub use makepad_script_derive;
 #[macro_export]
 macro_rules! script_eval {
     ($vm:expr, { $($tt:tt)* } $(,)?) => {{
-        ($vm).eval($crate::script! { $($tt)* })
+        ($vm).with_vm(|vm|{let b = $crate::script! { $($tt)* };vm.eval(b)})
     }};
 }
 
@@ -60,11 +60,11 @@ pub mod shader_control;
 pub mod shader_glsl;
 pub mod shader_hlsl;
 pub mod shader_metal;
-pub mod shader_wgsl;
 pub mod shader_ops;
 pub mod shader_output;
 pub mod shader_tables;
 pub mod shader_vars;
+pub mod shader_wgsl;
 pub mod suggest;
 pub mod test;
 pub mod thread;

@@ -910,17 +910,19 @@ impl Cx {
     /// Used by Servo integration: Makepad owns the texture, Servo renders into it via its FBO.
     #[cfg(any(target_os = "android", target_os = "linux"))]
     pub fn create_gl_render_texture(&mut self, width: usize, height: usize) -> (Texture, u32) {
-        let texture = Texture::new_with_format(self, TextureFormat::RenderBGRAu8 {
-            size: TextureSize::Fixed { width, height },
-            initial: true,
-        });
+        let texture = Texture::new_with_format(
+            self,
+            TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Fixed { width, height },
+                initial: true,
+            },
+        );
         let gl = self.os.gl();
         let cxtexture = &mut self.textures[texture.texture_id()];
         cxtexture.update_render_target(gl, width, height);
         let gl_id = cxtexture.os.gl_texture.unwrap();
         (texture, gl_id)
     }
-
 }
 
 const NUM_SHADER_VARIANTS: usize = 2;
@@ -2339,8 +2341,10 @@ impl CxTexture {
                     );
                 },
                 _ => {
-                    crate::error!("Unsupported texture pixel format for OpenGL render target allocation");
-                },
+                    crate::error!(
+                        "Unsupported texture pixel format for OpenGL render target allocation"
+                    );
+                }
             }
             unsafe {
                 (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
@@ -2475,5 +2479,76 @@ impl OpenglBuffer {
         if let Some(gl_buffer) = self.gl_buffer.take() {
             unsafe { (gl.glDeleteBuffers)(1, &gl_buffer) };
         }
+    }
+}
+
+/// EGL render bridge wrapping references to makepad's existing OpenGL context.
+pub struct EglRenderBridge {
+    egl_display: crate::egl_sys::EGLDisplay,
+    egl_config: crate::egl_sys::EGLConfig,
+    egl_context: crate::egl_sys::EGLContext,
+    egl_get_proc_address: unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_void,
+    egl_make_current: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+    ) -> u32,
+}
+
+impl EglRenderBridge {
+    pub fn new(
+        egl_display: crate::egl_sys::EGLDisplay,
+        egl_config: crate::egl_sys::EGLConfig,
+        egl_context: crate::egl_sys::EGLContext,
+        egl_get_proc_address: unsafe extern "C" fn(
+            *const std::ffi::c_char,
+        ) -> *mut std::ffi::c_void,
+        egl_make_current: unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+        ) -> u32,
+    ) -> Self {
+        Self {
+            egl_display,
+            egl_config,
+            egl_context,
+            egl_get_proc_address,
+            egl_make_current,
+        }
+    }
+
+    pub fn make_current(&self) {
+        unsafe {
+            (self.egl_make_current)(
+                self.egl_display,
+                std::ptr::null_mut(), // EGL_NO_SURFACE
+                std::ptr::null_mut(), // EGL_NO_SURFACE
+                self.egl_context,
+            );
+        }
+    }
+
+    pub fn get_proc_address(&self, name: &str) -> *const std::ffi::c_void {
+        let c_name = std::ffi::CString::new(name).unwrap();
+        unsafe { (self.egl_get_proc_address)(c_name.as_ptr()) as *const _ }
+    }
+
+    pub fn gl_api(&self) -> crate::gl_render_bridge::GlApi {
+        crate::gl_render_bridge::GlApi::GLES
+    }
+
+    pub fn egl_display(&self) -> *mut std::ffi::c_void {
+        self.egl_display
+    }
+
+    pub fn egl_config(&self) -> *mut std::ffi::c_void {
+        self.egl_config
+    }
+
+    pub fn egl_context(&self) -> *mut std::ffi::c_void {
+        self.egl_context
     }
 }

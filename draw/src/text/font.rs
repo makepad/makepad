@@ -6,6 +6,7 @@ use {
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
         intern::Intern,
+        loader::FontData,
         rasterizer::{RasterizedGlyph, Rasterizer},
     },
     rustybuzz,
@@ -65,7 +66,7 @@ impl Font {
         self.id
     }
 
-    pub fn data(&self) -> &Rc<Vec<u8>> {
+    pub fn data(&self) -> &FontData {
         self.face.data()
     }
 
