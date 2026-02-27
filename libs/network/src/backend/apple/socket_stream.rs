@@ -1,7 +1,8 @@
 use makepad_apple_sys::{
     errSSLClosedAbort, errSSLClosedGraceful, errSSLWouldBlock, kSSLClientSide, kSSLStreamType,
     CFRelease, OSStatus, SSLClose, SSLConnectionRef, SSLContextRef, SSLCreateContext, SSLHandshake,
-    SSLRead, SSLSetConnection, SSLSetEnableCertVerify, SSLSetIOFuncs, SSLSetPeerDomainName,
+    SSLRead, SSLSetConnection, SSLSetIOFuncs, SSLSetPeerDomainName,
+    SSLSetSessionOption, kSSLSessionOptionBreakOnServerAuth, errSSLServerAuthCompleted,
     SSLWrite,
 };
 use std::{
@@ -145,8 +146,8 @@ impl SecureTransportStream {
                 )
             })?;
             if !verify_peer {
-                check_ssl_status("SSLSetEnableCertVerify", unsafe {
-                    SSLSetEnableCertVerify(ssl_context, false)
+                check_ssl_status("SSLSetSessionOption(BreakOnServerAuth)", unsafe {
+                    SSLSetSessionOption(ssl_context, kSSLSessionOptionBreakOnServerAuth, true)
                 })?;
             }
 
@@ -154,6 +155,7 @@ impl SecureTransportStream {
                 let status = unsafe { SSLHandshake(ssl_context) };
                 match status {
                     SSL_OK => break,
+                    s if s == errSSLServerAuthCompleted => continue, // skip verification
                     ERR_SSL_WOULD_BLOCK => continue,
                     _ => {
                         return Err(io_other(format!(

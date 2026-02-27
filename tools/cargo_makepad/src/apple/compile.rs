@@ -3,7 +3,7 @@ use crate::makepad_shell::*;
 use crate::utils::*;
 use std::path::{Path, PathBuf};
 
-const IOS_DEPLOYMENT_TARGET: &str = "26.0";
+const IOS_DEPLOYMENT_TARGET: &str = "17.0";
 
 /// Resolve the cargo target directory for apple builds.
 /// Defaults to `target/apple` to avoid invalidating desktop build caches.
@@ -21,11 +21,11 @@ fn cargo_target_dir(cwd: &Path) -> PathBuf {
 }
 
 pub struct PlistValues {
-    identifier: String,
-    display_name: String,
-    name: String,
-    executable: String,
-    version: String,
+    pub identifier: String,
+    pub display_name: String,
+    pub name: String,
+    pub executable: String,
+    pub version: String,
 }
 
 pub struct ParsedProfiles {
@@ -265,7 +265,7 @@ impl PlistValues {
                 <key>LSRequiresIPhoneOS</key>
                 <true/>
                 <key>MinimumOSVersion</key>
-                <string>26.0</string>
+                <string>17.0</string>
                 <key>UIApplicationSupportsIndirectInputEvents</key>
                 <true/>
                 <key>UIDeviceFamily</key>
@@ -416,10 +416,10 @@ impl Scent {
 }
 
 pub struct IosBuildResult {
-    app_dir: PathBuf,
-    build_dir: PathBuf,
-    plist: PlistValues,
-    dst_bin: PathBuf,
+    pub app_dir: PathBuf,
+    pub build_dir: PathBuf,
+    pub plist: PlistValues,
+    pub dst_bin: PathBuf,
 }
 
 pub fn build(
@@ -739,7 +739,7 @@ impl ProvisionData {
     }
 }
 
-fn copy_resources(
+pub fn copy_resources(
     app_dir: &Path,
     build_crate: &str,
     build_dir: &Path,

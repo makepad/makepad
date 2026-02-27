@@ -128,7 +128,7 @@ fn map_metal_gpu_times_to_app_timeline(
 
 // IOSurface-based texture sharing (replaces XPC service approach)
 // Uses global IOSurface IDs which work across processes without needing Mach port transfer
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 use crate::os::apple::apple_sys::{
     CFRelease, IOSurfaceCreate, IOSurfaceGetID, IOSurfaceID, IOSurfaceLookup, IOSurfaceRef,
 };
@@ -1172,7 +1172,14 @@ impl Cx {
         cxtexture.update_shared_texture(self.os.metal_device.unwrap())
     }
 
-    #[cfg(any(target_os = "ios", target_os = "tvos"))]
+    #[cfg(target_os = "ios")]
+    pub fn share_texture_for_presentable_image(&mut self, texture: &Texture) -> u32 {
+        let cxtexture = &mut self.textures[texture.texture_id()];
+        let device = crate::os::apple::ios::ios_app::with_ios_app(|app| app.metal_device());
+        cxtexture.update_shared_texture(device)
+    }
+
+    #[cfg(target_os = "tvos")]
     pub fn share_texture_for_presentable_image(&mut self, _texture: &Texture) -> u32 {
         0
     }
@@ -1204,6 +1211,31 @@ impl Cx {
         );
         let cxtexture = &mut self.textures[texture.texture_id()];
         let iosurface_id = cxtexture.update_shared_texture(self.os.metal_device.unwrap());
+        let iosurface_ref = cxtexture.os.iosurface.unwrap_or(std::ptr::null_mut());
+        (texture, iosurface_ref, iosurface_id)
+    }
+
+    #[cfg(target_os = "ios")]
+    pub fn create_iosurface_render_texture(
+        &mut self,
+        width: usize,
+        height: usize,
+    ) -> (Texture, *mut std::ffi::c_void, u32) {
+        use crate::shared_framebuf::PresentableImageId;
+        use crate::texture::TextureFormat;
+
+        let texture = Texture::new_with_format(
+            self,
+            TextureFormat::SharedBGRAu8 {
+                width,
+                height,
+                id: PresentableImageId::alloc(),
+                initial: true,
+            },
+        );
+        let cxtexture = &mut self.textures[texture.texture_id()];
+        let device = crate::os::apple::ios::ios_app::with_ios_app(|app| app.metal_device());
+        let iosurface_id = cxtexture.update_shared_texture(device);
         let iosurface_ref = cxtexture.os.iosurface.unwrap_or(std::ptr::null_mut());
         (texture, iosurface_ref, iosurface_id)
     }
@@ -1655,9 +1687,9 @@ struct MetalBufferInner {
 #[derive(Default)]
 pub struct CxOsTexture {
     pub(crate) texture: Option<RcObjcId>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     iosurface: Option<IOSurfaceRef>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     iosurface_id: IOSurfaceID,
 }
 fn texture_pixel_to_mtl_pixel(pix: &TexturePixel) -> MTLPixelFormat {
@@ -1898,7 +1930,7 @@ impl CxTexture {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     fn update_shared_texture(&mut self, metal_device: ObjcId) -> IOSurfaceID {
         // we need a width/height for this one.
         if !self.alloc_shared() {
@@ -1994,7 +2026,7 @@ impl CxTexture {
         iosurface_id
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     pub fn update_from_shared_handle(
         &mut self,
         metal_cx: &MetalCx,
@@ -2330,6 +2362,108 @@ impl CglRenderBridge {
             assert!(err == 0, "CGLTexImageIOSurface2D failed: {}", err);
 
             gl_bind_texture(GL_TEXTURE_RECTANGLE, 0);
+
+            gl_texture
+        }
+    }
+}
+
+/// EAGL render bridge for iOS. Creates a standalone EAGL context (GLES 3.0)
+/// that shares textures with Metal via IOSurface.
+#[cfg(target_os = "ios")]
+pub struct EaglRenderBridge {
+    pub(crate) eagl_context: ObjcId,
+    pub(crate) opengles_framework: *mut std::ffi::c_void,
+}
+
+#[cfg(target_os = "ios")]
+impl EaglRenderBridge {
+    pub fn new() -> Self {
+        use std::ffi::c_void;
+
+        // kEAGLRenderingAPIOpenGLES3 = 3
+        const K_EAGL_RENDERING_API_OPENGLES3: u64 = 3;
+
+        extern "C" {
+            fn dlopen(path: *const i8, mode: i32) -> *mut c_void;
+        }
+
+        unsafe {
+            let ctx: ObjcId = msg_send![class!(EAGLContext), alloc];
+            let ctx: ObjcId = msg_send![ctx, initWithAPI: K_EAGL_RENDERING_API_OPENGLES3];
+            assert!(!ctx.is_null(), "Failed to create EAGLContext with GLES 3.0");
+
+            let framework_path = b"/System/Library/Frameworks/OpenGLES.framework/OpenGLES\0";
+            let opengles_framework = dlopen(framework_path.as_ptr() as *const i8, 1); // RTLD_LAZY
+            assert!(!opengles_framework.is_null(), "Failed to load OpenGLES.framework");
+
+            EaglRenderBridge {
+                eagl_context: ctx,
+                opengles_framework,
+            }
+        }
+    }
+
+    pub fn make_current(&self) {
+        let success: bool = unsafe {
+            msg_send![class!(EAGLContext), setCurrentContext: self.eagl_context]
+        };
+        assert!(success, "EAGLContext setCurrentContext failed");
+    }
+
+    pub fn get_proc_address(&self, name: &str) -> *const std::ffi::c_void {
+        extern "C" {
+            fn dlsym(handle: *mut std::ffi::c_void, symbol: *const i8) -> *mut std::ffi::c_void;
+        }
+        let c_name = std::ffi::CString::new(name).unwrap();
+        unsafe { dlsym(self.opengles_framework, c_name.as_ptr()) }
+    }
+
+    pub fn gl_api(&self) -> crate::gl_render_bridge::GlApi {
+        crate::gl_render_bridge::GlApi::GLES
+    }
+
+    /// Bind an IOSurface to a GLES texture (TEXTURE_2D).
+    /// Returns the GL texture ID.
+    pub fn bind_iosurface_to_gl_texture(
+        &self,
+        iosurface_ref: *mut std::ffi::c_void,
+        width: usize,
+        height: usize,
+    ) -> u32 {
+        const GL_TEXTURE_2D: u32 = 0x0DE1;
+        const GL_RGBA: u32 = 0x1908;
+        const GL_BGRA: u32 = 0x80E1;
+        const GL_UNSIGNED_BYTE: u32 = 0x1401;
+
+        type GlGenTexturesFn = unsafe extern "C" fn(i32, *mut u32);
+        type GlBindTextureFn = unsafe extern "C" fn(u32, u32);
+
+        unsafe {
+            let gl_gen_textures: GlGenTexturesFn =
+                std::mem::transmute(self.get_proc_address("glGenTextures"));
+            let gl_bind_texture: GlBindTextureFn =
+                std::mem::transmute(self.get_proc_address("glBindTexture"));
+
+            let mut gl_texture: u32 = 0;
+            gl_gen_textures(1, &mut gl_texture);
+            gl_bind_texture(GL_TEXTURE_2D, gl_texture);
+
+            // Use EAGLContext texImageIOSurface binding
+            let success: u8 = msg_send![
+                self.eagl_context,
+                texImageIOSurface: iosurface_ref
+                target: GL_TEXTURE_2D
+                internalFormat: GL_RGBA
+                width: width as u32
+                height: height as u32
+                format: GL_BGRA
+                type: GL_UNSIGNED_BYTE
+                plane: 0u32
+            ];
+            assert!(success != 0, "EAGLContext texImageIOSurface failed");
+
+            gl_bind_texture(GL_TEXTURE_2D, 0);
 
             gl_texture
         }
