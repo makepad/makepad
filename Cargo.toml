@@ -31,20 +31,22 @@ workspace.members = [
     "libs/apple_sys",
     "libs/network",
     "platform/script/test",
-    "widgets/test",
+    # "widgets/test",
     "studio",
     "studio/ai",
     "studio2/backend",
     "studio2/desktop",
     "tools/cargo_makepad",
-    "libs/terminal_core",
     "libs/git",
     "libs/fast_inflate",
-    "libs/voice",
+    # "libs/voice",
 #    "libs/matrix",
 ]
 
 workspace.exclude = [
+    "libs/terminal_core",
+    "libs/voice",
+    "widgets/test",
     "libs/stitch",
     "libs/wasm_bridge/test",
     # vendored third-party libs (tests require external dev-deps)
