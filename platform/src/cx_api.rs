@@ -14,10 +14,10 @@ use {
         gpu_info::GpuInfo,
         ime::TextInputConfig,
         macos_menu::MacosMenu,
-        makepad_network::HttpRequest,
         makepad_futures::executor::Spawner,
         makepad_live_id::*,
         makepad_math::{Rect, Vec2d},
+        makepad_network::HttpRequest,
         makepad_script::value::ScriptHandle,
         texture::{Texture, TextureId},
         window::WindowId,
@@ -306,15 +306,6 @@ impl Cx {
         }
 
         Err(format!("Dependency not loaded {}", path))
-    }
-
-    /// Get the absolute path of a resource by ScriptHandle.
-    pub fn get_resource_abs_path(&self, handle: ScriptHandle) -> Option<String> {
-        let resources = self.script_data.resources.resources.borrow();
-        resources
-            .iter()
-            .find(|r| r.handle == handle)
-            .map(|r| r.abs_path.clone())
     }
 
     /// Get loaded resource data by ScriptHandle

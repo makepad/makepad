@@ -1,12 +1,12 @@
 use {
     super::{
-        loader::FontData,
         font_face::FontFace,
         geom::{Point, Rect},
         glyph_outline,
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
         intern::Intern,
+        loader::FontData,
         rasterizer::{RasterizedGlyph, Rasterizer},
     },
     rustybuzz,
