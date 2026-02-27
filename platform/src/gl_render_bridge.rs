@@ -1,6 +1,20 @@
 use std::ffi::c_void;
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "ios"
+))]
 use crate::cx::Cx;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "ios"
+))]
 use crate::texture::Texture;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -35,6 +49,13 @@ pub struct GlRenderBridge {
     pub(crate) inner: crate::os::apple::metal::EaglRenderBridge,
 }
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "ios"
+))]
 impl GlRenderBridge {
     /// Make this GL context current on the calling thread.
     pub fn make_current(&self) {
@@ -49,6 +70,25 @@ impl GlRenderBridge {
     /// GL API type (GL on macOS, GLES on Linux/Android/Windows).
     pub fn gl_api(&self) -> GlApi {
         self.inner.gl_api()
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "ios"
+)))]
+impl GlRenderBridge {
+    pub fn make_current(&self) {}
+
+    pub fn get_proc_address(&self, _name: &str) -> *const c_void {
+        std::ptr::null()
+    }
+
+    pub fn gl_api(&self) -> GlApi {
+        GlApi::GLES
     }
 }
 

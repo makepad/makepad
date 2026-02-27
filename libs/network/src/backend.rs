@@ -19,7 +19,7 @@ pub mod apple;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_arch = "wasm32")]
-mod web;
+pub mod web;
 #[cfg(target_os = "windows")]
 pub mod windows;
 

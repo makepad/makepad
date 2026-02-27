@@ -6,8 +6,6 @@ use crate::{
     makepad_platform::event::video_playback::*,
     widget::*,
 };
-use std::time::Instant;
-
 script_mod! {
     use mod.prelude.widgets_internal.*
 
@@ -185,6 +183,19 @@ script_mod! {
             }
         }
 
+        draw_error_bg +: {
+            pixel: fn() {
+                return Pal.premul(vec4(0.0, 0.0, 0.0, 0.75))
+            }
+        }
+
+        draw_error_text +: {
+            color: #fff
+            text_style: theme.font_regular{
+                font_size: 10.0
+            }
+        }
+
         controls_height: 32.0
         show_controls: true
 
@@ -306,6 +317,10 @@ pub struct Video {
     draw_time_text: DrawText,
     #[live]
     draw_seek_indicator: DrawQuad,
+    #[live]
+    draw_error_bg: DrawColor,
+    #[live]
+    draw_error_text: DrawText,
 
     // Controls config
     #[live(true)]
@@ -380,12 +395,14 @@ pub struct Video {
     seek_cooldown: u32,
     /// Manual double-tap tracking (fallback for unreliable platform tap_count on touch).
     #[rust]
-    last_tap_time: Option<Instant>,
+    last_tap_time: Option<f64>,
     #[rust]
     last_tap_abs: DVec2,
 
     #[rust]
     id: LiveId,
+    #[rust]
+    last_error: Option<String>,
 }
 
 impl ScriptHook for Video {
@@ -606,6 +623,7 @@ impl Widget for Video {
 
         // Draw seek indicator overlay (centered on left or right half of video)
         self.draw_seek_indicator(cx);
+        self.draw_error_overlay(cx);
 
         DrawStep::done()
     }
@@ -674,7 +692,7 @@ impl Widget for Video {
 
         self.handle_gestures(cx, event, scope);
         self.handle_activity_events(cx, event);
-        self.handle_errors(event);
+        self.handle_errors(cx, event);
     }
 }
 
@@ -772,12 +790,14 @@ impl Video {
             );
 
             self.playback_state = PlaybackState::Preparing;
+            self.last_error = None;
             self.should_prepare_playback = false;
         }
     }
 
     fn handle_playback_prepared(&mut self, cx: &mut Cx, event: &VideoPlaybackPreparedEvent) {
         self.playback_state = PlaybackState::Prepared;
+        self.last_error = None;
         self.video_width = event.video_width as usize;
         self.video_height = event.video_height as usize;
         self.total_duration = event.duration;
@@ -791,6 +811,12 @@ impl Video {
         if self.mute && self.audio_state != AudioState::Muted {
             cx.mute_video_playback(self.id);
         }
+
+        if self.autoplay {
+            cx.begin_video_playback(self.id);
+            self.playback_state = PlaybackState::Playing;
+            self.draw_bg.set_uniform(cx, id!(show_thumbnail), &[0.0]);
+        }
     }
 
     fn controls_interactable(&self) -> bool {
@@ -800,9 +826,9 @@ impl Video {
     /// Manual double-tap detection as a fallback for unreliable platform tap_count on touch.
     /// Returns true if a double-tap is detected, and clears the tracking state.
     /// Otherwise records this tap for future detection.
-    fn check_double_tap(&mut self, abs: DVec2) -> bool {
+    fn check_double_tap(&mut self, abs: DVec2, time: f64) -> bool {
         if let Some(last_time) = self.last_tap_time {
-            let elapsed = last_time.elapsed().as_secs_f64();
+            let elapsed = time - last_time;
             let dx = abs.x - self.last_tap_abs.x;
             let dy = abs.y - self.last_tap_abs.y;
             let dist = (dx * dx + dy * dy).sqrt();
@@ -811,7 +837,7 @@ impl Video {
                 return true;
             }
         }
-        self.last_tap_time = Some(Instant::now());
+        self.last_tap_time = Some(time);
         self.last_tap_abs = abs;
         false
     }
@@ -846,7 +872,7 @@ impl Video {
                     self.last_tap_time = None;
                     true
                 } else {
-                    self.check_double_tap(fe.abs)
+                    self.check_double_tap(fe.abs, fe.time)
                 };
 
                 // Double-tap on video area: seek forward/backward
@@ -957,13 +983,18 @@ impl Video {
         }
     }
 
-    fn handle_errors(&mut self, event: &Event) {
+    fn handle_errors(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::VideoDecodingError(event) = event {
             if event.video_id == self.id {
                 error!(
                     "Error decoding video with id {} : {}",
                     self.id.0, event.error
                 );
+                // Recover from a failed prepare/playback attempt so callers can retry.
+                self.playback_state = PlaybackState::Unprepared;
+                self.should_prepare_playback = false;
+                self.last_error = Some(event.error.clone());
+                self.redraw(cx);
             }
         }
     }
@@ -1280,6 +1311,51 @@ impl Video {
         );
     }
 
+    fn draw_error_overlay(&mut self, cx: &mut Cx2d) {
+        let Some(error_text) = self.last_error.as_ref() else {
+            return;
+        };
+
+        let video_rect = self.draw_bg.area().rect(cx);
+        if video_rect.size.x <= 0.0 || video_rect.size.y <= 0.0 {
+            return;
+        }
+
+        let msg_owned = if error_text.chars().count() > 140 {
+            let mut s = error_text.chars().take(140).collect::<String>();
+            s.push_str("...");
+            s
+        } else {
+            error_text.clone()
+        };
+        let msg = msg_owned.as_str();
+
+        let pad_x = 10.0;
+        let pad_y = 6.0;
+        let max_width = (video_rect.size.x - 2.0 * pad_x).max(32.0);
+        let laid_out = self.draw_error_text.layout(
+            cx,
+            max_width as f32,
+            0.0,
+            None,
+            false,
+            Align::default(),
+            msg,
+        );
+        let text_w = laid_out.size_in_lpxs.width as f64;
+        let text_h = laid_out.size_in_lpxs.height as f64;
+
+        let bg_h = text_h + 2.0 * pad_y;
+        self.draw_error_bg.draw_abs(cx, Rect {
+            pos: dvec2(video_rect.pos.x, video_rect.pos.y),
+            size: dvec2(video_rect.size.x, bg_h),
+        });
+
+        let text_x = video_rect.pos.x + ((video_rect.size.x - text_w) * 0.5).max(pad_x);
+        let text_y = video_rect.pos.y + pad_y;
+        self.draw_error_text.draw_abs(cx, dvec2(text_x, text_y), msg);
+    }
+
     fn seek_to_position_from_x(&mut self, cx: &mut Cx, abs_x: f64) {
         let progress_rect = self.draw_progress_bg.area().rect(cx);
         if progress_rect.size.x <= 0.0 || self.total_duration == 0 {
@@ -1369,6 +1445,11 @@ impl Video {
             PlaybackState::Paused => self.resume_playback(cx),
             PlaybackState::Unprepared => {
                 self.begin_playback(cx);
+            }
+            PlaybackState::Preparing => {
+                // Preparation in progress — mark autoplay so playback starts
+                // as soon as preparation completes.
+                self.autoplay = true;
             }
             PlaybackState::Prepared => {
                 cx.begin_video_playback(self.id);

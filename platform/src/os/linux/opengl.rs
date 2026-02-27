@@ -593,7 +593,10 @@ impl Cx {
                             let texture_id = texture.texture_id();
                             let cxtexture = &mut self.textures[texture_id];
                             let bind_target = match cxtexture.format {
+                                #[cfg(target_os = "android")]
                                 TextureFormat::VideoRGB => gl_sys::TEXTURE_EXTERNAL_OES,
+                                #[cfg(not(target_os = "android"))]
+                                TextureFormat::VideoRGB => gl_sys::TEXTURE_2D,
                                 TextureFormat::VecCubeBGRAu8_32 { .. } => gl_sys::TEXTURE_CUBE_MAP,
                                 _ => gl_sys::TEXTURE_2D,
                             };
@@ -612,11 +615,12 @@ impl Cx {
                         if let Some(gl_bind_sampler) = gl.glBindSampler {
                             // Do not bind sampler objects for OES external textures;
                             // per GL ES spec, using sampler objects with external textures
-                            // is undefined behavior.
-                            let is_oes = matches!(
-                                sh.mapping.textures[i].tex_type,
-                                TextureType::TextureVideo
-                            );
+                            // is undefined behavior. Only applies on Android where we use OES.
+                            let is_oes = cfg!(target_os = "android")
+                                && matches!(
+                                    sh.mapping.textures[i].tex_type,
+                                    TextureType::TextureVideo
+                                );
                             let sampler = if is_oes {
                                 0
                             } else {
@@ -2171,6 +2175,7 @@ impl CxTexture {
                 }
             }
 
+            #[cfg(target_os = "android")]
             unsafe {
                 let gpu_renderer = get_gl_string(gl, gl_sys::RENDERER);
                 if gpu_renderer.contains("Adreno") {
@@ -2212,6 +2217,43 @@ impl CxTexture {
                     self.os.gl_texture.unwrap()
                 );
             }
+
+            #[cfg(not(target_os = "android"))]
+            unsafe {
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_WRAP_S,
+                    gl_sys::CLAMP_TO_EDGE as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_WRAP_T,
+                    gl_sys::CLAMP_TO_EDGE as i32,
+                );
+
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_MIN_FILTER,
+                    gl_sys::LINEAR as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_MAG_FILTER,
+                    gl_sys::LINEAR as i32,
+                );
+
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+
+                assert_eq!(
+                    (gl.glGetError)(),
+                    0,
+                    "UPDATE VIDEO TEXTURE ERROR {}",
+                    self.os.gl_texture.unwrap()
+                );
+            }
+
             return true;
         }
         false

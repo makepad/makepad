@@ -5,16 +5,18 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
-            Event, HttpError, HttpProgress, HttpResponse, MouseDownEvent, MouseMoveEvent,
-            MouseUpEvent, NetworkResponse, ScrollEvent, TextClipboardEvent, TimerEvent,
-            ToWasmMsgEvent, TouchUpdateEvent, WindowGeom, WindowGeomChangeEvent,
+            Event, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent, TextClipboardEvent,
+            TimerEvent, ToWasmMsgEvent, TouchUpdateEvent, VideoPlaybackCompletedEvent,
+            VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
+            VideoPlaybackResourcesReleasedEvent, VideoSource, VideoTextureUpdatedEvent, WindowGeom,
+            WindowGeomChangeEvent,
         },
         makepad_live_id::*,
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
         permission::{Permission, PermissionResult, PermissionStatus},
         thread::SignalToUI,
         window::CxWindowPool,
-        Vec2d,
+        HttpError, HttpProgress, HttpResponse, Vec2d,
     },
     std::cell::RefCell,
     std::panic,
@@ -211,7 +213,7 @@ impl Cx {
                     let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponse::HttpResponse {
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
-                        response: HttpResponse::new(
+                        response: HttpResponse::from_header_string(
                             LiveId::from_lo_hi(tw.metadata_id_lo, tw.metadata_id_hi),
                             tw.status as u16,
                             tw.headers,
@@ -326,6 +328,50 @@ impl Cx {
                         }
                     }
                 }*/
+                live_id!(ToWasmVideoPlaybackPrepared) => {
+                    let tw = ToWasmVideoPlaybackPrepared::read_to_wasm(&mut to_wasm);
+                    let video_id = LiveId::from_lo_hi(tw.video_id_lo, tw.video_id_hi);
+                    let duration = (tw.duration_lo as u128) | ((tw.duration_hi as u128) << 32);
+                    self.call_event_handler(&Event::VideoPlaybackPrepared(
+                        VideoPlaybackPreparedEvent {
+                            video_id,
+                            video_width: tw.video_width,
+                            video_height: tw.video_height,
+                            duration,
+                        },
+                    ));
+                }
+
+                live_id!(ToWasmVideoTextureUpdated) => {
+                    let tw = ToWasmVideoTextureUpdated::read_to_wasm(&mut to_wasm);
+                    let video_id = LiveId::from_lo_hi(tw.video_id_lo, tw.video_id_hi);
+                    let current_position_ms =
+                        (tw.current_position_lo as u128) | ((tw.current_position_hi as u128) << 32);
+                    self.call_event_handler(&Event::VideoTextureUpdated(
+                        VideoTextureUpdatedEvent {
+                            video_id,
+                            current_position_ms,
+                        },
+                    ));
+                    self.redraw_all();
+                }
+
+                live_id!(ToWasmVideoPlaybackCompleted) => {
+                    let tw = ToWasmVideoPlaybackCompleted::read_to_wasm(&mut to_wasm);
+                    let video_id = LiveId::from_lo_hi(tw.video_id_lo, tw.video_id_hi);
+                    self.call_event_handler(&Event::VideoPlaybackCompleted(
+                        VideoPlaybackCompletedEvent { video_id },
+                    ));
+                }
+
+                live_id!(ToWasmVideoPlaybackResourcesReleased) => {
+                    let tw = ToWasmVideoPlaybackResourcesReleased::read_to_wasm(&mut to_wasm);
+                    let video_id = LiveId::from_lo_hi(tw.video_id_lo, tw.video_id_hi);
+                    self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                        VideoPlaybackResourcesReleasedEvent { video_id },
+                    ));
+                }
+
                 live_id!(ToWasmAudioDeviceList) => {
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
                     self.os
@@ -549,6 +595,81 @@ impl Cx {
                         request_id: request_id as u32,
                     });
                 }
+                CxOsOp::PrepareVideoPlayback(video_id, source, _external_texture_id, texture_id, autoplay, should_loop) => {
+                    match source {
+                        VideoSource::Network(url) => {
+                            self.os.from_wasm(FromWasmPrepareVideoPlayback {
+                                video_id_lo: video_id.lo(),
+                                video_id_hi: video_id.hi(),
+                                texture_id: texture_id.0,
+                                source_url: url,
+                                autoplay,
+                                should_loop,
+                            });
+                        }
+                        VideoSource::InMemory(_) => {
+                            let error = "VideoSource::InMemory is not supported on web".to_string();
+                            crate::error!("{}", error);
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
+                        }
+                        VideoSource::Filesystem(_) => {
+                            let error = "VideoSource::Filesystem is not supported on web".to_string();
+                            crate::error!("{}", error);
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
+                        }
+                    }
+                }
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    self.os.from_wasm(FromWasmBeginVideoPlayback {
+                        video_id_lo: video_id.lo(),
+                        video_id_hi: video_id.hi(),
+                    });
+                }
+                CxOsOp::PauseVideoPlayback(video_id) => {
+                    self.os.from_wasm(FromWasmPauseVideoPlayback {
+                        video_id_lo: video_id.lo(),
+                        video_id_hi: video_id.hi(),
+                    });
+                }
+                CxOsOp::ResumeVideoPlayback(video_id) => {
+                    self.os.from_wasm(FromWasmResumeVideoPlayback {
+                        video_id_lo: video_id.lo(),
+                        video_id_hi: video_id.hi(),
+                    });
+                }
+                CxOsOp::MuteVideoPlayback(video_id) => {
+                    self.os.from_wasm(FromWasmMuteVideoPlayback {
+                        video_id_lo: video_id.lo(),
+                        video_id_hi: video_id.hi(),
+                    });
+                }
+                CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    self.os.from_wasm(FromWasmUnmuteVideoPlayback {
+                        video_id_lo: video_id.lo(),
+                        video_id_hi: video_id.hi(),
+                    });
+                }
+                CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
+                    self.os.from_wasm(FromWasmSeekVideoPlayback {
+                        video_id_lo: video_id.lo(),
+                        video_id_hi: video_id.hi(),
+                        position_ms_lo: (position_ms & 0xFFFFFFFF) as u32,
+                        position_ms_hi: ((position_ms >> 32) & 0xFFFFFFFF) as u32,
+                    });
+                }
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    self.os.from_wasm(FromWasmCleanupVideoPlaybackResources {
+                        video_id_lo: video_id.lo(),
+                        video_id_hi: video_id.hi(),
+                    });
+                }
+                CxOsOp::UpdateVideoSurfaceTexture(_) => {
+                    // On web, texture updates happen in the JS animation frame loop
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*
@@ -620,6 +741,10 @@ impl CxOsApi for Cx {
             ToWasmMidiInputData::to_js_code(),
             ToWasmMidiPortList::to_js_code(),
             ToWasmAudioDeviceList::to_js_code(),
+            ToWasmVideoPlaybackPrepared::to_js_code(),
+            ToWasmVideoTextureUpdated::to_js_code(),
+            ToWasmVideoPlaybackCompleted::to_js_code(),
+            ToWasmVideoPlaybackResourcesReleased::to_js_code(),
         ]);
 
         self.os.append_from_wasm_js(&[
@@ -663,6 +788,14 @@ impl CxOsApi for Cx {
             FromWasmStartAudioOutput::to_js_code(),
             FromWasmStopAudioOutput::to_js_code(),
             FromWasmQueryMidiPorts::to_js_code(),
+            FromWasmPrepareVideoPlayback::to_js_code(),
+            FromWasmBeginVideoPlayback::to_js_code(),
+            FromWasmPauseVideoPlayback::to_js_code(),
+            FromWasmResumeVideoPlayback::to_js_code(),
+            FromWasmMuteVideoPlayback::to_js_code(),
+            FromWasmUnmuteVideoPlayback::to_js_code(),
+            FromWasmSeekVideoPlayback::to_js_code(),
+            FromWasmCleanupVideoPlaybackResources::to_js_code(),
         ]);
     }
 
