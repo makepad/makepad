@@ -5,6 +5,21 @@ use std::path::{Path, PathBuf};
 
 const IOS_DEPLOYMENT_TARGET: &str = "26.0";
 
+/// Resolve the cargo target directory for apple builds.
+/// Defaults to `target/apple` to avoid invalidating desktop build caches.
+fn cargo_target_dir(cwd: &Path) -> PathBuf {
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        if target_dir.is_absolute() {
+            target_dir
+        } else {
+            cwd.join(target_dir)
+        }
+    } else {
+        cwd.join("target").join("apple")
+    }
+}
+
 pub struct PlistValues {
     identifier: String,
     display_name: String,
@@ -418,6 +433,9 @@ pub fn build(
     let binary_name = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
 
     let cwd = std::env::current_dir().unwrap();
+    let target_dir = cargo_target_dir(&cwd);
+    let target_dir_str = target_dir.to_string_lossy().to_string();
+    let target_dir_arg = format!("--target-dir={target_dir_str}");
     let target_opt = format!("--target={}", apple_target.toolchain());
 
     let base_args = &[
@@ -426,6 +444,7 @@ pub fn build(
         "cargo",
         "build",
         &target_opt,
+        &target_dir_arg,
     ];
 
     let mut args_out = Vec::new();
@@ -459,8 +478,8 @@ pub fn build(
     };
     let profile = get_profile_from_args(args);
 
-    let app_dir = cwd.join(format!(
-        "target/makepad-apple-app/{}/{profile}/{build_crate}.app",
+    let app_dir = target_dir.join(format!(
+        "makepad-apple-app/{}/{profile}/{build_crate}.app",
         apple_target.toolchain()
     ));
     mkdir(&app_dir)?;
@@ -468,9 +487,9 @@ pub fn build(
     let plist_file = app_dir.join("Info.plist");
     write_text(&plist_file, &plist.to_plist_file(apple_target.os()))?;
 
-    let build_dir = cwd.join(format!("target/{}/{profile}/", apple_target.toolchain()));
-    let src_bin = cwd.join(format!(
-        "target/{}/{profile}/{binary_name}",
+    let build_dir = target_dir.join(format!("{}/{profile}/", apple_target.toolchain()));
+    let src_bin = target_dir.join(format!(
+        "{}/{profile}/{binary_name}",
         apple_target.toolchain()
     ));
     let dst_bin = app_dir.join(binary_name.clone());
@@ -827,8 +846,9 @@ pub fn run_on_device(
         team_id: provision.team_ident.to_string(),
     };
 
-    let scent_file = cwd.join(format!(
-        "target/makepad-apple-app/{}/release/{build_crate}.scent",
+    let target_dir = cargo_target_dir(&cwd);
+    let scent_file = target_dir.join(format!(
+        "makepad-apple-app/{}/release/{build_crate}.scent",
         apple_target.toolchain()
     ));
     write_text(&scent_file, &scent.to_scent_file())?;
