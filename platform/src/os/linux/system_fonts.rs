@@ -1,4 +1,7 @@
-use crate::os::system_fonts::{SystemFontData, SystemFontError, SystemFontProvider};
+use crate::{
+    os::system_fonts::{SystemFontData, SystemFontError, SystemFontProvider},
+    shared_bytes::SharedBytes,
+};
 use std::process::Command;
 
 pub struct LinuxSystemFontProvider;
@@ -28,7 +31,8 @@ impl SystemFontProvider for LinuxSystemFontProvider {
                 "failed to parse fc-match face index '{index_line}': {err}"
             ))
         })?;
-        let data = std::fs::read(&path).map_err(|err| SystemFontError::Io(err.to_string()))?;
+        let data = SharedBytes::from_file_mmap_or_read(&path)
+            .map_err(|err| SystemFontError::Io(err.to_string()))?;
         Ok(SystemFontData { data, index })
     }
 }

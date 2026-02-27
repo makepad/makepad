@@ -1,6 +1,8 @@
+use crate::shared_bytes::SharedBytes;
+
 #[derive(Clone, Debug)]
 pub struct SystemFontData {
-    pub data: Vec<u8>,
+    pub data: SharedBytes,
     pub index: u32,
 }
 
@@ -19,7 +21,10 @@ pub trait SystemFontProvider: Send + Sync {
 ///
 /// Supported on macOS/iOS/tvOS, Windows, Linux desktop, and Android. Other targets return
 /// `SystemFontError::Unsupported`.
-#[cfg(all(not(headless), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
+#[cfg(all(
+    not(headless),
+    any(target_os = "macos", target_os = "ios", target_os = "tvos")
+))]
 pub fn query_system_font(family: &str) -> Result<SystemFontData, SystemFontError> {
     crate::os::apple::system_fonts::query_font(family)
 }
@@ -39,11 +44,7 @@ pub fn query_system_font(family: &str) -> Result<SystemFontData, SystemFontError
     crate::os::linux::android::system_fonts::query_font(family)
 }
 
-#[cfg(any(
-    headless,
-    target_arch = "wasm32",
-    target_env = "ohos",
-))]
+#[cfg(any(headless, target_arch = "wasm32", target_env = "ohos"))]
 pub fn query_system_font(_family: &str) -> Result<SystemFontData, SystemFontError> {
     Err(SystemFontError::Unsupported)
 }
