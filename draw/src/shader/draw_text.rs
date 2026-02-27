@@ -5,7 +5,6 @@ use {
         draw_list_2d::ManyInstances,
         makepad_platform::*,
         text::{
-            builtins,
             color::Color,
             font::FontId,
             font_family::FontFamilyId,
@@ -22,7 +21,7 @@ use {
         turtle::*,
         turtle::{Align, Walk},
     },
-    std::{borrow::Cow, cell::RefCell, rc::Rc},
+    std::{cell::RefCell, rc::Rc},
 };
 
 script_mod! {
@@ -832,15 +831,7 @@ impl FontFamily {
             let font_id: FontId = (member.handle.index() as u64).into();
 
             if !fonts.is_font_known(font_id) {
-                let font_data = cx
-                    .get_resource_abs_path(member.handle)
-                    .and_then(|path| builtins::get_builtin_font_data(&path))
-                    .or_else(|| {
-                        cx.get_resource(member.handle)
-                            .map(|rc| Rc::new(Cow::Owned((*rc).clone())))
-                    });
-
-                if let Some(data) = font_data {
+                if let Some(data) = cx.get_resource(member.handle) {
                     fonts.define_font(
                         font_id,
                         FontDefinition {

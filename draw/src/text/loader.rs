@@ -8,10 +8,10 @@ use {
         shaper,
         shaper::Shaper,
     },
-    std::{borrow::Cow, cell::RefCell, collections::HashMap, rc::Rc},
+    std::{cell::RefCell, collections::HashMap, rc::Rc},
 };
 
-pub type FontData = Rc<Cow<'static, [u8]>>;
+pub type FontData = Rc<Vec<u8>>;
 
 #[derive(Clone, Debug)]
 pub struct Loader {
