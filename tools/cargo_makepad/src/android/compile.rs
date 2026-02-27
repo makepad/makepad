@@ -96,6 +96,8 @@ fn rust_build(
     urls: &AndroidSDKUrls,
 ) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
+    let target_dir = cargo_target_dir(&cwd);
+    let target_dir_str = target_dir.to_string_lossy().to_string();
     let (_ndk_version, ndk_prebuilt_root) =
         resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
     for android_target in android_targets {
@@ -114,6 +116,7 @@ fn rust_build(
 
         let toolchain = android_target.toolchain();
         let target_opt = format!("--target={toolchain}");
+        let target_dir_arg = format!("--target-dir={target_dir_str}");
 
         let base_args = &[
             "run",
@@ -123,6 +126,7 @@ fn rust_build(
             "--lib",
             "--crate-type=cdylib",
             &target_opt,
+            &target_dir_arg,
         ];
         let mut args_out = Vec::new();
         args_out.extend_from_slice(base_args);
@@ -185,6 +189,8 @@ fn rust_build(
     Ok(())
 }
 
+/// Resolve the cargo target directory for android builds.
+/// Defaults to `target/android` to avoid invalidating desktop build caches.
 fn cargo_target_dir(cwd: &Path) -> PathBuf {
     if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
         let target_dir = PathBuf::from(target_dir);
@@ -194,7 +200,7 @@ fn cargo_target_dir(cwd: &Path) -> PathBuf {
             cwd.join(target_dir)
         }
     } else {
-        cwd.join("target")
+        cwd.join("target").join("android")
     }
 }
 
