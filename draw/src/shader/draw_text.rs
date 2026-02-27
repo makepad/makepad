@@ -853,7 +853,7 @@ impl FontFamily {
                 font_ids.push(font_id);
             }
         }
-        #[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+        #[cfg(feature = "system-fonts")]
         {
             for family in default_system_fallback_families() {
                 try_push_system_font(fonts, &mut font_ids, family);
@@ -874,25 +874,25 @@ impl FontFamily {
     }
 }
 
-#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+#[cfg(feature = "system-fonts")]
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 fn default_system_fallback_families() -> &'static [&'static str] {
-    &["STHeiti", "Apple Color Emoji"]
+    &["PingFang SC", "Apple Color Emoji"]
 }
 
-#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+#[cfg(feature = "system-fonts")]
 #[cfg(target_os = "windows")]
 fn default_system_fallback_families() -> &'static [&'static str] {
     &["Microsoft YaHei", "Segoe UI Emoji"]
 }
 
-#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+#[cfg(feature = "system-fonts")]
 #[cfg(target_os = "linux")]
 fn default_system_fallback_families() -> &'static [&'static str] {
     &["Noto Sans CJK SC", "Noto Color Emoji"]
 }
 
-#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+#[cfg(feature = "system-fonts")]
 #[cfg(not(any(
     target_os = "linux",
     target_os = "windows",
@@ -904,7 +904,7 @@ fn default_system_fallback_families() -> &'static [&'static str] {
     &[]
 }
 
-#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+#[cfg(feature = "system-fonts")]
 fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &str) {
     let font_id = system_font_id(family);
     if !fonts.is_font_known(font_id) {
@@ -936,7 +936,7 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
     }
 }
 
-#[cfg(all(feature = "system-fonts", not(feature = "bundled-fonts")))]
+#[cfg(feature = "system-fonts")]
 /// Creates a deterministic ID namespace for system-font fallbacks.
 fn system_font_id(family: &str) -> FontId {
     fxhash::hash64(&("system-font", family)).into()

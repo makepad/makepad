@@ -18,11 +18,12 @@ fn font_candidates(family: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if family.eq_ignore_ascii_case("apple color emoji") {
         out.push("/System/Library/Fonts/Apple Color Emoji.ttc".into());
-    } else if family.eq_ignore_ascii_case("stheiti") {
+    } else if family.eq_ignore_ascii_case("pingfang sc")
+        || family.eq_ignore_ascii_case("stheiti")
+    {
+        out.push("/System/Library/Fonts/PingFang.ttc".into());
         out.push("/System/Library/Fonts/STHeiti Light.ttc".into());
         out.push("/System/Library/Fonts/STHeiti Medium.ttc".into());
-    } else if family.eq_ignore_ascii_case("pingfang sc") {
-        out.push("/System/Library/Fonts/PingFang.ttc".into());
     }
     out
 }
