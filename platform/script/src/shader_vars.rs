@@ -631,6 +631,29 @@ impl ShaderFnCompiler {
         }
     }
 
+    fn infer_shader_io_type_from_pod_ty(pod_ty: &crate::pod::ScriptPodTy) -> Option<ShaderIoType> {
+        use crate::pod::ScriptPodTy::*;
+        match pod_ty {
+            // Implicit scalar rule: float/int become dynamic instance fields.
+            F32 | F16 | U32 | I32 => Some(SHADER_IO_DYN_INSTANCE),
+            // Implicit vector/matrix rule: vec* and mat* become dynamic uniforms.
+            Vec(_) | Mat(_) => Some(SHADER_IO_DYN_UNIFORM),
+            _ => None,
+        }
+    }
+
+    fn infer_unmarked_shader_io_type(
+        vm: &ScriptVm,
+        value: ScriptValue,
+    ) -> Option<(ShaderIoType, ScriptPodType)> {
+        let pod_ty = match Self::type_from_value(vm, value) {
+            ShaderType::Pod(pod_ty) | ShaderType::PodType(pod_ty) => pod_ty,
+            _ => return None,
+        };
+        let pod_data = &vm.bx.heap.pod_types[pod_ty.index as usize];
+        Self::infer_shader_io_type_from_pod_ty(&pod_data.ty).map(|io_type| (io_type, pod_ty))
+    }
+
     pub(crate) fn handle_field(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
         let (field_ty, field_s) = self.stack.pop(self.trap.pass());
         let (instance_ty, instance_s) = self.pop_resolved(vm, output);
@@ -1116,6 +1139,76 @@ impl ShaderFnCompiler {
                     }
                 }
 
+                // No explicit marker, try implicit inference based on value type:
+                // - float/int scalar => instance
+                // - vec*/mat* => uniform
+                if let Some((io_type, pod_ty)) = Self::infer_unmarked_shader_io_type(vm, value) {
+                    let (mut kind, prefix) = output
+                        .backend
+                        .get_shader_io_kind_and_prefix(output.mode, io_type);
+                    let mut resolved_prefix = prefix;
+
+                    if let Some(existing) = output.io.iter().find(|io| io.name == field_id) {
+                        if !Self::shader_io_kind_matches(&existing.kind, &kind) {
+                            if let Some(existing_io_type) =
+                                Self::shader_io_type_from_kind(&existing.kind)
+                            {
+                                let (existing_kind, existing_prefix) = output
+                                    .backend
+                                    .get_shader_io_kind_and_prefix(output.mode, existing_io_type);
+                                kind = existing_kind;
+                                resolved_prefix = existing_prefix;
+                            }
+                        } else {
+                            resolved_prefix = match (&existing.kind, &kind) {
+                                (ShaderIoKind::RustInstance, ShaderIoKind::DynInstance) => {
+                                    output
+                                        .backend
+                                        .get_shader_io_kind_and_prefix(
+                                            output.mode,
+                                            SHADER_IO_RUST_INSTANCE,
+                                        )
+                                        .1
+                                }
+                                (ShaderIoKind::DynInstance, ShaderIoKind::RustInstance) => {
+                                    output
+                                        .backend
+                                        .get_shader_io_kind_and_prefix(
+                                            output.mode,
+                                            SHADER_IO_DYN_INSTANCE,
+                                        )
+                                        .1
+                                }
+                                _ => resolved_prefix,
+                            };
+                        }
+                    }
+
+                    vm.bx.heap.pod_type_name_if_not_set(pod_ty, field_id);
+                    if !output.io.iter().any(|io| io.name == field_id) {
+                        output.io.push(ShaderIo {
+                            kind: kind.clone(),
+                            name: field_id,
+                            ty: pod_ty,
+                            buffer_index: None,
+                        });
+                    }
+
+                    let mut s = self.stack.new_string();
+                    match &resolved_prefix {
+                        ShaderIoPrefix::Prefix(prefix) => {
+                            let io_name = output.backend.map_io_name(field_id);
+                            write!(s, "{}{}", prefix, io_name).ok()
+                        }
+                        ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+                        ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
+                    };
+                    self.stack.push(self.trap.pass(), ShaderType::Pod(pod_ty), s);
+                    self.stack.free_string(field_s);
+                    self.stack.free_string(instance_s);
+                    return;
+                }
+
                 // No shader IO marker found - clear any trap error from value lookup
                 // before checking RustInstance fields (which don't depend on prototype values)
                 self.trap.err.take();
@@ -1148,9 +1241,12 @@ impl ShaderFnCompiler {
                 }
 
                 // Not a RustInstance field and no shader IO marker found.
-                // Script-defined shader fields MUST have an explicit marker: uniform(), instance(), varying(), etc.
-                // This prevents confusing inheritance behavior where child values are ignored.
-                script_err_shader!(self.trap, "shader field `{}` requires an explicit IO marker: use uniform(...), instance(...), or varying(...)", field_id);
+                // Script-defined shader fields either need an explicit marker or an inferable type.
+                script_err_shader!(
+                    self.trap,
+                    "shader field `{}` needs explicit IO marker (uniform/instance/varying) or implicit scalar/vec/mat type",
+                    field_id
+                );
                 self.stack.push(
                     self.trap.pass(),
                     ShaderType::Pod(vm.bx.code.builtins.pod.pod_void),
@@ -1295,5 +1391,59 @@ impl ShaderFnCompiler {
                 script_err_unexpected!(self.trap, "var requires Id");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pod::{ScriptPodMat, ScriptPodTy, ScriptPodVec};
+
+    #[test]
+    fn infer_unmarked_shader_io_rules_match_requested_defaults() {
+        assert_eq!(
+            ShaderFnCompiler::infer_shader_io_type_from_pod_ty(&ScriptPodTy::F32),
+            Some(SHADER_IO_DYN_INSTANCE)
+        );
+        assert_eq!(
+            ShaderFnCompiler::infer_shader_io_type_from_pod_ty(&ScriptPodTy::I32),
+            Some(SHADER_IO_DYN_INSTANCE)
+        );
+        assert_eq!(
+            ShaderFnCompiler::infer_shader_io_type_from_pod_ty(&ScriptPodTy::U32),
+            Some(SHADER_IO_DYN_INSTANCE)
+        );
+
+        assert_eq!(
+            ShaderFnCompiler::infer_shader_io_type_from_pod_ty(&ScriptPodTy::Vec(
+                ScriptPodVec::Vec2f
+            )),
+            Some(SHADER_IO_DYN_UNIFORM)
+        );
+        assert_eq!(
+            ShaderFnCompiler::infer_shader_io_type_from_pod_ty(&ScriptPodTy::Vec(
+                ScriptPodVec::Vec4i
+            )),
+            Some(SHADER_IO_DYN_UNIFORM)
+        );
+        assert_eq!(
+            ShaderFnCompiler::infer_shader_io_type_from_pod_ty(&ScriptPodTy::Mat(
+                ScriptPodMat::Mat4x4f
+            )),
+            Some(SHADER_IO_DYN_UNIFORM)
+        );
+
+        assert_eq!(
+            ShaderFnCompiler::infer_shader_io_type_from_pod_ty(&ScriptPodTy::Bool),
+            None
+        );
+        assert_eq!(
+            ShaderFnCompiler::infer_shader_io_type_from_pod_ty(&ScriptPodTy::Struct {
+                align_of: 4,
+                size_of: 4,
+                fields: Vec::new(),
+            }),
+            None
+        );
     }
 }

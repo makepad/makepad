@@ -26,13 +26,13 @@ script_mod! {
         label_walk: Walk{width: Fit, height: Fit}
 
         draw_text +: {
-            hover: instance(0.0)
+            hover: 0.0
             down: instance(0.0)
             focus: instance(0.0)
             disabled: instance(0.0)
 
             color: theme.color_label_inner
-            color_hover: uniform(theme.color_label_inner_hover)
+            color_hover: theme.color_label_inner_hover
             color_down: uniform(theme.color_label_inner_down)
             color_focus: uniform(theme.color_label_inner_focus)
             color_disabled: uniform(theme.color_label_inner_disabled)
