@@ -543,7 +543,6 @@ impl WindowsVideoPlayer {
             }
         };
 
-        log!("VIDEO: MediaEngine created for {:?}", video_id);
         Some(Self {
             engine: ptrs.0 as *mut c_void,
             dxgi_manager: ptrs.1 as *mut c_void,
@@ -699,7 +698,6 @@ impl WindowsVideoPlayer {
                 0
             };
             self.prepare_notified = true;
-            log!("VIDEO: prepared {}x{}, {}ms", w, h, duration_ms);
             if self.autoplay {
                 let _ = (vtbl.Play)(self.engine);
             }

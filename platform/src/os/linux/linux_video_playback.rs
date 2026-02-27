@@ -297,9 +297,6 @@ impl GStreamerVideoPlayer {
                 0u128
             };
 
-            log!("VIDEO: prepared {}x{}, duration={}ms, autoplay={}",
-                self.video_width, self.video_height, duration_ms, self.autoplay);
-
             // Start playback immediately if autoplay — this transitions to PLAYING
             // which makes try_pull_sample start returning decoded frames.
             if self.autoplay {
