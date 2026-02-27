@@ -1,4 +1,6 @@
-use super::loader::{FontDefinition, FontFamilyDefinition, Loader};
+use super::loader::FontData;
+use std::borrow::Cow;
+use std::rc::Rc;
 
 pub const IBM_PLEX_SANS_TEXT: &[u8] =
     include_bytes!("../../../widgets/resources/IBMPlexSans-Text.ttf");
@@ -8,50 +10,15 @@ pub const NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../../../widgets/fonts/NotoC
 pub const LIBERATION_MONO_REGULAR: &[u8] =
     include_bytes!("../../../widgets/resources/LiberationMono-Regular.ttf");
 
-pub fn define(loader: &mut Loader) {
-    loader.define_font_family(
-        "Sans".into(),
-        FontFamilyDefinition {
-            font_ids: [
-                "IBM Plex Sans Text".into(),
-                "LXG WWen Kai Regular".into(),
-                "Noto Color Emoji".into(),
-            ]
-            .into(),
-        },
-    );
-    loader.define_font_family(
-        "Monospace".into(),
-        FontFamilyDefinition {
-            font_ids: ["Liberation Mono Regular".into()].into(),
-        },
-    );
-    loader.define_font(
-        "IBM Plex Sans Text".into(),
-        FontDefinition {
-            data: IBM_PLEX_SANS_TEXT.to_vec().into(),
-            index: 0,
-        },
-    );
-    loader.define_font(
-        "LXG WWen Kai Regular".into(),
-        FontDefinition {
-            data: LXG_WEN_KAI_REGULAR.to_vec().into(),
-            index: 0,
-        },
-    );
-    loader.define_font(
-        "Noto Color Emoji".into(),
-        FontDefinition {
-            data: NOTO_COLOR_EMOJI.to_vec().into(),
-            index: 0,
-        },
-    );
-    loader.define_font(
-        "Liberation Mono Regular".into(),
-        FontDefinition {
-            data: LIBERATION_MONO_REGULAR.to_vec().into(),
-            index: 0,
-        },
-    );
+/// Returns static font data for a known builtin font, matched by filename
+/// suffix of the resource's abs_path.
+pub fn get_builtin_font_data(abs_path: &str) -> Option<FontData> {
+    let filename = abs_path.rsplit('/').next().unwrap_or(abs_path);
+    match filename {
+        "IBMPlexSans-Text.ttf" => Some(Rc::new(Cow::Borrowed(IBM_PLEX_SANS_TEXT))),
+        "LXGWWenKaiRegular.ttf" => Some(Rc::new(Cow::Borrowed(LXG_WEN_KAI_REGULAR))),
+        "NotoColorEmoji.ttf" => Some(Rc::new(Cow::Borrowed(NOTO_COLOR_EMOJI))),
+        "LiberationMono-Regular.ttf" => Some(Rc::new(Cow::Borrowed(LIBERATION_MONO_REGULAR))),
+        _ => None,
+    }
 }

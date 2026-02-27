@@ -1,14 +1,15 @@
 use {
+    super::loader::FontData,
     rustybuzz,
     rustybuzz::ttf_parser,
-    std::{fmt, marker::PhantomPinned, mem, pin::Pin, rc::Rc},
+    std::{fmt, marker::PhantomPinned, mem, pin::Pin},
 };
 
 #[derive(Debug)]
 pub struct FontFace(Pin<Box<FontFaceInner>>);
 
 impl FontFace {
-    pub fn from_data_and_index(data: Rc<Vec<u8>>, index: u32) -> Option<Self> {
+    pub fn from_data_and_index(data: FontData, index: u32) -> Option<Self> {
         let mut inner = Box::pin(FontFaceInner {
             data,
             ttf_parser_face: None,
@@ -34,13 +35,13 @@ impl FontFace {
         self.0.rustybuzz_face.as_ref().unwrap()
     }
 
-    pub fn data(&self) -> &Rc<Vec<u8>> {
+    pub fn data(&self) -> &FontData {
         &self.0.data
     }
 }
 
 struct FontFaceInner {
-    data: Rc<Vec<u8>>,
+    data: FontData,
     ttf_parser_face: Option<ttf_parser::Face<'static>>,
     rustybuzz_face: Option<rustybuzz::Face<'static>>,
     _pinned: PhantomPinned,

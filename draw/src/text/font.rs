@@ -1,5 +1,6 @@
 use {
     super::{
+        loader::FontData,
         font_face::FontFace,
         geom::{Point, Rect},
         glyph_outline,
@@ -65,7 +66,7 @@ impl Font {
         self.id
     }
 
-    pub fn data(&self) -> &Rc<Vec<u8>> {
+    pub fn data(&self) -> &FontData {
         self.face.data()
     }
 
