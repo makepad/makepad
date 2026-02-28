@@ -95,21 +95,42 @@ impl std::fmt::Display for ScriptLoc {
 impl ScriptCode {
     pub fn ip_to_loc(&self, ip: ScriptIp) -> Option<ScriptLoc> {
         if let Some(body) = self.bodies.borrow().get(ip.body as usize) {
-            if let Some(Some(index)) = body.parser.source_map.get(ip.index as usize) {
-                if let Some(rc) = body.tokenizer.token_index_to_row_col(*index) {
+            let source_map = &body.parser.source_map;
+            let ip_index = ip.index as usize;
+
+            let direct_token = source_map.get(ip_index).and_then(|slot| *slot);
+            // Some opcodes are synthetic and have `None` in source_map.
+            // For error reporting, fall back to the nearest mapped token so we still
+            // surface a real file/line instead of "unknown".
+            let nearest_token = if direct_token.is_some() {
+                direct_token
+            } else {
+                let left = ip_index.min(source_map.len().saturating_sub(1));
+                let left_token = (0..=left)
+                    .rev()
+                    .find_map(|idx| source_map.get(idx).and_then(|slot| *slot));
+                if left_token.is_some() {
+                    left_token
+                } else {
+                    ((ip_index + 1)..source_map.len())
+                        .find_map(|idx| source_map.get(idx).and_then(|slot| *slot))
+                }
+            };
+
+            if let Some(token_index) = nearest_token {
+                if let Some(rc) = body.tokenizer.token_index_to_row_col(token_index) {
                     if let ScriptSource::Mod(script_mod) = &body.source {
                         return Some(ScriptLoc {
                             file: script_mod.file.clone(),
                             line: rc.0 + script_mod.line as u32,
                             col: rc.1,
                         });
-                    } else {
-                        return Some(ScriptLoc {
-                            file: "generated".into(),
-                            line: rc.0,
-                            col: rc.1,
-                        });
-                    };
+                    }
+                    return Some(ScriptLoc {
+                        file: "generated".into(),
+                        line: rc.0,
+                        col: rc.1,
+                    });
                 }
             }
         }
