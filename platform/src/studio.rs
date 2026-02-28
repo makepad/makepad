@@ -279,6 +279,8 @@ pub enum AppToStudio {
     SetClipboard(String),
     // the client is done drawing, and the texture is completely updated
     DrawCompleteAndFlip(PresentableDraw),
+    /// Application-defined response to a `StudioToApp::Custom` event.
+    Custom(String),
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson, Debug, Clone)]
@@ -351,6 +353,8 @@ pub enum StudioToApp {
     TextCopy,
     TextCut,
     Scroll(RemoteScroll),
+    /// Application-defined event. Delivered to the app as `Event::Custom`.
+    Custom(String),
     #[default]
     None,
     Kill,

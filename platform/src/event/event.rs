@@ -199,6 +199,10 @@ pub enum Event {
     Drop(DropEvent),
     DragEnd,
 
+    /// Application-defined event sent via the studio/debug control protocol.
+    /// Respond with `Cx::send_studio_message(AppToStudio::Custom(..))`.
+    Custom(String),
+
     Actions(ActionsBuf),
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
@@ -385,6 +389,7 @@ impl Event {
             Self::ToWasmMsg(_) => 55,
 
             Self::XrLocal(_) => 57,
+            Self::Custom(_) => 60,
         }
     }
 
