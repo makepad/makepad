@@ -297,6 +297,17 @@ extern "C" {
     pub static kCVPixelBufferWidthKey: CFStringRef;
     pub static kCVPixelBufferHeightKey: CFStringRef;
     pub static kCVPixelBufferPixelFormatTypeKey: CFStringRef;
+    pub static kCVPixelBufferIOSurfacePropertiesKey: CFStringRef;
+    pub static kCVPixelBufferOpenGLESCompatibilityKey: CFStringRef;
+    pub static kCVPixelBufferMetalCompatibilityKey: CFStringRef;
+    pub fn CVPixelBufferCreate(
+        allocator: *const c_void,
+        width: usize,
+        height: usize,
+        pixelFormatType: u32,
+        pixelBufferAttributes: *const c_void,
+        pixelBufferOut: *mut CVPixelBufferRef,
+    ) -> CVReturn;
     pub fn CVPixelBufferLockBaseAddress(
         pixelBuffer: CVPixelBufferRef,
         lockFlags: CVPixelBufferLockFlags,

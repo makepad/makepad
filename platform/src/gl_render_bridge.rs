@@ -319,20 +319,49 @@ impl Cx {
 
     /// Create a texture renderable via GL (EAGL) and displayable by makepad (Metal).
     /// Returns (Texture handle, GL texture ID for rendering into).
+    ///
+    /// Uses CVPixelBuffer as the shared backing: CoreVideo creates an
+    /// IOSurface-backed pixel buffer internally and hands out both a GLES
+    /// texture (via CVOpenGLESTextureCache) and a Metal texture (via
+    /// CVMetalTextureCache).  This is the standard iOS zero-copy path and
+    /// avoids the -6683 error that occurs when wrapping a manually-created
+    /// IOSurface in a CVPixelBuffer after the fact.
     pub fn create_gl_render_bridge_texture(
         &mut self,
         bridge: &GlRenderBridge,
         width: usize,
         height: usize,
     ) -> (Texture, u32) {
+        use crate::texture::TextureFormat;
+        use crate::shared_framebuf::PresentableImageId;
+
         bridge.inner.make_current();
-        let (texture, iosurface_ref, _iosurface_id) =
-            self.create_iosurface_render_texture(width, height);
-        let gl_texture_id = bridge.inner.bind_iosurface_to_gl_texture(
-            iosurface_ref,
-            width,
-            height,
+
+        let metal_device = crate::os::apple::ios::ios_app::with_ios_app(|app| app.metal_device());
+
+        let (gl_texture_id, metal_texture) =
+            bridge.inner.create_shared_texture(metal_device, width, height);
+
+        // Create a Makepad Texture with SharedBGRAu8 format and inject the
+        // Metal texture obtained from CVMetalTextureCache.
+        let texture = Texture::new_with_format(
+            self,
+            TextureFormat::SharedBGRAu8 {
+                width,
+                height,
+                id: PresentableImageId::alloc(),
+                initial: true,
+            },
         );
+        let cxtexture = &mut self.textures[texture.texture_id()];
+        // Force alloc so the texture is considered initialized.
+        cxtexture.alloc_shared();
+        cxtexture.os.texture = Some(
+            crate::os::apple::apple_sys::RcObjcId::from_owned(
+                std::ptr::NonNull::new(metal_texture).expect("Metal texture is null"),
+            ),
+        );
+
         (texture, gl_texture_id)
     }
 
