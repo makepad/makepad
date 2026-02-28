@@ -85,6 +85,17 @@ pub trait WidgetNode: ScriptApply {
     fn selection_get_full_text(&self) -> String {
         String::new()
     }
+    
+    fn script_call_live(
+        &mut self,
+        _vm: &mut ScriptVm,
+        _method: LiveId,
+        _args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        ScriptAsyncResult::MethodNotFound
+    }
+    
+    fn script_result_live(&mut self, _vm: &mut ScriptVm, _id: ScriptAsyncId, _result: ScriptValue) {}
 }
 
 pub trait Widget: WidgetNode {
