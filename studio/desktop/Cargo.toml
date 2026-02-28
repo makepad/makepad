@@ -1,5 +1,5 @@
 [package]
-name = "makepad-studio-desktop"
+name = "makepad"
 version = "0.1.0"
 edition = "2021"
 description = "Studio2 desktop frontend"
