@@ -108,6 +108,15 @@ impl Fonts {
         self.layouter.is_font_family_known(id)
     }
 
+    pub fn is_font_family_complete(&self, id: FontFamilyId) -> bool {
+        self.layouter
+            .loader
+            .font_family_definitions
+            .get(&id)
+            .map(|def| def.font_ids.len() == def.expected_member_count)
+            .unwrap_or(false)
+    }
+
     pub fn is_font_known(&self, id: FontId) -> bool {
         self.layouter.is_font_known(id)
     }

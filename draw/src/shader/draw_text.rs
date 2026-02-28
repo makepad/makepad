@@ -540,9 +540,7 @@ impl DrawText {
         align: Align,
         text: &str,
     ) -> Rc<LaidoutText> {
-        cx.load_all_script_resources();
         self.text_style.font_family.ensure_fonts_loaded(cx);
-        CxDraw::lazy_construct_fonts(cx);
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 
@@ -851,15 +849,37 @@ impl FontFamily {
 
         fonts.set_font_family_definition(
             self.to_font_family_id(),
-            FontFamilyDefinition { font_ids },
+            FontFamilyDefinition {
+                font_ids,
+                expected_member_count: self.members.len(),
+            },
         );
     }
 
     fn ensure_fonts_loaded(&self, cx: &mut Cx) {
         CxDraw::lazy_construct_fonts(cx);
+
+        let family_id = self.to_font_family_id();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        let mut fonts = fonts.borrow_mut();
-        self.update_font_definitions(cx, &mut fonts);
+
+        {
+            let fonts_ref = fonts.borrow();
+            if fonts_ref.is_font_family_complete(family_id) {
+                return;
+            }
+        }
+
+        // Slow path: attempt to progress pending resource loads, then re-check.
+        cx.load_all_script_resources();
+        {
+            let fonts_ref = fonts.borrow();
+            if fonts_ref.is_font_family_complete(family_id) {
+                return;
+            }
+        }
+
+        let mut fonts_ref = fonts.borrow_mut();
+        self.update_font_definitions(cx, &mut fonts_ref);
     }
 }
 
@@ -902,12 +922,10 @@ impl ScriptHook for FontFamily {
             }
         }
 
-        let cx = vm.host.cx_mut();
-        cx.load_all_script_resources();
-        CxDraw::lazy_construct_fonts(cx);
-        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        let mut fonts = fonts.borrow_mut();
-        self.update_font_definitions(cx, &mut fonts);
+        // Don't eagerly register fonts here. Font registration is deferred
+        // to ensure_fonts_loaded() which is called at draw time.
+        // This avoids redundant work when the same FontFamily is applied
+        // to hundreds of widgets.
 
         true
     }
