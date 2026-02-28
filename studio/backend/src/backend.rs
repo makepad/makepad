@@ -98,16 +98,13 @@ impl StudioBackend {
         let mut gateway = None;
         let mut studio_addr = None;
         if config.enable_in_process_gateway {
-            for candidate in in_process_gateway_candidates(config.listen_address) {
-                match start_http_gateway(candidate, config.post_max_size, event_tx.clone()) {
-                    Ok(handle) => {
-                        studio_addr = Some(studio_addr_for_child(handle.listen_address));
-                        gateway = Some(handle);
-                        break;
-                    }
-                    Err(_) => {}
-                }
-            }
+            let handle = start_http_gateway_with_fallback(
+                config.listen_address,
+                config.post_max_size,
+                &event_tx,
+            )?;
+            studio_addr = Some(studio_addr_for_child(handle.listen_address));
+            gateway = Some(handle);
         }
 
         let mut core = StudioCore::new(event_rx, event_tx.clone(), vfs, studio_addr);
@@ -159,24 +156,25 @@ impl StudioBackend {
                 .map_err(|e| format!("mount {} failed: {}", mount.name, e))?;
         }
 
+        let gateway = start_http_gateway_with_fallback(
+            config.listen_address,
+            config.post_max_size,
+            &event_tx,
+        )?;
+        let listen_address = gateway.listen_address;
+
         let mut core = StudioCore::new(
             event_rx,
             event_tx.clone(),
             vfs,
-            Some(studio_addr_for_child(config.listen_address)),
+            Some(studio_addr_for_child(listen_address)),
         );
         let core_thread = std::thread::spawn(move || {
             core.run();
         });
 
-        let gateway = start_http_gateway(
-            config.listen_address,
-            config.post_max_size,
-            event_tx.clone(),
-        )?;
-
         Ok(BackendHandle {
-            listen_address: config.listen_address,
+            listen_address,
             event_tx,
             _gateway: gateway,
             _core_thread: core_thread,
@@ -184,12 +182,32 @@ impl StudioBackend {
     }
 }
 
-fn in_process_gateway_candidates(base: SocketAddr) -> Vec<SocketAddr> {
-    let mut out = vec![base];
-    if base.port() == 8001 {
-        out.push(SocketAddr::new(base.ip(), 8002));
+fn start_http_gateway_with_fallback(
+    base: SocketAddr,
+    post_max_size: u64,
+    event_tx: &Sender<StudioEvent>,
+) -> Result<GatewayHandle, String> {
+    let mut last_err: Option<String> = None;
+    for candidate in gateway_bind_candidates(base) {
+        match start_http_gateway(candidate, post_max_size, event_tx.clone()) {
+            Ok(handle) => return Ok(handle),
+            Err(err) => last_err = Some(err),
+        }
     }
-    out
+
+    Err(last_err.unwrap_or_else(|| {
+        format!(
+            "failed to bind http server at {} and all higher ports up to {}:{}",
+            base,
+            base.ip(),
+            u16::MAX
+        )
+    }))
+}
+
+fn gateway_bind_candidates(base: SocketAddr) -> impl Iterator<Item = SocketAddr> {
+    let ip = base.ip();
+    (base.port()..=u16::MAX).map(move |port| SocketAddr::new(ip, port))
 }
 
 fn studio_addr_for_child(listen_address: SocketAddr) -> String {
