@@ -6,6 +6,7 @@ pub mod process_manager;
 pub mod protocol;
 pub mod terminal_manager;
 pub mod virtual_fs;
+mod worker_pool;
 
 pub use backend::{BackendConfig, BackendHandle, MountConfig, StudioBackend, StudioConnection};
 pub use dispatch::{StudioCore, StudioEvent};

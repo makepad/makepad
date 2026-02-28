@@ -1,4 +1,5 @@
 pub mod app;
+pub mod app_data;
 pub mod app_ui;
 pub mod desktop_code_editor;
 pub mod desktop_file_tree;

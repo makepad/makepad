@@ -3,9 +3,10 @@ use crate::gateway::{start_http_gateway, GatewayHandle};
 use crate::protocol::{ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope};
 use crate::virtual_fs::VirtualFs;
 use makepad_micro_serde::{DeBin, SerBin};
+use makepad_network::ToUIReceiver;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -45,7 +46,7 @@ pub struct StudioConnection {
     client_id: ClientId,
     web_socket_id: u64,
     event_tx: Sender<StudioEvent>,
-    recv_raw: Receiver<Vec<u8>>,
+    recv_raw: ToUIReceiver<Vec<u8>>,
     next_counter: u64,
     _gateway: Option<GatewayHandle>,
     _core_thread: JoinHandle<()>,
@@ -77,7 +78,7 @@ impl StudioConnection {
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Option<StudioToUI> {
-        let data = self.recv_raw.recv_timeout(timeout).ok()?;
+        let data = self.recv_raw.receiver.recv_timeout(timeout).ok()?;
         StudioToUI::deserialize_bin(&data).ok()
     }
 }
@@ -115,15 +116,16 @@ impl StudioBackend {
         });
 
         let web_socket_id = 1u64;
-        let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>();
+        let raw_rx = ToUIReceiver::<Vec<u8>>::default();
         event_tx
             .send(StudioEvent::UiConnected {
                 web_socket_id,
-                sender: raw_tx,
+                sender: raw_rx.sender(),
             })
             .map_err(|err| format!("failed to connect in-process ui client: {}", err))?;
 
         let hello = raw_rx
+            .receiver
             .recv_timeout(Duration::from_secs(2))
             .map_err(|err| format!("backend did not send hello: {}", err))?;
         let hello = StudioToUI::deserialize_bin(&hello).map_err(|err| err.msg)?;

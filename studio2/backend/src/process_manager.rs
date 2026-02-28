@@ -40,17 +40,24 @@ impl ProcessManager {
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
-        command.env("RUST_BACKTRACE", "1");
-        command.env("MAKEPAD", "lines");
-        if let Some(studio_addr) = studio_addr.as_deref() {
-            if !studio_addr.trim().is_empty() {
-                command.env("STUDIO", studio_addr.trim());
-                command.env("STUDIO_BUILD_ID", build_id.0.to_string());
+        let mut child_env = env;
+        child_env.insert("RUST_BACKTRACE".to_string(), "1".to_string());
+        child_env.insert("MAKEPAD".to_string(), "lines".to_string());
+
+        if let Some(studio_addr) = studio_addr.as_deref().map(str::trim) {
+            if !studio_addr.is_empty() {
+                // Force studio routing for stdin-loop apps, regardless of user env overrides.
+                child_env.insert("STUDIO".to_string(), studio_addr.to_string());
+                child_env.insert("STUDIO_BUILD_ID".to_string(), build_id.0.to_string());
             }
+        } else if child_env
+            .get("STUDIO")
+            .is_some_and(|studio| !studio.trim().is_empty())
+        {
+            // If caller supplied STUDIO manually, still provide the build-id path segment.
+            child_env.insert("STUDIO_BUILD_ID".to_string(), build_id.0.to_string());
         }
-        for (key, value) in env {
-            command.env(key, value);
-        }
+        command.envs(child_env.iter());
 
         let mut child = command.spawn().map_err(|err| {
             format!(

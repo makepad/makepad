@@ -1,5 +1,6 @@
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
+use makepad_studio_protocol::PresentableDraw;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerBin, DeBin, SerJson, DeJson)]
@@ -306,7 +307,7 @@ pub enum StudioToUI {
     RunViewDrawComplete {
         build_id: QueryId,
         window_id: usize,
-        presented_image_id: u32,
+        presentable_draw: PresentableDraw,
     },
     RunViewCursor {
         build_id: QueryId,
@@ -612,95 +613,6 @@ pub struct TerminalCellUpdate {
     pub y: u16,
     pub ch: u32,
 }
-
-#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum StudioToAppMsg {
-    ScreenshotRequest {
-        request_id: u64,
-        kind_id: u32,
-    },
-    WidgetTreeDumpRequest {
-        request_id: u64,
-    },
-    WidgetQueryRequest {
-        request_id: u64,
-        query: String,
-    },
-    Click {
-        x: i64,
-        y: i64,
-        button: u32,
-    },
-    TypeText {
-        text: String,
-        replace_last: bool,
-        was_paste: bool,
-    },
-    Return,
-    RunViewInput {
-        window_id: usize,
-        msg_bin: Vec<u8>,
-    },
-    RunViewResize {
-        window_id: usize,
-        width: f64,
-        height: f64,
-        dpi: f64,
-    },
-    KeepAlive,
-    Kill,
-}
-
-#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub struct StudioToAppVec(pub Vec<StudioToAppMsg>);
-
-#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum AppToStudioMsg {
-    Log {
-        level: LogLevel,
-        message: String,
-        file_name: Option<String>,
-        line: Option<usize>,
-        column: Option<usize>,
-    },
-    EventSample(EventSample),
-    GPUSample(GPUSample),
-    GCSample(GCSample),
-    Screenshot {
-        request_id: u64,
-        kind_id: u32,
-        png: Vec<u8>,
-        width: u32,
-        height: u32,
-    },
-    WidgetTreeDump {
-        request_id: u64,
-        dump: String,
-    },
-    WidgetQuery {
-        request_id: u64,
-        query: String,
-        rects: Vec<String>,
-    },
-    RunViewFrame {
-        window_id: usize,
-        frame_id: u64,
-        width: u32,
-        height: u32,
-        codec: FrameCodec,
-        data: Vec<u8>,
-    },
-    RunViewDrawComplete {
-        window_id: usize,
-        presented_image_id: u32,
-    },
-    RunViewCursor {
-        cursor: String,
-    },
-}
-
-#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub struct AppToStudioVec(pub Vec<AppToStudioMsg>);
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub struct FileDelta {

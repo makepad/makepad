@@ -1,5 +1,5 @@
 use crate::{
-    app::AppData,
+    app_data::AppData,
     makepad_code_editor::CodeEditor,
     makepad_widgets::*,
 };

@@ -1,7 +1,7 @@
 use crate::makepad_widgets::text::geom::Point;
 use crate::makepad_widgets::text::rasterizer::RasterizedGlyph;
-use crate::{app::AppData, makepad_widgets::*};
-use makepad_terminal_core::{Color, CursorShape, StyleFlags, TermKeyCode, Terminal};
+use crate::{app_data::AppData, makepad_widgets::*};
+use makepad_terminal_core::{Color, StyleFlags, TermKeyCode, Terminal};
 use std::collections::HashMap;
 
 script_mod! {
@@ -66,6 +66,10 @@ script_mod! {
         faint_factor: 0.75
         selection_color_focus: theme.color_outset_active
         selection_color_unfocus: theme.color_outset_active * 0.65
+        scroll_bars: mod.widgets.ScrollBars {
+            show_scroll_x: false
+            show_scroll_y: true
+        }
         draw_bg +: {
             color: uniform(#x1d1f21)
             pixel: fn() {
@@ -146,6 +150,8 @@ pub struct DesktopTerminalView {
     source: ScriptObjectRef,
     #[walk]
     walk: Walk,
+    #[live]
+    scroll_bars: ScrollBars,
     #[layout]
     layout: Layout,
     #[redraw]
@@ -188,7 +194,11 @@ pub struct DesktopTerminalView {
     #[rust]
     viewport_rect: Rect,
     #[rust]
+    unscrolled_rect: Rect,
+    #[rust]
     last_size: (usize, usize),
+    #[rust]
+    last_reported_size: (usize, usize),
     #[rust]
     current_path: Option<String>,
     #[rust]
@@ -212,11 +222,17 @@ pub struct DesktopTerminalView {
     #[rust]
     cursor_blink_on: bool,
     #[rust]
+    follow_output: bool,
+    #[rust]
     selection_anchor: Option<(usize, usize)>,
     #[rust]
     selection_cursor: Option<(usize, usize)>,
     #[rust]
     selecting: bool,
+    #[rust]
+    select_scroll_next_frame: NextFrame,
+    #[rust]
+    last_finger_abs: Option<Vec2d>,
 }
 
 impl ScriptHook for DesktopTerminalView {
@@ -230,7 +246,7 @@ impl ScriptHook for DesktopTerminalView {
 impl DesktopTerminalView {
     fn terminal_path_for_widget(cx: &Cx, data: &AppData, widget_uid: WidgetUid) -> Option<String> {
         let mount = data.active_mount.as_ref()?;
-        let tabs = data.mount_terminal_tab_to_path.get(mount)?;
+        let tabs = &data.mounts.get(mount)?.terminal_tab_to_path;
         let path = cx.widget_tree().path_to(widget_uid);
         for node in path.iter().rev() {
             if let Some(terminal_path) = tabs.get(node) {
@@ -252,10 +268,13 @@ impl DesktopTerminalView {
         self.terminal = Some(Terminal::new(cols.max(1), rows.max(1)));
         self.current_path = Some(path.to_string());
         self.consumed_stream_len = 0;
+        self.last_reported_size = (0, 0);
         self.cursor_blink_on = true;
+        self.follow_output = true;
         self.selection_anchor = None;
         self.selection_cursor = None;
         self.selecting = false;
+        self.last_finger_abs = None;
     }
 
     fn fallback_cell_metrics(&self) -> (f64, f64) {
@@ -317,6 +336,48 @@ impl DesktopTerminalView {
         )
     }
 
+    fn max_scroll_rows(screen: &makepad_terminal_core::Screen) -> usize {
+        screen.total_rows().saturating_sub(screen.rows())
+    }
+
+    fn current_scroll_pixels(&self) -> f64 {
+        self.scroll_bars.get_scroll_pos().y.max(0.0)
+    }
+
+    fn max_scroll_pixels(&self) -> f64 {
+        (self.content_height() - self.viewport_rect.size.y).max(0.0)
+    }
+
+    fn current_scroll_rows(&self) -> usize {
+        let (_, cell_height) = self.cell_metrics();
+        (self.current_scroll_pixels() / cell_height).floor() as usize
+    }
+
+    fn is_scrolled_to_bottom(&self) -> bool {
+        self.current_scroll_pixels() >= self.max_scroll_pixels() - 1.0
+    }
+
+    fn clamp_scroll_position(&mut self, cx: &mut Cx) {
+        let y = self.current_scroll_pixels().min(self.max_scroll_pixels());
+        let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, y));
+    }
+
+    fn stick_to_bottom(&mut self, cx: &mut Cx) {
+        let y = self.max_scroll_pixels();
+        let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, y));
+        self.follow_output = true;
+    }
+
+    fn content_height(&self) -> f64 {
+        let Some(terminal) = &self.terminal else {
+            return self.viewport_rect.size.y.max(1.0);
+        };
+        let (_, cell_height) = self.cell_metrics();
+        let total_rows = terminal.screen().total_rows();
+        let content_rows_h = total_rows as f64 * cell_height;
+        (content_rows_h + self.pad_y * 2.0).max(self.viewport_rect.size.y)
+    }
+
     fn invalidate_glyph_cache_if_needed(&mut self, cx: &Cx2d) {
         let font_size = self.draw_text.text_style.font_size;
         let font_scale = self.draw_text.font_scale;
@@ -364,24 +425,60 @@ impl DesktopTerminalView {
             self.reset_terminal_for_path(path);
         }
 
-        let chunk = &stream[self.consumed_stream_len..];
+        let chunk_start = self.consumed_stream_len;
+        let chunk_end = stream.len();
+        let chunk = &stream[chunk_start..chunk_end];
         if chunk.is_empty() {
             return;
         }
+        let was_at_bottom = self.follow_output || self.is_scrolled_to_bottom();
+        let history_len = data.terminal_history_len_by_path.get(path).copied().unwrap_or(0);
         if let Some(terminal) = &mut self.terminal {
-            terminal.process_bytes(chunk);
-            let outbound = terminal.take_outbound();
-            if !outbound.is_empty() {
-                cx.widget_action(
-                    self.widget_uid(),
-                    DesktopTerminalViewAction::Input {
-                        path: path.to_string(),
-                        data: outbound,
-                    },
-                );
+            if chunk_start < history_len {
+                let history_end = history_len.min(chunk_end);
+                let history_chunk = &stream[chunk_start..history_end];
+                if !history_chunk.is_empty() {
+                    terminal.process_bytes(history_chunk);
+                    // Do not feed generated query replies back to the live PTY
+                    // while replaying persisted history bytes.
+                    let _ = terminal.take_outbound();
+                }
+                if history_end < chunk_end {
+                    let live_chunk = &stream[history_end..chunk_end];
+                    if !live_chunk.is_empty() {
+                        terminal.process_bytes(live_chunk);
+                        let outbound = terminal.take_outbound();
+                        if !outbound.is_empty() {
+                            cx.widget_action(
+                                self.widget_uid(),
+                                DesktopTerminalViewAction::Input {
+                                    path: path.to_string(),
+                                    data: outbound,
+                                },
+                            );
+                        }
+                    }
+                }
+            } else {
+                terminal.process_bytes(chunk);
+                let outbound = terminal.take_outbound();
+                if !outbound.is_empty() {
+                    cx.widget_action(
+                        self.widget_uid(),
+                        DesktopTerminalViewAction::Input {
+                            path: path.to_string(),
+                            data: outbound,
+                        },
+                    );
+                }
             }
         }
-        self.consumed_stream_len = stream.len();
+        self.consumed_stream_len = chunk_end;
+        if was_at_bottom {
+            self.stick_to_bottom(cx);
+        } else {
+            self.clamp_scroll_position(cx);
+        }
     }
 
     fn update_terminal_size(&mut self, cx: &mut Cx, path: Option<&str>) {
@@ -393,54 +490,75 @@ impl DesktopTerminalView {
         let rows = ((rect.size.y - self.pad_y * 2.0) / cell_height)
             .floor()
             .max(1.0) as usize;
-        if (cols, rows) == self.last_size {
-            return;
-        }
-        self.last_size = (cols, rows);
-        if let Some(terminal) = &mut self.terminal {
-            terminal.resize(cols.max(1), rows.max(1));
+        let size = (cols, rows);
+        if size != self.last_size {
+            self.last_size = size;
+            if let Some(terminal) = &mut self.terminal {
+                terminal.resize(cols.max(1), rows.max(1));
+            }
         }
         if let Some(path) = path {
-            cx.widget_action(
-                self.widget_uid(),
-                DesktopTerminalViewAction::Resize {
-                    path: path.to_string(),
-                    cols: cols as u16,
-                    rows: rows as u16,
-                },
-            );
+            if size != self.last_reported_size {
+                self.last_reported_size = size;
+                cx.widget_action(
+                    self.widget_uid(),
+                    DesktopTerminalViewAction::Resize {
+                        path: path.to_string(),
+                        cols: cols as u16,
+                        rows: rows as u16,
+                    },
+                );
+            }
         }
     }
 
     fn draw_terminal(&mut self, cx: &mut Cx2d) {
-        let Some(terminal) = self.terminal.as_ref() else {
-            return;
+        let (
+            cols,
+            total_rows,
+            max_scroll_rows,
+            scrollback_len,
+            cursor_visible,
+            cursor,
+            palette,
+            default_fg,
+            default_bg,
+        ) = {
+            let Some(terminal) = self.terminal.as_ref() else {
+                return;
+            };
+            let screen = terminal.screen();
+            (
+                screen.cols(),
+                screen.total_rows(),
+                Self::max_scroll_rows(screen),
+                screen.scrollback_len(),
+                terminal.modes.cursor_visible,
+                terminal.cursor().clone(),
+                terminal.palette.colors,
+                terminal.default_fg,
+                terminal.default_bg,
+            )
         };
-        let cols = terminal.screen().cols();
         if cols == 0 {
             return;
         }
 
         let (cell_width, cell_height) = self.cell_metrics();
-        let rows_visible = ((self.viewport_rect.size.y - self.pad_y * 2.0) / cell_height)
-            .floor()
-            .max(1.0) as usize;
-        let total_rows = terminal.screen().total_rows();
-        let top_row = total_rows.saturating_sub(rows_visible);
+        let scroll_y = self.current_scroll_pixels();
+        let top_row = self.current_scroll_rows().min(max_scroll_rows);
+        let viewport_rows = (self.viewport_rect.size.y / cell_height).ceil().max(0.0) as usize;
+        let draw_end_row_exclusive = top_row
+            .saturating_add(viewport_rows)
+            .saturating_add(1)
+            .min(total_rows);
 
         let origin_x = self.viewport_rect.pos.x + self.pad_x;
         let origin_y = self.viewport_rect.pos.y + self.pad_y;
 
-        let palette = terminal.palette.colors;
-        let default_fg = terminal.default_fg;
-        let default_bg = terminal.default_bg;
-        let cursor_visible = terminal.modes.cursor_visible;
-        let cursor = terminal.cursor().clone();
-        let scrollback_len = terminal.screen().scrollback_len();
         let blank_cell = makepad_terminal_core::Cell::default();
-        let has_focus = cx.has_key_focus(self.area);
+        let has_focus = cx.has_key_focus(self.scroll_bars.area());
 
-        let _ = terminal;
         self.draw_cell_bg.new_draw_call(cx);
         self.draw_cursor.new_draw_call(cx);
         self.draw_text.new_draw_call(cx);
@@ -448,13 +566,14 @@ impl DesktopTerminalView {
         self.draw_text.begin_many_instances(cx);
         self.invalidate_glyph_cache_if_needed(cx);
 
-        for virtual_row in top_row..total_rows {
-            let row_cells = self.terminal.as_ref().and_then(|t| {
-                t.screen()
+        for virtual_row in top_row..draw_end_row_exclusive {
+            let row_cells = self.terminal.as_ref().and_then(|terminal| {
+                terminal
+                    .screen()
                     .row_slice_virtual(virtual_row)
                     .map(|row| row.to_vec())
             });
-            let y = origin_y + (virtual_row - top_row) as f64 * cell_height;
+            let y = origin_y + virtual_row as f64 * cell_height;
             for col in 0..cols {
                 let cell = row_cells
                     .as_ref()
@@ -561,25 +680,17 @@ impl DesktopTerminalView {
 
         if cursor_visible {
             let cursor_virtual_y = scrollback_len + cursor.y;
-            if cursor_virtual_y >= top_row {
-                let cursor_screen_row = cursor_virtual_y - top_row;
+            let cursor_content_y = cursor_virtual_y as f64 * cell_height;
+            if !(cursor_content_y + cell_height < scroll_y
+                || cursor_content_y > scroll_y + self.viewport_rect.size.y)
+            {
                 let cx_x = origin_x + cursor.x as f64 * cell_width;
-                let cx_y = origin_y + cursor_screen_row as f64 * cell_height + self.cursor_y_offset;
+                let cx_y = origin_y + cursor_content_y + self.cursor_y_offset;
                 self.draw_cursor.focus = if has_focus { 1.0 } else { 0.0 };
                 let cursor_rect = if has_focus {
-                    match cursor.shape {
-                        CursorShape::Block => Rect {
-                            pos: dvec2(cx_x, cx_y),
-                            size: dvec2(cell_width, cell_height),
-                        },
-                        CursorShape::Bar => Rect {
-                            pos: dvec2(cx_x, cx_y),
-                            size: dvec2(2.0, cell_height),
-                        },
-                        CursorShape::Underline => Rect {
-                            pos: dvec2(cx_x, cx_y + cell_height - 2.0),
-                            size: dvec2(cell_width, 2.0),
-                        },
+                    Rect {
+                        pos: dvec2(cx_x, cx_y),
+                        size: dvec2(2.0, cell_height),
                     }
                 } else {
                     Rect {
@@ -765,16 +876,6 @@ impl DesktopTerminalView {
         )
     }
 
-    fn visible_rows_and_top_row(&self) -> Option<(usize, usize)> {
-        let terminal = self.terminal.as_ref()?;
-        let (_, cell_height) = self.cell_metrics();
-        let rows_visible = ((self.viewport_rect.size.y - self.pad_y * 2.0) / cell_height)
-            .floor()
-            .max(1.0) as usize;
-        let top_row = terminal.screen().total_rows().saturating_sub(rows_visible);
-        Some((rows_visible, top_row))
-    }
-
     fn pick(&self, abs: Vec2d) -> (usize, usize) {
         let Some(terminal) = self.terminal.as_ref() else {
             return (0, 0);
@@ -782,20 +883,59 @@ impl DesktopTerminalView {
         let cols = terminal.screen().cols().max(1);
         let total_rows = terminal.screen().total_rows().max(1);
         let (cell_width, cell_height) = self.cell_metrics();
-        let origin_x = self.viewport_rect.pos.x + self.pad_x;
-        let origin_y = self.viewport_rect.pos.y + self.pad_y;
-        let (_, top_row) = self.visible_rows_and_top_row().unwrap_or((1, 0));
+        let local_x = abs.x - self.unscrolled_rect.pos.x - self.pad_x;
+        let local_y =
+            abs.y - self.unscrolled_rect.pos.y - self.pad_y + self.current_scroll_pixels();
 
-        let col = ((abs.x - origin_x) / cell_width).floor().max(0.0) as usize;
-        let row = ((abs.y - origin_y) / cell_height).floor().max(0.0) as usize;
+        let col = (local_x / cell_width).floor().max(0.0) as usize;
+        let row = (local_y / cell_height).floor().max(0.0) as usize;
         let col = col.min(cols.saturating_sub(1));
-        let row = (top_row + row).min(total_rows.saturating_sub(1));
+        let row = row.min(total_rows.saturating_sub(1));
         (row, col)
     }
 
-    fn normalized_selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
+    fn word_kind(ch: char) -> Option<bool> {
+        if ch == '\0' || ch.is_whitespace() {
+            None
+        } else {
+            Some(ch.is_alphanumeric() || ch == '_')
+        }
+    }
+
+    fn word_range_at(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        let terminal = self.terminal.as_ref()?;
+        let row_slice = terminal.screen().row_slice_virtual(row)?;
+        if row_slice.is_empty() {
+            return None;
+        }
+
+        let col = col.min(row_slice.len().saturating_sub(1));
+        let kind = Self::word_kind(row_slice[col].codepoint)?;
+
+        let mut start = col;
+        while start > 0 {
+            if Self::word_kind(row_slice[start - 1].codepoint) != Some(kind) {
+                break;
+            }
+            start -= 1;
+        }
+
+        let mut end = col + 1;
+        while end < row_slice.len() {
+            if Self::word_kind(row_slice[end].codepoint) != Some(kind) {
+                break;
+            }
+            end += 1;
+        }
+        Some((start, end))
+    }
+
+    fn selection_ordered(&self) -> Option<((usize, usize), (usize, usize))> {
         let anchor = self.selection_anchor?;
         let cursor = self.selection_cursor?;
+        if anchor == cursor {
+            return None;
+        }
         if anchor <= cursor {
             Some((anchor, cursor))
         } else {
@@ -804,7 +944,7 @@ impl DesktopTerminalView {
     }
 
     fn is_cell_selected(&self, row: usize, col: usize) -> bool {
-        let Some(((start_row, start_col), (end_row, end_col))) = self.normalized_selection_range()
+        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered()
         else {
             return false;
         };
@@ -812,13 +952,13 @@ impl DesktopTerminalView {
             return false;
         }
         if start_row == end_row {
-            return col >= start_col && col <= end_col;
+            return col >= start_col && col < end_col;
         }
         if row == start_row {
             return col >= start_col;
         }
         if row == end_row {
-            return col <= end_col;
+            return col < end_col;
         }
         true
     }
@@ -829,7 +969,7 @@ impl DesktopTerminalView {
         if cols == 0 {
             return None;
         }
-        let Some(((start_row, start_col), (end_row, end_col))) = self.normalized_selection_range()
+        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered()
         else {
             return None;
         };
@@ -844,15 +984,16 @@ impl DesktopTerminalView {
                 continue;
             }
             let from_col = if row == start_row { start_col } else { 0 };
-            let to_col = if row == end_row {
+            let to_col_exclusive = if row == end_row {
                 end_col
             } else {
-                cols.saturating_sub(1)
+                cols
             };
-            if from_col > to_col {
+            if from_col >= to_col_exclusive {
                 continue;
             }
-            for col in from_col..=to_col.min(row_cells.len().saturating_sub(1)) {
+            let to_col_exclusive = to_col_exclusive.min(row_cells.len());
+            for col in from_col..to_col_exclusive {
                 let ch = row_cells[col].codepoint;
                 if ch != '\0' {
                     out.push(ch);
@@ -870,7 +1011,7 @@ impl DesktopTerminalView {
     }
 
     fn handle_drop(&mut self, cx: &mut Cx, path: &str, event: &Event) -> bool {
-        match event.drag_hits(cx, self.area) {
+        match event.drag_hits(cx, self.scroll_bars.area()) {
             DragHit::Drag(drag) => {
                 if Self::dropped_text_payload(drag.items.as_ref()).is_none() {
                     return false;
@@ -895,8 +1036,9 @@ impl DesktopTerminalView {
 impl Widget for DesktopTerminalView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.ensure_terminal();
-        cx.begin_turtle(walk, self.layout);
+        self.scroll_bars.begin(cx, walk, self.layout);
         self.viewport_rect = cx.turtle().rect();
+        self.unscrolled_rect = cx.turtle().rect_unscrolled();
         self.refresh_cell_metrics(cx);
 
         let mut path_for_resize: Option<String> = None;
@@ -921,10 +1063,13 @@ impl Widget for DesktopTerminalView {
                 ],
             );
         }
-        self.draw_bg.draw_abs(cx, self.viewport_rect);
+        self.draw_bg.draw_abs(cx, self.unscrolled_rect);
         self.draw_terminal(cx);
 
-        cx.end_turtle_with_area(&mut self.area);
+        cx.turtle_mut()
+            .set_used(self.viewport_rect.size.x.max(1.0), self.content_height());
+        self.scroll_bars.end(cx);
+        self.area = self.scroll_bars.area();
         DrawStep::done()
     }
 
@@ -936,25 +1081,71 @@ impl Widget for DesktopTerminalView {
             }
         }
 
+        if self.scroll_bars.handle_event(cx, event, scope).len() > 0 {
+            self.follow_output = self.is_scrolled_to_bottom();
+            self.draw_bg.redraw(cx);
+        }
+
         let path = scope
             .data
             .get::<AppData>()
             .and_then(|data| Self::terminal_path_for_widget(cx, data, self.widget_uid()));
-        let Some(path) = path else {
-            return;
-        };
 
-        if self.handle_drop(cx, &path, event) {
-            return;
+        if let Some(path) = path.as_deref() {
+            if self.handle_drop(cx, path, event) {
+                return;
+            }
         }
 
-        match event.hits(cx, self.area) {
-            Hit::FingerDown(FingerDownEvent { abs, .. }) => {
-                cx.set_key_focus(self.area);
+        if self.selecting && self.select_scroll_next_frame.is_event(event).is_some() {
+            self.select_scroll_next_frame = cx.new_next_frame();
+            if let Some(abs) = self.last_finger_abs {
+                let vp_rect = self.scroll_bars.area().clipped_rect(cx);
+                let vp_top = vp_rect.pos.y;
+                let vp_bottom = vp_top + vp_rect.size.y;
+                let (_, cell_height) = self.cell_metrics();
+                let scroll_speed = cell_height * 2.0;
+                let edge_band = cell_height.max(4.0);
+                let top_trigger = vp_top + edge_band;
+                let bottom_trigger = vp_bottom - edge_band;
+
+                if abs.y <= top_trigger {
+                    let delta = (top_trigger - abs.y).max(cell_height * 0.25).min(scroll_speed);
+                    let new_y = (self.current_scroll_pixels() - delta).max(0.0);
+                    let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
+                } else if abs.y >= bottom_trigger {
+                    let delta = (abs.y - bottom_trigger).max(cell_height * 0.25).min(scroll_speed);
+                    let new_y = (self.current_scroll_pixels() + delta).min(self.max_scroll_pixels());
+                    let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
+                }
+
+                self.follow_output = self.is_scrolled_to_bottom();
+                self.selection_cursor = Some(self.pick(abs));
+                self.draw_bg.redraw(cx);
+            }
+        }
+
+        match event.hits(cx, self.scroll_bars.area()) {
+            Hit::FingerDown(FingerDownEvent { abs, tap_count, .. }) => {
+                cx.set_key_focus(self.scroll_bars.area());
                 let pos = self.pick(abs);
-                self.selection_anchor = Some(pos);
-                self.selection_cursor = Some(pos);
-                self.selecting = true;
+                if tap_count == 2 {
+                    if let Some((start_col, end_col)) = self.word_range_at(pos.0, pos.1) {
+                        self.selection_anchor = Some((pos.0, start_col));
+                        self.selection_cursor = Some((pos.0, end_col));
+                    } else {
+                        self.selection_anchor = Some(pos);
+                        self.selection_cursor = Some(pos);
+                    }
+                    self.selecting = false;
+                    self.last_finger_abs = None;
+                } else {
+                    self.selection_anchor = Some(pos);
+                    self.selection_cursor = Some(pos);
+                    self.selecting = true;
+                    self.last_finger_abs = Some(abs);
+                    self.select_scroll_next_frame = cx.new_next_frame();
+                }
                 self.cursor_blink_on = true;
                 self.draw_bg.redraw(cx);
             }
@@ -962,11 +1153,13 @@ impl Widget for DesktopTerminalView {
                 cx.set_cursor(MouseCursor::Text);
                 if self.selecting {
                     self.selection_cursor = Some(self.pick(abs));
+                    self.last_finger_abs = Some(abs);
                     self.draw_bg.redraw(cx);
                 }
             }
             Hit::FingerUp(_) => {
                 self.selecting = false;
+                self.last_finger_abs = None;
             }
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Text);
@@ -975,32 +1168,38 @@ impl Widget for DesktopTerminalView {
                 self.draw_bg.redraw(cx);
             }
             Hit::KeyDown(e) => {
+                let Some(path) = path.as_deref() else {
+                    return;
+                };
                 if Self::is_clipboard_paste_shortcut(e.key_code, &e.modifiers) {
                     return;
                 }
                 let sends_special_key = Self::is_special_pty_key(e.key_code);
                 let sends_ctrl_char = e.modifiers.control && e.key_code.to_char(false).is_some();
                 if sends_special_key {
-                    self.send_key_to_terminal(cx, &path, e.key_code, &e.modifiers);
+                    self.send_key_to_terminal(cx, path, e.key_code, &e.modifiers);
                     self.cursor_blink_on = true;
                     self.draw_bg.redraw(cx);
                 } else if sends_ctrl_char {
                     if let Some(ch) = e.key_code.to_char(false) {
-                        self.send_text_to_terminal(cx, &path, &ch.to_string(), &e.modifiers);
+                        self.send_text_to_terminal(cx, path, &ch.to_string(), &e.modifiers);
                         self.cursor_blink_on = true;
                         self.draw_bg.redraw(cx);
                     }
                 }
             }
             Hit::TextInput(e) => {
+                let Some(path) = path.as_deref() else {
+                    return;
+                };
                 let is_newline_text = matches!(e.input.as_str(), "\n" | "\r" | "\r\n");
                 if !e.was_paste && is_newline_text {
                     return;
                 }
                 if e.was_paste {
-                    self.emit_paste_text(cx, &path, &e.input);
+                    self.emit_paste_text(cx, path, &e.input);
                 } else {
-                    self.send_text_to_terminal(cx, &path, &e.input, &KeyModifiers::default());
+                    self.send_text_to_terminal(cx, path, &e.input, &KeyModifiers::default());
                 }
                 self.cursor_blink_on = true;
                 self.draw_bg.redraw(cx);
