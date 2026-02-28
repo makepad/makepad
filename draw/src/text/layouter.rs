@@ -29,7 +29,7 @@ const PTS_PER_INCH: f32 = 72.0;
 
 #[derive(Debug)]
 pub struct Layouter {
-    loader: Loader,
+    pub(crate) loader: Loader,
     cache_size: usize,
     cached_params: VecDeque<OwnedLayoutParams>,
     cached_results: HashMap<OwnedLayoutParams, Rc<LaidoutText>>,

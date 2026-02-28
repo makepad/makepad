@@ -81,7 +81,13 @@ impl<'a> CxDraw<'a> {
             return false;
         }
         let mut fonts = Fonts::new(cx, layouter::Settings::default());
-        fonts.define_font_family(0.into(), FontFamilyDefinition { font_ids: vec![] });
+        fonts.define_font_family(
+            0.into(),
+            FontFamilyDefinition {
+                font_ids: vec![],
+                expected_member_count: 0,
+            },
+        );
         cx.set_global(Rc::new(RefCell::new(fonts)));
         true
     }
