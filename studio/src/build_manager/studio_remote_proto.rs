@@ -436,6 +436,14 @@ impl BuildManager {
             }
             StudioToApp::None => "None".to_string(),
             StudioToApp::Kill => "Kill".to_string(),
+            StudioToApp::Custom(msg) => {
+                let mut text = msg.clone();
+                if text.len() > 48 {
+                    text.truncate(48);
+                    text.push_str("...");
+                }
+                format!("Custom {:?}", text)
+            }
         }
     }
 
