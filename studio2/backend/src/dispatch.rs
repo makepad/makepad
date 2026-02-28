@@ -8,22 +8,22 @@ use crate::protocol::{
     LogEntry, LogLevel, LogSource, QueryId, RunnableBuild, SaveResult, StudioToBuildBox,
     StudioToBuildBoxVec, StudioToUI, TerminalGrid, UIToStudio, UIToStudioEnvelope,
 };
-use makepad_live_id::LiveId;
-use makepad_network::ToUISender;
 use crate::terminal_manager::TerminalManager;
 use crate::virtual_fs::{protocol_search_results, VirtualFs};
 use crate::worker_pool::WorkerPool;
+use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
+use makepad_live_id::LiveId;
+use makepad_micro_serde::*;
+use makepad_network::ToUISender;
 use makepad_studio_protocol::{
-    AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent,
-    KeyModifiers, LogLevel as StudioProtocolLogLevel, MouseButton, RemoteKeyModifiers,
-    RemoteMouseDown, RemoteMouseUp, ScreenshotRequest, StudioToApp, StudioToAppVec, TextInputEvent,
+    AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent, KeyModifiers,
+    LogLevel as StudioProtocolLogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown,
+    RemoteMouseUp, ScreenshotRequest, StudioToApp, StudioToAppVec, TextInputEvent,
     WidgetTreeDumpRequest,
 };
-use makepad_micro_serde::*;
-use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -104,8 +104,18 @@ pub enum StudioEvent {
         live: bool,
         entries: Vec<(usize, LogEntry)>,
     },
+    WorkerLoadFileTreeDone {
+        web_socket_id: u64,
+        mount: String,
+        result: Result<crate::protocol::FileTreeData, String>,
+    },
+    WorkerFileTreeDeltaDone {
+        mount: String,
+        change: crate::protocol::FileTreeChange,
+    },
     MountFsChanged {
         mount: String,
+        path: PathBuf,
     },
     Shutdown,
 }
@@ -158,7 +168,8 @@ pub struct StudioCore {
     cancelled_queries: HashSet<QueryId>,
     worker_pool: WorkerPool,
     fs_watcher: Option<FileSystemWatcher>,
-    mount_last_fs_event: HashMap<String, Instant>,
+    fs_event_last_by_path: HashMap<String, Instant>,
+    mount_suppress_fs_until: HashMap<String, Instant>,
 }
 
 impl StudioCore {
@@ -193,7 +204,8 @@ impl StudioCore {
             cancelled_queries: HashSet::new(),
             worker_pool: WorkerPool::new(worker_count),
             fs_watcher: None,
-            mount_last_fs_event: HashMap::new(),
+            fs_event_last_by_path: HashMap::new(),
+            mount_suppress_fs_until: HashMap::new(),
         };
         this.reset_fs_watcher();
         this
@@ -299,7 +311,18 @@ impl StudioCore {
                 live,
                 entries,
             } => self.on_worker_query_logs_done(web_socket_id, query_id, query, live, entries),
-            StudioEvent::MountFsChanged { mount } => self.on_mount_fs_changed(mount),
+            StudioEvent::WorkerLoadFileTreeDone {
+                web_socket_id,
+                mount,
+                result,
+            } => self.on_worker_load_file_tree_done(web_socket_id, mount, result),
+            StudioEvent::WorkerFileTreeDeltaDone { mount, change } => {
+                self.broadcast_ui_message(StudioToUI::FileTreeDiff {
+                    mount,
+                    changes: vec![change],
+                });
+            }
+            StudioEvent::MountFsChanged { mount, path } => self.on_mount_fs_changed(mount, path),
             StudioEvent::Shutdown => return false,
         }
         true
@@ -378,13 +401,13 @@ impl StudioCore {
                 Ok(()) => {
                     self.reset_fs_watcher();
                     match self.vfs.load_file_tree(&name) {
-                    Ok(data) => self.send_ui_message(
-                        web_socket_id,
-                        StudioToUI::FileTree { mount: name, data },
-                        self.ui_format(web_socket_id),
-                    ),
-                    Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
-                }
+                        Ok(data) => self.send_ui_message(
+                            web_socket_id,
+                            StudioToUI::FileTree { mount: name, data },
+                            self.ui_format(web_socket_id),
+                        ),
+                        Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
+                    }
                 }
                 Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
             },
@@ -416,14 +439,21 @@ impl StudioCore {
                     self.ui_format(web_socket_id),
                 );
             }
-            UIToStudio::LoadFileTree { mount } => match self.vfs.load_file_tree(&mount) {
-                Ok(data) => self.send_ui_message(
-                    web_socket_id,
-                    StudioToUI::FileTree { mount, data },
-                    self.ui_format(web_socket_id),
-                ),
-                Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
-            },
+            UIToStudio::LoadFileTree { mount } => {
+                let mount_name = mount.clone();
+                let vfs = self.vfs.clone_for_search();
+                let event_tx = self.event_tx.clone();
+                self.worker_pool.execute(move || {
+                    let result = vfs
+                        .load_file_tree(&mount_name)
+                        .map_err(|err| err.to_string());
+                    let _ = event_tx.send(StudioEvent::WorkerLoadFileTreeDone {
+                        web_socket_id,
+                        mount: mount_name,
+                        result,
+                    });
+                });
+            }
             UIToStudio::OpenTextFile { path } => match self.vfs.open_text_file(&path) {
                 Ok(content) => self.send_ui_message(
                     web_socket_id,
@@ -449,16 +479,26 @@ impl StudioCore {
                     Ok(()) => SaveResult::Ok,
                     Err(err) => SaveResult::Err(err.into()),
                 };
+                let save_ok = matches!(result, SaveResult::Ok);
                 self.send_ui_message(
                     web_socket_id,
-                    StudioToUI::TextFileSaved { path, result },
+                    StudioToUI::TextFileSaved {
+                        path: path.clone(),
+                        result,
+                    },
                     self.ui_format(web_socket_id),
                 );
+                if save_ok {
+                    self.enqueue_file_tree_delta_for_virtual_path(&path);
+                }
             }
             UIToStudio::DeleteFile { path } => {
                 self.terminal_manager.close_terminal(&path);
+                let disk_path = self.vfs.resolve_path(&path).ok();
                 if let Err(err) = self.vfs.delete_path(&path) {
                     self.send_ui_error(web_socket_id, err.to_string());
+                } else if let Some(disk_path) = disk_path {
+                    self.enqueue_file_tree_delta_for_known_path(&path, disk_path);
                 }
             }
             UIToStudio::FindFiles {
@@ -727,10 +767,7 @@ impl StudioCore {
                 };
                 if let Err(err) = self.send_app_msgs(
                     build_id,
-                    vec![
-                        StudioToApp::KeyDown(key),
-                        StudioToApp::KeyUp(key),
-                    ],
+                    vec![StudioToApp::KeyDown(key), StudioToApp::KeyUp(key)],
                 ) {
                     self.send_ui_error(web_socket_id, err);
                 }
@@ -1019,7 +1056,8 @@ impl StudioCore {
 
     fn reset_fs_watcher(&mut self) {
         self.fs_watcher.take();
-        self.mount_last_fs_event.clear();
+        self.fs_event_last_by_path.clear();
+        self.mount_suppress_fs_until.clear();
 
         let roots: Vec<WatchRoot> = self
             .vfs
@@ -1036,7 +1074,10 @@ impl StudioCore {
 
         let event_tx = self.event_tx.clone();
         match FileSystemWatcher::start(roots, move |event| {
-            let _ = event_tx.send(StudioEvent::MountFsChanged { mount: event.mount });
+            let _ = event_tx.send(StudioEvent::MountFsChanged {
+                mount: event.mount,
+                path: event.path,
+            });
         }) {
             Ok(watcher) => {
                 self.fs_watcher = Some(watcher);
@@ -1047,18 +1088,97 @@ impl StudioCore {
         }
     }
 
-    fn on_mount_fs_changed(&mut self, mount: String) {
+    fn on_mount_fs_changed(&mut self, mount: String, path: PathBuf) {
         let now = Instant::now();
-        if let Some(last) = self.mount_last_fs_event.get(&mount) {
-            if now.saturating_duration_since(*last) < Duration::from_millis(120) {
+        if let Some(until) = self.mount_suppress_fs_until.get(&mount).copied() {
+            if now < until {
+                return;
+            }
+            self.mount_suppress_fs_until.remove(&mount);
+        }
+        let Some(virtual_path) = self.mount_path_to_virtual(&mount, &path) else {
+            return;
+        };
+        self.enqueue_file_tree_delta(&mount, &virtual_path, path, now);
+    }
+
+    fn mount_path_to_virtual(&self, mount: &str, path: &Path) -> Option<String> {
+        let mount_root = self.vfs.resolve_mount(mount).ok()?;
+        let path = path.strip_prefix(&mount_root).ok()?;
+        if path.as_os_str().is_empty() {
+            return Some(mount.to_string());
+        }
+        let path_string = path.to_string_lossy().replace('\\', "/");
+        if let Some(rest) = path_string.strip_prefix("branch/") {
+            if let Some((branch, tail)) = rest.split_once('/') {
+                let encoded = percent_encode_local(branch);
+                return Some(format!("{}/@{}/{}", mount, encoded, tail));
+            }
+            let encoded = percent_encode_local(rest);
+            return Some(format!("{}/@{}", mount, encoded));
+        }
+        Some(format!("{}/{}", mount, path_string))
+    }
+
+    fn enqueue_file_tree_delta_for_virtual_path(&mut self, virtual_path: &str) {
+        let Some((_mount, _)) = virtual_path.split_once('/') else {
+            return;
+        };
+        let disk_path = match self.vfs.resolve_path(virtual_path) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        self.enqueue_file_tree_delta_for_known_path(virtual_path, disk_path);
+    }
+
+    fn enqueue_file_tree_delta_for_known_path(&mut self, virtual_path: &str, disk_path: PathBuf) {
+        let Some((mount, _)) = virtual_path.split_once('/') else {
+            return;
+        };
+        self.enqueue_file_tree_delta(mount, virtual_path, disk_path, Instant::now());
+    }
+
+    fn enqueue_file_tree_delta(
+        &mut self,
+        mount: &str,
+        virtual_path: &str,
+        disk_path: PathBuf,
+        now: Instant,
+    ) {
+        if self.should_ignore_virtual_path(mount, virtual_path) {
+            return;
+        }
+        if let Some(last) = self.fs_event_last_by_path.get(virtual_path).copied() {
+            if now.saturating_duration_since(last) < Duration::from_millis(80) {
                 return;
             }
         }
-        self.mount_last_fs_event.insert(mount.clone(), now);
-        self.broadcast_ui_message(StudioToUI::FileTreeDiff {
-            mount,
-            changes: Vec::new(),
+        self.fs_event_last_by_path
+            .insert(virtual_path.to_string(), now);
+
+        let mount = mount.to_string();
+        let virtual_path = virtual_path.to_string();
+        let event_tx = self.event_tx.clone();
+        self.worker_pool.execute(move || {
+            let change = compute_filetree_change_for_path(&disk_path, virtual_path);
+            let _ = event_tx.send(StudioEvent::WorkerFileTreeDeltaDone { mount, change });
         });
+    }
+
+    fn should_ignore_virtual_path(&self, mount: &str, virtual_path: &str) -> bool {
+        if virtual_path == mount {
+            return true;
+        }
+        let prefix = format!("{}/", mount);
+        let Some(rest) = virtual_path.strip_prefix(&prefix) else {
+            return true;
+        };
+        rest == ".git"
+            || rest.starts_with(".git/")
+            || rest == "target"
+            || rest.starts_with("target/")
+            || rest == ".makepad"
+            || rest.starts_with(".makepad/")
     }
 
     fn on_worker_find_files_done(
@@ -1123,8 +1243,29 @@ impl StudioCore {
         );
 
         if live && self.ui_clients.contains_key(&web_socket_id) {
-            self.live_log_queries
-                .insert(query_id, LiveLogSubscription { web_socket_id, query });
+            self.live_log_queries.insert(
+                query_id,
+                LiveLogSubscription {
+                    web_socket_id,
+                    query,
+                },
+            );
+        }
+    }
+
+    fn on_worker_load_file_tree_done(
+        &mut self,
+        web_socket_id: u64,
+        mount: String,
+        result: Result<crate::protocol::FileTreeData, String>,
+    ) {
+        match result {
+            Ok(data) => self.send_ui_message(
+                web_socket_id,
+                StudioToUI::FileTree { mount, data },
+                self.ui_format(web_socket_id),
+            ),
+            Err(err) => self.send_ui_error(web_socket_id, err),
         }
     }
 
@@ -1140,19 +1281,11 @@ impl StudioCore {
             .map_err(|_| format!("failed to send app message for build {}", build_id.0))
     }
 
-    fn send_app_msg(
-        &self,
-        build_id: QueryId,
-        msg: StudioToApp,
-    ) -> Result<(), String> {
+    fn send_app_msg(&self, build_id: QueryId, msg: StudioToApp) -> Result<(), String> {
         self.send_to_app(build_id, StudioToAppVec(vec![msg]).serialize_bin())
     }
 
-    fn send_app_msgs(
-        &self,
-        build_id: QueryId,
-        msgs: Vec<StudioToApp>,
-    ) -> Result<(), String> {
+    fn send_app_msgs(&self, build_id: QueryId, msgs: Vec<StudioToApp>) -> Result<(), String> {
         self.send_to_app(build_id, StudioToAppVec(msgs).serialize_bin())
     }
 
@@ -1430,8 +1563,14 @@ impl StudioCore {
                     },
                 );
             }
-            AppToStudio::CreateWindow { window_id, kind_id: _ } => {
-                self.broadcast_ui_message(StudioToUI::RunViewCreated { build_id, window_id });
+            AppToStudio::CreateWindow {
+                window_id,
+                kind_id: _,
+            } => {
+                self.broadcast_ui_message(StudioToUI::RunViewCreated {
+                    build_id,
+                    window_id,
+                });
             }
             AppToStudio::SetCursor(cursor) => {
                 self.broadcast_ui_message(StudioToUI::RunViewCursor {
@@ -1526,9 +1665,15 @@ impl StudioCore {
         if data.is_empty() {
             return;
         }
-        if self.terminal_manager.mount_for_path(&path).is_none() {
-            return;
-        }
+        let mount = match self.terminal_manager.mount_for_path(&path) {
+            Some(mount) => mount.to_string(),
+            None => return,
+        };
+        // Terminal history is persisted into .makepad/*.term and can trigger file
+        // watcher churn. Suppress those self-induced fs events briefly so typing
+        // in terminal does not force repeated file-tree reloads.
+        self.mount_suppress_fs_until
+            .insert(mount, Instant::now() + Duration::from_millis(750));
         let _ = append_terminal_history_bytes(&self.vfs, &path, &data);
         self.broadcast_ui_message(StudioToUI::TerminalOutput { path, data });
     }
@@ -1781,20 +1926,20 @@ fn append_terminal_history_bytes(vfs: &VirtualFs, path: &str, data: &[u8]) -> Re
 
 fn map_platform_log_level(level: StudioProtocolLogLevel) -> LogLevel {
     match level {
-        StudioProtocolLogLevel::Error | StudioProtocolLogLevel::Panic => {
-            LogLevel::Error
-        }
-        StudioProtocolLogLevel::Warning | StudioProtocolLogLevel::Wait => {
-            LogLevel::Warning
-        }
+        StudioProtocolLogLevel::Error | StudioProtocolLogLevel::Panic => LogLevel::Error,
+        StudioProtocolLogLevel::Warning | StudioProtocolLogLevel::Wait => LogLevel::Warning,
         StudioProtocolLogLevel::Log => LogLevel::Log,
     }
 }
 
 fn map_platform_event_sample(sample: EventSample) -> StudioEventSample {
     StudioEventSample {
-        at: sample.start,
+        at: sample.end,
         label: LiveId(sample.event_u32 as u64),
+        event_u32: sample.event_u32,
+        event_meta: sample.event_meta,
+        start: sample.start,
+        end: sample.end,
     }
 }
 
@@ -1802,6 +1947,15 @@ fn map_platform_gpu_sample(sample: GPUSample) -> StudioGPUSample {
     StudioGPUSample {
         at: sample.end,
         label: LiveId(0),
+        start: sample.start,
+        end: sample.end,
+        draw_calls: sample.draw_calls,
+        instances: sample.instances,
+        vertices: sample.vertices,
+        instance_bytes: sample.instance_bytes,
+        uniform_bytes: sample.uniform_bytes,
+        vertex_buffer_bytes: sample.vertex_buffer_bytes,
+        texture_bytes: sample.texture_bytes,
     }
 }
 
@@ -1809,6 +1963,9 @@ fn map_platform_gc_sample(sample: GCSample) -> StudioGCSample {
     StudioGCSample {
         at: sample.end,
         label: LiveId(0),
+        start: sample.start,
+        end: sample.end,
+        heap_live: sample.heap_live,
     }
 }
 
@@ -1907,6 +2064,122 @@ fn parse_package_name(args: &[String]) -> Option<String> {
         i += 1;
     }
     None
+}
+
+fn compute_filetree_change_for_path(
+    abs_path: &Path,
+    virtual_path: String,
+) -> crate::protocol::FileTreeChange {
+    match fs::metadata(abs_path) {
+        Ok(meta) => {
+            let node_type = if meta.is_dir() {
+                crate::protocol::FileNodeType::Dir
+            } else {
+                crate::protocol::FileNodeType::File
+            };
+            let git_status = git_status_for_path(abs_path);
+            crate::protocol::FileTreeChange::Added {
+                path: virtual_path,
+                node_type,
+                git_status,
+            }
+        }
+        Err(_) => crate::protocol::FileTreeChange::Removed { path: virtual_path },
+    }
+}
+
+fn git_status_for_path(path: &Path) -> crate::protocol::GitStatus {
+    let repo_root = match find_repo_root(path) {
+        Some(root) => root,
+        None => return crate::protocol::GitStatus::Unknown,
+    };
+    let rel = match path.strip_prefix(&repo_root) {
+        Ok(rel) => rel,
+        Err(_) => return crate::protocol::GitStatus::Unknown,
+    };
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    if rel.is_empty() {
+        return crate::protocol::GitStatus::Clean;
+    }
+
+    let output = match Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .arg("status")
+        .arg("--porcelain")
+        .arg("--")
+        .arg(&rel)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return crate::protocol::GitStatus::Unknown,
+    };
+    if !output.status.success() {
+        return crate::protocol::GitStatus::Unknown;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next().unwrap_or("").trim_end();
+    if line.is_empty() {
+        return crate::protocol::GitStatus::Clean;
+    }
+    if line.starts_with("??") {
+        return crate::protocol::GitStatus::Untracked;
+    }
+    let mut chars = line.chars();
+    let x = chars.next().unwrap_or(' ');
+    let y = chars.next().unwrap_or(' ');
+    if x == 'U' || y == 'U' {
+        return crate::protocol::GitStatus::Conflict;
+    }
+    if x == 'A' {
+        return crate::protocol::GitStatus::Added;
+    }
+    if x == 'D' || y == 'D' {
+        return crate::protocol::GitStatus::Deleted;
+    }
+    if x != ' ' && x != '?' {
+        return crate::protocol::GitStatus::Staged;
+    }
+    if y != ' ' {
+        return crate::protocol::GitStatus::Modified;
+    }
+    crate::protocol::GitStatus::Clean
+}
+
+fn find_repo_root(path: &Path) -> Option<PathBuf> {
+    let mut dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+fn percent_encode_local(input: &str) -> String {
+    let mut out = String::new();
+    for b in input.bytes() {
+        let safe = b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.';
+        if safe {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(hex_local((b >> 4) & 0x0F));
+            out.push(hex_local(b & 0x0F));
+        }
+    }
+    out
+}
+
+fn hex_local(v: u8) -> char {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    HEX[v as usize] as char
 }
 
 fn file_tree_diff(

@@ -9,16 +9,17 @@ script_mod! {
     mod.widgets.RunPlayIcon = View {
         width: 14.0
         height: 14.0
-        margin: Inset {left: 3.0 right: 6.0 top: 0.0 bottom: 0.0}
+        margin: Inset {left: 3.0 right: 3.0 top: 0.0 bottom: 0.0}
         show_bg: true
         draw_bg +: {
+            hover: instance(0.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.move_to(3.0, 2.0)
                 sdf.line_to(11.0, 7.0)
                 sdf.line_to(3.0, 12.0)
                 sdf.close_path()
-                sdf.fill(#x7BD88F)
+                sdf.fill(theme.color_label_inner.mix(#xFFFFFF, self.hover))
                 return sdf.result
             }
         }
@@ -29,24 +30,16 @@ script_mod! {
         height: 34.0
         flow: Right
         align: Align {x: 0.0 y: 0.5}
-        spacing: theme.space_2
+        spacing: theme.space_1
         padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
         show_bg: true
 
         draw_bg +: {
             is_even: instance(0.0)
-            selected: instance(0.0)
-            hover: instance(0.0)
             pixel: fn() {
                 return theme.color_bg_even.mix(
                     theme.color_bg_odd,
                     self.is_even
-                ).mix(
-                    #x2A3B28,
-                    self.selected
-                ).mix(
-                    #x233526,
-                    self.hover
                 )
             }
         }
@@ -58,37 +51,29 @@ script_mod! {
                 off: AnimatorState {
                     from: {all: Forward {duration: 0.08}}
                     apply: {
-                        draw_bg: {hover: 0.0}
+                        icon: {draw_bg: {hover: 0.0}}
+                        row_button: {draw_text: {hover: 0.0}}
                     }
                 }
                 on: AnimatorState {
                     cursor: MouseCursor.Hand
                     from: {all: Snap}
                     apply: {
-                        draw_bg: {hover: 1.0}
-                    }
-                }
-            }
-            select: {
-                default: @off
-                off: AnimatorState {
-                    from: {all: Snap}
-                    apply: {
-                        draw_bg: {selected: 0.0}
-                    }
-                }
-                on: AnimatorState {
-                    from: {all: Snap}
-                    apply: {
-                        draw_bg: {selected: 1.0}
+                        icon: {draw_bg: {hover: 1.0}}
+                        row_button: {draw_text: {hover: 1.0}}
                     }
                 }
             }
         }
 
+        icon := mod.widgets.RunPlayIcon {}
+
         row_button := ButtonFlat {
             width: Fill
             height: Fill
+            align: Align {x: 0.0 y: 0.5}
+            label_walk: Walk {width: Fit height: Fit}
+            padding: Inset {left: 4.0 right: 0.0 top: 0.0 bottom: 0.0}
             text: ""
             draw_bg +: {
                 color: #0000
@@ -96,7 +81,12 @@ script_mod! {
                 color_pressed: #0000
                 border_color: #0000
             }
-            draw_text.color: #xE9F0FF
+            draw_text +: {
+                color: theme.color_label_inner
+                color_hover: #xFFFFFF
+                color_pressed: #xFFFFFF
+                color_focus: #xFFFFFF
+            }
         }
     }
 
@@ -136,9 +126,7 @@ script_mod! {
             auto_tail: false
             selectable: false
             drag_scrolling: true
-            Item := mod.widgets.RunListItem {
-                icon := mod.widgets.RunPlayIcon {}
-            }
+            Item := mod.widgets.RunListItem {}
             Empty := mod.widgets.RunListEmpty {}
         }
     }
@@ -232,15 +220,9 @@ impl DesktopRunList {
             };
 
             let mut item = list.item(cx, item_id, id!(Item)).as_view();
-            let selected_f = if self.selected_index == Some(item_id) {
-                1.0
-            } else {
-                0.0
-            };
             script_apply_eval!(cx, item, {
                 draw_bg +: {
-                    is_even: #(is_even_f),
-                    selected: #(selected_f)
+                    is_even: #(is_even_f)
                 }
             });
             let button = item.button(cx, ids!(row_button));
