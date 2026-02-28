@@ -292,6 +292,9 @@ impl Cx {
                 self.call_event_handler(&Event::Shutdown);
                 return true;
             }
+            StudioToApp::Custom(data) => {
+                self.call_event_handler(&Event::Custom(data));
+            }
             StudioToApp::KeepAlive | StudioToApp::None => {}
             other @ StudioToApp::LiveChange { .. } => {
                 self.action(other);
