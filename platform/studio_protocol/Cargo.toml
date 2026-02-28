@@ -1,0 +1,9 @@
+[package]
+name = "makepad-studio-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Shared Studio app<->studio wire protocol types"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-platform = { path = "..", version = "2.0.0" }
