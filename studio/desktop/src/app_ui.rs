@@ -89,11 +89,9 @@ script_mod! {
             log_open_profiler := ButtonFlatterIcon {
                 width: 24.0
                 height: 24.0
-                icon_walk: Walk {width: Fit height: 14.0}
+                icon_walk: Walk {width: 14.0 height: 14.0}
                 draw_icon +: {
-                    color: #xD0D5DD
-                    color_hover: #xFFFFFF
-                    color_pressed: #xFFFFFF
+                    color: theme.color_label_outer
                     svg: crate_resource("self://resources/icons/icon_profiler.svg")
                 }
             }
