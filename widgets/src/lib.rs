@@ -270,6 +270,8 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             draw:mod.draw,
             MouseCursor:mod.draw.MouseCursor
         }
+        mod.theme = mod.themes.dark
+        
     });
 }
 
@@ -383,8 +385,5 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
 pub fn script_mod(vm: &mut ScriptVm) {
     theme_mod(vm);
-    script_eval!(vm,{
-        mod.theme = mod.themes.dark
-    });
     widgets_mod(vm);
 }

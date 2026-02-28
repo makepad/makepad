@@ -1,7 +1,7 @@
 use crate::makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::net::UdpSocket;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 app_main!(App);
 
@@ -11,6 +11,8 @@ const ARTNET_BIND_ADDR: &str = "0.0.0.0:0";
 const ARTNET_BROADCAST_ADDR: &str = "255.255.255.255:6454";
 const PRESET_DIR: &str = "examples/automate/local/dmx";
 const CURRENT_STATE_FILE: &str = "examples/automate/local/dmx/current.ron";
+const DEBUG_SCENE_EVENTS: bool = true;
+const CONTROLLER_INSTANCE_LOCK_ADDR: &str = "127.0.0.1:64640";
 
 pub const DMXOUTPUT_HEADER: [u8; 18] = [
     b'A', b'r', b't', b'-', b'N', b'e', b't', b'\0', 0,    // opcode hi
@@ -28,113 +30,359 @@ pub const DMXOUTPUT_HEADER: [u8; 18] = [
 script_mod! {
 use mod.prelude.widgets.*
 
-let Panel = RoundedView{
+let DeckFrame = RoundedView{
+    width: Fill
+    height: Fill
+    flow: Down
+    spacing: 12
+    padding: Inset{top: 14. bottom: 14. left: 14. right: 14.}
+    draw_bg.color: #x0b141f
+    draw_bg.border_radius: 14.
+    draw_bg.border_size: 1.
+    draw_bg.border_color: #x2a3645
+}
+
+let SectionFrame = RoundedView{
     width: Fill
     height: Fit
     flow: Down
     spacing: 8
-    padding: Inset{top: 12. bottom: 12. left: 12. right: 12.}
-    draw_bg.color: #x18212d
+    padding: Inset{top: 10. bottom: 10. left: 10. right: 10.}
+    draw_bg.color: #x111c2a
     draw_bg.border_radius: 10.
     draw_bg.border_size: 1.
-    draw_bg.border_color: #x2f3a4b
+    draw_bg.border_color: #x304359
 }
 
-let MonoLine = Label{
-    width: Fill
-    draw_text.color: #xccd6e6
-    draw_text.text_style: theme.font_code{font_size: 11.}
+let SectionTitle = Label{
+    width: Fit
+    draw_text.color: #xd2deef
+    draw_text.text_style: theme.font_bold{font_size: 11.}
 }
 
-let DimLine = Label{
-    width: Fill
-    draw_text.color: #x90a0bb
-    draw_text.text_style.font_size: 10.
+let ScenePad = Button{
+    width: 88
+    height: 36
+    draw_text +: {
+        color: #xbfd2ec
+        color_hover: #xeff5ff
+        color_down: #xffffff
+        color_focus: #xffffff
+    }
+    draw_bg +: {
+        border_radius: uniform(7.)
+        color: uniform(#x162638)
+        color_hover: uniform(#x1d3249)
+        color_down: uniform(#x304f73)
+        color_focus: uniform(#x365d87)
+        border_color: uniform(#x2f4966)
+        border_color_hover: uniform(#x48698f)
+        border_color_down: uniform(#x66a0e2)
+        border_color_focus: uniform(#x78bcff)
+        border_color_2: uniform(#x223447)
+        border_color_2_hover: uniform(#x37516c)
+        border_color_2_down: uniform(#x6fa5e2)
+        border_color_2_focus: uniform(#x86c7ff)
+    }
+}
+
+let TransportToggle = Toggle{
+    width: 108
+    height: 34
+    draw_text +: {
+        color: #xbfd0e4
+        color_hover: #xdbe7f7
+        color_down: #xffffff
+        color_active: #xd6ffe2
+    }
+    draw_bg +: {
+        color: uniform(#x131f2f)
+        color_hover: uniform(#x1a2a3f)
+        color_down: uniform(#x102134)
+        color_active: uniform(#x1f3f33)
+        color_focus: uniform(#x2a4664)
+        border_color: uniform(#x34465a)
+        border_color_hover: uniform(#x4d6683)
+        border_color_down: uniform(#x3b4f68)
+        border_color_active: uniform(#x4d8f6d)
+        border_color_focus: uniform(#x68a7e8)
+        mark_color: uniform(#x8b99ab)
+        mark_color_hover: uniform(#xb5c6de)
+        mark_color_down: uniform(#xd4e0ee)
+        mark_color_active: uniform(#x84f0b0)
+        mark_color_active_hover: uniform(#xa6ffca)
+    }
+}
+
+let EncoderKnob = Rotary{
+    width: 72
+    height: 72
+    min: 0.
+    max: 127.
+    precision: 0
+}
+
+let APCFader = Slider{
+    axis: Vertical
+    width: 54
+    height: 220
+    min: 0.
+    max: 127.
+    precision: 0
+    step: 1.
+    text: ""
+
+    draw_bg +: {
+        body_color: uniform(#x08121d)
+        track_color: uniform(#x111d2b)
+        fill_color: uniform(#x79b8f2)
+        cap_color: uniform(#xe1e7f0)
+        cap_shadow: uniform(#x8d98a7)
+
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            sdf.box(3., 2., self.rect_size.x - 6., self.rect_size.y - 4., 6.)
+            sdf.fill(self.body_color)
+
+            let top = 12.
+            let bottom_pad = 12.
+            let h = self.rect_size.y - top - bottom_pad
+            let track_w = self.rect_size.x * 0.30
+            let track_x = (self.rect_size.x - track_w) * 0.5
+
+            sdf.box(track_x, top, track_w, h, 3.)
+            sdf.fill(self.track_color)
+
+            let fill_h = h * self.slide_pos
+            let fill_h_inner = max(1., fill_h - 3.)
+            sdf.box(
+                track_x + 1.5
+                top + (h - fill_h) + 1.5
+                track_w - 3.
+                fill_h_inner
+                2.
+            )
+            sdf.fill(self.fill_color)
+
+            let cap_h = 16.
+            let cap_y = top + (h - fill_h) - cap_h * 0.5
+            sdf.box(7., cap_y + 1.5, self.rect_size.x - 14., cap_h, 4.)
+            sdf.fill(self.cap_shadow)
+            sdf.box(6., cap_y, self.rect_size.x - 12., cap_h, 4.)
+            sdf.fill(self.cap_color)
+
+            return sdf.result
+        }
+    }
 }
 
 startup() do #(App::script_component(vm)){
     ui: Root{
         main_window := Window{
-            window.title: "Automate - Home MIDI/DMX"
+            window.title: "Automate - Control Surface"
             window.inner_size: vec2(1520, 940)
-            pass.clear_color: vec4(0.05, 0.07, 0.10, 1.0)
+            pass.clear_color: vec4(0.03, 0.05, 0.08, 1.0)
             body +: {
-                app_root := SolidView{
-                    width: Fill
-                    height: Fill
-                    flow: Down
-                    spacing: 12
-                    padding: Inset{top: 16. bottom: 16. left: 16. right: 16.}
-                    draw_bg.color: #x0d1219
-
-                    header := Panel{
-                        Label{
-                            text: "Home Automation Controller"
-                            draw_text.color: #xfff
-                            draw_text.text_style: theme.font_bold{font_size: 20.}
-                        }
-                        DimLine{
-                            text: "APC40 mapped state + Art-Net DMX output (AI/image generation removed)."
-                        }
-                        status_line := MonoLine{text: "Status: booting..."}
-                    }
-
-                    View{
+                    app_root := SolidView{
                         width: Fill
                         height: Fill
-                        flow: Right
+                        flow: Down
                         spacing: 12
+                        padding: Inset{top: 14. bottom: 14. left: 14. right: 14.}
+                        draw_bg.color: #x070d14
 
-                        controller_panel := Panel{
-                            width: Fill
-                            height: Fill
-                            Label{
-                                text: "Mapped Controller State"
-                                draw_text.color: #xfff
-                                draw_text.text_style: theme.font_bold{font_size: 14.}
-                            }
-                            ScrollYView{
+                        deck := DeckFrame{
+                            View{
                                 width: Fill
-                                height: Fill
-                                flow: Down
-                                spacing: 6
-                                midi_ports := MonoLine{text: "MIDI inputs: waiting..."}
-                                last_event := MonoLine{text: "Last MIDI event: none"}
-                                tempo_line := MonoLine{text: "TEMPO 0:000[......]"}
-                                top_dials := MonoLine{text: "TOP ..."}
-                                fader_line := MonoLine{text: "FAD ..."}
-                                preset_line := MonoLine{text: "PRE ..."}
-                                switch_line := MonoLine{text: "SWI ..."}
-                                channel_0 := MonoLine{text: "CH0 ..."}
-                                channel_1 := MonoLine{text: "CH1 ..."}
-                                channel_2 := MonoLine{text: "CH2 ..."}
-                                channel_3 := MonoLine{text: "CH3 ..."}
-                                channel_4 := MonoLine{text: "CH4 ..."}
-                                channel_5 := MonoLine{text: "CH5 ..."}
-                                channel_6 := MonoLine{text: "CH6 ..."}
-                                channel_7 := MonoLine{text: "CH7 ..."}
-                            }
-                        }
+                                height: Fit
+                                flow: Right
+                                spacing: 12
 
-                        dmx_panel := Panel{
-                            width: 470
-                            height: Fill
-                            Label{
-                                text: "DMX Output"
-                                draw_text.color: #xfff
-                                draw_text.text_style: theme.font_bold{font_size: 14.}
+                                SectionFrame{
+                                    width: Fill
+                                    SectionTitle{text: "ENCODERS"}
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Right
+                                        spacing: 7
+                                        top_knob_0 := EncoderKnob{text: "T0"}
+                                        top_knob_1 := EncoderKnob{text: "T1"}
+                                        top_knob_2 := EncoderKnob{text: "T2"}
+                                        top_knob_3 := EncoderKnob{text: "T3"}
+                                        top_knob_4 := EncoderKnob{text: "T4"}
+                                        top_knob_5 := EncoderKnob{text: "T5"}
+                                        top_knob_6 := EncoderKnob{text: "T6"}
+                                        top_knob_7 := EncoderKnob{text: "T7"}
+                                    }
+                                }
+
+                                SectionFrame{
+                                    width: 360
+                                    SectionTitle{text: "TRANSPORT"}
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 6
+                                        View{
+                                            width: Fit
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 6
+                                            trn_btn_0 := TransportToggle{text: "REW"}
+                                            trn_btn_1 := TransportToggle{text: "FF"}
+                                            trn_btn_2 := TransportToggle{text: "STOP"}
+                                        }
+                                        View{
+                                            width: Fit
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 6
+                                            trn_btn_3 := TransportToggle{text: "PLAY"}
+                                            trn_btn_4 := TransportToggle{text: "REC"}
+                                            trn_btn_5 := TransportToggle{text: "SHIFT"}
+                                        }
+                                        View{
+                                            width: Fit
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 6
+                                            trn_btn_6 := TransportToggle{text: "TAP"}
+                                            trn_btn_7 := TransportToggle{text: "WRITE"}
+                                            trn_btn_8 := TransportToggle{text: "POWER"}
+                                        }
+                                    }
+                                }
                             }
-                            dmx_info := MonoLine{text: "Art-Net target: 255.255.255.255:6454"}
-                            scene_hint := MonoLine{text: "Dominant zone: n/a"}
-                            DimLine{text: "Preview (first 32 channels in hex):"}
-                            dmx_preview := MonoLine{text: "CH001:00 CH002:00 CH003:00 CH004:00"}
+
+                            SectionFrame{
+                                width: Fill
+                                SectionTitle{text: "SCENES"}
+                                View{
+                                    width: Fit
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 6
+                                    scene_btn_0 := ScenePad{text: "P00"}
+                                    scene_btn_1 := ScenePad{text: "P01"}
+                                    scene_btn_2 := ScenePad{text: "P02"}
+                                    scene_btn_3 := ScenePad{text: "P03"}
+                                    scene_btn_4 := ScenePad{text: "P04"}
+                                    scene_btn_5 := ScenePad{text: "P05"}
+                                    scene_btn_6 := ScenePad{text: "P06"}
+                                }
+                                View{
+                                    width: Fit
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 6
+                                    scene_btn_7 := ScenePad{text: "P07"}
+                                    scene_btn_8 := ScenePad{text: "P08"}
+                                    scene_btn_9 := ScenePad{text: "P09"}
+                                    scene_btn_10 := ScenePad{text: "P10"}
+                                    scene_btn_11 := ScenePad{text: "P11"}
+                                    scene_btn_12 := ScenePad{text: "P12"}
+                                }
+                            }
+
+                            SectionFrame{
+                                width: Fill
+                                SectionTitle{text: "FADERS"}
+                                View{
+                                    width: Fit
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 4
+                                        align: Align{x: 0.5}
+                                        Label{text: "F0" draw_text.color: #x95a8c0 draw_text.text_style.font_size: 11.}
+                                        fader_0 := APCFader{}
+                                    }
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 4
+                                        align: Align{x: 0.5}
+                                        Label{text: "F1" draw_text.color: #x95a8c0 draw_text.text_style.font_size: 11.}
+                                        fader_1 := APCFader{}
+                                    }
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 4
+                                        align: Align{x: 0.5}
+                                        Label{text: "F2" draw_text.color: #x95a8c0 draw_text.text_style.font_size: 11.}
+                                        fader_2 := APCFader{}
+                                    }
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 4
+                                        align: Align{x: 0.5}
+                                        Label{text: "F3" draw_text.color: #x95a8c0 draw_text.text_style.font_size: 11.}
+                                        fader_3 := APCFader{}
+                                    }
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 4
+                                        align: Align{x: 0.5}
+                                        Label{text: "F4" draw_text.color: #x95a8c0 draw_text.text_style.font_size: 11.}
+                                        fader_4 := APCFader{}
+                                    }
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 4
+                                        align: Align{x: 0.5}
+                                        Label{text: "F5" draw_text.color: #x95a8c0 draw_text.text_style.font_size: 11.}
+                                        fader_5 := APCFader{}
+                                    }
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 4
+                                        align: Align{x: 0.5}
+                                        Label{text: "F6" draw_text.color: #x95a8c0 draw_text.text_style.font_size: 11.}
+                                        fader_6 := APCFader{}
+                                    }
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 4
+                                        align: Align{x: 0.5}
+                                        Label{text: "F7" draw_text.color: #x95a8c0 draw_text.text_style.font_size: 11.}
+                                        fader_7 := APCFader{}
+                                    }
+                                    View{
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 4
+                                        align: Align{x: 0.5}
+                                        Label{text: "M" draw_text.color: #x95a8c0 draw_text.text_style.font_size: 11.}
+                                        fader_8 := APCFader{}
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     }
-}
 }
 
 #[derive(Debug, Clone, Copy, Default, SerRon, DeRon)]
@@ -153,18 +401,6 @@ struct ControllerState {
 }
 
 impl ControllerState {
-    fn bank(&self, index: usize) -> &[f32; 8] {
-        match index {
-            0 => &self.dial_0,
-            1 => &self.dial_1,
-            2 => &self.dial_2,
-            3 => &self.dial_3,
-            4 => &self.dial_4,
-            5 => &self.dial_5,
-            6 => &self.dial_6,
-            _ => &self.dial_7,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -175,44 +411,70 @@ struct ControllerButtons {
 }
 
 impl ControllerButtons {
-    fn active_preset(&self) -> Option<usize> {
-        for index in 0..self.preset.len() {
-            if self.preset[index] {
-                return Some(index);
-            }
+}
+
+#[derive(Debug, Clone)]
+struct MidiMirrorState {
+    cc: [[u8; 128]; 16],
+    note_velocity: [[u8; 128]; 16],
+}
+
+impl Default for MidiMirrorState {
+    fn default() -> Self {
+        Self {
+            cc: [[0; 128]; 16],
+            note_velocity: [[0; 128]; 16],
         }
-        None
+    }
+}
+
+impl MidiMirrorState {
+    fn set_cc(&mut self, channel: usize, param: usize, value: u8) {
+        if channel < self.cc.len() && param < self.cc[channel].len() {
+            self.cc[channel][param] = value;
+        }
     }
 
-    fn rising_preset(&self, previous: &Self) -> Option<usize> {
-        for index in 0..self.preset.len() {
-            if !previous.preset[index] && self.preset[index] {
-                return Some(index);
-            }
+    fn set_note(&mut self, channel: usize, note: usize, is_on: bool, velocity: u8) {
+        if channel < self.note_velocity.len() && note < self.note_velocity[channel].len() {
+            self.note_velocity[channel][note] = if is_on { velocity.max(1) } else { 0 };
         }
-        None
+    }
+
+    fn note_is_on(&self, channel: usize, note: usize) -> bool {
+        if channel < self.note_velocity.len() && note < self.note_velocity[channel].len() {
+            self.note_velocity[channel][note] > 0
+        } else {
+            false
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 struct ControllerSnapshot {
     state: ControllerState,
-    buttons: ControllerButtons,
+    mirror: MidiMirrorState,
     last_event: String,
     dmx_packets: u64,
-    dmx_preview: [u8; 32],
 }
 
 impl Default for ControllerSnapshot {
     fn default() -> Self {
         Self {
             state: ControllerState::default(),
-            buttons: ControllerButtons::default(),
+            mirror: MidiMirrorState::default(),
             last_event: "Waiting for MIDI input...".to_string(),
             dmx_packets: 0,
-            dmx_preview: [0; 32],
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UiControlMessage {
+    SetTopKnob { index: usize, value: f32 },
+    SetFader { index: usize, value: f32 },
+    TriggerScene { index: usize },
+    SetTransport { index: usize, on: bool },
 }
 
 fn clamp01(value: f32) -> f32 {
@@ -391,6 +653,16 @@ fn save_state_file(path: &str, state: &ControllerState) {
     let _ = std::fs::write(path, state.serialize_ron().as_bytes());
 }
 
+fn load_preset_slot(slot: usize, state: &mut ControllerState) -> bool {
+    if let Some(mut loaded) = load_state_file(&preset_file(slot)) {
+        loaded.dial_0 = state.dial_0;
+        *state = loaded;
+        true
+    } else {
+        false
+    }
+}
+
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -401,6 +673,8 @@ pub struct App {
     snapshot: ControllerSnapshot,
     #[rust("MIDI inputs: waiting for device scan".to_string())]
     midi_ports_summary: String,
+    #[rust(FromUISender::default())]
+    ui_controls: FromUISender<UiControlMessage>,
 }
 
 impl App {
@@ -409,175 +683,81 @@ impl App {
         App::from_script_mod(vm, self::script_mod)
     }
 
-    fn meter(value: f32, width: usize) -> String {
-        let mut out = String::with_capacity(width);
-        let filled = (clamp01(value) * width as f32).round() as usize;
-        for idx in 0..width {
-            out.push(if idx < filled { '#' } else { '.' });
+    fn set_slider_widget_value(&self, cx: &mut Cx, id: LiveId, value: u8) {
+        if let Some(mut slider) = self.ui.widget(cx, &[id]).borrow_mut::<Slider>() {
+            slider.set_value(cx, value as f64);
         }
-        out
     }
 
-    fn cell(index: usize, value: f32) -> String {
-        let midi = (clamp01(value) * 127.0).round() as u8;
-        format!("{index}:{midi:03}[{}]", Self::meter(value, 6))
-    }
-
-    fn format_bank(name: &str, values: &[f32; 8]) -> String {
-        let mut out = format!("{name} ");
-        for (index, value) in values.iter().enumerate() {
-            if index > 0 {
-                out.push(' ');
+    fn set_toggle_widget_active(&self, cx: &mut Cx, id: LiveId, active: bool) {
+        if let Some(mut toggle) = self.ui.widget(cx, &[id]).borrow_mut::<CheckBox>() {
+            if toggle.active(cx) != active {
+                toggle.set_active(cx, active);
             }
-            out.push_str(&Self::cell(index, *value));
         }
-        out
     }
 
-    fn format_faders(values: &[f32; 9]) -> String {
-        let mut out = String::from("FAD ");
-        for (index, value) in values.iter().enumerate() {
-            if index > 0 {
-                out.push(' ');
-            }
-            let midi = (clamp01(*value) * 127.0).round() as u8;
-            out.push_str(&format!("{index}:{midi:03}[{}]", Self::meter(*value, 8)));
-        }
-        out
-    }
-
-    fn format_presets(buttons: &ControllerButtons) -> String {
-        let mut out = String::from("PRE ");
-        for (index, active) in buttons.preset.iter().enumerate() {
-            if index > 0 {
-                out.push(' ');
-            }
-            out.push_str(&format!("{index:02}[{}]", if *active { "X" } else { "." }));
-        }
-        out
-    }
-
-    fn format_dmx_preview(values: &[u8; 32]) -> String {
-        let mut out = String::new();
-        for row in 0..4 {
-            for col in 0..8 {
-                let index = row * 8 + col;
-                if col > 0 {
-                    out.push(' ');
+    fn slider_action_value(&self, cx: &mut Cx, actions: &Actions, id: LiveId) -> Option<f64> {
+        let widget = self.ui.widget(cx, &[id]);
+        if let Some(action) = actions.find_widget_action(widget.widget_uid()) {
+            match action.cast() {
+                SliderAction::TextSlide(v) | SliderAction::Slide(v) | SliderAction::EndSlide(v) => {
+                    Some(v)
                 }
-                out.push_str(&format!("CH{:03}:{:02X}", index + 1, values[index]));
+                _ => None,
             }
-            if row != 3 {
-                out.push('\n');
-            }
+        } else {
+            None
         }
-        out
     }
 
-    fn scene_hint(snapshot: &ControllerSnapshot) -> String {
-        let mut dominant = 0usize;
-        let mut level = 0.0f32;
-        for (index, value) in snapshot.state.fade.iter().enumerate() {
-            if *value > level {
-                dominant = index;
-                level = *value;
+    fn toggle_action_value(&self, cx: &mut Cx, actions: &Actions, id: LiveId) -> Option<bool> {
+        let widget = self.ui.widget(cx, &[id]);
+        if let Some(action) = actions.find_widget_action(widget.widget_uid()) {
+            match action.cast() {
+                CheckBoxAction::Change(v) => Some(v),
+                _ => None,
             }
+        } else {
+            None
         }
-        format!(
-            "Dominant zone: fader {} at {:.0}% | power:{} | write:{}",
-            dominant,
-            level * 100.0,
-            if snapshot.buttons.power { "on" } else { "off" },
-            if snapshot.buttons.write_preset {
-                "on"
-            } else {
-                "off"
-            }
-        )
+    }
+
+    fn button_clicked(&self, cx: &mut Cx, actions: &Actions, id: LiveId) -> bool {
+        let widget = self.ui.widget(cx, &[id]);
+        if let Some(action) = actions.find_widget_action(widget.widget_uid()) {
+            matches!(action.cast(), ButtonAction::Clicked(_))
+        } else {
+            false
+        }
+    }
+
+    fn slider_ui_to_norm(value: f64) -> f32 {
+        let v = value as f32;
+        if v <= 1.0 {
+            clamp01(v)
+        } else {
+            clamp01(v / 127.0)
+        }
     }
 
     fn refresh_ui(&mut self, cx: &mut Cx) {
-        self.ui.label(cx, ids!(status_line)).set_text(
-            cx,
-            &format!(
-                "{} | DMX packets: {}",
-                self.midi_ports_summary, self.snapshot.dmx_packets
-            ),
-        );
-        self.ui
-            .label(cx, ids!(midi_ports))
-            .set_text(cx, &self.midi_ports_summary);
-        self.ui.label(cx, ids!(last_event)).set_text(
-            cx,
-            &format!("Last MIDI event: {}", self.snapshot.last_event),
-        );
-        self.ui.label(cx, ids!(tempo_line)).set_text(
-            cx,
-            &format!("TEMPO {}", Self::cell(0, self.snapshot.state.tempo),),
-        );
-        self.ui
-            .label(cx, ids!(top_dials))
-            .set_text(cx, &Self::format_bank("TOP", &self.snapshot.state.dial_top));
-        self.ui
-            .label(cx, ids!(fader_line))
-            .set_text(cx, &Self::format_faders(&self.snapshot.state.fade));
-        self.ui
-            .label(cx, ids!(preset_line))
-            .set_text(cx, &Self::format_presets(&self.snapshot.buttons));
-        self.ui.label(cx, ids!(switch_line)).set_text(
-            cx,
-            &format!(
-                "SWI write:[{}] power:[{}]",
-                if self.snapshot.buttons.write_preset {
-                    "X"
-                } else {
-                    "."
-                },
-                if self.snapshot.buttons.power {
-                    "X"
-                } else {
-                    "."
-                }
-            ),
-        );
-        self.ui
-            .label(cx, ids!(channel_0))
-            .set_text(cx, &Self::format_bank("CH0", self.snapshot.state.bank(0)));
-        self.ui
-            .label(cx, ids!(channel_1))
-            .set_text(cx, &Self::format_bank("CH1", self.snapshot.state.bank(1)));
-        self.ui
-            .label(cx, ids!(channel_2))
-            .set_text(cx, &Self::format_bank("CH2", self.snapshot.state.bank(2)));
-        self.ui
-            .label(cx, ids!(channel_3))
-            .set_text(cx, &Self::format_bank("CH3", self.snapshot.state.bank(3)));
-        self.ui
-            .label(cx, ids!(channel_4))
-            .set_text(cx, &Self::format_bank("CH4", self.snapshot.state.bank(4)));
-        self.ui
-            .label(cx, ids!(channel_5))
-            .set_text(cx, &Self::format_bank("CH5", self.snapshot.state.bank(5)));
-        self.ui
-            .label(cx, ids!(channel_6))
-            .set_text(cx, &Self::format_bank("CH6", self.snapshot.state.bank(6)));
-        self.ui
-            .label(cx, ids!(channel_7))
-            .set_text(cx, &Self::format_bank("CH7", self.snapshot.state.bank(7)));
+        for index in 0..8 {
+            let knob = LiveId::from_str(&format!("top_knob_{index}"));
+            let value = (clamp01(self.snapshot.state.dial_top[index]) * 127.0).round() as u8;
+            self.set_slider_widget_value(cx, knob, value);
+        }
+        for index in 0..9 {
+            let fader = LiveId::from_str(&format!("fader_{index}"));
+            let value = (clamp01(self.snapshot.state.fade[index]) * 127.0).round() as u8;
+            self.set_slider_widget_value(cx, fader, value);
+        }
 
-        self.ui.label(cx, ids!(dmx_info)).set_text(
-            cx,
-            &format!(
-                "Art-Net target: {} | bind: {}",
-                ARTNET_BROADCAST_ADDR, ARTNET_BIND_ADDR
-            ),
-        );
-        self.ui
-            .label(cx, ids!(scene_hint))
-            .set_text(cx, &Self::scene_hint(&self.snapshot));
-        self.ui
-            .label(cx, ids!(dmx_preview))
-            .set_text(cx, &Self::format_dmx_preview(&self.snapshot.dmx_preview));
+        let transport_notes = [91usize, 92, 93, 94, 95, 98, 99, 81, 89];
+        for (index, note) in transport_notes.iter().enumerate() {
+            let id = LiveId::from_str(&format!("trn_btn_{index}"));
+            self.set_toggle_widget_active(cx, id, self.snapshot.mirror.note_is_on(0, *note));
+        }
     }
 
     fn start_dmx_bridge(&mut self, cx: &mut Cx) {
@@ -585,12 +765,24 @@ impl App {
 
         let mut midi_input = cx.midi_input();
         let state_sender = self.state_updates.sender();
+        let ui_receiver = self.ui_controls.receiver();
 
         std::thread::spawn(move || {
+            let _instance_lock = match UdpSocket::bind(CONTROLLER_INSTANCE_LOCK_ADDR) {
+                Ok(socket) => socket,
+                Err(err) => {
+                    println!(
+                        "scene_change source=runtime action=instance_lock_busy addr={} err={}",
+                        CONTROLLER_INSTANCE_LOCK_ADDR, err
+                    );
+                    return;
+                }
+            };
+
             let mut state = load_state_file(CURRENT_STATE_FILE).unwrap_or_default();
             let mut buttons = ControllerButtons::default();
             buttons.power = true;
-            let mut previous_buttons = buttons;
+            let mut mirror = MidiMirrorState::default();
 
             let mut universe = [0u8; DMXOUTPUT_HEADER.len() + 512];
             universe[0..DMXOUTPUT_HEADER.len()].copy_from_slice(&DMXOUTPUT_HEADER);
@@ -607,11 +799,82 @@ impl App {
             let mut dmx_packets: u64 = 0;
             let mut persist_counter: u32 = 0;
             let mut clock = 0.0f64;
+            let mut ui_scene_cooldown_until = Instant::now();
+            let transport_notes = [91usize, 92, 93, 94, 95, 98, 99, 81, 89];
 
             loop {
+                while let Ok(msg) = ui_receiver.try_recv() {
+                    match msg {
+                        UiControlMessage::SetTopKnob { index, value } => {
+                            if index < state.dial_top.len() {
+                                state.dial_top[index] = clamp01(value);
+                                let midi = (clamp01(value) * 127.0).round() as u8;
+                                mirror.set_cc(0, 48 + index, midi);
+                                last_event = format!("UI top knob {} = {}", index, midi);
+                            }
+                        }
+                        UiControlMessage::SetFader { index, value } => {
+                            if index < state.fade.len() {
+                                state.fade[index] = clamp01(value);
+                                let midi = (clamp01(value) * 127.0).round() as u8;
+                                mirror.set_cc(index, 7, midi);
+                                last_event = format!("UI fader {} = {}", index, midi);
+                            }
+                        }
+                        UiControlMessage::TriggerScene { index } => {
+                            if index < 13 {
+                                if DEBUG_SCENE_EVENTS {
+                                    println!(
+                                        "scene_change source=ui action=trigger slot={index:02}"
+                                    );
+                                }
+                                if load_preset_slot(index, &mut state) {
+                                    last_event = format!("UI loaded preset {:02}", index);
+                                    if DEBUG_SCENE_EVENTS {
+                                        println!("scene_change source=ui action=load slot={index:02}");
+                                    }
+                                } else {
+                                    last_event = format!("UI preset {:02} not found", index);
+                                    if DEBUG_SCENE_EVENTS {
+                                        println!("scene_change source=ui action=missing slot={index:02}");
+                                    }
+                                }
+                                ui_scene_cooldown_until = Instant::now() + Duration::from_millis(350);
+                                buttons.preset.fill(false);
+                                buttons.preset[index] = true;
+                                for channel in 0..8 {
+                                    mirror.set_note(channel, 52, false, 0);
+                                }
+                                for note in 82..=86 {
+                                    mirror.set_note(0, note, false, 0);
+                                }
+                                if index < 8 {
+                                    mirror.set_note(index, 52, true, 127);
+                                } else {
+                                    mirror.set_note(0, 82 + (index - 8), true, 127);
+                                }
+                            }
+                        }
+                        UiControlMessage::SetTransport { index, on } => {
+                            if index < transport_notes.len() {
+                                let note = transport_notes[index];
+                                mirror.set_note(0, note, on, if on { 127 } else { 0 });
+                                if note == 81 {
+                                    buttons.write_preset = on;
+                                }
+                                if note == 89 {
+                                    buttons.power = on;
+                                }
+                                last_event = format!("UI transport {} = {}", note, on);
+                            }
+                        }
+                    }
+                }
+
                 while let Some((_port, data)) = midi_input.receive() {
                     match data.decode() {
                         MidiEvent::ControlChange(cc) => {
+                            mirror.set_cc(cc.channel as usize, cc.param as usize, cc.value);
                             if cc.param == 13 {
                                 if cc.value == 1 {
                                     state.tempo = (state.tempo + 0.02).min(1.0);
@@ -653,55 +916,144 @@ impl App {
                             );
                         }
                         MidiEvent::Note(note) => {
+                            mirror.set_note(
+                                note.channel as usize,
+                                note.note_number as usize,
+                                note.is_on,
+                                note.velocity,
+                            );
                             match note.note_number {
                                 81 => buttons.write_preset = note.is_on,
                                 89 => buttons.power = note.is_on,
                                 52 => {
                                     let channel = note.channel as usize;
                                     if channel < 8 {
-                                        buttons.preset[channel] = note.is_on;
+                                        if DEBUG_SCENE_EVENTS {
+                                            println!(
+                                                "scene_change source=midi action=note slot={channel:02} note=52 ch={} on={} vel={}",
+                                                note.channel,
+                                                note.is_on,
+                                                note.velocity
+                                            );
+                                        }
+                                        if note.is_on {
+                                            if Instant::now() < ui_scene_cooldown_until {
+                                                if DEBUG_SCENE_EVENTS {
+                                                    println!(
+                                                        "scene_change source=midi action=ignored slot={channel:02} note=52 ch={} reason=ui_cooldown",
+                                                        note.channel
+                                                    );
+                                                }
+                                            } else {
+                                                buttons.preset.fill(false);
+                                                buttons.preset[channel] = true;
+                                                if buttons.write_preset {
+                                                    save_state_file(&preset_file(channel), &state);
+                                                    last_event = format!("Saved preset {:02}", channel);
+                                                    if DEBUG_SCENE_EVENTS {
+                                                        println!(
+                                                            "scene_change source=midi action=save slot={channel:02} note=52 ch={}",
+                                                            note.channel
+                                                        );
+                                                    }
+                                                } else if load_preset_slot(channel, &mut state) {
+                                                    last_event = format!("Loaded preset {:02}", channel);
+                                                    if DEBUG_SCENE_EVENTS {
+                                                        println!(
+                                                            "scene_change source=midi action=load slot={channel:02} note=52 ch={}",
+                                                            note.channel
+                                                        );
+                                                    }
+                                                } else {
+                                                    last_event =
+                                                        format!("Preset {:02} not found", channel);
+                                                    if DEBUG_SCENE_EVENTS {
+                                                        println!(
+                                                            "scene_change source=midi action=missing slot={channel:02} note=52 ch={}",
+                                                            note.channel
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            buttons.preset[channel] = false;
+                                        }
                                     }
                                 }
                                 82..=86 => {
                                     let index = (note.note_number - 82) as usize + 8;
                                     if index < buttons.preset.len() {
-                                        buttons.preset[index] = note.is_on;
+                                        if DEBUG_SCENE_EVENTS {
+                                            println!(
+                                                "scene_change source=midi action=note slot={index:02} note={} ch={} on={} vel={}",
+                                                note.note_number,
+                                                note.channel,
+                                                note.is_on,
+                                                note.velocity
+                                            );
+                                        }
+                                        if note.is_on {
+                                            if Instant::now() < ui_scene_cooldown_until {
+                                                if DEBUG_SCENE_EVENTS {
+                                                    println!(
+                                                        "scene_change source=midi action=ignored slot={index:02} note={} ch={} reason=ui_cooldown",
+                                                        note.note_number,
+                                                        note.channel
+                                                    );
+                                                }
+                                            } else {
+                                                buttons.preset.fill(false);
+                                                buttons.preset[index] = true;
+                                                if buttons.write_preset {
+                                                    save_state_file(&preset_file(index), &state);
+                                                    last_event = format!("Saved preset {:02}", index);
+                                                    if DEBUG_SCENE_EVENTS {
+                                                        println!(
+                                                            "scene_change source=midi action=save slot={index:02} note={} ch={}",
+                                                            note.note_number,
+                                                            note.channel
+                                                        );
+                                                    }
+                                                } else if load_preset_slot(index, &mut state) {
+                                                    last_event = format!("Loaded preset {:02}", index);
+                                                    if DEBUG_SCENE_EVENTS {
+                                                        println!(
+                                                            "scene_change source=midi action=load slot={index:02} note={} ch={}",
+                                                            note.note_number,
+                                                            note.channel
+                                                        );
+                                                    }
+                                                } else {
+                                                    last_event =
+                                                        format!("Preset {:02} not found", index);
+                                                    if DEBUG_SCENE_EVENTS {
+                                                        println!(
+                                                            "scene_change source=midi action=missing slot={index:02} note={} ch={}",
+                                                            note.note_number,
+                                                            note.channel
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            buttons.preset[index] = false;
+                                        }
                                     }
                                 }
                                 _ => {}
                             }
-
-                            last_event = format!(
-                                "NOTE ch:{} num:{} on:{} vel:{}",
-                                note.channel, note.note_number, note.is_on, note.velocity
-                            );
+                            if !matches!(note.note_number, 52 | 82..=86) {
+                                last_event = format!(
+                                    "NOTE ch:{} num:{} on:{} vel:{}",
+                                    note.channel, note.note_number, note.is_on, note.velocity
+                                );
+                            }
                         }
                         other => {
                             last_event = format!("MIDI {:?}", other);
                         }
                     }
                 }
-
-                if buttons.write_preset {
-                    if let Some(slot) = buttons.rising_preset(&previous_buttons) {
-                        save_state_file(&preset_file(slot), &state);
-                        last_event = format!("Saved preset {:02}", slot);
-                    } else if !previous_buttons.write_preset {
-                        if let Some(slot) = buttons.active_preset() {
-                            save_state_file(&preset_file(slot), &state);
-                            last_event = format!("Saved preset {:02}", slot);
-                        }
-                    }
-                } else if let Some(slot) = buttons.rising_preset(&previous_buttons) {
-                    if let Some(mut loaded) = load_state_file(&preset_file(slot)) {
-                        loaded.dial_0 = state.dial_0;
-                        state = loaded;
-                        last_event = format!("Loaded preset {:02}", slot);
-                    } else {
-                        last_event = format!("Preset {:02} not found", slot);
-                    }
-                }
-                previous_buttons = buttons;
 
                 universe[12] = (dmx_packets % 255) as u8;
                 {
@@ -723,16 +1075,11 @@ impl App {
                 }
 
                 if dmx_packets % 3 == 0 {
-                    let mut dmx_preview = [0u8; 32];
-                    dmx_preview.copy_from_slice(
-                        &universe[DMXOUTPUT_HEADER.len()..DMXOUTPUT_HEADER.len() + 32],
-                    );
                     let _ = state_sender.send(ControllerSnapshot {
                         state,
-                        buttons,
+                        mirror: mirror.clone(),
                         last_event: last_event.clone(),
                         dmx_packets,
-                        dmx_preview,
                     });
                 }
 
@@ -761,7 +1108,18 @@ impl MatchEvent for App {
         self.midi_ports_summary = if names.is_empty() {
             "MIDI inputs: none detected".to_string()
         } else {
-            format!("MIDI inputs: {}", names.join(", "))
+            let shown: Vec<String> = names.iter().take(3).cloned().collect();
+            let extra = names.len().saturating_sub(shown.len());
+            if extra > 0 {
+                format!(
+                    "MIDI inputs ({}): {} (+{} more)",
+                    names.len(),
+                    shown.join(", "),
+                    extra
+                )
+            } else {
+                format!("MIDI inputs ({}): {}", names.len(), shown.join(", "))
+            }
         };
         self.refresh_ui(cx);
     }
@@ -777,7 +1135,45 @@ impl MatchEvent for App {
         }
     }
 
-    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for index in 0..8 {
+            let id = LiveId::from_str(&format!("top_knob_{index}"));
+            if let Some(value) = self.slider_action_value(cx, actions, id) {
+                let _ = self.ui_controls.send(UiControlMessage::SetTopKnob {
+                    index,
+                    value: Self::slider_ui_to_norm(value),
+                });
+            }
+        }
+        for index in 0..9 {
+            let id = LiveId::from_str(&format!("fader_{index}"));
+            if let Some(value) = self.slider_action_value(cx, actions, id) {
+                let _ = self.ui_controls.send(UiControlMessage::SetFader {
+                    index,
+                    value: Self::slider_ui_to_norm(value),
+                });
+            }
+        }
+        for index in 0..13 {
+            let id = LiveId::from_str(&format!("scene_btn_{index}"));
+            if self.button_clicked(cx, actions, id) {
+                if DEBUG_SCENE_EVENTS {
+                    println!("scene_change source=ui action=click slot={index:02}");
+                }
+                let _ = self
+                    .ui_controls
+                    .send(UiControlMessage::TriggerScene { index });
+            }
+        }
+        for index in 0..9 {
+            let id = LiveId::from_str(&format!("trn_btn_{index}"));
+            if let Some(on) = self.toggle_action_value(cx, actions, id) {
+                let _ = self
+                    .ui_controls
+                    .send(UiControlMessage::SetTransport { index, on });
+            }
+        }
+    }
 }
 
 impl AppMain for App {
