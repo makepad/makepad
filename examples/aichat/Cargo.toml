@@ -9,4 +9,4 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 makepad-widgets = { path = "../../widgets", features = ["maps", "pdf"] }
 makepad-code-editor = { path = "../../code_editor" }
-makepad-ai = { path = "../../studio/ai" }
+makepad-ai = { path = "../../old/studio/ai" }

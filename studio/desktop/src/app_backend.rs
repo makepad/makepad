@@ -1,5 +1,40 @@
 use super::*;
 
+fn parse_mounts_spec(spec: &str, item_sep: char, pair_sep: char) -> Vec<MountConfig> {
+    spec.split(item_sep)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .filter_map(|token| {
+            let (name, path_str) = token.split_once(pair_sep)?;
+            let name = name.trim();
+            let path_str = path_str.trim();
+            if name.is_empty() || path_str.is_empty() {
+                return None;
+            }
+            let path = std::path::PathBuf::from(path_str).canonicalize().ok()?;
+            Some(MountConfig {
+                name: name.to_string(),
+                path,
+            })
+        })
+        .collect()
+}
+
+fn parse_cli_mounts_spec() -> Option<String> {
+    let mut mounts_spec = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(spec) = arg.strip_prefix("--mounts=") {
+            mounts_spec = Some(spec.to_string());
+            continue;
+        }
+        if arg == "--mounts" {
+            mounts_spec = Some(args.next().unwrap_or_default());
+        }
+    }
+    mounts_spec
+}
+
 impl App {
     pub(super) fn apply_mount_file_tree_diff(
         &mut self,
@@ -87,25 +122,13 @@ impl App {
             }
         };
 
-        let mut mounts = Vec::new();
-        if let Ok(spec) = env::var("STUDIO2_MOUNTS") {
-            for token in spec.split(';').map(str::trim).filter(|t| !t.is_empty()) {
-                let Some((name, path_str)) = token.split_once('=') else {
-                    continue;
-                };
-                let name = name.trim();
-                let path_str = path_str.trim();
-                if name.is_empty() || path_str.is_empty() {
-                    continue;
-                }
-                if let Ok(path) = std::path::PathBuf::from(path_str).canonicalize() {
-                    mounts.push(MountConfig {
-                        name: name.to_string(),
-                        path,
-                    });
-                }
-            }
-        }
+        let mut mounts = if let Some(spec) = parse_cli_mounts_spec() {
+            parse_mounts_spec(&spec, ',', ':')
+        } else if let Ok(spec) = env::var("STUDIO2_MOUNTS") {
+            parse_mounts_spec(&spec, ';', '=')
+        } else {
+            Vec::new()
+        };
         if mounts.is_empty() {
             mounts.push(MountConfig {
                 name: "makepad".to_string(),
