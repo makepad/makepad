@@ -613,6 +613,24 @@ fn generate_app_icon_xcassets(app_dir: &Path, build_crate: &str) -> Result<bool,
         ],
     )?;
 
+    // Merge actool's partial Info.plist (contains CFBundleIcons for iOS 15)
+    // into the main Info.plist.
+    let actool_plist = app_dir.join("actool-Info.plist");
+    if actool_plist.is_file() {
+        let main_plist = app_dir.join("Info.plist");
+        // PlistBuddy Merge copies all keys from source into destination
+        shell_env_cap(
+            &[],
+            &cwd,
+            "/usr/libexec/PlistBuddy",
+            &[
+                "-c",
+                &format!("Merge {}", actool_plist.to_string_lossy()),
+                &main_plist.to_string_lossy(),
+            ],
+        )?;
+    }
+
     Ok(true)
 }
 
