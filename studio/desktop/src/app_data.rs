@@ -2,8 +2,7 @@ use crate::{
     makepad_code_editor::CodeSession,
     makepad_studio_backend::{
         EventSample, FileNodeType, FileTreeData, GCSample, GPUSample, GitStatus, LogLevel,
-        LogSource, QueryId, RunnableBuild,
-        StudioConnection,
+        LogSource, QueryId, RunnableBuild, StudioConnection,
     },
     makepad_widgets::{file_tree::GitStatusDotKind, *},
 };
@@ -75,6 +74,7 @@ pub struct MountState {
     pub file_filter: String,
     pub file_filter_results: Vec<String>,
     pub file_filter_query: Option<QueryId>,
+    pub file_filter_pending: bool,
     pub log_filter: String,
     pub log_tail: bool,
 }
@@ -95,6 +95,7 @@ impl Default for MountState {
             file_filter: String::new(),
             file_filter_results: Vec::new(),
             file_filter_query: None,
+            file_filter_pending: false,
             log_filter: String::new(),
             log_tail: true,
         }

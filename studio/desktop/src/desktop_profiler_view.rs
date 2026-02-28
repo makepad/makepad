@@ -191,11 +191,7 @@ struct DesktopProfilerEventChart {
 }
 
 impl DesktopProfilerEventChart {
-    fn profiler_tab_id_from_path(
-        &self,
-        cx: &Cx,
-        data: &AppData,
-    ) -> Option<LiveId> {
+    fn profiler_tab_id_from_path(&self, cx: &Cx, data: &AppData) -> Option<LiveId> {
         let path = cx.widget_tree().path_to(self.uid);
         path.iter()
             .rev()
@@ -216,7 +212,9 @@ impl DesktopProfilerEventChart {
     }
 
     fn sync_live_window(&mut self, latest_sample_end: f64) {
-        let window = self.current_window_seconds().max(MIN_PROFILE_WINDOW_SECONDS);
+        let window = self
+            .current_window_seconds()
+            .max(MIN_PROFILE_WINDOW_SECONDS);
         self.time_range = if latest_sample_end <= window {
             TimeRange {
                 start: 0.0,
@@ -240,7 +238,9 @@ impl DesktopProfilerEventChart {
     }
 
     fn has_samples(samples: &UiProfilerSamples) -> bool {
-        !(samples.event_samples.is_empty() && samples.gpu_samples.is_empty() && samples.gc_samples.is_empty())
+        !(samples.event_samples.is_empty()
+            && samples.gpu_samples.is_empty()
+            && samples.gc_samples.is_empty())
     }
 
     fn latest_sample_end(samples: &UiProfilerSamples) -> Option<f64> {
@@ -369,7 +369,8 @@ impl DesktopProfilerEventChart {
                 if sample_start > self.time_range.end {
                     break;
                 }
-                let color = LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32 | 0xff000000;
+                let color =
+                    LiveId(0).bytes_append(&sample.event_u32.to_be_bytes()).0 as u32 | 0xff000000;
                 self.draw_item.color = Vec4f::from_u32(color);
                 self.draw_block(
                     cx,
@@ -496,12 +497,9 @@ impl DesktopProfilerEventChart {
         base_y: f64,
         label: &mut String,
     ) {
-        let Some(graph_rect) = self.draw_graph_lane_background(
-            cx,
-            rect,
-            base_y,
-            PROFILE_FRAMETIME_GRAPH_OFFSET_Y,
-        ) else {
+        let Some(graph_rect) =
+            self.draw_graph_lane_background(cx, rect, base_y, PROFILE_FRAMETIME_GRAPH_OFFSET_Y)
+        else {
             return;
         };
 
@@ -553,7 +551,9 @@ impl DesktopProfilerEventChart {
 
         self.draw_vector.set_color(0.95, 0.64, 0.12, 1.0);
         let mut is_first = true;
-        let Some((plot_start, plot_end)) = self.graph_plot_range_with_edges(&samples.gpu_samples, |sample| sample.end) else {
+        let Some((plot_start, plot_end)) =
+            self.graph_plot_range_with_edges(&samples.gpu_samples, |sample| sample.end)
+        else {
             return;
         };
         for sample in &samples.gpu_samples[plot_start..plot_end] {
@@ -580,12 +580,9 @@ impl DesktopProfilerEventChart {
         base_y: f64,
         label: &mut String,
     ) {
-        let Some(graph_rect) = self.draw_graph_lane_background(
-            cx,
-            rect,
-            base_y,
-            PROFILE_COUNTS_GRAPH_OFFSET_Y,
-        ) else {
+        let Some(graph_rect) =
+            self.draw_graph_lane_background(cx, rect, base_y, PROFILE_COUNTS_GRAPH_OFFSET_Y)
+        else {
             return;
         };
 
@@ -622,7 +619,9 @@ impl DesktopProfilerEventChart {
         self.draw_time
             .draw_abs(cx, graph_rect.pos + dvec2(4.0, 2.0), label);
 
-        let Some((plot_start, plot_end)) = self.graph_plot_range_with_edges(&samples.gpu_samples, |sample| sample.end) else {
+        let Some((plot_start, plot_end)) =
+            self.graph_plot_range_with_edges(&samples.gpu_samples, |sample| sample.end)
+        else {
             return;
         };
 
@@ -703,12 +702,9 @@ impl DesktopProfilerEventChart {
         base_y: f64,
         label: &mut String,
     ) {
-        let Some(graph_rect) = self.draw_graph_lane_background(
-            cx,
-            rect,
-            base_y,
-            PROFILE_UPLOAD_GRAPH_OFFSET_Y,
-        ) else {
+        let Some(graph_rect) =
+            self.draw_graph_lane_background(cx, rect, base_y, PROFILE_UPLOAD_GRAPH_OFFSET_Y)
+        else {
             return;
         };
 
@@ -749,7 +745,9 @@ impl DesktopProfilerEventChart {
         self.draw_time
             .draw_abs(cx, graph_rect.pos + dvec2(4.0, 2.0), label);
 
-        let Some((plot_start, plot_end)) = self.graph_plot_range_with_edges(&samples.gpu_samples, |sample| sample.end) else {
+        let Some((plot_start, plot_end)) =
+            self.graph_plot_range_with_edges(&samples.gpu_samples, |sample| sample.end)
+        else {
             return;
         };
 
@@ -967,7 +965,8 @@ impl Widget for DesktopProfilerEventChart {
 
             self.draw_time_grid(cx, &rect, &mut label);
             self.draw_vector.begin();
-            self.draw_time.draw_abs(cx, rect.pos + dvec2(4.0, 2.0), "App");
+            self.draw_time
+                .draw_abs(cx, rect.pos + dvec2(4.0, 2.0), "App");
             self.draw_profile_store(cx, &rect, samples, 0.0);
             self.draw_gpu_frametime_graph(cx, &rect, samples, 0.0, &mut label);
             self.draw_gpu_counts_graph(cx, &rect, samples, 0.0, &mut label);
@@ -1009,7 +1008,9 @@ impl Widget for DesktopProfilerEventChart {
                 if e.device.is_mouse() {
                     let zoom = (1.03).powf(e.scroll.y / 150.0);
                     if self.follow_live {
-                        let window = self.current_window_seconds().max(MIN_PROFILE_WINDOW_SECONDS);
+                        let window = self
+                            .current_window_seconds()
+                            .max(MIN_PROFILE_WINDOW_SECONDS);
                         let next_window = (window * zoom).max(MIN_PROFILE_WINDOW_SECONDS);
                         self.time_range = TimeRange {
                             start: self.time_range.end - next_window,
@@ -1046,11 +1047,7 @@ pub struct DesktopProfilerView {
 }
 
 impl DesktopProfilerView {
-    fn profiler_tab_id_from_path(
-        &self,
-        cx: &Cx,
-        data: &AppData,
-    ) -> Option<LiveId> {
+    fn profiler_tab_id_from_path(&self, cx: &Cx, data: &AppData) -> Option<LiveId> {
         let path = cx.widget_tree().path_to(self.uid);
         path.iter()
             .rev()
@@ -1112,7 +1109,8 @@ impl Widget for DesktopProfilerView {
             .and_then(|id| data.profiler_running_by_build.get(&id).copied())
             .unwrap_or(true);
 
-        self.check_box(cx, ids!(running_button)).set_active(cx, running);
+        self.check_box(cx, ids!(running_button))
+            .set_active(cx, running);
         if let Some(mut chart) = self
             .view
             .widget(cx, ids!(chart))
@@ -1133,8 +1131,7 @@ impl Widget for DesktopProfilerView {
             let _ = write!(
                 &mut self.tmp_status_label,
                 "Build: {} ({})",
-                tab_state.title,
-                tab_state.build_id.0
+                tab_state.title, tab_state.build_id.0
             );
             let _ = write!(
                 &mut self.tmp_sample_count_label,

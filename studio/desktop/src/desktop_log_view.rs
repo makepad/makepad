@@ -368,6 +368,20 @@ impl DesktopLogViewRef {
         self.borrow().map(|inner| inner.tail).unwrap_or(true)
     }
 
+    pub fn scrolled(&self, cx: &mut Cx, actions: &Actions) -> bool {
+        let Some(inner) = self.borrow() else {
+            return false;
+        };
+        inner.view.portal_list(cx, ids!(list)).scrolled(actions)
+    }
+
+    pub fn is_at_end(&self, cx: &mut Cx) -> bool {
+        let Some(inner) = self.borrow() else {
+            return true;
+        };
+        inner.view.portal_list(cx, ids!(list)).is_at_end()
+    }
+
     pub fn open_location_requested(&self, actions: &Actions) -> Option<(String, usize, usize)> {
         let item = actions.find_widget_action(self.widget_uid())?;
         if let DesktopLogViewAction::OpenLocation { path, line, column } = item.cast() {

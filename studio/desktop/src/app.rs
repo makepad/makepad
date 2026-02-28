@@ -81,6 +81,10 @@ pub struct App {
     pub ui: WidgetRef,
     #[rust]
     pub data: AppData,
+    #[rust]
+    pub file_filter_debounce_timer: Timer,
+    #[rust]
+    pub pending_file_filter: Option<(String, String)>,
 }
 
 impl MatchEvent for App {
@@ -108,7 +112,7 @@ impl MatchEvent for App {
                     .text_input(cx, ids!(file_tree_filter))
                     .changed(actions)
                 {
-                    self.set_mount_file_filter(cx, &active_mount, filter);
+                    self.queue_mount_file_filter(cx, &active_mount, filter);
                 }
                 if let Some((mount, package, outside_studio)) = workspace
                     .desktop_run_list(cx, ids!(run_list))
@@ -132,17 +136,36 @@ impl MatchEvent for App {
                     self.set_mount_log_tail(cx, &active_mount, tail);
                     self.restart_log_query_for_mount(cx, &active_mount);
                 }
-                if let Some(filter) = workspace.text_input(cx, ids!(log_filter)).changed(actions)
-                {
+                let log_view = workspace.desktop_log_view(cx, ids!(log_view));
+                if log_view.scrolled(cx, actions) && !log_view.is_at_end(cx) {
+                    let was_tailing = self
+                        .mount_state(&active_mount)
+                        .map(|state| state.log_tail)
+                        .unwrap_or(true);
+                    if was_tailing {
+                        workspace
+                            .check_box(cx, ids!(log_tail_toggle))
+                            .set_active(cx, false);
+                        self.set_mount_log_tail(cx, &active_mount, false);
+                        self.restart_log_query_for_mount(cx, &active_mount);
+                    }
+                }
+                if let Some(filter) = workspace.text_input(cx, ids!(log_filter)).changed(actions) {
                     self.set_mount_log_filter(&active_mount, filter);
                     self.restart_log_query_for_mount(cx, &active_mount);
                 }
-                if workspace.button(cx, ids!(clear_log_filter)).clicked(actions) {
+                if workspace
+                    .button(cx, ids!(clear_log_filter))
+                    .clicked(actions)
+                {
                     self.set_mount_log_filter(&active_mount, String::new());
                     workspace.text_input(cx, ids!(log_filter)).set_text(cx, "");
                     self.restart_log_query_for_mount(cx, &active_mount);
                 }
-                if workspace.button(cx, ids!(log_open_profiler)).clicked(actions) {
+                if workspace
+                    .button(cx, ids!(log_open_profiler))
+                    .clicked(actions)
+                {
                     self.open_profiler_for_mount(cx, &active_mount);
                 }
             }
@@ -224,6 +247,15 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::Timer(timer_event) = event {
+            if self
+                .file_filter_debounce_timer
+                .is_timer(timer_event)
+                .is_some()
+            {
+                self.flush_queued_mount_file_filter(cx);
+            }
+        }
         self.match_event(cx, event);
         self.ui
             .handle_event(cx, event, &mut Scope::with_data(&mut self.data));

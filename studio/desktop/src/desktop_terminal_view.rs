@@ -432,7 +432,11 @@ impl DesktopTerminalView {
             return;
         }
         let was_at_bottom = self.follow_output || self.is_scrolled_to_bottom();
-        let history_len = data.terminal_history_len_by_path.get(path).copied().unwrap_or(0);
+        let history_len = data
+            .terminal_history_len_by_path
+            .get(path)
+            .copied()
+            .unwrap_or(0);
         if let Some(terminal) = &mut self.terminal {
             if chunk_start < history_len {
                 let history_end = history_len.min(chunk_end);
@@ -944,8 +948,7 @@ impl DesktopTerminalView {
     }
 
     fn is_cell_selected(&self, row: usize, col: usize) -> bool {
-        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered()
-        else {
+        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered() else {
             return false;
         };
         if row < start_row || row > end_row {
@@ -969,8 +972,7 @@ impl DesktopTerminalView {
         if cols == 0 {
             return None;
         }
-        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered()
-        else {
+        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered() else {
             return None;
         };
 
@@ -984,11 +986,7 @@ impl DesktopTerminalView {
                 continue;
             }
             let from_col = if row == start_row { start_col } else { 0 };
-            let to_col_exclusive = if row == end_row {
-                end_col
-            } else {
-                cols
-            };
+            let to_col_exclusive = if row == end_row { end_col } else { cols };
             if from_col >= to_col_exclusive {
                 continue;
             }
@@ -1110,13 +1108,22 @@ impl Widget for DesktopTerminalView {
                 let bottom_trigger = vp_bottom - edge_band;
 
                 if abs.y <= top_trigger {
-                    let delta = (top_trigger - abs.y).max(cell_height * 0.25).min(scroll_speed);
+                    let delta = (top_trigger - abs.y)
+                        .max(cell_height * 0.25)
+                        .min(scroll_speed);
                     let new_y = (self.current_scroll_pixels() - delta).max(0.0);
-                    let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
+                    let _ = self
+                        .scroll_bars
+                        .set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
                 } else if abs.y >= bottom_trigger {
-                    let delta = (abs.y - bottom_trigger).max(cell_height * 0.25).min(scroll_speed);
-                    let new_y = (self.current_scroll_pixels() + delta).min(self.max_scroll_pixels());
-                    let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
+                    let delta = (abs.y - bottom_trigger)
+                        .max(cell_height * 0.25)
+                        .min(scroll_speed);
+                    let new_y =
+                        (self.current_scroll_pixels() + delta).min(self.max_scroll_pixels());
+                    let _ = self
+                        .scroll_bars
+                        .set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
                 }
 
                 self.follow_output = self.is_scrolled_to_bottom();
