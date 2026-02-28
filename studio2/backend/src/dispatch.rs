@@ -1,17 +1,18 @@
-use crate::log_store::{
-    AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore,
-};
+use crate::log_store::{AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore};
 use crate::process_manager::ProcessManager;
 use crate::protocol::{
     AppToStudioMsg, AppToStudioVec, BuildBoxInfo, BuildBoxStatus, BuildBoxToStudio,
     BuildBoxToStudioVec, BuildInfo, ClientId, LogEntry, LogLevel, LogSource, QueryId,
-    SaveResult, StudioToAppMsg, StudioToAppVec, StudioToBuildBox, StudioToBuildBoxVec,
-    StudioToUI, UIToStudio, UIToStudioEnvelope,
+    RunnableBuild, SaveResult, StudioToAppMsg, StudioToAppVec, StudioToBuildBox,
+    StudioToBuildBoxVec, StudioToUI, TerminalGrid, UIToStudio, UIToStudioEnvelope,
 };
+use crate::terminal_manager::TerminalManager;
 use crate::virtual_fs::{protocol_search_results, VirtualFs};
 use makepad_micro_serde::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,6 +71,14 @@ pub enum StudioEvent {
         build_id: QueryId,
         exit_code: Option<i32>,
     },
+    TerminalOutput {
+        path: String,
+        data: Vec<u8>,
+    },
+    TerminalExited {
+        path: String,
+        exit_code: i32,
+    },
     Shutdown,
 }
 
@@ -104,6 +113,7 @@ pub struct StudioCore {
     rx: Receiver<StudioEvent>,
     event_tx: Sender<StudioEvent>,
     pub vfs: VirtualFs,
+    studio_addr: Option<String>,
     next_client_id: u16,
     ui_clients: HashMap<u64, UiClient>,
     app_sockets: HashMap<u64, AppSocket>,
@@ -114,16 +124,23 @@ pub struct StudioCore {
     log_store: LogStore,
     profiler_store: ProfilerStore,
     process_manager: ProcessManager,
+    terminal_manager: TerminalManager,
     live_log_queries: HashMap<QueryId, LiveLogSubscription>,
     live_profiler_queries: HashMap<QueryId, LiveProfilerSubscription>,
 }
 
 impl StudioCore {
-    pub fn new(rx: Receiver<StudioEvent>, event_tx: Sender<StudioEvent>, vfs: VirtualFs) -> Self {
+    pub fn new(
+        rx: Receiver<StudioEvent>,
+        event_tx: Sender<StudioEvent>,
+        vfs: VirtualFs,
+        studio_addr: Option<String>,
+    ) -> Self {
         Self {
             rx,
             event_tx,
             vfs,
+            studio_addr,
             next_client_id: 0,
             ui_clients: HashMap::new(),
             app_sockets: HashMap::new(),
@@ -134,6 +151,7 @@ impl StudioCore {
             log_store: LogStore::default(),
             profiler_store: ProfilerStore::default(),
             process_manager: ProcessManager::default(),
+            terminal_manager: TerminalManager::default(),
             live_log_queries: HashMap::new(),
             live_profiler_queries: HashMap::new(),
         }
@@ -222,6 +240,10 @@ impl StudioCore {
                 build_id,
                 exit_code,
             } => self.on_process_exited(build_id, exit_code),
+            StudioEvent::TerminalOutput { path, data } => self.on_terminal_output(path, data),
+            StudioEvent::TerminalExited { path, exit_code } => {
+                self.on_terminal_exited(path, exit_code)
+            }
             StudioEvent::Shutdown => return false,
         }
         true
@@ -300,7 +322,7 @@ impl StudioCore {
                 Ok(()) => match self.vfs.load_file_tree(&name) {
                     Ok(data) => self.send_ui_message(
                         web_socket_id,
-                        StudioToUI::FileTree { root: name, data },
+                        StudioToUI::FileTree { mount: name, data },
                         self.ui_format(web_socket_id),
                     ),
                     Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
@@ -308,20 +330,36 @@ impl StudioCore {
                 Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
             },
             UIToStudio::Unmount { name } => {
+                let changes = match self.vfs.load_file_tree(&name) {
+                    Ok(tree) => tree
+                        .nodes
+                        .into_iter()
+                        .map(|node| crate::protocol::FileTreeChange::Removed { path: node.path })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
                 self.vfs.unmount(&name);
                 self.send_ui_message(
                     web_socket_id,
                     StudioToUI::FileTree {
-                        root: name,
+                        mount: name.clone(),
                         data: crate::protocol::FileTreeData { nodes: Vec::new() },
                     },
                     self.ui_format(web_socket_id),
                 );
+                self.send_ui_message(
+                    web_socket_id,
+                    StudioToUI::FileTreeDiff {
+                        mount: name,
+                        changes,
+                    },
+                    self.ui_format(web_socket_id),
+                );
             }
-            UIToStudio::LoadFileTree { root } => match self.vfs.load_file_tree(&root) {
+            UIToStudio::LoadFileTree { mount } => match self.vfs.load_file_tree(&mount) {
                 Ok(data) => self.send_ui_message(
                     web_socket_id,
-                    StudioToUI::FileTree { root, data },
+                    StudioToUI::FileTree { mount, data },
                     self.ui_format(web_socket_id),
                 ),
                 Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
@@ -357,12 +395,18 @@ impl StudioCore {
                     self.ui_format(web_socket_id),
                 );
             }
+            UIToStudio::DeleteFile { path } => {
+                self.terminal_manager.close_terminal(&path);
+                if let Err(err) = self.vfs.delete_path(&path) {
+                    self.send_ui_error(web_socket_id, err.to_string());
+                }
+            }
             UIToStudio::FindFiles {
-                root,
+                mount,
                 pattern,
                 is_regex: _,
                 max_results,
-            } => match self.vfs.find_files(root.as_deref(), &pattern, max_results) {
+            } => match self.vfs.find_files(mount.as_deref(), &pattern, max_results) {
                 Ok(paths) => self.send_ui_message(
                     web_socket_id,
                     StudioToUI::FindFileResults {
@@ -375,12 +419,12 @@ impl StudioCore {
                 Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
             },
             UIToStudio::SearchFiles {
-                root,
+                mount,
                 pattern,
                 is_regex: _,
                 glob: _,
                 max_results,
-            } => match self.vfs.find_files(root.as_deref(), &pattern, max_results) {
+            } => match self.vfs.find_files(mount.as_deref(), &pattern, max_results) {
                 Ok(paths) => self.send_ui_message(
                     web_socket_id,
                     StudioToUI::SearchFileResults {
@@ -392,46 +436,78 @@ impl StudioCore {
                 ),
                 Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
             },
-            UIToStudio::GitLog { root, max_count } => {
-                match self.vfs.git_log(&root, max_count.unwrap_or(100)) {
+            UIToStudio::GitLog { mount, max_count } => {
+                match self.vfs.git_log(&mount, max_count.unwrap_or(100)) {
                     Ok(log) => self.send_ui_message(
                         web_socket_id,
-                        StudioToUI::GitLog { root, log },
+                        StudioToUI::GitLog { mount, log },
                         self.ui_format(web_socket_id),
                     ),
                     Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
                 }
             }
             UIToStudio::CreateBranch {
-                root,
+                mount,
                 name,
                 from_ref,
             } => {
-                if let Err(err) = self.vfs.create_branch(&root, &name, from_ref.as_deref()) {
+                let before = self.vfs.load_file_tree(&mount).ok();
+                if let Err(err) = self.vfs.create_branch(&mount, &name, from_ref.as_deref()) {
                     self.send_ui_error(web_socket_id, err.to_string());
                     return;
                 }
-                match self.vfs.load_file_tree(&root) {
+                match self.vfs.load_file_tree(&mount) {
                     Ok(data) => self.send_ui_message(
                         web_socket_id,
-                        StudioToUI::FileTree { root, data },
+                        StudioToUI::FileTree {
+                            mount: mount.clone(),
+                            data: data.clone(),
+                        },
                         self.ui_format(web_socket_id),
                     ),
                     Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
+                }
+                if let Some(before) = before {
+                    if let Ok(after) = self.vfs.load_file_tree(&mount) {
+                        self.send_ui_message(
+                            web_socket_id,
+                            StudioToUI::FileTreeDiff {
+                                mount,
+                                changes: file_tree_diff(&before, &after),
+                            },
+                            self.ui_format(web_socket_id),
+                        );
+                    }
                 }
             }
-            UIToStudio::DeleteBranch { root, name } => {
-                if let Err(err) = self.vfs.delete_branch(&root, &name) {
+            UIToStudio::DeleteBranch { mount, name } => {
+                let before = self.vfs.load_file_tree(&mount).ok();
+                if let Err(err) = self.vfs.delete_branch(&mount, &name) {
                     self.send_ui_error(web_socket_id, err.to_string());
                     return;
                 }
-                match self.vfs.load_file_tree(&root) {
+                match self.vfs.load_file_tree(&mount) {
                     Ok(data) => self.send_ui_message(
                         web_socket_id,
-                        StudioToUI::FileTree { root, data },
+                        StudioToUI::FileTree {
+                            mount: mount.clone(),
+                            data: data.clone(),
+                        },
                         self.ui_format(web_socket_id),
                     ),
                     Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
+                }
+                if let Some(before) = before {
+                    if let Ok(after) = self.vfs.load_file_tree(&mount) {
+                        self.send_ui_message(
+                            web_socket_id,
+                            StudioToUI::FileTreeDiff {
+                                mount,
+                                changes: file_tree_diff(&before, &after),
+                            },
+                            self.ui_format(web_socket_id),
+                        );
+                    }
                 }
             }
             UIToStudio::ListBuilds => {
@@ -443,19 +519,37 @@ impl StudioCore {
                     self.ui_format(web_socket_id),
                 );
             }
+            UIToStudio::LoadRunnableBuilds { mount } => {
+                let cwd = match self.vfs.resolve_mount(&mount) {
+                    Ok(cwd) => cwd,
+                    Err(err) => {
+                        self.send_ui_error(web_socket_id, err.to_string());
+                        return;
+                    }
+                };
+                match discover_runnable_builds(&cwd) {
+                    Ok(builds) => self.send_ui_message(
+                        web_socket_id,
+                        StudioToUI::RunnableBuilds { mount, builds },
+                        self.ui_format(web_socket_id),
+                    ),
+                    Err(err) => self.send_ui_error(web_socket_id, err),
+                }
+            }
             UIToStudio::CargoRun {
-                root,
+                mount,
                 args,
                 startup_query: _,
                 env,
                 buildbox,
             } => {
                 if let Some(buildbox_name) = buildbox {
-                    let package = parse_package_name(&args).unwrap_or_else(|| "unknown".to_string());
+                    let package =
+                        parse_package_name(&args).unwrap_or_else(|| "unknown".to_string());
                     let env = env.unwrap_or_default();
                     let msg = StudioToBuildBox::CargoBuild {
                         build_id: query_id,
-                        root: root.clone(),
+                        mount: mount.clone(),
                         args,
                         env,
                     };
@@ -466,19 +560,22 @@ impl StudioCore {
 
                     let info = BuildInfo {
                         build_id: query_id,
-                        root: root.clone(),
+                        mount: mount.clone(),
                         package,
                         active: true,
                     };
                     self.remote_build_owner
                         .insert(query_id, buildbox_name.clone());
                     self.remote_builds.insert(query_id, info.clone());
-                    self.set_buildbox_status(&buildbox_name, BuildBoxStatus::Building { build_id: query_id });
+                    self.set_buildbox_status(
+                        &buildbox_name,
+                        BuildBoxStatus::Building { build_id: query_id },
+                    );
                     self.send_ui_message(
                         web_socket_id,
                         StudioToUI::BuildStarted {
                             build_id: info.build_id,
-                            root: info.root,
+                            mount: info.mount,
                             package: info.package,
                         },
                         self.ui_format(web_socket_id),
@@ -486,7 +583,7 @@ impl StudioCore {
                     return;
                 }
 
-                let cwd = match self.vfs.resolve_root(&root) {
+                let cwd = match self.vfs.resolve_mount(&mount) {
                     Ok(cwd) => cwd,
                     Err(err) => {
                         self.send_ui_error(web_socket_id, err.to_string());
@@ -495,17 +592,18 @@ impl StudioCore {
                 };
                 match self.process_manager.start_cargo_run(
                     query_id,
-                    root.clone(),
+                    mount.clone(),
                     &cwd,
                     args,
                     env.unwrap_or_default(),
+                    self.studio_addr.clone(),
                     self.event_tx.clone(),
                 ) {
                     Ok(info) => self.send_ui_message(
                         web_socket_id,
                         StudioToUI::BuildStarted {
                             build_id: info.build_id,
-                            root: info.root,
+                            mount: info.mount,
                             package: info.package,
                         },
                         self.ui_format(web_socket_id),
@@ -521,10 +619,9 @@ impl StudioCore {
                     self.send_ui_error(web_socket_id, format!("unknown build: {}", build_id.0));
                     return;
                 };
-                if let Err(err) = self.send_to_buildbox_name(
-                    &buildbox_name,
-                    StudioToBuildBox::StopBuild { build_id },
-                ) {
+                if let Err(err) = self
+                    .send_to_buildbox_name(&buildbox_name, StudioToBuildBox::StopBuild { build_id })
+                {
                     self.send_ui_error(web_socket_id, err);
                 }
             }
@@ -554,10 +651,9 @@ impl StudioCore {
                 }
             }
             UIToStudio::Click { build_id, x, y } => {
-                if let Err(err) = self.send_app_msg(
-                    build_id,
-                    StudioToAppMsg::Click { x, y, button: 1 },
-                ) {
+                if let Err(err) =
+                    self.send_app_msg(build_id, StudioToAppMsg::Click { x, y, button: 1 })
+                {
                     self.send_ui_error(web_socket_id, err);
                 }
             }
@@ -623,6 +719,66 @@ impl StudioCore {
                 ) {
                     self.send_ui_error(web_socket_id, err);
                 }
+            }
+            UIToStudio::TerminalOpen {
+                path,
+                cols,
+                rows,
+                env,
+            } => {
+                let Some(mount) = mount_from_virtual_path(&path).map(ToOwned::to_owned) else {
+                    self.send_ui_error(
+                        web_socket_id,
+                        format!("invalid terminal path (missing mount): {}", path),
+                    );
+                    return;
+                };
+                let cwd = match self.vfs.resolve_mount(&mount) {
+                    Ok(cwd) => cwd,
+                    Err(err) => {
+                        self.send_ui_error(web_socket_id, err.to_string());
+                        return;
+                    }
+                };
+                let history = self
+                    .vfs
+                    .resolve_path(&path)
+                    .ok()
+                    .and_then(|disk_path| fs::read(disk_path).ok())
+                    .unwrap_or_default();
+                match self.terminal_manager.open_terminal(
+                    path.clone(),
+                    mount,
+                    &cwd,
+                    cols,
+                    rows,
+                    env,
+                    self.event_tx.clone(),
+                ) {
+                    Ok(()) => self.send_ui_message(
+                        web_socket_id,
+                        StudioToUI::TerminalOpened {
+                            path: path.clone(),
+                            grid: terminal_grid_from_history(&history, cols, rows),
+                            history,
+                        },
+                        self.ui_format(web_socket_id),
+                    ),
+                    Err(err) => self.send_ui_error(web_socket_id, err),
+                }
+            }
+            UIToStudio::TerminalInput { path, data } => {
+                if let Err(err) = self.terminal_manager.send_input(&path, data) {
+                    self.send_ui_error(web_socket_id, err);
+                }
+            }
+            UIToStudio::TerminalResize { path, cols, rows } => {
+                if let Err(err) = self.terminal_manager.resize(&path, cols, rows) {
+                    self.send_ui_error(web_socket_id, err);
+                }
+            }
+            UIToStudio::TerminalClose { path } => {
+                self.terminal_manager.close_terminal(&path);
             }
             UIToStudio::QueryLogs {
                 build_id,
@@ -714,7 +870,11 @@ impl StudioCore {
             }
             UIToStudio::LogClear => {
                 self.log_store.clear();
-                self.send_ui_message(web_socket_id, StudioToUI::LogCleared, self.ui_format(web_socket_id));
+                self.send_ui_message(
+                    web_socket_id,
+                    StudioToUI::LogCleared,
+                    self.ui_format(web_socket_id),
+                );
             }
             UIToStudio::ListBuildBoxes => {
                 self.send_ui_message(
@@ -913,18 +1073,21 @@ impl StudioCore {
             }
             BuildBoxToStudio::BuildStarted { build_id } => {
                 if let Some(buildbox_name) = self.remote_build_owner.get(&build_id).cloned() {
-                    self.set_buildbox_status(
-                        &buildbox_name,
-                        BuildBoxStatus::Building { build_id },
-                    );
+                    self.set_buildbox_status(&buildbox_name, BuildBoxStatus::Building { build_id });
                 }
             }
-            BuildBoxToStudio::BuildStopped { build_id, exit_code } => {
+            BuildBoxToStudio::BuildStopped {
+                build_id,
+                exit_code,
+            } => {
                 if let Some(buildbox_name) = self.remote_build_owner.remove(&build_id) {
                     self.remote_builds.remove(&build_id);
                     self.set_buildbox_status(&buildbox_name, BuildBoxStatus::Idle);
                 }
-                self.broadcast_ui_message(StudioToUI::BuildStopped { build_id, exit_code });
+                self.broadcast_ui_message(StudioToUI::BuildStopped {
+                    build_id,
+                    exit_code,
+                });
             }
             BuildBoxToStudio::SyncComplete { tree_hash } => {
                 if let Some(socket) = self.buildbox_sockets.get_mut(&web_socket_id) {
@@ -1101,25 +1264,68 @@ impl StudioCore {
         if line.is_empty() {
             return;
         }
-        let level = classify_cargo_log_line(is_stderr, &line);
-        let (index, entry) = self.log_store.append(AppendLogEntry {
-            build_id: Some(build_id),
-            level,
-            source: LogSource::Cargo,
-            message: line,
-            file_name: None,
-            line: None,
-            column: None,
-            timestamp: None,
-        });
-        self.broadcast_live_log_entry(index, entry);
+        match parse_cargo_output_line(&line) {
+            ParsedCargoOutputLine::Structured(parsed) => {
+                let (index, entry) = self.log_store.append(AppendLogEntry {
+                    build_id: Some(build_id),
+                    level: parsed.level,
+                    source: LogSource::Cargo,
+                    message: parsed.message,
+                    file_name: parsed.file_name,
+                    line: parsed.line,
+                    column: parsed.column,
+                    timestamp: None,
+                });
+                self.broadcast_live_log_entry(index, entry);
+            }
+            ParsedCargoOutputLine::IgnoredStructured => {
+                // Ignore non-diagnostic cargo json lines (artifacts, summaries, etc).
+            }
+            ParsedCargoOutputLine::RawText => {
+                let level = classify_cargo_log_line(is_stderr, &line);
+                let (index, entry) = self.log_store.append(AppendLogEntry {
+                    build_id: Some(build_id),
+                    level,
+                    source: LogSource::Cargo,
+                    message: line,
+                    file_name: None,
+                    line: None,
+                    column: None,
+                    timestamp: None,
+                });
+                self.broadcast_live_log_entry(index, entry);
+            }
+        }
     }
 
     fn on_process_exited(&mut self, build_id: QueryId, exit_code: Option<i32>) {
-        if self.process_manager.mark_exited(build_id, exit_code).is_none() {
+        if self
+            .process_manager
+            .mark_exited(build_id, exit_code)
+            .is_none()
+        {
             return;
         }
-        self.broadcast_ui_message(StudioToUI::BuildStopped { build_id, exit_code });
+        self.broadcast_ui_message(StudioToUI::BuildStopped {
+            build_id,
+            exit_code,
+        });
+    }
+
+    fn on_terminal_output(&mut self, path: String, data: Vec<u8>) {
+        if data.is_empty() {
+            return;
+        }
+        let _ = append_terminal_history_bytes(&self.vfs, &path, &data);
+        self.broadcast_ui_message(StudioToUI::TerminalOutput { path, data });
+    }
+
+    fn on_terminal_exited(&mut self, path: String, exit_code: i32) {
+        self.terminal_manager.remove_terminal(&path);
+        self.broadcast_ui_message(StudioToUI::TerminalExited {
+            path,
+            code: exit_code,
+        });
     }
 
     fn broadcast_live_log_entry(&self, index: usize, entry: LogEntry) {
@@ -1204,6 +1410,162 @@ impl StudioCore {
     }
 }
 
+#[derive(Clone, Debug, Default, DeJson)]
+struct CargoMetadata {
+    packages: Vec<CargoMetadataPackage>,
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+struct CargoMetadataPackage {
+    name: String,
+    targets: Vec<CargoMetadataTarget>,
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+struct CargoMetadataTarget {
+    kind: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+struct RustcCompilerMessage {
+    reason: String,
+    message: Option<RustcMessage>,
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+struct RustcMessage {
+    message: String,
+    level: String,
+    spans: Vec<RustcSpan>,
+    rendered: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+struct RustcSpan {
+    file_name: String,
+    line_start: Option<usize>,
+    column_start: Option<usize>,
+    is_primary: Option<bool>,
+}
+
+enum ParsedCargoOutputLine {
+    Structured(ParsedCargoLogEntry),
+    IgnoredStructured,
+    RawText,
+}
+
+struct ParsedCargoLogEntry {
+    level: LogLevel,
+    message: String,
+    file_name: Option<String>,
+    line: Option<usize>,
+    column: Option<usize>,
+}
+
+fn discover_runnable_builds(root_path: &Path) -> Result<Vec<RunnableBuild>, String> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .current_dir(root_path)
+        .output()
+        .map_err(|err| {
+            format!(
+                "failed to run cargo metadata in {}: {}",
+                root_path.display(),
+                err
+            )
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed in {}\n{}\n{}",
+            root_path.display(),
+            stderr.trim(),
+            stdout.trim()
+        ));
+    }
+
+    let metadata = CargoMetadata::deserialize_json_lenient(&stdout)
+        .map_err(|err| format!("failed to parse cargo metadata json: {err:?}"))?;
+
+    let mut builds = Vec::new();
+    let mut seen = HashSet::new();
+    for package in metadata.packages {
+        let has_bin_target = package
+            .targets
+            .iter()
+            .any(|target| target.kind.iter().any(|kind| kind == "bin"));
+        if has_bin_target && seen.insert(package.name.clone()) {
+            builds.push(RunnableBuild {
+                package: package.name,
+            });
+        }
+    }
+    builds.sort_by(|a, b| a.package.cmp(&b.package));
+    Ok(builds)
+}
+
+fn terminal_grid_from_history(history: &[u8], cols: u16, rows: u16) -> TerminalGrid {
+    let mut terminal =
+        makepad_terminal_core::Terminal::new(cols.max(1) as usize, rows.max(1) as usize);
+    terminal.process_bytes(history);
+    let screen = terminal.screen();
+    let total_rows = screen.total_rows();
+    let start_row = total_rows.saturating_sub(rows as usize);
+    let mut text = String::new();
+    for row in start_row..total_rows {
+        if let Some(row_slice) = screen.row_slice_virtual(row) {
+            for col in 0..screen.cols() {
+                let ch = row_slice.get(col).map(|cell| cell.codepoint).unwrap_or(' ');
+                text.push(ch);
+            }
+        }
+        if row + 1 < total_rows {
+            text.push('\n');
+        }
+    }
+    TerminalGrid { cols, rows, text }
+}
+
+fn mount_from_virtual_path(path: &str) -> Option<&str> {
+    path.split('/').next().filter(|part| !part.is_empty())
+}
+
+fn append_terminal_history_bytes(vfs: &VirtualFs, path: &str, data: &[u8]) -> Result<(), String> {
+    let disk_path = vfs
+        .resolve_path(path)
+        .map_err(|err| format!("failed to resolve terminal path {}: {}", path, err))?;
+    if let Some(parent) = disk_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create terminal history directory {}: {}",
+                parent.display(),
+                err
+            )
+        })?;
+    }
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&disk_path)
+        .map_err(|err| {
+            format!(
+                "failed to open terminal history {}: {}",
+                disk_path.display(),
+                err
+            )
+        })?;
+    file.write_all(data).map_err(|err| {
+        format!(
+            "failed to append terminal history {}: {}",
+            disk_path.display(),
+            err
+        )
+    })
+}
+
 fn classify_cargo_log_line(is_stderr: bool, line: &str) -> LogLevel {
     let lower = line.to_ascii_lowercase();
     if lower.contains("error") {
@@ -1216,6 +1578,72 @@ fn classify_cargo_log_line(is_stderr: bool, line: &str) -> LogLevel {
         return LogLevel::Warning;
     }
     LogLevel::Log
+}
+
+fn parse_cargo_output_line(line: &str) -> ParsedCargoOutputLine {
+    let Ok(msg) = RustcCompilerMessage::deserialize_json_lenient(line) else {
+        return ParsedCargoOutputLine::RawText;
+    };
+    match msg.reason.as_str() {
+        "compiler-message" | "makepad-error-log" => {}
+        _ => return ParsedCargoOutputLine::IgnoredStructured,
+    }
+    let Some(message) = msg.message else {
+        return ParsedCargoOutputLine::IgnoredStructured;
+    };
+    let level = rustc_level_to_log_level(&message.level);
+    if matches!(level, LogLevel::Warning)
+        && message
+            .message
+            .starts_with("unstable feature specified for")
+    {
+        return ParsedCargoOutputLine::IgnoredStructured;
+    }
+
+    if let Some(span) = message
+        .spans
+        .iter()
+        .find(|span| span.is_primary.unwrap_or(false))
+    {
+        let file_name = if span.file_name.is_empty() {
+            None
+        } else {
+            Some(span.file_name.replace('\\', "/"))
+        };
+        return ParsedCargoOutputLine::Structured(ParsedCargoLogEntry {
+            level,
+            message: message.message,
+            file_name,
+            line: span.line_start.filter(|line| *line > 0),
+            column: span.column_start.filter(|column| *column > 0),
+        });
+    }
+
+    let trimmed = message.message.trim();
+    if trimmed.starts_with("Some errors have detailed explanations")
+        || trimmed.starts_with("For more information about an error")
+        || trimmed.contains("warnings emitted")
+        || trimmed.contains("warning emitted")
+    {
+        return ParsedCargoOutputLine::IgnoredStructured;
+    }
+    let fallback_text = message.rendered.unwrap_or_else(|| message.message);
+    ParsedCargoOutputLine::Structured(ParsedCargoLogEntry {
+        level,
+        message: fallback_text,
+        file_name: None,
+        line: None,
+        column: None,
+    })
+}
+
+fn rustc_level_to_log_level(level: &str) -> LogLevel {
+    match level {
+        "error" | "failure-note" | "panic" => LogLevel::Error,
+        "warning" => LogLevel::Warning,
+        // rustc may emit "note" / "help" / "log"
+        _ => LogLevel::Log,
+    }
 }
 
 fn parse_package_name(args: &[String]) -> Option<String> {
@@ -1235,6 +1663,93 @@ fn parse_package_name(args: &[String]) -> Option<String> {
         i += 1;
     }
     None
+}
+
+fn file_tree_diff(
+    before: &crate::protocol::FileTreeData,
+    after: &crate::protocol::FileTreeData,
+) -> Vec<crate::protocol::FileTreeChange> {
+    let mut before_by_path = HashMap::new();
+    for node in &before.nodes {
+        before_by_path.insert(node.path.as_str(), (&node.node_type, node.git_status));
+    }
+    let mut after_by_path = HashMap::new();
+    for node in &after.nodes {
+        after_by_path.insert(node.path.as_str(), (&node.node_type, node.git_status));
+    }
+
+    let mut changes = Vec::new();
+    for node in &before.nodes {
+        if !after_by_path.contains_key(node.path.as_str()) {
+            changes.push(crate::protocol::FileTreeChange::Removed {
+                path: node.path.clone(),
+            });
+        }
+    }
+    for node in &after.nodes {
+        match before_by_path.get(node.path.as_str()) {
+            None => changes.push(crate::protocol::FileTreeChange::Added {
+                path: node.path.clone(),
+                node_type: node.node_type.clone(),
+                git_status: node.git_status,
+            }),
+            Some((_, before_status)) if *before_status != node.git_status => {
+                changes.push(crate::protocol::FileTreeChange::Modified {
+                    path: node.path.clone(),
+                    git_status: node.git_status,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    changes.sort_by(|a, b| {
+        let a_path = match a {
+            crate::protocol::FileTreeChange::Added { path, .. } => path,
+            crate::protocol::FileTreeChange::Removed { path } => path,
+            crate::protocol::FileTreeChange::Modified { path, .. } => path,
+        };
+        let b_path = match b {
+            crate::protocol::FileTreeChange::Added { path, .. } => path,
+            crate::protocol::FileTreeChange::Removed { path } => path,
+            crate::protocol::FileTreeChange::Modified { path, .. } => path,
+        };
+        a_path.cmp(b_path)
+    });
+    changes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cargo_output_line_extracts_primary_span() {
+        let line = r#"{"reason":"compiler-message","message":{"message":"cannot find value `x` in this scope","level":"error","spans":[{"file_name":"src/main.rs","line_start":7,"column_start":13,"is_primary":true}],"rendered":"rendered text"}}"#;
+        let parsed = parse_cargo_output_line(line);
+        let ParsedCargoOutputLine::Structured(parsed) = parsed else {
+            panic!("expected structured parsed output");
+        };
+        assert!(matches!(parsed.level, LogLevel::Error));
+        assert_eq!(parsed.message, "cannot find value `x` in this scope");
+        assert_eq!(parsed.file_name.as_deref(), Some("src/main.rs"));
+        assert_eq!(parsed.line, Some(7));
+        assert_eq!(parsed.column, Some(13));
+    }
+
+    #[test]
+    fn parse_cargo_output_line_ignores_non_diagnostic_json() {
+        let line = r#"{"reason":"compiler-artifact","package_id":"demo 0.1.0"}"#;
+        let parsed = parse_cargo_output_line(line);
+        assert!(matches!(parsed, ParsedCargoOutputLine::IgnoredStructured));
+    }
+
+    #[test]
+    fn parse_cargo_output_line_falls_back_for_raw_text() {
+        let line = "Compiling makepad-studio-backend v0.1.0";
+        let parsed = parse_cargo_output_line(line);
+        assert!(matches!(parsed, ParsedCargoOutputLine::RawText));
+    }
 }
 
 fn write_screenshot_png(

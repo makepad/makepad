@@ -72,6 +72,7 @@ fn websocket_ui_hello_and_load_file_tree_roundtrip() {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
+        enable_in_process_gateway: false,
     };
 
     let _backend = match StudioBackend::start_headless(config) {
@@ -91,9 +92,11 @@ fn websocket_ui_hello_and_load_file_tree_roundtrip() {
         return;
     }
 
-    let opened = wait_for_event(&runtime, Duration::from_secs(3), |event| {
-        matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == socket_id)
-    });
+    let opened = wait_for_event(
+        &runtime,
+        Duration::from_secs(3),
+        |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == socket_id),
+    );
     assert!(opened.is_some(), "did not receive WsOpened");
 
     let hello_bin = wait_for_ws_binary(&runtime, socket_id, Duration::from_secs(3));
@@ -107,7 +110,7 @@ fn websocket_ui_hello_and_load_file_tree_roundtrip() {
     let envelope = UIToStudioEnvelope {
         query_id: QueryId::new(client_id, 0),
         msg: UIToStudio::LoadFileTree {
-            root: "repo".to_string(),
+            mount: "repo".to_string(),
         },
     };
     runtime
@@ -117,8 +120,8 @@ fn websocket_ui_hello_and_load_file_tree_roundtrip() {
     let tree_bin = wait_for_ws_binary(&runtime, socket_id, Duration::from_secs(3));
     let tree_msg = StudioToUI::deserialize_bin(&tree_bin).expect("decode tree");
     match tree_msg {
-        StudioToUI::FileTree { root, data } => {
-            assert_eq!(root, "repo");
+        StudioToUI::FileTree { mount, data } => {
+            assert_eq!(mount, "repo");
             assert!(data.nodes.iter().any(|n| n.path == "repo/src/lib.rs"));
         }
         other => panic!("expected FileTree, got {:?}", other),

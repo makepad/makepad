@@ -72,6 +72,7 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
+        enable_in_process_gateway: false,
     };
     let _backend = match StudioBackend::start_headless(config) {
         Ok(v) => v,
@@ -89,9 +90,11 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
     if runtime.ws_open(ui_socket, ui_request).is_err() {
         return;
     }
-    let ui_opened = wait_for_event(&runtime, Duration::from_secs(3), |event| {
-        matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == ui_socket)
-    });
+    let ui_opened = wait_for_event(
+        &runtime,
+        Duration::from_secs(3),
+        |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == ui_socket),
+    );
     assert!(ui_opened.is_some(), "did not receive ui WsOpened");
 
     let hello_bin = wait_for_ws_binary(&runtime, ui_socket, Duration::from_secs(3));
@@ -108,10 +111,14 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
         format!("ws://127.0.0.1:{port}/$studio_app/{}", build_id.0),
         HttpMethod::GET,
     );
-    runtime.ws_open(app_socket, app_request).expect("open app socket");
-    let app_opened = wait_for_event(&runtime, Duration::from_secs(3), |event| {
-        matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == app_socket)
-    });
+    runtime
+        .ws_open(app_socket, app_request)
+        .expect("open app socket");
+    let app_opened = wait_for_event(
+        &runtime,
+        Duration::from_secs(3),
+        |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == app_socket),
+    );
     assert!(app_opened.is_some(), "did not receive app WsOpened");
 
     let query_id = QueryId::new(client_id, 1);
