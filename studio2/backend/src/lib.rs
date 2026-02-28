@@ -4,6 +4,7 @@ pub mod gateway;
 pub mod log_store;
 pub mod process_manager;
 pub mod protocol;
+pub mod terminal_manager;
 pub mod virtual_fs;
 
 pub use backend::{BackendConfig, BackendHandle, MountConfig, StudioBackend, StudioConnection};

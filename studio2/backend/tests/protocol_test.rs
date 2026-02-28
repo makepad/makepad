@@ -1,7 +1,5 @@
 use makepad_micro_serde::{DeBin, DeJson, SerBin, SerJson};
-use makepad_studio_backend::{
-    ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope,
-};
+use makepad_studio_backend::{ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope};
 
 #[test]
 fn query_id_layout_roundtrip() {
@@ -16,7 +14,7 @@ fn ui_envelope_binary_and_json_roundtrip() {
     let envelope = UIToStudioEnvelope {
         query_id: QueryId::new(ClientId(3), 99),
         msg: UIToStudio::LoadFileTree {
-            root: "makepad".to_string(),
+            mount: "makepad".to_string(),
         },
     };
 

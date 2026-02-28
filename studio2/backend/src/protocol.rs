@@ -1,5 +1,5 @@
-use makepad_micro_serde::*;
 use makepad_live_id::LiveId;
+use makepad_micro_serde::*;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerBin, DeBin, SerJson, DeJson)]
@@ -32,7 +32,7 @@ pub struct UIToStudioEnvelope {
 pub enum UIToStudio {
     // === File System ===
     LoadFileTree {
-        root: String,
+        mount: String,
     },
     OpenTextFile {
         path: String,
@@ -41,11 +41,14 @@ pub enum UIToStudio {
         path: String,
         content: String,
     },
+    DeleteFile {
+        path: String,
+    },
     ReadTextFile {
         path: String,
     },
     FindFiles {
-        root: Option<String>,
+        mount: Option<String>,
         pattern: String,
         is_regex: Option<bool>,
         max_results: Option<usize>,
@@ -60,23 +63,26 @@ pub enum UIToStudio {
         name: String,
     },
     CreateBranch {
-        root: String,
+        mount: String,
         name: String,
         from_ref: Option<String>,
     },
     DeleteBranch {
-        root: String,
+        mount: String,
         name: String,
     },
     GitLog {
-        root: String,
+        mount: String,
         max_count: Option<usize>,
     },
 
     // === Build Control ===
     ListBuilds,
+    LoadRunnableBuilds {
+        mount: String,
+    },
     CargoRun {
-        root: String,
+        mount: String,
         args: Vec<String>,
         startup_query: Option<String>,
         env: Option<HashMap<String, String>>,
@@ -150,7 +156,7 @@ pub enum UIToStudio {
 
     // === Search & Query ===
     SearchFiles {
-        root: Option<String>,
+        mount: Option<String>,
         pattern: String,
         is_regex: Option<bool>,
         glob: Option<String>,
@@ -206,11 +212,11 @@ pub enum StudioToUI {
 
     // === File System ===
     FileTree {
-        root: String,
+        mount: String,
         data: FileTreeData,
     },
     FileTreeDiff {
-        root: String,
+        mount: String,
         changes: Vec<FileTreeChange>,
     },
     TextFileOpened {
@@ -235,7 +241,7 @@ pub enum StudioToUI {
         done: bool,
     },
     GitLog {
-        root: String,
+        mount: String,
         log: GitLog,
     },
 
@@ -243,9 +249,13 @@ pub enum StudioToUI {
     Builds {
         builds: Vec<BuildInfo>,
     },
+    RunnableBuilds {
+        mount: String,
+        builds: Vec<RunnableBuild>,
+    },
     BuildStarted {
         build_id: QueryId,
-        root: String,
+        mount: String,
         package: String,
     },
     BuildStopped {
@@ -310,12 +320,12 @@ pub enum StudioToUI {
     // === Terminal ===
     TerminalOpened {
         path: String,
-        history: String,
+        history: Vec<u8>,
         grid: TerminalGrid,
     },
     TerminalOutput {
         path: String,
-        cells: TerminalCellDiff,
+        data: Vec<u8>,
     },
     TerminalTitle {
         path: String,
@@ -476,9 +486,14 @@ pub struct GitCommitInfo {
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub struct BuildInfo {
     pub build_id: QueryId,
-    pub root: String,
+    pub mount: String,
     pub package: String,
     pub active: bool,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct RunnableBuild {
+    pub package: String,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
@@ -722,7 +737,7 @@ pub enum StudioToBuildBox {
     RequestTreeHash,
     CargoBuild {
         build_id: QueryId,
-        root: String,
+        mount: String,
         args: Vec<String>,
         env: HashMap<String, String>,
     },

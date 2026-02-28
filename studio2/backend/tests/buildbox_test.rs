@@ -106,6 +106,7 @@ fn websocket_buildbox_remote_build_roundtrip() {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
+        enable_in_process_gateway: false,
     };
 
     let _backend = match StudioBackend::start_headless(config) {
@@ -125,9 +126,11 @@ fn websocket_buildbox_remote_build_roundtrip() {
     if runtime.ws_open(ui_socket, ui_request).is_err() {
         return;
     }
-    let ui_opened = wait_for_event(&runtime, Duration::from_secs(3), |event| {
-        matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == ui_socket)
-    });
+    let ui_opened = wait_for_event(
+        &runtime,
+        Duration::from_secs(3),
+        |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == ui_socket),
+    );
     assert!(ui_opened.is_some(), "did not receive ui WsOpened");
 
     let hello = wait_for_ui_message(&runtime, ui_socket, Duration::from_secs(3), |msg| {
@@ -148,9 +151,11 @@ fn websocket_buildbox_remote_build_roundtrip() {
     runtime
         .ws_open(buildbox_socket, buildbox_request)
         .expect("open buildbox socket");
-    let bb_opened = wait_for_event(&runtime, Duration::from_secs(3), |event| {
-        matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == buildbox_socket)
-    });
+    let bb_opened = wait_for_event(
+        &runtime,
+        Duration::from_secs(3),
+        |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == buildbox_socket),
+    );
     assert!(bb_opened.is_some(), "did not receive buildbox WsOpened");
 
     let hello = BuildBoxToStudioVec(vec![BuildBoxToStudio::Hello {
@@ -202,9 +207,8 @@ fn websocket_buildbox_remote_build_roundtrip() {
     runtime
         .ws_send(ui_socket, WsSend::Binary(sync_query.serialize_bin()))
         .expect("send buildbox sync now");
-    let sync_cmd =
-        wait_for_buildbox_message(&runtime, buildbox_socket, Duration::from_secs(3))
-            .expect("did not receive buildbox sync command");
+    let sync_cmd = wait_for_buildbox_message(&runtime, buildbox_socket, Duration::from_secs(3))
+        .expect("did not receive buildbox sync command");
     assert_eq!(sync_cmd.0.len(), 1);
     assert!(matches!(sync_cmd.0[0], StudioToBuildBox::RequestTreeHash));
 
@@ -212,7 +216,7 @@ fn websocket_buildbox_remote_build_roundtrip() {
     let run_query = UIToStudioEnvelope {
         query_id: build_id,
         msg: UIToStudio::CargoRun {
-            root: "repo".to_string(),
+            mount: "repo".to_string(),
             args: vec!["-p".to_string(), "remote-app".to_string()],
             startup_query: None,
             env: None,
@@ -223,24 +227,26 @@ fn websocket_buildbox_remote_build_roundtrip() {
         .ws_send(ui_socket, WsSend::Binary(run_query.serialize_bin()))
         .expect("send remote cargo run");
 
-    let started = wait_for_ui_message(&runtime, ui_socket, Duration::from_secs(3), |msg| {
-        matches!(msg, StudioToUI::BuildStarted { build_id: id, .. } if *id == build_id)
-    });
+    let started = wait_for_ui_message(
+        &runtime,
+        ui_socket,
+        Duration::from_secs(3),
+        |msg| matches!(msg, StudioToUI::BuildStarted { build_id: id, .. } if *id == build_id),
+    );
     assert!(started.is_some(), "did not receive BuildStarted");
 
-    let cargo_cmd =
-        wait_for_buildbox_message(&runtime, buildbox_socket, Duration::from_secs(3))
-            .expect("did not receive buildbox cargo command");
+    let cargo_cmd = wait_for_buildbox_message(&runtime, buildbox_socket, Duration::from_secs(3))
+        .expect("did not receive buildbox cargo command");
     assert_eq!(cargo_cmd.0.len(), 1);
     match &cargo_cmd.0[0] {
         StudioToBuildBox::CargoBuild {
             build_id: id,
-            root,
+            mount,
             args,
             ..
         } => {
             assert_eq!(*id, build_id);
-            assert_eq!(root, "repo");
+            assert_eq!(mount, "repo");
             assert_eq!(args, &vec!["-p".to_string(), "remote-app".to_string()]);
         }
         other => panic!("unexpected buildbox command: {:?}", other),
@@ -277,7 +283,9 @@ fn websocket_buildbox_remote_build_roundtrip() {
     .expect("did not receive QueryLogResults");
     match log_result {
         StudioToUI::QueryLogResults { entries, .. } => {
-            assert!(entries.iter().any(|(_, e)| e.message.contains("remote build line")));
+            assert!(entries
+                .iter()
+                .any(|(_, e)| e.message.contains("remote build line")));
         }
         _ => unreachable!(),
     }
