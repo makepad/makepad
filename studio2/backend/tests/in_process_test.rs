@@ -21,6 +21,17 @@ where
     None
 }
 
+fn drain_messages(connection: &makepad_studio_backend::StudioConnection, duration: Duration) -> Vec<StudioToUI> {
+    let deadline = Instant::now() + duration;
+    let mut out = Vec::new();
+    while Instant::now() < deadline {
+        if let Some(msg) = connection.recv_timeout(Duration::from_millis(50)) {
+            out.push(msg);
+        }
+    }
+    out
+}
+
 #[test]
 fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
@@ -228,4 +239,110 @@ fn runnable_builds_are_scoped_per_mount() {
         }
         _ => unreachable!(),
     }
+}
+
+#[test]
+fn file_watch_emits_single_path_delta_without_full_tree_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(UIToStudio::LoadFileTree {
+        mount: "repo".to_string(),
+    });
+    let _ = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+    )
+    .expect("did not receive initial file tree");
+
+    let _ = connection.send(UIToStudio::SaveTextFile {
+        path: "repo/src/lib.rs".to_string(),
+        content: "pub fn hi() { let _x = 1; }\n".to_string(),
+    });
+
+    let diff_msg = wait_for_message(
+        &connection,
+        Duration::from_secs(5),
+        |msg| {
+            matches!(
+                msg,
+                StudioToUI::FileTreeDiff { mount, changes }
+                    if mount == "repo"
+                        && changes.len() == 1
+                        && matches!(
+                            &changes[0],
+                            makepad_studio_backend::FileTreeChange::Added { path, .. }
+                                | makepad_studio_backend::FileTreeChange::Modified { path, .. }
+                                | makepad_studio_backend::FileTreeChange::Removed { path }
+                                if path.starts_with("repo/")
+                        )
+            )
+        },
+    )
+    .expect("did not receive path-scoped filetree delta");
+
+    match diff_msg {
+        StudioToUI::FileTreeDiff { changes, .. } => {
+            assert_eq!(changes.len(), 1);
+        }
+        _ => unreachable!(),
+    }
+
+    let trailing = drain_messages(&connection, Duration::from_millis(500));
+    assert!(
+        !trailing
+            .iter()
+            .any(|msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo")),
+        "unexpected full file-tree reload after delta update"
+    );
+}
+
+#[test]
+fn file_watch_ignores_makepad_term_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".makepad")).unwrap();
+    fs::write(dir.path().join(".makepad/a.term"), "").unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(UIToStudio::LoadFileTree {
+        mount: "repo".to_string(),
+    });
+    let _ = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+    )
+    .expect("did not receive initial file tree");
+
+    let _ = connection.send(UIToStudio::SaveTextFile {
+        path: "repo/.makepad/a.term".to_string(),
+        content: "echo hi\n".to_string(),
+    });
+
+    let messages = drain_messages(&connection, Duration::from_millis(900));
+    assert!(
+        !messages.iter().any(|msg| {
+            matches!(msg, StudioToUI::FileTreeDiff { mount, .. } if mount == "repo")
+        }),
+        "expected .makepad terminal writes to be ignored by fs delta watcher"
+    );
 }

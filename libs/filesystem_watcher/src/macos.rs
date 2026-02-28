@@ -1,5 +1,5 @@
 use crate::{FileSystemEvent, FileSystemEventKind, WatchCallback, WatchRoot};
-use std::ffi::{c_void, CString};
+use std::ffi::{c_void, CStr, CString};
 use std::os::raw::{c_char, c_double};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -59,6 +59,14 @@ unsafe extern "C" {
         num_values: CFIndex,
         callbacks: *const c_void,
     ) -> CFArrayRef;
+    fn CFArrayGetCount(the_array: CFArrayRef) -> CFIndex;
+    fn CFArrayGetValueAtIndex(the_array: CFArrayRef, idx: CFIndex) -> *const c_void;
+    fn CFStringGetCString(
+        the_string: CFStringRef,
+        buffer: *mut c_char,
+        buffer_size: CFIndex,
+        encoding: u32,
+    ) -> Boolean;
 
     fn CFRelease(cf: *const c_void);
 
@@ -114,7 +122,7 @@ extern "C" fn fsevent_callback(
     _stream_ref: FSEventStreamRef,
     client_callback_info: *mut c_void,
     num_events: usize,
-    _event_paths: *mut c_void,
+    event_paths: *mut c_void,
     _event_flags: *const FSEventStreamEventFlags,
     _event_ids: *const FSEventStreamEventId,
 ) {
@@ -122,11 +130,46 @@ extern "C" fn fsevent_callback(
         return;
     }
     let info = unsafe { &*(client_callback_info as *const CallbackInfo) };
-    (info.on_event)(FileSystemEvent {
-        mount: info.mount.clone(),
-        path: info.root.clone(),
-        kind: FileSystemEventKind::Changed,
-    });
+    let paths_array = event_paths as CFArrayRef;
+    let mut emitted = 0usize;
+    if !paths_array.is_null() {
+        let count = unsafe { CFArrayGetCount(paths_array) }.max(0) as usize;
+        let total = num_events.min(count);
+        for i in 0..total {
+            let cf_path = unsafe { CFArrayGetValueAtIndex(paths_array, i as CFIndex) } as CFStringRef;
+            if cf_path.is_null() {
+                continue;
+            }
+            let mut buf = vec![0 as c_char; 8192];
+            let ok = unsafe {
+                CFStringGetCString(
+                    cf_path,
+                    buf.as_mut_ptr(),
+                    buf.len() as CFIndex,
+                    K_CF_STRING_ENCODING_UTF8,
+                )
+            };
+            if ok == 0 {
+                continue;
+            }
+            let path = unsafe { CStr::from_ptr(buf.as_ptr()) }
+                .to_string_lossy()
+                .into_owned();
+            (info.on_event)(FileSystemEvent {
+                mount: info.mount.clone(),
+                path: PathBuf::from(path),
+                kind: FileSystemEventKind::Changed,
+            });
+            emitted += 1;
+        }
+    }
+    if emitted == 0 {
+        (info.on_event)(FileSystemEvent {
+            mount: info.mount.clone(),
+            path: info.root.clone(),
+            kind: FileSystemEventKind::Changed,
+        });
+    }
 }
 
 pub struct PlatformWatcher {
