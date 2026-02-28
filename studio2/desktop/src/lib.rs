@@ -4,6 +4,7 @@ pub mod app_ui;
 pub mod desktop_code_editor;
 pub mod desktop_file_tree;
 pub mod desktop_log_view;
+pub mod desktop_profiler_view;
 pub mod desktop_run_list;
 pub mod desktop_run_view;
 pub mod desktop_terminal_view;
@@ -24,6 +25,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::desktop_file_tree::script_mod(vm);
     crate::desktop_code_editor::script_mod(vm);
     crate::desktop_log_view::script_mod(vm);
+    crate::desktop_profiler_view::script_mod(vm);
     crate::desktop_run_list::script_mod(vm);
     crate::desktop_run_view::script_mod(vm);
     crate::desktop_terminal_view::script_mod(vm);

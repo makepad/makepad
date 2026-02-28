@@ -581,18 +581,34 @@ pub enum LogLevel {
 pub struct EventSample {
     pub at: f64,
     pub label: LiveId,
+    pub event_u32: u32,
+    pub event_meta: u64,
+    pub start: f64,
+    pub end: f64,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, Default)]
 pub struct GPUSample {
     pub at: f64,
     pub label: LiveId,
+    pub start: f64,
+    pub end: f64,
+    pub draw_calls: u64,
+    pub instances: u64,
+    pub vertices: u64,
+    pub instance_bytes: u64,
+    pub uniform_bytes: u64,
+    pub vertex_buffer_bytes: u64,
+    pub texture_bytes: u64,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, Default)]
 pub struct GCSample {
     pub at: f64,
     pub label: LiveId,
+    pub start: f64,
+    pub end: f64,
+    pub heap_live: u64,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, Default)]

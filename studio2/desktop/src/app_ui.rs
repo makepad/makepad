@@ -86,8 +86,26 @@ script_mod! {
                 text: "x"
                 padding: Inset {left: 4.0 right: 4.0 top: 0.0 bottom: 0.0}
             }
+            log_open_profiler := ButtonFlatterIcon {
+                width: 24.0
+                height: 24.0
+                icon_walk: Walk {width: Fit height: 14.0}
+                draw_icon +: {
+                    color: #xD0D5DD
+                    color_hover: #xFFFFFF
+                    color_pressed: #xFFFFFF
+                    svg: crate_resource("self://resources/icons/icon_profiler.svg")
+                }
+            }
         }
         log_view := DesktopLogView {}
+    }
+
+    let ProfilerPane = View {
+        width: Fill
+        height: Fill
+        flow: Down
+        profiler_view := DesktopProfilerView {}
     }
 
     let LogFirstPane = RectView {
@@ -375,6 +393,7 @@ script_mod! {
                         RunFirstPane := RunFirstPane {}
                         LogFirstPane := LogFirstPane {}
                         LogPane := LogPane {}
+                        ProfilerPane := ProfilerPane {}
                         TerminalFirstPane := TerminalFirstPane {}
                         TerminalPane := TerminalPane {}
                         TerminalAddPane := View {}

@@ -2,6 +2,7 @@ use crate::{
     app_data::*,
     desktop_file_tree::*,
     desktop_log_view::*,
+    desktop_profiler_view::*,
     desktop_run_list::*,
     desktop_run_view::*,
     desktop_terminal_view::*,
@@ -141,10 +142,14 @@ impl MatchEvent for App {
                     workspace.text_input(cx, ids!(log_filter)).set_text(cx, "");
                     self.restart_log_query_for_mount(cx, &active_mount);
                 }
+                if workspace.button(cx, ids!(log_open_profiler)).clicked(actions) {
+                    self.open_profiler_for_mount(cx, &active_mount);
+                }
             }
         }
 
         self.handle_run_view_actions(actions);
+        self.handle_profiler_actions(cx, actions);
         self.handle_terminal_actions(actions);
 
         for action in actions {
@@ -158,6 +163,15 @@ impl MatchEvent for App {
                                 self.create_new_terminal_tab(cx, &mount);
                             }
                         } else {
+                            if let Some(state) = self.data.log_tab_state.get(&tab_id) {
+                                self.data
+                                    .active_log_build_by_mount
+                                    .insert(state.mount.clone(), state.build_id);
+                            } else if let Some(state) = self.data.profiler_tab_state.get(&tab_id) {
+                                self.data
+                                    .active_log_build_by_mount
+                                    .insert(state.mount.clone(), state.build_id);
+                            }
                             if let Some((_mount, path)) = self.terminal_tab_mount_path(tab_id) {
                                 self.ensure_terminal_session_open(&path);
                             }
@@ -172,6 +186,8 @@ impl MatchEvent for App {
                             self.close_run_tab(cx, tab_id);
                         } else if self.data.log_tab_state.contains_key(&tab_id) {
                             self.close_log_tab(cx, tab_id);
+                        } else if self.data.profiler_tab_state.contains_key(&tab_id) {
+                            self.close_profiler_tab(cx, tab_id);
                         } else if self.data.tab_to_path.contains_key(&tab_id) {
                             self.close_editor_tab(cx, tab_id);
                         } else if tab_id != id!(terminal_add) {

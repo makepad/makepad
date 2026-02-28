@@ -57,6 +57,7 @@ fn profiler_store_filters_and_downsamples() {
             EventSample {
                 at: i as f64,
                 label: LiveId::from_str("event.tick"),
+                ..Default::default()
             },
         );
     }
@@ -66,6 +67,7 @@ fn profiler_store_filters_and_downsamples() {
             GPUSample {
                 at: i as f64,
                 label: LiveId::from_str("gpu.frame"),
+                ..Default::default()
             },
         );
     }
