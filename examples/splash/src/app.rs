@@ -6,6 +6,7 @@ use std::path::Path;
 app_main!(App);
 
 script_mod! {
+    ~@hi
     use mod.prelude.widgets.*
     use mod.widgets.*
     let TestDraw = #(TestDraw::register_widget(vm)) {
