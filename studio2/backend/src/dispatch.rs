@@ -1,20 +1,32 @@
-use crate::log_store::{AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore};
+use crate::log_store::{
+    query_log_entries, AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore,
+};
 use crate::process_manager::ProcessManager;
 use crate::protocol::{
-    AppToStudioMsg, AppToStudioVec, BuildBoxInfo, BuildBoxStatus, BuildBoxToStudio,
-    BuildBoxToStudioVec, BuildInfo, ClientId, LogEntry, LogLevel, LogSource, QueryId,
-    RunnableBuild, SaveResult, StudioToAppMsg, StudioToAppVec, StudioToBuildBox,
+    BuildBoxInfo, BuildBoxStatus, BuildBoxToStudio, BuildBoxToStudioVec, BuildInfo, ClientId,
+    EventSample as StudioEventSample, GCSample as StudioGCSample, GPUSample as StudioGPUSample,
+    LogEntry, LogLevel, LogSource, QueryId, RunnableBuild, SaveResult, StudioToBuildBox,
     StudioToBuildBoxVec, StudioToUI, TerminalGrid, UIToStudio, UIToStudioEnvelope,
 };
+use makepad_live_id::LiveId;
+use makepad_network::ToUISender;
 use crate::terminal_manager::TerminalManager;
 use crate::virtual_fs::{protocol_search_results, VirtualFs};
+use crate::worker_pool::WorkerPool;
+use makepad_studio_protocol::{
+    AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent,
+    KeyModifiers, LogLevel as StudioProtocolLogLevel, MouseButton, RemoteKeyModifiers,
+    RemoteMouseDown, RemoteMouseUp, ScreenshotRequest, StudioToApp, StudioToAppVec, TextInputEvent,
+    WidgetTreeDumpRequest,
+};
 use makepad_micro_serde::*;
+use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireFormat {
@@ -26,7 +38,7 @@ pub enum WireFormat {
 pub enum StudioEvent {
     UiConnected {
         web_socket_id: u64,
-        sender: Sender<Vec<u8>>,
+        sender: ToUISender<Vec<u8>>,
     },
     UiDisconnected {
         web_socket_id: u64,
@@ -79,12 +91,28 @@ pub enum StudioEvent {
         path: String,
         exit_code: i32,
     },
+    WorkerFindFilesDone {
+        web_socket_id: u64,
+        query_id: QueryId,
+        for_search: bool,
+        result: Result<Vec<String>, String>,
+    },
+    WorkerQueryLogsDone {
+        web_socket_id: u64,
+        query_id: QueryId,
+        query: LogQuery,
+        live: bool,
+        entries: Vec<(usize, LogEntry)>,
+    },
+    MountFsChanged {
+        mount: String,
+    },
     Shutdown,
 }
 
 struct UiClient {
     client_id: ClientId,
-    sender: Sender<Vec<u8>>,
+    sender: ToUISender<Vec<u8>>,
     format: WireFormat,
 }
 
@@ -127,6 +155,10 @@ pub struct StudioCore {
     terminal_manager: TerminalManager,
     live_log_queries: HashMap<QueryId, LiveLogSubscription>,
     live_profiler_queries: HashMap<QueryId, LiveProfilerSubscription>,
+    cancelled_queries: HashSet<QueryId>,
+    worker_pool: WorkerPool,
+    fs_watcher: Option<FileSystemWatcher>,
+    mount_last_fs_event: HashMap<String, Instant>,
 }
 
 impl StudioCore {
@@ -136,7 +168,11 @@ impl StudioCore {
         vfs: VirtualFs,
         studio_addr: Option<String>,
     ) -> Self {
-        Self {
+        let worker_count = std::thread::available_parallelism()
+            .map(|v| v.get())
+            .unwrap_or(4)
+            .clamp(2, 16);
+        let mut this = Self {
             rx,
             event_tx,
             vfs,
@@ -154,7 +190,13 @@ impl StudioCore {
             terminal_manager: TerminalManager::default(),
             live_log_queries: HashMap::new(),
             live_profiler_queries: HashMap::new(),
-        }
+            cancelled_queries: HashSet::new(),
+            worker_pool: WorkerPool::new(worker_count),
+            fs_watcher: None,
+            mount_last_fs_event: HashMap::new(),
+        };
+        this.reset_fs_watcher();
+        this
     }
 
     pub fn run(&mut self) {
@@ -244,6 +286,20 @@ impl StudioCore {
             StudioEvent::TerminalExited { path, exit_code } => {
                 self.on_terminal_exited(path, exit_code)
             }
+            StudioEvent::WorkerFindFilesDone {
+                web_socket_id,
+                query_id,
+                for_search,
+                result,
+            } => self.on_worker_find_files_done(web_socket_id, query_id, for_search, result),
+            StudioEvent::WorkerQueryLogsDone {
+                web_socket_id,
+                query_id,
+                query,
+                live,
+                entries,
+            } => self.on_worker_query_logs_done(web_socket_id, query_id, query, live, entries),
+            StudioEvent::MountFsChanged { mount } => self.on_mount_fs_changed(mount),
             StudioEvent::Shutdown => return false,
         }
         true
@@ -258,7 +314,7 @@ impl StudioCore {
         Some(id)
     }
 
-    fn on_ui_connected(&mut self, web_socket_id: u64, sender: Sender<Vec<u8>>) {
+    fn on_ui_connected(&mut self, web_socket_id: u64, sender: ToUISender<Vec<u8>>) {
         let Some(client_id) = self.alloc_client_id() else {
             let _ = sender.send(
                 StudioToUI::Error {
@@ -319,14 +375,17 @@ impl StudioCore {
         let query_id = envelope.query_id;
         match envelope.msg {
             UIToStudio::Mount { name, path } => match self.vfs.mount(&name, path) {
-                Ok(()) => match self.vfs.load_file_tree(&name) {
+                Ok(()) => {
+                    self.reset_fs_watcher();
+                    match self.vfs.load_file_tree(&name) {
                     Ok(data) => self.send_ui_message(
                         web_socket_id,
                         StudioToUI::FileTree { mount: name, data },
                         self.ui_format(web_socket_id),
                     ),
                     Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
-                },
+                }
+                }
                 Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
             },
             UIToStudio::Unmount { name } => {
@@ -339,6 +398,7 @@ impl StudioCore {
                     Err(_) => Vec::new(),
                 };
                 self.vfs.unmount(&name);
+                self.reset_fs_watcher();
                 self.send_ui_message(
                     web_socket_id,
                     StudioToUI::FileTree {
@@ -406,36 +466,48 @@ impl StudioCore {
                 pattern,
                 is_regex: _,
                 max_results,
-            } => match self.vfs.find_files(mount.as_deref(), &pattern, max_results) {
-                Ok(paths) => self.send_ui_message(
-                    web_socket_id,
-                    StudioToUI::FindFileResults {
+            } => {
+                self.cancelled_queries.remove(&query_id);
+                let mount = mount.clone();
+                let pattern = pattern.clone();
+                let vfs = self.vfs.clone_for_search();
+                let event_tx = self.event_tx.clone();
+                self.worker_pool.execute(move || {
+                    let result = vfs
+                        .find_files(mount.as_deref(), &pattern, max_results)
+                        .map_err(|err| err.to_string());
+                    let _ = event_tx.send(StudioEvent::WorkerFindFilesDone {
+                        web_socket_id,
                         query_id,
-                        paths,
-                        done: true,
-                    },
-                    self.ui_format(web_socket_id),
-                ),
-                Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
-            },
+                        for_search: false,
+                        result,
+                    });
+                });
+            }
             UIToStudio::SearchFiles {
                 mount,
                 pattern,
                 is_regex: _,
                 glob: _,
                 max_results,
-            } => match self.vfs.find_files(mount.as_deref(), &pattern, max_results) {
-                Ok(paths) => self.send_ui_message(
-                    web_socket_id,
-                    StudioToUI::SearchFileResults {
+            } => {
+                self.cancelled_queries.remove(&query_id);
+                let mount = mount.clone();
+                let pattern = pattern.clone();
+                let vfs = self.vfs.clone_for_search();
+                let event_tx = self.event_tx.clone();
+                self.worker_pool.execute(move || {
+                    let result = vfs
+                        .find_files(mount.as_deref(), &pattern, max_results)
+                        .map_err(|err| err.to_string());
+                    let _ = event_tx.send(StudioEvent::WorkerFindFilesDone {
+                        web_socket_id,
                         query_id,
-                        results: protocol_search_results(paths),
-                        done: true,
-                    },
-                    self.ui_format(web_socket_id),
-                ),
-                Err(err) => self.send_ui_error(web_socket_id, err.to_string()),
-            },
+                        for_search: true,
+                        result,
+                    });
+                });
+            }
             UIToStudio::GitLog { mount, max_count } => {
                 match self.vfs.git_log(&mount, max_count.unwrap_or(100)) {
                     Ok(log) => self.send_ui_message(
@@ -633,11 +705,12 @@ impl StudioCore {
             UIToStudio::TypeText { build_id, text } => {
                 if let Err(err) = self.send_app_msg(
                     build_id,
-                    StudioToAppMsg::TypeText {
-                        text,
+                    StudioToApp::TextInput(TextInputEvent {
+                        input: text,
                         replace_last: false,
                         was_paste: false,
-                    },
+                        ..Default::default()
+                    }),
                 ) {
                     self.send_ui_error(web_socket_id, err);
                 }
@@ -646,24 +719,54 @@ impl StudioCore {
                 build_id,
                 auto_dump: _,
             } => {
-                if let Err(err) = self.send_app_msg(build_id, StudioToAppMsg::Return) {
+                let key = KeyEvent {
+                    key_code: KeyCode::ReturnKey,
+                    is_repeat: false,
+                    modifiers: KeyModifiers::default(),
+                    time: 0.0,
+                };
+                if let Err(err) = self.send_app_msgs(
+                    build_id,
+                    vec![
+                        StudioToApp::KeyDown(key),
+                        StudioToApp::KeyUp(key),
+                    ],
+                ) {
                     self.send_ui_error(web_socket_id, err);
                 }
             }
             UIToStudio::Click { build_id, x, y } => {
-                if let Err(err) =
-                    self.send_app_msg(build_id, StudioToAppMsg::Click { x, y, button: 1 })
-                {
+                let mouse_down = RemoteMouseDown {
+                    button_raw_bits: MouseButton::PRIMARY.bits(),
+                    x: x as f64,
+                    y: y as f64,
+                    time: 0.0,
+                    modifiers: RemoteKeyModifiers::default(),
+                };
+                let mouse_up = RemoteMouseUp {
+                    button_raw_bits: MouseButton::PRIMARY.bits(),
+                    x: x as f64,
+                    y: y as f64,
+                    time: 0.0,
+                    modifiers: RemoteKeyModifiers::default(),
+                };
+                if let Err(err) = self.send_app_msgs(
+                    build_id,
+                    vec![
+                        StudioToApp::MouseDown(mouse_down),
+                        StudioToApp::MouseUp(mouse_up),
+                    ],
+                ) {
                     self.send_ui_error(web_socket_id, err);
                 }
             }
             UIToStudio::Screenshot { build_id, kind_id } => {
                 if let Err(err) = self.send_app_msg(
                     build_id,
-                    StudioToAppMsg::ScreenshotRequest {
+                    StudioToApp::Screenshot(ScreenshotRequest {
                         request_id: query_id.0,
                         kind_id: kind_id.unwrap_or(0),
-                    },
+                    }),
                 ) {
                     self.send_ui_error(web_socket_id, err);
                 }
@@ -671,33 +774,28 @@ impl StudioCore {
             UIToStudio::WidgetTreeDump { build_id } => {
                 if let Err(err) = self.send_app_msg(
                     build_id,
-                    StudioToAppMsg::WidgetTreeDumpRequest {
+                    StudioToApp::WidgetTreeDump(WidgetTreeDumpRequest {
                         request_id: query_id.0,
-                    },
+                    }),
                 ) {
                     self.send_ui_error(web_socket_id, err);
                 }
             }
             UIToStudio::WidgetQuery { build_id, query } => {
-                if let Err(err) = self.send_app_msg(
-                    build_id,
-                    StudioToAppMsg::WidgetQueryRequest {
-                        request_id: query_id.0,
-                        query,
-                    },
-                ) {
-                    self.send_ui_error(web_socket_id, err);
-                }
+                let _ = build_id;
+                let _ = query;
+                self.send_ui_error(
+                    web_socket_id,
+                    "WidgetQuery is not part of platform StudioToApp protocol".to_string(),
+                );
             }
             UIToStudio::RunViewInput {
                 build_id,
                 window_id,
                 msg_bin,
             } => {
-                if let Err(err) = self.send_app_msg(
-                    build_id,
-                    StudioToAppMsg::RunViewInput { window_id, msg_bin },
-                ) {
+                let _ = window_id;
+                if let Err(err) = self.send_to_app(build_id, msg_bin) {
                     self.send_ui_error(web_socket_id, err);
                 }
             }
@@ -710,11 +808,13 @@ impl StudioCore {
             } => {
                 if let Err(err) = self.send_app_msg(
                     build_id,
-                    StudioToAppMsg::RunViewResize {
+                    StudioToApp::WindowGeomChange {
                         window_id,
+                        dpi_factor: dpi,
+                        left: 0.0,
+                        top: 0.0,
                         width,
                         height,
-                        dpi,
                     },
                 ) {
                     self.send_ui_error(web_socket_id, err);
@@ -799,25 +899,24 @@ impl StudioCore {
                     pattern,
                     since_index,
                 };
-                let entries = self.log_store.query(&query);
-                self.send_ui_message(
-                    web_socket_id,
-                    StudioToUI::QueryLogResults {
+                self.cancelled_queries.remove(&query_id);
+                let entries_handle = self.log_store.entries_handle();
+                let event_tx = self.event_tx.clone();
+                self.worker_pool.execute(move || {
+                    let entries = {
+                        let entries = entries_handle
+                            .read()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        query_log_entries(&entries, &query)
+                    };
+                    let _ = event_tx.send(StudioEvent::WorkerQueryLogsDone {
+                        web_socket_id,
                         query_id,
+                        query,
+                        live,
                         entries,
-                        done: !live,
-                    },
-                    self.ui_format(web_socket_id),
-                );
-                if live {
-                    self.live_log_queries.insert(
-                        query_id,
-                        LiveLogSubscription {
-                            web_socket_id,
-                            query,
-                        },
-                    );
-                }
+                    });
+                });
             }
             UIToStudio::QueryProfiler {
                 build_id,
@@ -860,6 +959,7 @@ impl StudioCore {
                 }
             }
             UIToStudio::CancelQuery { query_id } => {
+                self.cancelled_queries.insert(query_id);
                 self.live_log_queries.remove(&query_id);
                 self.live_profiler_queries.remove(&query_id);
                 self.send_ui_message(
@@ -917,6 +1017,117 @@ impl StudioCore {
         }
     }
 
+    fn reset_fs_watcher(&mut self) {
+        self.fs_watcher.take();
+        self.mount_last_fs_event.clear();
+
+        let roots: Vec<WatchRoot> = self
+            .vfs
+            .mounts()
+            .into_iter()
+            .map(|mount| WatchRoot {
+                mount: mount.name,
+                path: mount.path,
+            })
+            .collect();
+        if roots.is_empty() {
+            return;
+        }
+
+        let event_tx = self.event_tx.clone();
+        match FileSystemWatcher::start(roots, move |event| {
+            let _ = event_tx.send(StudioEvent::MountFsChanged { mount: event.mount });
+        }) {
+            Ok(watcher) => {
+                self.fs_watcher = Some(watcher);
+            }
+            Err(err) => {
+                eprintln!("[studio2-backend] filesystem watcher unavailable: {}", err);
+            }
+        }
+    }
+
+    fn on_mount_fs_changed(&mut self, mount: String) {
+        let now = Instant::now();
+        if let Some(last) = self.mount_last_fs_event.get(&mount) {
+            if now.saturating_duration_since(*last) < Duration::from_millis(120) {
+                return;
+            }
+        }
+        self.mount_last_fs_event.insert(mount.clone(), now);
+        self.broadcast_ui_message(StudioToUI::FileTreeDiff {
+            mount,
+            changes: Vec::new(),
+        });
+    }
+
+    fn on_worker_find_files_done(
+        &mut self,
+        web_socket_id: u64,
+        query_id: QueryId,
+        for_search: bool,
+        result: Result<Vec<String>, String>,
+    ) {
+        if self.cancelled_queries.remove(&query_id) {
+            return;
+        }
+
+        match result {
+            Ok(paths) => {
+                if for_search {
+                    self.send_ui_message(
+                        web_socket_id,
+                        StudioToUI::SearchFileResults {
+                            query_id,
+                            results: protocol_search_results(paths),
+                            done: true,
+                        },
+                        self.ui_format(web_socket_id),
+                    );
+                } else {
+                    self.send_ui_message(
+                        web_socket_id,
+                        StudioToUI::FindFileResults {
+                            query_id,
+                            paths,
+                            done: true,
+                        },
+                        self.ui_format(web_socket_id),
+                    );
+                }
+            }
+            Err(err) => self.send_ui_error(web_socket_id, err),
+        }
+    }
+
+    fn on_worker_query_logs_done(
+        &mut self,
+        web_socket_id: u64,
+        query_id: QueryId,
+        query: LogQuery,
+        live: bool,
+        entries: Vec<(usize, LogEntry)>,
+    ) {
+        if self.cancelled_queries.remove(&query_id) {
+            return;
+        }
+
+        self.send_ui_message(
+            web_socket_id,
+            StudioToUI::QueryLogResults {
+                query_id,
+                entries,
+                done: !live,
+            },
+            self.ui_format(web_socket_id),
+        );
+
+        if live && self.ui_clients.contains_key(&web_socket_id) {
+            self.live_log_queries
+                .insert(query_id, LiveLogSubscription { web_socket_id, query });
+        }
+    }
+
     fn send_to_app(&self, build_id: QueryId, msg_bin: Vec<u8>) -> Result<(), String> {
         let sender = self
             .app_sockets
@@ -929,8 +1140,20 @@ impl StudioCore {
             .map_err(|_| format!("failed to send app message for build {}", build_id.0))
     }
 
-    fn send_app_msg(&self, build_id: QueryId, msg: StudioToAppMsg) -> Result<(), String> {
+    fn send_app_msg(
+        &self,
+        build_id: QueryId,
+        msg: StudioToApp,
+    ) -> Result<(), String> {
         self.send_to_app(build_id, StudioToAppVec(vec![msg]).serialize_bin())
+    }
+
+    fn send_app_msgs(
+        &self,
+        build_id: QueryId,
+        msgs: Vec<StudioToApp>,
+    ) -> Result<(), String> {
+        self.send_to_app(build_id, StudioToAppVec(msgs).serialize_bin())
     }
 
     fn send_to_buildbox_name(&self, name: &str, msg: StudioToBuildBox) -> Result<(), String> {
@@ -1142,121 +1365,109 @@ impl StudioCore {
         }
     }
 
-    fn handle_app_message(&mut self, build_id: QueryId, msg: AppToStudioMsg) {
+    fn handle_app_message(&mut self, build_id: QueryId, msg: AppToStudio) {
         match msg {
-            AppToStudioMsg::Log {
-                level,
-                message,
-                file_name,
-                line,
-                column,
-            } => {
+            AppToStudio::LogItem(item) => {
                 let (index, entry) = self.log_store.append(AppendLogEntry {
                     build_id: Some(build_id),
-                    level,
+                    level: map_platform_log_level(item.level),
                     source: LogSource::ChildApp,
-                    message,
-                    file_name,
-                    line,
-                    column,
+                    message: item.message,
+                    file_name: Some(item.file_name),
+                    line: Some((item.line_start as usize).saturating_add(1)),
+                    column: Some((item.column_start as usize).saturating_add(1)),
                     timestamp: None,
                 });
                 self.broadcast_live_log_entry(index, entry);
             }
-            AppToStudioMsg::EventSample(sample) => {
-                self.profiler_store.append_event(Some(build_id), sample);
+            AppToStudio::EventSample(sample) => {
+                self.profiler_store
+                    .append_event(Some(build_id), map_platform_event_sample(sample));
                 self.broadcast_live_profiler_queries();
             }
-            AppToStudioMsg::GPUSample(sample) => {
-                self.profiler_store.append_gpu(Some(build_id), sample);
+            AppToStudio::GPUSample(sample) => {
+                self.profiler_store
+                    .append_gpu(Some(build_id), map_platform_gpu_sample(sample));
                 self.broadcast_live_profiler_queries();
             }
-            AppToStudioMsg::GCSample(sample) => {
-                self.profiler_store.append_gc(Some(build_id), sample);
+            AppToStudio::GCSample(sample) => {
+                self.profiler_store
+                    .append_gc(Some(build_id), map_platform_gc_sample(sample));
                 self.broadcast_live_profiler_queries();
             }
-            AppToStudioMsg::Screenshot {
-                request_id,
-                kind_id,
-                png,
-                width,
-                height,
-            } => {
-                let query_id = QueryId(request_id);
-                match write_screenshot_png(build_id, kind_id, request_id, &png) {
-                    Ok(path) => self.send_to_query_owner(
-                        query_id,
-                        StudioToUI::Screenshot {
+            AppToStudio::Screenshot(response) => {
+                for request_id in response.request_ids {
+                    let query_id = QueryId(request_id);
+                    match write_screenshot_png(build_id, 0, request_id, &response.png) {
+                        Ok(path) => self.send_to_query_owner(
                             query_id,
-                            build_id,
-                            kind_id,
-                            path,
-                            width,
-                            height,
-                        },
-                    ),
-                    Err(err) => self.send_to_query_owner(
-                        query_id,
-                        StudioToUI::Error {
-                            message: format!("failed to persist screenshot: {}", err),
-                        },
-                    ),
+                            StudioToUI::Screenshot {
+                                query_id,
+                                build_id,
+                                kind_id: 0,
+                                path,
+                                width: response.width,
+                                height: response.height,
+                            },
+                        ),
+                        Err(err) => self.send_to_query_owner(
+                            query_id,
+                            StudioToUI::Error {
+                                message: format!("failed to persist screenshot: {}", err),
+                            },
+                        ),
+                    }
                 }
             }
-            AppToStudioMsg::WidgetTreeDump { request_id, dump } => {
-                let query_id = QueryId(request_id);
+            AppToStudio::WidgetTreeDump(response) => {
+                let query_id = QueryId(response.request_id);
                 self.send_to_query_owner(
                     query_id,
                     StudioToUI::WidgetTreeDump {
                         query_id,
                         build_id,
-                        dump,
+                        dump: response.dump,
                     },
                 );
             }
-            AppToStudioMsg::WidgetQuery {
-                request_id,
-                query,
-                rects,
-            } => {
-                let query_id = QueryId(request_id);
-                self.send_to_query_owner(
-                    query_id,
-                    StudioToUI::WidgetQuery {
-                        query_id,
-                        build_id,
-                        query,
-                        rects,
-                    },
-                );
+            AppToStudio::CreateWindow { window_id, kind_id: _ } => {
+                self.broadcast_ui_message(StudioToUI::RunViewCreated { build_id, window_id });
             }
-            AppToStudioMsg::RunViewFrame {
-                window_id,
-                frame_id,
-                width,
-                height,
-                codec,
-                data,
-            } => self.broadcast_ui_message(StudioToUI::RunViewFrame {
-                build_id,
-                window_id,
-                frame_id,
-                width,
-                height,
-                codec,
-                data,
-            }),
-            AppToStudioMsg::RunViewDrawComplete {
-                window_id,
-                presented_image_id,
-            } => self.broadcast_ui_message(StudioToUI::RunViewDrawComplete {
-                build_id,
-                window_id,
-                presented_image_id,
-            }),
-            AppToStudioMsg::RunViewCursor { cursor } => {
-                self.broadcast_ui_message(StudioToUI::RunViewCursor { build_id, cursor })
+            AppToStudio::SetCursor(cursor) => {
+                self.broadcast_ui_message(StudioToUI::RunViewCursor {
+                    build_id,
+                    cursor: format!("{:?}", cursor),
+                });
             }
+            AppToStudio::DrawCompleteAndFlip(presentable_draw) => {
+                self.broadcast_ui_message(StudioToUI::RunViewDrawComplete {
+                    build_id,
+                    window_id: presentable_draw.window_id,
+                    presentable_draw,
+                });
+            }
+            AppToStudio::Custom(message) => {
+                let (index, entry) = self.log_store.append(AppendLogEntry {
+                    build_id: Some(build_id),
+                    level: LogLevel::Log,
+                    source: LogSource::ChildApp,
+                    message,
+                    file_name: None,
+                    line: None,
+                    column: None,
+                    timestamp: None,
+                });
+                self.broadcast_live_log_entry(index, entry);
+            }
+            AppToStudio::JumpToFile(_)
+            | AppToStudio::SelectInFile(_)
+            | AppToStudio::PatchFile(_)
+            | AppToStudio::EditFile(_)
+            | AppToStudio::SwapSelection(_)
+            | AppToStudio::TweakHits(_)
+            | AppToStudio::ReadyToStart
+            | AppToStudio::RequestAnimationFrame
+            | AppToStudio::SetClipboard(_) => {}
         }
     }
 
@@ -1297,7 +1508,6 @@ impl StudioCore {
             }
         }
     }
-
     fn on_process_exited(&mut self, build_id: QueryId, exit_code: Option<i32>) {
         if self
             .process_manager
@@ -1314,6 +1524,9 @@ impl StudioCore {
 
     fn on_terminal_output(&mut self, path: String, data: Vec<u8>) {
         if data.is_empty() {
+            return;
+        }
+        if self.terminal_manager.mount_for_path(&path).is_none() {
             return;
         }
         let _ = append_terminal_history_bytes(&self.vfs, &path, &data);
@@ -1566,6 +1779,39 @@ fn append_terminal_history_bytes(vfs: &VirtualFs, path: &str, data: &[u8]) -> Re
     })
 }
 
+fn map_platform_log_level(level: StudioProtocolLogLevel) -> LogLevel {
+    match level {
+        StudioProtocolLogLevel::Error | StudioProtocolLogLevel::Panic => {
+            LogLevel::Error
+        }
+        StudioProtocolLogLevel::Warning | StudioProtocolLogLevel::Wait => {
+            LogLevel::Warning
+        }
+        StudioProtocolLogLevel::Log => LogLevel::Log,
+    }
+}
+
+fn map_platform_event_sample(sample: EventSample) -> StudioEventSample {
+    StudioEventSample {
+        at: sample.start,
+        label: LiveId(sample.event_u32 as u64),
+    }
+}
+
+fn map_platform_gpu_sample(sample: GPUSample) -> StudioGPUSample {
+    StudioGPUSample {
+        at: sample.end,
+        label: LiveId(0),
+    }
+}
+
+fn map_platform_gc_sample(sample: GCSample) -> StudioGCSample {
+    StudioGCSample {
+        at: sample.end,
+        label: LiveId(0),
+    }
+}
+
 fn classify_cargo_log_line(is_stderr: bool, line: &str) -> LogLevel {
     let lower = line.to_ascii_lowercase();
     if lower.contains("error") {
@@ -1574,9 +1820,7 @@ fn classify_cargo_log_line(is_stderr: bool, line: &str) -> LogLevel {
     if lower.contains("warning") {
         return LogLevel::Warning;
     }
-    if is_stderr {
-        return LogLevel::Warning;
-    }
+    let _ = is_stderr;
     LogLevel::Log
 }
 
@@ -1749,6 +1993,20 @@ mod tests {
         let line = "Compiling makepad-studio-backend v0.1.0";
         let parsed = parse_cargo_output_line(line);
         assert!(matches!(parsed, ParsedCargoOutputLine::RawText));
+    }
+
+    #[test]
+    fn classify_cargo_progress_stderr_as_log() {
+        let level = classify_cargo_log_line(true, "Compiling makepad-studio-backend v0.1.0");
+        assert!(matches!(level, LogLevel::Log));
+    }
+
+    #[test]
+    fn classify_cargo_warning_and_error_text() {
+        let warning = classify_cargo_log_line(true, "warning: unused import: `foo`");
+        let error = classify_cargo_log_line(false, "error: could not compile `demo`");
+        assert!(matches!(warning, LogLevel::Warning));
+        assert!(matches!(error, LogLevel::Error));
     }
 }
 

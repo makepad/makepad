@@ -5,6 +5,7 @@ pub mod plain_web_socket;
 pub mod runtime;
 pub mod socket_stream;
 pub mod types;
+pub mod ui_signal;
 pub mod utils;
 pub mod web_socket_parser;
 
@@ -17,6 +18,9 @@ pub use crate::socket_stream::SocketStream;
 pub use crate::types::{
     HttpError, HttpMethod, HttpProgress, HttpRequest, HttpResponse, NetworkError, NetworkResponse,
     SplitUrl, WebSocketMessage, WebSocketTransport, WsMessage, WsSend,
+};
+pub use crate::ui_signal::{
+    FromUIReceiver, FromUISender, SignalFromUI, SignalToUI, ToUIReceiver, ToUISender,
 };
 pub use crate::utils::HttpServerHeaders;
 pub use crate::web_socket_parser::{

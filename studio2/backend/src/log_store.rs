@@ -2,6 +2,7 @@ use crate::protocol::{
     EventSample, GCSample, GPUSample, LogEntry, LogLevel, LogSource, QueryId,
 };
 use makepad_live_id::LiveId;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Default)]
@@ -70,14 +71,18 @@ pub struct AppendLogEntry {
     pub timestamp: Option<f64>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct LogStore {
-    entries: Vec<LogEntry>,
+    entries: Arc<RwLock<Vec<LogEntry>>>,
 }
 
 impl LogStore {
     pub fn append(&mut self, entry: AppendLogEntry) -> (usize, LogEntry) {
-        let index = self.entries.len();
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let index = entries.len();
         let entry = LogEntry {
             index,
             timestamp: entry.timestamp.unwrap_or_else(now_seconds),
@@ -89,21 +94,36 @@ impl LogStore {
             line: entry.line,
             column: entry.column,
         };
-        self.entries.push(entry.clone());
+        entries.push(entry.clone());
         (index, entry)
     }
 
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.entries
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     pub fn query(&self, query: &LogQuery) -> Vec<(usize, LogEntry)> {
-        self.entries
-            .iter()
-            .filter(|entry| query.matches(entry))
-            .map(|entry| (entry.index, entry.clone()))
-            .collect()
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        query_log_entries(&entries, query)
     }
+
+    pub fn entries_handle(&self) -> Arc<RwLock<Vec<LogEntry>>> {
+        Arc::clone(&self.entries)
+    }
+}
+
+pub fn query_log_entries(entries: &[LogEntry], query: &LogQuery) -> Vec<(usize, LogEntry)> {
+    entries
+        .iter()
+        .filter(|entry| query.matches(entry))
+        .map(|entry| (entry.index, entry.clone()))
+        .collect()
 }
 
 #[derive(Clone, Debug, Default)]

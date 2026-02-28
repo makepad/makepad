@@ -1,5 +1,5 @@
 use crate::{
-    app::{AppData, UiLogEntry},
+    app_data::{AppData, UiLogEntry},
     makepad_widgets::*,
 };
 
@@ -197,10 +197,18 @@ struct LogLocationLink {
     column: usize,
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct DesktopLogView {
     #[deref]
     view: View,
+    #[rust]
+    tail: bool,
+}
+
+impl ScriptHook for DesktopLogView {
+    fn on_after_new(&mut self, _vm: &mut ScriptVm) {
+        self.tail = true;
+    }
 }
 
 impl DesktopLogView {
@@ -232,7 +240,8 @@ impl DesktopLogView {
         }
         data.active_mount
             .as_ref()
-            .and_then(|mount| data.mount_log_entries.get(mount))
+            .and_then(|mount| data.mounts.get(mount))
+            .map(|mount| &mount.log_entries)
             .cloned()
             .unwrap_or_default()
     }
@@ -312,6 +321,7 @@ impl Widget for DesktopLogView {
         let tab_id = self.tab_id(cx);
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
+                list.set_tail_range(self.tail);
                 if let Some(data) = scope.data.get_mut::<AppData>() {
                     let entries = Self::collect_entries(data, tab_id);
                     self.draw_entries(cx, &mut *list, &entries);
@@ -346,6 +356,18 @@ impl Widget for DesktopLogView {
 }
 
 impl DesktopLogViewRef {
+    pub fn set_tail(&self, cx: &mut Cx, tail: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.tail = tail;
+            inner.view.portal_list(cx, ids!(list)).set_tail_range(tail);
+            inner.view.redraw(cx);
+        }
+    }
+
+    pub fn tail(&self) -> bool {
+        self.borrow().map(|inner| inner.tail).unwrap_or(true)
+    }
+
     pub fn open_location_requested(&self, actions: &Actions) -> Option<(String, usize, usize)> {
         let item = actions.find_widget_action(self.widget_uid())?;
         if let DesktopLogViewAction::OpenLocation { path, line, column } = item.cast() {

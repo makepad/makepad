@@ -66,6 +66,13 @@ impl VirtualFs {
         Self::default()
     }
 
+    pub fn clone_for_search(&self) -> Self {
+        Self {
+            mounts: self.mounts.clone(),
+            open_buffers: HashMap::new(),
+        }
+    }
+
     pub fn mount(&mut self, name: &str, path: impl Into<PathBuf>) -> Result<(), VirtualFsError> {
         if name.is_empty() {
             return Err(VirtualFsError::InvalidVirtualPath(
