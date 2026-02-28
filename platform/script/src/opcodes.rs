@@ -16,6 +16,10 @@ impl<'a> ScriptVm<'a> {
     #[inline]
     pub fn opcode(&mut self, opcode: Opcode, opargs: OpcodeArgs) {
         match opcode {
+            // NOP placeholder emitted by parser rewrite passes (for markers / unary +).
+            // It intentionally performs no stack mutation and just advances IP.
+            Opcode::NOP => self.bx.threads.cur().trap.goto_next(),
+
             // ARITHMETIC
             Opcode::NOT => self.handle_not(),
             Opcode::NEG => self.handle_neg(),
@@ -223,7 +227,26 @@ impl<'a> ScriptVm<'a> {
             Opcode::LET_DESTRUCT_OBJECT_EL => self.handle_let_destruct_object_el(),
 
             opcode => {
-                println!("UNDEFINED OPCODE {}", opcode);
+                let ip = self.bx.threads.cur_ref().trap.ip;
+                let loc = self.bx.code.ip_to_loc(ip);
+                if let Some(loc) = loc {
+                    eprintln!(
+                        "UNDEFINED OPCODE {} (raw={}) at {} (ip body={}, index={})",
+                        opcode,
+                        opcode.raw(),
+                        loc,
+                        ip.body,
+                        ip.index
+                    );
+                } else {
+                    eprintln!(
+                        "UNDEFINED OPCODE {} (raw={}) at ip body={}, index={}",
+                        opcode,
+                        opcode.raw(),
+                        ip.body,
+                        ip.index
+                    );
+                }
                 self.bx.threads.cur().trap.goto_next();
             }
         }

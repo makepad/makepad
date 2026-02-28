@@ -21,7 +21,10 @@ where
     None
 }
 
-fn drain_messages(connection: &makepad_studio_backend::StudioConnection, duration: Duration) -> Vec<StudioToUI> {
+fn drain_messages(
+    connection: &makepad_studio_backend::StudioConnection,
+    duration: Duration,
+) -> Vec<StudioToUI> {
     let deadline = Instant::now() + duration;
     let mut out = Vec::new();
     while Instant::now() < deadline {
@@ -271,25 +274,21 @@ fn file_watch_emits_single_path_delta_without_full_tree_reload() {
         content: "pub fn hi() { let _x = 1; }\n".to_string(),
     });
 
-    let diff_msg = wait_for_message(
-        &connection,
-        Duration::from_secs(5),
-        |msg| {
-            matches!(
-                msg,
-                StudioToUI::FileTreeDiff { mount, changes }
-                    if mount == "repo"
-                        && changes.len() == 1
-                        && matches!(
-                            &changes[0],
-                            makepad_studio_backend::FileTreeChange::Added { path, .. }
-                                | makepad_studio_backend::FileTreeChange::Modified { path, .. }
-                                | makepad_studio_backend::FileTreeChange::Removed { path }
-                                if path.starts_with("repo/")
-                        )
-            )
-        },
-    )
+    let diff_msg = wait_for_message(&connection, Duration::from_secs(5), |msg| {
+        matches!(
+            msg,
+            StudioToUI::FileTreeDiff { mount, changes }
+                if mount == "repo"
+                    && changes.len() == 1
+                    && matches!(
+                        &changes[0],
+                        makepad_studio_backend::FileTreeChange::Added { path, .. }
+                            | makepad_studio_backend::FileTreeChange::Modified { path, .. }
+                            | makepad_studio_backend::FileTreeChange::Removed { path }
+                            if path.starts_with("repo/")
+                    )
+        )
+    })
     .expect("did not receive path-scoped filetree delta");
 
     match diff_msg {
@@ -344,5 +343,137 @@ fn file_watch_ignores_makepad_term_writes() {
             matches!(msg, StudioToUI::FileTreeDiff { mount, .. } if mount == "repo")
         }),
         "expected .makepad terminal writes to be ignored by fs delta watcher"
+    );
+}
+
+#[test]
+#[ignore = "depends on host filesystem watcher delivery timing"]
+fn file_watch_picks_up_external_new_file() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(UIToStudio::LoadFileTree {
+        mount: "repo".to_string(),
+    });
+    let _ = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+    )
+    .expect("did not receive initial file tree");
+
+    fs::write(dir.path().join("src/new_file.rs"), "pub fn new_file() {}\n").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut saw_new_file = false;
+    while Instant::now() < deadline {
+        let Some(msg) = connection.recv_timeout(Duration::from_millis(120)) else {
+            continue;
+        };
+        match msg {
+            StudioToUI::FileTreeDiff { mount, changes } if mount == "repo" => {
+                if changes.iter().any(|change| {
+                    matches!(
+                        change,
+                        makepad_studio_backend::FileTreeChange::Added { path, .. }
+                            if path == "repo/src/new_file.rs"
+                    )
+                }) {
+                    saw_new_file = true;
+                    break;
+                }
+            }
+            StudioToUI::FileTree { mount, data } if mount == "repo" => {
+                if data
+                    .nodes
+                    .iter()
+                    .any(|node| node.path == "repo/src/new_file.rs")
+                {
+                    saw_new_file = true;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_new_file,
+        "did not observe file-tree update for externally created file"
+    );
+}
+
+#[test]
+#[ignore = "depends on host filesystem watcher delivery timing"]
+fn file_watch_picks_up_external_removed_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+    fs::write(dir.path().join("src/nested/mod.rs"), "pub fn nested() {}\n").unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(UIToStudio::LoadFileTree {
+        mount: "repo".to_string(),
+    });
+    let _ = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+    )
+    .expect("did not receive initial file tree");
+
+    fs::remove_dir_all(dir.path().join("src/nested")).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut saw_nested_removed = false;
+    while Instant::now() < deadline {
+        let Some(msg) = connection.recv_timeout(Duration::from_millis(120)) else {
+            continue;
+        };
+        match msg {
+            StudioToUI::FileTreeDiff { mount, changes } if mount == "repo" => {
+                if changes.iter().any(|change| {
+                    matches!(
+                        change,
+                        makepad_studio_backend::FileTreeChange::Removed { path }
+                            if path == "repo/src/nested" || path.starts_with("repo/src/nested/")
+                    )
+                }) {
+                    saw_nested_removed = true;
+                    break;
+                }
+            }
+            StudioToUI::FileTree { mount, data } if mount == "repo" => {
+                if !data.nodes.iter().any(|node| {
+                    node.path == "repo/src/nested" || node.path.starts_with("repo/src/nested/")
+                }) {
+                    saw_nested_removed = true;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_nested_removed,
+        "did not observe file-tree update for externally removed directory"
     );
 }

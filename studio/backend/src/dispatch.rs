@@ -1097,14 +1097,41 @@ impl StudioCore {
             self.mount_suppress_fs_until.remove(&mount);
         }
         let Some(virtual_path) = self.mount_path_to_virtual(&mount, &path) else {
+            self.reload_mount_file_tree_broadcast(&mount);
             return;
         };
+        if virtual_path == mount {
+            self.reload_mount_file_tree_broadcast(&mount);
+            return;
+        }
+        if path.is_dir() {
+            self.reload_mount_file_tree_broadcast(&mount);
+            return;
+        }
         self.enqueue_file_tree_delta(&mount, &virtual_path, path, now);
     }
 
     fn mount_path_to_virtual(&self, mount: &str, path: &Path) -> Option<String> {
         let mount_root = self.vfs.resolve_mount(mount).ok()?;
-        let path = path.strip_prefix(&mount_root).ok()?;
+        let path = path
+            .strip_prefix(&mount_root)
+            .ok()
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                #[cfg(target_os = "macos")]
+                {
+                    let normalized_mount_root = normalize_macos_private_alias(&mount_root);
+                    let normalized_path = normalize_macos_private_alias(path);
+                    normalized_path
+                        .strip_prefix(&normalized_mount_root)
+                        .ok()
+                        .map(Path::to_path_buf)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    None
+                }
+            })?;
         if path.as_os_str().is_empty() {
             return Some(mount.to_string());
         }
@@ -1179,6 +1206,26 @@ impl StudioCore {
             || rest.starts_with("target/")
             || rest == ".makepad"
             || rest.starts_with(".makepad/")
+    }
+
+    fn reload_mount_file_tree_broadcast(&mut self, mount: &str) {
+        let now = Instant::now();
+        let reload_key = format!("__mount_reload__/{}", mount);
+        if let Some(last) = self.fs_event_last_by_path.get(&reload_key).copied() {
+            if now.saturating_duration_since(last) < Duration::from_millis(120) {
+                return;
+            }
+        }
+        self.fs_event_last_by_path.insert(reload_key, now);
+        match self.vfs.load_file_tree(mount) {
+            Ok(data) => self.broadcast_ui_message(StudioToUI::FileTree {
+                mount: mount.to_string(),
+                data,
+            }),
+            Err(err) => self.broadcast_ui_message(StudioToUI::Error {
+                message: format!("file tree reload failed for {}: {}", mount, err),
+            }),
+        }
     }
 
     fn on_worker_find_files_done(
@@ -2177,6 +2224,16 @@ fn percent_encode_local(input: &str) -> String {
     out
 }
 
+#[cfg(target_os = "macos")]
+fn normalize_macos_private_alias(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("/private/") {
+        PathBuf::from(format!("/{}", rest))
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn hex_local(v: u8) -> char {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     HEX[v as usize] as char
@@ -2239,6 +2296,8 @@ fn file_tree_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_network::ToUIReceiver;
+    use std::sync::mpsc;
 
     #[test]
     fn parse_cargo_output_line_extracts_primary_span() {
@@ -2280,6 +2339,151 @@ mod tests {
         let error = classify_cargo_log_line(false, "error: could not compile `demo`");
         assert!(matches!(warning, LogLevel::Warning));
         assert!(matches!(error, LogLevel::Error));
+    }
+
+    fn test_core_with_ui(root: &Path) -> (StudioCore, ToUIReceiver<Vec<u8>>) {
+        let (event_tx, event_rx) = mpsc::channel::<StudioEvent>();
+        let mut vfs = VirtualFs::new();
+        vfs.mount("repo", root.to_path_buf()).expect("mount repo");
+        let mut core = StudioCore::new(event_rx, event_tx, vfs, None);
+
+        let ui_rx = ToUIReceiver::<Vec<u8>>::default();
+        core.handle_event(StudioEvent::UiConnected {
+            web_socket_id: 1,
+            sender: ui_rx.sender(),
+        });
+        let _ = ui_rx.receiver.recv_timeout(Duration::from_millis(250)); // hello
+        (core, ui_rx)
+    }
+
+    fn pump_core(core: &mut StudioCore, max_wait: Duration) {
+        let deadline = Instant::now() + max_wait;
+        while Instant::now() < deadline {
+            match core.rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(event) => {
+                    if !core.handle_event(event) {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn recv_ui_messages(rx: &ToUIReceiver<Vec<u8>>, max_wait: Duration) -> Vec<StudioToUI> {
+        let deadline = Instant::now() + max_wait;
+        let mut out = Vec::new();
+        while Instant::now() < deadline {
+            match rx.receiver.recv_timeout(Duration::from_millis(25)) {
+                Ok(data) => {
+                    if let Ok(msg) = StudioToUI::deserialize_bin(&data) {
+                        out.push(msg);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn mount_fs_changed_file_path_emits_added_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+        fs::write(dir.path().join("src/new_file.rs"), "pub fn new_file() {}\n").unwrap();
+        core.handle_event(StudioEvent::MountFsChanged {
+            mount: "repo".to_string(),
+            path: dir.path().join("src/new_file.rs"),
+        });
+
+        pump_core(&mut core, Duration::from_millis(400));
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(300));
+        assert!(
+            messages.iter().any(|msg| {
+                matches!(
+                    msg,
+                    StudioToUI::FileTreeDiff { mount, changes }
+                        if mount == "repo"
+                            && changes.iter().any(|change| {
+                                matches!(
+                                    change,
+                                    crate::protocol::FileTreeChange::Added { path, .. }
+                                        if path == "repo/src/new_file.rs"
+                                )
+                            })
+                )
+            }),
+            "expected Added diff for repo/src/new_file.rs"
+        );
+    }
+
+    #[test]
+    fn mount_fs_changed_directory_path_triggers_full_tree_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+        fs::write(dir.path().join("src/from_dir_event.rs"), "pub fn d() {}\n").unwrap();
+        core.handle_event(StudioEvent::MountFsChanged {
+            mount: "repo".to_string(),
+            path: dir.path().join("src"),
+        });
+
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
+        assert!(
+            messages.iter().any(|msg| {
+                matches!(
+                    msg,
+                    StudioToUI::FileTree { mount, data }
+                        if mount == "repo"
+                            && data
+                                .nodes
+                                .iter()
+                                .any(|node| node.path == "repo/src/from_dir_event.rs")
+                )
+            }),
+            "expected full FileTree reload to include repo/src/from_dir_event.rs"
+        );
+    }
+
+    #[test]
+    fn mount_fs_changed_removed_directory_emits_removed_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        fs::write(dir.path().join("src/nested/mod.rs"), "pub fn nested() {}\n").unwrap();
+
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+        fs::remove_dir_all(dir.path().join("src/nested")).unwrap();
+        core.handle_event(StudioEvent::MountFsChanged {
+            mount: "repo".to_string(),
+            path: dir.path().join("src/nested"),
+        });
+
+        pump_core(&mut core, Duration::from_millis(400));
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(300));
+        assert!(
+            messages.iter().any(|msg| {
+                matches!(
+                    msg,
+                    StudioToUI::FileTreeDiff { mount, changes }
+                        if mount == "repo"
+                            && changes.iter().any(|change| {
+                                matches!(
+                                    change,
+                                    crate::protocol::FileTreeChange::Removed { path }
+                                        if path == "repo/src/nested"
+                                )
+                            })
+                )
+            }),
+            "expected Removed diff for repo/src/nested"
+        );
     }
 }
 
