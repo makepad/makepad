@@ -27,7 +27,7 @@ use {
         executor::{Executor, Spawner},
     },
     makepad_network::NetworkRuntime,
-    makepad_script::{ScriptVm, ScriptVmBase},
+    makepad_script::*,
     std::{
         any::{Any, TypeId},
         cell::RefCell,
@@ -142,60 +142,90 @@ pub struct CxRef(pub Rc<RefCell<Cx>>);
 pub struct CxDependency {
     pub data: Option<Result<Rc<Vec<u8>>, String>>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct AndroidParams {
+    #[live]
     pub cache_path: String,
+    #[live]
     pub data_path: String,
+    #[live]
     pub density: f64,
+    #[live]
     pub is_emulator: bool,
+    #[live]
     pub has_xr_mode: bool,
+    #[live]
     pub android_version: String,
+    #[live]
     pub build_number: String,
+    #[live]
     pub kernel_version: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct IosParams {
+    #[live]
     pub data_path: String,
+    #[live]
     pub device_model: String,
+    #[live]
     pub system_version: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct OpenHarmonyParams {
+    #[live]
     pub files_dir: String,
+    #[live]
     pub cache_dir: String,
+    #[live]
     pub temp_dir: String,
+    #[live]
     pub device_type: String,
+    #[live]
     pub os_full_name: String,
+    #[live]
     pub display_density: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct WebParams {
+    #[live]
     pub protocol: String,
+    #[live]
     pub host: String,
+    #[live]
     pub hostname: String,
+    #[live]
     pub pathname: String,
+    #[live]
     pub search: String,
+    #[live]
     pub hash: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct LinuxWindowParams {
+    #[live]
     pub custom_window_chrome: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Script, ScriptHook)]
 pub enum OsType {
+    #[pick]
     Unknown,
     Windows,
     Macos,
+    #[live(IosParams::default())]
     Ios(IosParams),
+    #[live(AndroidParams::default())]
     Android(AndroidParams),
+    #[live(OpenHarmonyParams::default())]
     OpenHarmony(OpenHarmonyParams),
+    #[live(LinuxWindowParams::default())]
     LinuxWindow(LinuxWindowParams),
     LinuxDirect,
+    #[live(WebParams::default())]
     Web(WebParams),
 }
 
