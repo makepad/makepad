@@ -1,0 +1,429 @@
+use super::*;
+
+impl App {
+    pub(super) fn drain_studio_messages(&mut self, cx: &mut Cx) {
+        loop {
+            let Some(msg) = self
+                .data
+                .studio
+                .as_ref()
+                .and_then(|studio| studio.try_recv())
+            else {
+                break;
+            };
+            self.handle_studio_message(cx, msg);
+        }
+    }
+
+    pub(super) fn handle_studio_message(&mut self, cx: &mut Cx, msg: StudioToUI) {
+        match msg {
+            StudioToUI::FileTree { mount, data } => {
+                let _ = self.ensure_mount_tab(cx, &mount);
+                self.mount_state_mut(&mount).file_tree_data = Some(data);
+                self.ensure_mount_terminal_file(cx, &mount);
+                if let Some(filter) = self
+                    .mount_state(&mount)
+                    .map(|mount| mount.file_filter.clone())
+                    .filter(|filter| !filter.is_empty())
+                {
+                    self.set_mount_file_filter(cx, &mount, filter);
+                }
+                if self.data.active_mount.is_none() {
+                    self.select_mount(cx, &mount);
+                } else if self.data.active_mount.as_deref() == Some(mount.as_str()) {
+                    self.refresh_active_mount_tree(cx);
+                    self.set_status(cx, &format!("file tree loaded: {}", mount));
+                }
+            }
+            StudioToUI::TextFileOpened { path, content, .. } => {
+                if Self::is_terminal_virtual_path(&path) {
+                    let content_bytes = content.into_bytes();
+                    self.data
+                        .terminal_history_len_by_path
+                        .insert(path.clone(), content_bytes.len());
+                    self.data
+                        .terminal_stream_by_path
+                        .insert(path, content_bytes);
+                    self.refresh_active_mount_log_panels(cx);
+                    return;
+                }
+                self.data.pending_open_paths.remove(&path);
+                if let Some((tab_id, _)) = self.ensure_editor_tab_for_path(cx, &path, false) {
+                    self.data.sessions.insert(
+                        tab_id,
+                        CodeSession::new(CodeDocument::new(content.into(), DecorationSet::new())),
+                    );
+                    self.apply_pending_log_jump(&path, tab_id);
+                    if let Some(mount) = Self::mount_from_virtual_path(&path) {
+                        if let Some(dock) = self.mount_workspace_dock(cx, mount) {
+                            dock.redraw_tab(cx, tab_id);
+                        }
+                    }
+                }
+                self.set_status(cx, "opened file");
+            }
+            StudioToUI::FileTreeDiff { mount, changes } => {
+                self.apply_mount_file_tree_diff(cx, &mount, changes);
+            }
+            StudioToUI::TextFileRead { path, content } => {
+                if Self::is_terminal_virtual_path(&path) {
+                    let content_bytes = content.into_bytes();
+                    self.data
+                        .terminal_history_len_by_path
+                        .insert(path.clone(), content_bytes.len());
+                    self.data
+                        .terminal_stream_by_path
+                        .insert(path, content_bytes);
+                    self.refresh_active_mount_log_panels(cx);
+                    return;
+                }
+                self.data.pending_open_paths.remove(&path);
+                if let Some((tab_id, _)) = self.ensure_editor_tab_for_path(cx, &path, false) {
+                    self.data.sessions.insert(
+                        tab_id,
+                        CodeSession::new(CodeDocument::new(content.into(), DecorationSet::new())),
+                    );
+                    self.apply_pending_log_jump(&path, tab_id);
+                    if let Some(mount) = Self::mount_from_virtual_path(&path) {
+                        if let Some(dock) = self.mount_workspace_dock(cx, mount) {
+                            dock.redraw_tab(cx, tab_id);
+                        }
+                    }
+                }
+            }
+            StudioToUI::TextFileSaved { path, result } => {
+                if Self::is_terminal_virtual_path(&path) {
+                    return;
+                }
+                self.set_status(cx, &format!("saved {} ({:?})", path, result));
+            }
+            StudioToUI::FindFileResults {
+                query_id,
+                paths,
+                done,
+            } => {
+                let Some(mount) = self.data.file_filter_mount_by_query.get(&query_id).cloned()
+                else {
+                    return;
+                };
+                if self
+                    .mount_state(&mount)
+                    .and_then(|mount| mount.file_filter_query)
+                    != Some(query_id)
+                {
+                    return;
+                }
+                self.mount_state_mut(&mount).file_filter_results = paths;
+                if done {
+                    self.mount_state_mut(&mount).file_filter_query = None;
+                    self.data.file_filter_mount_by_query.remove(&query_id);
+                }
+                if self.data.active_mount.as_deref() == Some(mount.as_str()) {
+                    self.refresh_active_mount_tree(cx);
+                }
+            }
+            StudioToUI::Builds { builds } => {
+                for build in &builds {
+                    self.data
+                        .build_to_mount
+                        .insert(build.build_id, build.mount.clone());
+                }
+                let Some(mount) = self.data.pending_stop_all_mount.take() else {
+                    return;
+                };
+                let mut stop_count = 0usize;
+                for build in builds {
+                    if build.active && build.mount == mount {
+                        if let Some(tab_id) = self.data.run_tab_by_build.get(&build.build_id).copied() {
+                            if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                                dock.item(tab_id)
+                                    .desktop_run_view(cx, ids!(run_view))
+                                    .clear_run_target(cx);
+                                dock.redraw_tab(cx, tab_id);
+                            }
+                        }
+                        let _ = self.send_studio(UIToStudio::StopBuild {
+                            build_id: build.build_id,
+                        });
+                        stop_count += 1;
+                    }
+                }
+                self.set_status(
+                    cx,
+                    &format!("stop-all {}: {} running build(s)", mount, stop_count),
+                );
+            }
+            StudioToUI::RunnableBuilds { mount, builds } => {
+                self.mount_state_mut(&mount).runnable_builds = builds;
+                if self.data.active_mount.as_deref() == Some(mount.as_str()) {
+                    self.refresh_active_mount_run_list(cx);
+                    self.set_status(cx, &format!("run targets loaded: {}", mount));
+                }
+            }
+            StudioToUI::BuildStarted {
+                build_id,
+                mount,
+                package,
+            } => {
+                self.data
+                    .profiler_running_by_build
+                    .entry(build_id)
+                    .or_insert(true);
+                self.data.build_to_mount.insert(build_id, mount.clone());
+                self.data.build_package.insert(build_id, package.clone());
+                self.data
+                    .active_log_build_by_mount
+                    .insert(mount.clone(), build_id);
+                if !self.data.log_tab_by_build.contains_key(&build_id) {
+                    let _ = self.ensure_log_tab_for_build(cx, build_id, &mount, &package, false);
+                }
+                if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
+                    let mut window_id = None;
+                    if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
+                        state.mount = mount.clone();
+                        state.package = package.clone();
+                        state.status = "running".to_string();
+                        window_id = state.window_id;
+                    }
+                    if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                        dock.item(tab_id)
+                            .desktop_run_view(cx, ids!(run_view))
+                            .set_run_target(cx, build_id, window_id);
+                        dock.redraw_tab(cx, tab_id);
+                    }
+                }
+                if let Some(log_tab_id) = self.data.log_tab_by_build.get(&build_id).copied() {
+                    if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                        dock.redraw_tab(cx, log_tab_id);
+                    }
+                }
+                self.set_status(cx, &format!("build started: {}", package));
+            }
+            StudioToUI::BuildStopped {
+                build_id,
+                exit_code,
+            } => {
+                self.data.build_to_mount.remove(&build_id);
+                self.stop_profiler_query_for_build(build_id);
+                self.data.profiler_running_by_build.insert(build_id, false);
+                if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
+                    let mount = self
+                        .data
+                        .run_tab_state
+                        .get(&tab_id)
+                        .map(|state| state.mount.clone())
+                        .unwrap_or_default();
+                    if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
+                        state.status = match exit_code {
+                            Some(code) => format!("stopped (exit code {})", code),
+                            None => "stopped".to_string(),
+                        };
+                        state.window_id = None;
+                    }
+                    if !mount.is_empty() {
+                        if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                            dock.item(tab_id)
+                                .desktop_run_view(cx, ids!(run_view))
+                                .clear_run_target(cx);
+                            dock.redraw_tab(cx, tab_id);
+                        }
+                    }
+                }
+            }
+            StudioToUI::RunViewCreated {
+                build_id,
+                window_id,
+            } => {
+                let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() else {
+                    return;
+                };
+                let mut mount = None;
+                if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
+                    mount = Some(state.mount.clone());
+                    if state.window_id.is_none() {
+                        state.window_id = Some(window_id);
+                    }
+                }
+                if let Some(mount) = mount {
+                    if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                        dock.item(tab_id)
+                            .desktop_run_view(cx, ids!(run_view))
+                            .set_run_target(cx, build_id, Some(window_id));
+                        dock.redraw_tab(cx, tab_id);
+                    }
+                }
+            }
+            StudioToUI::RunViewDrawComplete {
+                build_id,
+                window_id,
+                presentable_draw,
+            } => {
+                let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() else {
+                    return;
+                };
+                let mut mount = None;
+                let mut accepted_window = false;
+                if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
+                    mount = Some(state.mount.clone());
+                    if state.window_id.is_none() {
+                        state.window_id = Some(window_id);
+                    }
+                    accepted_window = state.window_id == Some(window_id);
+                }
+                if !accepted_window {
+                    return;
+                }
+                let Some(mount) = mount else {
+                    return;
+                };
+                if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                    let run_view = dock.item(tab_id).desktop_run_view(cx, ids!(run_view));
+                    run_view.set_run_target(cx, build_id, Some(window_id));
+                    run_view.set_presentable_draw(cx, presentable_draw);
+                    dock.redraw_tab(cx, tab_id);
+                }
+            }
+            StudioToUI::QueryLogResults {
+                query_id,
+                entries,
+                done: _,
+            } => {
+                if self.data.live_log_query != Some(query_id) {
+                    return;
+                }
+                let mut touched_mounts = HashSet::new();
+                for (_index, entry) in entries {
+                    let Some(build_id) = entry.build_id else {
+                        continue;
+                    };
+                    let Some(mount) = self.data.build_to_mount.get(&build_id).cloned() else {
+                        continue;
+                    };
+                    let location = self.extract_log_location(&mount, &entry);
+                    let log_entry = UiLogEntry {
+                        level: entry.level,
+                        source: entry.source,
+                        message: entry.message,
+                        location,
+                    };
+                    push_capped_vec(
+                        self.data.build_log_entries.entry(build_id).or_default(),
+                        log_entry.clone(),
+                        2_000,
+                    );
+                    push_capped_vec(
+                        &mut self.mount_state_mut(&mount).log_entries,
+                        log_entry,
+                        3_000,
+                    );
+                    touched_mounts.insert(mount);
+
+                    if let Some(log_tab_id) = self.data.log_tab_by_build.get(&build_id).copied() {
+                        if let Some(log_mount) = self.data.build_to_mount.get(&build_id).cloned() {
+                            if let Some(dock) = self.mount_workspace_dock(cx, &log_mount) {
+                                dock.redraw_tab(cx, log_tab_id);
+                            }
+                        }
+                    }
+                }
+                touched_mounts.retain(|mount| !mount.is_empty());
+                self.refresh_active_mount_log_panels(cx);
+            }
+            StudioToUI::QueryProfilerResults {
+                query_id,
+                event_samples,
+                gpu_samples,
+                gc_samples,
+                total_in_window,
+                done,
+            } => {
+                let Some(build_id) = self
+                    .data
+                    .profiler_query_build_by_query
+                    .get(&query_id)
+                    .copied()
+                else {
+                    return;
+                };
+                if self
+                    .data
+                    .profiler_running_by_build
+                    .get(&build_id)
+                    .copied()
+                    == Some(false)
+                {
+                    return;
+                }
+                self.data.profiler_samples_by_build.insert(
+                    build_id,
+                    UiProfilerSamples {
+                        event_samples,
+                        gpu_samples,
+                        gc_samples,
+                        total_in_window,
+                    },
+                );
+                if done {
+                    self.data.profiler_query_build_by_query.remove(&query_id);
+                    if self.data.live_profiler_query_by_build.get(&build_id) == Some(&query_id) {
+                        self.data.live_profiler_query_by_build.remove(&build_id);
+                    }
+                }
+                if let Some(tab_id) = self.data.profiler_tab_by_build.get(&build_id).copied() {
+                    let mount = self
+                        .data
+                        .profiler_tab_state
+                        .get(&tab_id)
+                        .map(|state| state.mount.clone());
+                    if let Some(mount) = mount {
+                        if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                            dock.redraw_tab(cx, tab_id);
+                        }
+                    }
+                }
+            }
+            StudioToUI::QueryCancelled { query_id } => {
+                if let Some(build_id) = self.data.profiler_query_build_by_query.remove(&query_id) {
+                    if self.data.live_profiler_query_by_build.get(&build_id) == Some(&query_id) {
+                        self.data.live_profiler_query_by_build.remove(&build_id);
+                    }
+                }
+            }
+            StudioToUI::TerminalOpened {
+                path,
+                history,
+                grid: _,
+            } => {
+                self.data.terminal_open_paths.insert(path.clone());
+                let desired_size = self.data.terminal_desired_size_by_path.get(&path).copied();
+                // Always replay raw terminal bytes so ANSI/control codes are preserved.
+                self.data
+                    .terminal_history_len_by_path
+                    .insert(path.clone(), history.len());
+                self.data
+                    .terminal_stream_by_path
+                    .insert(path.clone(), history);
+                if let Some((cols, rows)) = desired_size {
+                    let _ = self.send_studio(UIToStudio::TerminalResize { path, cols, rows });
+                }
+                self.refresh_active_mount_log_panels(cx);
+            }
+            StudioToUI::TerminalOutput { path, data } => {
+                self.data
+                    .terminal_stream_by_path
+                    .entry(path)
+                    .or_default()
+                    .extend_from_slice(&data);
+                self.refresh_active_mount_log_panels(cx);
+            }
+            StudioToUI::TerminalExited { path, code } => {
+                self.data.terminal_open_paths.remove(&path);
+                self.set_status(cx, &format!("terminal exited ({})", code));
+            }
+            StudioToUI::Error { message } => {
+                self.set_status(cx, &format!("error: {}", message));
+            }
+            _ => {}
+        }
+    }
+}
