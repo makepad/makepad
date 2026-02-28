@@ -114,6 +114,7 @@ impl App {
                     return;
                 }
                 self.mount_state_mut(&mount).file_filter_results = paths;
+                self.mount_state_mut(&mount).file_filter_pending = !done;
                 if done {
                     self.mount_state_mut(&mount).file_filter_query = None;
                     self.data.file_filter_mount_by_query.remove(&query_id);
@@ -134,7 +135,9 @@ impl App {
                 let mut stop_count = 0usize;
                 for build in builds {
                     if build.active && build.mount == mount {
-                        if let Some(tab_id) = self.data.run_tab_by_build.get(&build.build_id).copied() {
+                        if let Some(tab_id) =
+                            self.data.run_tab_by_build.get(&build.build_id).copied()
+                        {
                             if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
                                 dock.item(tab_id)
                                     .desktop_run_view(cx, ids!(run_view))
@@ -283,6 +286,24 @@ impl App {
                     dock.redraw_tab(cx, tab_id);
                 }
             }
+            StudioToUI::RunViewCursor { build_id, cursor } => {
+                let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() else {
+                    return;
+                };
+                let Some(mount) = self
+                    .data
+                    .run_tab_state
+                    .get(&tab_id)
+                    .map(|state| state.mount.clone())
+                else {
+                    return;
+                };
+                if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                    dock.item(tab_id)
+                        .desktop_run_view(cx, ids!(run_view))
+                        .set_remote_cursor(cx, Self::parse_run_view_cursor(&cursor));
+                }
+            }
             StudioToUI::QueryLogResults {
                 query_id,
                 entries,
@@ -345,13 +366,7 @@ impl App {
                 else {
                     return;
                 };
-                if self
-                    .data
-                    .profiler_running_by_build
-                    .get(&build_id)
-                    .copied()
-                    == Some(false)
-                {
+                if self.data.profiler_running_by_build.get(&build_id).copied() == Some(false) {
                     return;
                 }
                 self.data.profiler_samples_by_build.insert(
@@ -424,6 +439,38 @@ impl App {
                 self.set_status(cx, &format!("error: {}", message));
             }
             _ => {}
+        }
+    }
+
+    fn parse_run_view_cursor(cursor: &str) -> MouseCursor {
+        match cursor {
+            "Hidden" => MouseCursor::Hidden,
+            "Default" => MouseCursor::Default,
+            "Crosshair" => MouseCursor::Crosshair,
+            "Hand" => MouseCursor::Hand,
+            "Arrow" => MouseCursor::Arrow,
+            "Move" => MouseCursor::Move,
+            "Text" => MouseCursor::Text,
+            "Wait" => MouseCursor::Wait,
+            "Help" => MouseCursor::Help,
+            "NotAllowed" => MouseCursor::NotAllowed,
+            "Grab" => MouseCursor::Grab,
+            "Grabbing" => MouseCursor::Grabbing,
+            "NResize" => MouseCursor::NResize,
+            "NeResize" => MouseCursor::NeResize,
+            "EResize" => MouseCursor::EResize,
+            "SeResize" => MouseCursor::SeResize,
+            "SResize" => MouseCursor::SResize,
+            "SwResize" => MouseCursor::SwResize,
+            "WResize" => MouseCursor::WResize,
+            "NwResize" => MouseCursor::NwResize,
+            "NsResize" => MouseCursor::NsResize,
+            "NeswResize" => MouseCursor::NeswResize,
+            "EwResize" => MouseCursor::EwResize,
+            "NwseResize" => MouseCursor::NwseResize,
+            "ColResize" => MouseCursor::ColResize,
+            "RowResize" => MouseCursor::RowResize,
+            _ => MouseCursor::Default,
         }
     }
 }

@@ -34,7 +34,9 @@ impl TerminalManager {
         event_tx: Sender<StudioEvent>,
     ) -> Result<(), String> {
         if let Some(existing) = self.terminals.get(&path) {
-            let _ = existing.control_tx.send(TerminalControl::Resize { cols, rows });
+            let _ = existing
+                .control_tx
+                .send(TerminalControl::Resize { cols, rows });
             return Ok(());
         }
 
@@ -84,7 +86,9 @@ impl TerminalManager {
     }
 
     pub fn mount_for_path(&self, path: &str) -> Option<&str> {
-        self.terminals.get(path).map(|terminal| terminal.mount.as_str())
+        self.terminals
+            .get(path)
+            .map(|terminal| terminal.mount.as_str())
     }
 
     pub fn remove_terminal(&mut self, path: &str) -> Option<String> {
@@ -129,7 +133,10 @@ fn run_terminal_loop(
 
         if let Some(data) = pty.try_read() {
             if !data.is_empty() {
-                let _ = event_tx.send(StudioEvent::TerminalOutput { path: path.clone(), data });
+                let _ = event_tx.send(StudioEvent::TerminalOutput {
+                    path: path.clone(),
+                    data,
+                });
             }
         }
 

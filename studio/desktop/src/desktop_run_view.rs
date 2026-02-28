@@ -1,6 +1,6 @@
-use crate::makepad_widgets::*;
 use crate::makepad_widgets::makepad_micro_serde::SerBin;
 use crate::makepad_widgets::makepad_platform::shared_framebuf::{HostSwapchain, SharedSwapchain};
+use crate::makepad_widgets::*;
 use makepad_studio_backend::QueryId;
 use makepad_studio_protocol::{
     MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
@@ -120,6 +120,10 @@ pub struct DesktopRunView {
     debug_present_ok_count: usize,
     #[rust]
     debug_present_miss_count: usize,
+    #[rust]
+    remote_cursor: MouseCursor,
+    #[rust]
+    is_hovered: bool,
 }
 
 impl ScriptHook for DesktopRunView {
@@ -148,6 +152,8 @@ impl DesktopRunView {
             return;
         }
         self.current_target = target;
+        self.remote_cursor = MouseCursor::Default;
+        self.is_hovered = false;
         self.swapchain = None;
         self.last_swapchain_with_completed_draws = None;
         self.pending_draw = None;
@@ -178,6 +184,13 @@ impl DesktopRunView {
         self.draw_bg.redraw(cx);
         self.draw_app.redraw(cx);
         self.no_fb_view.redraw(cx);
+    }
+
+    fn set_remote_cursor(&mut self, cx: &mut Cx, cursor: MouseCursor) {
+        self.remote_cursor = cursor;
+        if self.is_hovered {
+            cx.set_cursor(self.remote_cursor);
+        }
     }
 
     fn apply_presentable_draw_to_quad(
@@ -213,12 +226,19 @@ impl DesktopRunView {
         draw_app.draw_vars.set_dyn_instance(
             cx,
             id!(tex_size),
-            &[(swapchain.alloc_width as f32), (swapchain.alloc_height as f32)],
+            &[
+                (swapchain.alloc_width as f32),
+                (swapchain.alloc_height as f32),
+            ],
         );
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        draw_app.draw_vars.set_dyn_instance(cx, id!(y_flip), &[1.0f32]);
+        draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(y_flip), &[1.0f32]);
         #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-        draw_app.draw_vars.set_dyn_instance(cx, id!(y_flip), &[0.0f32]);
+        draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(y_flip), &[0.0f32]);
 
         *redraw_countdown = (*redraw_countdown).max(20);
         true
@@ -309,9 +329,12 @@ impl DesktopRunView {
                 min_height.max(64).next_power_of_two(),
             );
 
-            self.swapchain = Some(
-                HostSwapchain::new(target.window_id, alloc_width, alloc_height, cx),
-            );
+            self.swapchain = Some(HostSwapchain::new(
+                target.window_id,
+                alloc_width,
+                alloc_height,
+                cx,
+            ));
         }
 
         #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
@@ -363,9 +386,7 @@ impl DesktopRunView {
     }
 
     fn default_mouse_button(device: &DigitDevice) -> MouseButton {
-        device
-            .mouse_button()
-            .unwrap_or(MouseButton::PRIMARY)
+        device.mouse_button().unwrap_or(MouseButton::PRIMARY)
     }
 }
 
@@ -450,6 +471,26 @@ impl Widget for DesktopRunView {
                     );
                 }
             }
+            Hit::FingerHoverIn(e) | Hit::FingerHoverOver(e) => {
+                self.is_hovered = true;
+                cx.set_cursor(self.remote_cursor);
+                if let Some(local) = self.local_from_area(cx, e.abs) {
+                    self.emit_to_app(
+                        cx,
+                        target.build_id,
+                        vec![StudioToApp::MouseMove(RemoteMouseMove {
+                            x: local.x,
+                            y: local.y,
+                            time: e.time,
+                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
+                        })],
+                    );
+                }
+            }
+            Hit::FingerHoverOut(_) => {
+                self.is_hovered = false;
+                cx.set_cursor(MouseCursor::Default);
+            }
             Hit::FingerUp(e) => {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
                     self.emit_to_app(
@@ -518,6 +559,12 @@ impl DesktopRunViewRef {
     pub fn clear_run_target(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.clear_run_target(cx);
+        }
+    }
+
+    pub fn set_remote_cursor(&self, cx: &mut Cx, cursor: MouseCursor) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_remote_cursor(cx, cursor);
         }
     }
 }

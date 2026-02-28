@@ -113,12 +113,20 @@ pub enum StudioEvent {
         mount: String,
         change: crate::protocol::FileTreeChange,
     },
+    FlushPendingFileTreeDiffs,
     MountFsChanged {
         mount: String,
         path: PathBuf,
     },
     Shutdown,
 }
+
+const FS_EVENT_PATH_DEBOUNCE: Duration = Duration::from_millis(80);
+const FS_EVENT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(120);
+const FS_EVENT_HISTORY_PRUNE_INTERVAL: Duration = Duration::from_secs(4);
+const FS_EVENT_HISTORY_RETENTION: Duration = Duration::from_secs(12);
+const FS_DELTA_FLUSH_DELAY: Duration = Duration::from_millis(32);
+const FS_DELTA_RELOAD_THRESHOLD: usize = 768;
 
 struct UiClient {
     client_id: ClientId,
@@ -169,6 +177,10 @@ pub struct StudioCore {
     worker_pool: WorkerPool,
     fs_watcher: Option<FileSystemWatcher>,
     fs_event_last_by_path: HashMap<String, Instant>,
+    fs_pending_diffs: HashMap<String, Vec<crate::protocol::FileTreeChange>>,
+    fs_pending_reload_mounts: HashSet<String>,
+    fs_diff_flush_scheduled: bool,
+    fs_event_last_prune: Instant,
     mount_suppress_fs_until: HashMap<String, Instant>,
 }
 
@@ -205,6 +217,10 @@ impl StudioCore {
             worker_pool: WorkerPool::new(worker_count),
             fs_watcher: None,
             fs_event_last_by_path: HashMap::new(),
+            fs_pending_diffs: HashMap::new(),
+            fs_pending_reload_mounts: HashSet::new(),
+            fs_diff_flush_scheduled: false,
+            fs_event_last_prune: Instant::now(),
             mount_suppress_fs_until: HashMap::new(),
         };
         this.reset_fs_watcher();
@@ -317,11 +333,9 @@ impl StudioCore {
                 result,
             } => self.on_worker_load_file_tree_done(web_socket_id, mount, result),
             StudioEvent::WorkerFileTreeDeltaDone { mount, change } => {
-                self.broadcast_ui_message(StudioToUI::FileTreeDiff {
-                    mount,
-                    changes: vec![change],
-                });
+                self.queue_file_tree_delta_change(mount, change);
             }
+            StudioEvent::FlushPendingFileTreeDiffs => self.flush_pending_file_tree_diffs(),
             StudioEvent::MountFsChanged { mount, path } => self.on_mount_fs_changed(mount, path),
             StudioEvent::Shutdown => return false,
         }
@@ -1057,6 +1071,10 @@ impl StudioCore {
     fn reset_fs_watcher(&mut self) {
         self.fs_watcher.take();
         self.fs_event_last_by_path.clear();
+        self.fs_pending_diffs.clear();
+        self.fs_pending_reload_mounts.clear();
+        self.fs_diff_flush_scheduled = false;
+        self.fs_event_last_prune = Instant::now();
         self.mount_suppress_fs_until.clear();
 
         let roots: Vec<WatchRoot> = self
@@ -1108,7 +1126,45 @@ impl StudioCore {
             self.reload_mount_file_tree_broadcast(&mount);
             return;
         }
+        let (path, virtual_path) =
+            self.collapse_removed_path_to_missing_ancestor(&mount, path, virtual_path);
         self.enqueue_file_tree_delta(&mount, &virtual_path, path, now);
+    }
+
+    fn collapse_removed_path_to_missing_ancestor(
+        &self,
+        mount: &str,
+        path: PathBuf,
+        virtual_path: String,
+    ) -> (PathBuf, String) {
+        if path.exists() {
+            return (path, virtual_path);
+        }
+        let mount_root = match self.vfs.resolve_mount(mount) {
+            Ok(root) => root,
+            Err(_) => return (path, virtual_path),
+        };
+        let mut probe = path.clone();
+        let mut collapsed = None;
+        loop {
+            if !probe.starts_with(&mount_root) || probe.exists() {
+                break;
+            }
+            collapsed = Some(probe.clone());
+            if probe == mount_root || !probe.pop() {
+                break;
+            }
+        }
+        let Some(collapsed_path) = collapsed else {
+            return (path, virtual_path);
+        };
+        let Some(collapsed_virtual) = self.mount_path_to_virtual(mount, &collapsed_path) else {
+            return (path, virtual_path);
+        };
+        if collapsed_virtual == mount {
+            return (path, virtual_path);
+        }
+        (collapsed_path, collapsed_virtual)
     }
 
     fn mount_path_to_virtual(&self, mount: &str, path: &Path) -> Option<String> {
@@ -1175,8 +1231,9 @@ impl StudioCore {
         if self.should_ignore_virtual_path(mount, virtual_path) {
             return;
         }
+        self.prune_fs_event_history(now);
         if let Some(last) = self.fs_event_last_by_path.get(virtual_path).copied() {
-            if now.saturating_duration_since(last) < Duration::from_millis(80) {
+            if now.saturating_duration_since(last) < FS_EVENT_PATH_DEBOUNCE {
                 return;
             }
         }
@@ -1210,9 +1267,10 @@ impl StudioCore {
 
     fn reload_mount_file_tree_broadcast(&mut self, mount: &str) {
         let now = Instant::now();
+        self.prune_fs_event_history(now);
         let reload_key = format!("__mount_reload__/{}", mount);
         if let Some(last) = self.fs_event_last_by_path.get(&reload_key).copied() {
-            if now.saturating_duration_since(last) < Duration::from_millis(120) {
+            if now.saturating_duration_since(last) < FS_EVENT_RELOAD_DEBOUNCE {
                 return;
             }
         }
@@ -1226,6 +1284,64 @@ impl StudioCore {
                 message: format!("file tree reload failed for {}: {}", mount, err),
             }),
         }
+    }
+
+    fn queue_file_tree_delta_change(
+        &mut self,
+        mount: String,
+        change: crate::protocol::FileTreeChange,
+    ) {
+        if self.fs_pending_reload_mounts.contains(&mount) {
+            self.schedule_fs_diff_flush();
+            return;
+        }
+        let pending = self.fs_pending_diffs.entry(mount.clone()).or_default();
+        coalesce_file_tree_change(pending, change);
+        if pending.len() >= FS_DELTA_RELOAD_THRESHOLD {
+            self.fs_pending_diffs.remove(&mount);
+            self.fs_pending_reload_mounts.insert(mount);
+        }
+        self.schedule_fs_diff_flush();
+    }
+
+    fn schedule_fs_diff_flush(&mut self) {
+        if self.fs_diff_flush_scheduled {
+            return;
+        }
+        self.fs_diff_flush_scheduled = true;
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(FS_DELTA_FLUSH_DELAY);
+            let _ = event_tx.send(StudioEvent::FlushPendingFileTreeDiffs);
+        });
+    }
+
+    fn flush_pending_file_tree_diffs(&mut self) {
+        self.fs_diff_flush_scheduled = false;
+
+        let reload_mounts: Vec<String> = self.fs_pending_reload_mounts.drain().collect();
+        for mount in reload_mounts {
+            self.reload_mount_file_tree_broadcast(&mount);
+        }
+
+        let pending = std::mem::take(&mut self.fs_pending_diffs);
+        for (mount, mut changes) in pending {
+            if changes.is_empty() {
+                continue;
+            }
+            changes.sort_by(|a, b| file_tree_change_path(a).cmp(file_tree_change_path(b)));
+            self.broadcast_ui_message(StudioToUI::FileTreeDiff { mount, changes });
+        }
+    }
+
+    fn prune_fs_event_history(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.fs_event_last_prune) < FS_EVENT_HISTORY_PRUNE_INTERVAL
+        {
+            return;
+        }
+        self.fs_event_last_prune = now;
+        self.fs_event_last_by_path
+            .retain(|_, ts| now.saturating_duration_since(*ts) < FS_EVENT_HISTORY_RETENTION);
     }
 
     fn on_worker_find_files_done(
@@ -2113,6 +2229,90 @@ fn parse_package_name(args: &[String]) -> Option<String> {
     None
 }
 
+fn file_tree_change_path(change: &crate::protocol::FileTreeChange) -> &str {
+    match change {
+        crate::protocol::FileTreeChange::Added { path, .. } => path,
+        crate::protocol::FileTreeChange::Removed { path } => path,
+        crate::protocol::FileTreeChange::Modified { path, .. } => path,
+    }
+}
+
+fn path_is_child_of(parent: &str, child: &str) -> bool {
+    child.len() > parent.len()
+        && child.starts_with(parent)
+        && child.as_bytes().get(parent.len()) == Some(&b'/')
+}
+
+fn coalesce_file_tree_change(
+    changes: &mut Vec<crate::protocol::FileTreeChange>,
+    change: crate::protocol::FileTreeChange,
+) {
+    match &change {
+        crate::protocol::FileTreeChange::Removed { path } => {
+            if changes.iter().any(|existing| {
+                matches!(
+                    existing,
+                    crate::protocol::FileTreeChange::Removed { path: existing_path }
+                        if existing_path == path || path_is_child_of(existing_path, path)
+                )
+            }) {
+                return;
+            }
+            changes.retain(|existing| {
+                let existing_path = file_tree_change_path(existing);
+                existing_path != path && !path_is_child_of(path, existing_path)
+            });
+            changes.push(change);
+        }
+        crate::protocol::FileTreeChange::Added { path, .. } => {
+            // If the path reappears after a remove event, keep the fresh "Added" state.
+            changes.retain(|existing| {
+                !matches!(
+                    existing,
+                    crate::protocol::FileTreeChange::Removed { path: removed_path }
+                        if removed_path == path || path_is_child_of(removed_path, path)
+                )
+            });
+            if let Some(index) = changes
+                .iter()
+                .position(|existing| file_tree_change_path(existing) == path)
+            {
+                changes.remove(index);
+            }
+            changes.push(change);
+        }
+        crate::protocol::FileTreeChange::Modified { path, git_status } => {
+            changes.retain(|existing| {
+                !matches!(
+                    existing,
+                    crate::protocol::FileTreeChange::Removed { path: removed_path }
+                        if removed_path == path || path_is_child_of(removed_path, path)
+                )
+            });
+            if let Some(existing) = changes
+                .iter_mut()
+                .find(|existing| file_tree_change_path(existing) == path)
+            {
+                match existing {
+                    crate::protocol::FileTreeChange::Added {
+                        git_status: status, ..
+                    } => {
+                        *status = *git_status;
+                    }
+                    crate::protocol::FileTreeChange::Removed { .. } => {}
+                    crate::protocol::FileTreeChange::Modified {
+                        git_status: status, ..
+                    } => {
+                        *status = *git_status;
+                    }
+                }
+                return;
+            }
+            changes.push(change);
+        }
+    }
+}
+
 fn compute_filetree_change_for_path(
     abs_path: &Path,
     virtual_path: String,
@@ -2483,6 +2683,131 @@ mod tests {
                 )
             }),
             "expected Removed diff for repo/src/nested"
+        );
+    }
+
+    #[test]
+    fn worker_deltas_batch_and_coalesce_removed_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+
+        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+            mount: "repo".to_string(),
+            change: crate::protocol::FileTreeChange::Removed {
+                path: "repo/src/nested/a.rs".to_string(),
+            },
+        });
+        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+            mount: "repo".to_string(),
+            change: crate::protocol::FileTreeChange::Removed {
+                path: "repo/src/nested/b.rs".to_string(),
+            },
+        });
+        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+            mount: "repo".to_string(),
+            change: crate::protocol::FileTreeChange::Removed {
+                path: "repo/src/nested".to_string(),
+            },
+        });
+        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+            mount: "repo".to_string(),
+            change: crate::protocol::FileTreeChange::Removed {
+                path: "repo/src/nested/c.rs".to_string(),
+            },
+        });
+
+        pump_core(&mut core, Duration::from_millis(500));
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
+        let diffs: Vec<Vec<crate::protocol::FileTreeChange>> = messages
+            .into_iter()
+            .filter_map(|msg| match msg {
+                StudioToUI::FileTreeDiff { mount, changes } if mount == "repo" => Some(changes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            diffs.len(),
+            1,
+            "expected exactly one coalesced diff message"
+        );
+        let changes = &diffs[0];
+        assert_eq!(changes.len(), 1, "expected descendant removals to collapse");
+        assert!(matches!(
+            &changes[0],
+            crate::protocol::FileTreeChange::Removed { path } if path == "repo/src/nested"
+        ));
+    }
+
+    #[test]
+    fn worker_remove_then_add_same_path_keeps_added_state() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+
+        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+            mount: "repo".to_string(),
+            change: crate::protocol::FileTreeChange::Removed {
+                path: "repo/src/lib.rs".to_string(),
+            },
+        });
+        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+            mount: "repo".to_string(),
+            change: crate::protocol::FileTreeChange::Added {
+                path: "repo/src/lib.rs".to_string(),
+                node_type: crate::protocol::FileNodeType::File,
+                git_status: crate::protocol::GitStatus::Modified,
+            },
+        });
+
+        pump_core(&mut core, Duration::from_millis(500));
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
+        let diffs: Vec<Vec<crate::protocol::FileTreeChange>> = messages
+            .into_iter()
+            .filter_map(|msg| match msg {
+                StudioToUI::FileTreeDiff { mount, changes } if mount == "repo" => Some(changes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(diffs.len(), 1, "expected exactly one diff message");
+        assert_eq!(diffs[0].len(), 1, "expected a single merged change");
+        assert!(matches!(
+            &diffs[0][0],
+            crate::protocol::FileTreeChange::Added { path, .. } if path == "repo/src/lib.rs"
+        ));
+    }
+
+    #[test]
+    fn worker_delta_storm_falls_back_to_single_tree_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+        for index in 0..(FS_DELTA_RELOAD_THRESHOLD + 16) {
+            core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+                mount: "repo".to_string(),
+                change: crate::protocol::FileTreeChange::Removed {
+                    path: format!("repo/src/storm/file_{index}.rs"),
+                },
+            });
+        }
+
+        pump_core(&mut core, Duration::from_millis(700));
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
+        let saw_reload = messages
+            .iter()
+            .any(|msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"));
+        let saw_diff = messages
+            .iter()
+            .any(|msg| matches!(msg, StudioToUI::FileTreeDiff { mount, .. } if mount == "repo"));
+        assert!(
+            saw_reload,
+            "expected full tree reload for large delta storm"
+        );
+        assert!(
+            !saw_diff,
+            "expected storm fallback to suppress per-path diff emission"
         );
     }
 }
