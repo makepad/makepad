@@ -35,6 +35,9 @@ fn parse_cli_mounts_spec() -> Option<String> {
     mounts_spec
 }
 
+const FILE_FILTER_DEBOUNCE_SECONDS: f64 = 0.14;
+const FILE_FILTER_MAX_RESULTS: usize = 600;
+
 impl App {
     pub(super) fn apply_mount_file_tree_diff(
         &mut self,
@@ -146,7 +149,8 @@ impl App {
             Ok(studio) => {
                 self.data.studio = Some(studio);
                 for mount in &mounts {
-                    self.data.mounts.entry(mount.name.clone()).or_default().root = mount.path.clone();
+                    self.data.mounts.entry(mount.name.clone()).or_default().root =
+                        mount.path.clone();
                     let _ = self.ensure_mount_tab(cx, &mount.name);
                     let _ = self.send_studio(UIToStudio::LoadFileTree {
                         mount: mount.name.clone(),
@@ -321,11 +325,17 @@ impl App {
     }
 
     pub(super) fn set_mount_file_filter(&mut self, cx: &mut Cx, mount: &str, filter: String) {
+        self.pending_file_filter = None;
+        if !self.file_filter_debounce_timer.is_empty() {
+            cx.stop_timer(self.file_filter_debounce_timer);
+        }
+
         let filter = filter.trim().to_string();
         let old_query = {
             let mount_state = self.mount_state_mut(mount);
             mount_state.file_filter = filter.clone();
             mount_state.file_filter_results.clear();
+            mount_state.file_filter_pending = !filter.is_empty();
             mount_state.file_filter_query.take()
         };
         if let Some(query_id) = old_query {
@@ -338,19 +348,62 @@ impl App {
                 mount: Some(mount.to_string()),
                 pattern: filter,
                 is_regex: Some(false),
-                max_results: Some(2000),
+                max_results: Some(FILE_FILTER_MAX_RESULTS),
             }) {
                 self.mount_state_mut(mount).file_filter_query = Some(query_id);
                 self.data
                     .file_filter_mount_by_query
                     .insert(query_id, mount.to_string());
+            } else {
+                self.mount_state_mut(mount).file_filter_pending = false;
             }
+        } else {
+            self.mount_state_mut(mount).file_filter_pending = false;
         }
         if self.data.active_mount.as_deref() == Some(mount) {
             if let Some(workspace) = self.mount_workspace_widget(cx, mount) {
                 workspace.widget(cx, ids!(file_tree)).redraw(cx);
             }
         }
+    }
+
+    pub(super) fn queue_mount_file_filter(&mut self, cx: &mut Cx, mount: &str, filter: String) {
+        let filter = filter.trim().to_string();
+
+        let old_query = {
+            let mount_state = self.mount_state_mut(mount);
+            mount_state.file_filter = filter.clone();
+            mount_state.file_filter_results.clear();
+            mount_state.file_filter_pending = !filter.is_empty();
+            mount_state.file_filter_query.take()
+        };
+        if let Some(query_id) = old_query {
+            self.data.file_filter_mount_by_query.remove(&query_id);
+            let _ = self.send_studio(UIToStudio::CancelQuery { query_id });
+        }
+
+        self.pending_file_filter = None;
+        if self.file_filter_debounce_timer.is_empty() == false {
+            cx.stop_timer(self.file_filter_debounce_timer);
+        }
+
+        if !filter.is_empty() {
+            self.pending_file_filter = Some((mount.to_string(), filter));
+            self.file_filter_debounce_timer = cx.start_timeout(FILE_FILTER_DEBOUNCE_SECONDS);
+        }
+
+        if self.data.active_mount.as_deref() == Some(mount) {
+            if let Some(workspace) = self.mount_workspace_widget(cx, mount) {
+                workspace.widget(cx, ids!(file_tree)).redraw(cx);
+            }
+        }
+    }
+
+    pub(super) fn flush_queued_mount_file_filter(&mut self, cx: &mut Cx) {
+        let Some((mount, filter)) = self.pending_file_filter.take() else {
+            return;
+        };
+        self.set_mount_file_filter(cx, &mount, filter);
     }
 
     pub(super) fn set_mount_log_tail(&mut self, cx: &mut Cx, mount: &str, tail: bool) {

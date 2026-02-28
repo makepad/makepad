@@ -1,6 +1,4 @@
-use crate::protocol::{
-    EventSample, GCSample, GPUSample, LogEntry, LogLevel, LogSource, QueryId,
-};
+use crate::protocol::{EventSample, GCSample, GPUSample, LogEntry, LogLevel, LogSource, QueryId};
 use makepad_live_id::LiveId;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -155,23 +153,32 @@ impl ProfilerStore {
         self.gc_samples.push((build_id, sample));
     }
 
-    pub fn query(&self, query: &ProfilerQuery) -> (Vec<EventSample>, Vec<GPUSample>, Vec<GCSample>, usize) {
+    pub fn query(
+        &self,
+        query: &ProfilerQuery,
+    ) -> (Vec<EventSample>, Vec<GPUSample>, Vec<GCSample>, usize) {
         let event_selected: Vec<EventSample> = self
             .event_samples
             .iter()
-            .filter(|(build_id, sample)| query_profiler_sample(query, *build_id, sample.at, SAMPLE_TYPE_EVENT))
+            .filter(|(build_id, sample)| {
+                query_profiler_sample(query, *build_id, sample.at, SAMPLE_TYPE_EVENT)
+            })
             .map(|(_, sample)| sample.clone())
             .collect();
         let gpu_selected: Vec<GPUSample> = self
             .gpu_samples
             .iter()
-            .filter(|(build_id, sample)| query_profiler_sample(query, *build_id, sample.at, SAMPLE_TYPE_GPU))
+            .filter(|(build_id, sample)| {
+                query_profiler_sample(query, *build_id, sample.at, SAMPLE_TYPE_GPU)
+            })
             .map(|(_, sample)| sample.clone())
             .collect();
         let gc_selected: Vec<GCSample> = self
             .gc_samples
             .iter()
-            .filter(|(build_id, sample)| query_profiler_sample(query, *build_id, sample.at, SAMPLE_TYPE_GC))
+            .filter(|(build_id, sample)| {
+                query_profiler_sample(query, *build_id, sample.at, SAMPLE_TYPE_GC)
+            })
             .map(|(_, sample)| sample.clone())
             .collect();
 

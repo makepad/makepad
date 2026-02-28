@@ -186,7 +186,10 @@ impl DesktopRunList {
             return;
         };
 
-        let Some(entries) = data.mounts.get(active_mount).map(|mount| &mount.runnable_builds)
+        let Some(entries) = data
+            .mounts
+            .get(active_mount)
+            .map(|mount| &mount.runnable_builds)
         else {
             self.draw_empty(cx, list, "Loading run targets...");
             return;

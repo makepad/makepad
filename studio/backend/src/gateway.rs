@@ -73,7 +73,8 @@ pub fn start_http_gateway(
                     if let Some(role) = socket_roles.remove(&web_socket_id) {
                         match role {
                             SocketRole::Ui => {
-                                let _ = event_tx.send(StudioEvent::UiDisconnected { web_socket_id });
+                                let _ =
+                                    event_tx.send(StudioEvent::UiDisconnected { web_socket_id });
                             }
                             SocketRole::App => {
                                 let _ =
@@ -92,13 +93,22 @@ pub fn start_http_gateway(
                     data,
                 } => match socket_roles.get(&web_socket_id) {
                     Some(SocketRole::Ui) => {
-                        let _ = event_tx.send(StudioEvent::UiBinary { web_socket_id, data });
+                        let _ = event_tx.send(StudioEvent::UiBinary {
+                            web_socket_id,
+                            data,
+                        });
                     }
                     Some(SocketRole::App) => {
-                        let _ = event_tx.send(StudioEvent::AppBinary { web_socket_id, data });
+                        let _ = event_tx.send(StudioEvent::AppBinary {
+                            web_socket_id,
+                            data,
+                        });
                     }
                     Some(SocketRole::BuildBox) => {
-                        let _ = event_tx.send(StudioEvent::BuildBoxBinary { web_socket_id, data });
+                        let _ = event_tx.send(StudioEvent::BuildBoxBinary {
+                            web_socket_id,
+                            data,
+                        });
                     }
                     None => {}
                 },

@@ -502,7 +502,9 @@ impl App {
 
     pub(super) fn start_profiler_query_for_build(&mut self, build_id: QueryId) {
         if let Some(prev_query_id) = self.data.live_profiler_query_by_build.remove(&build_id) {
-            self.data.profiler_query_build_by_query.remove(&prev_query_id);
+            self.data
+                .profiler_query_build_by_query
+                .remove(&prev_query_id);
             let _ = self.send_studio(UIToStudio::CancelQuery {
                 query_id: prev_query_id,
             });
@@ -657,7 +659,13 @@ impl App {
         Self::apply_cursor_jump(session, line, column);
     }
 
-    pub(super) fn open_log_location(&mut self, cx: &mut Cx, path: &str, line: usize, column: usize) {
+    pub(super) fn open_log_location(
+        &mut self,
+        cx: &mut Cx,
+        path: &str,
+        line: usize,
+        column: usize,
+    ) {
         let Some((tab_id, _already_open)) = self.ensure_editor_tab_for_path(cx, path, true) else {
             self.set_status(cx, &format!("could not open log location {}", path));
             return;
@@ -686,7 +694,11 @@ impl App {
         self.set_status(cx, &format!("opening {}:{}:{}", path, line, column));
     }
 
-    pub(super) fn extract_log_location(&self, mount: &str, entry: &LogEntry) -> Option<UiLogLocation> {
+    pub(super) fn extract_log_location(
+        &self,
+        mount: &str,
+        entry: &LogEntry,
+    ) -> Option<UiLogLocation> {
         if let Some(file_name) = entry.file_name.as_deref() {
             let path = self.virtualize_log_path(mount, file_name)?;
             let line = entry.line.unwrap_or(1).max(1);
@@ -807,7 +819,9 @@ impl App {
             return;
         };
         self.data.build_to_mount.insert(build_id, mount.to_string());
-        self.data.build_package.insert(build_id, package.to_string());
+        self.data
+            .build_package
+            .insert(build_id, package.to_string());
         self.data
             .active_log_build_by_mount
             .insert(mount.to_string(), build_id);
@@ -841,7 +855,8 @@ impl App {
             let Some(widget_action) = action.as_widget_action() else {
                 continue;
             };
-            let Some(run_action) = widget_action.action.downcast_ref::<DesktopRunViewAction>() else {
+            let Some(run_action) = widget_action.action.downcast_ref::<DesktopRunViewAction>()
+            else {
                 continue;
             };
             match run_action {
@@ -986,7 +1001,9 @@ impl App {
         };
         self.data.profiler_tab_by_build.remove(&state.build_id);
         self.data.profiler_running_by_build.remove(&state.build_id);
-        self.data.profiler_time_start_by_build.remove(&state.build_id);
+        self.data
+            .profiler_time_start_by_build
+            .remove(&state.build_id);
         if self.data.active_log_build_by_mount.get(&state.mount) == Some(&state.build_id) {
             self.data.active_log_build_by_mount.remove(&state.mount);
         }

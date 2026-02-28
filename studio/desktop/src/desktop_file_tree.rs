@@ -146,7 +146,7 @@ impl DesktopFileTree {
             GitStatusDotKind::Modified | GitStatusDotKind::Deleted | GitStatusDotKind::Mixed => {
                 vec4(0.847, 0.392, 0.392, 1.0)
             }
-            GitStatusDotKind::None => vec4(0.0, 0.0, 0.0, 0.0),
+            GitStatusDotKind::None => vec4(0.42, 0.48, 0.56, 0.45),
         }
     }
 
@@ -247,7 +247,8 @@ impl Widget for DesktopFileTree {
                     if let Some(data) = scope.data.get_mut::<AppData>() {
                         if let Some(active_mount) = data.active_mount.as_deref() {
                             if let Some(mount_state) = data.mounts.get(active_mount) {
-                                let empty_text = if mount_state.file_filter_query.is_some()
+                                let empty_text = if (mount_state.file_filter_pending
+                                    || mount_state.file_filter_query.is_some())
                                     && mount_state.file_filter_results.is_empty()
                                 {
                                     "Searching..."
@@ -271,7 +272,13 @@ impl Widget for DesktopFileTree {
                                 );
                             }
                         } else {
-                            self.draw_filtered_list(cx, &mut *list, &[], &data.file_tree, "No mount");
+                            self.draw_filtered_list(
+                                cx,
+                                &mut *list,
+                                &[],
+                                &data.file_tree,
+                                "No mount",
+                            );
                         }
                     }
                 }
