@@ -1,4 +1,4 @@
-use crate::{app::AppData, makepad_widgets::*};
+use crate::{app_data::AppData, makepad_widgets::*};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -102,7 +102,17 @@ script_mod! {
 
     mod.widgets.RunListEmpty = View {
         width: Fill
-        height: 36.0
+        height: 34.0
+        show_bg: true
+        draw_bg +: {
+            is_even: instance(0.0)
+            pixel: fn() {
+                return theme.color_bg_even.mix(
+                    theme.color_bg_odd,
+                    self.is_even
+                )
+            }
+        }
         padding: Inset {left: 10.0 right: 10.0 top: 8.0 bottom: 8.0}
         info_label := Label {
             width: Fill
@@ -116,10 +126,15 @@ script_mod! {
         height: Fill
         flow: Down
 
-        list := FlatList {
+        list := PortalList {
             width: Fill
             height: Fill
             flow: Down
+            max_pull_down: 0.0
+            capture_overload: false
+            grab_key_focus: false
+            auto_tail: false
+            selectable: false
             drag_scrolling: true
             Item := mod.widgets.RunListItem {
                 icon := mod.widgets.RunPlayIcon {}
@@ -131,7 +146,11 @@ script_mod! {
 
 #[derive(Clone, Debug, Default)]
 pub enum DesktopRunListAction {
-    RunPackage { mount: String, package: String },
+    RunPackage {
+        mount: String,
+        package: String,
+        outside_studio: bool,
+    },
     #[default]
     None,
 }
@@ -162,13 +181,25 @@ pub struct DesktopRunList {
 }
 
 impl DesktopRunList {
-    fn draw_entries(&mut self, cx: &mut Cx2d, list: &mut FlatList, data: &AppData) {
+    const ROW_HEIGHT: f64 = 34.0;
+
+    fn empty_fill_rows(list: &PortalList, cx: &Cx2d, used_rows: usize) -> usize {
+        let viewport_h = list.area().rect(cx).size.y.max(0.0);
+        if viewport_h <= 0.0 {
+            return 1usize.saturating_sub(used_rows);
+        }
+        let visible_rows = ((viewport_h / Self::ROW_HEIGHT).ceil() as usize).max(1);
+        visible_rows.saturating_sub(used_rows)
+    }
+
+    fn draw_entries(&mut self, cx: &mut Cx2d, list: &mut PortalList, data: &AppData) {
         let Some(active_mount) = data.active_mount.as_deref() else {
             self.draw_empty(cx, list, "Select a mount");
             return;
         };
 
-        let Some(entries) = data.mount_runnable_builds.get(active_mount) else {
+        let Some(entries) = data.mounts.get(active_mount).map(|mount| &mount.runnable_builds)
+        else {
             self.draw_empty(cx, list, "Loading run targets...");
             return;
         };
@@ -178,14 +209,34 @@ impl DesktopRunList {
             return;
         }
 
-        for (index, entry) in entries.iter().enumerate() {
-            let item_id = LiveId::from_str("run_item").bytes_append(&(index as u64).to_be_bytes());
-            let Some(item) = list.item(cx, item_id, id!(Item)) else {
+        if self
+            .selected_index
+            .is_some_and(|selected| selected >= entries.len())
+        {
+            self.selected_index = None;
+        }
+
+        let empty_rows = Self::empty_fill_rows(list, cx, entries.len());
+        let item_count = entries.len() + empty_rows;
+        list.set_item_range(cx, 0, item_count);
+        while let Some(item_id) = list.next_visible_item(cx) {
+            let is_even_f = if item_id & 1 == 0 { 1.0 } else { 0.0 };
+            let Some(entry) = entries.get(item_id) else {
+                let mut item = list.item(cx, item_id, id!(Empty)).as_view();
+                script_apply_eval!(cx, item, {
+                    draw_bg +: {is_even: #(is_even_f)}
+                });
+                item.label(cx, ids!(info_label)).set_text(cx, "");
+                item.draw_all(cx, &mut Scope::empty());
                 continue;
             };
-            let mut item = item.as_view();
-            let is_even_f = if index & 1 == 0 { 0.0 } else { 1.0 };
-            let selected_f = if self.selected_index == Some(index) { 1.0 } else { 0.0 };
+
+            let mut item = list.item(cx, item_id, id!(Item)).as_view();
+            let selected_f = if self.selected_index == Some(item_id) {
+                1.0
+            } else {
+                0.0
+            };
             script_apply_eval!(cx, item, {
                 draw_bg +: {
                     is_even: #(is_even_f),
@@ -197,26 +248,32 @@ impl DesktopRunList {
             button.set_action_data(RunListRowData::RunPackage {
                 mount: active_mount.to_string(),
                 package: entry.package.clone(),
-                index,
+                index: item_id,
             });
             item.draw_all(cx, &mut Scope::empty());
         }
     }
 
-    fn draw_empty(&mut self, cx: &mut Cx2d, list: &mut FlatList, text: &str) {
-        let Some(item) = list.item(cx, id!(run_empty), id!(Empty)) else {
-            return;
-        };
-        let item = item.as_view();
-        item.label(cx, ids!(info_label)).set_text(cx, text);
-        item.draw_all(cx, &mut Scope::empty());
+    fn draw_empty(&mut self, cx: &mut Cx2d, list: &mut PortalList, text: &str) {
+        let rows = Self::empty_fill_rows(list, cx, 0).max(1);
+        list.set_item_range(cx, 0, rows);
+        while let Some(item_id) = list.next_visible_item(cx) {
+            let mut item = list.item(cx, item_id, id!(Empty)).as_view();
+            let is_even_f = if item_id & 1 == 0 { 1.0 } else { 0.0 };
+            script_apply_eval!(cx, item, {
+                draw_bg +: {is_even: #(is_even_f)}
+            });
+            let label = if item_id == 0 { text } else { "" };
+            item.label(cx, ids!(info_label)).set_text(cx, label);
+            item.draw_all(cx, &mut Scope::empty());
+        }
     }
 }
 
 impl Widget for DesktopRunList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
-            if let Some(mut list) = item.as_flat_list().borrow_mut() {
+            if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 if let Some(data) = scope.data.get_mut::<AppData>() {
                     self.draw_entries(cx, &mut *list, data);
                 } else {
@@ -229,12 +286,15 @@ impl Widget for DesktopRunList {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        let run_list = self.view.flat_list(cx, ids!(list));
+        let run_list = self.view.portal_list(cx, ids!(list));
         self.view.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {
+            if !run_list.any_items_with_actions(actions) {
+                return;
+            }
             for (_item_id, item) in run_list.items_with_actions(actions) {
                 let button = item.button(cx, ids!(row_button));
-                if button.clicked(actions) {
+                if let Some(modifiers) = button.clicked_modifiers(actions) {
                     if let RunListRowData::RunPackage {
                         mount,
                         package,
@@ -247,6 +307,7 @@ impl Widget for DesktopRunList {
                             DesktopRunListAction::RunPackage {
                                 mount: mount.clone(),
                                 package: package.clone(),
+                                outside_studio: modifiers.logo || modifiers.control,
                             },
                         );
                     }
@@ -257,10 +318,15 @@ impl Widget for DesktopRunList {
 }
 
 impl DesktopRunListRef {
-    pub fn run_requested(&self, actions: &Actions) -> Option<(String, String)> {
+    pub fn run_requested(&self, actions: &Actions) -> Option<(String, String, bool)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let DesktopRunListAction::RunPackage { mount, package } = item.cast() {
-                return Some((mount, package));
+            if let DesktopRunListAction::RunPackage {
+                mount,
+                package,
+                outside_studio,
+            } = item.cast()
+            {
+                return Some((mount, package, outside_studio));
             }
         }
         None

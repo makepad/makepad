@@ -3,9 +3,12 @@ use makepad_micro_serde::{DeBin, SerBin};
 use makepad_network::{
     HttpMethod, HttpRequest, NetworkConfig, NetworkResponse, NetworkRuntime, WsMessage, WsSend,
 };
+use makepad_studio_protocol::{
+    AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec, WidgetTreeDumpResponse,
+};
 use makepad_studio_backend::{
-    AppToStudioMsg, AppToStudioVec, BackendConfig, ClientId, MountConfig, QueryId, StudioBackend,
-    StudioToAppMsg, StudioToAppVec, StudioToUI, UIToStudio, UIToStudioEnvelope,
+    BackendConfig, ClientId, MountConfig, QueryId, StudioBackend, StudioToUI, UIToStudio,
+    UIToStudioEnvelope,
 };
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -134,16 +137,14 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
     let app_msg = StudioToAppVec::deserialize_bin(&app_incoming).expect("decode app command");
     assert_eq!(app_msg.0.len(), 1);
     match &app_msg.0[0] {
-        StudioToAppMsg::WidgetTreeDumpRequest { request_id } => {
-            assert_eq!(*request_id, query_id.0);
-        }
+        StudioToApp::WidgetTreeDump(request) => assert_eq!(request.request_id, query_id.0),
         other => panic!("unexpected app message: {:?}", other),
     }
 
-    let response = AppToStudioVec(vec![AppToStudioMsg::WidgetTreeDump {
+    let response = AppToStudioVec(vec![AppToStudio::WidgetTreeDump(WidgetTreeDumpResponse {
         request_id: query_id.0,
         dump: "W1 root View 0 0 10 10".to_string(),
-    }]);
+    })]);
     runtime
         .ws_send(app_socket, WsSend::Binary(response.serialize_bin()))
         .expect("send app response");

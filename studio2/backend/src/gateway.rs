@@ -1,6 +1,8 @@
 use crate::dispatch::StudioEvent;
 use crate::protocol::QueryId;
-use makepad_network::{start_http_server, HttpServer, HttpServerRequest, HttpServerResponse};
+use makepad_network::{
+    start_http_server, HttpServer, HttpServerRequest, HttpServerResponse, ToUISender,
+};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::mpsc::{self, Sender};
@@ -44,7 +46,7 @@ pub fn start_http_gateway(
                         socket_roles.insert(web_socket_id, SocketRole::Ui);
                         let _ = event_tx.send(StudioEvent::UiConnected {
                             web_socket_id,
-                            sender: response_sender,
+                            sender: ToUISender::from_sender(response_sender),
                         });
                         continue;
                     }
@@ -138,11 +140,40 @@ pub fn start_http_gateway(
 }
 
 fn parse_app_path(path: &str) -> Option<QueryId> {
-    let rest = path.strip_prefix("/$studio_app/")?;
-    if rest.is_empty() {
-        return None;
+    for prefix in ["/$studio_app/", "/$studio_web_socket/"] {
+        let Some(rest) = path.strip_prefix(prefix) else {
+            continue;
+        };
+        if rest.is_empty() {
+            return None;
+        }
+        if let Ok(id) = rest.parse::<u64>() {
+            return Some(QueryId(id));
+        }
     }
-    rest.parse::<u64>().ok().map(QueryId)
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_legacy_studio_app_path() {
+        assert_eq!(parse_app_path("/$studio_app/42"), Some(QueryId(42)));
+    }
+
+    #[test]
+    fn parse_current_studio_web_socket_path() {
+        assert_eq!(parse_app_path("/$studio_web_socket/99"), Some(QueryId(99)));
+    }
+
+    #[test]
+    fn reject_missing_or_invalid_build_id() {
+        assert_eq!(parse_app_path("/$studio_app/"), None);
+        assert_eq!(parse_app_path("/$studio_web_socket/not-a-number"), None);
+        assert_eq!(parse_app_path("/$studio_ui"), None);
+    }
 }
 
 fn ok_response(body: Vec<u8>, content_type: &str) -> HttpServerResponse {

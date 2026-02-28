@@ -4,10 +4,28 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
+    let PaneToolbar = RectView {
+        width: Fill
+        height: 36.0
+        flow: Right
+        align: Align {x: 0.0 y: 0.5}
+        padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
+        spacing: theme.space_2
+        draw_bg +: {
+            color: theme.color_bg_container
+        }
+    }
+
     let FileTreePane = View {
         width: Fill
         height: Fill
         flow: Down
+        PaneToolbar {
+            file_tree_filter := TextInputFlat {
+                width: Fill
+                empty_text: "Filter"
+            }
+        }
         file_tree := DesktopFileTree {}
     }
 
@@ -22,6 +40,9 @@ script_mod! {
         width: Fill
         height: Fill
         flow: Down
+        PaneToolbar {
+            run_stop_all := ButtonFlat {text: "Stop All"}
+        }
         run_list := DesktopRunList {}
     }
 
@@ -32,10 +53,40 @@ script_mod! {
         run_view := DesktopRunView {}
     }
 
+    let RunFirstPane = RectView {
+        draw_bg +: {
+            color: theme.color_bg_container
+        }
+        View {
+            width: Fill
+            height: Fill
+            align: Align {x: 0.5 y: 0.5}
+            placeholder := Label {
+                text: "Click play in Run to launch"
+                draw_text.color: theme.color_label_outer
+            }
+        }
+    }
+
     let LogPane = View {
         width: Fill
         height: Fill
         flow: Down
+        PaneToolbar {
+            log_tail_toggle := Toggle {
+                text: "Tail"
+                active: true
+            }
+            Filler {}
+            log_filter := TextInputFlat {
+                width: 200.0
+                empty_text: "Filter"
+            }
+            clear_log_filter := ButtonFlatter {
+                text: "x"
+                padding: Inset {left: 4.0 right: 4.0 top: 0.0 bottom: 0.0}
+            }
+        }
         log_view := DesktopLogView {}
     }
 
@@ -152,7 +203,7 @@ script_mod! {
             height: Fill
             flow: Down
             spacing: 0.0
-            padding: 0.0
+            padding: 10.0
 
             RoundedView {
                 visible: false
@@ -296,7 +347,7 @@ script_mod! {
                         run_first := DockTab {
                             name: ""
                             template: @RunFirstTab
-                            kind: @RunningAppPane
+                            kind: @RunFirstPane
                         }
 
                         log_first := DockTab {
@@ -321,6 +372,7 @@ script_mod! {
                         RunListPane := RunListPane {}
                         CodeEditorPane := CodeEditorPane {}
                         RunningAppPane := RunningAppPane {}
+                        RunFirstPane := RunFirstPane {}
                         LogFirstPane := LogFirstPane {}
                         LogPane := LogPane {}
                         TerminalFirstPane := TerminalFirstPane {}
