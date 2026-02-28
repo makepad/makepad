@@ -284,6 +284,7 @@ impl Cx {
             }
             StudioToApp::Screenshot(request) => {
                 self.screenshot_requests.push(request);
+                self.redraw_all();
             }
             StudioToApp::WidgetTreeDump(request) => {
                 self.send_studio_widget_tree_dump_response(request.request_id);
