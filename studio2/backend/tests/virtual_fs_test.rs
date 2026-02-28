@@ -44,18 +44,16 @@ fn resolves_mount_and_branch_paths() {
     let mut vfs = VirtualFs::new();
     vfs.mount("makepad", dir.path()).unwrap();
 
-    let main_root = vfs.resolve_root("makepad").unwrap();
+    let main_root = vfs.resolve_mount("makepad").unwrap();
     assert_eq!(main_root, dir.path().canonicalize().unwrap());
 
-    let branch_root = vfs.resolve_root("makepad/@feature-ui").unwrap();
+    let branch_root = vfs.resolve_mount("makepad/@feature-ui").unwrap();
     assert_eq!(
         branch_root,
         dir.path().canonicalize().unwrap().join("branch/feature-ui")
     );
 
-    let branch_file = vfs
-        .resolve_path("makepad/@feature-ui/src/lib.rs")
-        .unwrap();
+    let branch_file = vfs.resolve_path("makepad/@feature-ui/src/lib.rs").unwrap();
     assert!(branch_file.ends_with("branch/feature-ui/src/lib.rs"));
 
     let tree = vfs.load_file_tree("makepad").unwrap();
@@ -112,4 +110,48 @@ fn git_statuses_are_mapped_for_tree_nodes() {
         .find(|n| n.path == "repo/new_untracked.txt")
         .expect("untracked node missing");
     assert_eq!(untracked.git_status, GitStatus::Untracked);
+}
+
+#[test]
+fn load_file_tree_is_scoped_to_requested_mount() {
+    let mount_a = tempfile::tempdir().unwrap();
+    let mount_b = tempfile::tempdir().unwrap();
+    fs::create_dir_all(mount_a.path().join("src")).unwrap();
+    fs::create_dir_all(mount_b.path().join("src")).unwrap();
+    fs::write(mount_a.path().join("src/a.rs"), "pub fn a() {}\n").unwrap();
+    fs::write(mount_b.path().join("src/b.rs"), "pub fn b() {}\n").unwrap();
+
+    let mut vfs = VirtualFs::new();
+    vfs.mount("alpha", mount_a.path()).unwrap();
+    vfs.mount("beta", mount_b.path()).unwrap();
+
+    let alpha_tree = vfs.load_file_tree("alpha").unwrap();
+    assert!(!alpha_tree.nodes.is_empty());
+    assert!(alpha_tree
+        .nodes
+        .iter()
+        .all(|node| node.path.starts_with("alpha")));
+    assert!(!alpha_tree
+        .nodes
+        .iter()
+        .any(|node| node.path.starts_with("beta")));
+    assert!(alpha_tree
+        .nodes
+        .iter()
+        .any(|node| node.path == "alpha/src/a.rs"));
+
+    let beta_tree = vfs.load_file_tree("beta").unwrap();
+    assert!(!beta_tree.nodes.is_empty());
+    assert!(beta_tree
+        .nodes
+        .iter()
+        .all(|node| node.path.starts_with("beta")));
+    assert!(!beta_tree
+        .nodes
+        .iter()
+        .any(|node| node.path.starts_with("alpha")));
+    assert!(beta_tree
+        .nodes
+        .iter()
+        .any(|node| node.path == "beta/src/b.rs"));
 }

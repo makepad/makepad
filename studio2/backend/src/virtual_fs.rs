@@ -1,6 +1,5 @@
 use crate::protocol::{
-    FileError, FileNode, FileNodeType, FileTreeData, GitCommitInfo, GitLog, GitStatus,
-    SearchResult,
+    FileError, FileNode, FileNodeType, FileTreeData, GitCommitInfo, GitLog, GitStatus, SearchResult,
 };
 use makepad_git::{FileStatus as GitFileStatus, GitError, Repository as GitRepository};
 use std::collections::HashMap;
@@ -10,7 +9,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug)]
 pub struct MountPoint {
     pub name: String,
-    pub root: PathBuf,
+    pub path: PathBuf,
 }
 
 #[derive(Default)]
@@ -73,12 +72,12 @@ impl VirtualFs {
                 "mount name cannot be empty".to_string(),
             ));
         }
-        let root = path.into().canonicalize()?;
+        let mount_path = path.into().canonicalize()?;
         self.mounts.insert(
             name.to_string(),
             MountPoint {
                 name: name.to_string(),
-                root,
+                path: mount_path,
             },
         );
         Ok(())
@@ -94,17 +93,17 @@ impl VirtualFs {
         mounts
     }
 
-    pub fn resolve_root(&self, root: &str) -> Result<PathBuf, VirtualFsError> {
-        let (mount_name, rest) = split_mount_and_rest(root)?;
+    pub fn resolve_mount(&self, mount: &str) -> Result<PathBuf, VirtualFsError> {
+        let (mount_name, rest) = split_mount_and_rest(mount)?;
         let mount = self
             .mounts
             .get(mount_name)
             .ok_or_else(|| VirtualFsError::MissingMount(mount_name.to_string()))?;
         if rest.is_empty() {
-            return Ok(mount.root.clone());
+            return Ok(mount.path.clone());
         }
         let branch = parse_branch_segment(rest)?;
-        Ok(mount.root.join("branch").join(branch))
+        Ok(mount.path.join("branch").join(branch))
     }
 
     pub fn resolve_path(&self, path: &str) -> Result<PathBuf, VirtualFsError> {
@@ -121,12 +120,12 @@ impl VirtualFs {
             if head.starts_with('@') {
                 let branch = parse_branch_segment(head)?;
                 if tail.is_empty() {
-                    return Ok(mount.root.join("branch").join(branch));
+                    return Ok(mount.path.join("branch").join(branch));
                 }
-                return Ok(mount.root.join("branch").join(branch).join(tail));
+                return Ok(mount.path.join("branch").join(branch).join(tail));
             }
         }
-        Ok(mount.root.join(rest))
+        Ok(mount.path.join(rest))
     }
 
     pub fn read_text_file(&self, path: &str) -> Result<String, VirtualFsError> {
@@ -155,9 +154,20 @@ impl VirtualFs {
         Ok(())
     }
 
+    pub fn delete_path(&mut self, path: &str) -> Result<(), VirtualFsError> {
+        let disk_path = self.resolve_path(path)?;
+        if disk_path.is_dir() {
+            fs::remove_dir_all(&disk_path)?;
+        } else if disk_path.exists() {
+            fs::remove_file(&disk_path)?;
+        }
+        self.open_buffers.remove(path);
+        Ok(())
+    }
+
     pub fn create_branch(
         &self,
-        root: &str,
+        mount: &str,
         name: &str,
         from_ref: Option<&str>,
     ) -> Result<(), VirtualFsError> {
@@ -166,11 +176,11 @@ impl VirtualFs {
                 "branch name cannot be empty".to_string(),
             ));
         }
-        let (mount_name, rest) = split_mount_and_rest(root)?;
+        let (mount_name, rest) = split_mount_and_rest(mount)?;
         if !rest.is_empty() {
             return Err(VirtualFsError::InvalidVirtualPath(format!(
-                "CreateBranch root must be a mount, got {}",
-                root
+                "CreateBranch mount must be a mount name, got {}",
+                mount
             )));
         }
         let mount = self
@@ -178,7 +188,7 @@ impl VirtualFs {
             .get(mount_name)
             .ok_or_else(|| VirtualFsError::MissingMount(mount_name.to_string()))?;
         let repo =
-            GitRepository::open(&mount.root).map_err(|e| VirtualFsError::Git(e.to_string()))?;
+            GitRepository::open(&mount.path).map_err(|e| VirtualFsError::Git(e.to_string()))?;
 
         let base_oid = if let Some(from_ref) = from_ref {
             match repo.resolve_ref(from_ref) {
@@ -197,24 +207,24 @@ impl VirtualFs {
         repo.create_branch(name, &base_oid)
             .map_err(|e| VirtualFsError::Git(e.to_string()))?;
 
-        let branch_dir = mount.root.join("branch").join(name);
+        let branch_dir = mount.path.join("branch").join(name);
         if branch_dir.exists() {
             return Ok(());
         }
         if let Some(parent) = branch_dir.parent() {
             fs::create_dir_all(parent)?;
         }
-        makepad_git::local_clone_depth1(&mount.root, &branch_dir, Some(name))
+        makepad_git::local_clone_depth1(&mount.path, &branch_dir, Some(name))
             .map_err(|e| VirtualFsError::Git(e.to_string()))?;
         Ok(())
     }
 
-    pub fn delete_branch(&self, root: &str, name: &str) -> Result<(), VirtualFsError> {
-        let (mount_name, rest) = split_mount_and_rest(root)?;
+    pub fn delete_branch(&self, mount: &str, name: &str) -> Result<(), VirtualFsError> {
+        let (mount_name, rest) = split_mount_and_rest(mount)?;
         if !rest.is_empty() {
             return Err(VirtualFsError::InvalidVirtualPath(format!(
-                "DeleteBranch root must be a mount, got {}",
-                root
+                "DeleteBranch mount must be a mount name, got {}",
+                mount
             )));
         }
         let mount = self
@@ -222,24 +232,26 @@ impl VirtualFs {
             .get(mount_name)
             .ok_or_else(|| VirtualFsError::MissingMount(mount_name.to_string()))?;
         let repo =
-            GitRepository::open(&mount.root).map_err(|e| VirtualFsError::Git(e.to_string()))?;
+            GitRepository::open(&mount.path).map_err(|e| VirtualFsError::Git(e.to_string()))?;
         match repo.delete_branch(name) {
             Ok(()) => {}
             Err(GitError::RefNotFound(_)) => {}
             Err(err) => return Err(VirtualFsError::Git(err.to_string())),
         }
-        let branch_dir = mount.root.join("branch").join(name);
+        let branch_dir = mount.path.join("branch").join(name);
         if branch_dir.exists() {
             fs::remove_dir_all(branch_dir)?;
         }
         Ok(())
     }
 
-    pub fn git_log(&self, root: &str, max_count: usize) -> Result<GitLog, VirtualFsError> {
-        let real_root = self.resolve_root(root)?;
+    pub fn git_log(&self, mount: &str, max_count: usize) -> Result<GitLog, VirtualFsError> {
+        let real_mount = self.resolve_mount(mount)?;
         let mut repo =
-            GitRepository::open(&real_root).map_err(|e| VirtualFsError::Git(e.to_string()))?;
-        let head = repo.head_oid().map_err(|e| VirtualFsError::Git(e.to_string()))?;
+            GitRepository::open(&real_mount).map_err(|e| VirtualFsError::Git(e.to_string()))?;
+        let head = repo
+            .head_oid()
+            .map_err(|e| VirtualFsError::Git(e.to_string()))?;
         let log_entries = repo
             .log(&head, max_count)
             .map_err(|e| VirtualFsError::Git(e.to_string()))?;
@@ -255,8 +267,8 @@ impl VirtualFs {
         Ok(GitLog { commits })
     }
 
-    pub fn load_file_tree(&self, root: &str) -> Result<FileTreeData, VirtualFsError> {
-        let (mount_name, rest) = split_mount_and_rest(root)?;
+    pub fn load_file_tree(&self, mount: &str) -> Result<FileTreeData, VirtualFsError> {
+        let (mount_name, rest) = split_mount_and_rest(mount)?;
         let mount = self
             .mounts
             .get(mount_name)
@@ -264,7 +276,7 @@ impl VirtualFs {
 
         let mut nodes = Vec::new();
         if rest.is_empty() {
-            let main_ctx = self.load_status_context(&mount.root);
+            let main_ctx = self.load_status_context(&mount.path);
             nodes.push(FileNode {
                 path: mount_name.to_string(),
                 name: mount_name.to_string(),
@@ -272,15 +284,15 @@ impl VirtualFs {
                 git_status: aggregate_root_git_status(&main_ctx),
             });
             self.walk_dir(
-                &mount.root,
-                &mount.root,
+                &mount.path,
+                &mount.path,
                 mount_name,
                 &main_ctx,
                 &mut nodes,
                 true,
             )?;
 
-            for (branch_name, branch_root) in scan_branch_roots(&mount.root)? {
+            for (branch_name, branch_root) in scan_branch_roots(&mount.path)? {
                 let encoded = percent_encode(&branch_name);
                 let branch_virtual_root = format!("{}/@{}", mount_name, encoded);
                 let ctx = self.load_status_context(&branch_root);
@@ -301,7 +313,7 @@ impl VirtualFs {
             }
         } else {
             let branch = parse_branch_segment(rest)?;
-            let branch_root = mount.root.join("branch").join(&branch);
+            let branch_root = mount.path.join("branch").join(&branch);
             let virtual_root = format!("{}/@{}", mount_name, percent_encode(&branch));
             let ctx = self.load_status_context(&branch_root);
             nodes.push(FileNode {
@@ -324,24 +336,24 @@ impl VirtualFs {
 
     pub fn find_files(
         &self,
-        root: Option<&str>,
+        mount: Option<&str>,
         pattern: &str,
         max_results: Option<usize>,
     ) -> Result<Vec<String>, VirtualFsError> {
         let max_results = max_results.unwrap_or(10_000);
         let mut out = Vec::new();
 
-        if let Some(root) = root {
-            let real_root = self.resolve_root(root)?;
-            self.walk_files_for_search(&real_root, root, pattern, &mut out, max_results)?;
+        if let Some(mount) = mount {
+            let real_mount = self.resolve_mount(mount)?;
+            self.walk_files_for_search(&real_mount, mount, pattern, &mut out, max_results)?;
             return Ok(out);
         }
 
         let mut mounts: Vec<_> = self.mounts.values().collect();
         mounts.sort_by(|a, b| a.name.cmp(&b.name));
         for mount in mounts {
-            self.walk_files_for_search(&mount.root, &mount.name, pattern, &mut out, max_results)?;
-            for (branch_name, branch_root) in scan_branch_roots(&mount.root)? {
+            self.walk_files_for_search(&mount.path, &mount.name, pattern, &mut out, max_results)?;
+            for (branch_name, branch_root) in scan_branch_roots(&mount.path)? {
                 let virtual_root = format!("{}/@{}", mount.name, percent_encode(&branch_name));
                 self.walk_files_for_search(
                     &branch_root,
@@ -459,14 +471,7 @@ impl VirtualFs {
                     node_type: FileNodeType::Dir,
                     git_status: GitStatus::Unknown,
                 });
-                self.walk_dir(
-                    &path,
-                    status_root,
-                    &virtual_path,
-                    status_ctx,
-                    out,
-                    false,
-                )?;
+                self.walk_dir(&path, status_root, &virtual_path, status_ctx, out, false)?;
             } else if path.is_file() {
                 let rel = slash_rel(status_root, &path);
                 let git_status = if let Some(status) = status_ctx.status_map.get(&rel) {
@@ -516,10 +521,7 @@ fn split_head_tail(input: &str) -> Option<(&str, &str)> {
 
 fn parse_branch_segment(segment: &str) -> Result<String, VirtualFsError> {
     let encoded = segment.strip_prefix('@').ok_or_else(|| {
-        VirtualFsError::InvalidVirtualPath(format!(
-            "expected @branch segment, got {}",
-            segment
-        ))
+        VirtualFsError::InvalidVirtualPath(format!("expected @branch segment, got {}", segment))
     })?;
     percent_decode(encoded)
 }
@@ -657,7 +659,8 @@ fn hex(v: u8) -> char {
 }
 
 pub(crate) fn protocol_search_results(paths: Vec<String>) -> Vec<SearchResult> {
-    paths.into_iter()
+    paths
+        .into_iter()
         .map(|path| SearchResult {
             path,
             line: 0,

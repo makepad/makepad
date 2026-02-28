@@ -3,11 +3,11 @@ use crate::gateway::{start_http_gateway, GatewayHandle};
 use crate::protocol::{ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope};
 use crate::virtual_fs::VirtualFs;
 use makepad_micro_serde::{DeBin, SerBin};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct MountConfig {
@@ -20,6 +20,7 @@ pub struct BackendConfig {
     pub listen_address: SocketAddr,
     pub post_max_size: u64,
     pub mounts: Vec<MountConfig>,
+    pub enable_in_process_gateway: bool,
 }
 
 impl Default for BackendConfig {
@@ -28,6 +29,7 @@ impl Default for BackendConfig {
             listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8001),
             post_max_size: 1024 * 1024,
             mounts: Vec::new(),
+            enable_in_process_gateway: false,
         }
     }
 }
@@ -45,6 +47,7 @@ pub struct StudioConnection {
     event_tx: Sender<StudioEvent>,
     recv_raw: Receiver<Vec<u8>>,
     next_counter: u64,
+    _gateway: Option<GatewayHandle>,
     _core_thread: JoinHandle<()>,
 }
 
@@ -91,7 +94,22 @@ impl StudioBackend {
                 .map_err(|e| format!("mount {} failed: {}", mount.name, e))?;
         }
 
-        let mut core = StudioCore::new(event_rx, event_tx.clone(), vfs);
+        let mut gateway = None;
+        let mut studio_addr = None;
+        if config.enable_in_process_gateway {
+            for candidate in in_process_gateway_candidates(config.listen_address) {
+                match start_http_gateway(candidate, config.post_max_size, event_tx.clone()) {
+                    Ok(handle) => {
+                        studio_addr = Some(studio_addr_for_child(handle.listen_address));
+                        gateway = Some(handle);
+                        break;
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+
+        let mut core = StudioCore::new(event_rx, event_tx.clone(), vfs, studio_addr);
         let core_thread = std::thread::spawn(move || {
             core.run();
         });
@@ -125,6 +143,7 @@ impl StudioBackend {
             event_tx,
             recv_raw: raw_rx,
             next_counter: 0,
+            _gateway: gateway,
             _core_thread: core_thread,
         })
     }
@@ -138,7 +157,12 @@ impl StudioBackend {
                 .map_err(|e| format!("mount {} failed: {}", mount.name, e))?;
         }
 
-        let mut core = StudioCore::new(event_rx, event_tx.clone(), vfs);
+        let mut core = StudioCore::new(
+            event_rx,
+            event_tx.clone(),
+            vfs,
+            Some(studio_addr_for_child(config.listen_address)),
+        );
         let core_thread = std::thread::spawn(move || {
             core.run();
         });
@@ -156,4 +180,21 @@ impl StudioBackend {
             _core_thread: core_thread,
         })
     }
+}
+
+fn in_process_gateway_candidates(base: SocketAddr) -> Vec<SocketAddr> {
+    let mut out = vec![base];
+    if base.port() == 8001 {
+        out.push(SocketAddr::new(base.ip(), 8002));
+    }
+    out
+}
+
+fn studio_addr_for_child(listen_address: SocketAddr) -> String {
+    let ip = match listen_address.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    format!("{}:{}", ip, listen_address.port())
 }

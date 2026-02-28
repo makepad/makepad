@@ -18,6 +18,7 @@ fn process_manager_emits_output_and_exit_for_cargo() {
             tmp.path(),
             vec!["--version".to_string()],
             HashMap::new(),
+            None,
             tx,
         )
         .expect("start cargo");
@@ -33,9 +34,7 @@ fn process_manager_emits_output_and_exit_for_cargo() {
         };
         match event {
             StudioEvent::ProcessOutput {
-                build_id: id,
-                line,
-                ..
+                build_id: id, line, ..
             } if id == build_id => {
                 if line.contains("cargo") {
                     saw_output = true;

@@ -22,10 +22,11 @@ impl ProcessManager {
     pub fn start_cargo_run(
         &mut self,
         build_id: QueryId,
-        root: String,
+        mount: String,
         cwd: &Path,
         args: Vec<String>,
         env: HashMap<String, String>,
+        studio_addr: Option<String>,
         event_tx: std::sync::mpsc::Sender<StudioEvent>,
     ) -> Result<BuildInfo, String> {
         if self.builds.contains_key(&build_id) {
@@ -36,9 +37,17 @@ impl ProcessManager {
         let mut command = Command::new("cargo");
         command.args(&args);
         command.current_dir(cwd);
-        command.stdin(Stdio::null());
+        command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+        command.env("RUST_BACKTRACE", "1");
+        command.env("MAKEPAD", "lines");
+        if let Some(studio_addr) = studio_addr.as_deref() {
+            if !studio_addr.trim().is_empty() {
+                command.env("STUDIO", studio_addr.trim());
+                command.env("STUDIO_BUILD_ID", build_id.0.to_string());
+            }
+        }
         for (key, value) in env {
             command.env(key, value);
         }
@@ -65,7 +74,7 @@ impl ProcessManager {
 
         let info = BuildInfo {
             build_id,
-            root,
+            mount,
             package,
             active: true,
         };
