@@ -495,9 +495,10 @@ impl StudioCore {
                 );
             }
             UIToStudio::LoadFileTree { mount } => {
+                let open_fds = open_fd_count().unwrap_or(0);
                 eprintln!(
-                    "[studio-tree] backend recv LoadFileTree web_socket_id={} mount={}",
-                    web_socket_id, mount
+                    "[studio-tree] backend recv LoadFileTree web_socket_id={} mount={} open_fds={}",
+                    web_socket_id, mount, open_fds
                 );
                 let waiters = self.file_tree_load_waiters.entry(mount.clone()).or_default();
                 let first_request = waiters.is_empty();
@@ -516,18 +517,22 @@ impl StudioCore {
                 let vfs = self.vfs.clone_for_search();
                 let event_tx = self.event_tx.clone();
                 self.worker_pool.execute(move || {
+                    let fd_before = open_fd_count().unwrap_or(0);
                     let result = vfs
                         .load_file_tree(&mount_name)
                         .map_err(|err| err.to_string());
+                    let fd_after = open_fd_count().unwrap_or(0);
                     match &result {
                         Ok(data) => eprintln!(
-                            "[studio-tree] backend worker LoadFileTree done mount={} nodes={}",
+                            "[studio-tree] backend worker LoadFileTree done mount={} nodes={} open_fds_before={} open_fds_after={}",
                             mount_name,
-                            data.nodes.len()
+                            data.nodes.len(),
+                            fd_before,
+                            fd_after
                         ),
                         Err(err) => eprintln!(
-                            "[studio-tree] backend worker LoadFileTree error mount={} err={}",
-                            mount_name, err
+                            "[studio-tree] backend worker LoadFileTree error mount={} err={} open_fds_before={} open_fds_after={}",
+                            mount_name, err, fd_before, fd_after
                         ),
                     }
                     let _ = event_tx.send(StudioEvent::WorkerLoadFileTreeDone {
@@ -3014,4 +3019,10 @@ fn write_screenshot_png(
     fs::write(&path, png)
         .map_err(|err| format!("failed to write screenshot {}: {}", path.display(), err))?;
     Ok(path.to_string_lossy().to_string())
+}
+
+fn open_fd_count() -> Option<usize> {
+    fs::read_dir("/dev/fd")
+        .ok()
+        .map(|entries| entries.filter_map(Result::ok).count())
 }
