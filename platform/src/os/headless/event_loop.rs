@@ -7,10 +7,10 @@ use crate::{
     makepad_math::dvec2,
     makepad_micro_serde::*,
     os::shared_framebuf::{PollTimer, PresentableDraw, PresentableImageId},
-    studio::{AppToStudio, ScreenshotResponse, StudioToApp},
     thread::SignalToUI,
     window::CxWindowPool,
 };
+use makepad_studio_protocol::{AppToStudio, ScreenshotResponse, StudioToApp};
 use std::{
     cell::RefCell,
     io::{self, BufRead, BufReader, Write},
@@ -141,7 +141,14 @@ impl Cx {
                 StudioToApp::MouseDown(e) => {
                     self.fingers.process_tap_count(dvec2(e.x, e.y), e.time);
                     let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
-                    let mouse_down_event = e.into_event(window_id, pos);
+                    let mouse_down_event = crate::event::MouseDownEvent {
+                        abs: dvec2(e.x - pos.x, e.y - pos.y),
+                        button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
+                        window_id,
+                        modifiers: e.modifiers.into_key_modifiers(),
+                        handled: std::cell::Cell::new(crate::Area::Empty),
+                        time: e.time,
+                    };
                     self.fingers.mouse_down(mouse_down_event.button, window_id);
                     self.call_event_handler(&Event::MouseDown(mouse_down_event));
                 }
@@ -152,14 +159,28 @@ impl Cx {
                         } else {
                             self.windows.window_id_contains(dvec2(e.x, e.y))
                         };
-                    self.call_event_handler(&Event::MouseMove(e.into_event(window_id, pos)));
+                    self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
+                        abs: dvec2(e.x - pos.x, e.y - pos.y),
+                        window_id,
+                        modifiers: e.modifiers.into_key_modifiers(),
+                        time: e.time,
+                        handled: std::cell::Cell::new(crate::Area::Empty),
+                    }));
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
                     self.fingers.switch_captures();
                 }
                 StudioToApp::TweakRay(e) => {
                     let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                     let dpi_factor = self.windows[window_id].window_geom.dpi_factor.max(1.0);
-                    let tweak_ray = e.into_event(window_id, pos, dpi_factor);
+                    let tweak_ray = crate::event::TweakRayEvent {
+                        abs: dvec2(e.x - pos.x, e.y - pos.y),
+                        window_id,
+                        modifiers: e.modifiers.into_key_modifiers(),
+                        time: e.time,
+                        dpi_factor,
+                        hit_widget_uids: std::cell::RefCell::new(Vec::new()),
+                        hit_rect: std::cell::Cell::new(None),
+                    };
                     self.call_event_handler(&Event::TweakRay(tweak_ray));
                 }
                 StudioToApp::MouseUp(e) => {
@@ -169,7 +190,13 @@ impl Cx {
                         } else {
                             self.windows.window_id_contains(dvec2(e.x, e.y))
                         };
-                    let mouse_up_event = e.into_event(window_id, pos);
+                    let mouse_up_event = crate::event::MouseUpEvent {
+                        abs: dvec2(e.x - pos.x, e.y - pos.y),
+                        button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
+                        window_id,
+                        modifiers: e.modifiers.into_key_modifiers(),
+                        time: e.time,
+                    };
                     let button = mouse_up_event.button;
                     self.call_event_handler(&Event::MouseUp(mouse_up_event));
                     self.fingers.mouse_up(button);
@@ -177,7 +204,16 @@ impl Cx {
                 }
                 StudioToApp::Scroll(e) => {
                     let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
-                    self.call_event_handler(&Event::Scroll(e.into_event(window_id, pos)));
+                    self.call_event_handler(&Event::Scroll(crate::event::ScrollEvent {
+                        abs: dvec2(e.x - pos.x, e.y - pos.y),
+                        scroll: dvec2(e.sx, e.sy),
+                        window_id,
+                        modifiers: e.modifiers.into_key_modifiers(),
+                        handled_x: std::cell::Cell::new(false),
+                        handled_y: std::cell::Cell::new(false),
+                        is_mouse: e.is_mouse,
+                        time: e.time,
+                    }));
                 }
                 StudioToApp::WindowGeomChange {
                     dpi_factor,
@@ -349,12 +385,14 @@ impl Cx {
                     state.presentable_id = Some(id);
                     id
                 };
-                write_stdout_msg(&AppToStudio::DrawCompleteAndFlip(PresentableDraw {
-                    window_id,
-                    target_id,
-                    width,
-                    height,
-                }));
+                write_stdout_msg(&AppToStudio::DrawCompleteAndFlip(
+                    PresentableDraw {
+                        window_id,
+                        target_id,
+                        width,
+                        height,
+                    },
+                ));
             } else {
                 crate::log!(
                     "headless frame written: {} ({}x{})",
@@ -438,7 +476,7 @@ impl Cx {
                 }
                 CxOsOp::SetCursor(cursor) => {
                     if send_protocol {
-                        write_stdout_msg(&AppToStudio::SetCursor(cursor));
+                        write_stdout_msg(&AppToStudio::SetCursor(cursor.into()));
                     }
                 }
                 CxOsOp::StartTimer {

@@ -56,7 +56,6 @@ use {
         makepad_math::*,
         os::cx_native::EventFlow,
         shared_framebuf::{PollTimer, PollTimers},
-        studio::{AppToStudio, GPUSample},
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
         web_socket::WebSocketMessage,
@@ -67,6 +66,7 @@ use {
     makepad_network::{
         ServerWebSocketMessage as WebSocketMessageImpl, WebSocketParser as WebSocketImpl,
     },
+    makepad_studio_protocol::{AppToStudio, GPUSample},
     std::cell::RefCell,
     std::collections::HashMap,
     std::ffi::CString,

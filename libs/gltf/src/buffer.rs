@@ -3,6 +3,7 @@ use crate::{
     error::GltfError,
     loader::LoadedGltf,
 };
+use makepad_math::DecodedPrimitive;
 
 pub const GLTF_COMPONENT_TYPE_BYTE: u32 = 5120;
 pub const GLTF_COMPONENT_TYPE_UNSIGNED_BYTE: u32 = 5121;
@@ -10,16 +11,6 @@ pub const GLTF_COMPONENT_TYPE_SHORT: u32 = 5122;
 pub const GLTF_COMPONENT_TYPE_UNSIGNED_SHORT: u32 = 5123;
 pub const GLTF_COMPONENT_TYPE_UNSIGNED_INT: u32 = 5125;
 pub const GLTF_COMPONENT_TYPE_FLOAT: u32 = 5126;
-
-#[derive(Clone, Debug)]
-pub struct DecodedPrimitive {
-    pub positions: Vec<[f32; 3]>,
-    pub normals: Option<Vec<[f32; 3]>>,
-    pub tangents: Option<Vec<[f32; 4]>>,
-    pub texcoords0: Option<Vec<[f32; 2]>>,
-    pub indices: Vec<u32>,
-    pub material: Option<usize>,
-}
 
 pub fn decode_mesh_primitive(
     loaded: &LoadedGltf,

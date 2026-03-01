@@ -1,7 +1,10 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 use std::{path::PathBuf, rc::Rc};
 
-use super::scene_3d::{apply_scene_to_draw_pbr, register_draw_call_anchor, scene_state_from_scope};
+use super::{
+    gltf_bridge::GltfRenderer,
+    scene_3d::{apply_scene_to_draw_pbr, register_draw_call_anchor, scene_state_from_scope},
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*

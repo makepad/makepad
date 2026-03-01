@@ -10,12 +10,12 @@ use crate::{
         metal::{DrawPassMode, MetalCx},
         shared_framebuf::{PollTimer, PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
     },
-    studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
     texture::{Texture, TextureFormat},
     thread::SignalToUI,
     web_socket::WebSocketMessage,
     window::CxWindowPool,
 };
+use makepad_studio_protocol::{AppToStudio, GCSample, StudioToApp, StudioToAppVec};
 
 /// Local swapchain for client-side texture management
 struct LocalSwapchain {
@@ -185,7 +185,15 @@ impl Cx {
             StudioToApp::TweakRay(e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 let dpi_factor = self.windows[window_id].window_geom.dpi_factor.max(1.0);
-                let tweak_ray = e.into_event(window_id, pos, dpi_factor);
+                let tweak_ray = crate::event::TweakRayEvent {
+                    abs: dvec2(e.x - pos.x, e.y - pos.y),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                    dpi_factor,
+                    hit_widget_uids: std::cell::RefCell::new(Vec::new()),
+                    hit_rect: std::cell::Cell::new(None),
+                };
                 self.call_event_handler(&Event::TweakRay(tweak_ray));
             }
             StudioToApp::MouseUp(ref e) => {
@@ -356,7 +364,7 @@ impl Cx {
                     });
                 }
                 CxOsOp::SetCursor(cursor) => {
-                    Self::stdin_send_to_host(AppToStudio::SetCursor(cursor));
+                    Self::stdin_send_to_host(AppToStudio::SetCursor(cursor.into()));
                 }
                 CxOsOp::StartTimer {
                     timer_id,

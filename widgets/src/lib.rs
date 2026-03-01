@@ -90,6 +90,7 @@ pub mod pdf_view;
 pub mod splash;
 pub mod svg;
 pub mod vector;
+#[cfg(feature = "3d")]
 #[path = "3d/mod.rs"]
 pub mod widgets_3d;
 
@@ -227,6 +228,7 @@ pub use crate::splash::*;
 pub use crate::pdf_view::*;
 pub use crate::svg::*;
 pub use crate::vector::*;
+#[cfg(feature = "3d")]
 pub use crate::widgets_3d::*;
 
 pub use crate::chart::*;
@@ -367,6 +369,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::svg::script_mod(vm);
     crate::vector::script_mod(vm);
     crate::chart::script_mod(vm);
+    #[cfg(feature = "3d")]
     crate::widgets_3d::script_mod(vm);
     #[cfg(feature = "maps")]
     crate::map::style::script_mod(vm);
