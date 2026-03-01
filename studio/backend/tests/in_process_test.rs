@@ -119,6 +119,54 @@ fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
 }
 
 #[test]
+fn file_tree_keeps_hidden_directories_for_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::create_dir_all(dir.path().join(".hidden")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+    fs::write(dir.path().join(".hidden/secret.txt"), "secret\n").unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(UIToStudio::LoadFileTree {
+        mount: "repo".to_string(),
+    });
+    let tree = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+    )
+    .expect("did not receive file tree");
+
+    match tree {
+        StudioToUI::FileTree { data, .. } => {
+            assert!(
+                data.nodes.iter().any(|node| node.path == "repo/.hidden"),
+                "hidden directory should be present in backend file tree"
+            );
+            assert!(
+                data.nodes
+                    .iter()
+                    .any(|node| node.path == "repo/.hidden/secret.txt"),
+                "hidden file should be present in backend file tree"
+            );
+            assert!(
+                data.nodes.iter().any(|node| node.path == "repo/src/lib.rs"),
+                "expected visible file to remain in file tree"
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
 fn unmount_emits_file_tree_diff_scoped_to_mount() {
     let mount_a = tempfile::tempdir().unwrap();
     let mount_b = tempfile::tempdir().unwrap();
@@ -405,6 +453,56 @@ fn file_watch_ignores_makepad_term_writes() {
 }
 
 #[test]
+fn file_watch_emits_hidden_directory_writes() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(UIToStudio::LoadFileTree {
+        mount: "repo".to_string(),
+    });
+    let _ = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+    )
+    .expect("did not receive initial file tree");
+
+    let _ = connection.send(UIToStudio::SaveTextFile {
+        path: "repo/.hidden/a.txt".to_string(),
+        content: "hello\n".to_string(),
+    });
+
+    let diff = wait_for_message(&connection, Duration::from_secs(5), |msg| {
+        matches!(
+            msg,
+            StudioToUI::FileTreeDiff { mount, changes }
+                if mount == "repo"
+                    && changes.iter().any(|change| {
+                        matches!(
+                            change,
+                            makepad_studio_protocol::backend_protocol::FileTreeChange::Added { path, .. }
+                                | makepad_studio_protocol::backend_protocol::FileTreeChange::Modified { path, .. }
+                                | makepad_studio_protocol::backend_protocol::FileTreeChange::Removed { path }
+                                if path == "repo/.hidden/a.txt"
+                        )
+                    })
+        )
+    });
+    assert!(
+        diff.is_some(),
+        "expected hidden-directory writes to emit deltas"
+    );
+}
+
+#[test]
 fn file_watch_picks_up_external_new_file() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -467,6 +565,105 @@ fn file_watch_picks_up_external_new_file() {
     assert!(
         saw_new_file,
         "did not observe file-tree update for externally created file"
+    );
+}
+
+#[test]
+fn file_watch_emits_file_changed_for_external_write() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(UIToStudio::LoadFileTree {
+        mount: "repo".to_string(),
+    });
+    let _ = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+    )
+    .expect("did not receive initial file tree");
+
+    // External write (not via SaveTextFile) should still notify UI clients.
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub fn hi() { let _extern = 1; }\n",
+    )
+    .unwrap();
+
+    let changed = wait_for_message(
+        &connection,
+        Duration::from_secs(6),
+        |msg| {
+            matches!(
+                msg,
+                StudioToUI::FileChanged { path }
+                    if path == "repo/src/lib.rs" || path == "repo"
+            )
+        },
+    );
+    assert!(
+        changed.is_some(),
+        "did not observe FileChanged for external write"
+    );
+}
+
+#[test]
+fn read_text_file_returns_fresh_content_after_external_write() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(UIToStudio::OpenTextFile {
+        path: "repo/src/lib.rs".to_string(),
+    });
+    let opened = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            StudioToUI::TextFileOpened { path, content, .. }
+                if path == "repo/src/lib.rs" && content == "pub fn hi() {}\n"
+        )
+    });
+    assert!(opened.is_some(), "did not receive initial TextFileOpened");
+
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub fn hi() { let external = 1; }\n",
+    )
+    .unwrap();
+
+    let _ = connection.send(UIToStudio::ReadTextFile {
+        path: "repo/src/lib.rs".to_string(),
+    });
+    let read = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            StudioToUI::TextFileRead { path, content }
+                if path == "repo/src/lib.rs"
+                    && content == "pub fn hi() { let external = 1; }\n"
+        )
+    });
+    assert!(
+        read.is_some(),
+        "did not receive fresh TextFileRead content after external write"
     );
 }
 

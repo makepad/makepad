@@ -1,5 +1,14 @@
 use super::*;
 
+macro_rules! ui_file_sync_trace {
+    ($($arg:tt)*) => {
+        crate::makepad_widgets::makepad_platform::makepad_error_log::log!(
+            "[studio2-ui/file-sync] {}",
+            format!($($arg)*)
+        );
+    };
+}
+
 impl App {
     fn apply_terminal_text(&mut self, cx: &mut Cx, path: String, content: String) {
         let content_bytes = content.into_bytes();
@@ -23,18 +32,28 @@ impl App {
         self.data.pending_reload_paths.remove(&path);
 
         if !allow_create_tab && !self.data.path_to_tab.contains_key(&path) {
+            ui_file_sync_trace!(
+                "skip update path={} allow_create_tab={} reason=not-open",
+                path,
+                allow_create_tab
+            );
             return;
         }
 
         let Some((tab_id, _)) = self.ensure_editor_tab_for_path(cx, &path, false) else {
+            ui_file_sync_trace!("skip update path={} reason=no-tab", path);
             return;
         };
 
         if let Some(session) = self.data.sessions.get_mut(&tab_id) {
             if session.document().as_text().to_string() != content {
+                ui_file_sync_trace!("replace session text path={} tab={}", path, tab_id.0);
                 session.document().replace(content.into());
+            } else {
+                ui_file_sync_trace!("skip replace path={} tab={} reason=identical", path, tab_id.0);
             }
         } else {
+            ui_file_sync_trace!("create session path={} tab={}", path, tab_id.0);
             self.data.sessions.insert(
                 tab_id,
                 CodeSession::new(CodeDocument::new(content.into(), DecorationSet::new())),
@@ -44,6 +63,7 @@ impl App {
         self.apply_pending_log_jump(&path, tab_id);
         if let Some(mount) = Self::mount_from_virtual_path(&path) {
             if let Some(dock) = self.mount_workspace_dock(cx, mount) {
+                dock.item(tab_id).redraw(cx);
                 dock.redraw_tab(cx, tab_id);
             }
         }
@@ -100,6 +120,12 @@ impl App {
                     return;
                 }
                 let allow_create_tab = self.data.pending_open_paths.contains(&path);
+                ui_file_sync_trace!(
+                    "TextFileRead path={} allow_create_tab={} pending_reload={}",
+                    path,
+                    allow_create_tab,
+                    self.data.pending_reload_paths.contains(&path)
+                );
                 self.apply_editor_text_update(cx, path, content, allow_create_tab);
             }
             StudioToUI::TextFileSaved { path, result } => {
@@ -109,12 +135,62 @@ impl App {
                 self.set_status(cx, &format!("saved {} ({:?})", path, result));
             }
             StudioToUI::FileChanged { path } => {
-                if Self::is_terminal_virtual_path(&path) || !self.data.path_to_tab.contains_key(&path)
-                {
+                if Self::is_terminal_virtual_path(&path) {
+                    ui_file_sync_trace!("ignore FileChanged path={} reason=terminal", path);
                     return;
                 }
+
+                // Root-level watcher fallback: backend can emit mount names when
+                // it only knows "something changed under this mount".
+                if !path.contains('/') {
+                    let mount = path;
+                    let open_paths: Vec<String> = self
+                        .data
+                        .path_to_tab
+                        .keys()
+                        .filter(|open_path| {
+                            Self::mount_from_virtual_path(open_path.as_str()) == Some(mount.as_str())
+                        })
+                        .cloned()
+                        .collect();
+                    if open_paths.is_empty() {
+                        ui_file_sync_trace!(
+                            "ignore mount-level FileChanged mount={} reason=no-open-tabs",
+                            mount
+                        );
+                        return;
+                    }
+                    let mut queued = 0usize;
+                    for open_path in open_paths {
+                        if self.data.pending_reload_paths.insert(open_path.clone()) {
+                            let _ = self.send_studio(UIToStudio::ReadTextFile {
+                                path: open_path.clone(),
+                            });
+                            queued += 1;
+                        }
+                    }
+                    ui_file_sync_trace!(
+                        "mount-level FileChanged mount={} queued_reads={}",
+                        mount,
+                        queued
+                    );
+                    return;
+                }
+
+                if !self.data.path_to_tab.contains_key(&path) {
+                    ui_file_sync_trace!(
+                        "ignore FileChanged path={} reason=not-open pending_reload={}",
+                        path,
+                        self.data.pending_reload_paths.contains(&path)
+                    );
+                    return;
+                }
+
                 if self.data.pending_reload_paths.insert(path.clone()) {
+                    ui_file_sync_trace!("queue file reload path={}", path);
                     let _ = self.send_studio(UIToStudio::ReadTextFile { path });
+                } else {
+                    ui_file_sync_trace!("coalesce file reload path={}", path);
                 }
             }
             StudioToUI::FindFileResults {

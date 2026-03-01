@@ -159,6 +159,15 @@ pub struct FlatFileTree {
     path_to_id: HashMap<String, LiveId>,
 }
 
+pub fn is_hidden_virtual_path(path: &str) -> bool {
+    let Some((_mount, rest)) = path.split_once('/') else {
+        return false;
+    };
+    rest.split('/')
+        .filter(|segment| !segment.is_empty())
+        .any(|segment| segment.starts_with('.'))
+}
+
 impl FlatFileTree {
     pub fn rebuild(&mut self, data: &FileTreeData) {
         self.nodes.clear();
@@ -166,6 +175,9 @@ impl FlatFileTree {
         self.path_to_id.clear();
 
         for node in &data.nodes {
+            if is_hidden_virtual_path(&node.path) {
+                continue;
+            }
             let id = LiveId::from_str(&node.path);
             self.path_to_id.insert(node.path.clone(), id);
             self.nodes.insert(
