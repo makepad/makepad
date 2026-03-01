@@ -36,9 +36,8 @@ impl Cx {
             let block_id = LiveId(to_wasm.read_u64());
             let skip = to_wasm.read_block_skip();
             match block_id {
-                live_id!(ToWasmGetDeps) => {
-                    // fetch_deps
-                    let tw = ToWasmGetDeps::read_to_wasm(&mut to_wasm);
+                live_id!(ToWasmInit) => {
+                    let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
                     self.cpu_cores = tw.cpu_cores as usize;
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,
@@ -47,25 +46,11 @@ impl Cx {
                     );
                     self.os_type = tw.browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
-
-                    let mut deps = Vec::<String>::new();
-                    for (path, _) in &self.dependencies {
-                        deps.push(path.to_string());
-                    }
-                    self.os.from_wasm(FromWasmLoadDeps { deps });
-                }
-
-                live_id!(ToWasmInit) => {
-                    let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
-
-                    for dep_in in tw.deps {
-                        if let Some(dep) = self.dependencies.get_mut(&dep_in.path) {
-                            dep.data = Some(Ok(Rc::new(dep_in.data.into_vec_u8())))
-                        }
-                    }
                     self.os.window_geom = tw.window_info.into();
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
+                    // Ensure script resources deferred during pre-init are queued now.
+                    self.load_all_script_resources();
                     self.call_event_handler(&Event::Startup);
                     self.redraw_all();
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
@@ -709,7 +694,6 @@ impl CxOsApi for Cx {
         self.package_root = Some(String::new());
 
         self.os.append_to_wasm_js(&[
-            ToWasmGetDeps::to_js_code(),
             ToWasmInit::to_js_code(),
             ToWasmResizeWindow::to_js_code(),
             ToWasmAnimationFrame::to_js_code(),
@@ -748,7 +732,6 @@ impl CxOsApi for Cx {
         ]);
 
         self.os.append_from_wasm_js(&[
-            FromWasmLoadDeps::to_js_code(),
             FromWasmStartTimer::to_js_code(),
             FromWasmStopTimer::to_js_code(),
             FromWasmFullScreen::to_js_code(),
@@ -845,6 +828,7 @@ impl CxOsApi for Cx {
 }
 
 impl Cx {
+    #[allow(dead_code)]
     pub(crate) fn spawn_timer_thread<F>(&mut self, timer: u32, f: F)
     where
         F: Fn() + Send + 'static,
