@@ -1,4 +1,7 @@
-use crate::protocol::{EventSample, GCSample, GPUSample, LogEntry, LogLevel, LogSource, QueryId};
+use makepad_studio_protocol::backend_protocol::{
+    EventSample, GCSample, GPUSample, LogEntry, LogSource, QueryId,
+};
+use makepad_studio_protocol::LogLevel;
 use makepad_live_id::LiveId;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};

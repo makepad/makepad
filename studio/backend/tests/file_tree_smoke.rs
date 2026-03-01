@@ -1,4 +1,5 @@
-use makepad_studio_backend::{BackendConfig, MountConfig, StudioBackend, StudioToUI, UIToStudio};
+use makepad_studio_backend::{BackendConfig, MountConfig, StudioBackend};
+use makepad_studio_protocol::backend_protocol::{StudioToUI, UIToStudio};
 use std::time::Duration;
 
 #[test]

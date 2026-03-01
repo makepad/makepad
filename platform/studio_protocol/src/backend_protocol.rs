@@ -1,6 +1,7 @@
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
-use makepad_studio_protocol::PresentableDraw;
+use makepad_error_log::LogLevel;
+use makepad_platform::os::shared_framebuf::PresentableDraw;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerBin, DeBin, SerJson, DeJson)]
@@ -568,13 +569,6 @@ pub enum LogSource {
     Terminal,
     ScriptCi,
     Other(LiveId),
-}
-
-#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum LogLevel {
-    Error,
-    Warning,
-    Log,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, Default)]

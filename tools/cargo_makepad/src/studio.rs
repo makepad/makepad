@@ -1,51 +1,47 @@
-use makepad_network::{
-    WebSocketParser, ServerWebSocketError, ServerWebSocketMessage, ServerWebSocketMessageFormat,
-    ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PONG_MESSAGE,
-};
 use makepad_micro_serde::*;
-use std::collections::HashMap;
+use makepad_network::{
+    ServerWebSocketError, ServerWebSocketMessage, ServerWebSocketMessageFormat,
+    ServerWebSocketMessageHeader, WebSocketParser, SERVER_WEB_SOCKET_PONG_MESSAGE,
+};
+use makepad_studio_protocol::backend_protocol::{
+    ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope,
+};
+use std::collections::VecDeque;
 use std::env;
 use std::io::{self, BufRead, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_STUDIO_HOST_PORT: &str = "127.0.0.1:8001";
-const DEFAULT_STUDIO_REMOTE_PATH: &str = "/$studio_remote";
+const STUDIO_UI_PATH: &str = "/$studio_ui";
+const LEGACY_STUDIO_TERMINAL_PATH: &str = "/$studio_terminal";
+const LEGACY_STUDIO_REMOTE_PATH: &str = "/$studio_remote";
 
-#[derive(Debug, Clone, SerJson, DeJson)]
-enum StudioRemoteRequest {
-    CargoRun {
-        args: Vec<String>,
-        root: Option<String>,
-        startup_query: Option<String>,
-        env: Option<HashMap<String, String>>,
-    },
-    Stop {
-        build_id: u64,
-    },
+struct BridgeState {
+    client_id: Option<ClientId>,
+    next_counter: u64,
 }
 
 fn show_studio_help() {
-    eprintln!("Studio websocket remote");
+    eprintln!("Studio websocket bridge (studio protocol passthrough)");
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  cargo makepad studio [terminal|studio_remote] [--studio=IP:PORT]");
     eprintln!("  cargo makepad studio run [--studio=IP:PORT] [--root=ROOT] [cargo run args]");
     eprintln!();
+    eprintln!("Stdin JSON lines accepted:");
+    eprintln!("  UIToStudio");
+    eprintln!();
+    eprintln!("Stdout JSON lines emitted:");
+    eprintln!("  StudioToUI");
+    eprintln!();
     eprintln!("Examples:");
-    eprintln!("  cargo makepad studio");
-    eprintln!("  cargo makepad studio --studio=127.0.0.1:8001");
-    eprintln!("  cargo makepad studio run -p makepad-example-splash --release");
-    eprintln!("  cargo makepad studio run --root=makepad -- -p makepad-example-splash");
+    eprintln!("  echo '{{\"ListBuilds\":[]}}' | cargo makepad studio");
     eprintln!(
-        "  echo '{{\"Screenshot\":{{\"build_id\":1234,\"kind_id\":0}}}}' | cargo makepad studio"
+        "  echo '{{\"CargoRun\":{{\"mount\":\"makepad\",\"args\":[\"run\",\"-p\",\"makepad-example-splash\"],\"startup_query\":null,\"env\":null,\"buildbox\":null}}}}' | cargo makepad studio"
     );
-    eprintln!("  echo '{{\"WidgetTreeDump\":{{\"build_id\":1234}}}}' | cargo makepad studio");
 }
 
 pub fn handle_studio(args: &[String]) -> Result<(), String> {
@@ -108,17 +104,32 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
     }
 
     let target = resolve_host_port(studio)?;
+
+    let mut initial_messages = Vec::new();
     if mode_run {
-        let request = StudioRemoteRequest::CargoRun {
-            args: cargo_run_args,
-            root,
+        let mount = root.unwrap_or_else(default_mount_from_env);
+        initial_messages.push(UIToStudio::CargoRun {
+            mount,
+            args: normalize_cargo_run_args(cargo_run_args)?,
             startup_query: None,
             env: None,
-        };
-        run_studio_remote(target, vec![request.serialize_json()])
-    } else {
-        run_studio_remote(target, Vec::new())
+            buildbox: None,
+        });
     }
+
+    run_studio_remote(target, initial_messages)
+}
+
+fn default_mount_from_env() -> String {
+    env::var("STUDIO_ROOT")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            env::var("STUDIO_MOUNT")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or_else(|| "makepad".to_string())
 }
 
 fn resolve_host_port(studio_override: Option<String>) -> Result<(String, u16), String> {
@@ -151,7 +162,7 @@ fn resolve_host_port(studio_override: Option<String>) -> Result<(String, u16), S
     Ok((host.to_string(), port))
 }
 
-fn run_studio_remote(target: (String, u16), initial_messages: Vec<String>) -> Result<(), String> {
+fn run_studio_remote(target: (String, u16), initial_messages: Vec<UIToStudio>) -> Result<(), String> {
     let (host, port) = target;
     let host_header = format!("{host}:{port}");
     let addr = host_header.clone();
@@ -162,79 +173,167 @@ fn run_studio_remote(target: (String, u16), initial_messages: Vec<String>) -> Re
         .next()
         .ok_or_else(|| format!("failed to resolve studio address {addr}"))?;
 
-    let mut stream = TcpStream::connect(socket_addr)
-        .map_err(|e| format!("failed to connect to studio websocket at {addr}: {e}"))?;
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+    let mut last_err = None;
+    let mut selected_path = None;
+    let mut selected_stream = None;
+    let mut selected_leftover = Vec::new();
+    for path in [
+        STUDIO_UI_PATH,
+        LEGACY_STUDIO_TERMINAL_PATH,
+        LEGACY_STUDIO_REMOTE_PATH,
+    ] {
+        match connect_websocket(socket_addr, &host_header, path) {
+            Ok((stream, leftover)) => {
+                selected_path = Some(path);
+                selected_stream = Some(stream);
+                selected_leftover = leftover;
+                break;
+            }
+            Err(err) => {
+                last_err = Some(format!("{path}: {err}"));
+            }
+        }
+    }
 
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: SxJdXBRtW7Q4awLDhflO0Q==\r\n\r\n",
-        DEFAULT_STUDIO_REMOTE_PATH, host_header
-    );
-    write_all_no_error(&mut stream, request.as_bytes())
-        .map_err(|e| format!("failed to write websocket handshake request: {e}"))?;
-
-    let leftover = read_websocket_handshake_response(&mut stream)?;
+    let path = selected_path.ok_or_else(|| {
+        format!(
+            "failed to connect to studio websocket at {addr} (tried {}, {}, {}): {}",
+            STUDIO_UI_PATH,
+            LEGACY_STUDIO_TERMINAL_PATH,
+            LEGACY_STUDIO_REMOTE_PATH,
+            last_err.unwrap_or_else(|| "unknown error".to_string())
+        )
+    })?;
+    let stream = selected_stream.expect("selected stream exists");
     let mut read_stream = stream
         .try_clone()
         .map_err(|e| format!("failed to clone websocket stream for reading: {e}"))?;
     let write_stream = Arc::new(Mutex::new(stream));
-    let is_done = Arc::new(AtomicBool::new(false));
 
-    for message in initial_messages {
-        let message = message.trim();
-        if message.is_empty() {
-            continue;
-        }
-        send_text_frame(&write_stream, message)
-            .map_err(|e| format!("failed to send initial studio request: {e}"))?;
+    let mut state = BridgeState {
+        client_id: None,
+        next_counter: 0,
+    };
+
+    let mut out = io::stdout();
+    let mut web_socket = WebSocketParser::new();
+    if !selected_leftover.is_empty() {
+        parse_incoming_frames(
+            &write_stream,
+            &mut web_socket,
+            &mut state,
+            &mut out,
+            &selected_leftover,
+        )?;
     }
 
-    {
-        let write_stream = write_stream.clone();
-        let is_done = is_done.clone();
-        thread::spawn(move || {
-            let stdin = io::stdin();
-            let mut stdin = stdin.lock();
-            let mut line = String::new();
-            while !is_done.load(Ordering::Relaxed) {
-                line.clear();
-                match stdin.read_line(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let text = line.trim_end_matches(&['\r', '\n'][..]);
-                        if text.is_empty() {
-                            continue;
-                        }
-                        if let Err(err) = JsonValue::deserialize_json(text) {
-                            eprintln!("studio remote: invalid json request: {err:?}");
-                            continue;
-                        }
-                        if let Err(err) = send_text_frame(&write_stream, text) {
-                            eprintln!("studio remote: failed to send websocket text frame: {err}");
-                            break;
-                        }
+    if state.client_id.is_none() {
+        let hello_deadline = Instant::now() + Duration::from_secs(3);
+        let mut recv_buf = [0u8; 65535];
+        while state.client_id.is_none() {
+            if Instant::now() >= hello_deadline {
+                return Err(format!(
+                    "studio did not send Hello on {} (expected backend /$studio_ui protocol)",
+                    path
+                ));
+            }
+            let read = match read_stream.read(&mut recv_buf) {
+                Ok(0) => return Err("connection closed before Hello".to_string()),
+                Ok(n) => n,
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "studio websocket read error while waiting for Hello: {err}"
+                    ))
+                }
+            };
+            parse_incoming_frames(
+                &write_stream,
+                &mut web_socket,
+                &mut state,
+                &mut out,
+                &recv_buf[..read],
+            )?;
+        }
+    }
+
+    let mut pending_envelopes = VecDeque::new();
+    for msg in initial_messages {
+        pending_envelopes.push_back(make_envelope(&mut state, msg)?);
+    }
+
+    let (stdin_tx, stdin_rx) = mpsc::channel::<Option<String>>();
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut stdin = stdin.lock();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match stdin.read_line(&mut line) {
+                Ok(0) => {
+                    let _ = stdin_tx.send(None);
+                    break;
+                }
+                Ok(_) => {
+                    let text = line.trim_end_matches(&['\r', '\n'][..]).to_string();
+                    if text.is_empty() {
+                        continue;
                     }
-                    Err(_) => break,
+                    let _ = stdin_tx.send(Some(text));
+                }
+                Err(_) => {
+                    let _ = stdin_tx.send(None);
+                    break;
                 }
             }
-            is_done.store(true, Ordering::Relaxed);
-        });
-    }
+        }
+    });
 
-    let mut web_socket = WebSocketParser::new();
-    if !leftover.is_empty() {
-        parse_incoming_frames(&write_stream, &mut web_socket, &is_done, &leftover)?;
-    }
-
+    let mut stdin_closed = false;
+    let mut shutdown_deadline: Option<Instant> = None;
     let mut recv_buf = [0u8; 65535];
-    while !is_done.load(Ordering::Relaxed) {
-        let read = match read_stream.read(&mut recv_buf) {
-            Ok(0) => {
-                is_done.store(true, Ordering::Relaxed);
-                break;
+
+    loop {
+        while let Ok(line) = stdin_rx.try_recv() {
+            match line {
+                Some(line) => {
+                    match UIToStudio::deserialize_json(&line) {
+                        Ok(msg) => match make_envelope(&mut state, msg) {
+                            Ok(envelope) => pending_envelopes.push_back(envelope),
+                            Err(err) => {
+                                eprintln!("studio remote: {err}");
+                            }
+                        },
+                        Err(err) => {
+                            eprintln!("studio remote: invalid request json (expected UIToStudio): {err:?}");
+                        }
+                    }
+                    shutdown_deadline = None;
+                }
+                None => {
+                    stdin_closed = true;
+                    if shutdown_deadline.is_none() {
+                        shutdown_deadline = Some(Instant::now() + Duration::from_millis(700));
+                    }
+                }
             }
+        }
+
+        while let Some(envelope) = pending_envelopes.pop_front() {
+            send_ui_envelope(&write_stream, envelope)?;
+        }
+
+        let read = match read_stream.read(&mut recv_buf) {
+            Ok(0) => break,
             Ok(n) => n,
             Err(err)
                 if matches!(
@@ -244,37 +343,120 @@ fn run_studio_remote(target: (String, u16), initial_messages: Vec<String>) -> Re
                         | io::ErrorKind::Interrupted
                 ) =>
             {
-                continue;
+                0
             }
-            Err(err) => {
-                return Err(format!("studio websocket read error: {err}"));
-            }
+            Err(err) => return Err(format!("studio websocket read error: {err}")),
         };
+        if read > 0 {
+            parse_incoming_frames(
+                &write_stream,
+                &mut web_socket,
+                &mut state,
+                &mut out,
+                &recv_buf[..read],
+            )?;
+            if stdin_closed {
+                shutdown_deadline = Some(Instant::now() + Duration::from_millis(700));
+            }
+        }
 
-        parse_incoming_frames(&write_stream, &mut web_socket, &is_done, &recv_buf[..read])?;
+        if stdin_closed
+            && pending_envelopes.is_empty()
+            && shutdown_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            break;
+        }
     }
 
     Ok(())
 }
 
-fn send_text_frame(stream: &Arc<Mutex<TcpStream>>, text: &str) -> io::Result<()> {
-    let header = ServerWebSocketMessageHeader::from_len(
-        text.len(),
-        ServerWebSocketMessageFormat::Text,
-        true,
-    );
-    let frame = WebSocketParser::build_message(header, text.as_bytes());
-    let mut guard = stream.lock().unwrap();
-    write_all_no_error(&mut guard, &frame)
+fn make_envelope(state: &mut BridgeState, msg: UIToStudio) -> Result<UIToStudioEnvelope, String> {
+    let client_id = state
+        .client_id
+        .ok_or_else(|| "missing studio hello/client_id".to_string())?;
+    let query_id = QueryId::new(client_id, state.next_counter);
+    state.next_counter = state.next_counter.wrapping_add(1);
+    Ok(UIToStudioEnvelope { query_id, msg })
+}
+
+fn send_ui_envelope(
+    write_stream: &Arc<Mutex<TcpStream>>,
+    envelope: UIToStudioEnvelope,
+) -> Result<(), String> {
+    send_binary_frame(write_stream, &envelope.serialize_bin())
+        .map_err(|e| format!("failed to send studio request: {e}"))
+}
+
+fn has_message_format_json(args: &[String]) -> bool {
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--message-format=json" {
+            return true;
+        }
+        if arg == "--message-format" && iter.peek().is_some_and(|next| next.as_str() == "json") {
+            return true;
+        }
+        if arg
+            .strip_prefix("--message-format=")
+            .is_some_and(|value| value == "json")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn normalize_cargo_run_args(raw_args: Vec<String>) -> Result<Vec<String>, String> {
+    let mut args = raw_args;
+    if args.first().is_some_and(|arg| arg == "run") {
+        args.remove(0);
+    }
+    if args
+        .first()
+        .is_some_and(|arg| !arg.starts_with('-') && arg != "--")
+    {
+        return Err(
+            "CargoRun expects args after `cargo run` (do not pass a different cargo subcommand)"
+                .to_string(),
+        );
+    }
+
+    let split_index = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let mut cargo_args = args[..split_index].to_vec();
+    let mut app_args = if split_index < args.len() {
+        args[(split_index + 1)..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    if !has_message_format_json(&cargo_args) {
+        cargo_args.push("--message-format=json".to_string());
+    }
+    if !has_message_format_json(&app_args) {
+        app_args.insert(0, "--message-format=json".to_string());
+    }
+    if !app_args.iter().any(|arg| arg == "--stdin-loop") {
+        app_args.insert(0, "--stdin-loop".to_string());
+    }
+
+    let mut final_args = vec!["run".to_string()];
+    final_args.extend(cargo_args);
+    final_args.push("--".to_string());
+    final_args.extend(app_args);
+    Ok(final_args)
 }
 
 fn parse_incoming_frames(
     stream: &Arc<Mutex<TcpStream>>,
     web_socket: &mut WebSocketParser,
-    is_done: &Arc<AtomicBool>,
+    state: &mut BridgeState,
+    out: &mut io::Stdout,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let mut out = io::stdout();
     web_socket.parse(bytes, |result| match result {
         Ok(ServerWebSocketMessage::Ping(_)) => {
             if let Ok(mut guard) = stream.lock() {
@@ -283,22 +465,28 @@ fn parse_incoming_frames(
         }
         Ok(ServerWebSocketMessage::Pong(_)) => {}
         Ok(ServerWebSocketMessage::Text(text)) => {
-            let _ = out.write_all(text.as_bytes());
-            let _ = out.write_all(b"\n");
-            let _ = out.flush();
-        }
-        Ok(ServerWebSocketMessage::Binary(data)) => {
-            if let Ok(text) = std::str::from_utf8(data) {
+            if let Ok(msg) = StudioToUI::deserialize_json(text) {
+                let _ = emit_protocol_response(out, state, msg);
+            } else {
                 let _ = out.write_all(text.as_bytes());
                 let _ = out.write_all(b"\n");
                 let _ = out.flush();
-            } else {
-                eprintln!("studio remote: ignoring non-utf8 binary websocket message");
             }
         }
-        Ok(ServerWebSocketMessage::Close) => {
-            is_done.store(true, Ordering::Relaxed);
+        Ok(ServerWebSocketMessage::Binary(data)) => {
+            if let Ok(msg) = StudioToUI::deserialize_bin(data) {
+                let _ = emit_protocol_response(out, state, msg);
+            } else if let Ok(text) = std::str::from_utf8(data) {
+                if let Ok(msg) = StudioToUI::deserialize_json(text) {
+                    let _ = emit_protocol_response(out, state, msg);
+                } else {
+                    eprintln!("studio remote: unrecognized utf8 binary websocket payload");
+                }
+            } else {
+                eprintln!("studio remote: unrecognized binary websocket payload");
+            }
         }
+        Ok(ServerWebSocketMessage::Close) => {}
         Err(ServerWebSocketError::OpcodeNotSupported(opcode)) => {
             eprintln!("studio remote: websocket opcode not supported: {opcode}");
         }
@@ -307,6 +495,62 @@ fn parse_incoming_frames(
         }
     });
     Ok(())
+}
+
+fn emit_protocol_response(
+    out: &mut io::Stdout,
+    state: &mut BridgeState,
+    msg: StudioToUI,
+) -> Result<(), String> {
+    if let StudioToUI::Hello { client_id } = msg {
+        state.client_id = Some(client_id);
+        state.next_counter = 0;
+        write_protocol_response(out, StudioToUI::Hello { client_id })
+    } else {
+        write_protocol_response(out, msg)
+    }
+}
+
+fn write_protocol_response(out: &mut io::Stdout, msg: StudioToUI) -> Result<(), String> {
+    let json = msg.serialize_json();
+    out.write_all(json.as_bytes())
+        .map_err(|e| format!("failed to write response: {e}"))?;
+    out.write_all(b"\n")
+        .map_err(|e| format!("failed to write response newline: {e}"))?;
+    out.flush()
+        .map_err(|e| format!("failed to flush response: {e}"))?;
+    Ok(())
+}
+
+fn connect_websocket(
+    socket_addr: std::net::SocketAddr,
+    host_header: &str,
+    path: &str,
+) -> Result<(TcpStream, Vec<u8>), String> {
+    let mut stream = TcpStream::connect(socket_addr).map_err(|e| format!("connect failed: {e}"))?;
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: SxJdXBRtW7Q4awLDhflO0Q==\r\n\r\n",
+        path, host_header
+    );
+    write_all_no_error(&mut stream, request.as_bytes())
+        .map_err(|e| format!("failed to write websocket handshake request: {e}"))?;
+    let leftover = read_websocket_handshake_response(&mut stream)?;
+    Ok((stream, leftover))
+}
+
+fn send_binary_frame(stream: &Arc<Mutex<TcpStream>>, bytes: &[u8]) -> io::Result<()> {
+    let header = ServerWebSocketMessageHeader::from_len(
+        bytes.len(),
+        ServerWebSocketMessageFormat::Binary,
+        true,
+    );
+    let frame = WebSocketParser::build_message(header, bytes);
+    let mut guard = stream.lock().unwrap();
+    write_all_no_error(&mut guard, &frame)
 }
 
 fn read_websocket_handshake_response(stream: &mut TcpStream) -> Result<Vec<u8>, String> {

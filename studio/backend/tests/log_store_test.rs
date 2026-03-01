@@ -3,7 +3,10 @@ use makepad_studio_backend::log_store::{
     AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore, SAMPLE_TYPE_EVENT,
     SAMPLE_TYPE_GPU,
 };
-use makepad_studio_backend::{ClientId, EventSample, GPUSample, LogLevel, LogSource, QueryId};
+use makepad_studio_protocol::backend_protocol::{
+    ClientId, EventSample, GPUSample, LogSource, QueryId,
+};
+use makepad_studio_protocol::LogLevel;
 
 #[test]
 fn log_store_filters_by_build_source_and_pattern() {

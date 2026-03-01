@@ -1,4 +1,5 @@
-use makepad_studio_backend::{BackendConfig, MountConfig, StudioBackend, StudioToUI, UIToStudio};
+use makepad_studio_backend::{BackendConfig, MountConfig, StudioBackend};
+use makepad_studio_protocol::backend_protocol::{StudioToUI, UIToStudio};
 use std::fs;
 use std::time::{Duration, Instant};
 
@@ -158,9 +159,15 @@ fn unmount_emits_file_tree_diff_scoped_to_mount() {
             assert!(!changes.is_empty(), "expected removed paths for alpha");
             for change in changes {
                 match change {
-                    makepad_studio_backend::FileTreeChange::Added { path, .. }
-                    | makepad_studio_backend::FileTreeChange::Removed { path }
-                    | makepad_studio_backend::FileTreeChange::Modified { path, .. } => {
+                    makepad_studio_protocol::backend_protocol::FileTreeChange::Added {
+                        path,
+                        ..
+                    }
+                    | makepad_studio_protocol::backend_protocol::FileTreeChange::Removed { path }
+                    | makepad_studio_protocol::backend_protocol::FileTreeChange::Modified {
+                        path,
+                        ..
+                    } => {
                         assert!(path == "alpha" || path.starts_with("alpha/"));
                         assert!(!path.starts_with("beta/"));
                     }
@@ -282,9 +289,9 @@ fn file_watch_emits_single_path_delta_without_full_tree_reload() {
                     && changes.len() == 1
                     && matches!(
                         &changes[0],
-                        makepad_studio_backend::FileTreeChange::Added { path, .. }
-                            | makepad_studio_backend::FileTreeChange::Modified { path, .. }
-                            | makepad_studio_backend::FileTreeChange::Removed { path }
+                        makepad_studio_protocol::backend_protocol::FileTreeChange::Added { path, .. }
+                            | makepad_studio_protocol::backend_protocol::FileTreeChange::Modified { path, .. }
+                            | makepad_studio_protocol::backend_protocol::FileTreeChange::Removed { path }
                             if path.starts_with("repo/")
                     )
         )
@@ -347,7 +354,6 @@ fn file_watch_ignores_makepad_term_writes() {
 }
 
 #[test]
-#[ignore = "depends on host filesystem watcher delivery timing"]
 fn file_watch_picks_up_external_new_file() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -385,7 +391,7 @@ fn file_watch_picks_up_external_new_file() {
                 if changes.iter().any(|change| {
                     matches!(
                         change,
-                        makepad_studio_backend::FileTreeChange::Added { path, .. }
+                        makepad_studio_protocol::backend_protocol::FileTreeChange::Added { path, .. }
                             if path == "repo/src/new_file.rs"
                     )
                 }) {
@@ -414,7 +420,6 @@ fn file_watch_picks_up_external_new_file() {
 }
 
 #[test]
-#[ignore = "depends on host filesystem watcher delivery timing"]
 fn file_watch_picks_up_external_removed_directory() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src/nested")).unwrap();
@@ -452,7 +457,7 @@ fn file_watch_picks_up_external_removed_directory() {
                 if changes.iter().any(|change| {
                     matches!(
                         change,
-                        makepad_studio_backend::FileTreeChange::Removed { path }
+                        makepad_studio_protocol::backend_protocol::FileTreeChange::Removed { path }
                             if path == "repo/src/nested" || path.starts_with("repo/src/nested/")
                     )
                 }) {

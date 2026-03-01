@@ -1,4 +1,5 @@
-use makepad_studio_backend::{GitStatus, VirtualFs};
+use makepad_studio_backend::VirtualFs;
+use makepad_studio_protocol::backend_protocol::GitStatus;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
