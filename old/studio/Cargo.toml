@@ -1,5 +1,5 @@
 [package]
-name = "makepad-studio"
+name = "makepad-studio-old"
 version = "2.0.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
