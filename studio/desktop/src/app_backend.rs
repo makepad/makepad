@@ -275,22 +275,24 @@ impl App {
             self.data.file_tree = FlatFileTree::default();
             return;
         };
-        let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) else {
-            return;
-        };
-        let Some(tree_data) = self
+        let tree_data = self
             .mount_state(&active_mount)
-            .and_then(|mount| mount.file_tree_data.clone())
-        else {
+            .and_then(|mount| mount.file_tree_data.clone());
+        let Some(tree_data) = tree_data else {
             self.data.file_tree = FlatFileTree::default();
-            workspace.widget(cx, ids!(file_tree)).redraw(cx);
+            if let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) {
+                workspace.widget(cx, ids!(file_tree)).redraw(cx);
+            }
             return;
         };
+
         self.data.file_tree.rebuild(tree_data);
-        workspace.widget(cx, ids!(file_tree)).redraw(cx);
-        workspace
-            .desktop_file_tree(cx, ids!(file_tree))
-            .set_folder_is_open(cx, LiveId::from_str(&active_mount), true, Animate::No);
+        if let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) {
+            workspace.widget(cx, ids!(file_tree)).redraw(cx);
+            workspace
+                .desktop_file_tree(cx, ids!(file_tree))
+                .set_folder_is_open(cx, LiveId::from_str(&active_mount), true, Animate::No);
+        }
     }
 
     pub(super) fn refresh_active_mount_run_list(&mut self, cx: &mut Cx) {
