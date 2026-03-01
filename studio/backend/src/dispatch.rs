@@ -1114,10 +1114,11 @@ impl StudioCore {
         let now = Instant::now();
         let path_is_file = path.is_file();
         let path_is_dir = path.is_dir();
-        if let Some(until) = self.mount_suppress_fs_until.get(&mount).copied() {
-            if now < until {
-                return;
-            }
+        if self
+            .mount_suppress_fs_until
+            .get(&mount)
+            .is_some_and(|until| now >= *until)
+        {
             self.mount_suppress_fs_until.remove(&mount);
         }
         let Some(virtual_path) = self.mount_path_to_virtual(&mount, &path) else {
@@ -1128,6 +1129,13 @@ impl StudioCore {
             return;
         }
         if virtual_path == mount {
+            if self
+                .mount_suppress_fs_until
+                .get(&mount)
+                .is_some_and(|until| now < *until)
+            {
+                return;
+            }
             if self.should_suppress_self_save_mount_root_event(&mount, now) {
                 return;
             }
@@ -2788,6 +2796,69 @@ mod tests {
                 )
             }),
             "expected Added diff for repo/src/new_file.rs"
+        );
+    }
+
+    #[test]
+    fn mount_fs_changed_file_path_ignores_mount_root_suppress_window() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+        core.mount_suppress_fs_until
+            .insert("repo".to_string(), Instant::now() + Duration::from_secs(2));
+        fs::write(dir.path().join("src/new_file.rs"), "pub fn new_file() {}\n").unwrap();
+        core.handle_event(StudioEvent::MountFsChanged {
+            mount: "repo".to_string(),
+            path: dir.path().join("src/new_file.rs"),
+        });
+
+        pump_core(&mut core, Duration::from_millis(400));
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(300));
+        assert!(
+            messages.iter().any(|msg| {
+                matches!(
+                    msg,
+                    StudioToUI::FileTreeDiff { mount, changes }
+                        if mount == "repo"
+                            && changes.iter().any(|change| {
+                                matches!(
+                                    change,
+                                    backend_proto::FileTreeChange::Added { path, .. }
+                                        if path == "repo/src/new_file.rs"
+                                )
+                            })
+                )
+            }),
+            "expected path-level fs event to bypass mount-root suppress window"
+        );
+    }
+
+    #[test]
+    fn mount_fs_changed_mount_root_still_honors_suppress_window() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+        core.mount_suppress_fs_until
+            .insert("repo".to_string(), Instant::now() + Duration::from_secs(2));
+        core.handle_event(StudioEvent::MountFsChanged {
+            mount: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        });
+
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
+        assert!(
+            !messages.iter().any(|msg| {
+                matches!(
+                    msg,
+                    StudioToUI::FileTree { mount, .. } | StudioToUI::FileTreeDiff { mount, .. }
+                        if mount == "repo"
+                ) || matches!(msg, StudioToUI::FileChanged { path } if path == "repo")
+            }),
+            "expected mount-root fs event to remain suppressed"
         );
     }
 
