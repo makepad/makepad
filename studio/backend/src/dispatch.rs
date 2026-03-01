@@ -492,6 +492,10 @@ impl StudioCore {
                 );
             }
             UIToStudio::LoadFileTree { mount } => {
+                eprintln!(
+                    "[studio-tree] backend recv LoadFileTree web_socket_id={} mount={}",
+                    web_socket_id, mount
+                );
                 let mount_name = mount.clone();
                 let vfs = self.vfs.clone_for_search();
                 let event_tx = self.event_tx.clone();
@@ -499,6 +503,18 @@ impl StudioCore {
                     let result = vfs
                         .load_file_tree(&mount_name)
                         .map_err(|err| err.to_string());
+                    match &result {
+                        Ok(data) => eprintln!(
+                            "[studio-tree] backend worker LoadFileTree done web_socket_id={} mount={} nodes={}",
+                            web_socket_id,
+                            mount_name,
+                            data.nodes.len()
+                        ),
+                        Err(err) => eprintln!(
+                            "[studio-tree] backend worker LoadFileTree error web_socket_id={} mount={} err={}",
+                            web_socket_id, mount_name, err
+                        ),
+                    }
                     let _ = event_tx.send(StudioEvent::WorkerLoadFileTreeDone {
                         web_socket_id,
                         mount: mount_name,
@@ -1461,12 +1477,25 @@ impl StudioCore {
         result: Result<backend_proto::FileTreeData, String>,
     ) {
         match result {
-            Ok(data) => self.send_ui_message(
-                web_socket_id,
-                StudioToUI::FileTree { mount, data },
-                self.ui_format(web_socket_id),
-            ),
-            Err(err) => self.send_ui_error(web_socket_id, err),
+            Ok(data) => {
+                let node_count = data.nodes.len();
+                eprintln!(
+                    "[studio-tree] backend event WorkerLoadFileTreeDone web_socket_id={} mount={} nodes={}",
+                    web_socket_id, mount, node_count
+                );
+                self.send_ui_message(
+                    web_socket_id,
+                    StudioToUI::FileTree { mount, data },
+                    self.ui_format(web_socket_id),
+                )
+            }
+            Err(err) => {
+                eprintln!(
+                    "[studio-tree] backend event WorkerLoadFileTreeDone error web_socket_id={} mount={} err={}",
+                    web_socket_id, mount, err
+                );
+                self.send_ui_error(web_socket_id, err)
+            }
         }
     }
 
@@ -1961,6 +1990,23 @@ impl StudioCore {
         let Some(client) = self.ui_clients.get(&web_socket_id) else {
             return;
         };
+        if let StudioToUI::FileTree { mount, data } = &msg {
+            eprintln!(
+                "[studio-tree] backend send_ui_message kind=FileTree web_socket_id={} mount={} nodes={} channel={}",
+                web_socket_id,
+                mount,
+                data.nodes.len(),
+                if client.typed_sender.is_some() { "typed" } else { "wire" }
+            );
+        } else if let StudioToUI::FileTreeDiff { mount, changes } = &msg {
+            eprintln!(
+                "[studio-tree] backend send_ui_message kind=FileTreeDiff web_socket_id={} mount={} changes={} channel={}",
+                web_socket_id,
+                mount,
+                changes.len(),
+                if client.typed_sender.is_some() { "typed" } else { "wire" }
+            );
+        }
         if let Some(typed_sender) = &client.typed_sender {
             let _ = typed_sender.send(msg);
             return;

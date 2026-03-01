@@ -152,6 +152,11 @@ impl App {
                 for mount in &mounts {
                     self.data.mounts.entry(mount.name.clone()).or_default().root =
                         mount.path.clone();
+                    eprintln!(
+                        "[studio-tree] startup mount={} path={} request=LoadFileTree",
+                        mount.name,
+                        mount.path.display()
+                    );
                     let _ = self.ensure_mount_tab(cx, &mount.name);
                     let _ = self.send_studio(UIToStudio::LoadFileTree {
                         mount: mount.name.clone(),
@@ -200,6 +205,10 @@ impl App {
             if dock.find_tab_bar_of_tab(tab_id).is_some() {
                 return Some(tab_id);
             }
+            eprintln!(
+                "[studio-tree] ensure_mount_tab mount={} stale_tab_id={:?} (missing tab bar)",
+                mount, tab_id
+            );
             self.data.tab_to_mount.remove(&tab_id);
             self.mount_state_mut(mount).tab_id = None;
         }
@@ -219,7 +228,13 @@ impl App {
                 .filter_map(|state| state.tab_id)
                 .next()
                 .unwrap_or(id!(mount_first));
-            let (tab_bar, pos) = dock.find_tab_bar_of_tab(anchor)?;
+            let Some((tab_bar, pos)) = dock.find_tab_bar_of_tab(anchor) else {
+                eprintln!(
+                    "[studio-tree] ensure_mount_tab mount={} failed: missing anchor tab bar for {:?}",
+                    mount, anchor
+                );
+                return None;
+            };
             let tab_id = dock.unique_id(LiveId::from_str(&format!("mount/{}", mount)).0);
             if dock
                 .create_tab(
@@ -233,6 +248,10 @@ impl App {
                 )
                 .is_none()
             {
+                eprintln!(
+                    "[studio-tree] ensure_mount_tab mount={} failed: create_tab returned None",
+                    mount
+                );
                 return None;
             }
             tab_id
@@ -257,9 +276,19 @@ impl App {
     }
 
     pub(super) fn mount_workspace_widget(&mut self, cx: &mut Cx, mount: &str) -> Option<WidgetRef> {
-        let tab_id = self.ensure_mount_tab(cx, mount)?;
+        let Some(tab_id) = self.ensure_mount_tab(cx, mount) else {
+            eprintln!(
+                "[studio-tree] mount_workspace_widget mount={} failed: ensure_mount_tab returned None",
+                mount
+            );
+            return None;
+        };
         let mount_dock = self.ui.dock(cx, ids!(mount_dock));
         if mount_dock.find_tab_bar_of_tab(tab_id).is_none() {
+            eprintln!(
+                "[studio-tree] mount_workspace_widget mount={} failed: tab {:?} has no tab bar",
+                mount, tab_id
+            );
             return None;
         }
         Some(mount_dock.item(tab_id))
@@ -272,27 +301,39 @@ impl App {
 
     pub(super) fn refresh_active_mount_tree(&mut self, cx: &mut Cx) {
         let Some(active_mount) = self.data.active_mount.clone() else {
+            eprintln!("[studio-tree] refresh skipped: no active mount");
             self.data.file_tree = FlatFileTree::default();
             return;
         };
-        let tree_data = self
+        let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) else {
+            eprintln!(
+                "[studio-tree] refresh skipped: workspace missing for active_mount={}",
+                active_mount
+            );
+            return;
+        };
+        let Some(tree_data) = self
             .mount_state(&active_mount)
-            .and_then(|mount| mount.file_tree_data.clone());
-        let Some(tree_data) = tree_data else {
+            .and_then(|mount| mount.file_tree_data.clone())
+        else {
+            eprintln!(
+                "[studio-tree] refresh empty: no file_tree_data for active_mount={}",
+                active_mount
+            );
             self.data.file_tree = FlatFileTree::default();
-            if let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) {
-                workspace.widget(cx, ids!(file_tree)).redraw(cx);
-            }
+            workspace.widget(cx, ids!(file_tree)).redraw(cx);
             return;
         };
-
+        let node_count = tree_data.nodes.len();
+        eprintln!(
+            "[studio-tree] refresh apply: active_mount={} nodes={}",
+            active_mount, node_count
+        );
         self.data.file_tree.rebuild(tree_data);
-        if let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) {
-            workspace.widget(cx, ids!(file_tree)).redraw(cx);
-            workspace
-                .desktop_file_tree(cx, ids!(file_tree))
-                .set_folder_is_open(cx, LiveId::from_str(&active_mount), true, Animate::No);
-        }
+        workspace.widget(cx, ids!(file_tree)).redraw(cx);
+        workspace
+            .desktop_file_tree(cx, ids!(file_tree))
+            .set_folder_is_open(cx, LiveId::from_str(&active_mount), true, Animate::No);
     }
 
     pub(super) fn refresh_active_mount_run_list(&mut self, cx: &mut Cx) {
@@ -781,6 +822,14 @@ impl App {
 
     pub(super) fn select_mount(&mut self, cx: &mut Cx, mount: &str) {
         self.data.active_mount = Some(mount.to_string());
+        let has_tree_data = self
+            .mount_state(mount)
+            .and_then(|mount| mount.file_tree_data.as_ref())
+            .is_some();
+        eprintln!(
+            "[studio-tree] select_mount mount={} has_tree_data={}",
+            mount, has_tree_data
+        );
         if let Some(tab_id) = self.ensure_mount_tab(cx, mount) {
             self.ui.dock(cx, ids!(mount_dock)).select_tab(cx, tab_id);
         }
@@ -792,6 +841,10 @@ impl App {
             self.refresh_active_mount_tree(cx);
             self.set_status(cx, &format!("mount ready: {}", mount));
         } else {
+            eprintln!(
+                "[studio-tree] select_mount mount={} request=LoadFileTree (missing tree_data)",
+                mount
+            );
             let _ = self.send_studio(UIToStudio::LoadFileTree {
                 mount: mount.to_string(),
             });
