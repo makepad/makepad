@@ -1,11 +1,13 @@
 use crate::{
     makepad_code_editor::CodeSession,
-    makepad_studio_backend::{
-        EventSample, FileNodeType, FileTreeData, GCSample, GPUSample, GitStatus, LogLevel,
-        LogSource, QueryId, RunnableBuild, StudioConnection,
-    },
+    makepad_studio_backend::StudioConnection,
     makepad_widgets::{file_tree::GitStatusDotKind, *},
 };
+use makepad_studio_protocol::backend_protocol::{
+    EventSample, FileNodeType, FileTreeData, GCSample, GPUSample, GitStatus, LogSource, QueryId,
+    RunnableBuild,
+};
+use makepad_studio_protocol::LogLevel;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 

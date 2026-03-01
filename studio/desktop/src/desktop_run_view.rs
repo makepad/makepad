@@ -1,7 +1,7 @@
 use crate::makepad_widgets::makepad_micro_serde::SerBin;
 use crate::makepad_widgets::makepad_platform::shared_framebuf::{HostSwapchain, SharedSwapchain};
 use crate::makepad_widgets::*;
-use makepad_studio_backend::QueryId;
+use makepad_studio_protocol::backend_protocol::QueryId;
 use makepad_studio_protocol::{
     MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
     RemoteMouseUp, RemoteScroll, StudioToApp, StudioToAppVec,

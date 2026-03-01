@@ -2,6 +2,7 @@ use crate::{
     app_data::{AppData, UiLogEntry},
     makepad_widgets::*,
 };
+use makepad_studio_protocol::LogLevel;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -246,11 +247,13 @@ impl DesktopLogView {
             .unwrap_or_default()
     }
 
-    fn icon_for_level(level: &crate::makepad_studio_backend::LogLevel) -> LiveId {
+    fn icon_for_level(level: &LogLevel) -> LiveId {
         match level {
-            crate::makepad_studio_backend::LogLevel::Error => id!(error_icon),
-            crate::makepad_studio_backend::LogLevel::Warning => id!(warning_icon),
-            crate::makepad_studio_backend::LogLevel::Log => id!(log_icon),
+            LogLevel::Error => id!(error_icon),
+            LogLevel::Warning => id!(warning_icon),
+            LogLevel::Wait => id!(warning_icon),
+            LogLevel::Panic => id!(error_icon),
+            LogLevel::Log => id!(log_icon),
         }
     }
 
@@ -321,7 +324,6 @@ impl Widget for DesktopLogView {
         let tab_id = self.tab_id(cx);
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
-                list.set_tail_range(self.tail);
                 if let Some(data) = scope.data.get_mut::<AppData>() {
                     let entries = Self::collect_entries(data, tab_id);
                     self.draw_entries(cx, &mut *list, &entries);
@@ -359,8 +361,11 @@ impl DesktopLogViewRef {
     pub fn set_tail(&self, cx: &mut Cx, tail: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.tail = tail;
-            inner.view.portal_list(cx, ids!(list)).set_tail_range(tail);
-            inner.view.redraw(cx);
+            let list = inner.view.portal_list(cx, ids!(list));
+            list.set_tail_range(tail);
+            if tail {
+                list.scroll_to_end(cx);
+            }
         }
     }
 

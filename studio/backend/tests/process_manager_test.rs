@@ -1,5 +1,6 @@
 use makepad_studio_backend::process_manager::ProcessManager;
-use makepad_studio_backend::{ClientId, QueryId, StudioEvent};
+use makepad_studio_backend::StudioEvent;
+use makepad_studio_protocol::backend_protocol::{ClientId, QueryId};
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};

@@ -1,4 +1,5 @@
 use super::*;
+use makepad_studio_protocol::backend_protocol::{FileNode, FileTreeChange};
 
 fn parse_mounts_spec(spec: &str, item_sep: char, pair_sep: char) -> Vec<MountConfig> {
     spec.split(item_sep)
@@ -43,7 +44,7 @@ impl App {
         &mut self,
         cx: &mut Cx,
         mount: &str,
-        changes: Vec<crate::makepad_studio_backend::FileTreeChange>,
+        changes: Vec<FileTreeChange>,
     ) {
         if changes.is_empty() {
             return;
@@ -58,7 +59,7 @@ impl App {
 
         for change in changes {
             match change {
-                crate::makepad_studio_backend::FileTreeChange::Added {
+                FileTreeChange::Added {
                     path,
                     node_type,
                     git_status,
@@ -72,7 +73,7 @@ impl App {
                         }
                         changed = true;
                     } else if !name.is_empty() {
-                        tree.nodes.push(crate::makepad_studio_backend::FileNode {
+                        tree.nodes.push(FileNode {
                             path,
                             name,
                             node_type,
@@ -81,7 +82,7 @@ impl App {
                         changed = true;
                     }
                 }
-                crate::makepad_studio_backend::FileTreeChange::Removed { path } => {
+                FileTreeChange::Removed { path } => {
                     let prefix = format!("{}/", path);
                     let before = tree.nodes.len();
                     tree.nodes
@@ -90,7 +91,7 @@ impl App {
                         changed = true;
                     }
                 }
-                crate::makepad_studio_backend::FileTreeChange::Modified { path, git_status } => {
+                FileTreeChange::Modified { path, git_status } => {
                     if let Some(node) = tree.nodes.iter_mut().find(|node| node.path == path) {
                         node.git_status = git_status;
                         changed = true;

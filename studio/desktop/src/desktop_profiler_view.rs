@@ -1,8 +1,8 @@
 use crate::{
     app_data::{AppData, UiProfilerSamples},
-    makepad_studio_backend::QueryId,
     makepad_widgets::*,
 };
+use makepad_studio_protocol::backend_protocol::QueryId;
 use std::fmt::Write;
 
 script_mod! {

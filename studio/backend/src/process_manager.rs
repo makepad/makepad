@@ -1,5 +1,5 @@
 use crate::dispatch::StudioEvent;
-use crate::protocol::{BuildInfo, QueryId};
+use makepad_studio_protocol::backend_protocol::{BuildInfo, QueryId};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;

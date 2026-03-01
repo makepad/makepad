@@ -1,6 +1,6 @@
 use crate::dispatch::{StudioCore, StudioEvent};
 use crate::gateway::{start_http_gateway, GatewayHandle};
-use crate::protocol::{ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope};
+use makepad_studio_protocol::backend_protocol::{ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope};
 use crate::virtual_fs::VirtualFs;
 use makepad_micro_serde::{DeBin, SerBin};
 use makepad_network::ToUIReceiver;
