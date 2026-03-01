@@ -454,17 +454,7 @@ impl VirtualFs {
     ) -> Result<(), VirtualFsError> {
         // Store plain paths, not DirEntry handles, so parent directory fds are
         // released before descending recursively.
-        let read_dir = match fs::read_dir(real_root) {
-            Ok(read_dir) => read_dir,
-            Err(err) => {
-                eprintln!(
-                    "[studio-tree] walk_dir read_dir error path={} err={}",
-                    real_root.display(),
-                    err
-                );
-                return Err(VirtualFsError::Io(err));
-            }
-        };
+        let read_dir = fs::read_dir(real_root)?;
         let mut entries: Vec<(String, PathBuf)> = read_dir
             .filter_map(Result::ok)
             .filter_map(|entry| {
