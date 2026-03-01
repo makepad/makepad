@@ -211,6 +211,8 @@ impl FlatFileTree {
             }
         }
 
+        self.cascade_git_status_to_folders();
+
         let mut sort_meta = HashMap::<LiveId, (bool, String)>::new();
         for (id, node) in &self.nodes {
             sort_meta.insert(
@@ -275,6 +277,34 @@ impl FlatFileTree {
             .unwrap_or(GitStatusDotKind::None)
     }
 
+    fn cascade_git_status_to_folders(&mut self) {
+        let mut ids_by_depth: Vec<(usize, LiveId)> = self
+            .nodes
+            .iter()
+            .map(|(id, node)| (node.path.matches('/').count(), *id))
+            .collect();
+        ids_by_depth.sort_by(|a, b| b.0.cmp(&a.0));
+
+        for (_, id) in ids_by_depth {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            if !matches!(node.node_type, FileNodeType::Dir) {
+                continue;
+            }
+            let mut status = node.git_status;
+            let children = node.children.clone();
+            for child_id in children {
+                if let Some(child) = self.nodes.get(&child_id) {
+                    status = merge_git_status(status, child.git_status);
+                }
+            }
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.git_status = status;
+            }
+        }
+    }
+
     fn draw_node(&self, cx: &mut Cx2d, file_tree: &mut FileTree, node_id: LiveId) {
         let Some(node) = self.nodes.get(&node_id) else {
             return;
@@ -304,5 +334,107 @@ fn git_status_dot(status: GitStatus) -> GitStatusDotKind {
         GitStatus::Deleted => GitStatusDotKind::Deleted,
         GitStatus::Conflict => GitStatusDotKind::Mixed,
         GitStatus::Clean | GitStatus::Ignored | GitStatus::Unknown => GitStatusDotKind::None,
+    }
+}
+
+fn merge_git_status(current: GitStatus, next: GitStatus) -> GitStatus {
+    if git_status_rank(next) > git_status_rank(current) {
+        next
+    } else {
+        current
+    }
+}
+
+fn git_status_rank(status: GitStatus) -> u8 {
+    match status {
+        GitStatus::Conflict => 6,
+        GitStatus::Deleted => 5,
+        GitStatus::Modified => 4,
+        GitStatus::Staged => 3,
+        GitStatus::Added => 2,
+        GitStatus::Untracked => 1,
+        GitStatus::Clean | GitStatus::Ignored | GitStatus::Unknown => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_studio_protocol::backend_protocol::FileNode;
+
+    fn dir(path: &str) -> FileNode {
+        FileNode {
+            path: path.to_string(),
+            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            node_type: FileNodeType::Dir,
+            git_status: GitStatus::Unknown,
+        }
+    }
+
+    fn file(path: &str, status: GitStatus) -> FileNode {
+        FileNode {
+            path: path.to_string(),
+            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            node_type: FileNodeType::File,
+            git_status: status,
+        }
+    }
+
+    #[test]
+    fn folder_git_status_cascades_from_children() {
+        let data = FileTreeData {
+            nodes: vec![
+                FileNode {
+                    path: "repo".to_string(),
+                    name: "repo".to_string(),
+                    node_type: FileNodeType::Dir,
+                    git_status: GitStatus::Clean,
+                },
+                dir("repo/src"),
+                file("repo/src/lib.rs", GitStatus::Modified),
+                file("repo/Cargo.toml", GitStatus::Clean),
+            ],
+        };
+
+        let mut tree = FlatFileTree::default();
+        tree.rebuild(&data);
+
+        assert_eq!(
+            tree.git_status_dot_for_path("repo/src"),
+            GitStatusDotKind::Modified
+        );
+        assert_eq!(
+            tree.git_status_dot_for_path("repo"),
+            GitStatusDotKind::Modified
+        );
+    }
+
+    #[test]
+    fn deleted_child_wins_over_modified_for_folder_dot() {
+        let data = FileTreeData {
+            nodes: vec![
+                FileNode {
+                    path: "repo".to_string(),
+                    name: "repo".to_string(),
+                    node_type: FileNodeType::Dir,
+                    git_status: GitStatus::Clean,
+                },
+                dir("repo/src"),
+                file("repo/src/a.rs", GitStatus::Modified),
+                file("repo/src/b.rs", GitStatus::Deleted),
+            ],
+        };
+
+        let mut tree = FlatFileTree::default();
+        tree.rebuild(&data);
+
+        assert_eq!(
+            tree.git_status_dot_for_path("repo/src"),
+            GitStatusDotKind::Deleted
+        );
+        assert_eq!(
+            tree.git_status_dot_for_path("repo"),
+            GitStatusDotKind::Deleted
+        );
     }
 }
