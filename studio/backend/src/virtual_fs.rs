@@ -454,7 +454,18 @@ impl VirtualFs {
     ) -> Result<(), VirtualFsError> {
         // Store plain paths, not DirEntry handles, so parent directory fds are
         // released before descending recursively.
-        let mut entries: Vec<(String, PathBuf)> = fs::read_dir(real_root)?
+        let read_dir = match fs::read_dir(real_root) {
+            Ok(read_dir) => read_dir,
+            Err(err) => {
+                eprintln!(
+                    "[studio-tree] walk_dir read_dir error path={} err={}",
+                    real_root.display(),
+                    err
+                );
+                return Err(VirtualFsError::Io(err));
+            }
+        };
+        let mut entries: Vec<(String, PathBuf)> = read_dir
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -464,6 +475,9 @@ impl VirtualFs {
                 if skip_branch_dir && name == "branch" {
                     return None;
                 }
+                if name == "target" {
+                    return None;
+                }
                 Some((name, entry.path()))
             })
             .collect();
@@ -471,7 +485,11 @@ impl VirtualFs {
 
         for (name, path) in entries {
             let virtual_path = format!("{}/{}", virtual_prefix, name);
-            if path.is_dir() {
+            let file_type = match fs::symlink_metadata(&path) {
+                Ok(meta) => meta.file_type(),
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
                 out.push(FileNode {
                     path: virtual_path.clone(),
                     name: name.clone(),
@@ -479,7 +497,7 @@ impl VirtualFs {
                     git_status: GitStatus::Unknown,
                 });
                 self.walk_dir(&path, status_root, &virtual_path, status_ctx, out, false)?;
-            } else if path.is_file() {
+            } else if file_type.is_file() || file_type.is_symlink() {
                 let rel = slash_rel(status_root, &path);
                 let git_status = if let Some(status) = status_ctx.status_map.get(&rel) {
                     *status

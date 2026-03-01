@@ -465,6 +465,7 @@ impl Repository {
         self.status_with_options(worktree::StatusOptions {
             skip_hidden: true,
             skip_target_dirs: true,
+            skip_worktree_content_compare: true,
         })
     }
 
