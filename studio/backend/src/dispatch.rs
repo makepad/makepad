@@ -111,7 +111,6 @@ pub enum StudioEvent {
         entries: Vec<(usize, LogEntry)>,
     },
     WorkerLoadFileTreeDone {
-        web_socket_id: u64,
         mount: String,
         result: Result<backend_proto::FileTreeData, String>,
     },
@@ -186,6 +185,7 @@ pub struct StudioCore {
     fs_event_last_by_path: HashMap<String, Instant>,
     fs_pending_diffs: HashMap<String, Vec<backend_proto::FileTreeChange>>,
     fs_pending_reload_mounts: HashSet<String>,
+    file_tree_load_waiters: HashMap<String, HashSet<u64>>,
     fs_diff_flush_scheduled: bool,
     fs_event_last_prune: Instant,
     mount_suppress_fs_until: HashMap<String, Instant>,
@@ -226,6 +226,7 @@ impl StudioCore {
             fs_event_last_by_path: HashMap::new(),
             fs_pending_diffs: HashMap::new(),
             fs_pending_reload_mounts: HashSet::new(),
+            file_tree_load_waiters: HashMap::new(),
             fs_diff_flush_scheduled: false,
             fs_event_last_prune: Instant::now(),
             mount_suppress_fs_until: HashMap::new(),
@@ -255,6 +256,9 @@ impl StudioCore {
                     .retain(|_, query| query.web_socket_id != web_socket_id);
                 self.live_profiler_queries
                     .retain(|_, query| query.web_socket_id != web_socket_id);
+                for waiters in self.file_tree_load_waiters.values_mut() {
+                    waiters.remove(&web_socket_id);
+                }
             }
             StudioEvent::UiEnvelope {
                 web_socket_id,
@@ -340,10 +344,9 @@ impl StudioCore {
                 entries,
             } => self.on_worker_query_logs_done(web_socket_id, query_id, query, live, entries),
             StudioEvent::WorkerLoadFileTreeDone {
-                web_socket_id,
                 mount,
                 result,
-            } => self.on_worker_load_file_tree_done(web_socket_id, mount, result),
+            } => self.on_worker_load_file_tree_done(mount, result),
             StudioEvent::WorkerFileTreeDeltaDone { mount, change } => {
                 self.queue_file_tree_delta_change(mount, change);
             }
@@ -496,6 +499,19 @@ impl StudioCore {
                     "[studio-tree] backend recv LoadFileTree web_socket_id={} mount={}",
                     web_socket_id, mount
                 );
+                let waiters = self.file_tree_load_waiters.entry(mount.clone()).or_default();
+                let first_request = waiters.is_empty();
+                waiters.insert(web_socket_id);
+                if !first_request {
+                    eprintln!(
+                        "[studio-tree] backend dedupe LoadFileTree web_socket_id={} mount={} waiters={}",
+                        web_socket_id,
+                        mount,
+                        waiters.len()
+                    );
+                    return;
+                }
+
                 let mount_name = mount.clone();
                 let vfs = self.vfs.clone_for_search();
                 let event_tx = self.event_tx.clone();
@@ -505,18 +521,16 @@ impl StudioCore {
                         .map_err(|err| err.to_string());
                     match &result {
                         Ok(data) => eprintln!(
-                            "[studio-tree] backend worker LoadFileTree done web_socket_id={} mount={} nodes={}",
-                            web_socket_id,
+                            "[studio-tree] backend worker LoadFileTree done mount={} nodes={}",
                             mount_name,
                             data.nodes.len()
                         ),
                         Err(err) => eprintln!(
-                            "[studio-tree] backend worker LoadFileTree error web_socket_id={} mount={} err={}",
-                            web_socket_id, mount_name, err
+                            "[studio-tree] backend worker LoadFileTree error mount={} err={}",
+                            mount_name, err
                         ),
                     }
                     let _ = event_tx.send(StudioEvent::WorkerLoadFileTreeDone {
-                        web_socket_id,
                         mount: mount_name,
                         result,
                     });
@@ -1472,29 +1486,50 @@ impl StudioCore {
 
     fn on_worker_load_file_tree_done(
         &mut self,
-        web_socket_id: u64,
         mount: String,
         result: Result<backend_proto::FileTreeData, String>,
     ) {
+        let waiters = self
+            .file_tree_load_waiters
+            .remove(&mount)
+            .unwrap_or_default();
+        if waiters.is_empty() {
+            eprintln!(
+                "[studio-tree] backend event WorkerLoadFileTreeDone mount={} dropped: no waiters",
+                mount
+            );
+            return;
+        }
         match result {
             Ok(data) => {
                 let node_count = data.nodes.len();
                 eprintln!(
-                    "[studio-tree] backend event WorkerLoadFileTreeDone web_socket_id={} mount={} nodes={}",
-                    web_socket_id, mount, node_count
+                    "[studio-tree] backend event WorkerLoadFileTreeDone mount={} nodes={} waiters={}",
+                    mount,
+                    node_count,
+                    waiters.len()
                 );
-                self.send_ui_message(
-                    web_socket_id,
-                    StudioToUI::FileTree { mount, data },
-                    self.ui_format(web_socket_id),
-                )
+                for web_socket_id in waiters {
+                    self.send_ui_message(
+                        web_socket_id,
+                        StudioToUI::FileTree {
+                            mount: mount.clone(),
+                            data: data.clone(),
+                        },
+                        self.ui_format(web_socket_id),
+                    );
+                }
             }
             Err(err) => {
                 eprintln!(
-                    "[studio-tree] backend event WorkerLoadFileTreeDone error web_socket_id={} mount={} err={}",
-                    web_socket_id, mount, err
+                    "[studio-tree] backend event WorkerLoadFileTreeDone error mount={} waiters={} err={}",
+                    mount,
+                    waiters.len(),
+                    err
                 );
-                self.send_ui_error(web_socket_id, err)
+                for web_socket_id in waiters {
+                    self.send_ui_error(web_socket_id, err.clone());
+                }
             }
         }
     }
