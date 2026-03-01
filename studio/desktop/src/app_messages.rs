@@ -18,7 +18,18 @@ impl App {
     pub(super) fn handle_studio_message(&mut self, cx: &mut Cx, msg: StudioToUI) {
         match msg {
             StudioToUI::FileTree { mount, data } => {
-                let _ = self.ensure_mount_tab(cx, &mount);
+                let node_count = data.nodes.len();
+                let active_mount = self.data.active_mount.clone();
+                eprintln!(
+                    "[studio-tree] recv FileTree mount={} nodes={} active_mount={:?}",
+                    mount, node_count, active_mount
+                );
+                if self.ensure_mount_tab(cx, &mount).is_none() {
+                    eprintln!(
+                        "[studio-tree] recv FileTree mount={} warning: ensure_mount_tab returned None",
+                        mount
+                    );
+                }
                 self.mount_state_mut(&mount).file_tree_data = Some(data);
                 self.ensure_mount_terminal_file(cx, &mount);
                 if let Some(filter) = self
@@ -29,10 +40,23 @@ impl App {
                     self.set_mount_file_filter(cx, &mount, filter);
                 }
                 if self.data.active_mount.is_none() {
+                    eprintln!(
+                        "[studio-tree] recv FileTree mount={} action=select_mount (no active mount)",
+                        mount
+                    );
                     self.select_mount(cx, &mount);
                 } else if self.data.active_mount.as_deref() == Some(mount.as_str()) {
+                    eprintln!(
+                        "[studio-tree] recv FileTree mount={} action=refresh_active_mount_tree",
+                        mount
+                    );
                     self.refresh_active_mount_tree(cx);
                     self.set_status(cx, &format!("file tree loaded: {}", mount));
+                } else {
+                    eprintln!(
+                        "[studio-tree] recv FileTree mount={} action=store_only (inactive)",
+                        mount
+                    );
                 }
             }
             StudioToUI::TextFileOpened { path, content, .. } => {
