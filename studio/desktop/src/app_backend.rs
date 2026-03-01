@@ -729,17 +729,23 @@ impl App {
 
         if !known_before && files.is_empty() {
             let path = Self::terminal_virtual_path(mount);
-            self.mount_state_mut(mount).select_last_terminal_once = true;
+            {
+                let mount_state = self.mount_state_mut(mount);
+                mount_state.select_last_terminal_once = true;
+                if !mount_state.terminal_files.iter().any(|existing| existing == &path) {
+                    mount_state.terminal_files.push(path.clone());
+                    mount_state.terminal_files.sort();
+                }
+            }
             self.data
                 .terminal_stream_by_path
                 .entry(path.clone())
                 .or_default();
+            self.sync_mount_terminal_tabs(cx, mount, true);
+            self.ensure_terminal_session_open(&path);
             let _ = self.send_studio(UIToStudio::SaveTextFile {
                 path,
                 content: String::new(),
-            });
-            let _ = self.send_studio(UIToStudio::LoadFileTree {
-                mount: mount.to_string(),
             });
             return;
         }
@@ -773,15 +779,25 @@ impl App {
     pub(super) fn create_new_terminal_tab(&mut self, _cx: &mut Cx, mount: &str) {
         let path = self.next_terminal_path(mount);
         let name = path.rsplit('/').next().unwrap_or("terminal").to_string();
-        self.mount_state_mut(mount).select_last_terminal_once = true;
+        {
+            let mount_state = self.mount_state_mut(mount);
+            mount_state.select_last_terminal_once = true;
+            if !mount_state.terminal_files.iter().any(|existing| existing == &path) {
+                mount_state.terminal_files.push(path.clone());
+                mount_state.terminal_files.sort();
+            }
+        }
 
         let _ = self.send_studio(UIToStudio::SaveTextFile {
             path: path.clone(),
             content: String::new(),
         });
-        let _ = self.send_studio(UIToStudio::LoadFileTree {
-            mount: mount.to_string(),
-        });
+        self.data
+            .terminal_stream_by_path
+            .entry(path.clone())
+            .or_default();
+        self.sync_mount_terminal_tabs(_cx, mount, true);
+        self.ensure_terminal_session_open(&path);
         self.set_status(_cx, &format!("created terminal {}", name));
     }
 
@@ -815,9 +831,6 @@ impl App {
         self.data.terminal_desired_size_by_path.remove(&path);
         let _ = self.send_studio(UIToStudio::TerminalClose { path: path.clone() });
         let _ = self.send_studio(UIToStudio::DeleteFile { path });
-        let _ = self.send_studio(UIToStudio::LoadFileTree {
-            mount: mount.to_string(),
-        });
     }
 
     pub(super) fn select_mount(&mut self, cx: &mut Cx, mount: &str) {
