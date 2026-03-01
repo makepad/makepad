@@ -423,15 +423,10 @@ impl App {
     }
 
     pub(super) fn restart_log_query_for_mount(&mut self, cx: &mut Cx, mount: &str) {
-        let (pattern, live) = self
+        let pattern = self
             .mount_state(mount)
-            .map(|mount_state| {
-                (
-                    mount_state.log_filter.trim().to_string(),
-                    mount_state.log_tail,
-                )
-            })
-            .unwrap_or_else(|| (String::new(), true));
+            .map(|mount_state| mount_state.log_filter.trim().to_string())
+            .unwrap_or_default();
         if let Some(query_id) = self.data.live_log_query.take() {
             let _ = self.send_studio(UIToStudio::CancelQuery { query_id });
         }
@@ -451,7 +446,7 @@ impl App {
             },
             is_regex: Some(false),
             since_index: None,
-            live: Some(live),
+            live: Some(true),
         });
         self.refresh_active_mount_log_panels(cx);
     }

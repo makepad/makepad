@@ -40,9 +40,14 @@ pub enum StudioEvent {
     UiConnected {
         web_socket_id: u64,
         sender: ToUISender<Vec<u8>>,
+        typed_sender: Option<ToUISender<StudioToUI>>,
     },
     UiDisconnected {
         web_socket_id: u64,
+    },
+    UiEnvelope {
+        web_socket_id: u64,
+        envelope: UIToStudioEnvelope,
     },
     UiBinary {
         web_socket_id: u64,
@@ -132,6 +137,7 @@ const FS_DELTA_RELOAD_THRESHOLD: usize = 768;
 struct UiClient {
     client_id: ClientId,
     sender: ToUISender<Vec<u8>>,
+    typed_sender: Option<ToUISender<StudioToUI>>,
     format: WireFormat,
 }
 
@@ -241,7 +247,8 @@ impl StudioCore {
             StudioEvent::UiConnected {
                 web_socket_id,
                 sender,
-            } => self.on_ui_connected(web_socket_id, sender),
+                typed_sender,
+            } => self.on_ui_connected(web_socket_id, sender, typed_sender),
             StudioEvent::UiDisconnected { web_socket_id } => {
                 self.ui_clients.remove(&web_socket_id);
                 self.live_log_queries
@@ -249,6 +256,10 @@ impl StudioCore {
                 self.live_profiler_queries
                     .retain(|_, query| query.web_socket_id != web_socket_id);
             }
+            StudioEvent::UiEnvelope {
+                web_socket_id,
+                envelope,
+            } => self.on_ui_envelope(web_socket_id, envelope),
             StudioEvent::UiBinary {
                 web_socket_id,
                 data,
@@ -352,14 +363,25 @@ impl StudioCore {
         Some(id)
     }
 
-    fn on_ui_connected(&mut self, web_socket_id: u64, sender: ToUISender<Vec<u8>>) {
+    fn on_ui_connected(
+        &mut self,
+        web_socket_id: u64,
+        sender: ToUISender<Vec<u8>>,
+        typed_sender: Option<ToUISender<StudioToUI>>,
+    ) {
         let Some(client_id) = self.alloc_client_id() else {
-            let _ = sender.send(
-                StudioToUI::Error {
+            if let Some(typed_sender) = &typed_sender {
+                let _ = typed_sender.send(StudioToUI::Error {
                     message: "client id space exhausted".to_string(),
-                }
-                .serialize_bin(),
-            );
+                });
+            } else {
+                let _ = sender.send(
+                    StudioToUI::Error {
+                        message: "client id space exhausted".to_string(),
+                    }
+                    .serialize_bin(),
+                );
+            }
             return;
         };
 
@@ -368,6 +390,7 @@ impl StudioCore {
             UiClient {
                 client_id,
                 sender,
+                typed_sender,
                 format: WireFormat::Binary,
             },
         );
@@ -376,6 +399,20 @@ impl StudioCore {
             StudioToUI::Hello { client_id },
             WireFormat::Binary,
         );
+    }
+
+    fn on_ui_envelope(&mut self, web_socket_id: u64, envelope: UIToStudioEnvelope) {
+        let Some(client) = self.ui_clients.get(&web_socket_id) else {
+            return;
+        };
+        if envelope.query_id.client_id() != client.client_id {
+            self.send_ui_error(
+                web_socket_id,
+                "query_id.client_id does not match assigned client".to_string(),
+            );
+            return;
+        }
+        self.handle_ui_message(web_socket_id, envelope);
     }
 
     fn on_ui_message(&mut self, web_socket_id: u64, format: WireFormat, data: &[u8]) {
@@ -1924,6 +1961,10 @@ impl StudioCore {
         let Some(client) = self.ui_clients.get(&web_socket_id) else {
             return;
         };
+        if let Some(typed_sender) = &client.typed_sender {
+            let _ = typed_sender.send(msg);
+            return;
+        }
         let payload = match format {
             WireFormat::Binary => msg.serialize_bin(),
             WireFormat::Text => msg.serialize_json().into_bytes(),
@@ -2552,6 +2593,7 @@ mod tests {
         core.handle_event(StudioEvent::UiConnected {
             web_socket_id: 1,
             sender: ui_rx.sender(),
+            typed_sender: None,
         });
         let _ = ui_rx.receiver.recv_timeout(Duration::from_millis(250)); // hello
         (core, ui_rx)
@@ -2587,6 +2629,61 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn ui_envelope_uses_typed_channel_for_in_process_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+        let (event_tx, event_rx) = mpsc::channel::<StudioEvent>();
+        let mut vfs = VirtualFs::new();
+        vfs.mount("repo", dir.path().to_path_buf()).expect("mount repo");
+        let mut core = StudioCore::new(event_rx, event_tx, vfs, None);
+
+        let ui_rx_bin = ToUIReceiver::<Vec<u8>>::default();
+        let ui_rx_typed = ToUIReceiver::<StudioToUI>::default();
+        core.handle_event(StudioEvent::UiConnected {
+            web_socket_id: 1,
+            sender: ui_rx_bin.sender(),
+            typed_sender: Some(ui_rx_typed.sender()),
+        });
+
+        let hello = ui_rx_typed
+            .receiver
+            .recv_timeout(Duration::from_millis(250))
+            .expect("typed hello");
+        let client_id = match hello {
+            StudioToUI::Hello { client_id } => client_id,
+            other => panic!("expected Hello, got {:?}", other),
+        };
+
+        let query_id = QueryId::new(client_id, 0);
+        core.handle_event(StudioEvent::UiEnvelope {
+            web_socket_id: 1,
+            envelope: UIToStudioEnvelope {
+                query_id,
+                msg: UIToStudio::LoadFileTree {
+                    mount: "repo".to_string(),
+                },
+            },
+        });
+        pump_core(&mut core, Duration::from_millis(300));
+
+        let msg = ui_rx_typed
+            .receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("typed FileTree");
+        match msg {
+            StudioToUI::FileTree { mount, data } => {
+                assert_eq!(mount, "repo");
+                assert!(data.nodes.iter().any(|node| node.path == "repo/src/lib.rs"));
+            }
+            other => panic!("expected FileTree, got {:?}", other),
+        }
+
+        assert!(ui_rx_bin.receiver.try_recv().is_err());
     }
 
     #[test]
