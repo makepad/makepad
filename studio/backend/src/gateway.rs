@@ -1,5 +1,5 @@
 use crate::dispatch::StudioEvent;
-use crate::protocol::QueryId;
+use makepad_studio_protocol::backend_protocol::QueryId;
 use makepad_network::{
     start_http_server, HttpServer, HttpServerRequest, HttpServerResponse, ToUISender,
 };

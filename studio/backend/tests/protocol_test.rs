@@ -1,5 +1,7 @@
 use makepad_micro_serde::{DeBin, DeJson, SerBin, SerJson};
-use makepad_studio_backend::{ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope};
+use makepad_studio_protocol::backend_protocol::{
+    ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope,
+};
 
 #[test]
 fn query_id_layout_roundtrip() {

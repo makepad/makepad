@@ -2,10 +2,11 @@ use crate::log_store::{
     query_log_entries, AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore,
 };
 use crate::process_manager::ProcessManager;
-use crate::protocol::{
+use makepad_studio_protocol::backend_protocol as backend_proto;
+use backend_proto::{
     BuildBoxInfo, BuildBoxStatus, BuildBoxToStudio, BuildBoxToStudioVec, BuildInfo, ClientId,
     EventSample as StudioEventSample, GCSample as StudioGCSample, GPUSample as StudioGPUSample,
-    LogEntry, LogLevel, LogSource, QueryId, RunnableBuild, SaveResult, StudioToBuildBox,
+    LogEntry, LogSource, QueryId, RunnableBuild, SaveResult, StudioToBuildBox,
     StudioToBuildBoxVec, StudioToUI, TerminalGrid, UIToStudio, UIToStudioEnvelope,
 };
 use crate::terminal_manager::TerminalManager;
@@ -17,8 +18,8 @@ use makepad_micro_serde::*;
 use makepad_network::ToUISender;
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent, KeyModifiers,
-    LogLevel as StudioProtocolLogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown,
-    RemoteMouseUp, ScreenshotRequest, StudioToApp, StudioToAppVec, TextInputEvent,
+    LogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseUp, ScreenshotRequest,
+    StudioToApp, StudioToAppVec, TextInputEvent,
     WidgetTreeDumpRequest,
 };
 use std::collections::{HashMap, HashSet};
@@ -107,11 +108,11 @@ pub enum StudioEvent {
     WorkerLoadFileTreeDone {
         web_socket_id: u64,
         mount: String,
-        result: Result<crate::protocol::FileTreeData, String>,
+        result: Result<backend_proto::FileTreeData, String>,
     },
     WorkerFileTreeDeltaDone {
         mount: String,
-        change: crate::protocol::FileTreeChange,
+        change: backend_proto::FileTreeChange,
     },
     FlushPendingFileTreeDiffs,
     MountFsChanged {
@@ -177,7 +178,7 @@ pub struct StudioCore {
     worker_pool: WorkerPool,
     fs_watcher: Option<FileSystemWatcher>,
     fs_event_last_by_path: HashMap<String, Instant>,
-    fs_pending_diffs: HashMap<String, Vec<crate::protocol::FileTreeChange>>,
+    fs_pending_diffs: HashMap<String, Vec<backend_proto::FileTreeChange>>,
     fs_pending_reload_mounts: HashSet<String>,
     fs_diff_flush_scheduled: bool,
     fs_event_last_prune: Instant,
@@ -430,7 +431,7 @@ impl StudioCore {
                     Ok(tree) => tree
                         .nodes
                         .into_iter()
-                        .map(|node| crate::protocol::FileTreeChange::Removed { path: node.path })
+                        .map(|node| backend_proto::FileTreeChange::Removed { path: node.path })
                         .collect(),
                     Err(_) => Vec::new(),
                 };
@@ -440,7 +441,7 @@ impl StudioCore {
                     web_socket_id,
                     StudioToUI::FileTree {
                         mount: name.clone(),
-                        data: crate::protocol::FileTreeData { nodes: Vec::new() },
+                        data: backend_proto::FileTreeData { nodes: Vec::new() },
                     },
                     self.ui_format(web_socket_id),
                 );
@@ -474,7 +475,7 @@ impl StudioCore {
                     StudioToUI::TextFileOpened {
                         path,
                         content,
-                        git_status: crate::protocol::GitStatus::Unknown,
+                        git_status: backend_proto::GitStatus::Unknown,
                     },
                     self.ui_format(web_socket_id),
                 ),
@@ -1289,7 +1290,7 @@ impl StudioCore {
     fn queue_file_tree_delta_change(
         &mut self,
         mount: String,
-        change: crate::protocol::FileTreeChange,
+        change: backend_proto::FileTreeChange,
     ) {
         if self.fs_pending_reload_mounts.contains(&mount) {
             self.schedule_fs_diff_flush();
@@ -1420,7 +1421,7 @@ impl StudioCore {
         &mut self,
         web_socket_id: u64,
         mount: String,
-        result: Result<crate::protocol::FileTreeData, String>,
+        result: Result<backend_proto::FileTreeData, String>,
     ) {
         match result {
             Ok(data) => self.send_ui_message(
@@ -2087,11 +2088,11 @@ fn append_terminal_history_bytes(vfs: &VirtualFs, path: &str, data: &[u8]) -> Re
     })
 }
 
-fn map_platform_log_level(level: StudioProtocolLogLevel) -> LogLevel {
+fn map_platform_log_level(level: LogLevel) -> LogLevel {
     match level {
-        StudioProtocolLogLevel::Error | StudioProtocolLogLevel::Panic => LogLevel::Error,
-        StudioProtocolLogLevel::Warning | StudioProtocolLogLevel::Wait => LogLevel::Warning,
-        StudioProtocolLogLevel::Log => LogLevel::Log,
+        LogLevel::Error | LogLevel::Panic => LogLevel::Error,
+        LogLevel::Warning | LogLevel::Wait => LogLevel::Warning,
+        LogLevel::Log => LogLevel::Log,
     }
 }
 
@@ -2229,11 +2230,11 @@ fn parse_package_name(args: &[String]) -> Option<String> {
     None
 }
 
-fn file_tree_change_path(change: &crate::protocol::FileTreeChange) -> &str {
+fn file_tree_change_path(change: &backend_proto::FileTreeChange) -> &str {
     match change {
-        crate::protocol::FileTreeChange::Added { path, .. } => path,
-        crate::protocol::FileTreeChange::Removed { path } => path,
-        crate::protocol::FileTreeChange::Modified { path, .. } => path,
+        backend_proto::FileTreeChange::Added { path, .. } => path,
+        backend_proto::FileTreeChange::Removed { path } => path,
+        backend_proto::FileTreeChange::Modified { path, .. } => path,
     }
 }
 
@@ -2244,15 +2245,15 @@ fn path_is_child_of(parent: &str, child: &str) -> bool {
 }
 
 fn coalesce_file_tree_change(
-    changes: &mut Vec<crate::protocol::FileTreeChange>,
-    change: crate::protocol::FileTreeChange,
+    changes: &mut Vec<backend_proto::FileTreeChange>,
+    change: backend_proto::FileTreeChange,
 ) {
     match &change {
-        crate::protocol::FileTreeChange::Removed { path } => {
+        backend_proto::FileTreeChange::Removed { path } => {
             if changes.iter().any(|existing| {
                 matches!(
                     existing,
-                    crate::protocol::FileTreeChange::Removed { path: existing_path }
+                    backend_proto::FileTreeChange::Removed { path: existing_path }
                         if existing_path == path || path_is_child_of(existing_path, path)
                 )
             }) {
@@ -2264,12 +2265,12 @@ fn coalesce_file_tree_change(
             });
             changes.push(change);
         }
-        crate::protocol::FileTreeChange::Added { path, .. } => {
+        backend_proto::FileTreeChange::Added { path, .. } => {
             // If the path reappears after a remove event, keep the fresh "Added" state.
             changes.retain(|existing| {
                 !matches!(
                     existing,
-                    crate::protocol::FileTreeChange::Removed { path: removed_path }
+                    backend_proto::FileTreeChange::Removed { path: removed_path }
                         if removed_path == path || path_is_child_of(removed_path, path)
                 )
             });
@@ -2281,11 +2282,11 @@ fn coalesce_file_tree_change(
             }
             changes.push(change);
         }
-        crate::protocol::FileTreeChange::Modified { path, git_status } => {
+        backend_proto::FileTreeChange::Modified { path, git_status } => {
             changes.retain(|existing| {
                 !matches!(
                     existing,
-                    crate::protocol::FileTreeChange::Removed { path: removed_path }
+                    backend_proto::FileTreeChange::Removed { path: removed_path }
                         if removed_path == path || path_is_child_of(removed_path, path)
                 )
             });
@@ -2294,13 +2295,13 @@ fn coalesce_file_tree_change(
                 .find(|existing| file_tree_change_path(existing) == path)
             {
                 match existing {
-                    crate::protocol::FileTreeChange::Added {
+                    backend_proto::FileTreeChange::Added {
                         git_status: status, ..
                     } => {
                         *status = *git_status;
                     }
-                    crate::protocol::FileTreeChange::Removed { .. } => {}
-                    crate::protocol::FileTreeChange::Modified {
+                    backend_proto::FileTreeChange::Removed { .. } => {}
+                    backend_proto::FileTreeChange::Modified {
                         git_status: status, ..
                     } => {
                         *status = *git_status;
@@ -2316,37 +2317,37 @@ fn coalesce_file_tree_change(
 fn compute_filetree_change_for_path(
     abs_path: &Path,
     virtual_path: String,
-) -> crate::protocol::FileTreeChange {
+) -> backend_proto::FileTreeChange {
     match fs::metadata(abs_path) {
         Ok(meta) => {
             let node_type = if meta.is_dir() {
-                crate::protocol::FileNodeType::Dir
+                backend_proto::FileNodeType::Dir
             } else {
-                crate::protocol::FileNodeType::File
+                backend_proto::FileNodeType::File
             };
             let git_status = git_status_for_path(abs_path);
-            crate::protocol::FileTreeChange::Added {
+            backend_proto::FileTreeChange::Added {
                 path: virtual_path,
                 node_type,
                 git_status,
             }
         }
-        Err(_) => crate::protocol::FileTreeChange::Removed { path: virtual_path },
+        Err(_) => backend_proto::FileTreeChange::Removed { path: virtual_path },
     }
 }
 
-fn git_status_for_path(path: &Path) -> crate::protocol::GitStatus {
+fn git_status_for_path(path: &Path) -> backend_proto::GitStatus {
     let repo_root = match find_repo_root(path) {
         Some(root) => root,
-        None => return crate::protocol::GitStatus::Unknown,
+        None => return backend_proto::GitStatus::Unknown,
     };
     let rel = match path.strip_prefix(&repo_root) {
         Ok(rel) => rel,
-        Err(_) => return crate::protocol::GitStatus::Unknown,
+        Err(_) => return backend_proto::GitStatus::Unknown,
     };
     let rel = rel.to_string_lossy().replace('\\', "/");
     if rel.is_empty() {
-        return crate::protocol::GitStatus::Clean;
+        return backend_proto::GitStatus::Clean;
     }
 
     let output = match Command::new("git")
@@ -2359,38 +2360,38 @@ fn git_status_for_path(path: &Path) -> crate::protocol::GitStatus {
         .output()
     {
         Ok(output) => output,
-        Err(_) => return crate::protocol::GitStatus::Unknown,
+        Err(_) => return backend_proto::GitStatus::Unknown,
     };
     if !output.status.success() {
-        return crate::protocol::GitStatus::Unknown;
+        return backend_proto::GitStatus::Unknown;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout.lines().next().unwrap_or("").trim_end();
     if line.is_empty() {
-        return crate::protocol::GitStatus::Clean;
+        return backend_proto::GitStatus::Clean;
     }
     if line.starts_with("??") {
-        return crate::protocol::GitStatus::Untracked;
+        return backend_proto::GitStatus::Untracked;
     }
     let mut chars = line.chars();
     let x = chars.next().unwrap_or(' ');
     let y = chars.next().unwrap_or(' ');
     if x == 'U' || y == 'U' {
-        return crate::protocol::GitStatus::Conflict;
+        return backend_proto::GitStatus::Conflict;
     }
     if x == 'A' {
-        return crate::protocol::GitStatus::Added;
+        return backend_proto::GitStatus::Added;
     }
     if x == 'D' || y == 'D' {
-        return crate::protocol::GitStatus::Deleted;
+        return backend_proto::GitStatus::Deleted;
     }
     if x != ' ' && x != '?' {
-        return crate::protocol::GitStatus::Staged;
+        return backend_proto::GitStatus::Staged;
     }
     if y != ' ' {
-        return crate::protocol::GitStatus::Modified;
+        return backend_proto::GitStatus::Modified;
     }
-    crate::protocol::GitStatus::Clean
+    backend_proto::GitStatus::Clean
 }
 
 fn find_repo_root(path: &Path) -> Option<PathBuf> {
@@ -2440,9 +2441,9 @@ fn hex_local(v: u8) -> char {
 }
 
 fn file_tree_diff(
-    before: &crate::protocol::FileTreeData,
-    after: &crate::protocol::FileTreeData,
-) -> Vec<crate::protocol::FileTreeChange> {
+    before: &backend_proto::FileTreeData,
+    after: &backend_proto::FileTreeData,
+) -> Vec<backend_proto::FileTreeChange> {
     let mut before_by_path = HashMap::new();
     for node in &before.nodes {
         before_by_path.insert(node.path.as_str(), (&node.node_type, node.git_status));
@@ -2455,20 +2456,20 @@ fn file_tree_diff(
     let mut changes = Vec::new();
     for node in &before.nodes {
         if !after_by_path.contains_key(node.path.as_str()) {
-            changes.push(crate::protocol::FileTreeChange::Removed {
+            changes.push(backend_proto::FileTreeChange::Removed {
                 path: node.path.clone(),
             });
         }
     }
     for node in &after.nodes {
         match before_by_path.get(node.path.as_str()) {
-            None => changes.push(crate::protocol::FileTreeChange::Added {
+            None => changes.push(backend_proto::FileTreeChange::Added {
                 path: node.path.clone(),
                 node_type: node.node_type.clone(),
                 git_status: node.git_status,
             }),
             Some((_, before_status)) if *before_status != node.git_status => {
-                changes.push(crate::protocol::FileTreeChange::Modified {
+                changes.push(backend_proto::FileTreeChange::Modified {
                     path: node.path.clone(),
                     git_status: node.git_status,
                 });
@@ -2479,14 +2480,14 @@ fn file_tree_diff(
 
     changes.sort_by(|a, b| {
         let a_path = match a {
-            crate::protocol::FileTreeChange::Added { path, .. } => path,
-            crate::protocol::FileTreeChange::Removed { path } => path,
-            crate::protocol::FileTreeChange::Modified { path, .. } => path,
+            backend_proto::FileTreeChange::Added { path, .. } => path,
+            backend_proto::FileTreeChange::Removed { path } => path,
+            backend_proto::FileTreeChange::Modified { path, .. } => path,
         };
         let b_path = match b {
-            crate::protocol::FileTreeChange::Added { path, .. } => path,
-            crate::protocol::FileTreeChange::Removed { path } => path,
-            crate::protocol::FileTreeChange::Modified { path, .. } => path,
+            backend_proto::FileTreeChange::Added { path, .. } => path,
+            backend_proto::FileTreeChange::Removed { path } => path,
+            backend_proto::FileTreeChange::Modified { path, .. } => path,
         };
         a_path.cmp(b_path)
     });
@@ -2612,7 +2613,7 @@ mod tests {
                             && changes.iter().any(|change| {
                                 matches!(
                                     change,
-                                    crate::protocol::FileTreeChange::Added { path, .. }
+                                    backend_proto::FileTreeChange::Added { path, .. }
                                         if path == "repo/src/new_file.rs"
                                 )
                             })
@@ -2676,7 +2677,7 @@ mod tests {
                             && changes.iter().any(|change| {
                                 matches!(
                                     change,
-                                    crate::protocol::FileTreeChange::Removed { path }
+                                    backend_proto::FileTreeChange::Removed { path }
                                         if path == "repo/src/nested"
                                 )
                             })
@@ -2694,32 +2695,32 @@ mod tests {
 
         core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
-            change: crate::protocol::FileTreeChange::Removed {
+            change: backend_proto::FileTreeChange::Removed {
                 path: "repo/src/nested/a.rs".to_string(),
             },
         });
         core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
-            change: crate::protocol::FileTreeChange::Removed {
+            change: backend_proto::FileTreeChange::Removed {
                 path: "repo/src/nested/b.rs".to_string(),
             },
         });
         core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
-            change: crate::protocol::FileTreeChange::Removed {
+            change: backend_proto::FileTreeChange::Removed {
                 path: "repo/src/nested".to_string(),
             },
         });
         core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
-            change: crate::protocol::FileTreeChange::Removed {
+            change: backend_proto::FileTreeChange::Removed {
                 path: "repo/src/nested/c.rs".to_string(),
             },
         });
 
         pump_core(&mut core, Duration::from_millis(500));
         let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
-        let diffs: Vec<Vec<crate::protocol::FileTreeChange>> = messages
+        let diffs: Vec<Vec<backend_proto::FileTreeChange>> = messages
             .into_iter()
             .filter_map(|msg| match msg {
                 StudioToUI::FileTreeDiff { mount, changes } if mount == "repo" => Some(changes),
@@ -2735,7 +2736,7 @@ mod tests {
         assert_eq!(changes.len(), 1, "expected descendant removals to collapse");
         assert!(matches!(
             &changes[0],
-            crate::protocol::FileTreeChange::Removed { path } if path == "repo/src/nested"
+            backend_proto::FileTreeChange::Removed { path } if path == "repo/src/nested"
         ));
     }
 
@@ -2747,22 +2748,22 @@ mod tests {
 
         core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
-            change: crate::protocol::FileTreeChange::Removed {
+            change: backend_proto::FileTreeChange::Removed {
                 path: "repo/src/lib.rs".to_string(),
             },
         });
         core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
-            change: crate::protocol::FileTreeChange::Added {
+            change: backend_proto::FileTreeChange::Added {
                 path: "repo/src/lib.rs".to_string(),
-                node_type: crate::protocol::FileNodeType::File,
-                git_status: crate::protocol::GitStatus::Modified,
+                node_type: backend_proto::FileNodeType::File,
+                git_status: backend_proto::GitStatus::Modified,
             },
         });
 
         pump_core(&mut core, Duration::from_millis(500));
         let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
-        let diffs: Vec<Vec<crate::protocol::FileTreeChange>> = messages
+        let diffs: Vec<Vec<backend_proto::FileTreeChange>> = messages
             .into_iter()
             .filter_map(|msg| match msg {
                 StudioToUI::FileTreeDiff { mount, changes } if mount == "repo" => Some(changes),
@@ -2773,7 +2774,7 @@ mod tests {
         assert_eq!(diffs[0].len(), 1, "expected a single merged change");
         assert!(matches!(
             &diffs[0][0],
-            crate::protocol::FileTreeChange::Added { path, .. } if path == "repo/src/lib.rs"
+            backend_proto::FileTreeChange::Added { path, .. } if path == "repo/src/lib.rs"
         ));
     }
 
@@ -2787,7 +2788,7 @@ mod tests {
         for index in 0..(FS_DELTA_RELOAD_THRESHOLD + 16) {
             core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
                 mount: "repo".to_string(),
-                change: crate::protocol::FileTreeChange::Removed {
+                change: backend_proto::FileTreeChange::Removed {
                     path: format!("repo/src/storm/file_{index}.rs"),
                 },
             });
