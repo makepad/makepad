@@ -1,17 +1,9 @@
-use crate::area::Area;
 use crate::cursor::MouseCursor;
-use crate::event::{
-    KeyEvent, KeyModifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
-    TextInputEvent, TweakRayEvent,
-};
-use crate::makepad_math::{dvec2, Vec2d};
-use crate::makepad_micro_serde::*;
-use crate::os::shared_framebuf::{PresentableDraw, SharedSwapchain};
-use crate::window::WindowId;
-use std::cell::{Cell, RefCell};
-//use crate::action::*;
-use crate::log::LogLevel;
-// communication enums for studio
+use crate::keyboard::{KeyEvent, TextInputEvent};
+use crate::mouse::KeyModifiers;
+use crate::shared_framebuf::{PresentableDraw, SharedSwapchain};
+use makepad_error_log::LogLevel;
+use makepad_micro_serde::*;
 
 #[derive(SerBin, DeBin, SerJson, DeJson, Debug, Clone)]
 pub struct EventSample {
@@ -147,19 +139,6 @@ pub struct RemoteMouseDown {
     pub modifiers: RemoteKeyModifiers,
 }
 
-impl RemoteMouseDown {
-    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseDownEvent {
-        MouseDownEvent {
-            abs: dvec2(self.x - pos.x, self.y - pos.y),
-            button: MouseButton::from_bits_retain(self.button_raw_bits),
-            window_id,
-            modifiers: self.modifiers.into_key_modifiers(),
-            time: self.time,
-            handled: Cell::new(Area::Empty),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct RemoteMouseMove {
     pub time: f64,
@@ -168,38 +147,12 @@ pub struct RemoteMouseMove {
     pub modifiers: RemoteKeyModifiers,
 }
 
-impl RemoteMouseMove {
-    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseMoveEvent {
-        MouseMoveEvent {
-            abs: dvec2(self.x - pos.x, self.y - pos.y),
-            window_id,
-            modifiers: self.modifiers.into_key_modifiers(),
-            time: self.time,
-            handled: Cell::new(Area::Empty),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct RemoteTweakRay {
     pub time: f64,
     pub x: f64,
     pub y: f64,
     pub modifiers: RemoteKeyModifiers,
-}
-
-impl RemoteTweakRay {
-    pub fn into_event(self, window_id: WindowId, pos: Vec2d, dpi_factor: f64) -> TweakRayEvent {
-        TweakRayEvent {
-            abs: dvec2(self.x - pos.x, self.y - pos.y),
-            window_id,
-            modifiers: self.modifiers.into_key_modifiers(),
-            time: self.time,
-            dpi_factor,
-            hit_widget_uids: RefCell::new(Vec::new()),
-            hit_rect: Cell::new(None),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
@@ -220,18 +173,6 @@ pub struct RemoteTextInput {
     pub y: f64,
 }
 
-impl RemoteMouseUp {
-    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> MouseUpEvent {
-        MouseUpEvent {
-            abs: dvec2(self.x - pos.x, self.y - pos.y),
-            button: MouseButton::from_bits_retain(self.button_raw_bits),
-            window_id,
-            modifiers: self.modifiers.into_key_modifiers(),
-            time: self.time,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct RemoteScroll {
     pub time: f64,
@@ -241,21 +182,6 @@ pub struct RemoteScroll {
     pub y: f64,
     pub is_mouse: bool,
     pub modifiers: RemoteKeyModifiers,
-}
-
-impl RemoteScroll {
-    pub fn into_event(self, window_id: WindowId, pos: Vec2d) -> ScrollEvent {
-        ScrollEvent {
-            abs: dvec2(self.x - pos.x, self.y - pos.y),
-            scroll: dvec2(self.sx, self.sy),
-            window_id,
-            modifiers: self.modifiers.into_key_modifiers(),
-            handled_x: Cell::new(false),
-            handled_y: Cell::new(false),
-            is_mouse: self.is_mouse,
-            time: self.time,
-        }
-    }
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson, Debug, Clone)]

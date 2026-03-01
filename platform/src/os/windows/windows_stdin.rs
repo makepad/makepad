@@ -12,7 +12,6 @@ use {
             shared_framebuf::{PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
             win32_app::Win32Time,
         },
-        studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
         web_socket::WebSocketMessage,
@@ -20,6 +19,7 @@ use {
         windows::Win32::Foundation::HANDLE,
         CxOsApi,
     },
+    makepad_studio_protocol::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
     std::ffi::c_void,
 };
 
@@ -192,7 +192,15 @@ impl Cx {
             StudioToApp::TweakRay(e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 let dpi_factor = self.windows[window_id].window_geom.dpi_factor.max(1.0);
-                let tweak_ray = e.into_event(window_id, pos, dpi_factor);
+                let tweak_ray = crate::event::TweakRayEvent {
+                    abs: dvec2(e.x - pos.x, e.y - pos.y),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                    dpi_factor,
+                    hit_widget_uids: std::cell::RefCell::new(Vec::new()),
+                    hit_rect: std::cell::Cell::new(None),
+                };
                 self.call_event_handler(&Event::TweakRay(tweak_ray));
             }
             StudioToApp::MouseUp(ref e) => {
@@ -300,9 +308,7 @@ impl Cx {
                 if has_pending_draws && d3d11_cx.is_gpu_done() {
                     for window in stdin_windows.iter_mut() {
                         if let Some(presentable_draw) = window.new_frame_being_rendered.take() {
-                            Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(
-                                presentable_draw,
-                            ));
+                            Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(presentable_draw));
                         }
                     }
                 }
@@ -342,7 +348,7 @@ impl Cx {
                     }*/
                 }
                 CxOsOp::SetCursor(cursor) => {
-                    Self::stdin_send_to_host(AppToStudio::SetCursor(cursor));
+                    Self::stdin_send_to_host(AppToStudio::SetCursor(cursor.into()));
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     Self::stdin_send_to_host(AppToStudio::SetClipboard(content));

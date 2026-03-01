@@ -7,16 +7,16 @@ use crate::{
     makepad_math::*,
     makepad_micro_serde::*,
     os::shared_framebuf::{
-        aux_chan, HostPresentableImage, HostSwapchain, LinuxSharedSoftwareBuffer, PollTimer,
-        PresentableDraw,
+        aux_chan, shared_presentable_image_recv_fds_from_aux_chan, HostPresentableImage,
+        HostSwapchain, LinuxSharedSoftwareBuffer, PollTimer, PresentableDraw,
     },
-    studio::{AppToStudio, GCSample, StudioToApp, StudioToAppVec},
     texture::{Texture, TextureFormat, TextureSize},
     thread::SignalToUI,
     web_socket::WebSocketMessage,
     window::CxWindowPool,
     CxOsApi,
 };
+use makepad_studio_protocol::{AppToStudio, GCSample, StudioToApp, StudioToAppVec};
 
 #[derive(Default)]
 pub(crate) struct StdinWindow {
@@ -148,9 +148,7 @@ impl Cx {
                         }
 
                         // inform host that frame is ready
-                        Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(
-                            presentable_draw,
-                        ));
+                        Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(presentable_draw));
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {
@@ -256,7 +254,15 @@ impl Cx {
             StudioToApp::TweakRay(e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 let dpi_factor = self.windows[window_id].window_geom.dpi_factor.max(1.0);
-                let tweak_ray = e.into_event(window_id, pos, dpi_factor);
+                let tweak_ray = crate::event::TweakRayEvent {
+                    abs: dvec2(e.x - pos.x, e.y - pos.y),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                    dpi_factor,
+                    hit_widget_uids: std::cell::RefCell::new(Vec::new()),
+                    hit_rect: std::cell::Cell::new(None),
+                };
                 self.call_event_handler(&Event::TweakRay(tweak_ray));
             }
             StudioToApp::MouseUp(ref e) => {
@@ -311,7 +317,10 @@ impl Cx {
                     let shared_pi = shared_images[i];
                     let mut texture = Texture::new(self);
                     let mut software_buffer = None;
-                    match shared_pi.recv_fds_from_aux_chan(aux_chan_client_endpoint) {
+                    match shared_presentable_image_recv_fds_from_aux_chan(
+                        shared_pi,
+                        aux_chan_client_endpoint,
+                    ) {
                         Ok(pi) => {
                             if pi.image.is_software_fallback() {
                                 texture = Texture::new_with_format(
@@ -481,7 +490,7 @@ impl Cx {
                     });
                 }
                 CxOsOp::SetCursor(cursor) => {
-                    Self::stdin_send_to_host(AppToStudio::SetCursor(cursor));
+                    Self::stdin_send_to_host(AppToStudio::SetCursor(cursor.into()));
                 }
                 CxOsOp::StartTimer {
                     timer_id,

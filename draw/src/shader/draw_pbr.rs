@@ -2,7 +2,7 @@ use crate::{
     cx_2d::*, draw_list_2d::ManyInstances, geometry::geometry_gen::GeometryGen,
     image_cache::ImageBuffer, makepad_platform::*, turtle::*,
 };
-use makepad_gltf::DecodedPrimitive;
+use makepad_math::DecodedPrimitive;
 use std::{collections::HashMap, f32::consts::PI, path::Path};
 
 const PBR_FLOATS_PER_VERTEX: usize = 16;

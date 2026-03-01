@@ -16,9 +16,9 @@ use {
             shared_framebuf::PresentableDraw,
         },
         script::vm::*,
-        studio::{AppToStudio, GPUSample},
         texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel},
     },
+    makepad_studio_protocol::{AppToStudio, GPUSample},
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
     makepad_zune_png::{
         makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},

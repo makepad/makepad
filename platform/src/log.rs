@@ -1,6 +1,6 @@
 use crate::cx::Cx;
 pub use crate::makepad_error_log::*;
-use crate::studio::{AppToStudio, StudioLogItem};
+use makepad_studio_protocol::{AppToStudio, StudioLogItem};
 
 impl Cx {
     pub fn init_log() {
