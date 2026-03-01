@@ -452,24 +452,24 @@ impl VirtualFs {
         out: &mut Vec<FileNode>,
         skip_branch_dir: bool,
     ) -> Result<(), VirtualFsError> {
-        let mut entries: Vec<_> = fs::read_dir(real_root)?
+        // Store plain paths, not DirEntry handles, so parent directory fds are
+        // released before descending recursively.
+        let mut entries: Vec<(String, PathBuf)> = fs::read_dir(real_root)?
             .filter_map(Result::ok)
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
                 if name == ".git" {
-                    return false;
+                    return None;
                 }
                 if skip_branch_dir && name == "branch" {
-                    return false;
+                    return None;
                 }
-                true
+                Some((name, entry.path()))
             })
             .collect();
-        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-        for entry in entries {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let path = entry.path();
+        for (name, path) in entries {
             let virtual_path = format!("{}/{}", virtual_prefix, name);
             if path.is_dir() {
                 out.push(FileNode {

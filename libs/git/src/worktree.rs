@@ -537,16 +537,19 @@ fn collect_untracked(
     }
     ignore_stack.push_ignore_file(root, dir, &dir.join(".gitignore"))?;
 
+    let mut dir_entries: Vec<(std::ffi::OsString, std::path::PathBuf)> = Vec::new();
     let read_dir = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(GitError::Io(e)),
     };
-
     for entry in read_dir {
         let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name();
+        dir_entries.push((entry.file_name(), entry.path()));
+    }
+
+    // Iterate over plain paths so read_dir handles are dropped before recursion.
+    for (name, path) in dir_entries {
         let name_str = name.to_string_lossy();
 
         // Skip .git directory
