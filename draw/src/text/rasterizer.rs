@@ -31,18 +31,7 @@ pub struct Rasterizer {
 
 impl Rasterizer {
     pub fn new(settings: Settings) -> Self {
-        let atlas_size = Size::new(
-            settings
-                .grayscale_atlas_size
-                .width
-                .max(settings.color_atlas_size.width)
-                .max(settings.msdf_atlas_size.width),
-            settings
-                .grayscale_atlas_size
-                .height
-                .max(settings.color_atlas_size.height)
-                .max(settings.msdf_atlas_size.height),
-        );
+        let atlas_size = settings.atlas_size;
         Self {
             sdfer: Sdfer::new(settings.sdfer),
             msdfer: Msdfer::new(settings.msdfer),
@@ -788,9 +777,7 @@ pub struct Settings {
     pub msdf_resolution: MsdfResolutionSettings,
     pub msdf_complexity: MsdfComplexitySettings,
     pub outline_rasterization_mode: OutlineRasterizationMode,
-    pub grayscale_atlas_size: Size<usize>,
-    pub color_atlas_size: Size<usize>,
-    pub msdf_atlas_size: Size<usize>,
+    pub atlas_size: Size<usize>,
 }
 
 #[derive(Clone, Debug)]

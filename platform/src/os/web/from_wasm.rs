@@ -6,11 +6,6 @@ use crate::{
 // WebBrowser API
 
 #[derive(FromWasm)]
-pub struct FromWasmLoadDeps {
-    pub deps: Vec<String>,
-}
-
-#[derive(FromWasm)]
 pub struct FromWasmStartTimer {
     pub repeats: bool,
     pub timer_id: f64,

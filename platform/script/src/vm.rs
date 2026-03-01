@@ -20,6 +20,7 @@ use crate::value::*;
 use crate::*;
 use std::any::Any;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::collections::HashMap;
 
 #[derive(Default, Debug)]
@@ -71,7 +72,7 @@ pub struct ScriptCode {
     pub builtins: ScriptBuiltins,
     pub native: RefCell<ScriptNative>,
     pub bodies: RefCell<Vec<ScriptBody>>,
-    pub crate_manifests: RefCell<HashMap<String, String>>,
+    pub crate_manifests: Rc<RefCell<HashMap<String, String>>>,
 }
 
 pub struct ScriptLoc {
