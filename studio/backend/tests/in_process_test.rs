@@ -315,6 +315,57 @@ fn file_watch_emits_single_path_delta_without_full_tree_reload() {
 }
 
 #[test]
+fn save_text_file_does_not_echo_file_changed_to_saving_client() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(UIToStudio::LoadFileTree {
+        mount: "repo".to_string(),
+    });
+    let _ = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+    )
+    .expect("did not receive initial file tree");
+
+    let _ = connection.send(UIToStudio::SaveTextFile {
+        path: "repo/src/lib.rs".to_string(),
+        content: "pub fn hi() { let _x = 7; }\n".to_string(),
+    });
+
+    let messages = drain_messages(&connection, Duration::from_millis(1200));
+    assert!(
+        messages.iter().any(|msg| {
+            matches!(
+                msg,
+                StudioToUI::TextFileSaved { path, .. } if path == "repo/src/lib.rs"
+            )
+        }),
+        "did not receive TextFileSaved after save request"
+    );
+    assert!(
+        !messages.iter().any(|msg| {
+            matches!(
+                msg,
+                StudioToUI::FileChanged { path } if path == "repo/src/lib.rs"
+            )
+        }),
+        "unexpected FileChanged echo for saving client"
+    );
+}
+
+#[test]
 fn file_watch_ignores_makepad_term_writes() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".makepad")).unwrap();

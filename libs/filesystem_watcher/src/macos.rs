@@ -1,10 +1,13 @@
 use crate::{FileSystemEvent, FileSystemEventKind, WatchCallback, WatchRoot};
+use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::{c_char, c_double};
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime};
 
 type CFAllocatorRef = *const c_void;
 type CFStringRef = *const c_void;
@@ -174,25 +177,30 @@ extern "C" fn fsevent_callback(
 
 pub struct PlatformWatcher {
     run_loop: Arc<Mutex<usize>>,
+    stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl PlatformWatcher {
     pub fn start(roots: Vec<WatchRoot>, on_event: WatchCallback) -> Result<Self, String> {
         let run_loop = Arc::new(Mutex::new(0usize));
+        let stop = Arc::new(AtomicBool::new(false));
         let run_loop_thread = Arc::clone(&run_loop);
+        let stop_thread = Arc::clone(&stop);
         let thread = thread::Builder::new()
             .name("fswatch-macos".to_string())
-            .spawn(move || run_loop_thread_main(roots, on_event, run_loop_thread))
+            .spawn(move || run_loop_thread_main(roots, on_event, run_loop_thread, stop_thread))
             .map_err(|err| format!("failed to spawn macos watcher thread: {}", err))?;
 
         Ok(Self {
             run_loop,
+            stop,
             thread: Some(thread),
         })
     }
 
     pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         let run_loop = self.run_loop.lock().ok().map(|guard| *guard).unwrap_or(0);
         if run_loop != 0 {
             unsafe {
@@ -205,12 +213,18 @@ impl PlatformWatcher {
     }
 }
 
-fn run_loop_thread_main(roots: Vec<WatchRoot>, on_event: WatchCallback, run_loop_slot: Arc<Mutex<usize>>) {
+fn run_loop_thread_main(
+    roots: Vec<WatchRoot>,
+    on_event: WatchCallback,
+    run_loop_slot: Arc<Mutex<usize>>,
+    stop: Arc<AtomicBool>,
+) {
     let run_loop = unsafe { CFRunLoopGetCurrent() };
     if let Ok(mut slot) = run_loop_slot.lock() {
         *slot = run_loop as usize;
     }
 
+    let roots_for_poll = roots.clone();
     let mut streams = Vec::<FSEventStreamRef>::new();
     let mut arrays = Vec::<CFArrayRef>::new();
     let mut strings = Vec::<CFStringRef>::new();
@@ -301,6 +315,8 @@ fn run_loop_thread_main(roots: Vec<WatchRoot>, on_event: WatchCallback, run_loop
         unsafe {
             CFRunLoopRun();
         }
+    } else {
+        poll_loop(roots_for_poll, on_event, stop);
     }
 
     for stream in streams {
@@ -320,4 +336,74 @@ fn run_loop_thread_main(roots: Vec<WatchRoot>, on_event: WatchCallback, run_loop
     if let Ok(mut slot) = run_loop_slot.lock() {
         *slot = 0;
     }
+}
+
+fn poll_loop(roots: Vec<WatchRoot>, on_event: WatchCallback, stop: Arc<AtomicBool>) {
+    const FORCE_EMIT_INTERVAL: Duration = Duration::from_secs(1);
+
+    let mut fingerprints: HashMap<String, u64> = HashMap::new();
+    let mut last_emit: HashMap<String, std::time::Instant> = HashMap::new();
+    for root in &roots {
+        fingerprints.insert(root.mount.clone(), fingerprint_tree(&root.path));
+        last_emit.insert(root.mount.clone(), std::time::Instant::now());
+    }
+
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(220));
+        for root in &roots {
+            let next = fingerprint_tree(&root.path);
+            let prev = fingerprints.entry(root.mount.clone()).or_insert(next);
+            let changed = *prev != next;
+            let now = std::time::Instant::now();
+            let should_force_emit = last_emit
+                .get(&root.mount)
+                .is_some_and(|ts| now.saturating_duration_since(*ts) >= FORCE_EMIT_INTERVAL);
+            if changed {
+                *prev = next;
+            }
+            if changed || should_force_emit {
+                last_emit.insert(root.mount.clone(), now);
+                (on_event)(FileSystemEvent {
+                    mount: root.mount.clone(),
+                    path: root.path.clone(),
+                    kind: FileSystemEventKind::Changed,
+                });
+            }
+        }
+    }
+}
+
+fn fingerprint_tree(root: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        rel.to_string_lossy().hash(&mut hasher);
+        meta.is_dir().hash(&mut hasher);
+        meta.len().hash(&mut hasher);
+        if let Ok(modified) = meta.modified() {
+            if let Ok(delta) = modified.duration_since(SystemTime::UNIX_EPOCH) {
+                delta.as_nanos().hash(&mut hasher);
+            }
+        }
+        if meta.is_dir() {
+            let Ok(entries) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            let mut children = entries
+                .filter_map(|entry| entry.ok().map(|v| v.path()))
+                .collect::<Vec<_>>();
+            children.sort();
+            for child in children.into_iter().rev() {
+                stack.push(child);
+            }
+        }
+    }
+    hasher.finish()
 }

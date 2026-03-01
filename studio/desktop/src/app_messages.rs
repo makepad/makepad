@@ -1,6 +1,54 @@
 use super::*;
 
 impl App {
+    fn apply_terminal_text(&mut self, cx: &mut Cx, path: String, content: String) {
+        let content_bytes = content.into_bytes();
+        self.data
+            .terminal_history_len_by_path
+            .insert(path.clone(), content_bytes.len());
+        self.data
+            .terminal_stream_by_path
+            .insert(path, content_bytes);
+        self.refresh_active_mount_log_panels(cx);
+    }
+
+    fn apply_editor_text_update(
+        &mut self,
+        cx: &mut Cx,
+        path: String,
+        content: String,
+        allow_create_tab: bool,
+    ) {
+        self.data.pending_open_paths.remove(&path);
+        self.data.pending_reload_paths.remove(&path);
+
+        if !allow_create_tab && !self.data.path_to_tab.contains_key(&path) {
+            return;
+        }
+
+        let Some((tab_id, _)) = self.ensure_editor_tab_for_path(cx, &path, false) else {
+            return;
+        };
+
+        if let Some(session) = self.data.sessions.get_mut(&tab_id) {
+            if session.document().as_text().to_string() != content {
+                session.document().replace(content.into());
+            }
+        } else {
+            self.data.sessions.insert(
+                tab_id,
+                CodeSession::new(CodeDocument::new(content.into(), DecorationSet::new())),
+            );
+        }
+
+        self.apply_pending_log_jump(&path, tab_id);
+        if let Some(mount) = Self::mount_from_virtual_path(&path) {
+            if let Some(dock) = self.mount_workspace_dock(cx, mount) {
+                dock.redraw_tab(cx, tab_id);
+            }
+        }
+    }
+
     pub(super) fn drain_studio_messages(&mut self, cx: &mut Cx) {
         loop {
             let Some(msg) = self
@@ -37,29 +85,10 @@ impl App {
             }
             StudioToUI::TextFileOpened { path, content, .. } => {
                 if Self::is_terminal_virtual_path(&path) {
-                    let content_bytes = content.into_bytes();
-                    self.data
-                        .terminal_history_len_by_path
-                        .insert(path.clone(), content_bytes.len());
-                    self.data
-                        .terminal_stream_by_path
-                        .insert(path, content_bytes);
-                    self.refresh_active_mount_log_panels(cx);
+                    self.apply_terminal_text(cx, path, content);
                     return;
                 }
-                self.data.pending_open_paths.remove(&path);
-                if let Some((tab_id, _)) = self.ensure_editor_tab_for_path(cx, &path, false) {
-                    self.data.sessions.insert(
-                        tab_id,
-                        CodeSession::new(CodeDocument::new(content.into(), DecorationSet::new())),
-                    );
-                    self.apply_pending_log_jump(&path, tab_id);
-                    if let Some(mount) = Self::mount_from_virtual_path(&path) {
-                        if let Some(dock) = self.mount_workspace_dock(cx, mount) {
-                            dock.redraw_tab(cx, tab_id);
-                        }
-                    }
-                }
+                self.apply_editor_text_update(cx, path, content, true);
                 self.set_status(cx, "opened file");
             }
             StudioToUI::FileTreeDiff { mount, changes } => {
@@ -67,35 +96,26 @@ impl App {
             }
             StudioToUI::TextFileRead { path, content } => {
                 if Self::is_terminal_virtual_path(&path) {
-                    let content_bytes = content.into_bytes();
-                    self.data
-                        .terminal_history_len_by_path
-                        .insert(path.clone(), content_bytes.len());
-                    self.data
-                        .terminal_stream_by_path
-                        .insert(path, content_bytes);
-                    self.refresh_active_mount_log_panels(cx);
+                    self.apply_terminal_text(cx, path, content);
                     return;
                 }
-                self.data.pending_open_paths.remove(&path);
-                if let Some((tab_id, _)) = self.ensure_editor_tab_for_path(cx, &path, false) {
-                    self.data.sessions.insert(
-                        tab_id,
-                        CodeSession::new(CodeDocument::new(content.into(), DecorationSet::new())),
-                    );
-                    self.apply_pending_log_jump(&path, tab_id);
-                    if let Some(mount) = Self::mount_from_virtual_path(&path) {
-                        if let Some(dock) = self.mount_workspace_dock(cx, mount) {
-                            dock.redraw_tab(cx, tab_id);
-                        }
-                    }
-                }
+                let allow_create_tab = self.data.pending_open_paths.contains(&path);
+                self.apply_editor_text_update(cx, path, content, allow_create_tab);
             }
             StudioToUI::TextFileSaved { path, result } => {
                 if Self::is_terminal_virtual_path(&path) {
                     return;
                 }
                 self.set_status(cx, &format!("saved {} ({:?})", path, result));
+            }
+            StudioToUI::FileChanged { path } => {
+                if Self::is_terminal_virtual_path(&path) || !self.data.path_to_tab.contains_key(&path)
+                {
+                    return;
+                }
+                if self.data.pending_reload_paths.insert(path.clone()) {
+                    let _ = self.send_studio(UIToStudio::ReadTextFile { path });
+                }
             }
             StudioToUI::FindFileResults {
                 query_id,
@@ -327,12 +347,12 @@ impl App {
                         message: entry.message,
                         location,
                     };
-                    push_capped_vec(
+                    push_capped_deque(
                         self.data.build_log_entries.entry(build_id).or_default(),
                         log_entry.clone(),
                         2_000,
                     );
-                    push_capped_vec(
+                    push_capped_deque(
                         &mut self.mount_state_mut(&mount).log_entries,
                         log_entry,
                         3_000,
@@ -436,6 +456,7 @@ impl App {
                 self.set_status(cx, &format!("terminal exited ({})", code));
             }
             StudioToUI::Error { message } => {
+                self.data.pending_reload_paths.clear();
                 self.set_status(cx, &format!("error: {}", message));
             }
             _ => {}
