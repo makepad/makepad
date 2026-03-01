@@ -24,6 +24,8 @@ export class WasmWebBrowser extends WasmBridge {
         this.timers = [];
         this.text_copy_response = "";
         this.web_sockets = [];
+        this.network_web_sockets = {};
+        this.network_http_requests = new Map();
         this.window_info = {}
         this.xr_capabilities = {
             vr_supported: false,
@@ -44,8 +46,9 @@ export class WasmWebBrowser extends WasmBridge {
         this.to_wasm = this.new_to_wasm();
         
         await this.query_xr_capabilities();
+        this.update_window_info();
         
-        this.to_wasm.ToWasmGetDeps({
+        this.to_wasm.ToWasmInit({
             gpu_info: this.gpu_info,
             cpu_cores: navigator.hardwareConcurrency,
             xr_capabilities: this.xr_capabilities,
@@ -56,27 +59,9 @@ export class WasmWebBrowser extends WasmBridge {
                 pathname: location.pathname + "",
                 search: location.search + "",
                 hash: location.hash + "",
-                has_threading_support: this.wasm._has_threading_support
-            }
-        });
-        
-        this.do_wasm_pump();
-        let results = await this.load_deps_promise;
-        let deps = [];
-        for (let result of results) {
-            if (result !== undefined) {
-                deps.push({
-                    path: result.path,
-                    data: result.buffer
-                })
-            }
-        }
-        this.update_window_info();
-        
-        this.to_wasm.ToWasmInit({
-            xr_capabilities: this.xr_capabilities,
+                has_thread_support: this.wasm._has_threading_support
+            },
             window_info: this.window_info,
-            deps: deps
         });
         
         this.do_wasm_pump();
@@ -105,14 +90,6 @@ export class WasmWebBrowser extends WasmBridge {
             link.target = "_blank";
             link.click();
         }
-    }
-    
-    FromWasmLoadDeps(args) {
-        let promises = [];
-        for (let path of args.deps) {
-            promises.push(fetch_path(".", path))
-        }
-        this.load_deps_promise = Promise.all(promises);
     }
     
     FromWasmStartTimer(args) {
@@ -513,6 +490,194 @@ export class WasmWebBrowser extends WasmBridge {
             if (parts.length == 2) {
                 request.setRequestHeader(parts[0], parts[1]);
             }
+        }
+    }
+
+    id_to_key(id_lo, id_hi) {
+        return `${id_lo}:${id_hi}`;
+    }
+
+    alloc_u8(input_u8) {
+        let ptr = this.wasm_new_data_u8(input_u8.length);
+        let out = new Uint8Array(this.memory.buffer, ptr, input_u8.length);
+        out.set(input_u8);
+        return {ptr, len: input_u8.length};
+    }
+
+    string_to_u8(s) {
+        const encoder = new TextEncoder();
+        return this.alloc_u8(encoder.encode(s));
+    }
+
+    array_to_u8(u8_array) {
+        return this.alloc_u8(u8_array);
+    }
+
+    u8_to_array(ptr, len) {
+        let u8 = new Uint8Array(this.memory.buffer, ptr, len);
+        let copy = new Uint8Array(len);
+        copy.set(u8);
+        return copy;
+    }
+
+    js_network_http_request(
+        request_id_lo,
+        request_id_hi,
+        metadata_id_lo,
+        metadata_id_hi,
+        url_ptr,
+        url_len,
+        method_ptr,
+        method_len,
+        headers_ptr,
+        headers_len,
+        body_ptr,
+        body_len
+    ) {
+        let url = this.u8_to_string(url_ptr, url_len);
+        let method = this.u8_to_string(method_ptr, method_len);
+        let headers_raw = this.u8_to_string(headers_ptr, headers_len);
+        let body = body_len > 0 ? this.u8_to_array(body_ptr, body_len) : undefined;
+        let controller = new AbortController();
+        let request_key = this.id_to_key(request_id_lo, request_id_hi);
+        this.network_http_requests.set(request_key, controller);
+
+        let headers = new Headers();
+        for (let line of headers_raw.split("\r\n")) {
+            if (!line) {
+                continue;
+            }
+            let sep = line.indexOf(":");
+            if (sep <= 0) {
+                continue;
+            }
+            let key = line.slice(0, sep).trim();
+            let value = line.slice(sep + 1).trim();
+            if (!key) {
+                continue;
+            }
+            try {
+                headers.append(key, value);
+            }
+            catch (_error) {
+            }
+        }
+
+        console.log("[makepad][http][req]", method, url);
+        fetch(url, {
+            method,
+            headers,
+            body,
+            signal: controller.signal,
+        }).then(async response => {
+            let response_headers = "";
+            response.headers.forEach((value, key) => {
+                response_headers += `${key}: ${value}\r\n`;
+            });
+            let response_body = new Uint8Array(await response.arrayBuffer());
+            let headers_u8 = this.string_to_u8(response_headers);
+            let body_u8 = this.array_to_u8(response_body);
+            console.log("[makepad][http][res]", response.status, url, response_body.length);
+            this.exports.wasm_network_http_response(
+                request_id_lo,
+                request_id_hi,
+                metadata_id_lo,
+                metadata_id_hi,
+                response.status,
+                headers_u8.ptr,
+                headers_u8.len,
+                body_u8.ptr,
+                body_u8.len
+            );
+        }).catch(error => {
+            console.error("[makepad][http][err]", method, url, "" + error);
+            let message_u8 = this.string_to_u8("" + error);
+            this.exports.wasm_network_http_error(
+                request_id_lo,
+                request_id_hi,
+                metadata_id_lo,
+                metadata_id_hi,
+                message_u8.ptr,
+                message_u8.len
+            );
+        }).finally(() => {
+            this.network_http_requests.delete(request_key);
+        });
+    }
+
+    js_network_http_cancel(request_id_lo, request_id_hi) {
+        let request_key = this.id_to_key(request_id_lo, request_id_hi);
+        let controller = this.network_http_requests.get(request_key);
+        if (controller) {
+            controller.abort();
+            this.network_http_requests.delete(request_key);
+        }
+    }
+
+    js_network_ws_open(socket_id_lo, socket_id_hi, url_ptr, url_len, _headers_ptr, _headers_len) {
+        let socket_key = this.id_to_key(socket_id_lo, socket_id_hi);
+        let url = this.u8_to_string(url_ptr, url_len);
+        let web_socket = new WebSocket(url);
+        web_socket.binaryType = "arraybuffer";
+        this.network_web_sockets[socket_key] = web_socket;
+        web_socket.onclose = _e => {
+            this.exports.wasm_network_ws_closed(socket_id_lo, socket_id_hi);
+            delete this.network_web_sockets[socket_key];
+        };
+        web_socket.onerror = e => {
+            let message = this.string_to_u8("" + e);
+            this.exports.wasm_network_ws_error(
+                socket_id_lo,
+                socket_id_hi,
+                message.ptr,
+                message.len
+            );
+        };
+        web_socket.onmessage = e => {
+            if (typeof e.data == "string") {
+                let data = this.string_to_u8("" + e.data);
+                this.exports.wasm_network_ws_text(
+                    socket_id_lo,
+                    socket_id_hi,
+                    data.ptr,
+                    data.len
+                );
+            }
+            else {
+                let data = this.array_to_u8(new Uint8Array(e.data));
+                this.exports.wasm_network_ws_binary(
+                    socket_id_lo,
+                    socket_id_hi,
+                    data.ptr,
+                    data.len
+                );
+            }
+        };
+        web_socket.onopen = _e => {
+            this.exports.wasm_network_ws_opened(socket_id_lo, socket_id_hi);
+        };
+    }
+
+    js_network_ws_send_binary(socket_id_lo, socket_id_hi, data_ptr, data_len) {
+        let socket = this.network_web_sockets[this.id_to_key(socket_id_lo, socket_id_hi)];
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(this.u8_to_array(data_ptr, data_len));
+        }
+    }
+
+    js_network_ws_send_text(socket_id_lo, socket_id_hi, data_ptr, data_len) {
+        let socket = this.network_web_sockets[this.id_to_key(socket_id_lo, socket_id_hi)];
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(this.u8_to_string(data_ptr, data_len));
+        }
+    }
+
+    js_network_ws_close(socket_id_lo, socket_id_hi) {
+        let socket_key = this.id_to_key(socket_id_lo, socket_id_hi);
+        let socket = this.network_web_sockets[socket_key];
+        if (socket) {
+            socket.close();
+            delete this.network_web_sockets[socket_key];
         }
     }
 
@@ -1441,39 +1606,6 @@ function report_browser_issue(kind, data) {
         fetch('/$report_error?data=' + encoded, {cache: 'no-store'});
     } catch (_error) {
     }
-}
-
-function fetch_path(base, path) {
-    
-    
-    return new Promise(function(resolve, reject) {
-        var req = new XMLHttpRequest()
-        req.addEventListener("error", function() {
-            report_browser_issue("deps.fetch.error", {
-                url: base + path,
-                path: path
-            });
-            reject(path)
-        })
-        req.responseType = 'arraybuffer'
-        req.addEventListener("load", function() {
-            if (req.status !== 200) {
-                report_browser_issue("deps.fetch.http_error", {
-                    url: base + path,
-                    path: path,
-                    status: req.status
-                });
-                return reject(req.status)
-            }
-            resolve({
-                path: path,
-                buffer: req.response
-            })
-        })
-        let url = base + path;
-        req.open("GET", url)
-        req.send()
-    })
 }
 
 let web_cursor_map = [

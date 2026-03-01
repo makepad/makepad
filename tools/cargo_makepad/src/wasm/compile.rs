@@ -169,36 +169,85 @@ pub fn cp_brotli(
     Ok(())
 }
 
+const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
+const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
+
+fn build_wasm_target_spec(cwd: &PathBuf) -> Result<PathBuf, String> {
+    let target_spec_dir = cwd.join("target/makepad-wasm-target");
+    mkdir(&target_spec_dir)?;
+    let target_spec_path = target_spec_dir.join(format!("{WASM_TARGET_TRIPLE}.json"));
+
+    let mut target_spec = shell_env_cap(
+        &[],
+        cwd,
+        "rustup",
+        &[
+            "run",
+            "nightly",
+            "rustc",
+            "-Z",
+            "unstable-options",
+            "--print",
+            "target-spec-json",
+            "--target",
+            WASM_TARGET_TRIPLE,
+        ],
+    )?;
+
+    if target_spec.contains("\"features\"") {
+        return Err(
+            "Built-in wasm target spec unexpectedly contains \"features\"; update cargo_makepad wasm target generation."
+                .to_string(),
+        );
+    }
+
+    let insert_at = target_spec
+        .rfind('}')
+        .ok_or_else(|| "Unable to parse wasm target spec JSON from rustc".to_string())?;
+    target_spec.insert_str(
+        insert_at,
+        &format!(",\n  \"features\": \"{WASM_TARGET_SPEC_FEATURES}\"\n"),
+    );
+
+    fs::write(&target_spec_path, target_spec)
+        .map_err(|e| format!("Can't write wasm target spec {:?}: {:?}", target_spec_path, e))?;
+    Ok(target_spec_path)
+}
+
 pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
-
-    let base_args = &[
-        "run",
-        "nightly",
-        "cargo",
-        "build",
-        "--target=wasm32-unknown-unknown",
-        "-Z",
-        "build-std=panic_abort,std",
-    ];
     let cwd = std::env::current_dir().unwrap();
+    let wasm_target_spec = build_wasm_target_spec(&cwd)?;
+    let target_arg = format!("--target={}", wasm_target_spec.display());
 
-    let mut args_out = Vec::new();
-    args_out.extend_from_slice(base_args);
+    let base_args = vec![
+        "run".to_string(),
+        "nightly".to_string(),
+        "cargo".to_string(),
+        "build".to_string(),
+        target_arg,
+        "-Z".to_string(),
+        "json-target-spec".to_string(),
+        "-Z".to_string(),
+        "build-std=panic_abort,std".to_string(),
+    ];
+
+    let mut args_out = base_args;
 
     // dont allow wasm builds to be debug builds
     let profile = get_profile_from_args(&args);
     for arg in args {
-        args_out.push(arg);
+        args_out.push(arg.clone());
     }
+    let args_out_refs: Vec<&str> = args_out.iter().map(|arg| arg.as_str()).collect();
 
     shell_env(&[
-        ("RUSTFLAGS", "-C codegen-units=1 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z"),
+        ("RUSTFLAGS", "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z"),
         ("MAKEPAD", "lines"),
-    ], &cwd, "rustup", &args_out) ?;
+    ], &cwd, "rustup", &args_out_refs) ?;
 
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
-    let build_dir = cwd.join(format!("target/wasm32-unknown-unknown/{profile}"));
+    let build_dir = cwd.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
 
     let build_crate_dir = get_crate_dir(build_crate)?;
     let local_resources_path = build_crate_dir.join("resources");
@@ -351,43 +400,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             })?;
         }
 
-        // Some widgets reference resources under crate-local fonts/*/resources.
-        // Mirror those folders into the wasm package so res.crate("self:fonts/...") resolves.
-        let fonts_path = dep_dir.join("fonts");
-        if fonts_path.is_dir() {
-            let entries = fs::read_dir(&fonts_path)
-                .map_err(|e| format!("Unable to read fonts dir {:?}: {:?}", fonts_path, e))?;
-            for entry in entries {
-                let entry = entry.map_err(|e| {
-                    format!("Unable to read fonts entry in {:?}: {:?}", fonts_path, e)
-                })?;
-                let sub_path = entry.path();
-                let resources_subdir = sub_path.join("resources");
-                if !resources_subdir.is_dir() {
-                    continue;
-                }
-                let sub_name = entry.file_name().to_string_lossy().to_string();
-                let dst_dir = app_dir
-                    .join(&name)
-                    .join("fonts")
-                    .join(&sub_name)
-                    .join("resources");
-                mkdir(&dst_dir)?;
-                walk_all(&resources_subdir, &dst_dir, &mut |source_path, dest_dir| {
-                    let source_file_name = source_path
-                        .file_name()
-                        .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
-                        .to_string_lossy()
-                        .to_string();
-                    let dest_path = dest_dir.join(&source_file_name);
-                    cp(source_path, &dest_path, false)?;
-                    if config.brotli {
-                        brotli_compress(&dest_path);
-                    }
-                    Ok(())
-                })?;
-            }
-        }
     }
     let wasm_source = if config.bindgen {
         shell(
@@ -481,7 +493,7 @@ pub fn run(config: WasmConfig, args: &[String]) -> Result<(), String> {
     // we should run the compiled folder root as webserver
     let result = build(config, args)?;
     start_wasm_server(result.app_dir, config.lan, config.port.unwrap_or(8010));
-    return Err("Run is not implemented yet".into());
+    Ok(())
 }
 
 fn from_hex_digit(v: u8) -> Option<u8> {

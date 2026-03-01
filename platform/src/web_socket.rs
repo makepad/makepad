@@ -18,10 +18,10 @@ use std::{
     sync::Arc,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{channel, Receiver, RecvTimeoutError, Sender},
+        mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError},
         Mutex,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub type WebSocket = u64;
@@ -45,6 +45,37 @@ pub(crate) static CONTROL_CHANNEL: Mutex<Option<Receiver<crate::studio::StudioTo
 pub(crate) static LOCAL_PROFILE_SAMPLES: Mutex<Vec<LocalProfileSample>> = Mutex::new(Vec::new());
 const LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT: usize = 16_384;
 const STUDIO_SOCKET_ID: u64 = 0;
+
+fn recv_studio_thread_msg(
+    rx: &Receiver<StudioWebSocketThreadMsg>,
+    timeout: Duration,
+) -> Result<StudioWebSocketThreadMsg, RecvTimeoutError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return rx.recv_timeout(timeout);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        if timeout == Duration::MAX {
+            return rx.recv().map_err(|_| RecvTimeoutError::Disconnected);
+        }
+
+        let deadline = Cx::time_now() + timeout.as_secs_f64();
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => return Ok(msg),
+                Err(TryRecvError::Empty) => {
+                    if Cx::time_now() >= deadline {
+                        return Err(RecvTimeoutError::Timeout);
+                    }
+                    std::thread::yield_now();
+                }
+                Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+            }
+        }
+    }
+}
 
 fn studio_ws_send_binary(data: Vec<u8>) -> Result<(), ()> {
     let runtime = STUDIO_NET_RUNTIME
@@ -131,17 +162,17 @@ impl Cx {
 
         self.spawn_thread(move || {
             let mut app_to_studio = AppToStudioVec(Vec::new());
-            let mut first_message = None;
+            let mut first_message_time = None;
             let default_collect_time = Duration::from_millis(16);
             let urgent_collect_time = Duration::from_millis(1);
             let mut collect_time = default_collect_time;
             let mut cycle_time = Duration::MAX;
 
             loop {
-                match rx.recv_timeout(cycle_time) {
+                match recv_studio_thread_msg(&rx, cycle_time) {
                     Ok(StudioWebSocketThreadMsg::AppToStudio { message }) => {
-                        if first_message.is_none() {
-                            first_message = Some(Instant::now());
+                        if first_message_time.is_none() {
+                            first_message_time = Some(Cx::time_now());
                         }
                         if matches!(
                             &message,
@@ -161,14 +192,14 @@ impl Cx {
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
 
-                if let Some(first_time) = first_message {
-                    if Instant::now().duration_since(first_time) >= collect_time {
+                if let Some(first_time) = first_message_time {
+                    if (Cx::time_now() - first_time) >= collect_time.as_secs_f64() {
                         if studio_ws_send_binary(app_to_studio.serialize_bin()).is_err() {
                             println!("Studio websocket disconnected!");
                             break;
                         }
                         app_to_studio.0.clear();
-                        first_message = None;
+                        first_message_time = None;
                         collect_time = default_collect_time;
                         cycle_time = Duration::MAX;
                     }
@@ -227,6 +258,7 @@ impl Cx {
     }
 
     #[cfg(not(target_os = "android"))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
         loop {
             let response = self.net.recv().ok()?;

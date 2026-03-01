@@ -307,6 +307,13 @@ impl Cx {
         if let Ok(mut sender) = ACTION_SENDER_GLOBAL.lock() {
             *sender = Some(action_sender);
         }
+        // On platforms that use a shim backend (wasm, android), install it
+        // before creating the NetworkRuntime so it picks up the real backend.
+        #[cfg(target_arch = "wasm32")]
+        crate::os::web_network::install_network_backend_shim();
+        #[cfg(target_os = "android")]
+        crate::os::linux::android::android_network::install_network_backend_shim();
+
         let net = Arc::new(NetworkRuntime::new(Default::default()));
         net.set_wake_fn(Some(Arc::new(|| {
             SignalToUI::set_ui_signal();
@@ -394,8 +401,11 @@ impl Cx {
             widget_tree_dump_callback: None,
             net,
 
+            script_data: CxScriptData {
+                crate_manifests: vm.bx.code.crate_manifests.clone(),
+                ..Default::default()
+            },
             script_vm: Some(vm.bx),
-            script_data: Default::default(),
         }
     }
 }
