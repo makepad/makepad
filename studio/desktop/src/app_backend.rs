@@ -278,15 +278,15 @@ impl App {
         let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) else {
             return;
         };
-        let Some(tree_data) = self
-            .mount_state(&active_mount)
-            .and_then(|mount| mount.file_tree_data.clone())
-        else {
+        // Take the data out temporarily to avoid cloning the entire FileTreeData.
+        let Some(tree_data) = self.mount_state_mut(&active_mount).file_tree_data.take() else {
             self.data.file_tree = FlatFileTree::default();
             workspace.widget(cx, ids!(file_tree)).redraw(cx);
             return;
         };
-        self.data.file_tree.rebuild(tree_data);
+        self.data.file_tree.rebuild(&tree_data);
+        // Put it back.
+        self.mount_state_mut(&active_mount).file_tree_data = Some(tree_data);
         workspace.widget(cx, ids!(file_tree)).redraw(cx);
         workspace
             .desktop_file_tree(cx, ids!(file_tree))
@@ -325,16 +325,14 @@ impl App {
         None
     }
 
-    pub(super) fn set_mount_file_filter(&mut self, cx: &mut Cx, mount: &str, filter: String) {
+    fn cancel_file_filter_query(&mut self, cx: &mut Cx, mount: &str, filter: &str) {
         self.pending_file_filter = None;
         if !self.file_filter_debounce_timer.is_empty() {
             cx.stop_timer(self.file_filter_debounce_timer);
         }
-
-        let filter = filter.trim().to_string();
         let old_query = {
             let mount_state = self.mount_state_mut(mount);
-            mount_state.file_filter = filter.clone();
+            mount_state.file_filter = filter.to_string();
             mount_state.file_filter_results.clear();
             mount_state.file_filter_pending = !filter.is_empty();
             mount_state.file_filter_query.take()
@@ -343,6 +341,19 @@ impl App {
             self.data.file_filter_mount_by_query.remove(&query_id);
             let _ = self.send_studio(UIToStudio::CancelQuery { query_id });
         }
+    }
+
+    fn redraw_file_tree_if_active(&mut self, cx: &mut Cx, mount: &str) {
+        if self.data.active_mount.as_deref() == Some(mount) {
+            if let Some(workspace) = self.mount_workspace_widget(cx, mount) {
+                workspace.widget(cx, ids!(file_tree)).redraw(cx);
+            }
+        }
+    }
+
+    pub(super) fn set_mount_file_filter(&mut self, cx: &mut Cx, mount: &str, filter: String) {
+        let filter = filter.trim().to_string();
+        self.cancel_file_filter_query(cx, mount, &filter);
 
         if !filter.is_empty() {
             if let Some(query_id) = self.send_studio(UIToStudio::FindFiles {
@@ -361,43 +372,18 @@ impl App {
         } else {
             self.mount_state_mut(mount).file_filter_pending = false;
         }
-        if self.data.active_mount.as_deref() == Some(mount) {
-            if let Some(workspace) = self.mount_workspace_widget(cx, mount) {
-                workspace.widget(cx, ids!(file_tree)).redraw(cx);
-            }
-        }
+        self.redraw_file_tree_if_active(cx, mount);
     }
 
     pub(super) fn queue_mount_file_filter(&mut self, cx: &mut Cx, mount: &str, filter: String) {
         let filter = filter.trim().to_string();
-
-        let old_query = {
-            let mount_state = self.mount_state_mut(mount);
-            mount_state.file_filter = filter.clone();
-            mount_state.file_filter_results.clear();
-            mount_state.file_filter_pending = !filter.is_empty();
-            mount_state.file_filter_query.take()
-        };
-        if let Some(query_id) = old_query {
-            self.data.file_filter_mount_by_query.remove(&query_id);
-            let _ = self.send_studio(UIToStudio::CancelQuery { query_id });
-        }
-
-        self.pending_file_filter = None;
-        if self.file_filter_debounce_timer.is_empty() == false {
-            cx.stop_timer(self.file_filter_debounce_timer);
-        }
+        self.cancel_file_filter_query(cx, mount, &filter);
 
         if !filter.is_empty() {
             self.pending_file_filter = Some((mount.to_string(), filter));
             self.file_filter_debounce_timer = cx.start_timeout(FILE_FILTER_DEBOUNCE_SECONDS);
         }
-
-        if self.data.active_mount.as_deref() == Some(mount) {
-            if let Some(workspace) = self.mount_workspace_widget(cx, mount) {
-                workspace.widget(cx, ids!(file_tree)).redraw(cx);
-            }
-        }
+        self.redraw_file_tree_if_active(cx, mount);
     }
 
     pub(super) fn flush_queued_mount_file_filter(&mut self, cx: &mut Cx) {
@@ -535,60 +521,32 @@ impl App {
         dock.set_tab_title(cx, id!(terminal_first), String::new());
 
         for path in files.iter() {
-            let tab_id = if let Some(existing_tab_id) = path_to_tab.get(path).copied() {
-                if dock.find_tab_bar_of_tab(existing_tab_id).is_some() {
-                    existing_tab_id
-                } else {
-                    path_to_tab.remove(path);
-                    tab_to_path.remove(&existing_tab_id);
-                    let Some((tab_bar, pos)) = dock.find_tab_bar_of_tab(id!(terminal_add)) else {
-                        continue;
-                    };
-                    let tab_id = dock.unique_id(LiveId::from_str(path).0);
-                    let insert_after = Some(pos.saturating_sub(1));
-                    if dock
-                        .create_tab(
-                            cx,
-                            tab_bar,
-                            tab_id,
-                            id!(TerminalPane),
-                            Self::terminal_tab_title(path),
-                            id!(CloseableTab),
-                            insert_after,
-                        )
-                        .is_none()
-                    {
-                        continue;
-                    }
-                    path_to_tab.insert(path.clone(), tab_id);
-                    tab_to_path.insert(tab_id, path.clone());
-                    tab_id
-                }
-            } else {
-                let Some((tab_bar, pos)) = dock.find_tab_bar_of_tab(id!(terminal_add)) else {
-                    continue;
-                };
-                let tab_id = dock.unique_id(LiveId::from_str(path).0);
-                let insert_after = Some(pos.saturating_sub(1));
-                if dock
-                    .create_tab(
-                        cx,
-                        tab_bar,
-                        tab_id,
-                        id!(TerminalPane),
-                        Self::terminal_tab_title(path),
-                        id!(CloseableTab),
-                        insert_after,
-                    )
-                    .is_none()
-                {
+            // If a valid tab already exists for this path, just update its title.
+            if let Some(existing) = path_to_tab.get(path).copied() {
+                if dock.find_tab_bar_of_tab(existing).is_some() {
+                    dock.set_tab_title(cx, existing, Self::terminal_tab_title(path));
                     continue;
                 }
-                path_to_tab.insert(path.clone(), tab_id);
-                tab_to_path.insert(tab_id, path.clone());
-                tab_id
+                path_to_tab.remove(path);
+                tab_to_path.remove(&existing);
+            }
+            // Create a new terminal tab before the "+" button.
+            let Some((tab_bar, pos)) = dock.find_tab_bar_of_tab(id!(terminal_add)) else {
+                continue;
             };
-            dock.set_tab_title(cx, tab_id, Self::terminal_tab_title(path));
+            let tab_id = dock.unique_id(LiveId::from_str(path).0);
+            if dock
+                .create_tab(
+                    cx, tab_bar, tab_id, id!(TerminalPane),
+                    Self::terminal_tab_title(path), id!(CloseableTab),
+                    Some(pos.saturating_sub(1)),
+                )
+                .is_none()
+            {
+                continue;
+            }
+            path_to_tab.insert(path.clone(), tab_id);
+            tab_to_path.insert(tab_id, path.clone());
         }
 
         let keep_paths: HashSet<String> = files.iter().cloned().collect();
