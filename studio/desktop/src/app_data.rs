@@ -8,7 +8,7 @@ use makepad_studio_protocol::backend_protocol::{
     RunnableBuild,
 };
 use makepad_studio_protocol::LogLevel;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 #[derive(Clone)]
@@ -67,7 +67,7 @@ pub struct MountState {
     pub tab_id: Option<LiveId>,
     pub file_tree_data: Option<FileTreeData>,
     pub runnable_builds: Vec<RunnableBuild>,
-    pub log_entries: Vec<UiLogEntry>,
+    pub log_entries: VecDeque<UiLogEntry>,
     pub terminal_files: Vec<String>,
     pub terminals_initialized: bool,
     pub select_last_terminal_once: bool,
@@ -88,7 +88,7 @@ impl Default for MountState {
             tab_id: None,
             file_tree_data: None,
             runnable_builds: Vec::new(),
-            log_entries: Vec::new(),
+            log_entries: VecDeque::new(),
             terminal_files: Vec::new(),
             terminals_initialized: false,
             select_last_terminal_once: false,
@@ -115,6 +115,7 @@ pub struct AppData {
     pub path_to_tab: HashMap<String, LiveId>,
     pub tab_to_path: HashMap<LiveId, String>,
     pub pending_open_paths: HashSet<String>,
+    pub pending_reload_paths: HashSet<String>,
     pub current_file_path: Option<String>,
     pub run_tab_state: HashMap<LiveId, RunTabState>,
     pub run_tab_by_build: HashMap<QueryId, LiveId>,
@@ -122,7 +123,7 @@ pub struct AppData {
     pub log_tab_by_build: HashMap<QueryId, LiveId>,
     pub profiler_tab_state: HashMap<LiveId, ProfilerTabState>,
     pub profiler_tab_by_build: HashMap<QueryId, LiveId>,
-    pub build_log_entries: HashMap<QueryId, Vec<UiLogEntry>>,
+    pub build_log_entries: HashMap<QueryId, VecDeque<UiLogEntry>>,
     pub profiler_samples_by_build: HashMap<QueryId, UiProfilerSamples>,
     pub profiler_running_by_build: HashMap<QueryId, bool>,
     pub profiler_time_start_by_build: HashMap<QueryId, f64>,
@@ -159,21 +160,21 @@ pub struct FlatFileTree {
 }
 
 impl FlatFileTree {
-    pub fn rebuild(&mut self, data: FileTreeData) {
+    pub fn rebuild(&mut self, data: &FileTreeData) {
         self.nodes.clear();
         self.roots.clear();
         self.path_to_id.clear();
 
-        for node in data.nodes {
+        for node in &data.nodes {
             let id = LiveId::from_str(&node.path);
             self.path_to_id.insert(node.path.clone(), id);
             self.nodes.insert(
                 id,
                 FlatNode {
                     id,
-                    path: node.path,
-                    name: node.name,
-                    node_type: node.node_type,
+                    path: node.path.clone(),
+                    name: node.name.clone(),
+                    node_type: node.node_type.clone(),
                     git_status: node.git_status,
                     children: Vec::new(),
                 },

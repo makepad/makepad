@@ -113,6 +113,7 @@ impl App {
             self.data.path_to_tab.remove(&path);
             self.data.sessions.remove(&tab_id);
             self.data.pending_open_paths.remove(&path);
+            self.data.pending_reload_paths.remove(&path);
             if self.data.current_file_path.as_deref() == Some(path.as_str()) {
                 self.data.current_file_path = None;
                 self.set_current_file_label(cx, None);
@@ -254,12 +255,39 @@ impl App {
         self.set_status(cx, "saving...");
     }
 
-    pub(super) fn find_run_anchor_tab(&self, dock: &DockRef, mount: &str) -> Option<LiveId> {
-        if dock.find_tab_bar_of_tab(id!(run_first)).is_some() {
-            return Some(id!(run_first));
+    fn create_dock_tab(
+        dock: &DockRef,
+        cx: &mut Cx,
+        anchor: LiveId,
+        tab_id: LiveId,
+        pane_id: LiveId,
+        title: String,
+        select: bool,
+    ) -> Option<()> {
+        let (tab_bar, pos) = dock.find_tab_bar_of_tab(anchor)?;
+        let created = if select {
+            dock.create_and_select_tab(
+                cx, tab_bar, tab_id, pane_id, title, id!(CloseableTab), Some(pos),
+            )
+        } else {
+            dock.create_tab(
+                cx, tab_bar, tab_id, pane_id, title, id!(CloseableTab), Some(pos),
+            )
+        };
+        created.map(|_| ())
+    }
+
+    fn find_anchor_tab_in<'a>(
+        dock: &DockRef,
+        default_id: LiveId,
+        iter: impl Iterator<Item = (&'a LiveId, &'a str)>,
+        mount: &str,
+    ) -> Option<LiveId> {
+        if dock.find_tab_bar_of_tab(default_id).is_some() {
+            return Some(default_id);
         }
-        for (tab_id, state) in &self.data.run_tab_state {
-            if state.mount == mount && dock.find_tab_bar_of_tab(*tab_id).is_some() {
+        for (tab_id, tab_mount) in iter {
+            if tab_mount == mount && dock.find_tab_bar_of_tab(*tab_id).is_some() {
                 return Some(*tab_id);
             }
         }
@@ -294,33 +322,13 @@ impl App {
             self.data.run_tab_state.remove(&tab_id);
         }
 
-        let anchor = self.find_run_anchor_tab(&dock, mount)?;
-        let (tab_bar, pos) = dock.find_tab_bar_of_tab(anchor)?;
+        let anchor = Self::find_anchor_tab_in(
+            &dock, id!(run_first),
+            self.data.run_tab_state.iter().map(|(id, s)| (id, s.mount.as_str())),
+            mount,
+        )?;
         let tab_id = dock.unique_id(LiveId::from_str(&format!("run/{}/{}", mount, build_id.0)).0);
-        let created = if select {
-            dock.create_and_select_tab(
-                cx,
-                tab_bar,
-                tab_id,
-                id!(RunningAppPane),
-                package.to_string(),
-                id!(CloseableTab),
-                Some(pos),
-            )
-        } else {
-            dock.create_tab(
-                cx,
-                tab_bar,
-                tab_id,
-                id!(RunningAppPane),
-                package.to_string(),
-                id!(CloseableTab),
-                Some(pos),
-            )
-        };
-        if created.is_none() {
-            return None;
-        }
+        Self::create_dock_tab(&dock, cx, anchor, tab_id, id!(RunningAppPane), package.to_string(), select)?;
 
         self.data.run_tab_by_build.insert(build_id, tab_id);
         self.data.run_tab_state.insert(
@@ -338,18 +346,6 @@ impl App {
             .desktop_run_view(cx, ids!(run_view))
             .set_run_target(cx, build_id, None);
         Some(tab_id)
-    }
-
-    pub(super) fn find_log_anchor_tab(&self, dock: &DockRef, mount: &str) -> Option<LiveId> {
-        if dock.find_tab_bar_of_tab(id!(log_first)).is_some() {
-            return Some(id!(log_first));
-        }
-        for (tab_id, state) in &self.data.log_tab_state {
-            if state.mount == mount && dock.find_tab_bar_of_tab(*tab_id).is_some() {
-                return Some(*tab_id);
-            }
-        }
-        None
     }
 
     pub(super) fn ensure_log_tab_for_build(
@@ -375,33 +371,14 @@ impl App {
             self.data.log_tab_state.remove(&tab_id);
         }
 
-        let anchor = self.find_log_anchor_tab(&dock, mount)?;
-        let (tab_bar, pos) = dock.find_tab_bar_of_tab(anchor)?;
+        let anchor = Self::find_anchor_tab_in(
+            &dock, id!(log_first),
+            self.data.log_tab_state.iter().map(|(id, s)| (id, s.mount.as_str())),
+            mount,
+        )?;
         let tab_id = dock.unique_id(LiveId::from_str(&format!("log/{}/{}", mount, build_id.0)).0);
-        let created = if select {
-            dock.create_and_select_tab(
-                cx,
-                tab_bar,
-                tab_id,
-                id!(LogPane),
-                title.to_string(),
-                id!(CloseableTab),
-                Some(pos),
-            )
-        } else {
-            dock.create_tab(
-                cx,
-                tab_bar,
-                tab_id,
-                id!(LogPane),
-                title.to_string(),
-                id!(CloseableTab),
-                Some(pos),
-            )
-        };
-        if created.is_none() {
-            return None;
-        }
+        Self::create_dock_tab(&dock, cx, anchor, tab_id, id!(LogPane), title.to_string(), select)?;
+
         self.data.log_tab_by_build.insert(build_id, tab_id);
         self.data.log_tab_state.insert(
             tab_id,
@@ -460,32 +437,8 @@ impl App {
         }
 
         let anchor = self.find_profiler_anchor_tab(&dock, mount)?;
-        let (tab_bar, pos) = dock.find_tab_bar_of_tab(anchor)?;
         let tab_id = dock.unique_id(LiveId::from_str(&format!("prof/{}/{}", mount, build_id.0)).0);
-        let created = if select {
-            dock.create_and_select_tab(
-                cx,
-                tab_bar,
-                tab_id,
-                id!(ProfilerPane),
-                title.to_string(),
-                id!(CloseableTab),
-                Some(pos),
-            )
-        } else {
-            dock.create_tab(
-                cx,
-                tab_bar,
-                tab_id,
-                id!(ProfilerPane),
-                title.to_string(),
-                id!(CloseableTab),
-                Some(pos),
-            )
-        };
-        if created.is_none() {
-            return None;
-        }
+        Self::create_dock_tab(&dock, cx, anchor, tab_id, id!(ProfilerPane), title.to_string(), select)?;
 
         self.data.profiler_tab_by_build.insert(build_id, tab_id);
         self.data.profiler_tab_state.insert(

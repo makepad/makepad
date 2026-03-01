@@ -38,11 +38,10 @@ script_mod! {
     }
 }
 
-fn push_capped_vec<T>(entries: &mut Vec<T>, entry: T, max_len: usize) {
-    entries.push(entry);
-    if entries.len() > max_len {
-        let remove = entries.len() - max_len;
-        entries.drain(..remove);
+fn push_capped_deque<T>(entries: &mut std::collections::VecDeque<T>, entry: T, max_len: usize) {
+    entries.push_back(entry);
+    while entries.len() > max_len {
+        entries.pop_front();
     }
 }
 

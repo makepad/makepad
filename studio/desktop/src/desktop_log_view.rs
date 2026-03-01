@@ -3,6 +3,7 @@ use crate::{
     makepad_widgets::*,
 };
 use makepad_studio_protocol::LogLevel;
+use std::collections::VecDeque;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -231,20 +232,14 @@ impl DesktopLogView {
         visible_rows.saturating_sub(used_rows)
     }
 
-    fn collect_entries(data: &AppData, tab_id: LiveId) -> Vec<UiLogEntry> {
+    fn collect_entries<'a>(data: &'a AppData, tab_id: LiveId) -> Option<&'a VecDeque<UiLogEntry>> {
         if let Some(state) = data.log_tab_state.get(&tab_id) {
-            return data
-                .build_log_entries
-                .get(&state.build_id)
-                .cloned()
-                .unwrap_or_default();
+            return data.build_log_entries.get(&state.build_id);
         }
         data.active_mount
             .as_ref()
             .and_then(|mount| data.mounts.get(mount))
             .map(|mount| &mount.log_entries)
-            .cloned()
-            .unwrap_or_default()
     }
 
     fn icon_for_level(level: &LogLevel) -> LiveId {
@@ -272,7 +267,7 @@ impl DesktopLogView {
         }
     }
 
-    fn draw_entries(&mut self, cx: &mut Cx2d, list: &mut PortalList, entries: &[UiLogEntry]) {
+    fn draw_entries(&mut self, cx: &mut Cx2d, list: &mut PortalList, entries: &VecDeque<UiLogEntry>) {
         if entries.is_empty() {
             self.draw_empty(cx, list, "No logs yet");
             return;
@@ -325,8 +320,11 @@ impl Widget for DesktopLogView {
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 if let Some(data) = scope.data.get_mut::<AppData>() {
-                    let entries = Self::collect_entries(data, tab_id);
-                    self.draw_entries(cx, &mut *list, &entries);
+                    if let Some(entries) = Self::collect_entries(data, tab_id) {
+                        self.draw_entries(cx, &mut *list, entries);
+                    } else {
+                        self.draw_empty(cx, &mut *list, "No logs yet");
+                    }
                 } else {
                     self.draw_empty(cx, &mut *list, "No app state");
                 }
