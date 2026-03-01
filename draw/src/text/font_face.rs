@@ -38,6 +38,22 @@ impl FontFace {
     pub fn data(&self) -> &FontData {
         &self.0.data
     }
+
+    pub fn set_variations(&mut self, variations: &[(u32, f32)]) {
+        let rb_variations: Vec<rustybuzz::Variation> = variations
+            .iter()
+            .map(|&(tag, value)| rustybuzz::Variation {
+                tag: ttf_parser::Tag::from_bytes(&tag.to_be_bytes()),
+                value,
+            })
+            .collect();
+        unsafe {
+            let inner = Pin::as_mut(&mut self.0).get_unchecked_mut();
+            if let Some(face) = inner.rustybuzz_face.as_mut() {
+                face.set_variations(&rb_variations);
+            }
+        }
+    }
 }
 
 struct FontFaceInner {
