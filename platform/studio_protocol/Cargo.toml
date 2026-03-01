@@ -6,7 +6,8 @@ description = "Shared Studio app<->studio wire protocol types"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-makepad-platform = { path = "..", version = "2.0.0" }
 makepad-error-log = { path = "../../libs/error_log", version = "1.0.0" }
 makepad-live-id = { path = "../../libs/live_id", version = "1.0.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
+makepad-script = { path = "../script", version = "1.0.0" }
+bitflags = { path = "../../libs/bitflags", version = "2.10" }

@@ -7,11 +7,11 @@ use crate::{
         HttpMethod, HttpRequest, NetworkResponse, NetworkRuntime, WebSocketTransport, WsMessage,
         WsSend,
     },
-    studio::{AppToStudio, AppToStudioVec, LocalProfileSample},
     thread::SignalToUI,
     makepad_live_id::LiveId,
     Cx,
 };
+use makepad_studio_protocol::{AppToStudio, AppToStudioVec, LocalProfileSample, StudioToApp};
 pub use crate::makepad_network::WebSocketMessage;
 #[allow(unused_imports)]
 use std::{
@@ -40,7 +40,7 @@ static STUDIO_NET_RUNTIME: Mutex<Option<Arc<NetworkRuntime>>> = Mutex::new(None)
 pub(crate) static HAS_STUDIO_WEB_SOCKET: AtomicBool = AtomicBool::new(false);
 pub(crate) static STUDIO_STDOUT_MODE: AtomicBool = AtomicBool::new(false);
 pub(crate) static LOCAL_PROFILE_CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
-pub(crate) static CONTROL_CHANNEL: Mutex<Option<Receiver<crate::studio::StudioToApp>>> =
+pub(crate) static CONTROL_CHANNEL: Mutex<Option<Receiver<StudioToApp>>> =
     Mutex::new(None);
 pub(crate) static LOCAL_PROFILE_SAMPLES: Mutex<Vec<LocalProfileSample>> = Mutex::new(Vec::new());
 const LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT: usize = 16_384;
@@ -106,7 +106,7 @@ impl Cx {
     /// Set a control channel for receiving StudioToApp messages.
     /// Messages are polled by the event loop and dispatched as events.
     /// The sender should call `SignalToUI::set_ui_signal()` after sending.
-    pub fn set_control_channel(rx: Receiver<crate::studio::StudioToApp>) {
+    pub fn set_control_channel(rx: Receiver<StudioToApp>) {
         *CONTROL_CHANNEL.lock().unwrap() = Some(rx);
     }
 

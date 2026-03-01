@@ -1,7 +1,11 @@
 #![allow(dead_code)]
 use {
-    crate::{cx::Cx, event::TimerEvent, makepad_micro_serde::*},
+    crate::{cx::Cx, event::TimerEvent},
     std::collections::HashMap,
+};
+pub use makepad_studio_protocol::{
+    AppToStudio, PresentableDraw, PresentableImageId, SharedPresentableImage, SharedSwapchain,
+    StudioToApp, SWAPCHAIN_IMAGE_COUNT,
 };
 
 // HACK(eddyb) more or less `<[T; N]>::each_ref`, which is still unstable.
@@ -13,42 +17,6 @@ fn ref_array_to_array_of_refs<T, const N: usize>(ref_array: &[T; N]) -> [&T; N] 
         }
     }
     unsafe { out_refs.assume_init() }
-}
-
-pub const SWAPCHAIN_IMAGE_COUNT: usize = match () {
-    _ if cfg!(target_os = "linux") => 3,
-    _ if cfg!(target_os = "macos") => 1,
-    _ if cfg!(target_os = "windows") => 2,
-    _ => 2,
-};
-
-/// Cross-process-unique ID of a presentable image.
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct PresentableImageId {
-    origin_pid: u32,
-    per_origin_counter: u32,
-}
-
-impl PresentableImageId {
-    pub fn alloc() -> Self {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        Self {
-            origin_pid: std::process::id(),
-            per_origin_counter: COUNTER.fetch_add(1, Ordering::Relaxed),
-        }
-    }
-
-    pub fn as_u64(self) -> u64 {
-        (u64::from(self.origin_pid) << 32) | u64::from(self.per_origin_counter)
-    }
-
-    fn from_u64(pid_and_counter: u64) -> Self {
-        Self {
-            origin_pid: (pid_and_counter >> 32) as u32,
-            per_origin_counter: pid_and_counter as u32,
-        }
-    }
 }
 
 // ============================================================================
@@ -236,38 +204,16 @@ impl HostSwapchain {
 // macOS: IOSurface-based swapchain (for serialization)
 // ============================================================================
 #[cfg(target_os = "macos")]
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedPresentableImage {
-    pub id: PresentableImageId,
-    pub iosurface_id: u32,
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedSwapchain {
-    pub window_id: usize,
-    pub alloc_width: u32,
-    pub alloc_height: u32,
-    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
-}
-
-#[cfg(target_os = "macos")]
-impl SharedSwapchain {
-    pub fn from_host_swapchain(host: &HostSwapchain, cx: &mut crate::cx::Cx) -> Self {
-        Self {
-            window_id: host.window_id,
-            alloc_width: host.alloc_width,
-            alloc_height: host.alloc_height,
-            presentable_images: std::array::from_fn(|i| SharedPresentableImage {
-                id: host.presentable_images[i].id,
-                iosurface_id: cx
-                    .share_texture_for_presentable_image(&host.presentable_images[i].texture),
-            }),
-        }
-    }
-
-    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
-        self.presentable_images.iter().find(|pi| pi.id == id)
+pub fn shared_swapchain_from_host_swapchain(host: &HostSwapchain, cx: &mut crate::cx::Cx) -> SharedSwapchain {
+    SharedSwapchain {
+        window_id: host.window_id,
+        alloc_width: host.alloc_width,
+        alloc_height: host.alloc_height,
+        presentable_images: std::array::from_fn(|i| SharedPresentableImage {
+            id: host.presentable_images[i].id,
+            iosurface_id: cx
+                .share_texture_for_presentable_image(&host.presentable_images[i].texture),
+        }),
     }
 }
 
@@ -275,58 +221,28 @@ impl SharedSwapchain {
 // Windows: HANDLE-based swapchain
 // ============================================================================
 #[cfg(target_os = "windows")]
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedPresentableImage {
-    pub id: PresentableImageId,
-    pub handle: u64,
+pub fn shared_swapchain_from_host_swapchain(host: &HostSwapchain, cx: &mut crate::cx::Cx) -> SharedSwapchain {
+    SharedSwapchain {
+        window_id: host.window_id,
+        alloc_width: host.alloc_width,
+        alloc_height: host.alloc_height,
+        presentable_images: std::array::from_fn(|i| SharedPresentableImage {
+            id: host.presentable_images[i].id,
+            handle: cx.share_texture_for_presentable_image(&host.presentable_images[i].texture),
+        }),
+    }
 }
 
-#[cfg(target_os = "windows")]
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedSwapchain {
-    pub window_id: usize,
-    pub alloc_width: u32,
-    pub alloc_height: u32,
-    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
-}
-
-#[cfg(target_os = "windows")]
-impl SharedSwapchain {
-    pub fn from_host_swapchain(host: &HostSwapchain, cx: &mut crate::cx::Cx) -> Self {
-        Self {
-            window_id: host.window_id,
-            alloc_width: host.alloc_width,
-            alloc_height: host.alloc_height,
-            presentable_images: std::array::from_fn(|i| SharedPresentableImage {
-                id: host.presentable_images[i].id,
-                handle: cx.share_texture_for_presentable_image(&host.presentable_images[i].texture),
-            }),
-        }
-    }
-
-    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
-        self.presentable_images.iter().find(|pi| pi.id == id)
-    }
+pub fn shared_swapchain_get_image(
+    swapchain: &SharedSwapchain,
+    id: PresentableImageId,
+) -> Option<&SharedPresentableImage> {
+    swapchain.presentable_images.iter().find(|pi| pi.id == id)
 }
 
 // ============================================================================
 // Linux: DMA-BUF-based swapchain
 // ============================================================================
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct LinuxSharedImagePlane {
-    pub dma_buf_fd: aux_chan::AuxChannedImageFd,
-    pub offset: u32,
-    pub stride: u32,
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct LinuxSharedImage {
-    pub drm_format: crate::os::linux::dma_buf::DrmFormat,
-    pub plane: LinuxSharedImagePlane,
-}
-
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 #[derive(Debug)]
 pub struct LinuxOwnedImagePlane {
@@ -365,190 +281,10 @@ impl LinuxOwnedImage {
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-impl SerBin for LinuxSharedImagePlane {
-    fn ser_bin(&self, s: &mut Vec<u8>) {
-        self.dma_buf_fd.ser_bin(s);
-        self.offset.ser_bin(s);
-        self.stride.ser_bin(s);
-    }
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-impl DeBin for LinuxSharedImagePlane {
-    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
-        Ok(Self {
-            dma_buf_fd: DeBin::de_bin(o, d)?,
-            offset: DeBin::de_bin(o, d)?,
-            stride: DeBin::de_bin(o, d)?,
-        })
-    }
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-impl SerJson for LinuxSharedImagePlane {
-    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
-        s.st_pre();
-        s.field(d + 1, "dma_buf_fd");
-        self.dma_buf_fd.ser_json(d + 1, s);
-        s.conl();
-        s.field(d + 1, "offset");
-        self.offset.ser_json(d + 1, s);
-        s.conl();
-        s.field(d + 1, "stride");
-        self.stride.ser_json(d + 1, s);
-        s.st_post(d);
-    }
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-impl DeJson for LinuxSharedImagePlane {
-    fn de_json(s: &mut DeJsonState, i: &mut std::str::Chars) -> Result<Self, DeJsonErr> {
-        let mut dma_buf_fd = None;
-        let mut offset = None;
-        let mut stride = None;
-
-        s.curly_open(i)?;
-        while s.tok != DeJsonTok::CurlyClose {
-            let key = s.as_string()?;
-            s.next_colon(i)?;
-            match key.as_str() {
-                "dma_buf_fd" => dma_buf_fd = Some(DeJson::de_json(s, i)?),
-                "offset" => offset = Some(DeJson::de_json(s, i)?),
-                "stride" => stride = Some(DeJson::de_json(s, i)?),
-                _ => {
-                    if s.lenient {
-                        s.skip_value(i)?;
-                    } else {
-                        return Err(s.err_exp(&s.strbuf));
-                    }
-                }
-            }
-            s.eat_comma_curly(i)?;
-        }
-        s.curly_close(i)?;
-
-        let dma_buf_fd = match dma_buf_fd {
-            Some(v) => v,
-            None => return Err(s.err_nf("dma_buf_fd")),
-        };
-        let offset = match offset {
-            Some(v) => v,
-            None => return Err(s.err_nf("offset")),
-        };
-        let stride = match stride {
-            Some(v) => v,
-            None => return Err(s.err_nf("stride")),
-        };
-
-        Ok(Self {
-            dma_buf_fd,
-            offset,
-            stride,
-        })
-    }
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-impl SerBin for LinuxSharedImage {
-    fn ser_bin(&self, s: &mut Vec<u8>) {
-        self.drm_format.ser_bin(s);
-        self.plane.ser_bin(s);
-    }
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-impl DeBin for LinuxSharedImage {
-    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
-        Ok(Self {
-            drm_format: DeBin::de_bin(o, d)?,
-            plane: DeBin::de_bin(o, d)?,
-        })
-    }
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-impl SerJson for LinuxSharedImage {
-    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
-        s.st_pre();
-        s.field(d + 1, "drm_format");
-        self.drm_format.ser_json(d + 1, s);
-        s.conl();
-        s.field(d + 1, "plane");
-        self.plane.ser_json(d + 1, s);
-        s.st_post(d);
-    }
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-impl DeJson for LinuxSharedImage {
-    fn de_json(s: &mut DeJsonState, i: &mut std::str::Chars) -> Result<Self, DeJsonErr> {
-        let mut drm_format = None;
-        let mut plane = None;
-
-        s.curly_open(i)?;
-        while s.tok != DeJsonTok::CurlyClose {
-            let key = s.as_string()?;
-            s.next_colon(i)?;
-            match key.as_str() {
-                "drm_format" => drm_format = Some(DeJson::de_json(s, i)?),
-                "plane" => plane = Some(DeJson::de_json(s, i)?),
-                _ => {
-                    if s.lenient {
-                        s.skip_value(i)?;
-                    } else {
-                        return Err(s.err_exp(&s.strbuf));
-                    }
-                }
-            }
-            s.eat_comma_curly(i)?;
-        }
-        s.curly_close(i)?;
-
-        let drm_format = match drm_format {
-            Some(v) => v,
-            None => return Err(s.err_nf("drm_format")),
-        };
-        let plane = match plane {
-            Some(v) => v,
-            None => return Err(s.err_nf("plane")),
-        };
-
-        Ok(Self { drm_format, plane })
-    }
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedPresentableImage {
-    pub id: PresentableImageId,
-    pub image: LinuxSharedImage,
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 #[derive(Debug)]
 pub struct LinuxPresentableImage {
     pub id: PresentableImageId,
     pub image: LinuxOwnedImage,
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-impl SharedPresentableImage {
-    pub fn recv_fds_from_aux_chan(
-        self,
-        client_endpoint: &aux_chan::ClientEndpoint,
-    ) -> std::io::Result<LinuxPresentableImage> {
-        let image = aux_chan::recv_image_fds_from_aux_chan(self.id, self.image, client_endpoint)?;
-        Ok(LinuxPresentableImage { id: self.id, image })
-    }
-}
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedSwapchain {
-    pub window_id: usize,
-    pub alloc_width: u32,
-    pub alloc_height: u32,
-    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
@@ -559,115 +295,120 @@ pub enum SharedSwapchainCreateError {
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-impl SharedSwapchain {
-    fn software_fallback_image(
-        host_image: &mut HostPresentableImage,
-        alloc_width: u32,
-        alloc_height: u32,
-    ) -> Result<LinuxOwnedImage, SharedSwapchainCreateError> {
-        let stride = alloc_width.checked_mul(4).ok_or_else(|| {
+pub fn shared_presentable_image_recv_fds_from_aux_chan(
+    image: SharedPresentableImage,
+    client_endpoint: &aux_chan::ClientEndpoint,
+) -> std::io::Result<LinuxPresentableImage> {
+    let id = image.id;
+    let owned_image = aux_chan::recv_image_fds_from_aux_chan(id, image.image, client_endpoint)?;
+    Ok(LinuxPresentableImage {
+        id,
+        image: owned_image,
+    })
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn software_fallback_image(
+    host_image: &mut HostPresentableImage,
+    alloc_width: u32,
+    alloc_height: u32,
+) -> Result<LinuxOwnedImage, SharedSwapchainCreateError> {
+    let stride = alloc_width.checked_mul(4).ok_or_else(|| {
+        SharedSwapchainCreateError::SoftwareFallback(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "software fallback stride overflow",
+        ))
+    })?;
+    let len = usize::try_from(stride)
+        .ok()
+        .and_then(|stride| {
+            usize::try_from(alloc_height)
+                .ok()
+                .and_then(|height| stride.checked_mul(height))
+        })
+        .ok_or_else(|| {
             SharedSwapchainCreateError::SoftwareFallback(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "software fallback stride overflow",
+                "software fallback buffer size overflow",
             ))
         })?;
-        let len = usize::try_from(stride)
-            .ok()
-            .and_then(|stride| {
-                usize::try_from(alloc_height)
-                    .ok()
-                    .and_then(|height| stride.checked_mul(height))
-            })
-            .ok_or_else(|| {
-                SharedSwapchainCreateError::SoftwareFallback(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "software fallback buffer size overflow",
-                ))
-            })?;
 
-        let needs_new_buffer = match host_image.software_buffer.as_ref() {
-            Some(buffer) => buffer.as_bytes().len() != len || buffer.stride != stride,
-            None => true,
-        };
-        if needs_new_buffer {
-            host_image.software_buffer = Some(
-                LinuxSharedSoftwareBuffer::create(len, stride)
-                    .map_err(SharedSwapchainCreateError::SoftwareFallback)?,
+    let needs_new_buffer = match host_image.software_buffer.as_ref() {
+        Some(buffer) => buffer.as_bytes().len() != len || buffer.stride != stride,
+        None => true,
+    };
+    if needs_new_buffer {
+        host_image.software_buffer = Some(
+            LinuxSharedSoftwareBuffer::create(len, stride)
+                .map_err(SharedSwapchainCreateError::SoftwareFallback)?,
+        );
+    }
+
+    let send_fd = host_image
+        .software_buffer
+        .as_ref()
+        .expect("software buffer initialized")
+        .clone_fd()
+        .map_err(SharedSwapchainCreateError::SoftwareFallback)?;
+
+    Ok(LinuxOwnedImage::software_fallback(send_fd, stride))
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub fn shared_swapchain_from_host_swapchain(
+    host: &mut HostSwapchain,
+    cx: &mut crate::cx::Cx,
+    host_endpoint: &aux_chan::HostEndpoint,
+) -> Result<SharedSwapchain, SharedSwapchainCreateError> {
+    let mut owned_images: [Option<LinuxOwnedImage>; SWAPCHAIN_IMAGE_COUNT] =
+        std::array::from_fn(|_| None);
+    let mut use_software_fallback = false;
+    for i in 0..SWAPCHAIN_IMAGE_COUNT {
+        if let Some(image) = cx.share_texture_for_presentable_image(&host.presentable_images[i].texture) {
+            owned_images[i] = Some(image);
+        } else {
+            use_software_fallback = true;
+            break;
+        }
+    }
+
+    if use_software_fallback {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static LOG_SOFTWARE_FALLBACK: AtomicBool = AtomicBool::new(false);
+        if !LOG_SOFTWARE_FALLBACK.swap(true, Ordering::Relaxed) {
+            crate::warning!(
+                "Linux DMA-BUF export unavailable for RunView; using software readback fallback"
             );
         }
-
-        let send_fd = host_image
-            .software_buffer
-            .as_ref()
-            .expect("software buffer initialized")
-            .clone_fd()
-            .map_err(SharedSwapchainCreateError::SoftwareFallback)?;
-
-        Ok(LinuxOwnedImage::software_fallback(send_fd, stride))
-    }
-
-    pub fn from_host_swapchain(
-        host: &mut HostSwapchain,
-        cx: &mut crate::cx::Cx,
-        host_endpoint: &aux_chan::HostEndpoint,
-    ) -> Result<Self, SharedSwapchainCreateError> {
-        let mut owned_images: [Option<LinuxOwnedImage>; SWAPCHAIN_IMAGE_COUNT] =
-            std::array::from_fn(|_| None);
-        let mut use_software_fallback = false;
         for i in 0..SWAPCHAIN_IMAGE_COUNT {
-            if let Some(image) =
-                cx.share_texture_for_presentable_image(&host.presentable_images[i].texture)
-            {
-                owned_images[i] = Some(image);
-            } else {
-                use_software_fallback = true;
-                break;
-            }
+            owned_images[i] = Some(software_fallback_image(
+                &mut host.presentable_images[i],
+                host.alloc_width,
+                host.alloc_height,
+            )?);
         }
-
-        if use_software_fallback {
-            use std::sync::atomic::{AtomicBool, Ordering};
-            static LOG_SOFTWARE_FALLBACK: AtomicBool = AtomicBool::new(false);
-            if !LOG_SOFTWARE_FALLBACK.swap(true, Ordering::Relaxed) {
-                crate::warning!(
-                    "Linux DMA-BUF export unavailable for RunView; using software readback fallback"
-                );
-            }
-            for i in 0..SWAPCHAIN_IMAGE_COUNT {
-                owned_images[i] = Some(Self::software_fallback_image(
-                    &mut host.presentable_images[i],
-                    host.alloc_width,
-                    host.alloc_height,
-                )?);
-            }
-        } else {
-            for image in &mut host.presentable_images {
-                image.software_buffer = None;
-            }
+    } else {
+        for image in &mut host.presentable_images {
+            image.software_buffer = None;
         }
-
-        let mut presentable_images: [Option<SharedPresentableImage>; SWAPCHAIN_IMAGE_COUNT] =
-            [None; SWAPCHAIN_IMAGE_COUNT];
-        for i in 0..SWAPCHAIN_IMAGE_COUNT {
-            let id = host.presentable_images[i].id;
-            let image = owned_images[i].take().expect("image exported");
-            let image = aux_chan::send_image_fds_to_aux_chan(id, image, host_endpoint)
-                .map_err(SharedSwapchainCreateError::AuxChannelSend)?;
-            presentable_images[i] = Some(SharedPresentableImage { id, image });
-        }
-        let presentable_images = presentable_images.map(|image| image.expect("filled"));
-
-        Ok(Self {
-            window_id: host.window_id,
-            alloc_width: host.alloc_width,
-            alloc_height: host.alloc_height,
-            presentable_images,
-        })
     }
 
-    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
-        self.presentable_images.iter().find(|pi| pi.id == id)
+    let mut presentable_images: [Option<SharedPresentableImage>; SWAPCHAIN_IMAGE_COUNT] = [None; SWAPCHAIN_IMAGE_COUNT];
+    for i in 0..SWAPCHAIN_IMAGE_COUNT {
+        let id = host.presentable_images[i].id;
+        let image = owned_images[i].take().expect("image exported");
+        let image = aux_chan::send_image_fds_to_aux_chan(id, image, host_endpoint)
+            .map_err(SharedSwapchainCreateError::AuxChannelSend)?;
+        presentable_images[i] = Some(SharedPresentableImage { id, image });
     }
+    let presentable_images = presentable_images.map(|image| image.expect("filled"));
+
+    Ok(SharedSwapchain {
+        window_id: host.window_id,
+        alloc_width: host.alloc_width,
+        alloc_height: host.alloc_height,
+        presentable_images,
+    })
 }
 
 // ============================================================================
@@ -678,57 +419,15 @@ impl SharedSwapchain {
     target_os = "macos",
     target_os = "windows"
 )))]
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedPresentableImage {
-    pub id: PresentableImageId,
-    pub _dummy: Option<u32>,
-}
-
-#[cfg(not(any(
-    all(target_os = "linux", not(target_env = "ohos")),
-    target_os = "macos",
-    target_os = "windows"
-)))]
-#[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-pub struct SharedSwapchain {
-    pub window_id: usize,
-    pub alloc_width: u32,
-    pub alloc_height: u32,
-    pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
-}
-
-#[cfg(not(any(
-    all(target_os = "linux", not(target_env = "ohos")),
-    target_os = "macos",
-    target_os = "windows"
-)))]
-impl SharedSwapchain {
-    pub fn from_host_swapchain(host: &HostSwapchain, _cx: &mut crate::cx::Cx) -> Self {
-        Self {
-            window_id: host.window_id,
-            alloc_width: host.alloc_width,
-            alloc_height: host.alloc_height,
-            presentable_images: std::array::from_fn(|i| SharedPresentableImage {
-                id: host.presentable_images[i].id,
-                _dummy: None,
-            }),
-        }
-    }
-
-    pub fn new(window_id: usize, alloc_width: u32, alloc_height: u32) -> Self {
-        Self {
-            window_id,
-            alloc_width,
-            alloc_height,
-            presentable_images: [(); SWAPCHAIN_IMAGE_COUNT].map(|()| SharedPresentableImage {
-                id: PresentableImageId::alloc(),
-                _dummy: None,
-            }),
-        }
-    }
-
-    pub fn get_image(&self, id: PresentableImageId) -> Option<&SharedPresentableImage> {
-        self.presentable_images.iter().find(|pi| pi.id == id)
+pub fn shared_swapchain_from_host_swapchain(host: &HostSwapchain, _cx: &mut crate::cx::Cx) -> SharedSwapchain {
+    SharedSwapchain {
+        window_id: host.window_id,
+        alloc_width: host.alloc_width,
+        alloc_height: host.alloc_height,
+        presentable_images: std::array::from_fn(|i| SharedPresentableImage {
+            id: host.presentable_images[i].id,
+            _dummy: None,
+        }),
     }
 }
 
@@ -877,26 +576,20 @@ pub mod aux_chan {
         }
     }
 
-    // HACK(eddyb) this type being serialized/deserialized doesn't really ensure
-    // anything in and of itself, it's only used here to guide correct usage
-    // through types - ideally host<->client (de)serialization itself would
-    // handle all the file descriptors passing necessary, but for now this helps.
-    #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
-    pub struct AuxChannedImageFd {
-        // HACK(eddyb) non-`()` field working around deriving limitations.
-        _private: Option<u32>,
-    }
     pub fn send_image_fds_to_aux_chan(
         id: PresentableImageId,
         image: LinuxOwnedImage,
         host_endpoint: &HostEndpoint,
-    ) -> io::Result<LinuxSharedImage> {
+    ) -> io::Result<makepad_studio_protocol::LinuxSharedImage> {
         let LinuxOwnedImage { drm_format, plane } = image;
         host_endpoint.send((id, plane.dma_buf_fd))?;
-        Ok(LinuxSharedImage {
-            drm_format,
-            plane: LinuxSharedImagePlane {
-                dma_buf_fd: AuxChannedImageFd { _private: None },
+        Ok(makepad_studio_protocol::LinuxSharedImage {
+            drm_format: makepad_studio_protocol::DrmFormat {
+                fourcc: drm_format.fourcc,
+                modifiers: drm_format.modifiers,
+            },
+            plane: makepad_studio_protocol::LinuxSharedImagePlane {
+                dma_buf_fd: makepad_studio_protocol::AuxChannedImageFd { _private: None },
                 offset: plane.offset,
                 stride: plane.stride,
             },
@@ -905,10 +598,10 @@ pub mod aux_chan {
 
     pub fn recv_image_fds_from_aux_chan(
         id: PresentableImageId,
-        image: LinuxSharedImage,
+        image: makepad_studio_protocol::LinuxSharedImage,
         client_endpoint: &ClientEndpoint,
     ) -> io::Result<LinuxOwnedImage> {
-        let LinuxSharedImage { drm_format, plane } = image;
+        let makepad_studio_protocol::LinuxSharedImage { drm_format, plane } = image;
         let dma_buf_fd = client_endpoint.recv().and_then(|(recv_id, recv_fd)| {
             if recv_id != id {
                 Err(io_error_other(format!(
@@ -920,7 +613,10 @@ pub mod aux_chan {
             }
         })?;
         Ok(LinuxOwnedImage {
-            drm_format,
+            drm_format: crate::os::linux::dma_buf::DrmFormat {
+                fourcc: drm_format.fourcc,
+                modifiers: drm_format.modifiers,
+            },
             plane: LinuxOwnedImagePlane {
                 dma_buf_fd,
                 offset: plane.offset,
@@ -956,20 +652,6 @@ pub mod aux_chan {
             Ok(HostEndpoint { _private: () })
         }
     }
-}
-
-pub use crate::studio::{AppToStudio, StudioToApp};
-
-/// After a successful client-side draw, all the host needs to know, so it can
-/// present the result, is the swapchain image used, and the sub-area within
-/// that image that was being used to draw the entire client window (with the
-/// whole allocated area rarely used, except just before needing a new swapchain).
-#[derive(Copy, Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub struct PresentableDraw {
-    pub window_id: usize,
-    pub target_id: PresentableImageId,
-    pub width: u32,
-    pub height: u32,
 }
 
 #[repr(usize)]

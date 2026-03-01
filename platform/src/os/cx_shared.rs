@@ -1,5 +1,6 @@
 use {
     crate::{
+        area::Area,
         cx::Cx,
         cx_api::CxOsApi,
         draw_pass::{CxDrawPassParent, DrawPassId},
@@ -9,11 +10,11 @@ use {
         },
         makepad_live_id::{live_id, LiveId},
         makepad_network::NetworkResponse,
-        studio::{
-            AppToStudio, EventSample, ScreenshotResponse, StudioToApp, WidgetTreeDumpResponse,
-        },
     },
-    std::cell::RefCell,
+    makepad_studio_protocol::{
+        AppToStudio, EventSample, ScreenshotResponse, StudioToApp, WidgetTreeDumpResponse,
+    },
+    std::cell::{Cell, RefCell},
     std::collections::{HashMap, HashSet},
     std::rc::Rc,
 };
@@ -231,25 +232,53 @@ impl Cx {
     ) -> bool {
         match msg {
             StudioToApp::MouseDown(e) => {
-                let event = e.into_event(window_id, pos);
+                let event = crate::event::MouseDownEvent {
+                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                    handled: Cell::new(Area::Empty),
+                };
                 self.fingers.process_tap_count(event.abs, event.time);
                 self.fingers.mouse_down(event.button, window_id);
                 self.call_event_handler(&Event::MouseDown(event));
             }
             StudioToApp::MouseMove(e) => {
-                self.call_event_handler(&Event::MouseMove(e.into_event(window_id, pos)));
+                self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
+                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                    handled: Cell::new(Area::Empty),
+                }));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
             StudioToApp::MouseUp(e) => {
-                let event = e.into_event(window_id, pos);
+                let event = crate::event::MouseUpEvent {
+                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                };
                 let button = event.button;
                 self.call_event_handler(&Event::MouseUp(event));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
             StudioToApp::Scroll(e) => {
-                self.call_event_handler(&Event::Scroll(e.into_event(window_id, pos)));
+                self.call_event_handler(&Event::Scroll(crate::event::ScrollEvent {
+                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    scroll: crate::makepad_math::dvec2(e.sx, e.sy),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    handled_x: Cell::new(false),
+                    handled_y: Cell::new(false),
+                    is_mouse: e.is_mouse,
+                    time: e.time,
+                }));
             }
             StudioToApp::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());

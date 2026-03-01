@@ -8,7 +8,6 @@ pub mod cx_3d;
 pub mod cx_draw;
 pub mod draw_list_2d;
 pub mod geometry;
-pub mod gltf_bridge;
 pub mod image_cache;
 pub mod match_event;
 pub mod nav;
@@ -49,10 +48,6 @@ pub use crate::{
     vector::{GradientStop, VectorPaint},
 };
 
-pub use crate::gltf_bridge::{
-    GltfDecodedMeshes, GltfDecodedPrimitiveObject, GltfDrawObject, GltfMaterialState,
-    GltfMeshObjects, GltfPrimitiveObject, GltfRenderer,
-};
 pub use crate::shader::draw_svg::DrawSvg;
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {

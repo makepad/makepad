@@ -17,7 +17,6 @@ use {
         os::CxOs,
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
-        studio::ScreenshotRequest,
         thread::SignalToUI,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         window::CxWindowPool,
@@ -27,6 +26,7 @@ use {
         executor::{Executor, Spawner},
     },
     makepad_network::NetworkRuntime,
+    makepad_studio_protocol::ScreenshotRequest,
     makepad_script::*,
     std::{
         any::{Any, TypeId},

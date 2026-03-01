@@ -39,7 +39,6 @@ pub mod ime;
 mod macos_menu;
 mod performance_stats;
 pub mod permission;
-pub mod studio;
 mod texture;
 mod window;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -72,6 +71,7 @@ pub use ::windows;
 
 pub use makepad_futures;
 pub use makepad_network;
+pub use makepad_studio_protocol as studio;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
 pub use makepad_script::trap;

@@ -1,5 +1,7 @@
 use crate::makepad_widgets::makepad_micro_serde::SerBin;
-use crate::makepad_widgets::makepad_platform::shared_framebuf::{HostSwapchain, SharedSwapchain};
+use crate::makepad_widgets::makepad_platform::shared_framebuf::{
+    shared_swapchain_from_host_swapchain, HostSwapchain,
+};
 use crate::makepad_widgets::*;
 use makepad_studio_protocol::backend_protocol::QueryId;
 use makepad_studio_protocol::{
@@ -340,7 +342,7 @@ impl DesktopRunView {
         #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
         if (needs_new_swapchain || force_bootstrap) && self.swapchain.is_some() {
             if let Some(swapchain) = self.swapchain.as_ref() {
-                let shared_swapchain = SharedSwapchain::from_host_swapchain(swapchain, cx);
+                let shared_swapchain = shared_swapchain_from_host_swapchain(swapchain, cx);
                 outbound.push(StudioToApp::Swapchain(shared_swapchain));
             }
         }
