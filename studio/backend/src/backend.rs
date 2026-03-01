@@ -2,7 +2,6 @@ use crate::dispatch::{StudioCore, StudioEvent};
 use crate::gateway::{start_http_gateway, GatewayHandle};
 use makepad_studio_protocol::backend_protocol::{ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope};
 use crate::virtual_fs::VirtualFs;
-use makepad_micro_serde::{DeBin, SerBin};
 use makepad_network::ToUIReceiver;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -46,7 +45,7 @@ pub struct StudioConnection {
     client_id: ClientId,
     web_socket_id: u64,
     event_tx: Sender<StudioEvent>,
-    recv_raw: ToUIReceiver<Vec<u8>>,
+    recv_typed: ToUIReceiver<StudioToUI>,
     next_counter: u64,
     _gateway: Option<GatewayHandle>,
     _core_thread: JoinHandle<()>,
@@ -61,9 +60,9 @@ impl StudioConnection {
         let query_id = QueryId::new(self.client_id, self.next_counter);
         self.next_counter = self.next_counter.wrapping_add(1);
         let envelope = UIToStudioEnvelope { query_id, msg };
-        let _ = self.event_tx.send(StudioEvent::UiBinary {
+        let _ = self.event_tx.send(StudioEvent::UiEnvelope {
             web_socket_id: self.web_socket_id,
-            data: envelope.serialize_bin(),
+            envelope,
         });
         query_id
     }
@@ -73,13 +72,11 @@ impl StudioConnection {
     }
 
     pub fn try_recv(&self) -> Option<StudioToUI> {
-        let data = self.recv_raw.try_recv().ok()?;
-        StudioToUI::deserialize_bin(&data).ok()
+        self.recv_typed.try_recv().ok()
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Option<StudioToUI> {
-        let data = self.recv_raw.receiver.recv_timeout(timeout).ok()?;
-        StudioToUI::deserialize_bin(&data).ok()
+        self.recv_typed.receiver.recv_timeout(timeout).ok()
     }
 }
 
@@ -114,18 +111,19 @@ impl StudioBackend {
 
         let web_socket_id = 1u64;
         let raw_rx = ToUIReceiver::<Vec<u8>>::default();
+        let typed_rx = ToUIReceiver::<StudioToUI>::default();
         event_tx
             .send(StudioEvent::UiConnected {
                 web_socket_id,
                 sender: raw_rx.sender(),
+                typed_sender: Some(typed_rx.sender()),
             })
             .map_err(|err| format!("failed to connect in-process ui client: {}", err))?;
 
-        let hello = raw_rx
+        let hello = typed_rx
             .receiver
             .recv_timeout(Duration::from_secs(2))
             .map_err(|err| format!("backend did not send hello: {}", err))?;
-        let hello = StudioToUI::deserialize_bin(&hello).map_err(|err| err.msg)?;
         let client_id = match hello {
             StudioToUI::Hello { client_id } => client_id,
             other => {
@@ -140,7 +138,7 @@ impl StudioBackend {
             client_id,
             web_socket_id,
             event_tx,
-            recv_raw: raw_rx,
+            recv_typed: typed_rx,
             next_counter: 0,
             _gateway: gateway,
             _core_thread: core_thread,

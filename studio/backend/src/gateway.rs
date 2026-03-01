@@ -47,6 +47,7 @@ pub fn start_http_gateway(
                         let _ = event_tx.send(StudioEvent::UiConnected {
                             web_socket_id,
                             sender: ToUISender::from_sender(response_sender),
+                            typed_sender: None,
                         });
                         continue;
                     }

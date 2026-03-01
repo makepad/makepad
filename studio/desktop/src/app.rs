@@ -132,7 +132,6 @@ impl MatchEvent for App {
                     .changed(actions)
                 {
                     self.set_mount_log_tail(cx, &active_mount, tail);
-                    self.restart_log_query_for_mount(cx, &active_mount);
                 }
                 let log_view = workspace.desktop_log_view(cx, ids!(log_view));
                 if log_view.scrolled(cx, actions) && !log_view.is_at_end(cx) {
@@ -145,7 +144,6 @@ impl MatchEvent for App {
                             .check_box(cx, ids!(log_tail_toggle))
                             .set_active(cx, false);
                         self.set_mount_log_tail(cx, &active_mount, false);
-                        self.restart_log_query_for_mount(cx, &active_mount);
                     }
                 }
                 if let Some(filter) = workspace.text_input(cx, ids!(log_filter)).changed(actions) {
