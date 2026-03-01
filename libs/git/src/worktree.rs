@@ -47,6 +47,7 @@ pub struct Status {
 pub struct StatusOptions {
     pub skip_hidden: bool,
     pub skip_target_dirs: bool,
+    pub skip_worktree_content_compare: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +137,9 @@ pub fn compute_status_with_options(
                 status: FileStatus::Deleted,
             });
         } else {
+            if options.skip_worktree_content_compare {
+                continue;
+            }
             // Quick stat check: if mtime/size match the index, skip content hashing
             let metadata = fs::metadata(&file_path)?;
             let stat_matches = metadata_mtime_sec(&metadata) == idx_entry.mtime_sec
@@ -210,6 +214,10 @@ pub fn compute_status_worktree_only_with_options(
                 path: path.to_string(),
                 status: FileStatus::Deleted,
             });
+            continue;
+        }
+
+        if options.skip_worktree_content_compare {
             continue;
         }
 
