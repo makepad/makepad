@@ -1112,6 +1112,8 @@ impl StudioCore {
 
     fn on_mount_fs_changed(&mut self, mount: String, path: PathBuf) {
         let now = Instant::now();
+        let path_is_file = path.is_file();
+        let path_is_dir = path.is_dir();
         if let Some(until) = self.mount_suppress_fs_until.get(&mount).copied() {
             if now < until {
                 return;
@@ -1122,19 +1124,28 @@ impl StudioCore {
             self.reload_mount_file_tree_broadcast(&mount);
             return;
         };
+        if self.should_ignore_fs_watch_virtual_path(&mount, &virtual_path) {
+            return;
+        }
         if virtual_path == mount {
+            if self.should_suppress_self_save_mount_root_event(&mount, now) {
+                return;
+            }
+            // Some watcher implementations only report "mount root changed".
+            // Broadcast a mount-level FileChanged so UI can refresh open tabs.
+            self.broadcast_ui_message(StudioToUI::FileChanged { path: mount.clone() });
             self.reload_mount_file_tree_broadcast(&mount);
             return;
         }
         if self.should_suppress_self_save_event(&virtual_path, now) {
             return;
         }
-        if path.is_file() && !self.should_ignore_virtual_path(&mount, &virtual_path) {
+        if path_is_file && !self.should_ignore_virtual_path(&mount, &virtual_path) {
             self.broadcast_ui_message(StudioToUI::FileChanged {
                 path: virtual_path.clone(),
             });
         }
-        if path.is_dir() {
+        if path_is_dir {
             self.reload_mount_file_tree_broadcast(&mount);
             return;
         }
@@ -1261,6 +1272,21 @@ impl StudioCore {
         });
     }
 
+    fn should_ignore_fs_watch_virtual_path(
+        &self,
+        mount: &str,
+        virtual_path: &str,
+    ) -> bool {
+        let prefix = format!("{}/", mount);
+        let Some(rest) = virtual_path.strip_prefix(&prefix) else {
+            return false;
+        };
+        rest == ".git"
+            || rest.starts_with(".git/")
+            || rest == ".makepad"
+            || rest.starts_with(".makepad/")
+    }
+
     fn should_ignore_virtual_path(&self, mount: &str, virtual_path: &str) -> bool {
         if virtual_path == mount {
             return true;
@@ -1269,10 +1295,10 @@ impl StudioCore {
         let Some(rest) = virtual_path.strip_prefix(&prefix) else {
             return true;
         };
-        rest == ".git"
-            || rest.starts_with(".git/")
-            || rest == "target"
+        rest == "target"
             || rest.starts_with("target/")
+            || rest == ".git"
+            || rest.starts_with(".git/")
             || rest == ".makepad"
             || rest.starts_with(".makepad/")
     }
@@ -1368,6 +1394,15 @@ impl StudioCore {
         self.self_save_suppress_until_by_path
             .get(virtual_path)
             .is_some_and(|until| now < *until)
+    }
+
+    fn should_suppress_self_save_mount_root_event(&mut self, mount: &str, now: Instant) -> bool {
+        self.self_save_suppress_until_by_path
+            .retain(|_, until| *until > now);
+        let mount_prefix = format!("{}/", mount);
+        self.self_save_suppress_until_by_path
+            .iter()
+            .any(|(path, until)| now < *until && path.starts_with(&mount_prefix))
     }
 
     fn on_worker_find_files_done(

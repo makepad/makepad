@@ -306,9 +306,21 @@ impl App {
         let Some(active_mount) = self.data.active_mount.clone() else {
             return;
         };
+
+        let terminal_tabs: Vec<LiveId> = self
+            .mount_state(&active_mount)
+            .map(|state| state.terminal_tab_to_path.keys().copied().collect())
+            .unwrap_or_default();
+
         if let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) {
             workspace.widget(cx, ids!(log_view)).redraw(cx);
-            workspace.widget(cx, ids!(terminal_view)).redraw(cx);
+        }
+
+        if let Some(dock) = self.mount_workspace_dock(cx, &active_mount) {
+            for tab_id in terminal_tabs {
+                dock.item(tab_id).redraw(cx);
+                dock.redraw_tab(cx, tab_id);
+            }
         }
     }
 
@@ -471,30 +483,46 @@ impl App {
     }
 
     pub(super) fn collect_mount_terminal_files(&self, mount: &str) -> Vec<String> {
-        let Some(tree) = self
+        let tree = self
             .mount_state(mount)
-            .and_then(|mount| mount.file_tree_data.as_ref())
-        else {
-            return Vec::new();
-        };
+            .and_then(|mount| mount.file_tree_data.as_ref());
         let prefix = format!("{}/.makepad/", mount);
-        let mut files: Vec<String> = tree
-            .nodes
-            .iter()
-            .filter_map(|node| {
+        let mut files: HashSet<String> = HashSet::new();
+
+        if let Some(tree) = tree {
+            for node in &tree.nodes {
                 if !matches!(node.node_type, FileNodeType::File) {
-                    return None;
+                    continue;
                 }
                 if !node.path.starts_with(&prefix) || !node.path.ends_with(".term") {
-                    return None;
+                    continue;
                 }
                 let tail = &node.path[prefix.len()..];
                 if tail.contains('/') {
-                    return None;
+                    continue;
                 }
-                Some(node.path.clone())
-            })
-            .collect();
+                files.insert(node.path.clone());
+            }
+        }
+
+        if let Some(state) = self.mount_state(mount) {
+            for path in &state.terminal_files {
+                if Self::is_terminal_virtual_path(path)
+                    && Self::mount_from_virtual_path(path.as_str()) == Some(mount)
+                {
+                    files.insert(path.clone());
+                }
+            }
+        }
+        for path in self.data.terminal_stream_by_path.keys() {
+            if Self::is_terminal_virtual_path(path)
+                && Self::mount_from_virtual_path(path.as_str()) == Some(mount)
+            {
+                files.insert(path.clone());
+            }
+        }
+
+        let mut files: Vec<String> = files.into_iter().collect();
         files.sort();
         files
     }

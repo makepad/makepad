@@ -1,5 +1,5 @@
 use crate::{
-    app_data::{AppData, FlatFileTree},
+    app_data::{is_hidden_virtual_path, AppData, FlatFileTree},
     makepad_widgets::file_tree::{FileTreeAction, GitStatusDotKind},
     makepad_widgets::*,
 };
@@ -247,9 +247,15 @@ impl Widget for DesktopFileTree {
                     if let Some(data) = scope.data.get_mut::<AppData>() {
                         if let Some(active_mount) = data.active_mount.as_deref() {
                             if let Some(mount_state) = data.mounts.get(active_mount) {
+                                let visible_paths: Vec<String> = mount_state
+                                    .file_filter_results
+                                    .iter()
+                                    .filter(|path| !is_hidden_virtual_path(path))
+                                    .cloned()
+                                    .collect();
                                 let empty_text = if (mount_state.file_filter_pending
                                     || mount_state.file_filter_query.is_some())
-                                    && mount_state.file_filter_results.is_empty()
+                                    && visible_paths.is_empty()
                                 {
                                     "Searching..."
                                 } else {
@@ -258,7 +264,7 @@ impl Widget for DesktopFileTree {
                                 self.draw_filtered_list(
                                     cx,
                                     &mut *list,
-                                    &mount_state.file_filter_results,
+                                    &visible_paths,
                                     &data.file_tree,
                                     empty_text,
                                 );

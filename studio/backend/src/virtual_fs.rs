@@ -135,12 +135,10 @@ impl VirtualFs {
         Ok(mount.path.join(rest))
     }
 
-    pub fn read_text_file(&self, path: &str) -> Result<String, VirtualFsError> {
-        if let Some(buf) = self.open_buffers.get(path) {
-            return Ok(buf.clone());
-        }
+    pub fn read_text_file(&mut self, path: &str) -> Result<String, VirtualFsError> {
         let disk_path = self.resolve_path(path)?;
         let data = fs::read_to_string(disk_path)?;
+        self.open_buffers.insert(path.to_string(), data.clone());
         Ok(data)
     }
 
