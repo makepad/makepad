@@ -166,11 +166,12 @@ impl Cx {
         let aux_chan_client_endpoint = aux_chan::ClientEndpoint::connect_from_studio_env()
             .expect("failed to acquire auxiliary channel");
 
-        Self::stdin_send_to_host(AppToStudio::ReadyToStart);
+        Self::stdin_send_to_host(AppToStudio::BeforeStartup);
 
         let mut stdin_windows: Vec<StdinWindow> = Vec::new();
 
         self.call_event_handler(&Event::Startup);
+        Self::stdin_send_to_host(AppToStudio::AfterStartup);
 
         loop {
             if !Self::has_studio_web_socket() {

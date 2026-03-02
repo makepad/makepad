@@ -22,7 +22,9 @@
 ## Request Protocol (JSON Lines)
 - `{"ListBuilds":[]}`
 - `{"LoadRunnableBuilds":{"mount":"makepad"}}`
-- `{"CargoRun":{"mount":"makepad","args":["run","-p","makepad-example-splash","--release","--","--stdin-loop","--message-format=json"],"startup_query":null,"env":null,"buildbox":null}}`
+- `{"Cargo":{"mount":"makepad","args":["check","-p","makepad-example-splash"],"env":null,"buildbox":null}}`
+- `{"Run":{"mount":"makepad","process":"makepad-example-splash","args":[]}}`
+- `{"Run":{"mount":"makepad","process":"makepad-example-splash","args":["--my-app-arg"]}}`
 - `{"StopBuild":{"build_id":38160721318170}}`
 - `{"WidgetTreeDump":{"build_id":38160721318170}}`
 - `{"WidgetQuery":{"build_id":38160721318170,"query":"id:todo_input"}}`
@@ -50,10 +52,22 @@
 
 ## Recommended Control Flow
 1. Start studio remote process once.
-2. `CargoRun` and wait for `BuildStarted`.
-3. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
-4. For text input, click field first, then send text, then return.
-5. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
+2. Prefer `Run` for app execution and wait for `BuildStarted`.
+3. Use `Cargo` only for raw cargo passthrough commands.
+4. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
+5. For text input, click field first, then send text, then return.
+6. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
+
+## `Run` Defaults
+- `Run` always builds a `cargo run -p <process>` command with `--release`.
+- `Run` always sets cargo `--message-format=json`.
+- `Run.args` are app args placed after `--`.
+- `Run.standalone` is optional; default is `false` (in-Studio runview/framebuffer mode).
+- `Run` injects app `--message-format=json` when missing.
+- `Run` injects `--stdin-loop` unless `standalone:true`.
+
+## `Cargo` Defaults
+- `Cargo` is passthrough for `args`, but injects `--message-format=json` when missing for supported subcommands (`build`, `check`, `run`, `test`, `bench`, `rustc`).
 
 ## One-Flow Input Burst
 - Send this as one stdin write (multiple JSON lines, no sleeps):

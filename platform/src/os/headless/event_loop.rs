@@ -103,8 +103,9 @@ impl Cx {
             }
         });
 
-        write_stdout_msg(&AppToStudio::ReadyToStart);
+        write_stdout_msg(&AppToStudio::BeforeStartup);
         self.call_event_handler(&Event::Startup);
+        write_stdout_msg(&AppToStudio::AfterStartup);
 
         let mut windows = Vec::<HeadlessWindowState>::new();
         let mut running = true;

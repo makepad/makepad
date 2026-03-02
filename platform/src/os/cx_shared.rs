@@ -12,7 +12,8 @@ use {
         makepad_network::NetworkResponse,
     },
     makepad_studio_protocol::{
-        AppToStudio, EventSample, ScreenshotResponse, StudioToApp, WidgetTreeDumpResponse,
+        AppToStudio, EventSample, ScreenshotResponse, StudioToApp, WidgetQueryResponse,
+        WidgetTreeDumpResponse,
     },
     std::cell::{Cell, RefCell},
     std::collections::{HashMap, HashSet},
@@ -170,6 +171,20 @@ impl Cx {
         self.try_send_studio_widget_tree_dump_responses();
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn send_studio_widget_query_response(&self, request_id: u64, query: String) {
+        let rects = if let Some(callback) = self.widget_query_callback {
+            callback(self, &query)
+        } else {
+            Vec::new()
+        };
+        Cx::send_studio_message(AppToStudio::WidgetQuery(WidgetQueryResponse {
+            request_id,
+            query,
+            rects,
+        }));
+    }
+
     fn widget_tree_dump_ready(dump: &str) -> bool {
         for line in dump.lines() {
             let mut parts = line.split_whitespace();
@@ -317,6 +332,9 @@ impl Cx {
             }
             StudioToApp::WidgetTreeDump(request) => {
                 self.send_studio_widget_tree_dump_response(request.request_id);
+            }
+            StudioToApp::WidgetQuery(request) => {
+                self.send_studio_widget_query_response(request.request_id, request.query);
             }
             StudioToApp::Kill => {
                 self.call_event_handler(&Event::Shutdown);
