@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_STUDIO_HOST_PORT: &str = "127.0.0.1:8001";
 const STUDIO_UI_PATH: &str = "/$studio_ui";
-const LEGACY_STUDIO_TERMINAL_PATH: &str = "/$studio_terminal";
 const LEGACY_STUDIO_REMOTE_PATH: &str = "/$studio_remote";
 
 struct BridgeState {
@@ -25,10 +24,10 @@ struct BridgeState {
 }
 
 fn show_studio_help() {
-    eprintln!("Studio websocket bridge (studio protocol passthrough)");
+    eprintln!("Studio websocket bridge (filtered protocol passthrough)");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  cargo makepad studio [terminal|studio_remote] [--studio=IP:PORT]");
+    eprintln!("  cargo makepad studio [studio_remote] [--studio=IP:PORT]");
     eprintln!("  cargo makepad studio run [--studio=IP:PORT] [--root=ROOT] [cargo run args]");
     eprintln!();
     eprintln!("Stdin JSON lines accepted:");
@@ -54,7 +53,7 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
     let mut index = 0usize;
     if let Some(first) = args.first() {
         match first.as_str() {
-            "terminal" | "studio_remote" => {
+            "studio_remote" => {
                 index = 1;
             }
             "run" => {
@@ -93,6 +92,8 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
                 return Err("missing value after --root".to_string());
             }
             root = Some(args[index].clone());
+        } else if !mode_run && arg == "terminal" {
+            return Err(format!("unsupported studio argument: '{arg}'"));
         } else if mode_run {
             cargo_run_args.push(arg.clone());
         } else if !arg.starts_with('-') && studio.is_none() {
@@ -177,11 +178,7 @@ fn run_studio_remote(target: (String, u16), initial_messages: Vec<UIToStudio>) -
     let mut selected_path = None;
     let mut selected_stream = None;
     let mut selected_leftover = Vec::new();
-    for path in [
-        STUDIO_UI_PATH,
-        LEGACY_STUDIO_TERMINAL_PATH,
-        LEGACY_STUDIO_REMOTE_PATH,
-    ] {
+    for path in [LEGACY_STUDIO_REMOTE_PATH, STUDIO_UI_PATH] {
         match connect_websocket(socket_addr, &host_header, path) {
             Ok((stream, leftover)) => {
                 selected_path = Some(path);
@@ -197,10 +194,9 @@ fn run_studio_remote(target: (String, u16), initial_messages: Vec<UIToStudio>) -
 
     let path = selected_path.ok_or_else(|| {
         format!(
-            "failed to connect to studio websocket at {addr} (tried {}, {}, {}): {}",
-            STUDIO_UI_PATH,
-            LEGACY_STUDIO_TERMINAL_PATH,
+            "failed to connect to studio websocket at {addr} (tried {}, {}): {}",
             LEGACY_STUDIO_REMOTE_PATH,
+            STUDIO_UI_PATH,
             last_err.unwrap_or_else(|| "unknown error".to_string())
         )
     })?;
@@ -233,7 +229,7 @@ fn run_studio_remote(target: (String, u16), initial_messages: Vec<UIToStudio>) -
         while state.client_id.is_none() {
             if Instant::now() >= hello_deadline {
                 return Err(format!(
-                    "studio did not send Hello on {} (expected backend /$studio_ui protocol)",
+                    "studio did not send Hello on {} (expected StudioToUI Hello handshake)",
                     path
                 ));
             }
@@ -467,10 +463,6 @@ fn parse_incoming_frames(
         Ok(ServerWebSocketMessage::Text(text)) => {
             if let Ok(msg) = StudioToUI::deserialize_json(text) {
                 let _ = emit_protocol_response(out, state, msg);
-            } else {
-                let _ = out.write_all(text.as_bytes());
-                let _ = out.write_all(b"\n");
-                let _ = out.flush();
             }
         }
         Ok(ServerWebSocketMessage::Binary(data)) => {
@@ -512,6 +504,10 @@ fn emit_protocol_response(
 }
 
 fn write_protocol_response(out: &mut io::Stdout, msg: StudioToUI) -> Result<(), String> {
+    if !should_emit_protocol_response(&msg) {
+        return Ok(());
+    }
+
     let json = msg.serialize_json();
     out.write_all(json.as_bytes())
         .map_err(|e| format!("failed to write response: {e}"))?;
@@ -520,6 +516,22 @@ fn write_protocol_response(out: &mut io::Stdout, msg: StudioToUI) -> Result<(), 
     out.flush()
         .map_err(|e| format!("failed to flush response: {e}"))?;
     Ok(())
+}
+
+fn should_emit_protocol_response(msg: &StudioToUI) -> bool {
+    matches!(
+        msg,
+        StudioToUI::Hello { .. }
+            | StudioToUI::Error { .. }
+            | StudioToUI::Builds { .. }
+            | StudioToUI::RunnableBuilds { .. }
+            | StudioToUI::BuildStarted { .. }
+            | StudioToUI::BuildStopped { .. }
+            | StudioToUI::Screenshot { .. }
+            | StudioToUI::WidgetTreeDump { .. }
+            | StudioToUI::WidgetQuery { .. }
+            | StudioToUI::QueryCancelled { .. }
+    )
 }
 
 fn connect_websocket(

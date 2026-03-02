@@ -136,9 +136,9 @@ fn show_help() {
     println!("Studio commands:");
     println!();
     println!(
-        "    studio [options]                              Start newline-JSON studio remote websocket"
+        "    studio [options]                              Start filtered newline-JSON studio remote websocket"
     );
-    println!("    studio terminal [options]                     Same as 'studio' (explicit mode)");
+    println!("    studio studio_remote [options]                Same as 'studio' (explicit mode)");
     println!(
         "    studio run [options] [cargo run args]         Ask Studio to start a cargo run child"
     );
