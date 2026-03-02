@@ -2,6 +2,8 @@ use makepad_studio_protocol::backend_protocol::{
     FileError, FileNode, FileNodeType, FileTreeData, GitCommitInfo, GitLog, GitStatus, SearchResult,
 };
 use makepad_git::{FileStatus as GitFileStatus, GitError, Repository as GitRepository};
+use makepad_rabin_karp::{search as rabin_karp_search, RabinKarpResult};
+use makepad_regex::{ParseOptions as RegexParseOptions, Regex};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,7 @@ pub struct VirtualFs {
 pub enum VirtualFsError {
     MissingMount(String),
     InvalidVirtualPath(String),
+    Search(String),
     Io(std::io::Error),
     Git(String),
 }
@@ -31,6 +34,7 @@ impl std::fmt::Display for VirtualFsError {
         match self {
             VirtualFsError::MissingMount(m) => write!(f, "missing mount: {}", m),
             VirtualFsError::InvalidVirtualPath(p) => write!(f, "invalid virtual path: {}", p),
+            VirtualFsError::Search(err) => write!(f, "search error: {}", err),
             VirtualFsError::Io(err) => write!(f, "io error: {}", err),
             VirtualFsError::Git(err) => write!(f, "git error: {}", err),
         }
@@ -50,6 +54,7 @@ impl From<VirtualFsError> for FileError {
         match value {
             VirtualFsError::MissingMount(v) => FileError::InvalidPath(v),
             VirtualFsError::InvalidVirtualPath(v) => FileError::InvalidPath(v),
+            VirtualFsError::Search(err) => FileError::Other(err),
             VirtualFsError::Io(err) => FileError::Io(err.to_string()),
             VirtualFsError::Git(err) => FileError::Git(err),
         }
@@ -140,6 +145,42 @@ impl VirtualFs {
         let data = fs::read_to_string(disk_path)?;
         self.open_buffers.insert(path.to_string(), data.clone());
         Ok(data)
+    }
+
+    pub fn read_text_range(
+        &mut self,
+        path: &str,
+        start_line: usize,
+        end_line: usize,
+    ) -> Result<(String, usize), VirtualFsError> {
+        if start_line == 0 || end_line == 0 || end_line < start_line {
+            return Err(VirtualFsError::InvalidVirtualPath(format!(
+                "invalid line range {}..{}",
+                start_line, end_line
+            )));
+        }
+
+        let content = self.read_text_file(path)?;
+        let total_lines = content.lines().count();
+        if total_lines == 0 {
+            return Ok((String::new(), 0));
+        }
+
+        let mut out = String::new();
+        for (index, line) in content.lines().enumerate() {
+            let line_no = index + 1;
+            if line_no < start_line {
+                continue;
+            }
+            if line_no > end_line {
+                break;
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+        }
+        Ok((out, total_lines))
     }
 
     pub fn open_text_file(&mut self, path: &str) -> Result<String, VirtualFsError> {
@@ -378,6 +419,78 @@ impl VirtualFs {
         Ok(out)
     }
 
+    pub fn find_in_files(
+        &self,
+        mount: Option<&str>,
+        pattern: &str,
+        is_regex: bool,
+        glob: Option<&str>,
+        max_results: Option<usize>,
+    ) -> Result<Vec<SearchResult>, VirtualFsError> {
+        if pattern.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let max_results = max_results.unwrap_or(10_000);
+        let mut out = Vec::new();
+        let matcher = if is_regex {
+            let options = RegexParseOptions {
+                multiline: true,
+                dot_all: true,
+                ..RegexParseOptions::default()
+            };
+            let regex = Regex::new_with_options(pattern, options)
+                .map_err(|err| VirtualFsError::Search(err.to_string()))?;
+            FindInFilesMatcher::Regex(regex)
+        } else {
+            FindInFilesMatcher::Literal(pattern.as_bytes().to_vec())
+        };
+
+        if let Some(mount) = mount {
+            let real_mount = self.resolve_mount(mount)?;
+            self.walk_files_for_content_search(
+                &real_mount,
+                mount,
+                &matcher,
+                glob,
+                &mut out,
+                max_results,
+            )?;
+            return Ok(out);
+        }
+
+        let mut mounts: Vec<_> = self.mounts.values().collect();
+        mounts.sort_by(|a, b| a.name.cmp(&b.name));
+        for mount in mounts {
+            self.walk_files_for_content_search(
+                &mount.path,
+                &mount.name,
+                &matcher,
+                glob,
+                &mut out,
+                max_results,
+            )?;
+            for (branch_name, branch_root) in scan_branch_roots(&mount.path)? {
+                let virtual_root = format!("{}/@{}", mount.name, percent_encode(&branch_name));
+                self.walk_files_for_content_search(
+                    &branch_root,
+                    &virtual_root,
+                    &matcher,
+                    glob,
+                    &mut out,
+                    max_results,
+                )?;
+                if out.len() >= max_results {
+                    return Ok(out);
+                }
+            }
+            if out.len() >= max_results {
+                return Ok(out);
+            }
+        }
+        Ok(out)
+    }
+
     fn walk_files_for_search(
         &self,
         real_root: &Path,
@@ -415,6 +528,54 @@ impl VirtualFs {
                     if out.len() >= max_results {
                         return Ok(());
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn walk_files_for_content_search(
+        &self,
+        real_root: &Path,
+        virtual_root: &str,
+        matcher: &FindInFilesMatcher,
+        glob: Option<&str>,
+        out: &mut Vec<SearchResult>,
+        max_results: usize,
+    ) -> Result<(), VirtualFsError> {
+        if !real_root.exists() {
+            return Ok(());
+        }
+        let mut stack = vec![real_root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == ".git" || name == "target" {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !path.is_file() {
+                    continue;
+                }
+                let rel = slash_rel(real_root, &path);
+                let virtual_path = format!("{}/{}", virtual_root, rel);
+                if !should_search_virtual_path(&path, &virtual_path, glob) {
+                    continue;
+                }
+                let file_content = match fs::read_to_string(&path) {
+                    Ok(content) => content,
+                    Err(_) => continue,
+                };
+                if search_file_content(&virtual_path, &file_content, matcher, out, max_results) {
+                    return Ok(());
                 }
             }
         }
@@ -504,6 +665,217 @@ impl VirtualFs {
         }
         Ok(())
     }
+}
+
+enum FindInFilesMatcher {
+    Literal(Vec<u8>),
+    Regex(Regex),
+}
+
+fn should_search_virtual_path(path: &Path, virtual_path: &str, glob: Option<&str>) -> bool {
+    if let Some(glob) = glob {
+        let glob = glob.trim();
+        if glob.is_empty() {
+            return true;
+        }
+        return glob
+            .split(',')
+            .map(str::trim)
+            .filter(|pat| !pat.is_empty())
+            .any(|pat| wildcard_match(pat, virtual_path));
+    }
+
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    ext.eq_ignore_ascii_case("rs")
+        || ext.eq_ignore_ascii_case("md")
+        || ext.eq_ignore_ascii_case("toml")
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let text = text.as_bytes();
+
+    let (mut pat_i, mut text_i) = (0usize, 0usize);
+    let mut last_star_pat_i: Option<usize> = None;
+    let mut last_star_text_i = 0usize;
+
+    while text_i < text.len() {
+        if pat_i < pattern.len() && (pattern[pat_i] == b'?' || pattern[pat_i] == text[text_i]) {
+            pat_i += 1;
+            text_i += 1;
+            continue;
+        }
+
+        if pat_i < pattern.len() && pattern[pat_i] == b'*' {
+            last_star_pat_i = Some(pat_i);
+            pat_i += 1;
+            last_star_text_i = text_i;
+            continue;
+        }
+
+        if let Some(star_pat_i) = last_star_pat_i {
+            pat_i = star_pat_i + 1;
+            last_star_text_i += 1;
+            text_i = last_star_text_i;
+            continue;
+        }
+
+        return false;
+    }
+
+    while pat_i < pattern.len() && pattern[pat_i] == b'*' {
+        pat_i += 1;
+    }
+    pat_i == pattern.len()
+}
+
+fn search_file_content(
+    virtual_path: &str,
+    content: &str,
+    matcher: &FindInFilesMatcher,
+    out: &mut Vec<SearchResult>,
+    max_results: usize,
+) -> bool {
+    match matcher {
+        FindInFilesMatcher::Literal(needle) => {
+            let mut matches = Vec::<RabinKarpResult>::new();
+            rabin_karp_search(content.as_bytes(), needle.as_slice(), &mut matches);
+            for matched in matches {
+                let line = matched.line + 1;
+                let column = matched.column_byte + 1;
+                let raw_line = line_text_for_line_start(content, matched.new_line_byte);
+                let line_text = compact_line_text(&raw_line, matched.column_byte);
+                out.push(SearchResult {
+                    path: virtual_path.to_string(),
+                    line,
+                    column,
+                    line_text,
+                });
+                if out.len() >= max_results {
+                    return true;
+                }
+            }
+            false
+        }
+        FindInFilesMatcher::Regex(regex) => {
+            let line_starts = line_starts(content.as_bytes());
+            let mut slots = vec![None; 2];
+            let mut search_from = 0usize;
+            while search_from <= content.len() {
+                slots[0] = None;
+                slots[1] = None;
+                let haystack = &content[search_from..];
+                if !regex.run(haystack, &mut slots) {
+                    break;
+                }
+
+                let start_rel = slots[0].unwrap_or(0);
+                let end_rel = slots[1].unwrap_or(0);
+                let match_start = search_from + start_rel;
+                let match_end = search_from + end_rel;
+
+                let result = search_result_for_byte_offset(content, &line_starts, virtual_path, match_start);
+                out.push(result);
+                if out.len() >= max_results {
+                    return true;
+                }
+
+                if match_end == search_from {
+                    search_from = next_char_boundary(content, match_end);
+                } else {
+                    search_from = match_end;
+                }
+            }
+            false
+        }
+    }
+}
+
+fn line_starts(bytes: &[u8]) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' && index + 1 < bytes.len() {
+            starts.push(index + 1);
+        }
+    }
+    starts
+}
+
+fn search_result_for_byte_offset(
+    content: &str,
+    line_starts: &[usize],
+    virtual_path: &str,
+    byte_offset: usize,
+) -> SearchResult {
+    let line_index = match line_starts.binary_search(&byte_offset) {
+        Ok(index) => index,
+        Err(index) => index.saturating_sub(1),
+    };
+    let line_start = line_starts.get(line_index).copied().unwrap_or(0);
+    let column_zero = byte_offset.saturating_sub(line_start);
+    let raw_line = line_text_for_line_start(content, line_start);
+    let line_text = compact_line_text(&raw_line, column_zero);
+    SearchResult {
+        path: virtual_path.to_string(),
+        line: line_index + 1,
+        column: column_zero + 1,
+        line_text,
+    }
+}
+
+fn line_text_for_line_start(content: &str, line_start: usize) -> String {
+    let bytes = content.as_bytes();
+    if line_start >= bytes.len() {
+        return String::new();
+    }
+    let mut line_end = bytes.len();
+    for (offset, byte) in bytes[line_start..].iter().enumerate() {
+        if *byte == b'\n' {
+            line_end = line_start + offset;
+            break;
+        }
+    }
+    String::from_utf8_lossy(&bytes[line_start..line_end]).to_string()
+}
+
+fn compact_line_text(line: &str, match_byte_offset: usize) -> String {
+    const MAX_LINE_TEXT_BYTES: usize = 220;
+    if line.len() <= MAX_LINE_TEXT_BYTES {
+        return line.to_string();
+    }
+
+    let mut start = match_byte_offset.saturating_sub(MAX_LINE_TEXT_BYTES / 2);
+    if start + MAX_LINE_TEXT_BYTES > line.len() {
+        start = line.len().saturating_sub(MAX_LINE_TEXT_BYTES);
+    }
+    let mut end = (start + MAX_LINE_TEXT_BYTES).min(line.len());
+
+    while start < line.len() && !line.is_char_boundary(start) {
+        start += 1;
+    }
+    while end > start && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut out = String::new();
+    if start > 0 {
+        out.push_str("...");
+    }
+    out.push_str(&line[start..end]);
+    if end < line.len() {
+        out.push_str("...");
+    }
+    out
+}
+
+fn next_char_boundary(text: &str, pos: usize) -> usize {
+    let mut p = pos.saturating_add(1);
+    while p < text.len() && !text.is_char_boundary(p) {
+        p += 1;
+    }
+    p
 }
 
 fn split_mount_and_rest(input: &str) -> Result<(&str, &str), VirtualFsError> {
@@ -669,16 +1041,4 @@ fn from_hex(b: u8) -> Option<u8> {
 fn hex(v: u8) -> char {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     HEX[v as usize] as char
-}
-
-pub(crate) fn protocol_search_results(paths: Vec<String>) -> Vec<SearchResult> {
-    paths
-        .into_iter()
-        .map(|path| SearchResult {
-            path,
-            line: 0,
-            column: 0,
-            line_text: String::new(),
-        })
-        .collect()
 }

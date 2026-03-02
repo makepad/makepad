@@ -54,6 +54,11 @@ pub enum UIToStudio {
     ReadTextFile {
         path: String,
     },
+    ReadTextRange {
+        path: String,
+        start_line: usize,
+        end_line: usize,
+    },
     FindFiles {
         mount: Option<String>,
         pattern: String,
@@ -180,6 +185,13 @@ pub enum UIToStudio {
         glob: Option<String>,
         max_results: Option<usize>,
     },
+    FindInFiles {
+        mount: Option<String>,
+        pattern: String,
+        is_regex: Option<bool>,
+        glob: Option<String>,
+        max_results: Option<usize>,
+    },
     QueryLogs {
         build_id: Option<QueryId>,
         level: Option<String>,
@@ -244,6 +256,13 @@ pub enum StudioToUI {
     },
     TextFileRead {
         path: String,
+        content: String,
+    },
+    TextFileRange {
+        path: String,
+        start_line: usize,
+        end_line: usize,
+        total_lines: usize,
         content: String,
     },
     TextFileSaved {
