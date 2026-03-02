@@ -42,6 +42,10 @@ pub const GST_SEEK_FLAG_FLUSH: c_uint = 1 << 0;
 pub const GST_SEEK_FLAG_ACCURATE: c_uint = 1 << 1;
 pub const GST_SEEK_FLAG_KEY_UNIT: c_uint = 1 << 2;
 
+// GstSeekType
+pub const GST_SEEK_TYPE_NONE: c_int = 0;
+pub const GST_SEEK_TYPE_SET: c_int = 1;
+
 // GstMessageType (bitmask)
 pub const GST_MESSAGE_ERROR: c_uint = 1 << 1;
 
@@ -90,6 +94,16 @@ pub struct LibGStreamer {
     pub gst_element_query_duration: unsafe extern "C" fn(*mut GstElement, c_int, *mut i64) -> c_int,
     pub gst_element_seek_simple:
         unsafe extern "C" fn(*mut GstElement, c_int, c_uint, i64) -> c_int,
+    pub gst_element_seek:
+        unsafe extern "C" fn(*mut GstElement, f64, c_int, c_uint, c_int, i64, c_int, i64) -> c_int,
+    pub gst_element_query: unsafe extern "C" fn(*mut GstElement, *mut c_void) -> c_int,
+    pub gst_query_new_seeking: unsafe extern "C" fn(c_int) -> *mut c_void,
+    pub gst_query_parse_seeking:
+        unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int, *mut i64, *mut i64),
+    pub gst_query_new_buffering: unsafe extern "C" fn(c_int) -> *mut c_void,
+    pub gst_query_get_n_buffering_ranges: unsafe extern "C" fn(*mut c_void) -> c_uint,
+    pub gst_query_parse_nth_buffering_range:
+        unsafe extern "C" fn(*mut c_void, c_uint, *mut i64, *mut i64) -> c_int,
     pub gst_element_get_bus: unsafe extern "C" fn(*mut GstElement) -> *mut GstBus,
     pub gst_bus_pop_filtered: unsafe extern "C" fn(*mut GstBus, c_uint) -> *mut GstMessage,
     pub gst_message_parse_error:
@@ -121,6 +135,8 @@ pub struct LibGStreamer {
         unsafe extern "C" fn(*mut GObject, *const c_char, c_int, *const c_void),
     pub g_object_set_ptr:
         unsafe extern "C" fn(*mut GObject, *const c_char, *mut c_void, *const c_void),
+    pub g_object_set_double:
+        unsafe extern "C" fn(*mut GObject, *const c_char, f64, *const c_void),
 
     // libglib-2.0.so.0
     pub g_free: unsafe extern "C" fn(*mut c_void),
@@ -142,6 +158,13 @@ impl LibGStreamer {
             gst_element_query_position: gst.get_symbol("gst_element_query_position").ok()?,
             gst_element_query_duration: gst.get_symbol("gst_element_query_duration").ok()?,
             gst_element_seek_simple: gst.get_symbol("gst_element_seek_simple").ok()?,
+            gst_element_seek: gst.get_symbol("gst_element_seek").ok()?,
+            gst_element_query: gst.get_symbol("gst_element_query").ok()?,
+            gst_query_new_seeking: gst.get_symbol("gst_query_new_seeking").ok()?,
+            gst_query_parse_seeking: gst.get_symbol("gst_query_parse_seeking").ok()?,
+            gst_query_new_buffering: gst.get_symbol("gst_query_new_buffering").ok()?,
+            gst_query_get_n_buffering_ranges: gst.get_symbol("gst_query_get_n_buffering_ranges").ok()?,
+            gst_query_parse_nth_buffering_range: gst.get_symbol("gst_query_parse_nth_buffering_range").ok()?,
             gst_element_get_bus: gst.get_symbol("gst_element_get_bus").ok()?,
             gst_bus_pop_filtered: gst.get_symbol("gst_bus_pop_filtered").ok()?,
             gst_message_parse_error: gst.get_symbol("gst_message_parse_error").ok()?,
@@ -165,6 +188,7 @@ impl LibGStreamer {
             g_object_set_string: gobject.get_symbol("g_object_set").ok()?,
             g_object_set_int: gobject.get_symbol("g_object_set").ok()?,
             g_object_set_ptr: gobject.get_symbol("g_object_set").ok()?,
+            g_object_set_double: gobject.get_symbol("g_object_set").ok()?,
 
             g_free: glib.get_symbol("g_free").ok()?,
             g_error_free: glib.get_symbol("g_error_free").ok()?,

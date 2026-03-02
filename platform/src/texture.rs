@@ -12,6 +12,14 @@ pub struct Texture(Rc<PoolId>);
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct TextureId(pub(crate) usize, u64);
 
+impl Default for TextureId {
+    /// Returns a sentinel `TextureId` that does not correspond to any allocated texture.
+    /// Used for audio-only players that carry no video output.
+    fn default() -> Self {
+        TextureId(usize::MAX, 0)
+    }
+}
+
 impl Texture {
     pub fn texture_id(&self) -> TextureId {
         TextureId(self.0.id, self.0.generation)

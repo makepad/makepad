@@ -131,6 +131,7 @@ pub enum CxOsOp {
     },
 
     PrepareVideoPlayback(LiveId, VideoSource, u32, TextureId, bool, bool),
+    PrepareAudioPlayback(LiveId, VideoSource, bool, bool),
     BeginVideoPlayback(LiveId),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
@@ -138,6 +139,8 @@ pub enum CxOsOp {
     UnmuteVideoPlayback(LiveId),
     CleanupVideoPlaybackResources(LiveId),
     SeekVideoPlayback(LiveId, u64),
+    SetVideoVolume(LiveId, f64),
+    SetVideoPlaybackRate(LiveId, f64),
     UpdateVideoSurfaceTexture(LiveId),
 
     CreateWebView {
@@ -203,6 +206,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::CancelHttpRequest { .. } => write!(f, "CancelHttpRequest"),
 
             Self::PrepareVideoPlayback(..) => write!(f, "PrepareVideoPlayback"),
+            Self::PrepareAudioPlayback(..) => write!(f, "PrepareAudioPlayback"),
             Self::BeginVideoPlayback(..) => write!(f, "BeginVideoPlayback"),
             Self::PauseVideoPlayback(..) => write!(f, "PauseVideoPlayback"),
             Self::ResumeVideoPlayback(..) => write!(f, "ResumeVideoPlayback"),
@@ -210,6 +214,8 @@ impl std::fmt::Debug for CxOsOp {
             Self::UnmuteVideoPlayback(..) => write!(f, "UnmuteVideoPlayback"),
             Self::CleanupVideoPlaybackResources(..) => write!(f, "CleanupVideoPlaybackResources"),
             Self::SeekVideoPlayback(..) => write!(f, "SeekVideoPlayback"),
+            Self::SetVideoVolume(..) => write!(f, "SetVideoVolume"),
+            Self::SetVideoPlaybackRate(..) => write!(f, "SetVideoPlaybackRate"),
             Self::UpdateVideoSurfaceTexture(..) => write!(f, "UpdateVideoSurfaceTexture"),
             Self::CreateWebView { .. } => write!(f, "CreateWebView"),
             Self::UpdateWebView { .. } => write!(f, "UpdateWebView"),
@@ -922,6 +928,31 @@ impl Cx {
             .push(CxOsOp::SeekVideoPlayback(video_id, position_ms));
     }
 
+    pub fn set_video_volume(&mut self, video_id: LiveId, volume: f64) {
+        self.platform_ops
+            .push(CxOsOp::SetVideoVolume(video_id, volume));
+    }
+
+    pub fn set_video_playback_rate(&mut self, video_id: LiveId, rate: f64) {
+        self.platform_ops
+            .push(CxOsOp::SetVideoPlaybackRate(video_id, rate));
+    }
+
+    pub fn prepare_audio_playback(
+        &mut self,
+        video_id: LiveId,
+        source: VideoSource,
+        autoplay: bool,
+        should_loop: bool,
+    ) {
+        self.platform_ops.push(CxOsOp::PrepareAudioPlayback(
+            video_id,
+            source,
+            autoplay,
+            should_loop,
+        ));
+    }
+
     pub fn println_resources(&self) {
         println!("Num textures: {}", self.textures.0.pool.len());
     }
@@ -949,6 +980,39 @@ impl Cx {
     pub fn event_id(&self) -> u64 {
         self.event_id
     }
+}
+
+/// Returns the canPlayType string for the given MIME type on the current platform.
+/// Possible values: `""` (cannot play), `"maybe"`, `"probably"`.
+pub fn can_play_type(mime: &str) -> &'static str {
+    can_play_type_impl(mime)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::linux::linux_video_playback::can_play_type(mime)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::apple::apple_video_playback::can_play_type(mime)
+}
+
+#[cfg(target_os = "windows")]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::windows::windows_video_playback::WindowsVideoPlayer::can_play_type(mime)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "windows",
+)))]
+fn can_play_type_impl(_mime: &str) -> &'static str {
+    ""
 }
 
 #[macro_export]

@@ -9,6 +9,24 @@ use {
     std::{ffi::c_void, ptr::NonNull},
 };
 
+/// Returns the canPlayType string for the given MIME type on Apple platforms (AVPlayer backend).
+pub fn can_play_type(mime: &str) -> &'static str {
+    let base = mime.split(';').next().unwrap_or("").trim();
+    match base {
+        // AVPlayer handles these natively
+        "video/mp4" | "video/x-m4v" | "video/quicktime" => "probably",
+        "video/x-matroska" => "maybe",
+        "video/webm" => "maybe", // limited: VP9 on newer Apple, AV1 on A17+
+        "audio/mp4" | "audio/x-m4a" | "audio/aac" => "probably",
+        "audio/mpeg" => "probably",
+        "audio/wav" | "audio/x-wav" => "probably",
+        "audio/flac" | "audio/x-flac" => "probably",
+        "audio/ogg" | "audio/vorbis" | "audio/opus" => "maybe",
+        _ if base.starts_with("video/") || base.starts_with("audio/") => "maybe",
+        _ => "",
+    }
+}
+
 pub struct AppleVideoPlayer {
     player: RcObjcId,
     player_item: RcObjcId,
@@ -168,8 +186,8 @@ impl AppleVideoPlayer {
     }
 
     /// Check if the player item has become ready to play.
-    /// Returns (width, height, duration_ms) if newly prepared.
-    pub fn check_prepared(&mut self) -> Option<(u32, u32, u128)> {
+    /// Returns `(width, height, duration_ms, is_seekable, video_tracks, audio_tracks)` if newly prepared.
+    pub fn check_prepared(&mut self) -> Option<(u32, u32, u128, bool, Vec<String>, Vec<String>)> {
         if self.prepare_notified {
             return None;
         }
@@ -183,18 +201,24 @@ impl AppleVideoPlayer {
 
                 // Get video dimensions from the asset's video track
                 let asset: ObjcId = msg_send![self.player_item.as_id(), asset];
-                let media_type = Self::to_nsstring("vide");
-                let tracks: ObjcId = msg_send![asset, tracksWithMediaType: media_type];
-                let _: () = msg_send![media_type, release];
+                let media_type_vid = Self::to_nsstring("vide");
+                let video_tracks_obj: ObjcId = msg_send![asset, tracksWithMediaType: media_type_vid];
+                let _: () = msg_send![media_type_vid, release];
 
-                let track_count: usize = msg_send![tracks, count];
-                let (width, height) = if track_count > 0 {
-                    let track: ObjcId = msg_send![tracks, objectAtIndex: 0usize];
+                let video_track_count: usize = msg_send![video_tracks_obj, count];
+                let (width, height) = if video_track_count > 0 {
+                    let track: ObjcId = msg_send![video_tracks_obj, objectAtIndex: 0usize];
                     let size: NSSize = msg_send![track, naturalSize];
                     (size.width as u32, size.height as u32)
                 } else {
-                    (1920, 1080) // fallback
+                    (0, 0) // audio-only
                 };
+
+                // Check for audio tracks
+                let media_type_aud = Self::to_nsstring("soun");
+                let audio_tracks_obj: ObjcId = msg_send![asset, tracksWithMediaType: media_type_aud];
+                let _: () = msg_send![media_type_aud, release];
+                let audio_track_count: usize = msg_send![audio_tracks_obj, count];
 
                 // Get duration
                 let duration: CMTime = msg_send![self.player_item.as_id(), duration];
@@ -205,11 +229,27 @@ impl AppleVideoPlayer {
                     0u128
                 };
 
+                // Query seekable ranges
+                let seekable_ranges: ObjcId = msg_send![self.player_item.as_id(), seekableTimeRanges];
+                let seekable_count: usize = msg_send![seekable_ranges, count];
+                let is_seekable = seekable_count > 0 && duration_ms > 0;
+
                 if self.autoplay {
                     self.play();
                 }
 
-                return Some((width, height, duration_ms));
+                let video_tracks = if width > 0 && height > 0 {
+                    vec!["video".to_string()]
+                } else {
+                    vec![]
+                };
+                let audio_tracks = if audio_track_count > 0 {
+                    vec!["audio".to_string()]
+                } else {
+                    vec![]
+                };
+
+                return Some((width, height, duration_ms, is_seekable, video_tracks, audio_tracks));
             }
 
             // AVPlayerItemStatusFailed = 2
@@ -229,6 +269,46 @@ impl AppleVideoPlayer {
             }
         }
         None
+    }
+
+    /// Returns seekable time ranges as (start_secs, end_secs) pairs.
+    pub fn seekable_ranges(&self) -> Vec<(f64, f64)> {
+        if !self.is_prepared { return vec![]; }
+        unsafe {
+            let ranges: ObjcId = msg_send![self.player_item.as_id(), seekableTimeRanges];
+            let count: usize = msg_send![ranges, count];
+            let mut result = Vec::with_capacity(count);
+            for i in 0..count {
+                let range_val: ObjcId = msg_send![ranges, objectAtIndex: i];
+                let range: CMTimeRange = msg_send![range_val, CMTimeRangeValue];
+                let start = CMTimeGetSeconds(range.start);
+                let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range));
+                if start.is_finite() && end.is_finite() && end > start {
+                    result.push((start, end));
+                }
+            }
+            result
+        }
+    }
+
+    /// Returns buffered (loaded) time ranges as (start_secs, end_secs) pairs.
+    pub fn buffered_ranges(&self) -> Vec<(f64, f64)> {
+        if !self.is_prepared { return vec![]; }
+        unsafe {
+            let ranges: ObjcId = msg_send![self.player_item.as_id(), loadedTimeRanges];
+            let count: usize = msg_send![ranges, count];
+            let mut result = Vec::with_capacity(count);
+            for i in 0..count {
+                let range_val: ObjcId = msg_send![ranges, objectAtIndex: i];
+                let range: CMTimeRange = msg_send![range_val, CMTimeRangeValue];
+                let start = CMTimeGetSeconds(range.start);
+                let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range));
+                if start.is_finite() && end.is_finite() && end > start {
+                    result.push((start, end));
+                }
+            }
+            result
+        }
     }
 
     /// Poll for a new video frame. Returns true if a new frame was bound to the texture.
@@ -365,6 +445,20 @@ impl AppleVideoPlayer {
     pub fn unmute(&self) {
         unsafe {
             let _: () = msg_send![self.player.as_id(), setMuted: NO];
+        }
+    }
+
+    pub fn set_volume(&self, volume: f64) {
+        unsafe {
+            let vol = volume.clamp(0.0, 1.0) as f32;
+            let _: () = msg_send![self.player.as_id(), setVolume: vol];
+        }
+    }
+
+    pub fn set_playback_rate(&self, rate: f64) {
+        unsafe {
+            let r = rate as f32;
+            let _: () = msg_send![self.player.as_id(), setRate: r];
         }
     }
 

@@ -19,6 +19,28 @@ use {
     },
 };
 
+/// Returns the canPlayType string for the given MIME type on Linux (GStreamer backend).
+/// Uses a hardcoded table covering common formats supported by typical GStreamer installs.
+pub fn can_play_type(mime: &str) -> &'static str {
+    let base = mime.split(';').next().unwrap_or("").trim();
+    match base {
+        // Containers + codecs GStreamer handles well with base/good/bad plugins
+        "video/mp4" | "video/x-m4v" => "probably",
+        "video/webm" => "probably",
+        "video/ogg" => "probably",
+        "video/x-matroska" | "video/x-msvideo" | "video/quicktime" => "maybe",
+        "audio/mp4" | "audio/x-m4a" => "probably",
+        "audio/mpeg" => "probably",
+        "audio/ogg" | "audio/vorbis" => "probably",
+        "audio/webm" => "probably",
+        "audio/wav" | "audio/x-wav" => "probably",
+        "audio/flac" | "audio/x-flac" => "probably",
+        "audio/opus" | "audio/ogg; codecs=opus" => "probably",
+        _ if base.starts_with("video/") || base.starts_with("audio/") => "maybe",
+        _ => "",
+    }
+}
+
 pub struct GStreamerVideoPlayer {
     gst: *const LibGStreamer,
     pipeline: *mut GstElement,
@@ -31,6 +53,8 @@ pub struct GStreamerVideoPlayer {
     eos_notified: bool,
     autoplay: bool,
     is_looping: bool,
+    /// Audio-only mode: no appsink, no texture updates.
+    audio_only: bool,
     video_width: u32,
     video_height: u32,
     duration_ns: i64,
@@ -53,6 +77,29 @@ impl GStreamerVideoPlayer {
         autoplay: bool,
         is_looping: bool,
     ) -> Self {
+        Self::new_impl(gst, video_id, texture_id, source, autoplay, is_looping, false)
+    }
+
+    pub fn new_audio_only(
+        gst: &LibGStreamer,
+        video_id: LiveId,
+        source: VideoSource,
+        autoplay: bool,
+        is_looping: bool,
+    ) -> Self {
+        // Use a placeholder texture_id — audio-only never uploads frames
+        Self::new_impl(gst, video_id, TextureId::default(), source, autoplay, is_looping, true)
+    }
+
+    fn new_impl(
+        gst: &LibGStreamer,
+        video_id: LiveId,
+        texture_id: TextureId,
+        source: VideoSource,
+        autoplay: bool,
+        is_looping: bool,
+        audio_only: bool,
+    ) -> Self {
         let gst_ptr = gst as *const LibGStreamer;
 
         // Resolve the URI from the source
@@ -69,7 +116,7 @@ impl GStreamerVideoPlayer {
             );
             if pipeline.is_null() {
                 error!("Failed to create GStreamer playbin for video {:?}", video_id);
-                return Self::null_player(gst_ptr, video_id, texture_id, autoplay, is_looping, temp_file_path);
+                return Self::null_player(gst_ptr, video_id, texture_id, autoplay, is_looping, audio_only, temp_file_path);
             }
 
             // Set the URI on playbin
@@ -82,41 +129,61 @@ impl GStreamerVideoPlayer {
                 std::ptr::null(),
             );
 
-            // Create appsink element
-            let appsink_type = CString::new("appsink").unwrap();
-            let appsink_name = CString::new("videosink").unwrap();
-            let video_sink = (gst.gst_element_factory_make)(
-                appsink_type.as_ptr(),
-                appsink_name.as_ptr(),
-            );
-            if video_sink.is_null() {
-                error!("Failed to create GStreamer appsink for video {:?}", video_id);
-                (gst.gst_object_unref)(pipeline as *mut c_void);
-                return Self::null_player(gst_ptr, video_id, texture_id, autoplay, is_looping, temp_file_path);
-            }
+            let video_sink = if audio_only {
+                // Audio-only: discard video with fakesink
+                let fakesink_type = CString::new("fakesink").unwrap();
+                let fakesink = (gst.gst_element_factory_make)(
+                    fakesink_type.as_ptr(),
+                    std::ptr::null(),
+                );
+                if !fakesink.is_null() {
+                    let video_sink_prop = CString::new("video-sink").unwrap();
+                    (gst.g_object_set_ptr)(
+                        pipeline,
+                        video_sink_prop.as_ptr(),
+                        fakesink as *mut c_void,
+                        std::ptr::null(),
+                    );
+                }
+                std::ptr::null_mut()
+            } else {
+                // Create appsink element
+                let appsink_type = CString::new("appsink").unwrap();
+                let appsink_name = CString::new("videosink").unwrap();
+                let video_sink = (gst.gst_element_factory_make)(
+                    appsink_type.as_ptr(),
+                    appsink_name.as_ptr(),
+                );
+                if video_sink.is_null() {
+                    error!("Failed to create GStreamer appsink for video {:?}", video_id);
+                    (gst.gst_object_unref)(pipeline as *mut c_void);
+                    return Self::null_player(gst_ptr, video_id, texture_id, autoplay, is_looping, audio_only, temp_file_path);
+                }
 
-            // Request RGBA frames — matches GL's RGBA upload format directly.
-            let caps_str = CString::new("video/x-raw,format=RGBA").unwrap();
-            let caps = (gst.gst_caps_from_string)(caps_str.as_ptr());
-            if !caps.is_null() {
-                (gst.gst_app_sink_set_caps)(video_sink, caps);
-                (gst.gst_caps_unref)(caps);
-            }
+                // Request RGBA frames — matches GL's RGBA upload format directly.
+                let caps_str = CString::new("video/x-raw,format=RGBA").unwrap();
+                let caps = (gst.gst_caps_from_string)(caps_str.as_ptr());
+                if !caps.is_null() {
+                    (gst.gst_app_sink_set_caps)(video_sink, caps);
+                    (gst.gst_caps_unref)(caps);
+                }
 
-            // Configure appsink: max-buffers=2, drop=true
-            let max_buffers_prop = CString::new("max-buffers").unwrap();
-            (gst.g_object_set_int)(video_sink, max_buffers_prop.as_ptr(), 2, std::ptr::null());
-            let drop_prop = CString::new("drop").unwrap();
-            (gst.g_object_set_int)(video_sink, drop_prop.as_ptr(), 1, std::ptr::null());
+                // Configure appsink: max-buffers=2, drop=true
+                let max_buffers_prop = CString::new("max-buffers").unwrap();
+                (gst.g_object_set_int)(video_sink, max_buffers_prop.as_ptr(), 2, std::ptr::null());
+                let drop_prop = CString::new("drop").unwrap();
+                (gst.g_object_set_int)(video_sink, drop_prop.as_ptr(), 1, std::ptr::null());
 
-            // Set appsink as playbin's video-sink property
-            let video_sink_prop = CString::new("video-sink").unwrap();
-            (gst.g_object_set_ptr)(
-                pipeline,
-                video_sink_prop.as_ptr(),
-                video_sink as *mut c_void,
-                std::ptr::null(),
-            );
+                // Set appsink as playbin's video-sink property
+                let video_sink_prop = CString::new("video-sink").unwrap();
+                (gst.g_object_set_ptr)(
+                    pipeline,
+                    video_sink_prop.as_ptr(),
+                    video_sink as *mut c_void,
+                    std::ptr::null(),
+                );
+                video_sink
+            };
 
             // Get the bus
             let bus = (gst.gst_element_get_bus)(pipeline);
@@ -139,6 +206,7 @@ impl GStreamerVideoPlayer {
             eos_notified: false,
             autoplay,
             is_looping,
+            audio_only,
             video_width: 0,
             video_height: 0,
             duration_ns: 0,
@@ -155,6 +223,7 @@ impl GStreamerVideoPlayer {
         texture_id: TextureId,
         autoplay: bool,
         is_looping: bool,
+        audio_only: bool,
         temp_file_path: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -169,6 +238,7 @@ impl GStreamerVideoPlayer {
             eos_notified: false,
             autoplay,
             is_looping,
+            audio_only,
             video_width: 0,
             video_height: 0,
             duration_ns: 0,
@@ -222,8 +292,8 @@ impl GStreamerVideoPlayer {
     }
 
     /// Check if the player has finished prerolling and is ready to play.
-    /// Returns (width, height, duration_ms) if newly prepared.
-    pub fn check_prepared(&mut self) -> Option<(u32, u32, u128)> {
+    /// Returns `(width, height, duration_ms, is_seekable, video_tracks, audio_tracks)` if newly prepared.
+    pub fn check_prepared(&mut self) -> Option<(u32, u32, u128, bool, Vec<String>, Vec<String>)> {
         if self.prepare_notified || self.pipeline.is_null() {
             return None;
         }
@@ -280,8 +350,8 @@ impl GStreamerVideoPlayer {
                 }
             }
 
-            // Fallback dimensions
-            if self.video_width == 0 || self.video_height == 0 {
+            // Fallback dimensions for video (audio-only stays 0x0)
+            if !self.audio_only && (self.video_width == 0 || self.video_height == 0) {
                 self.video_width = 1920;
                 self.video_height = 1080;
             }
@@ -297,14 +367,42 @@ impl GStreamerVideoPlayer {
                 0u128
             };
 
-            // Start playback immediately if autoplay — this transitions to PLAYING
-            // which makes try_pull_sample start returning decoded frames.
+            // Query seekable range
+            let is_seekable = self.query_is_seekable(gst);
+
+            // Start playback immediately if autoplay
             if self.autoplay {
                 (gst.gst_element_set_state)(self.pipeline, GST_STATE_PLAYING);
             }
 
-            Some((self.video_width, self.video_height, duration_ms))
+            let video_tracks = if self.audio_only || (self.video_width == 0 && self.video_height == 0) {
+                vec![]
+            } else {
+                vec!["video".to_string()]
+            };
+            let audio_tracks = vec!["audio".to_string()];
+
+            Some((self.video_width, self.video_height, duration_ms, is_seekable, video_tracks, audio_tracks))
         }
+    }
+
+    /// Query GStreamer for whether the current source is seekable.
+    unsafe fn query_is_seekable(&self, gst: &LibGStreamer) -> bool {
+        if self.pipeline.is_null() { return false; }
+        let query = (gst.gst_query_new_seeking)(GST_FORMAT_TIME);
+        if query.is_null() { return false; }
+        let res = (gst.gst_element_query)(self.pipeline, query);
+        if res == 0 {
+            (gst.gst_mini_object_unref)(query as *mut GstMiniObject);
+            return false;
+        }
+        let mut format: std::os::raw::c_int = 0;
+        let mut seekable: std::os::raw::c_int = 0;
+        let mut start: i64 = 0;
+        let mut stop: i64 = 0;
+        (gst.gst_query_parse_seeking)(query, &mut format, &mut seekable, &mut start, &mut stop);
+        (gst.gst_mini_object_unref)(query as *mut GstMiniObject);
+        seekable != 0
     }
 
     /// Pull a frame from appsink and upload it to the GL texture.
@@ -525,6 +623,84 @@ impl GStreamerVideoPlayer {
                 GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE,
                 position_ns,
             );
+        }
+    }
+
+    pub fn set_volume(&self, volume: f64) {
+        if self.pipeline.is_null() { return; }
+        unsafe {
+            // GStreamer playbin "volume" property: 0.0–10.0, 1.0 = 100%
+            let prop = CString::new("volume").unwrap();
+            ((*self.gst).g_object_set_double)(
+                self.pipeline,
+                prop.as_ptr(),
+                volume.clamp(0.0, 10.0),
+                std::ptr::null(),
+            );
+        }
+    }
+
+    pub fn set_playback_rate(&self, rate: f64) {
+        if self.pipeline.is_null() { return; }
+        let rate = if rate == 0.0 { 1.0 } else { rate };
+        unsafe {
+            let gst = &*self.gst;
+            // Query current position to seek in-place with new rate
+            let mut pos_ns: i64 = 0;
+            (gst.gst_element_query_position)(self.pipeline, GST_FORMAT_TIME, &mut pos_ns);
+            if pos_ns < 0 { pos_ns = 0; }
+            (gst.gst_element_seek)(
+                self.pipeline,
+                rate,
+                GST_FORMAT_TIME,
+                GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE,
+                GST_SEEK_TYPE_SET, pos_ns,
+                GST_SEEK_TYPE_NONE, -1,
+            );
+        }
+    }
+
+    /// Returns seekable time ranges as (start_secs, end_secs) pairs.
+    pub fn seekable_ranges(&self) -> Vec<(f64, f64)> {
+        if self.pipeline.is_null() || self.duration_ns <= 0 { return vec![]; }
+        let gst = unsafe { &*self.gst };
+        let is_seekable = unsafe { self.query_is_seekable(gst) };
+        if is_seekable {
+            let end = self.duration_ns as f64 / 1_000_000_000.0;
+            vec![(0.0, end)]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Returns buffered time ranges as (start_secs, end_secs) pairs.
+    pub fn buffered_ranges(&self) -> Vec<(f64, f64)> {
+        if self.pipeline.is_null() { return vec![]; }
+        let gst = unsafe { &*self.gst };
+        unsafe {
+            let query = (gst.gst_query_new_buffering)(GST_FORMAT_TIME);
+            if query.is_null() { return vec![]; }
+            let ok = (gst.gst_element_query)(self.pipeline, query);
+            if ok == 0 {
+                (gst.gst_mini_object_unref)(query as *mut GstMiniObject);
+                // Fallback: assume buffered to current position
+                let pos = self.current_position_ms() as f64 / 1000.0;
+                return if pos > 0.0 { vec![(0.0, pos)] } else { vec![] };
+            }
+            let n = (gst.gst_query_get_n_buffering_ranges)(query);
+            let mut ranges = Vec::with_capacity(n as usize);
+            for i in 0..n {
+                let mut start: i64 = 0;
+                let mut stop: i64 = 0;
+                let ok = (gst.gst_query_parse_nth_buffering_range)(query, i, &mut start, &mut stop);
+                if ok != 0 && start >= 0 && stop > start {
+                    let start_s = start as f64 / 1_000_000_000.0;
+                    let stop_s = stop as f64 / 1_000_000_000.0;
+                    ranges.push((start_s, stop_s));
+                }
+            }
+            (gst.gst_mini_object_unref)(query as *mut GstMiniObject);
+            ranges
         }
     }
 
