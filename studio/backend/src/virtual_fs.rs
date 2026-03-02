@@ -1,12 +1,15 @@
+use crate::worker_pool::WorkerPool;
 use makepad_studio_protocol::backend_protocol::{
     FileError, FileNode, FileNodeType, FileTreeData, GitCommitInfo, GitLog, GitStatus, SearchResult,
 };
 use makepad_git::{FileStatus as GitFileStatus, GitError, Repository as GitRepository};
-use makepad_rabin_karp::{search as rabin_karp_search, RabinKarpResult};
+use makepad_rabin_karp::{search_with_limit as rabin_karp_search, RabinKarpResult};
 use makepad_regex::{ParseOptions as RegexParseOptions, Regex};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 
 #[derive(Clone, Debug)]
 pub struct MountPoint {
@@ -64,6 +67,12 @@ impl From<VirtualFsError> for FileError {
 struct StatusContext {
     in_repo: bool,
     status_map: HashMap<String, GitStatus>,
+}
+
+struct SearchFileCandidate {
+    index: usize,
+    path: PathBuf,
+    virtual_path: String,
 }
 
 impl VirtualFs {
@@ -426,12 +435,28 @@ impl VirtualFs {
         is_regex: bool,
         glob: Option<&str>,
         max_results: Option<usize>,
+        regex_search_pool: Option<&WorkerPool>,
     ) -> Result<Vec<SearchResult>, VirtualFsError> {
         if pattern.is_empty() {
             return Ok(Vec::new());
         }
 
         let max_results = max_results.unwrap_or(10_000);
+        if is_regex {
+            if let Some(pool) = regex_search_pool {
+                let options = RegexParseOptions {
+                    multiline: true,
+                    dot_all: true,
+                    ..RegexParseOptions::default()
+                };
+                // Validate once up front so invalid regexes still return a query error.
+                Regex::new_with_options(pattern, options)
+                    .map_err(|err| VirtualFsError::Search(err.to_string()))?;
+                let files = self.collect_files_for_find_in_files(mount, glob)?;
+                return Ok(self.search_files_with_regex_pool(files, pattern, max_results, pool));
+            }
+        }
+
         let mut out = Vec::new();
         let matcher = if is_regex {
             let options = RegexParseOptions {
@@ -486,6 +511,50 @@ impl VirtualFs {
             }
             if out.len() >= max_results {
                 return Ok(out);
+            }
+        }
+        Ok(out)
+    }
+
+    fn collect_files_for_find_in_files(
+        &self,
+        mount: Option<&str>,
+        glob: Option<&str>,
+    ) -> Result<Vec<SearchFileCandidate>, VirtualFsError> {
+        let mut out = Vec::new();
+        let mut next_index = 0usize;
+
+        if let Some(mount) = mount {
+            let real_mount = self.resolve_mount(mount)?;
+            self.walk_files_for_content_search_candidates(
+                &real_mount,
+                mount,
+                glob,
+                &mut out,
+                &mut next_index,
+            )?;
+            return Ok(out);
+        }
+
+        let mut mounts: Vec<_> = self.mounts.values().collect();
+        mounts.sort_by(|a, b| a.name.cmp(&b.name));
+        for mount in mounts {
+            self.walk_files_for_content_search_candidates(
+                &mount.path,
+                &mount.name,
+                glob,
+                &mut out,
+                &mut next_index,
+            )?;
+            for (branch_name, branch_root) in scan_branch_roots(&mount.path)? {
+                let virtual_root = format!("{}/@{}", mount.name, percent_encode(&branch_name));
+                self.walk_files_for_content_search_candidates(
+                    &branch_root,
+                    &virtual_root,
+                    glob,
+                    &mut out,
+                    &mut next_index,
+                )?;
             }
         }
         Ok(out)
@@ -582,6 +651,109 @@ impl VirtualFs {
         Ok(())
     }
 
+    fn walk_files_for_content_search_candidates(
+        &self,
+        real_root: &Path,
+        virtual_root: &str,
+        glob: Option<&str>,
+        out: &mut Vec<SearchFileCandidate>,
+        next_index: &mut usize,
+    ) -> Result<(), VirtualFsError> {
+        if !real_root.exists() {
+            return Ok(());
+        }
+        let mut stack = vec![real_root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == ".git" || name == "target" {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !path.is_file() {
+                    continue;
+                }
+                let rel = slash_rel(real_root, &path);
+                let virtual_path = format!("{}/{}", virtual_root, rel);
+                if !should_search_virtual_path(&path, &virtual_path, glob) {
+                    continue;
+                }
+                out.push(SearchFileCandidate {
+                    index: *next_index,
+                    path,
+                    virtual_path,
+                });
+                *next_index += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn search_files_with_regex_pool(
+        &self,
+        files: Vec<SearchFileCandidate>,
+        regex_pattern: &str,
+        max_results: usize,
+        pool: &WorkerPool,
+    ) -> Vec<SearchResult> {
+        if max_results == 0 || files.is_empty() {
+            return Vec::new();
+        }
+
+        let total_files = files.len();
+        let mut file_results: Vec<Option<Vec<SearchResult>>> = vec![None; total_files];
+        let (result_tx, result_rx) = mpsc::channel::<(usize, Vec<SearchResult>)>();
+        let remaining = Arc::new(AtomicUsize::new(max_results));
+        let in_flight_cap = pool.worker_count().saturating_mul(2).max(1);
+
+        let mut pending = files.into_iter();
+        let mut in_flight = 0usize;
+
+        while in_flight < in_flight_cap && remaining.load(Ordering::Acquire) > 0 {
+            let Some(file) = pending.next() else {
+                break;
+            };
+            dispatch_regex_search_job(pool, file, regex_pattern, &remaining, &result_tx);
+            in_flight += 1;
+        }
+
+        while in_flight > 0 {
+            let Ok((index, results)) = result_rx.recv() else {
+                break;
+            };
+            in_flight = in_flight.saturating_sub(1);
+            if index < file_results.len() {
+                file_results[index] = Some(results);
+            }
+
+            while in_flight < in_flight_cap && remaining.load(Ordering::Acquire) > 0 {
+                let Some(file) = pending.next() else {
+                    break;
+                };
+                dispatch_regex_search_job(pool, file, regex_pattern, &remaining, &result_tx);
+                in_flight += 1;
+            }
+        }
+
+        let mut out = Vec::new();
+        for results in file_results.into_iter().flatten() {
+            out.extend(results);
+            if out.len() >= max_results {
+                out.truncate(max_results);
+                break;
+            }
+        }
+        out
+    }
+
     fn load_status_context(&self, real_root: &Path) -> StatusContext {
         let mut ctx = StatusContext {
             in_repo: false,
@@ -672,6 +844,108 @@ enum FindInFilesMatcher {
     Regex(Regex),
 }
 
+fn dispatch_regex_search_job(
+    pool: &WorkerPool,
+    file: SearchFileCandidate,
+    regex_pattern: &str,
+    remaining: &Arc<AtomicUsize>,
+    result_tx: &mpsc::Sender<(usize, Vec<SearchResult>)>,
+) {
+    let regex_pattern = regex_pattern.to_string();
+    let remaining = Arc::clone(remaining);
+    let result_tx = result_tx.clone();
+    pool.execute(move || {
+        let results = search_regex_file_with_budget(
+            &file.path,
+            &file.virtual_path,
+            &regex_pattern,
+            &remaining,
+        );
+        let _ = result_tx.send((file.index, results));
+    });
+}
+
+fn search_regex_file_with_budget(
+    path: &Path,
+    virtual_path: &str,
+    regex_pattern: &str,
+    remaining: &AtomicUsize,
+) -> Vec<SearchResult> {
+    if remaining.load(Ordering::Acquire) == 0 {
+        return Vec::new();
+    }
+    let options = RegexParseOptions {
+        multiline: true,
+        dot_all: true,
+        ..RegexParseOptions::default()
+    };
+    let Ok(regex) = Regex::new_with_options(regex_pattern, options) else {
+        return Vec::new();
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    search_regex_content_with_budget(virtual_path, &content, &regex, remaining)
+}
+
+fn search_regex_content_with_budget(
+    virtual_path: &str,
+    content: &str,
+    regex: &Regex,
+    remaining: &AtomicUsize,
+) -> Vec<SearchResult> {
+    let mut out = Vec::new();
+    let line_starts = line_starts(content.as_bytes());
+    let mut slots = vec![None; 2];
+    let mut search_from = 0usize;
+    while search_from <= content.len() {
+        slots[0] = None;
+        slots[1] = None;
+        let haystack = &content[search_from..];
+        if !regex.run(haystack, &mut slots) {
+            break;
+        }
+
+        let start_rel = slots[0].unwrap_or(0);
+        let end_rel = slots[1].unwrap_or(0);
+        let match_start = search_from + start_rel;
+        let match_end = search_from + end_rel;
+
+        if !try_claim_search_result_slot(remaining) {
+            break;
+        }
+        out.push(search_result_for_byte_offset(
+            content,
+            &line_starts,
+            virtual_path,
+            match_start,
+        ));
+
+        if match_end == search_from {
+            search_from = next_char_boundary(content, match_end);
+        } else {
+            search_from = match_end;
+        }
+    }
+    out
+}
+
+fn try_claim_search_result_slot(remaining: &AtomicUsize) -> bool {
+    let mut current = remaining.load(Ordering::Acquire);
+    while current > 0 {
+        match remaining.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(next) => current = next,
+        }
+    }
+    false
+}
+
 fn should_search_virtual_path(path: &Path, virtual_path: &str, glob: Option<&str>) -> bool {
     if let Some(glob) = glob {
         let glob = glob.trim();
@@ -741,7 +1015,11 @@ fn search_file_content(
     match matcher {
         FindInFilesMatcher::Literal(needle) => {
             let mut matches = Vec::<RabinKarpResult>::new();
-            rabin_karp_search(content.as_bytes(), needle.as_slice(), &mut matches);
+            let remaining = max_results.saturating_sub(out.len());
+            if remaining == 0 {
+                return true;
+            }
+            rabin_karp_search(content.as_bytes(), needle.as_slice(), &mut matches, remaining);
             for matched in matches {
                 let line = matched.line + 1;
                 let column = matched.column_byte + 1;
