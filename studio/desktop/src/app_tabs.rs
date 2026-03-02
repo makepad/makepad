@@ -778,21 +778,6 @@ impl App {
         self.data
             .active_log_build_by_mount
             .insert(mount.to_string(), build_id);
-        if !outside_studio {
-            if self
-                .ensure_run_tab_for_build(cx, build_id, mount, package, true)
-                .is_none()
-            {
-                self.set_status(cx, "failed to create run tab");
-                return;
-            }
-            if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
-                if let Some(dock) = self.mount_workspace_dock(cx, mount) {
-                    dock.redraw_tab(cx, tab_id);
-                }
-            }
-        }
-        let _ = self.ensure_log_tab_for_build(cx, build_id, mount, package, true);
         if outside_studio {
             self.set_status(
                 cx,

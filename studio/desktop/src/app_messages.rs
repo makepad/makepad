@@ -264,6 +264,10 @@ impl App {
                 mount,
                 package,
             } => {
+                let _ = self.ensure_mount_tab(cx, &mount);
+                if self.data.active_mount.as_deref() != Some(mount.as_str()) {
+                    self.select_mount(cx, &mount);
+                }
                 self.data
                     .profiler_running_by_build
                     .entry(build_id)
@@ -273,10 +277,11 @@ impl App {
                 self.data
                     .active_log_build_by_mount
                     .insert(mount.clone(), build_id);
-                if !self.data.log_tab_by_build.contains_key(&build_id) {
-                    let _ = self.ensure_log_tab_for_build(cx, build_id, &mount, &package, false);
-                }
-                if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
+                let run_tab_id = self.ensure_run_tab_for_build(cx, build_id, &mount, &package, true);
+                let _ = self.ensure_log_tab_for_build(cx, build_id, &mount, &package, true);
+                if let Some(tab_id) = run_tab_id
+                    .or_else(|| self.data.run_tab_by_build.get(&build_id).copied())
+                {
                     let mut window_id = None;
                     if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
                         state.mount = mount.clone();
@@ -333,8 +338,27 @@ impl App {
                 build_id,
                 window_id,
             } => {
-                let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() else {
-                    return;
+                let tab_id = if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
+                    tab_id
+                } else {
+                    let Some(mount) = self.data.build_to_mount.get(&build_id).cloned() else {
+                        return;
+                    };
+                    let package = self
+                        .data
+                        .build_package
+                        .get(&build_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("build {}", build_id.0));
+                    if self.data.active_mount.as_deref() != Some(mount.as_str()) {
+                        self.select_mount(cx, &mount);
+                    }
+                    let Some(tab_id) =
+                        self.ensure_run_tab_for_build(cx, build_id, &mount, &package, true)
+                    else {
+                        return;
+                    };
+                    tab_id
                 };
                 let mut mount = None;
                 if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
@@ -398,6 +422,29 @@ impl App {
                     dock.item(tab_id)
                         .desktop_run_view(cx, ids!(run_view))
                         .set_remote_cursor(cx, Self::parse_run_view_cursor(&cursor));
+                }
+            }
+            StudioToUI::RunViewInputViz {
+                build_id,
+                kind,
+                x,
+                y,
+            } => {
+                let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() else {
+                    return;
+                };
+                let Some(mount) = self
+                    .data
+                    .run_tab_state
+                    .get(&tab_id)
+                    .map(|state| state.mount.clone())
+                else {
+                    return;
+                };
+                if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                    dock.item(tab_id)
+                        .desktop_run_view(cx, ids!(run_view))
+                        .show_input_viz(cx, kind, x, y);
                 }
             }
             StudioToUI::QueryLogResults {

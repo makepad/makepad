@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_STUDIO_HOST_PORT: &str = "127.0.0.1:8001";
 const STUDIO_UI_PATH: &str = "/$studio_ui";
-const LEGACY_STUDIO_REMOTE_PATH: &str = "/$studio_remote";
 
 struct BridgeState {
     client_id: Option<ClientId>,
@@ -27,8 +26,7 @@ fn show_studio_help() {
     eprintln!("Studio websocket bridge (filtered protocol passthrough)");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  cargo makepad studio [studio_remote] [--studio=IP:PORT]");
-    eprintln!("  cargo makepad studio run [--studio=IP:PORT] [--root=ROOT] [cargo run args]");
+    eprintln!("  cargo makepad studio [--studio=IP:PORT]");
     eprintln!();
     eprintln!("Stdin JSON lines accepted:");
     eprintln!("  UIToStudio");
@@ -38,9 +36,6 @@ fn show_studio_help() {
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  echo '{{\"ListBuilds\":[]}}' | cargo makepad studio");
-    eprintln!(
-        "  echo '{{\"CargoRun\":{{\"mount\":\"makepad\",\"args\":[\"run\",\"-p\",\"makepad-example-splash\"],\"startup_query\":null,\"env\":null,\"buildbox\":null}}}}' | cargo makepad studio"
-    );
 }
 
 pub fn handle_studio(args: &[String]) -> Result<(), String> {
@@ -49,25 +44,8 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let mut mode_run = false;
     let mut index = 0usize;
-    if let Some(first) = args.first() {
-        match first.as_str() {
-            "studio_remote" => {
-                index = 1;
-            }
-            "run" => {
-                mode_run = true;
-                index = 1;
-            }
-            _ => {}
-        }
-    }
-
     let mut studio: Option<String> = None;
-    let mut root: Option<String> = None;
-    let mut cargo_run_args = Vec::new();
-
     while index < args.len() {
         let arg = &args[index];
         if let Some(v) = arg.strip_prefix("--studio=") {
@@ -78,26 +56,6 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
                 return Err("missing value after --studio".to_string());
             }
             studio = Some(args[index].clone());
-        } else if let Some(v) = arg.strip_prefix("--root=") {
-            if !mode_run {
-                return Err("--root is only supported with 'studio run'".to_string());
-            }
-            root = Some(v.to_string());
-        } else if arg == "--root" {
-            if !mode_run {
-                return Err("--root is only supported with 'studio run'".to_string());
-            }
-            index += 1;
-            if index >= args.len() {
-                return Err("missing value after --root".to_string());
-            }
-            root = Some(args[index].clone());
-        } else if !mode_run && arg == "terminal" {
-            return Err(format!("unsupported studio argument: '{arg}'"));
-        } else if mode_run {
-            cargo_run_args.push(arg.clone());
-        } else if !arg.starts_with('-') && studio.is_none() {
-            studio = Some(arg.to_string());
         } else {
             return Err(format!("unsupported studio argument: '{arg}'"));
         }
@@ -105,32 +63,7 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
     }
 
     let target = resolve_host_port(studio)?;
-
-    let mut initial_messages = Vec::new();
-    if mode_run {
-        let mount = root.unwrap_or_else(default_mount_from_env);
-        initial_messages.push(UIToStudio::CargoRun {
-            mount,
-            args: normalize_cargo_run_args(cargo_run_args)?,
-            startup_query: None,
-            env: None,
-            buildbox: None,
-        });
-    }
-
-    run_studio_remote(target, initial_messages)
-}
-
-fn default_mount_from_env() -> String {
-    env::var("STUDIO_ROOT")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            env::var("STUDIO_MOUNT")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
-        .unwrap_or_else(|| "makepad".to_string())
+    run_studio_remote(target)
 }
 
 fn resolve_host_port(studio_override: Option<String>) -> Result<(String, u16), String> {
@@ -163,7 +96,7 @@ fn resolve_host_port(studio_override: Option<String>) -> Result<(String, u16), S
     Ok((host.to_string(), port))
 }
 
-fn run_studio_remote(target: (String, u16), initial_messages: Vec<UIToStudio>) -> Result<(), String> {
+fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
     let (host, port) = target;
     let host_header = format!("{host}:{port}");
     let addr = host_header.clone();
@@ -174,98 +107,30 @@ fn run_studio_remote(target: (String, u16), initial_messages: Vec<UIToStudio>) -
         .next()
         .ok_or_else(|| format!("failed to resolve studio address {addr}"))?;
 
-    let mut last_err = None;
-    let mut selected_path = None;
-    let mut selected_stream = None;
-    let mut selected_leftover = Vec::new();
-    for path in [LEGACY_STUDIO_REMOTE_PATH, STUDIO_UI_PATH] {
-        match connect_websocket(socket_addr, &host_header, path) {
-            Ok((stream, leftover)) => {
-                selected_path = Some(path);
-                selected_stream = Some(stream);
-                selected_leftover = leftover;
-                break;
-            }
-            Err(err) => {
-                last_err = Some(format!("{path}: {err}"));
-            }
-        }
-    }
-
-    let path = selected_path.ok_or_else(|| {
-        format!(
-            "failed to connect to studio websocket at {addr} (tried {}, {}): {}",
-            LEGACY_STUDIO_REMOTE_PATH,
-            STUDIO_UI_PATH,
-            last_err.unwrap_or_else(|| "unknown error".to_string())
-        )
-    })?;
-    let stream = selected_stream.expect("selected stream exists");
+    let (stream, leftover) = connect_websocket(socket_addr, &host_header, STUDIO_UI_PATH)
+        .map_err(|err| format!("failed to connect to studio websocket at {addr}{STUDIO_UI_PATH}: {err}"))?;
     let mut read_stream = stream
         .try_clone()
         .map_err(|e| format!("failed to clone websocket stream for reading: {e}"))?;
     let write_stream = Arc::new(Mutex::new(stream));
 
+    let mut out = io::stdout();
     let mut state = BridgeState {
         client_id: None,
         next_counter: 0,
     };
-
-    let mut out = io::stdout();
     let mut web_socket = WebSocketParser::new();
-    if !selected_leftover.is_empty() {
+    if !leftover.is_empty() {
         parse_incoming_frames(
             &write_stream,
             &mut web_socket,
             &mut state,
             &mut out,
-            &selected_leftover,
+            &leftover,
         )?;
     }
 
-    if state.client_id.is_none() {
-        let hello_deadline = Instant::now() + Duration::from_secs(3);
-        let mut recv_buf = [0u8; 65535];
-        while state.client_id.is_none() {
-            if Instant::now() >= hello_deadline {
-                return Err(format!(
-                    "studio did not send Hello on {} (expected StudioToUI Hello handshake)",
-                    path
-                ));
-            }
-            let read = match read_stream.read(&mut recv_buf) {
-                Ok(0) => return Err("connection closed before Hello".to_string()),
-                Ok(n) => n,
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::WouldBlock
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    continue;
-                }
-                Err(err) => {
-                    return Err(format!(
-                        "studio websocket read error while waiting for Hello: {err}"
-                    ))
-                }
-            };
-            parse_incoming_frames(
-                &write_stream,
-                &mut web_socket,
-                &mut state,
-                &mut out,
-                &recv_buf[..read],
-            )?;
-        }
-    }
-
-    let mut pending_envelopes = VecDeque::new();
-    for msg in initial_messages {
-        pending_envelopes.push_back(make_envelope(&mut state, msg)?);
-    }
+    let mut pending_requests = VecDeque::new();
 
     let (stdin_tx, stdin_rx) = mpsc::channel::<Option<String>>();
     thread::spawn(move || {
@@ -303,12 +168,7 @@ fn run_studio_remote(target: (String, u16), initial_messages: Vec<UIToStudio>) -
             match line {
                 Some(line) => {
                     match UIToStudio::deserialize_json(&line) {
-                        Ok(msg) => match make_envelope(&mut state, msg) {
-                            Ok(envelope) => pending_envelopes.push_back(envelope),
-                            Err(err) => {
-                                eprintln!("studio remote: {err}");
-                            }
-                        },
+                        Ok(msg) => pending_requests.push_back(msg),
                         Err(err) => {
                             eprintln!("studio remote: invalid request json (expected UIToStudio): {err:?}");
                         }
@@ -324,8 +184,17 @@ fn run_studio_remote(target: (String, u16), initial_messages: Vec<UIToStudio>) -
             }
         }
 
-        while let Some(envelope) = pending_envelopes.pop_front() {
-            send_ui_envelope(&write_stream, envelope)?;
+        while state.client_id.is_some() {
+            let Some(msg) = pending_requests.pop_front() else {
+                break;
+            };
+            match make_envelope(&mut state, msg) {
+                Ok(envelope) => send_ui_envelope(&write_stream, envelope)?,
+                Err(err) => {
+                    eprintln!("studio remote: {err}");
+                    break;
+                }
+            }
         }
 
         let read = match read_stream.read(&mut recv_buf) {
@@ -357,7 +226,7 @@ fn run_studio_remote(target: (String, u16), initial_messages: Vec<UIToStudio>) -
         }
 
         if stdin_closed
-            && pending_envelopes.is_empty()
+            && pending_requests.is_empty()
             && shutdown_deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
             break;
@@ -382,68 +251,6 @@ fn send_ui_envelope(
 ) -> Result<(), String> {
     send_binary_frame(write_stream, &envelope.serialize_bin())
         .map_err(|e| format!("failed to send studio request: {e}"))
-}
-
-fn has_message_format_json(args: &[String]) -> bool {
-    let mut iter = args.iter().peekable();
-    while let Some(arg) = iter.next() {
-        if arg == "--message-format=json" {
-            return true;
-        }
-        if arg == "--message-format" && iter.peek().is_some_and(|next| next.as_str() == "json") {
-            return true;
-        }
-        if arg
-            .strip_prefix("--message-format=")
-            .is_some_and(|value| value == "json")
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn normalize_cargo_run_args(raw_args: Vec<String>) -> Result<Vec<String>, String> {
-    let mut args = raw_args;
-    if args.first().is_some_and(|arg| arg == "run") {
-        args.remove(0);
-    }
-    if args
-        .first()
-        .is_some_and(|arg| !arg.starts_with('-') && arg != "--")
-    {
-        return Err(
-            "CargoRun expects args after `cargo run` (do not pass a different cargo subcommand)"
-                .to_string(),
-        );
-    }
-
-    let split_index = args
-        .iter()
-        .position(|arg| arg == "--")
-        .unwrap_or(args.len());
-    let mut cargo_args = args[..split_index].to_vec();
-    let mut app_args = if split_index < args.len() {
-        args[(split_index + 1)..].to_vec()
-    } else {
-        Vec::new()
-    };
-
-    if !has_message_format_json(&cargo_args) {
-        cargo_args.push("--message-format=json".to_string());
-    }
-    if !has_message_format_json(&app_args) {
-        app_args.insert(0, "--message-format=json".to_string());
-    }
-    if !app_args.iter().any(|arg| arg == "--stdin-loop") {
-        app_args.insert(0, "--stdin-loop".to_string());
-    }
-
-    let mut final_args = vec!["run".to_string()];
-    final_args.extend(cargo_args);
-    final_args.push("--".to_string());
-    final_args.extend(app_args);
-    Ok(final_args)
 }
 
 fn parse_incoming_frames(
