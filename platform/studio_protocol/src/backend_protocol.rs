@@ -10,17 +10,22 @@ pub struct ClientId(pub u16);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerBin, DeBin, SerJson, DeJson)]
 pub struct QueryId(pub u64);
 
+pub const QUERY_ID_CLIENT_LANES: u16 = 16;
+
 impl QueryId {
     pub fn new(client_id: ClientId, counter: u64) -> Self {
-        QueryId((client_id.0 as u64) << 48 | (counter & 0x0000_FFFF_FFFF_FFFF))
+        let lanes = QUERY_ID_CLIENT_LANES as u64;
+        let lane = (client_id.0 as u64) % lanes;
+        QueryId(counter.wrapping_mul(lanes).wrapping_add(lane))
     }
 
     pub fn client_id(self) -> ClientId {
-        ClientId((self.0 >> 48) as u16)
+        let lanes = QUERY_ID_CLIENT_LANES as u64;
+        ClientId((self.0 % lanes) as u16)
     }
 
     pub fn counter(self) -> u64 {
-        self.0 & 0x0000_FFFF_FFFF_FFFF
+        self.0 / (QUERY_ID_CLIENT_LANES as u64)
     }
 }
 
@@ -87,10 +92,17 @@ pub enum UIToStudio {
     LoadRunnableBuilds {
         mount: String,
     },
-    CargoRun {
+    Cargo {
         mount: String,
         args: Vec<String>,
-        startup_query: Option<String>,
+        env: Option<HashMap<String, String>>,
+        buildbox: Option<String>,
+    },
+    Run {
+        mount: String,
+        process: String,
+        args: Vec<String>,
+        standalone: Option<bool>,
         env: Option<HashMap<String, String>>,
         buildbox: Option<String>,
     },
@@ -267,6 +279,9 @@ pub enum StudioToUI {
     BuildStopped {
         build_id: QueryId,
         exit_code: Option<i32>,
+    },
+    AppStarted {
+        build_id: QueryId,
     },
 
     // === App Interaction ===

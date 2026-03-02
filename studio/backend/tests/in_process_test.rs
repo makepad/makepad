@@ -67,10 +67,9 @@ fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
         _ => unreachable!(),
     }
 
-    let build_id = connection.send(UIToStudio::CargoRun {
+    let _run_query_id = connection.send(UIToStudio::Cargo {
         mount: "repo".to_string(),
         args: vec!["--version".to_string()],
-        startup_query: None,
         env: None,
         buildbox: None,
     });
@@ -78,9 +77,12 @@ fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
     let started = wait_for_message(
         &connection,
         Duration::from_secs(5),
-        |msg| matches!(msg, StudioToUI::BuildStarted { build_id: id, .. } if *id == build_id),
+        |msg| matches!(msg, StudioToUI::BuildStarted { mount, .. } if mount == "repo"),
     );
-    assert!(started.is_some(), "did not receive BuildStarted");
+    let build_id = match started {
+        Some(StudioToUI::BuildStarted { build_id, .. }) => build_id,
+        _ => panic!("did not receive BuildStarted"),
+    };
 
     let stopped = wait_for_message(
         &connection,

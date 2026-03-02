@@ -197,9 +197,11 @@ pub enum AppToStudio {
     SwapSelection(SwapSelection),
     Screenshot(ScreenshotResponse),
     WidgetTreeDump(WidgetTreeDumpResponse),
+    WidgetQuery(WidgetQueryResponse),
     TweakHits(TweakHitsResponse),
+    BeforeStartup,
     CreateWindow { window_id: usize, kind_id: usize },
-    ReadyToStart,
+    AfterStartup,
     RequestAnimationFrame,
     SetCursor(MouseCursor),
     SetClipboard(String),
@@ -229,6 +231,19 @@ pub struct WidgetTreeDumpResponse {
 }
 
 #[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
+pub struct WidgetQueryRequest {
+    pub request_id: u64,
+    pub query: String,
+}
+
+#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
+pub struct WidgetQueryResponse {
+    pub request_id: u64,
+    pub query: String,
+    pub rects: Vec<String>,
+}
+
+#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
 pub struct TweakHitsResponse {
     pub window_id: usize,
     pub dpi_factor: f64,
@@ -254,6 +269,7 @@ pub struct ScreenshotRequest {
 pub enum StudioToApp {
     Screenshot(ScreenshotRequest),
     WidgetTreeDump(WidgetTreeDumpRequest),
+    WidgetQuery(WidgetQueryRequest),
     KeepAlive,
     LiveChange {
         file_name: String,

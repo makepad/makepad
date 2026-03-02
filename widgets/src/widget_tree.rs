@@ -1220,6 +1220,135 @@ impl WidgetTree {
         self.inner.borrow().root_uid
     }
 
+    pub fn query_rects(&self, cx: &Cx, query: &str) -> Vec<String> {
+        self.sync_dirty();
+        let inner = self.inner.borrow();
+
+        let query = query.trim();
+        let (mode, needle) = if let Some(v) = query.strip_prefix("id:") {
+            ("id", v.trim())
+        } else if let Some(v) = query.strip_prefix("type:") {
+            ("type", v.trim())
+        } else {
+            ("any", query)
+        };
+
+        fn matches_query(mode: &str, needle: &str, id: &str, ty: &str) -> bool {
+            match mode {
+                "id" => id == needle,
+                "type" => ty == needle,
+                _ => needle.is_empty() || id.contains(needle) || ty.contains(needle),
+            }
+        }
+
+        fn live_id_token(id: LiveId) -> String {
+            if id == LiveId(0) {
+                return "-".to_string();
+            }
+            id.as_string(|name| {
+                if let Some(name) = name {
+                    name.to_string()
+                } else {
+                    format!("{:x}", id.0)
+                }
+            })
+        }
+
+        let mut widget_type_names: HashMap<TypeId, LiveId> = HashMap::new();
+        {
+            let widget_registry = cx.components.get::<WidgetRegistry>();
+            for (type_id, (info, _)) in widget_registry.map.iter() {
+                widget_type_names.insert(*type_id, info.name);
+            }
+        }
+
+        let mut rects = Vec::new();
+        let mut dump_index = 0usize;
+        for (index, node) in inner.nodes.iter().enumerate() {
+            let id = inner.names[index];
+            let ty = node
+                .widget
+                .widget_type_id()
+                .and_then(|type_id| widget_type_names.get(&type_id).copied())
+                .unwrap_or(LiveId(0));
+
+            let id_token = live_id_token(id);
+            let ty_token = live_id_token(ty);
+            let area = node.widget.area();
+            if area.is_valid(cx) {
+                let rect = area.rect(cx);
+                let x = rect.pos.x.round() as i64;
+                let y = rect.pos.y.round() as i64;
+                let w = rect.size.x.round() as i64;
+                let h = rect.size.y.round() as i64;
+                if w > 0
+                    && h > 0
+                    && matches_query(mode, needle, &id_token, &ty_token)
+                {
+                    rects.push(format!(
+                        "{} {} {} {} {} {} {}",
+                        dump_index, id_token, ty_token, x, y, w, h
+                    ));
+                    if rects.len() >= 256 {
+                        break;
+                    }
+                }
+                dump_index += 1;
+            }
+
+            if let Some(dock) = node.widget.borrow::<Dock>() {
+                let dock_dump = dock.compact_dump(cx);
+                for tabs in dock_dump.tabs {
+                    let x = tabs.rect.pos.x.round() as i64;
+                    let y = tabs.rect.pos.y.round() as i64;
+                    let w = tabs.rect.size.x.round() as i64;
+                    let h = tabs.rect.size.y.round() as i64;
+                    if w <= 0 || h <= 0 {
+                        continue;
+                    }
+                    let id_token = live_id_token(tabs.tabs_id);
+                    let ty_token = "DockTabs";
+                    if matches_query(mode, needle, &id_token, ty_token) {
+                        rects.push(format!(
+                            "DB {} {} {} {} {} {}",
+                            id_token, ty_token, x, y, w, h
+                        ));
+                        if rects.len() >= 256 {
+                            break;
+                        }
+                    }
+                }
+                if rects.len() >= 256 {
+                    break;
+                }
+                for tab in dock_dump.tab_headers {
+                    let x = tab.rect.pos.x.round() as i64;
+                    let y = tab.rect.pos.y.round() as i64;
+                    let w = tab.rect.size.x.round() as i64;
+                    let h = tab.rect.size.y.round() as i64;
+                    if w <= 0 || h <= 0 {
+                        continue;
+                    }
+                    let id_token = live_id_token(tab.tab_id);
+                    let ty_token = "DockTab";
+                    if matches_query(mode, needle, &id_token, ty_token) {
+                        rects.push(format!(
+                            "DT {} {} {} {} {} {}",
+                            id_token, ty_token, x, y, w, h
+                        ));
+                        if rects.len() >= 256 {
+                            break;
+                        }
+                    }
+                }
+                if rects.len() >= 256 {
+                    break;
+                }
+            }
+        }
+        rects
+    }
+
     pub fn compact_dump(&self, cx: &Cx) -> String {
         self.sync_dirty();
         let inner = self.inner.borrow();
@@ -1243,39 +1372,6 @@ impl WidgetTree {
                     format!("{:x}", id.0)
                 }
             })
-        }
-
-        fn has_live_id_name(id: LiveId) -> bool {
-            if id == LiveId(0) {
-                return false;
-            }
-            id.as_string(|name| name.is_some())
-        }
-
-        fn is_action_type(ty: &str) -> bool {
-            matches!(
-                ty,
-                "Button"
-                    | "DesktopButton"
-                    | "CheckBox"
-                    | "RadioButton"
-                    | "DropDown"
-                    | "Slider"
-                    | "TextInput"
-                    | "LinkLabel"
-                    | "FoldButton"
-                    | "FoldHeader"
-                    | "Tab"
-                    | "Tabs"
-                    | "TabBar"
-                    | "Dock"
-                    | "PortalList"
-                    | "Window"
-                    | "WindowMenu"
-                    | "SlidePanel"
-                    | "ScrollBar"
-                    | "Scrollbar"
-            )
         }
 
         fn compact_text_token(input: &str) -> String {
@@ -1356,12 +1452,8 @@ impl WidgetTree {
                 let w = rect.size.x.round() as i64;
                 let h = rect.size.y.round() as i64;
                 if w > 0 && h > 0 {
-                    let id_named = has_live_id_name(id);
                     let id_token = live_id_token(id);
                     let ty_token = live_id_token(ty);
-                    if !id_named && !is_action_type(&ty_token) {
-                        continue;
-                    }
                     dump_nodes.push(DumpNode {
                         index,
                         parent: node.parent,
@@ -1526,10 +1618,15 @@ fn compact_widget_tree_dump_callback(cx: &Cx) -> String {
     cx.widget_tree().compact_dump(cx)
 }
 
+fn widget_query_callback(cx: &Cx, query: &str) -> Vec<String> {
+    cx.widget_tree().query_rects(cx, query)
+}
+
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     let state = get_or_init_state(cx);
     state.tree.set_root_widget(ui.clone());
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
+    cx.widget_query_callback = Some(widget_query_callback);
     let root_uid = ui.widget_uid();
     update_global_ui_handle(cx, root_uid);
 }
