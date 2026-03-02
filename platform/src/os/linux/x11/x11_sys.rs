@@ -40,6 +40,7 @@ pub const DestroyNotify: u32 = 17;
 pub const ConfigureNotify: u32 = 22;
 pub const EnterNotify: u32 = 7;
 pub const LeaveNotify: u32 = 8;
+pub const FocusOut: u32 = 10;
 pub const MotionNotify: u32 = 6;
 pub const AllocNone: u32 = 0;
 pub const InputOutput: u32 = 1;
@@ -53,6 +54,10 @@ pub const Expose: u32 = 12;
 pub const CWBorderPixel: u32 = 8;
 pub const CWColormap: u32 = 8192;
 pub const CWEventMask: u32 = 2048;
+pub const CWOverrideRedirect: u32 = 512;
+
+pub const GrabModeAsync: i32 = 1;
+pub const GrabSuccess: i32 = 0;
 
 pub const SubstructureNotifyMask: u32 = 524288;
 pub const SubstructureRedirectMask: u32 = 1048576;
@@ -78,7 +83,6 @@ pub const XLookupKeySym: i32 = 3;
 pub const XLookupBoth: i32 = 4;
 
 pub const FocusIn: u32 = 9;
-pub const FocusOut: u32 = 10;
 
 pub const QueuedAlready: i32 = 0;
 pub const QueuedAfterReading: i32 = 1;
@@ -353,6 +357,7 @@ extern "C" {
         -> c_int;
 
     pub fn XMapWindow(arg1: *mut Display, arg2: Window) -> c_int;
+    pub fn XMapRaised(arg1: *mut Display, arg2: Window) -> c_int;
 
     pub fn XMoveWindow(display: *mut Display, window: Window, x: c_int, y: c_int);
 
@@ -417,7 +422,30 @@ extern "C" {
 
     pub fn XSetInputFocus(arg1: *mut Display, arg2: Window, arg3: c_int, arg4: Time) -> c_int;
 
+    pub fn XGrabPointer(
+        arg1: *mut Display,
+        arg2: Window,
+        arg3: c_int,
+        arg4: c_uint,
+        arg5: c_int,
+        arg6: c_int,
+        arg7: Window,
+        arg8: Cursor,
+        arg9: Time,
+    ) -> c_int;
+
     pub fn XUngrabPointer(arg1: *mut Display, arg2: Time) -> c_int;
+
+    pub fn XGrabKeyboard(
+        arg1: *mut Display,
+        arg2: Window,
+        arg3: c_int,
+        arg4: c_int,
+        arg5: c_int,
+        arg6: Time,
+    ) -> c_int;
+
+    pub fn XUngrabKeyboard(arg1: *mut Display, arg2: Time) -> c_int;
 
     pub fn XSetSelectionOwner(arg1: *mut Display, arg2: Atom, arg3: Window, arg4: Time) -> c_int;
 
