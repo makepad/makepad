@@ -120,6 +120,95 @@ fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn terminal_large_paste_keeps_session_alive() {
+    const LARGE_PASTE_BYTES: usize = 512 * 1024;
+    const MARKER: &[u8] = b"__paste_ok__";
+    const MARKER_TAIL_KEEP: usize = 512;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let path = "repo/.makepad/large_paste.term".to_string();
+    let _ = connection.send(UIToStudio::TerminalOpen {
+        path: path.clone(),
+        cols: 120,
+        rows: 30,
+        env: std::collections::HashMap::new(),
+    });
+    let opened = wait_for_message(
+        &connection,
+        Duration::from_secs(4),
+        |msg| matches!(msg, StudioToUI::TerminalOpened { path: p, .. } if p == &path),
+    );
+    assert!(opened.is_some(), "did not receive TerminalOpened");
+
+    // Disable echo so the large paste does not flood output, stream a large paste
+    // into cat, send Ctrl-D, then run a marker command.
+    let mut input = b"stty -echo\ncat > /dev/null\n".to_vec();
+    input.extend(std::iter::repeat_n(b'x', LARGE_PASTE_BYTES));
+    input.push(b'\n');
+    // Interrupt cat so we reliably return to shell even if EOF semantics vary.
+    input.push(0x03);
+    input.extend_from_slice(b"stty echo\necho __paste_ok__\n");
+    let _ = connection.send(UIToStudio::TerminalInput {
+        path: path.clone(),
+        data: input,
+    });
+
+    let mut saw_marker = false;
+    let mut tail = Vec::<u8>::new();
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while Instant::now() < deadline {
+        let Some(msg) = connection.recv_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
+        match msg {
+            StudioToUI::TerminalExited {
+                path: exited_path, ..
+            } if exited_path == path => {
+                panic!("terminal exited during large paste");
+            }
+            StudioToUI::Error { message }
+                if message.contains("unknown terminal") && message.contains(&path) =>
+            {
+                panic!("terminal lost after large paste: {}", message);
+            }
+            StudioToUI::TerminalOutput {
+                path: output_path,
+                data,
+            } if output_path == path => {
+                tail.extend_from_slice(&data);
+                if tail.windows(MARKER.len()).any(|window| window == MARKER) {
+                    saw_marker = true;
+                    break;
+                }
+                if tail.len() > 8192 {
+                    let drain_to = tail.len().saturating_sub(MARKER_TAIL_KEEP);
+                    if drain_to > 0 {
+                        tail.drain(0..drain_to);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let _ = connection.send(UIToStudio::TerminalClose { path });
+    assert!(saw_marker, "did not observe terminal response after large paste");
+}
+
 #[test]
 fn file_tree_keeps_hidden_directories_for_backend() {
     let dir = tempfile::tempdir().unwrap();

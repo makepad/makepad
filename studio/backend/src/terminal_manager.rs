@@ -1,6 +1,6 @@
 use crate::dispatch::StudioEvent;
 use makepad_terminal_core::Pty;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
@@ -15,6 +15,11 @@ enum TerminalControl {
 struct RunningTerminal {
     mount: String,
     control_tx: Sender<TerminalControl>,
+}
+
+struct PendingInput {
+    data: Vec<u8>,
+    offset: usize,
 }
 
 #[derive(Default)]
@@ -103,13 +108,13 @@ fn run_terminal_loop(
     event_tx: Sender<StudioEvent>,
 ) {
     let mut should_close = false;
+    let mut pending_input = VecDeque::<PendingInput>::new();
     loop {
         loop {
             match control_rx.try_recv() {
                 Ok(TerminalControl::Input(data)) => {
-                    if pty.write(&data).is_err() {
-                        should_close = true;
-                        break;
+                    if !data.is_empty() {
+                        pending_input.push_back(PendingInput { data, offset: 0 });
                     }
                 }
                 Ok(TerminalControl::Resize { cols, rows }) => {
@@ -131,6 +136,32 @@ fn run_terminal_loop(
             break;
         }
 
+        while let Some(front) = pending_input.front_mut() {
+            let remaining = &front.data[front.offset..];
+            match pty.try_write(remaining) {
+                Ok(0) => {
+                    should_close = true;
+                    break;
+                }
+                Ok(n) => {
+                    front.offset += n;
+                    if front.offset >= front.data.len() {
+                        pending_input.pop_front();
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    should_close = true;
+                    break;
+                }
+            }
+        }
+
+        if should_close {
+            break;
+        }
+
         if let Some(data) = pty.try_read() {
             if !data.is_empty() {
                 let _ = event_tx.send(StudioEvent::TerminalOutput {
@@ -140,7 +171,11 @@ fn run_terminal_loop(
             }
         }
 
-        thread::sleep(Duration::from_millis(16));
+        if pending_input.is_empty() {
+            thread::sleep(Duration::from_millis(16));
+        } else {
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     let _ = event_tx.send(StudioEvent::TerminalExited { path, exit_code: 0 });
