@@ -64,6 +64,10 @@ pub enum UIToStudio {
     Unmount {
         name: String,
     },
+    ObserveMount {
+        mount: String,
+        primary: Option<bool>,
+    },
     CreateBranch {
         mount: String,
         name: String,
@@ -314,6 +318,12 @@ pub enum StudioToUI {
         build_id: QueryId,
         cursor: String,
     },
+    RunViewInputViz {
+        build_id: QueryId,
+        kind: RunViewInputVizKind,
+        x: Option<f64>,
+        y: Option<f64>,
+    },
     RunViewDestroyed {
         build_id: QueryId,
         window_id: usize,
@@ -399,6 +409,14 @@ pub enum StudioToUI {
     Error {
         message: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SerBin, DeBin, SerJson, DeJson)]
+pub enum RunViewInputVizKind {
+    ClickDown,
+    ClickUp,
+    TypeText,
+    Return,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]

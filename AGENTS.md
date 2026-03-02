@@ -5,12 +5,6 @@
 - Command-line-only tasks (builds, tests, linting, file ops, grep/ripgrep, etc.) can be run directly in the shell.
 - Prefer studio remote control for any workflow that needs screenshots, widget queries, clicks, typing, or runtime UI inspection.
 
-## Task Title Marker
-- For every new task, emit a short one/two-word title marker in the terminal output stream.
-- Marker format: `{{Your Title}}` (no closing tag).
-- Keep the title to one or two words.
-- This marker is parsed by Studio from terminal output and used to set the terminal tab title.
-
 ## Assumptions
 - Studio is started manually by the user.
 - Studio remote target is `ip:port` only (no `http://`, no `ws://`), normally `127.0.0.1:8001`.

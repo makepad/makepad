@@ -9,6 +9,10 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+// In-process UI uses a dedicated transport connection id that never overlaps
+// with websocket ids from the gateway (which start from 1).
+const IN_PROCESS_UI_CONNECTION_ID: u64 = 0;
+
 #[derive(Clone, Debug)]
 pub struct MountConfig {
     pub name: String,
@@ -43,7 +47,7 @@ pub struct BackendHandle {
 
 pub struct StudioConnection {
     client_id: ClientId,
-    connection_id: u64,
+    web_socket_id: u64,
     event_tx: Sender<StudioEvent>,
     recv_typed: ToUIReceiver<StudioToUI>,
     next_counter: u64,
@@ -61,7 +65,7 @@ impl StudioConnection {
         self.next_counter = self.next_counter.wrapping_add(1);
         let envelope = UIToStudioEnvelope { query_id, msg };
         let _ = self.event_tx.send(StudioEvent::UiEnvelope {
-            connection_id: self.connection_id,
+            web_socket_id: self.web_socket_id,
             envelope,
         });
         query_id
@@ -109,12 +113,12 @@ impl StudioBackend {
             core.run();
         });
 
-        let connection_id = 1u64;
+        let web_socket_id = IN_PROCESS_UI_CONNECTION_ID;
         let raw_rx = ToUIReceiver::<Vec<u8>>::default();
         let typed_rx = ToUIReceiver::<StudioToUI>::default();
         event_tx
             .send(StudioEvent::UiConnected {
-                connection_id,
+                web_socket_id,
                 sender: raw_rx.sender(),
                 typed_sender: Some(typed_rx.sender()),
             })
@@ -136,7 +140,7 @@ impl StudioBackend {
 
         Ok(StudioConnection {
             client_id,
-            connection_id,
+            web_socket_id,
             event_tx,
             recv_typed: typed_rx,
             next_counter: 0,
