@@ -156,8 +156,6 @@ pub struct DesktopRunView {
     #[rust]
     debug_present_ok_count: usize,
     #[rust]
-    debug_present_miss_count: usize,
-    #[rust]
     remote_cursor: MouseCursor,
     #[rust]
     is_hovered: bool,
@@ -205,7 +203,6 @@ impl DesktopRunView {
         self.last_swapchain_with_completed_draws = None;
         self.pending_draw = None;
         self.debug_present_ok_count = 0;
-        self.debug_present_miss_count = 0;
         self.ai_viz_kind = None;
         self.ai_viz_frames_left = 0;
         self.ai_viz_total_frames = 0;
@@ -252,6 +249,12 @@ impl DesktopRunView {
         presentable_draw: PresentableDraw,
         swapchain: &HostSwapchain,
     ) -> bool {
+        // Ignore zero-sized frames from early startup races (before geom is applied).
+        // Treating these as "presented" can stall bootstrap until a manual resize.
+        if presentable_draw.width == 0 || presentable_draw.height == 0 {
+            return false;
+        }
+
         let Some(drawn) = swapchain.get_image(presentable_draw.target_id) else {
             return false;
         };
@@ -409,7 +412,6 @@ impl DesktopRunView {
             self.debug_present_ok_count += 1;
         } else {
             self.pending_draw = Some(presentable_draw);
-            self.debug_present_miss_count += 1;
         }
     }
 
@@ -423,6 +425,29 @@ impl DesktopRunView {
                 window_id: window_id.unwrap_or(0),
             }),
         );
+    }
+
+    pub fn rebootstrap_after_app_ready(
+        &mut self,
+        cx: &mut Cx,
+        build_id: QueryId,
+        window_id: usize,
+    ) {
+        let target = RunTarget {
+            build_id,
+            window_id,
+        };
+        if self.current_target != Some(target) {
+            self.set_target(cx, Some(target));
+            return;
+        }
+        // Re-send bootstrap against the current swapchain instead of reallocating.
+        // This keeps shared-memory resources stable while still re-triggering
+        // WindowGeomChange/Swapchain after app-side readiness.
+        self.last_rect = Rect::default();
+        self.debug_present_ok_count = 0;
+        self.redraw_countdown = self.redraw_countdown.max(240);
+        self.redraw(cx);
     }
 
     pub fn clear_run_target(&mut self, cx: &mut Cx) {
@@ -744,6 +769,12 @@ impl DesktopRunViewRef {
     ) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.show_input_viz(cx, kind, x, y);
+        }
+    }
+
+    pub fn rebootstrap_after_app_ready(&self, cx: &mut Cx, build_id: QueryId, window_id: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.rebootstrap_after_app_ready(cx, build_id, window_id);
         }
     }
 }

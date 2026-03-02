@@ -573,6 +573,9 @@ impl ScriptHeap {
                 obj.tag.clear_mark();
             }
         }
+        if obj_removed != 0 {
+            self.bump_object_reuse_epoch();
+        }
         for i in 1..self.arrays.len() {
             let array = &mut self.arrays.get_at_mut(i);
             // Skip static arrays - they are permanent
@@ -801,6 +804,7 @@ impl ScriptHeap {
             let new_gen = self.objects.generation(ptr.index as usize);
             self.objects_free
                 .push(ScriptObject::new(ptr.index, new_gen));
+            self.bump_object_reuse_epoch();
         }
     }
 }

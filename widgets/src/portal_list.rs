@@ -1050,7 +1050,19 @@ impl PortalList {
                             .iter()
                             .position(|v| v.template == template)
                         {
-                            self.reusable_items.remove(pos).widget
+                            let widget_ref = self.reusable_items.remove(pos).widget;
+                            // Reused items must be reset to template defaults, otherwise
+                            // stale instance/animator state (e.g. selected) can leak to a new entry.
+                            cx.with_vm(|vm| {
+                                let mut widget_ref = widget_ref.clone();
+                                widget_ref.script_apply(
+                                    vm,
+                                    &Apply::Reload,
+                                    &mut Scope::empty(),
+                                    template_value,
+                                );
+                            });
+                            widget_ref
                         } else {
                             cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value))
                         };
@@ -1072,7 +1084,19 @@ impl PortalList {
                         .iter()
                         .position(|v| v.template == template)
                     {
-                        self.reusable_items.remove(pos).widget
+                        let widget_ref = self.reusable_items.remove(pos).widget;
+                        // Reused items must be reset to template defaults, otherwise
+                        // stale instance/animator state (e.g. selected) can leak to a new entry.
+                        cx.with_vm(|vm| {
+                            let mut widget_ref = widget_ref.clone();
+                            widget_ref.script_apply(
+                                vm,
+                                &Apply::Reload,
+                                &mut Scope::empty(),
+                                template_value,
+                            );
+                        });
+                        widget_ref
                     } else {
                         cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value))
                     };

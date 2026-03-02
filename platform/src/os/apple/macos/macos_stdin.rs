@@ -64,7 +64,10 @@ impl Cx {
             match self.passes[draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
-                    if let Some(swapchain) = &mut stdin_windows[window_id.id()].swapchain {
+                    let Some(stdin_window) = stdin_windows.get_mut(window_id.id()) else {
+                        continue;
+                    };
+                    if let Some(swapchain) = &mut stdin_window.swapchain {
                         let [current_image] = &swapchain.presentable_images;
                         if let Some(texture) = &current_image.texture {
                             let window = &mut self.windows[window_id];
@@ -245,6 +248,9 @@ impl Cx {
                 }
             }
             StudioToApp::Swapchain(new_swapchain) => {
+                while new_swapchain.window_id >= stdin_windows.len() {
+                    stdin_windows.push(StdinWindow::new());
+                }
                 stdin_windows[new_swapchain.window_id].swapchain = Some(LocalSwapchain {
                     alloc_width: new_swapchain.alloc_width,
                     alloc_height: new_swapchain.alloc_height,
