@@ -184,13 +184,16 @@ impl Cx {
                     let mut players = std::mem::take(&mut self.os.video_players);
                     let mut video_events = Vec::new();
                     for (_id, player) in players.iter_mut() {
-                        if let Some((width, height, duration)) = player.check_prepared() {
+                        if let Some((width, height, duration, is_seekable, video_tracks, audio_tracks)) = player.check_prepared() {
                             video_events.push(Event::VideoPlaybackPrepared(
                                 VideoPlaybackPreparedEvent {
                                     video_id: player.video_id,
                                     video_width: width,
                                     video_height: height,
                                     duration,
+                                    is_seekable,
+                                    video_tracks,
+                                    audio_tracks,
                                 },
                             ));
                         }
@@ -676,6 +679,19 @@ impl Cx {
                     if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.seek_to(position_ms);
                     }
+                }
+                CxOsOp::SetVideoVolume(video_id, volume) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.set_volume(volume);
+                    }
+                }
+                CxOsOp::SetVideoPlaybackRate(video_id, rate) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.set_playback_rate(rate);
+                    }
+                }
+                CxOsOp::PrepareAudioPlayback(_, _, _, _) => {
+                    // TODO: implement Windows audio-only playback
                 }
                 CxOsOp::UpdateVideoSurfaceTexture(_) => {
                     // Android-only, no-op on Windows

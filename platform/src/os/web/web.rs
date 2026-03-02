@@ -323,6 +323,9 @@ impl Cx {
                             video_width: tw.video_width,
                             video_height: tw.video_height,
                             duration,
+                            is_seekable: duration > 0,
+                            video_tracks: if tw.video_width > 0 && tw.video_height > 0 { vec!["video".to_string()] } else { vec![] },
+                            audio_tracks: vec!["audio".to_string()],
                         },
                     ));
                 }
@@ -680,6 +683,10 @@ impl Cx {
                 CxOsOp::UpdateVideoSurfaceTexture(_) => {
                     // On web, texture updates happen in the JS animation frame loop
                 }
+                // New ops — no-op on Web (not yet wired to JS)
+                CxOsOp::SetVideoVolume(_, _) => {}
+                CxOsOp::SetVideoPlaybackRate(_, _) => {}
+                CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*

@@ -266,6 +266,43 @@ pub struct CMTime {
     pub epoch: CMTimeEpoch,
 }
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct CMTimeRange {
+    pub start: CMTime,
+    pub duration: CMTime,
+}
+
+/// Returns the end time of a `CMTimeRange` (start + duration).
+#[inline]
+pub fn CMTimeRangeGetEnd(range: CMTimeRange) -> CMTime {
+    // Inline the semantics of CMTimeAdd — sufficient for non-edge-case values.
+    // Both CMTime values have the same timescale coming from AVFoundation.
+    if range.start.timescale == range.duration.timescale {
+        CMTime {
+            value: range.start.value + range.duration.value,
+            timescale: range.start.timescale,
+            flags: range.start.flags,
+            epoch: range.start.epoch,
+        }
+    } else {
+        // Different timescales: convert to common timescale (start's)
+        let ts = range.start.timescale as i64;
+        let dur_ts = range.duration.timescale as i64;
+        let converted = if dur_ts != 0 {
+            range.duration.value * ts / dur_ts
+        } else {
+            0
+        };
+        CMTime {
+            value: range.start.value + converted,
+            timescale: range.start.timescale,
+            flags: range.start.flags,
+            epoch: range.start.epoch,
+        }
+    }
+}
+
 pub type CMSampleBufferRef = *mut c_void;
 
 #[repr(C)]

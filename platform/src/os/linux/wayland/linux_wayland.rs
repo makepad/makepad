@@ -22,8 +22,9 @@ use crate::{
     egl_sys,
     event::{
         video_playback::{
-            VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
-            VideoPlaybackResourcesReleasedEvent, VideoTextureUpdatedEvent,
+            VideoBufferedRangesEvent, VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
+            VideoPlaybackResourcesReleasedEvent, VideoSeekableRangesEvent,
+            VideoTextureUpdatedEvent,
         },
         PopupDismissReason, PopupDismissedEvent,
     },
@@ -337,15 +338,30 @@ impl WaylandCx {
                         let mut players = std::mem::take(&mut cx.os.video_players);
                         let mut video_events = Vec::new();
                         for (_video_id, player) in players.iter_mut() {
-                            if let Some((width, height, duration)) = player.check_prepared() {
+                            if let Some((width, height, duration, is_seekable, video_tracks, audio_tracks)) = player.check_prepared() {
                                 video_events.push(Event::VideoPlaybackPrepared(
                                     VideoPlaybackPreparedEvent {
                                         video_id: player.video_id,
                                         video_width: width,
                                         video_height: height,
                                         duration,
+                                        is_seekable,
+                                        video_tracks,
+                                        audio_tracks,
                                     },
                                 ));
+                                let seekable = player.seekable_ranges();
+                                if !seekable.is_empty() {
+                                    video_events.push(Event::VideoSeekableRanges(
+                                        VideoSeekableRangesEvent { video_id: player.video_id, ranges: seekable },
+                                    ));
+                                }
+                                let buffered = player.buffered_ranges();
+                                if !buffered.is_empty() {
+                                    video_events.push(Event::VideoBufferedRanges(
+                                        VideoBufferedRangesEvent { video_id: player.video_id, ranges: buffered },
+                                    ));
+                                }
                             }
                             if player.poll_frame(unsafe { &*gl }, &mut cx.textures) {
                                 video_events.push(Event::VideoTextureUpdated(
@@ -731,6 +747,53 @@ impl WaylandCx {
                 CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
                     if let Some(player) = cx.os.video_players.get(&video_id) {
                         player.seek_to(position_ms);
+                    }
+                }
+                CxOsOp::SetVideoVolume(video_id, volume) => {
+                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                        player.set_volume(volume);
+                    }
+                }
+                CxOsOp::SetVideoPlaybackRate(video_id, rate) => {
+                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                        player.set_playback_rate(rate);
+                    }
+                }
+                CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
+                    if cx.os.video_players.get(&video_id).map_or(false, |p| p.is_active()) {
+                        continue;
+                    }
+                    if cx.os.gstreamer.is_none() {
+                        match LibGStreamer::try_load() {
+                            Some(gst) => {
+                                gst.init();
+                                cx.os.gstreamer = Some(gst);
+                            }
+                            None => {
+                                cx.call_event_handler(&Event::VideoDecodingError(
+                                    VideoDecodingErrorEvent {
+                                        video_id,
+                                        error: "GStreamer not available".to_string(),
+                                    },
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(ref gst) = cx.os.gstreamer {
+                        let player = GStreamerVideoPlayer::new_audio_only(
+                            gst, video_id, source, autoplay, should_loop,
+                        );
+                        if player.is_active() {
+                            cx.os.video_players.insert(video_id, player);
+                        } else {
+                            cx.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent {
+                                    video_id,
+                                    error: "Failed to initialize audio-only GStreamer pipeline".to_string(),
+                                },
+                            ));
+                        }
                     }
                 }
                 CxOsOp::UpdateVideoSurfaceTexture(_) => {

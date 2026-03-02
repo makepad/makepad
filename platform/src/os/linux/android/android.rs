@@ -574,6 +574,9 @@ impl Cx {
                     video_width,
                     video_height,
                     duration,
+                    is_seekable: duration > 0,
+                    video_tracks: if video_width > 0 && video_height > 0 { vec!["video".to_string()] } else { vec![] },
+                    audio_tracks: vec!["audio".to_string()],
                 });
 
                 self.os
@@ -1455,6 +1458,15 @@ impl Cx {
                     let env = attach_jni_env();
                     android_jni::to_java_seek_video_playback(env, video_id, position_ms);
                 },
+                // New ops — no-op on Android (not yet implemented)
+                CxOsOp::SetVideoVolume(_, _) => {}
+                CxOsOp::SetVideoPlaybackRate(_, _) => {}
+                CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
+                    // Android: treat same as video but without a texture
+                    use crate::texture::TextureId;
+                    let _ = (video_id, source, autoplay, should_loop);
+                    // TODO: implement via MediaPlayer when needed
+                }
                 CxOsOp::XrStartPresenting => {
                     self.os.ignore_destroy = true;
                     if !self.os.in_xr_mode {

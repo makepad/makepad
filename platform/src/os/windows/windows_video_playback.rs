@@ -672,7 +672,7 @@ impl WindowsVideoPlayer {
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
-    pub fn check_prepared(&mut self) -> Option<(u32, u32, u128)> {
+    pub fn check_prepared(&mut self) -> Option<(u32, u32, u128, bool, Vec<String>, Vec<String>)> {
         if self.prepare_notified {
             return None;
         }
@@ -701,7 +701,30 @@ impl WindowsVideoPlayer {
             if self.autoplay {
                 let _ = (vtbl.Play)(self.engine);
             }
-            Some((w, h, duration_ms))
+            let is_seekable = duration_ms > 0;
+            let video_tracks = if w > 0 && h > 0 { vec!["video".to_string()] } else { vec![] };
+            let audio_tracks = vec!["audio".to_string()];
+            Some((w, h, duration_ms, is_seekable, video_tracks, audio_tracks))
+        }
+    }
+
+    pub fn set_volume(&self, _volume: f64) {
+        // TODO: implement via IMFMediaEngine::SetVolume
+    }
+
+    pub fn set_playback_rate(&self, _rate: f64) {
+        // TODO: implement via IMFMediaEngine::SetPlaybackRate
+    }
+
+    /// Returns the canPlayType string for the given MIME type on Windows (Media Foundation).
+    pub fn can_play_type(mime: &str) -> &'static str {
+        let base = mime.split(';').next().unwrap_or("").trim();
+        match base {
+            "video/mp4" | "video/x-m4v" => "probably",
+            "audio/mp4" | "audio/x-m4a" | "audio/mpeg" | "audio/wav" | "audio/x-wav" => "probably",
+            "video/webm" | "audio/webm" => "maybe",
+            _ if base.starts_with("video/") || base.starts_with("audio/") => "maybe",
+            _ => "",
         }
     }
 

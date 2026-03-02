@@ -5,7 +5,8 @@ use {
         draw_pass::CxDrawPassParent,
         event::{
             video_playback::{
-                VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
+                VideoBufferedRangesEvent, VideoPlaybackPreparedEvent,
+                VideoPlaybackResourcesReleasedEvent, VideoSeekableRangesEvent,
                 VideoTextureUpdatedEvent,
             },
             Event, GameInputEventChannel, MouseButton, MouseUpEvent, WindowGeom,
@@ -468,15 +469,30 @@ impl Cx {
                 if has_video_players {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
-                        if let Some((width, height, duration)) = player.check_prepared() {
+                        if let Some((width, height, duration, is_seekable, video_tracks, audio_tracks)) = player.check_prepared() {
                             video_events.push(Event::VideoPlaybackPrepared(
                                 VideoPlaybackPreparedEvent {
                                     video_id: player.video_id,
                                     video_width: width,
                                     video_height: height,
                                     duration,
+                                    is_seekable,
+                                    video_tracks,
+                                    audio_tracks,
                                 },
                             ));
+                            let seekable = player.seekable_ranges();
+                            if !seekable.is_empty() {
+                                video_events.push(Event::VideoSeekableRanges(
+                                    VideoSeekableRangesEvent { video_id: player.video_id, ranges: seekable },
+                                ));
+                            }
+                            let buffered = player.buffered_ranges();
+                            if !buffered.is_empty() {
+                                video_events.push(Event::VideoBufferedRanges(
+                                    VideoBufferedRangesEvent { video_id: player.video_id, ranges: buffered },
+                                ));
+                            }
                         }
                         if player.poll_frame(&mut self.textures) {
                             video_events.push(Event::VideoTextureUpdated(
@@ -880,6 +896,29 @@ impl Cx {
                     if let Some(player) = self.os.video_players.get(&video_id) {
                         player.seek_to(position_ms);
                     }
+                }
+                CxOsOp::SetVideoVolume(video_id, volume) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.set_volume(volume);
+                    }
+                }
+                CxOsOp::SetVideoPlaybackRate(video_id, rate) => {
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.set_playback_rate(rate);
+                    }
+                }
+                CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
+                    use crate::texture::TextureId;
+                    let player = AppleVideoPlayer::new(
+                        metal_cx.device,
+                        video_id,
+                        TextureId::default(),
+                        source,
+                        autoplay,
+                        should_loop,
+                    );
+                    self.os.video_players.insert(video_id, player);
+                    self.ensure_timer0_started();
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
