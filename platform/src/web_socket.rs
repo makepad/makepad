@@ -176,7 +176,8 @@ impl Cx {
                         }
                         if matches!(
                             &message,
-                            AppToStudio::ReadyToStart
+                            AppToStudio::BeforeStartup
+                                | AppToStudio::AfterStartup
                                 | AppToStudio::RequestAnimationFrame
                                 | AppToStudio::DrawCompleteAndFlip(_)
                         ) {

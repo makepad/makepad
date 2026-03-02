@@ -19,8 +19,7 @@ use makepad_network::ToUISender;
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent, KeyModifiers,
     LogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseUp, ScreenshotRequest,
-    StudioToApp, StudioToAppVec, TextInputEvent,
-    WidgetTreeDumpRequest,
+    StudioToApp, StudioToAppVec, TextInputEvent, WidgetQueryRequest, WidgetTreeDumpRequest,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -134,6 +133,7 @@ const FS_DELTA_FLUSH_DELAY: Duration = Duration::from_millis(32);
 const FS_DELTA_RELOAD_THRESHOLD: usize = 768;
 const FS_SELF_SAVE_SUPPRESS: Duration = Duration::from_millis(300);
 const IN_PROCESS_UI_WEB_SOCKET_ID: u64 = 0;
+const MAX_UI_CLIENT_IDS: usize = backend_proto::QUERY_ID_CLIENT_LANES as usize;
 
 struct UiClient {
     sender: ToUISender<Vec<u8>>,
@@ -167,7 +167,8 @@ pub struct StudioCore {
     event_tx: Sender<StudioEvent>,
     pub vfs: VirtualFs,
     studio_addr: Option<String>,
-    next_client_id: u16,
+    client_id_in_use: [bool; MAX_UI_CLIENT_IDS],
+    next_build_id: u64,
     client_by_web_socket: HashMap<u64, ClientId>,
     ui_clients: HashMap<ClientId, UiClient>,
     app_sockets: HashMap<u64, AppSocket>,
@@ -212,7 +213,8 @@ impl StudioCore {
             event_tx,
             vfs,
             studio_addr,
-            next_client_id: 1,
+            client_id_in_use: [false; MAX_UI_CLIENT_IDS],
+            next_build_id: 1,
             client_by_web_socket: HashMap::new(),
             ui_clients: HashMap::new(),
             app_sockets: HashMap::new(),
@@ -262,6 +264,7 @@ impl StudioCore {
             StudioEvent::UiDisconnected { web_socket_id } => {
                 if let Some(client_id) = self.client_by_web_socket.remove(&web_socket_id) {
                     self.ui_clients.remove(&client_id);
+                    self.release_client_id(client_id);
                     self.live_log_queries
                         .retain(|_, query| query.client_id != client_id);
                     self.live_profiler_queries
@@ -382,13 +385,39 @@ impl StudioCore {
         true
     }
 
-    fn alloc_client_id(&mut self) -> Option<ClientId> {
-        if self.next_client_id == u16::MAX {
-            return None;
+    fn reserve_client_id(&mut self, client_id: ClientId) -> bool {
+        let Some(slot) = self.client_id_in_use.get_mut(client_id.0 as usize) else {
+            return false;
+        };
+        if *slot {
+            return false;
         }
-        let id = ClientId(self.next_client_id);
-        self.next_client_id = self.next_client_id.wrapping_add(1);
-        Some(id)
+        *slot = true;
+        true
+    }
+
+    fn alloc_client_id(&mut self) -> Option<ClientId> {
+        for client_id in 1..(MAX_UI_CLIENT_IDS as u16) {
+            if self.reserve_client_id(ClientId(client_id)) {
+                return Some(ClientId(client_id));
+            }
+        }
+        None
+    }
+
+    fn release_client_id(&mut self, client_id: ClientId) {
+        if let Some(slot) = self.client_id_in_use.get_mut(client_id.0 as usize) {
+            *slot = false;
+        }
+    }
+
+    fn alloc_build_id(&mut self) -> QueryId {
+        let build_id = QueryId(self.next_build_id);
+        self.next_build_id = self.next_build_id.wrapping_add(1);
+        if self.next_build_id == 0 {
+            self.next_build_id = 1;
+        }
+        build_id
     }
 
     fn on_ui_connected(
@@ -399,7 +428,7 @@ impl StudioCore {
     ) {
         let client_id = if web_socket_id == IN_PROCESS_UI_WEB_SOCKET_ID {
             let reserved = ClientId(0);
-            if self.ui_clients.contains_key(&reserved) {
+            if !self.reserve_client_id(reserved) {
                 if let Some(typed_sender) = &typed_sender {
                     let _ = typed_sender.send(StudioToUI::Error {
                         message: "client id 0 already in use".to_string(),
@@ -417,24 +446,15 @@ impl StudioCore {
             reserved
         } else {
             let Some(client_id) = self.alloc_client_id() else {
-                if let Some(typed_sender) = &typed_sender {
-                    let _ = typed_sender.send(StudioToUI::Error {
-                        message: "client id space exhausted".to_string(),
-                    });
-                } else {
-                    let _ = sender.send(
-                        StudioToUI::Error {
-                            message: "client id space exhausted".to_string(),
-                        }
-                        .serialize_bin(),
-                    );
-                }
+                // Refuse the websocket when we cannot allocate a client lane.
+                let _ = sender.send(Vec::new());
                 return;
             };
             client_id
         };
 
         if self.ui_clients.contains_key(&client_id) {
+            self.release_client_id(client_id);
             if let Some(typed_sender) = &typed_sender {
                 let _ = typed_sender.send(StudioToUI::Error {
                     message: format!("client id {:?} already in use", client_id),
@@ -447,6 +467,7 @@ impl StudioCore {
                     .serialize_bin(),
                 );
             }
+            let _ = sender.send(Vec::new());
             return;
         }
 
@@ -727,19 +748,20 @@ impl StudioCore {
                     Err(err) => self.send_ui_error(client_id, err),
                 }
             }
-            UIToStudio::CargoRun {
+            UIToStudio::Cargo {
                 mount,
-                args,
-                startup_query: _,
+                args: raw_args,
                 env,
                 buildbox,
             } => {
+                let args = with_default_cargo_message_format(raw_args);
+                let build_id = self.alloc_build_id();
                 if let Some(buildbox_name) = buildbox {
                     let package =
                         parse_package_name(&args).unwrap_or_else(|| "unknown".to_string());
                     let env = env.unwrap_or_default();
                     let msg = StudioToBuildBox::CargoBuild {
-                        build_id: query_id,
+                        build_id,
                         mount: mount.clone(),
                         args,
                         env,
@@ -750,18 +772,18 @@ impl StudioCore {
                     }
 
                     let info = BuildInfo {
-                        build_id: query_id,
+                        build_id,
                         mount: mount.clone(),
                         package,
                         active: true,
                     };
                     self.remote_build_owner
-                        .insert(query_id, buildbox_name.clone());
-                    self.remote_builds.insert(query_id, info.clone());
-                    self.build_mount_by_id.insert(query_id, mount);
+                        .insert(build_id, buildbox_name.clone());
+                    self.remote_builds.insert(build_id, info.clone());
+                    self.build_mount_by_id.insert(build_id, mount);
                     self.set_buildbox_status(
                         &buildbox_name,
-                        BuildBoxStatus::Building { build_id: query_id },
+                        BuildBoxStatus::Building { build_id },
                     );
                     self.broadcast_ui_message(StudioToUI::BuildStarted {
                         build_id: info.build_id,
@@ -779,10 +801,84 @@ impl StudioCore {
                     }
                 };
                 match self.process_manager.start_cargo_run(
-                    query_id,
+                    build_id,
                     mount.clone(),
                     &cwd,
                     args,
+                    env.unwrap_or_default(),
+                    self.studio_addr.clone(),
+                    self.event_tx.clone(),
+                ) {
+                    Ok(info) => {
+                        self.build_mount_by_id
+                            .insert(info.build_id, info.mount.clone());
+                        self.broadcast_ui_message(StudioToUI::BuildStarted {
+                            build_id: info.build_id,
+                            mount: info.mount,
+                            package: info.package,
+                        });
+                    }
+                    Err(err) => self.send_ui_error(client_id, err),
+                }
+            }
+            UIToStudio::Run {
+                mount,
+                process,
+                args: app_args,
+                standalone,
+                env,
+                buildbox,
+            } => {
+                let cargo_args =
+                    build_run_cargo_args(&process, app_args, standalone.unwrap_or(false));
+                let build_id = self.alloc_build_id();
+                if let Some(buildbox_name) = buildbox {
+                    let env = env.unwrap_or_default();
+                    let msg = StudioToBuildBox::CargoBuild {
+                        build_id,
+                        mount: mount.clone(),
+                        args: cargo_args,
+                        env,
+                    };
+                    if let Err(err) = self.send_to_buildbox_name(&buildbox_name, msg) {
+                        self.send_ui_error(client_id, err);
+                        return;
+                    }
+
+                    let info = BuildInfo {
+                        build_id,
+                        mount: mount.clone(),
+                        package: process,
+                        active: true,
+                    };
+                    self.remote_build_owner
+                        .insert(build_id, buildbox_name.clone());
+                    self.remote_builds.insert(build_id, info.clone());
+                    self.build_mount_by_id.insert(build_id, mount);
+                    self.set_buildbox_status(
+                        &buildbox_name,
+                        BuildBoxStatus::Building { build_id },
+                    );
+                    self.broadcast_ui_message(StudioToUI::BuildStarted {
+                        build_id: info.build_id,
+                        mount: info.mount,
+                        package: info.package,
+                    });
+                    return;
+                }
+
+                let cwd = match self.vfs.resolve_mount(&mount) {
+                    Ok(cwd) => cwd,
+                    Err(err) => {
+                        self.send_ui_error(client_id, err.to_string());
+                        return;
+                    }
+                };
+                match self.process_manager.start_cargo_run(
+                    build_id,
+                    mount.clone(),
+                    &cwd,
+                    cargo_args,
                     env.unwrap_or_default(),
                     self.studio_addr.clone(),
                     self.event_tx.clone(),
@@ -936,12 +1032,15 @@ impl StudioCore {
                 }
             }
             UIToStudio::WidgetQuery { build_id, query } => {
-                let _ = build_id;
-                let _ = query;
-                self.send_ui_error(
-                    client_id,
-                    "WidgetQuery is not part of platform StudioToApp protocol".to_string(),
-                );
+                if let Err(err) = self.send_app_msg(
+                    build_id,
+                    StudioToApp::WidgetQuery(WidgetQueryRequest {
+                        request_id: query_id.0,
+                        query,
+                    }),
+                ) {
+                    self.send_ui_error(client_id, err);
+                }
             }
             UIToStudio::RunViewInput {
                 build_id,
@@ -1921,6 +2020,18 @@ impl StudioCore {
                     },
                 );
             }
+            AppToStudio::WidgetQuery(response) => {
+                let query_id = QueryId(response.request_id);
+                self.send_to_query_owner(
+                    query_id,
+                    StudioToUI::WidgetQuery {
+                        query_id,
+                        build_id,
+                        query: response.query,
+                        rects: response.rects,
+                    },
+                );
+            }
             AppToStudio::CreateWindow {
                 window_id,
                 kind_id: _,
@@ -1932,6 +2043,9 @@ impl StudioCore {
                         window_id,
                     },
                 );
+            }
+            AppToStudio::AfterStartup => {
+                self.broadcast_ui_message(StudioToUI::AppStarted { build_id });
             }
             AppToStudio::SetCursor(cursor) => {
                 self.send_runview_message(
@@ -1971,7 +2085,7 @@ impl StudioCore {
             | AppToStudio::EditFile(_)
             | AppToStudio::SwapSelection(_)
             | AppToStudio::TweakHits(_)
-            | AppToStudio::ReadyToStart
+            | AppToStudio::BeforeStartup
             | AppToStudio::RequestAnimationFrame
             | AppToStudio::SetClipboard(_) => {}
         }
@@ -2454,6 +2568,79 @@ fn rustc_level_to_log_level(level: &str) -> LogLevel {
     }
 }
 
+fn build_run_cargo_args(process: &str, mut app_args: Vec<String>, standalone: bool) -> Vec<String> {
+    if !has_message_format_json_arg(&app_args) {
+        app_args.insert(0, "--message-format=json".to_string());
+    }
+    if standalone {
+        app_args.retain(|arg| arg != "--stdin-loop");
+    } else if !app_args.iter().any(|arg| arg == "--stdin-loop") {
+        app_args.push("--stdin-loop".to_string());
+    }
+
+    let mut args = vec![
+        "run".to_string(),
+        "-p".to_string(),
+        process.to_string(),
+        "--release".to_string(),
+        "--message-format=json".to_string(),
+    ];
+    args.push("--".to_string());
+    args.extend(app_args);
+    args
+}
+
+fn with_default_cargo_message_format(mut args: Vec<String>) -> Vec<String> {
+    if has_message_format_json_arg(&args) {
+        return args;
+    }
+    if cargo_subcommand_supports_message_format(&args) {
+        args.push("--message-format=json".to_string());
+    }
+    args
+}
+
+fn cargo_subcommand_supports_message_format(args: &[String]) -> bool {
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('+') {
+            continue;
+        }
+        if arg == "--config"
+            || arg == "-Z"
+            || arg == "--color"
+            || arg == "--manifest-path"
+            || arg == "--target-dir"
+        {
+            if !arg.contains('=')
+                && iter.peek().is_some_and(|next| !next.starts_with('-'))
+            {
+                iter.next();
+            }
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        return matches!(
+            arg.as_str(),
+            "build" | "check" | "run" | "test" | "bench" | "rustc"
+        );
+    }
+    false
+}
+
+fn has_message_format_json_arg(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--message-format=json"
+            || arg == "--message-format"
+            || arg.starts_with("--message-format=")
+    })
+}
+
 fn parse_package_name(args: &[String]) -> Option<String> {
     let mut i = 0usize;
     while i < args.len() {
@@ -2783,6 +2970,96 @@ mod tests {
         let error = classify_cargo_log_line(false, "error: could not compile `demo`");
         assert!(matches!(warning, LogLevel::Warning));
         assert!(matches!(error, LogLevel::Error));
+    }
+
+    #[test]
+    fn build_run_cargo_args_defaults_to_release_and_stdin_loop() {
+        let normalized = build_run_cargo_args("makepad-example-splash", Vec::new(), false);
+        assert_eq!(
+            normalized,
+            vec![
+                "run".to_string(),
+                "-p".to_string(),
+                "makepad-example-splash".to_string(),
+                "--release".to_string(),
+                "--message-format=json".to_string(),
+                "--".to_string(),
+                "--message-format=json".to_string(),
+                "--stdin-loop".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_run_cargo_args_honors_standalone() {
+        let app_args = vec![
+            "--foo".to_string(),
+            "bar".to_string(),
+            "--stdin-loop".to_string(),
+        ];
+        let normalized = build_run_cargo_args("makepad-example-splash", app_args, true);
+        assert_eq!(
+            normalized,
+            vec![
+                "run".to_string(),
+                "-p".to_string(),
+                "makepad-example-splash".to_string(),
+                "--release".to_string(),
+                "--message-format=json".to_string(),
+                "--".to_string(),
+                "--message-format=json".to_string(),
+                "--foo".to_string(),
+                "bar".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_run_cargo_args_keeps_message_format_if_provided() {
+        let app_args = vec![
+            "--message-format=json".to_string(),
+            "--stdin-loop".to_string(),
+        ];
+        let normalized = build_run_cargo_args("makepad-example-splash", app_args, false);
+        assert_eq!(
+            normalized,
+            vec![
+                "run".to_string(),
+                "-p".to_string(),
+                "makepad-example-splash".to_string(),
+                "--release".to_string(),
+                "--message-format=json".to_string(),
+                "--".to_string(),
+                "--message-format=json".to_string(),
+                "--stdin-loop".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_default_cargo_message_format_injects_for_supported_subcommands() {
+        let args = vec![
+            "check".to_string(),
+            "-p".to_string(),
+            "makepad-example-splash".to_string(),
+        ];
+        let normalized = with_default_cargo_message_format(args);
+        assert_eq!(
+            normalized,
+            vec![
+                "check".to_string(),
+                "-p".to_string(),
+                "makepad-example-splash".to_string(),
+                "--message-format=json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_default_cargo_message_format_keeps_unsupported_commands_unchanged() {
+        let args = vec!["--version".to_string()];
+        let normalized = with_default_cargo_message_format(args.clone());
+        assert_eq!(normalized, args);
     }
 
     fn test_core_with_ui(root: &Path) -> (StudioCore, ToUIReceiver<Vec<u8>>) {

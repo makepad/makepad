@@ -6,7 +6,7 @@ use makepad_network::{
 use makepad_studio_protocol::backend_protocol::{
     ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope,
 };
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::io::{self, BufRead, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -20,6 +20,7 @@ const STUDIO_UI_PATH: &str = "/$studio_ui";
 struct BridgeState {
     client_id: Option<ClientId>,
     next_counter: u64,
+    auto_log_subscriptions: HashSet<QueryId>,
 }
 
 fn show_studio_help() {
@@ -118,19 +119,20 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
     let mut state = BridgeState {
         client_id: None,
         next_counter: 0,
+        auto_log_subscriptions: HashSet::new(),
     };
+    let mut pending_requests = VecDeque::new();
     let mut web_socket = WebSocketParser::new();
     if !leftover.is_empty() {
         parse_incoming_frames(
             &write_stream,
             &mut web_socket,
             &mut state,
+            &mut pending_requests,
             &mut out,
             &leftover,
         )?;
     }
-
-    let mut pending_requests = VecDeque::new();
 
     let (stdin_tx, stdin_rx) = mpsc::channel::<Option<String>>();
     thread::spawn(move || {
@@ -217,6 +219,7 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
                 &write_stream,
                 &mut web_socket,
                 &mut state,
+                &mut pending_requests,
                 &mut out,
                 &recv_buf[..read],
             )?;
@@ -257,6 +260,7 @@ fn parse_incoming_frames(
     stream: &Arc<Mutex<TcpStream>>,
     web_socket: &mut WebSocketParser,
     state: &mut BridgeState,
+    pending_requests: &mut VecDeque<UIToStudio>,
     out: &mut io::Stdout,
     bytes: &[u8],
 ) -> Result<(), String> {
@@ -269,15 +273,15 @@ fn parse_incoming_frames(
         Ok(ServerWebSocketMessage::Pong(_)) => {}
         Ok(ServerWebSocketMessage::Text(text)) => {
             if let Ok(msg) = StudioToUI::deserialize_json(text) {
-                let _ = emit_protocol_response(out, state, msg);
+                let _ = emit_protocol_response(out, state, pending_requests, msg);
             }
         }
         Ok(ServerWebSocketMessage::Binary(data)) => {
             if let Ok(msg) = StudioToUI::deserialize_bin(data) {
-                let _ = emit_protocol_response(out, state, msg);
+                let _ = emit_protocol_response(out, state, pending_requests, msg);
             } else if let Ok(text) = std::str::from_utf8(data) {
                 if let Ok(msg) = StudioToUI::deserialize_json(text) {
-                    let _ = emit_protocol_response(out, state, msg);
+                    let _ = emit_protocol_response(out, state, pending_requests, msg);
                 } else {
                     eprintln!("studio remote: unrecognized utf8 binary websocket payload");
                 }
@@ -299,14 +303,53 @@ fn parse_incoming_frames(
 fn emit_protocol_response(
     out: &mut io::Stdout,
     state: &mut BridgeState,
+    pending_requests: &mut VecDeque<UIToStudio>,
     msg: StudioToUI,
 ) -> Result<(), String> {
-    if let StudioToUI::Hello { client_id } = msg {
-        state.client_id = Some(client_id);
-        state.next_counter = 0;
-        write_protocol_response(out, StudioToUI::Hello { client_id })
-    } else {
-        write_protocol_response(out, msg)
+    match msg {
+        StudioToUI::Hello { client_id } => {
+            state.client_id = Some(client_id);
+            state.next_counter = 0;
+            state.auto_log_subscriptions.clear();
+            write_protocol_response(out, StudioToUI::Hello { client_id })
+        }
+        StudioToUI::BuildStarted {
+            build_id,
+            mount,
+            package,
+        } => {
+            if state.auto_log_subscriptions.insert(build_id) {
+                pending_requests.push_back(UIToStudio::QueryLogs {
+                    build_id: Some(build_id),
+                    level: None,
+                    source: None,
+                    file: None,
+                    pattern: None,
+                    is_regex: None,
+                    since_index: Some(0),
+                    live: Some(true),
+                });
+            }
+            write_protocol_response(
+                out,
+                StudioToUI::BuildStarted {
+                    build_id,
+                    mount,
+                    package,
+                },
+            )
+        }
+        StudioToUI::BuildStopped {
+            build_id,
+            exit_code,
+        } => {
+            state.auto_log_subscriptions.remove(&build_id);
+            write_protocol_response(out, StudioToUI::BuildStopped { build_id, exit_code })
+        }
+        StudioToUI::AppStarted { build_id } => {
+            write_protocol_response(out, StudioToUI::AppStarted { build_id })
+        }
+        other => write_protocol_response(out, other),
     }
 }
 
@@ -334,6 +377,9 @@ fn should_emit_protocol_response(msg: &StudioToUI) -> bool {
             | StudioToUI::RunnableBuilds { .. }
             | StudioToUI::BuildStarted { .. }
             | StudioToUI::BuildStopped { .. }
+            | StudioToUI::AppStarted { .. }
+            | StudioToUI::RunViewCreated { .. }
+            | StudioToUI::QueryLogResults { .. }
             | StudioToUI::Screenshot { .. }
             | StudioToUI::WidgetTreeDump { .. }
             | StudioToUI::WidgetQuery { .. }

@@ -106,10 +106,11 @@ impl Cx {
     }
 
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
-        Self::stdin_send_to_host(AppToStudio::ReadyToStart);
+        Self::stdin_send_to_host(AppToStudio::BeforeStartup);
 
         let mut stdin_windows: Vec<StdinWindow> = Vec::new();
         self.call_event_handler(&Event::Startup);
+        Self::stdin_send_to_host(AppToStudio::AfterStartup);
 
         loop {
             if !Self::has_studio_web_socket() {

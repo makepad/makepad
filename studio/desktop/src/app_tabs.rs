@@ -749,22 +749,11 @@ impl App {
         if !outside_studio {
             self.close_mount_run_and_log_tabs(cx, mount);
         }
-        let mut args = vec![
-            "run".to_string(),
-            "-p".to_string(),
-            package.to_string(),
-            "--release".to_string(),
-            "--message-format=json".to_string(),
-            "--".to_string(),
-            "--message-format=json".to_string(),
-        ];
-        if !outside_studio {
-            args.push("--stdin-loop".to_string());
-        }
-        let Some(build_id) = self.send_studio(UIToStudio::CargoRun {
+        let Some(build_id) = self.send_studio(UIToStudio::Run {
             mount: mount.to_string(),
-            args,
-            startup_query: None,
+            process: package.to_string(),
+            args: Vec::new(),
+            standalone: Some(outside_studio),
             env: None,
             buildbox: None,
         }) else {

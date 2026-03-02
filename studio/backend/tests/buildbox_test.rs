@@ -212,13 +212,12 @@ fn websocket_buildbox_remote_build_roundtrip() {
     assert_eq!(sync_cmd.0.len(), 1);
     assert!(matches!(sync_cmd.0[0], StudioToBuildBox::RequestTreeHash));
 
-    let build_id = QueryId::new(client_id, 2);
+    let run_query_id = QueryId::new(client_id, 2);
     let run_query = UIToStudioEnvelope {
-        query_id: build_id,
-        msg: UIToStudio::CargoRun {
+        query_id: run_query_id,
+        msg: UIToStudio::Cargo {
             mount: "repo".to_string(),
             args: vec!["-p".to_string(), "remote-app".to_string()],
-            startup_query: None,
             env: None,
             buildbox: Some("linux".to_string()),
         },
@@ -231,9 +230,12 @@ fn websocket_buildbox_remote_build_roundtrip() {
         &runtime,
         ui_socket,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::BuildStarted { build_id: id, .. } if *id == build_id),
+        |msg| matches!(msg, StudioToUI::BuildStarted { mount, .. } if mount == "repo"),
     );
-    assert!(started.is_some(), "did not receive BuildStarted");
+    let build_id = match started {
+        Some(StudioToUI::BuildStarted { build_id, .. }) => build_id,
+        _ => panic!("did not receive BuildStarted"),
+    };
 
     let cargo_cmd = wait_for_buildbox_message(&runtime, buildbox_socket, Duration::from_secs(3))
         .expect("did not receive buildbox cargo command");
