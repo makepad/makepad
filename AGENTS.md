@@ -20,23 +20,26 @@
 ## Start Studio Remote
 - Command:
   - `cargo run -p cargo-makepad --release -- studio --studio=127.0.0.1:8001`
+  - Explicit mode: `cargo run -p cargo-makepad --release -- studio studio_remote --studio=127.0.0.1:8001`
 - Send newline-delimited JSON requests on stdin.
 - Read newline-delimited JSON responses on stdout.
+- Protocol shape is `UIToStudio` requests and filtered `StudioToUI` responses.
 
 ## Request Protocol (JSON Lines)
 - `{"ListBuilds":[]}`
-- `{"CargoRun":{"args":["-p","makepad-example-todo","--release"],"root":null,"startup_query":"id:todo_input","env":null}}`
-- `{"Stop":{"build_id":38160721318170}}`
+- `{"LoadRunnableBuilds":{"mount":"makepad"}}`
+- `{"CargoRun":{"mount":"makepad","args":["run","-p","makepad-example-splash","--release","--","--stdin-loop","--message-format=json"],"startup_query":null,"env":null,"buildbox":null}}`
+- `{"StopBuild":{"build_id":38160721318170}}`
 - `{"WidgetTreeDump":{"build_id":38160721318170}}`
 - `{"WidgetQuery":{"build_id":38160721318170,"query":"id:todo_input"}}`
 - `{"Screenshot":{"build_id":38160721318170,"kind_id":0}}` (`kind_id` optional; defaults to `0`)
-- `{"Click":{"build_id":38160721318170,"x":1274,"y":342,"button":1,"auto_dump":false}}`
-- `{"TypeText":{"build_id":38160721318170,"text":"hello","replace_last":false,"was_paste":false,"auto_dump":false}}`
+- `{"Click":{"build_id":38160721318170,"x":1274,"y":342}}`
+- `{"TypeText":{"build_id":38160721318170,"text":"hello"}}`
 - `{"Return":{"build_id":38160721318170,"auto_dump":false}}`
-- `{"StudioToApp":{"build_id":38160721318170,"msg":{"MouseMove":{"time":0.0,"x":200.0,"y":160.0,"modifiers":{"shift":false,"control":false,"alt":false,"logo":false}}}}}`
+- `{"ForwardToApp":{"build_id":38160721318170,"msg_bin":[...]}}` (advanced; binary payload)
 
 ## `StudioToApp` API (Updated)
-- The studio remote protocol now supports raw `StudioToApp` passthrough via `StudioRemoteRequest::StudioToApp`.
+- The studio remote bridge supports raw app event passthrough via `UIToStudio::ForwardToApp`.
 - Current `StudioToApp` variants include:
   - `Screenshot`, `WidgetTreeDump`, `KeepAlive`, `LiveChange`, `Swapchain`, `WindowGeomChange`, `Tick`
   - `MouseDown`, `MouseUp`, `MouseMove`, `Scroll`
@@ -46,12 +49,14 @@
 - Use raw `StudioToApp` only for low-level event injection/debugging.
 
 ## Response Notes (Current)
-- `StudioRemoteResponse::Screenshot` returns file metadata (`path`, `width`, `height`) and not inline PNG bytes.
-- `StudioRemoteResponse::WidgetTreeDump` returns text dump content keyed by `request_id`.
+- Bridge stdout is filtered to: `Hello`, `Error`, `Builds`, `RunnableBuilds`, `BuildStarted`, `BuildStopped`, `Screenshot`, `WidgetTreeDump`, `WidgetQuery`, `QueryCancelled`.
+- `TerminalOutput`/`TerminalOpened`/`TerminalExited` and all `RunView*` messages are suppressed by `cargo makepad studio`.
+- `Screenshot` responses include file metadata (`path`, `width`, `height`) and not inline PNG bytes.
+- `WidgetTreeDump` responses include text dump content keyed by `request_id`.
 
 ## Recommended Control Flow
 1. Start studio remote process once.
-2. `CargoRun` and wait for `Started`.
+2. `CargoRun` and wait for `BuildStarted`.
 3. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
 4. For text input, click field first, then send text, then return.
 5. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
