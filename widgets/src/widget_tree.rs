@@ -1,7 +1,7 @@
 use {
     crate::dock::Dock,
     crate::makepad_draw::{cx_2d::Cx2d, cx_3d::Cx3d, *},
-    crate::widget::{WidgetRef, WidgetRegistry, WidgetUid},
+    crate::widget::{WidgetRef, WidgetRegistry, WidgetUid, WidgetWeakRef},
     crate::widget_async::update_global_ui_handle,
     std::any::TypeId,
     std::cell::RefCell,
@@ -9,7 +9,7 @@ use {
     std::fmt::Write,
 };
 
-// WidgetTree contains WidgetRef (Rc-based) and RefCell,
+// WidgetTree contains weak widget refs (Rc/Weak-based) and RefCell,
 // but we only ever access the tree from the main thread.
 // The OnceLock for the empty static tree requires Sync.
 unsafe impl Send for WidgetTree {}
@@ -45,13 +45,14 @@ struct WidgetTreeInner {
 struct WidgetTreeNode {
     #[allow(unused)]
     uid: WidgetUid,
-    widget: WidgetRef,
+    widget: WidgetWeakRef,
     parent: u32,
 }
 
 struct GraphNode {
     name: LiveId,
-    widget: WidgetRef,
+    widget: WidgetWeakRef,
+    placeholder: bool,
     skip_search: bool,
     parent: Option<WidgetUid>,
     children: Vec<WidgetUid>,
@@ -94,8 +95,9 @@ impl WidgetTree {
                     node.name = name;
                     name_changed = true;
                 }
-                if node.widget != widget {
-                    node.widget = widget;
+                if node.placeholder || node.widget != widget {
+                    node.widget = widget.downgrade();
+                    node.placeholder = false;
                     widget_changed = true;
                 }
                 if node.skip_search != skip_search {
@@ -112,7 +114,8 @@ impl WidgetTree {
                     uid,
                     GraphNode {
                         name,
-                        widget,
+                        widget: widget.downgrade(),
+                        placeholder: false,
                         skip_search,
                         parent,
                         children: Vec::new(),
@@ -209,7 +212,8 @@ impl WidgetTree {
                 parent_uid,
                 GraphNode {
                     name: LiveId(0),
-                    widget: WidgetRef::empty(),
+                    widget: WidgetWeakRef::default(),
+                    placeholder: true,
                     skip_search: false,
                     parent: None,
                     children: Vec::new(),
@@ -234,8 +238,9 @@ impl WidgetTree {
                     node.name = name;
                     name_changed = true;
                 }
-                if node.widget != widget {
-                    node.widget = widget;
+                if node.placeholder || node.widget != widget {
+                    node.widget = widget.downgrade();
+                    node.placeholder = false;
                 }
                 if node.skip_search != child_skip_search {
                     node.skip_search = child_skip_search;
@@ -251,7 +256,8 @@ impl WidgetTree {
                     child_uid,
                     GraphNode {
                         name,
-                        widget,
+                        widget: widget.downgrade(),
+                        placeholder: false,
                         skip_search: child_skip_search,
                         parent: Some(parent_uid),
                         children: Vec::new(),
@@ -349,8 +355,9 @@ impl WidgetTree {
         if let Some(node) = inner.graph.get_mut(&uid) {
             let mut widget_changed = false;
             let mut skip_search_changed = false;
-            if node.widget != widget {
-                node.widget = widget;
+            if node.placeholder || node.widget != widget {
+                node.widget = widget.downgrade();
+                node.placeholder = false;
                 widget_changed = true;
             }
             if node.skip_search != skip_search {
@@ -374,7 +381,8 @@ impl WidgetTree {
             uid,
             GraphNode {
                 name: LiveId(0),
-                widget,
+                widget: widget.downgrade(),
+                placeholder: false,
                 skip_search,
                 parent: None,
                 children: Vec::new(),
@@ -415,8 +423,9 @@ impl WidgetTree {
                     node.name = LiveId(0);
                     name_changed = true;
                 }
-                if node.widget != widget {
-                    node.widget = widget;
+                if node.placeholder || node.widget != widget {
+                    node.widget = widget.downgrade();
+                    node.placeholder = false;
                     widget_changed = true;
                 }
                 if node.skip_search != skip_search {
@@ -433,7 +442,8 @@ impl WidgetTree {
                     uid,
                     GraphNode {
                         name: LiveId(0),
-                        widget,
+                        widget: widget.downgrade(),
+                        placeholder: false,
                         skip_search,
                         parent: None,
                         children: Vec::new(),
@@ -490,7 +500,8 @@ impl WidgetTree {
                 uid,
                 GraphNode {
                     name: LiveId(0),
-                    widget: WidgetRef::empty(),
+                    widget: WidgetWeakRef::default(),
+                    placeholder: true,
                     skip_search: false,
                     parent: None,
                     children: Vec::new(),
@@ -546,15 +557,20 @@ impl WidgetTree {
         uid: WidgetUid,
         pending: &mut Vec<WidgetUid>,
     ) -> bool {
-        let parent_widget = match inner.graph.get(&uid) {
-            Some(node) => node.widget.clone(),
+        let (parent_widget, parent_placeholder) = match inner.graph.get(&uid) {
+            Some(node) => (node.widget.upgrade(), node.placeholder),
             None => return true,
         };
-        if parent_widget.is_empty() {
+        if parent_placeholder {
             // Placeholder node (seeded from borrowed context without a WidgetRef):
             // keep existing child edges until a concrete WidgetRef is seeded.
             return true;
         }
+        let Some(parent_widget) = parent_widget else {
+            // Concrete widget no longer exists; remove stale subtree.
+            Self::remove_subtree(inner, uid);
+            return true;
+        };
 
         let mut discovered_children: Vec<(LiveId, WidgetRef)> = Vec::new();
         if !parent_widget.try_children(&mut |name, child| {
@@ -616,8 +632,9 @@ impl WidgetTree {
                         child_node.name = child_name;
                         inner.dense_dirty = true;
                     }
-                    if child_node.widget != child_widget {
-                        child_node.widget = child_widget;
+                    if child_node.placeholder || child_node.widget != child_widget {
+                        child_node.widget = child_widget.downgrade();
+                        child_node.placeholder = false;
                         child_widget_changed = true;
                     }
                     if child_node.skip_search != child_skip_search {
@@ -634,7 +651,8 @@ impl WidgetTree {
                         child_uid,
                         GraphNode {
                             name: child_name,
-                            widget: child_widget,
+                            widget: child_widget.downgrade(),
+                            placeholder: false,
                             skip_search: child_skip_search,
                             parent: Some(uid),
                             children: Vec::new(),
@@ -881,7 +899,9 @@ impl WidgetTree {
             if inner.names[i] == target
                 && (path.len() == 1 || Self::verify_path(&inner, &path[..path.len() - 1], i))
             {
-                result = inner.nodes[i].widget.clone();
+                if let Some(widget) = inner.nodes[i].widget.upgrade() {
+                    result = widget;
+                }
             }
             // skip_search on the root node itself: don't skip, we explicitly
             // asked to search within this subtree
@@ -917,7 +937,9 @@ impl WidgetTree {
             if inner.names[i] == target
                 && (path.len() == 1 || Self::verify_path(&inner, &path[..path.len() - 1], i))
             {
-                results.push(inner.nodes[i].widget.clone());
+                if let Some(widget) = inner.nodes[i].widget.upgrade() {
+                    results.push(widget);
+                }
             }
             // skip_search on the root node itself: don't skip, we explicitly
             // asked to search within this subtree
@@ -952,7 +974,7 @@ impl WidgetTree {
         self.sync_dirty();
         let inner = self.inner.borrow();
         match inner.uid_map.get(&uid) {
-            Some(&idx) => inner.nodes[idx as usize].widget.clone(),
+            Some(&idx) => inner.nodes[idx as usize].widget.to_widget_ref(),
             None => WidgetRef::empty(),
         }
     }
@@ -1118,7 +1140,9 @@ impl WidgetTree {
             if inner.names[i] == target
                 && (path.len() == 1 || Self::verify_path(inner, &path[..path.len() - 1], i))
             {
-                return inner.nodes[i].widget.clone();
+                if let Some(widget) = inner.nodes[i].widget.upgrade() {
+                    return widget;
+                }
             }
             if i != start && inner.skip_search[i] {
                 i = inner.subtree_end[i] as usize;
@@ -1147,7 +1171,9 @@ impl WidgetTree {
             if inner.names[i] == target
                 && (path.len() == 1 || Self::verify_path(inner, &path[..path.len() - 1], i))
             {
-                return inner.nodes[i].widget.clone();
+                if let Some(widget) = inner.nodes[i].widget.upgrade() {
+                    return widget;
+                }
             }
             if i != start && inner.skip_search[i] {
                 i = inner.subtree_end[i] as usize;
@@ -1171,7 +1197,9 @@ impl WidgetTree {
             if inner.names[i] == target
                 && (path.len() == 1 || Self::verify_path(inner, &path[..path.len() - 1], i))
             {
-                results.push(inner.nodes[i].widget.clone());
+                if let Some(widget) = inner.nodes[i].widget.upgrade() {
+                    results.push(widget);
+                }
             }
             if i != start && inner.skip_search[i] {
                 i = inner.subtree_end[i] as usize;
@@ -1200,7 +1228,9 @@ impl WidgetTree {
             if inner.names[i] == target
                 && (path.len() == 1 || Self::verify_path(inner, &path[..path.len() - 1], i))
             {
-                results.push(inner.nodes[i].widget.clone());
+                if let Some(widget) = inner.nodes[i].widget.upgrade() {
+                    results.push(widget);
+                }
             }
             if i != start && inner.skip_search[i] {
                 i = inner.subtree_end[i] as usize;
@@ -1265,16 +1295,18 @@ impl WidgetTree {
         let mut rects = Vec::new();
         let mut dump_index = 0usize;
         for (index, node) in inner.nodes.iter().enumerate() {
+            let Some(widget) = node.widget.upgrade() else {
+                continue;
+            };
             let id = inner.names[index];
-            let ty = node
-                .widget
+            let ty = widget
                 .widget_type_id()
                 .and_then(|type_id| widget_type_names.get(&type_id).copied())
                 .unwrap_or(LiveId(0));
 
             let id_token = live_id_token(id);
             let ty_token = live_id_token(ty);
-            let area = node.widget.area();
+            let area = widget.area();
             if area.is_valid(cx) {
                 let rect = area.rect(cx);
                 let x = rect.pos.x.round() as i64;
@@ -1296,8 +1328,8 @@ impl WidgetTree {
                 dump_index += 1;
             }
 
-            if let Some(dock) = node.widget.borrow::<Dock>() {
-                let dock_dump = dock.compact_dump(cx);
+            let dock_dump = widget.borrow::<Dock>().map(|dock| dock.compact_dump(cx));
+            if let Some(dock_dump) = dock_dump {
                 for tabs in dock_dump.tabs {
                     let x = tabs.rect.pos.x.round() as i64;
                     let y = tabs.rect.pos.y.round() as i64;
@@ -1438,13 +1470,15 @@ impl WidgetTree {
         let mut dock_tabs_rows = Vec::<DockTabsRow>::new();
         let mut dock_tab_rows = Vec::<DockTabRow>::new();
         for (index, node) in inner.nodes.iter().enumerate() {
+            let Some(widget) = node.widget.upgrade() else {
+                continue;
+            };
             let id = inner.names[index];
-            let ty = node
-                .widget
+            let ty = widget
                 .widget_type_id()
                 .and_then(|type_id| widget_type_names.get(&type_id).copied())
                 .unwrap_or(LiveId(0));
-            let area = node.widget.area();
+            let area = widget.area();
             if area.is_valid(cx) {
                 let rect = area.rect(cx);
                 let x = rect.pos.x.round() as i64;
@@ -1467,9 +1501,9 @@ impl WidgetTree {
                 }
             }
 
-            if let Some(dock) = node.widget.borrow::<Dock>() {
+            let dock_dump = widget.borrow::<Dock>().map(|dock| dock.compact_dump(cx));
+            if let Some(dock_dump) = dock_dump {
                 let dock_id = live_id_token(id);
-                let dock_dump = dock.compact_dump(cx);
                 for tabs in dock_dump.tabs {
                     let x = tabs.rect.pos.x.round() as i64;
                     let y = tabs.rect.pos.y.round() as i64;
