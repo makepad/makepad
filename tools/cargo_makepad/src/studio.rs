@@ -306,6 +306,10 @@ fn emit_protocol_response(
     pending_requests: &mut VecDeque<UIToStudio>,
     msg: StudioToUI,
 ) -> Result<(), String> {
+    if !should_emit_for_client(state, &msg) {
+        return Ok(());
+    }
+
     match msg {
         StudioToUI::Hello { client_id } => {
             state.client_id = Some(client_id);
@@ -373,6 +377,10 @@ fn should_emit_protocol_response(msg: &StudioToUI) -> bool {
         msg,
         StudioToUI::Hello { .. }
             | StudioToUI::Error { .. }
+            | StudioToUI::TextFileRead { .. }
+            | StudioToUI::TextFileRange { .. }
+            | StudioToUI::FindFileResults { .. }
+            | StudioToUI::SearchFileResults { .. }
             | StudioToUI::Builds { .. }
             | StudioToUI::RunnableBuilds { .. }
             | StudioToUI::BuildStarted { .. }
@@ -385,6 +393,30 @@ fn should_emit_protocol_response(msg: &StudioToUI) -> bool {
             | StudioToUI::WidgetQuery { .. }
             | StudioToUI::QueryCancelled { .. }
     )
+}
+
+fn should_emit_for_client(state: &BridgeState, msg: &StudioToUI) -> bool {
+    let Some(query_id) = message_query_id(msg) else {
+        return true;
+    };
+    let Some(client_id) = state.client_id else {
+        return true;
+    };
+    query_id.client_id() == client_id
+}
+
+fn message_query_id(msg: &StudioToUI) -> Option<QueryId> {
+    match msg {
+        StudioToUI::Screenshot { query_id, .. }
+        | StudioToUI::WidgetTreeDump { query_id, .. }
+        | StudioToUI::WidgetQuery { query_id, .. }
+        | StudioToUI::FindFileResults { query_id, .. }
+        | StudioToUI::SearchFileResults { query_id, .. }
+        | StudioToUI::QueryLogResults { query_id, .. }
+        | StudioToUI::QueryProfilerResults { query_id, .. }
+        | StudioToUI::QueryCancelled { query_id } => Some(*query_id),
+        _ => None,
+    }
 }
 
 fn connect_websocket(

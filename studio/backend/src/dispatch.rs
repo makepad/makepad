@@ -5,12 +5,12 @@ use crate::process_manager::ProcessManager;
 use makepad_studio_protocol::backend_protocol as backend_proto;
 use backend_proto::{
     BuildBoxInfo, BuildBoxStatus, BuildBoxToStudio, BuildBoxToStudioVec, BuildInfo, ClientId,
-    EventSample as StudioEventSample, GCSample as StudioGCSample, GPUSample as StudioGPUSample,
-    LogEntry, LogSource, QueryId, RunViewInputVizKind, RunnableBuild, SaveResult, StudioToBuildBox,
+    EventSample as StudioEventSample, GCSample as StudioGCSample, GPUSample as StudioGPUSample, LogEntry,
+    LogSource, QueryId, RunViewInputVizKind, RunnableBuild, SaveResult, SearchResult, StudioToBuildBox,
     StudioToBuildBoxVec, StudioToUI, TerminalGrid, UIToStudio, UIToStudioEnvelope,
 };
 use crate::terminal_manager::TerminalManager;
-use crate::virtual_fs::{protocol_search_results, VirtualFs};
+use crate::virtual_fs::VirtualFs;
 use crate::worker_pool::WorkerPool;
 use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_live_id::LiveId;
@@ -99,8 +99,12 @@ pub enum StudioEvent {
     WorkerFindFilesDone {
         client_id: ClientId,
         query_id: QueryId,
-        for_search: bool,
         result: Result<Vec<String>, String>,
+    },
+    WorkerFindInFilesDone {
+        client_id: ClientId,
+        query_id: QueryId,
+        result: Result<Vec<SearchResult>, String>,
     },
     WorkerQueryLogsDone {
         client_id: ClientId,
@@ -361,9 +365,13 @@ impl StudioCore {
             StudioEvent::WorkerFindFilesDone {
                 client_id,
                 query_id,
-                for_search,
                 result,
-            } => self.on_worker_find_files_done(client_id, query_id, for_search, result),
+            } => self.on_worker_find_files_done(client_id, query_id, result),
+            StudioEvent::WorkerFindInFilesDone {
+                client_id,
+                query_id,
+                result,
+            } => self.on_worker_find_in_files_done(client_id, query_id, result),
             StudioEvent::WorkerQueryLogsDone {
                 client_id,
                 query_id,
@@ -622,6 +630,23 @@ impl StudioCore {
                 ),
                 Err(err) => self.send_ui_error(client_id, err.to_string()),
             },
+            UIToStudio::ReadTextRange {
+                path,
+                start_line,
+                end_line,
+            } => match self.vfs.read_text_range(&path, start_line, end_line) {
+                Ok((content, total_lines)) => self.send_ui_reply(
+                    client_id,
+                    StudioToUI::TextFileRange {
+                        path,
+                        start_line,
+                        end_line,
+                        total_lines,
+                        content,
+                    }
+                ),
+                Err(err) => self.send_ui_error(client_id, err.to_string()),
+            },
             UIToStudio::SaveTextFile { path, content } => {
                 let result = match self.vfs.save_text_file(&path, &content) {
                     Ok(()) => SaveResult::Ok,
@@ -672,7 +697,6 @@ impl StudioCore {
                     let _ = event_tx.send(StudioEvent::WorkerFindFilesDone {
                         client_id,
                         query_id,
-                        for_search: false,
                         result,
                     });
                 });
@@ -680,23 +704,37 @@ impl StudioCore {
             UIToStudio::SearchFiles {
                 mount,
                 pattern,
-                is_regex: _,
-                glob: _,
+                is_regex,
+                glob,
+                max_results,
+            }
+            | UIToStudio::FindInFiles {
+                mount,
+                pattern,
+                is_regex,
+                glob,
                 max_results,
             } => {
                 self.cancelled_queries.remove(&query_id);
                 let mount = mount.clone();
                 let pattern = pattern.clone();
+                let is_regex = is_regex.unwrap_or(false);
+                let glob = glob.clone();
                 let vfs = self.vfs.clone_for_search();
                 let event_tx = self.event_tx.clone();
                 self.worker_pool.execute(move || {
                     let result = vfs
-                        .find_files(mount.as_deref(), &pattern, max_results)
+                        .find_in_files(
+                            mount.as_deref(),
+                            &pattern,
+                            is_regex,
+                            glob.as_deref(),
+                            max_results,
+                        )
                         .map_err(|err| err.to_string());
-                    let _ = event_tx.send(StudioEvent::WorkerFindFilesDone {
+                    let _ = event_tx.send(StudioEvent::WorkerFindInFilesDone {
                         client_id,
                         query_id,
-                        for_search: true,
                         result,
                     });
                 });
@@ -1609,7 +1647,6 @@ impl StudioCore {
         &mut self,
         client_id: ClientId,
         query_id: QueryId,
-        for_search: bool,
         result: Result<Vec<String>, String>,
     ) {
         if self.cancelled_queries.remove(&query_id) {
@@ -1617,27 +1654,37 @@ impl StudioCore {
         }
 
         match result {
-            Ok(paths) => {
-                if for_search {
-                    self.send_ui_reply(
-                        client_id,
-                        StudioToUI::SearchFileResults {
-                            query_id,
-                            results: protocol_search_results(paths),
-                            done: true,
-                        }
-                    );
-                } else {
-                    self.send_ui_reply(
-                        client_id,
-                        StudioToUI::FindFileResults {
-                            query_id,
-                            paths,
-                            done: true,
-                        }
-                    );
+            Ok(paths) => self.send_ui_reply(
+                client_id,
+                StudioToUI::FindFileResults {
+                    query_id,
+                    paths,
+                    done: true,
                 }
-            }
+            ),
+            Err(err) => self.send_ui_error(client_id, err),
+        }
+    }
+
+    fn on_worker_find_in_files_done(
+        &mut self,
+        client_id: ClientId,
+        query_id: QueryId,
+        result: Result<Vec<SearchResult>, String>,
+    ) {
+        if self.cancelled_queries.remove(&query_id) {
+            return;
+        }
+
+        match result {
+            Ok(results) => self.send_ui_reply(
+                client_id,
+                StudioToUI::SearchFileResults {
+                    query_id,
+                    results,
+                    done: true,
+                }
+            ),
             Err(err) => self.send_ui_error(client_id, err),
         }
     }
