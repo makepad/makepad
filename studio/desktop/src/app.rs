@@ -257,5 +257,6 @@ impl AppMain for App {
         if matches!(event, Event::Signal) {
             self.drain_studio_messages(cx);
         }
+        self.refresh_run_view_targets(cx);
     }
 }

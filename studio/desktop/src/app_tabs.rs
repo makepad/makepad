@@ -348,6 +348,29 @@ impl App {
         Some(tab_id)
     }
 
+    pub(super) fn refresh_run_view_targets(&mut self, cx: &mut Cx) {
+        let targets: Vec<(LiveId, String, QueryId, Option<usize>)> = self
+            .data
+            .run_tab_state
+            .iter()
+            .filter_map(|(tab_id, state)| {
+                let active_mount = self.data.build_to_mount.get(&state.build_id)?;
+                if active_mount != &state.mount {
+                    return None;
+                }
+                Some((*tab_id, state.mount.clone(), state.build_id, state.window_id))
+            })
+            .collect();
+
+        for (tab_id, mount, build_id, window_id) in targets {
+            if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                dock.item(tab_id)
+                    .desktop_run_view(cx, ids!(run_view))
+                    .set_run_target(cx, build_id, window_id);
+            }
+        }
+    }
+
     pub(super) fn ensure_log_tab_for_build(
         &mut self,
         cx: &mut Cx,

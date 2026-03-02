@@ -12,6 +12,7 @@ enum WorkerMessage {
 pub struct WorkerPool {
     sender: Sender<WorkerMessage>,
     workers: Vec<JoinHandle<()>>,
+    worker_count: usize,
 }
 
 impl WorkerPool {
@@ -37,7 +38,11 @@ impl WorkerPool {
             }));
         }
 
-        Self { sender, workers }
+        Self {
+            sender,
+            workers,
+            worker_count,
+        }
     }
 
     pub fn execute<F>(&self, job: F)
@@ -45,6 +50,10 @@ impl WorkerPool {
         F: FnOnce() + Send + 'static,
     {
         let _ = self.sender.send(WorkerMessage::Job(Box::new(job)));
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.worker_count
     }
 }
 

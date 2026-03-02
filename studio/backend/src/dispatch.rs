@@ -26,6 +26,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +191,7 @@ pub struct StudioCore {
     live_profiler_queries: HashMap<QueryId, LiveProfilerSubscription>,
     cancelled_queries: HashSet<QueryId>,
     worker_pool: WorkerPool,
+    regex_search_pool: Arc<WorkerPool>,
     fs_watcher: Option<FileSystemWatcher>,
     fs_event_last_by_path: HashMap<String, Instant>,
     fs_pending_diffs: HashMap<String, Vec<backend_proto::FileTreeChange>>,
@@ -212,6 +214,7 @@ impl StudioCore {
             .map(|v| v.get())
             .unwrap_or(4)
             .clamp(2, 16);
+        let regex_search_worker_count = 8;
         let mut this = Self {
             rx,
             event_tx,
@@ -236,6 +239,7 @@ impl StudioCore {
             live_profiler_queries: HashMap::new(),
             cancelled_queries: HashSet::new(),
             worker_pool: WorkerPool::new(worker_count),
+            regex_search_pool: Arc::new(WorkerPool::new(regex_search_worker_count)),
             fs_watcher: None,
             fs_event_last_by_path: HashMap::new(),
             fs_pending_diffs: HashMap::new(),
@@ -722,6 +726,7 @@ impl StudioCore {
                 let glob = glob.clone();
                 let vfs = self.vfs.clone_for_search();
                 let event_tx = self.event_tx.clone();
+                let regex_search_pool = Arc::clone(&self.regex_search_pool);
                 self.worker_pool.execute(move || {
                     let result = vfs
                         .find_in_files(
@@ -730,6 +735,11 @@ impl StudioCore {
                             is_regex,
                             glob.as_deref(),
                             max_results,
+                            if is_regex {
+                                Some(regex_search_pool.as_ref())
+                            } else {
+                                None
+                            },
                         )
                         .map_err(|err| err.to_string());
                     let _ = event_tx.send(StudioEvent::WorkerFindInFilesDone {
