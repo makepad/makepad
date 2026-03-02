@@ -482,6 +482,21 @@ impl X11Cx {
                         }
                     }
                 }
+                CxOsOp::SetPrimarySelection(content) => {
+                    if let Some(window) = opengl_windows.get(0) {
+                        unsafe {
+                            xlib_app.set_primary_selection(
+                                &content,
+                                window.xlib_window.window.unwrap(),
+                                x11_sys::CurrentTime as u64,
+                            )
+                        }
+                    }
+                }
+                CxOsOp::ShowSelectionHandles { .. } => {}
+                CxOsOp::UpdateSelectionHandles { .. } => {}
+                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::StartDragging(items) => {
                     self.internal_drag_items = Some(Arc::new(items));
                 }

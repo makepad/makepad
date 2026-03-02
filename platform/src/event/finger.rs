@@ -885,6 +885,11 @@ impl Event {
                     return Hit::ImeAction(ia.clone());
                 }
             }
+            Event::SelectionHandleDrag(e) => {
+                if cx.keyboard.has_key_focus(area) {
+                    return Hit::SelectionHandleDrag(e.clone());
+                }
+            }
             Event::Scroll(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area) {
                     return Hit::Nothing;
