@@ -4,6 +4,7 @@
 - Visual UI programs must be launched and controlled through the Makepad Studio remote protocol.
 - Command-line-only tasks (builds, tests, linting, file ops, grep/ripgrep, etc.) can be run directly in the shell.
 - Prefer studio remote control for any workflow that needs screenshots, widget queries, clicks, typing, or runtime UI inspection.
+- Before using Studio protocol tools (`FindInFiles`, `ReadTextRange`, `WidgetTreeDump`, `WidgetQuery`, `Screenshot`, `Click`, `TypeText`, `Return`), always start one persistent `cargo makepad studio` background process and reuse it for the entire interaction.
 
 ## Assumptions
 - Studio is started manually by the user.
@@ -25,6 +26,9 @@
 - `{"Cargo":{"mount":"makepad","args":["check","-p","makepad-example-splash"],"env":null,"buildbox":null}}`
 - `{"Run":{"mount":"makepad","process":"makepad-example-splash","args":[]}}`
 - `{"Run":{"mount":"makepad","process":"makepad-example-splash","args":["--my-app-arg"]}}`
+- `{"FindInFiles":{"mount":"makepad","pattern":"UIToStudio::","is_regex":false,"glob":null,"max_results":200}}`
+- `{"FindInFiles":{"mount":"makepad","pattern":"UIToStudio::(FindInFiles|ReadTextRange)","is_regex":true,"glob":"**/*.rs","max_results":200}}`
+- `{"ReadTextRange":{"path":"makepad/studio/backend/src/dispatch.rs","start_line":640,"end_line":720}}`
 - `{"StopBuild":{"build_id":38160721318170}}`
 - `{"WidgetTreeDump":{"build_id":38160721318170}}`
 - `{"WidgetQuery":{"build_id":38160721318170,"query":"id:todo_input"}}`
@@ -45,18 +49,24 @@
 - Use raw `StudioToApp` only for low-level event injection/debugging.
 
 ## Response Notes (Current)
-- Bridge stdout is filtered to: `Hello`, `Error`, `Builds`, `RunnableBuilds`, `BuildStarted`, `BuildStopped`, `Screenshot`, `WidgetTreeDump`, `WidgetQuery`, `QueryCancelled`.
+- Bridge stdout is filtered to: `Hello`, `Error`, `TextFileRead`, `TextFileRange`, `FindFileResults`, `SearchFileResults`, `Builds`, `RunnableBuilds`, `BuildStarted`, `BuildStopped`, `Screenshot`, `WidgetTreeDump`, `WidgetQuery`, `QueryCancelled`.
 - `TerminalOutput`/`TerminalOpened`/`TerminalExited` and all `RunView*` messages are suppressed by `cargo makepad studio`.
 - `Screenshot` responses include file metadata (`path`, `width`, `height`) and not inline PNG bytes.
 - `WidgetTreeDump` responses include text dump content keyed by `request_id`.
+- `FindInFiles` responds as `SearchFileResults` with concise entries (`path`, `line`, `column`, `line_text`) and `done`.
+- `FindInFiles` defaults to searching only `.rs`, `.md`, `.toml` files unless `glob` is provided.
+- `ReadTextRange` responds as `TextFileRange` with `path`, requested `start_line`/`end_line`, `total_lines`, and `content`.
+- Query-scoped responses are lane-filtered by `query_id.client_id`; only this bridge client's query results are emitted.
+- `FindInFiles`/`SearchFiles` execution is worker-pooled in backend (not main dispatch thread).
 
 ## Recommended Control Flow
 1. Start studio remote process once.
-2. Prefer `Run` for app execution and wait for `BuildStarted`.
-3. Use `Cargo` only for raw cargo passthrough commands.
-4. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
-5. For text input, click field first, then send text, then return.
-6. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
+2. For code search, use `FindInFiles` first, then `ReadTextRange` to window exact regions.
+3. Prefer `Run` for app execution and wait for `BuildStarted`.
+4. Use `Cargo` only for raw cargo passthrough commands.
+5. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
+6. For text input, click field first, then send text, then return.
+7. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
 
 ## `Run` Defaults
 - `Run` always builds a `cargo run -p <process>` command with `--release`.
