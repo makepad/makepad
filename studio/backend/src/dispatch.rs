@@ -201,6 +201,7 @@ pub struct StudioCore {
     fs_event_last_prune: Instant,
     mount_suppress_fs_until: HashMap<String, Instant>,
     self_save_suppress_until_by_path: HashMap<String, Instant>,
+    pending_forward_to_app_by_build: HashMap<QueryId, Vec<Vec<u8>>>,
 }
 
 impl StudioCore {
@@ -249,6 +250,7 @@ impl StudioCore {
             fs_event_last_prune: Instant::now(),
             mount_suppress_fs_until: HashMap::new(),
             self_save_suppress_until_by_path: HashMap::new(),
+            pending_forward_to_app_by_build: HashMap::new(),
         };
         this.reset_fs_watcher();
         this
@@ -315,6 +317,7 @@ impl StudioCore {
             } => {
                 self.app_sockets
                     .insert(web_socket_id, AppSocket { build_id, sender });
+                self.flush_pending_forward_to_app(build_id);
             }
             StudioEvent::AppDisconnected { web_socket_id } => {
                 self.app_sockets.remove(&web_socket_id);
@@ -958,8 +961,22 @@ impl StudioCore {
                 }
             }
             UIToStudio::ForwardToApp { build_id, msg_bin } => {
-                if let Err(err) = self.send_to_app(build_id, msg_bin) {
-                    self.send_ui_error(client_id, err);
+                let is_bootstrap = StudioToAppVec::deserialize_bin(&msg_bin)
+                    .ok()
+                    .is_some_and(|msgs| {
+                        msgs.0.iter().any(|msg| {
+                            matches!(
+                                msg,
+                                StudioToApp::WindowGeomChange { .. } | StudioToApp::Swapchain(_)
+                            )
+                        })
+                    });
+                match self.send_to_app_with_socket(build_id, msg_bin.clone()) {
+                    Ok(_) => {}
+                    Err(err) if err.starts_with("no app socket for build") => {
+                        self.queue_pending_forward_to_app(build_id, msg_bin, is_bootstrap);
+                    }
+                    Err(err) => self.send_ui_error(client_id, err),
                 }
             }
             UIToStudio::TypeText { build_id, text } => {
@@ -1763,16 +1780,69 @@ impl StudioCore {
         }
     }
 
-    fn send_to_app(&self, build_id: QueryId, msg_bin: Vec<u8>) -> Result<(), String> {
-        let sender = self
+    fn send_to_app_with_socket(&self, build_id: QueryId, msg_bin: Vec<u8>) -> Result<u64, String> {
+        let mut candidates: Vec<(u64, Sender<Vec<u8>>)> = self
             .app_sockets
-            .values()
-            .find(|socket| socket.build_id == build_id)
-            .map(|socket| socket.sender.clone())
-            .ok_or_else(|| format!("no app socket for build {}", build_id.0))?;
-        sender
-            .send(msg_bin)
-            .map_err(|_| format!("failed to send app message for build {}", build_id.0))
+            .iter()
+            .filter_map(|(web_socket_id, socket)| {
+                (socket.build_id == build_id).then_some((*web_socket_id, socket.sender.clone()))
+            })
+            .collect();
+        candidates.sort_by_key(|(web_socket_id, _)| *web_socket_id);
+        let socket_ids = candidates
+            .iter()
+            .map(|(web_socket_id, _)| *web_socket_id)
+            .collect::<Vec<_>>();
+        let Some((socket_id, sender)) = candidates.pop() else {
+            return Err(format!("no app socket for build {}", build_id.0));
+        };
+        sender.send(msg_bin).map_err(|_| {
+            format!(
+                "failed to send app message for build {} socket={} sockets_for_build={:?}",
+                build_id.0, socket_id, socket_ids
+            )
+        })?;
+        Ok(socket_id)
+    }
+
+    fn queue_pending_forward_to_app(
+        &mut self,
+        build_id: QueryId,
+        msg_bin: Vec<u8>,
+        is_bootstrap: bool,
+    ) {
+        // Before an app socket exists, only bootstrap packets matter for RunView bring-up.
+        // Dropping pre-socket Tick/input traffic avoids queue churn and stale replays.
+        if !is_bootstrap {
+            return;
+        }
+        let queue = self
+            .pending_forward_to_app_by_build
+            .entry(build_id)
+            .or_default();
+        queue.clear();
+        queue.push(msg_bin);
+    }
+
+    fn flush_pending_forward_to_app(&mut self, build_id: QueryId) {
+        let Some(mut pending) = self.pending_forward_to_app_by_build.remove(&build_id) else {
+            return;
+        };
+        while let Some(msg_bin) = pending.first().cloned() {
+            match self.send_to_app_with_socket(build_id, msg_bin) {
+                Ok(_) => {
+                    pending.remove(0);
+                }
+                Err(_) => {
+                    self.pending_forward_to_app_by_build.insert(build_id, pending);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn send_to_app(&self, build_id: QueryId, msg_bin: Vec<u8>) -> Result<(), String> {
+        self.send_to_app_with_socket(build_id, msg_bin).map(|_| ())
     }
 
     fn send_app_msg(&self, build_id: QueryId, msg: StudioToApp) -> Result<(), String> {

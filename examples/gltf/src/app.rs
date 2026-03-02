@@ -48,6 +48,7 @@ impl App {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    #[rust] i:u32
 }
 
 impl MatchEvent for App {
@@ -56,6 +57,8 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        println!("QW:KEJRHQWLE:KJRHQWLEKJRHQWELKJRH {}",self.i);
+        self.i+=1;
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }

@@ -26,15 +26,18 @@ script_mod! {
         align: Align {x: 0.0 y: 0.0}
         show_bg: true
         draw_bg +: {
+            color_even: uniform(theme.color_bg_even)
+            color_odd: uniform(theme.color_bg_odd)
+            color_selected: uniform(theme.color_outset_active)
             is_even: instance(0.0)
             selected: instance(0.0)
             hover: instance(0.0)
             pixel: fn() {
-                return theme.color_bg_even.mix(
-                    theme.color_bg_odd,
+                return self.color_even.mix(
+                    self.color_odd,
                     self.is_even
                 ).mix(
-                    theme.color_outset_active,
+                    self.color_selected,
                     self.selected
                 )
             }
@@ -147,10 +150,12 @@ script_mod! {
         height: 25.0
         show_bg: true
         draw_bg +: {
+            color_even: uniform(theme.color_bg_even)
+            color_odd: uniform(theme.color_bg_odd)
             is_even: instance(0.0)
             pixel: fn() {
-                return theme.color_bg_even.mix(
-                    theme.color_bg_odd,
+                return self.color_even.mix(
+                    self.color_odd,
                     self.is_even
                 )
             }
@@ -252,22 +257,31 @@ impl DesktopLogView {
         }
     }
 
+    fn apply_is_even(cx: &mut Cx2d, item: &mut ViewRef, is_even_f: f32) {
+        script_apply_eval!(cx, item, {
+            draw_bg +: {is_even: #(is_even_f)}
+        });
+    }
+
     fn draw_empty(&mut self, cx: &mut Cx2d, list: &mut PortalList, text: &str) {
         let rows = Self::empty_fill_rows(list, cx, 0).max(1);
         list.set_item_range(cx, 0, rows);
         while let Some(item_id) = list.next_visible_item(cx) {
             let mut item = list.item(cx, item_id, id!(Empty)).as_view();
             let is_even_f = if item_id & 1 == 0 { 1.0 } else { 0.0 };
-            script_apply_eval!(cx, item, {
-                draw_bg +: {is_even: #(is_even_f)}
-            });
+            Self::apply_is_even(cx, &mut item, is_even_f);
             let label = if item_id == 0 { text } else { "" };
             item.label(cx, ids!(empty_label)).set_text(cx, label);
             item.draw_all(cx, &mut Scope::empty());
         }
     }
 
-    fn draw_entries(&mut self, cx: &mut Cx2d, list: &mut PortalList, entries: &VecDeque<UiLogEntry>) {
+    fn draw_entries(
+        &mut self,
+        cx: &mut Cx2d,
+        list: &mut PortalList,
+        entries: &VecDeque<UiLogEntry>,
+    ) {
         if entries.is_empty() {
             self.draw_empty(cx, list, "No logs yet");
             return;
@@ -279,17 +293,13 @@ impl DesktopLogView {
             let is_even_f = if item_id & 1 == 0 { 1.0 } else { 0.0 };
             let Some(entry) = entries.get(item_id) else {
                 let mut item = list.item(cx, item_id, id!(Empty)).as_view();
-                script_apply_eval!(cx, item, {
-                    draw_bg +: {is_even: #(is_even_f)}
-                });
+                Self::apply_is_even(cx, &mut item, is_even_f);
                 item.label(cx, ids!(empty_label)).set_text(cx, "");
                 item.draw_all(cx, &mut Scope::empty());
                 continue;
             };
             let mut item = list.item(cx, item_id, id!(LogItem)).as_view();
-            script_apply_eval!(cx, item, {
-                draw_bg +: {is_even: #(is_even_f)}
-            });
+            Self::apply_is_even(cx, &mut item, is_even_f);
 
             while let Some(step) = item.draw(cx, &mut Scope::empty()).step() {
                 if let Some(mut tf) = step.as_text_flow().borrow_mut() {
