@@ -138,15 +138,8 @@ fn show_help() {
     println!(
         "    studio [options]                              Start filtered newline-JSON studio remote websocket"
     );
-    println!("    studio studio_remote [options]                Same as 'studio' (explicit mode)");
-    println!(
-        "    studio run [options] [cargo run args]         Ask Studio to start a cargo run child"
-    );
     println!("    [options]:");
     println!("       --studio=127.0.0.1:8001                   Studio server ip:port");
-    println!(
-        "       --root=<ROOT>                             Studio root name (for 'studio run')"
-    );
     println!("                                                 (or set STUDIO=127.0.0.1:8001)");
     println!();
     println!();
@@ -171,9 +164,9 @@ fn main() -> Result<(), Cow<'static, str>> {
         args
     };
 
-    if args.len() <= 1 {
+    if args.is_empty() {
         show_help();
-        return Err("not enough arguments; expected 2 or more.".into());
+        return Err("not enough arguments; expected at least one command.".into());
     }
     let result = match args[0].as_ref() {
         "android" => handle_android(&args[1..]),

@@ -159,6 +159,10 @@ impl App {
                     let _ = self.send_studio(UIToStudio::LoadRunnableBuilds {
                         mount: mount.name.clone(),
                     });
+                    let _ = self.send_studio(UIToStudio::ObserveMount {
+                        mount: mount.name.clone(),
+                        primary: Some(true),
+                    });
                 }
                 if let Some(first_mount) = mounts.first() {
                     self.select_mount(cx, &first_mount.name);

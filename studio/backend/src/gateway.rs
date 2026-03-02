@@ -45,7 +45,7 @@ pub fn start_http_gateway(
                     if headers.path == "/$studio_ui" {
                         socket_roles.insert(web_socket_id, SocketRole::Ui);
                         let _ = event_tx.send(StudioEvent::UiConnected {
-                            connection_id: web_socket_id,
+                            web_socket_id: web_socket_id,
                             sender: ToUISender::from_sender(response_sender),
                             typed_sender: None,
                         });
@@ -55,7 +55,7 @@ pub fn start_http_gateway(
                         socket_roles.insert(web_socket_id, SocketRole::App);
                         let _ = event_tx.send(StudioEvent::AppConnected {
                             build_id,
-                            connection_id: web_socket_id,
+                            web_socket_id: web_socket_id,
                             sender: response_sender,
                         });
                         continue;
@@ -63,7 +63,7 @@ pub fn start_http_gateway(
                     if headers.path == "/$studio_buildbox" {
                         socket_roles.insert(web_socket_id, SocketRole::BuildBox);
                         let _ = event_tx.send(StudioEvent::BuildBoxConnected {
-                            connection_id: web_socket_id,
+                            web_socket_id: web_socket_id,
                             sender: response_sender,
                         });
                         continue;
@@ -75,15 +75,15 @@ pub fn start_http_gateway(
                         match role {
                             SocketRole::Ui => {
                                 let _ =
-                                    event_tx.send(StudioEvent::UiDisconnected { connection_id: web_socket_id });
+                                    event_tx.send(StudioEvent::UiDisconnected { web_socket_id: web_socket_id });
                             }
                             SocketRole::App => {
                                 let _ =
-                                    event_tx.send(StudioEvent::AppDisconnected { connection_id: web_socket_id });
+                                    event_tx.send(StudioEvent::AppDisconnected { web_socket_id: web_socket_id });
                             }
                             SocketRole::BuildBox => {
                                 let _ = event_tx
-                                    .send(StudioEvent::BuildBoxDisconnected { connection_id: web_socket_id });
+                                    .send(StudioEvent::BuildBoxDisconnected { web_socket_id: web_socket_id });
                             }
                         }
                     }
@@ -95,19 +95,19 @@ pub fn start_http_gateway(
                 } => match socket_roles.get(&web_socket_id) {
                     Some(SocketRole::Ui) => {
                         let _ = event_tx.send(StudioEvent::UiBinary {
-                            connection_id: web_socket_id,
+                            web_socket_id: web_socket_id,
                             data,
                         });
                     }
                     Some(SocketRole::App) => {
                         let _ = event_tx.send(StudioEvent::AppBinary {
-                            connection_id: web_socket_id,
+                            web_socket_id: web_socket_id,
                             data,
                         });
                     }
                     Some(SocketRole::BuildBox) => {
                         let _ = event_tx.send(StudioEvent::BuildBoxBinary {
-                            connection_id: web_socket_id,
+                            web_socket_id: web_socket_id,
                             data,
                         });
                     }
@@ -120,7 +120,7 @@ pub fn start_http_gateway(
                 } => match socket_roles.get(&web_socket_id) {
                     Some(SocketRole::Ui) => {
                         let _ = event_tx.send(StudioEvent::UiText {
-                            connection_id: web_socket_id,
+                            web_socket_id: web_socket_id,
                             text: string,
                         });
                     }
