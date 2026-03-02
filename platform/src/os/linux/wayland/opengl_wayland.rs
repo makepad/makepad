@@ -16,7 +16,9 @@ use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
 };
 use wayland_protocols::xdg::shell;
-use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::shell::client::{
+    xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
+};
 use wayland_protocols::xdg::toplevel_icon::v1::client::{
     xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1,
 };
@@ -230,22 +232,177 @@ impl WaylandWindow {
         }
     }
     pub fn close_window(&mut self) {
-        self.base_surface.destroy();
+        // Destroy in protocol order: role-specific objects first, base
+        // surface last.
         if let Some(decoration) = self.decoration.take() {
             decoration.destroy();
         }
+        self.toplevel.destroy();
+        self.xdg_surface.destroy();
         if let Some(viewport) = self.viewport.take() {
             viewport.destroy();
         }
         if let Some(fractional_scale) = self.fractional_scale.take() {
             fractional_scale.destroy();
         }
-        self.toplevel.destroy();
+        self.base_surface.destroy();
+    }
+}
+
+pub(crate) struct WaylandPopupWindow {
+    pub window_id: WindowId,
+    pub parent_window_id: WindowId,
+    pub base_surface: wl_surface::WlSurface,
+    pub xdg_surface: xdg_surface::XdgSurface,
+    pub xdg_popup: xdg_popup::XdgPopup,
+    pub viewport: Option<wp_viewport::WpViewport>,
+    pub fractional_scale: Option<wp_fractional_scale_v1::WpFractionalScaleV1>,
+    pub wl_egl_surface: Option<WlEglSurface>,
+    pub egl_surface: EGLSurface,
+    pub egl_display: egl_sys::EGLDisplay,
+    egl_destroy_surface_fn: unsafe extern "C" fn(egl_sys::EGLDisplay, EGLSurface) -> egl_sys::EGLBoolean,
+    pub window_geom: WindowGeom,
+    pub configured: bool,
+    pub cal_size: Vec2d,
+}
+
+impl WaylandPopupWindow {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        window_id: WindowId,
+        parent_window_id: WindowId,
+        compositer: &wl_compositor::WlCompositor,
+        wm_base: &xdg_wm_base::XdgWmBase,
+        parent_xdg_surface: &xdg_surface::XdgSurface,
+        _seat: Option<&wayland_client::protocol::wl_seat::WlSeat>,
+        _pointer_serial: Option<u32>,
+        _keyboard_serial: Option<u32>,
+        scale_manager: Option<&wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
+        viewporter: Option<&wp_viewporter::WpViewporter>,
+        qhandle: &QueueHandle<WaylandState>,
+        opengl_cx: &OpenglCx,
+        size: Vec2d,
+        position: Vec2d,
+        _grab_keyboard: bool,
+    ) -> WaylandPopupWindow {
+        assert_eq!(opengl_cx.egl_platform, egl_sys::EGL_PLATFORM_WAYLAND_KHR);
+
+        let base_surface = compositer.create_surface(qhandle, ());
+        let fractional_scale = scale_manager
+            .map(|manager| manager.get_fractional_scale(&base_surface, qhandle, window_id));
+        let viewport = viewporter.map(|vp| vp.get_viewport(&base_surface, qhandle, ()));
+
+        let xdg_surface = wm_base.get_xdg_surface(&base_surface, qhandle, window_id);
+        let positioner = wm_base.create_positioner(qhandle, ());
+        positioner.set_size(size.x.max(1.0) as i32, size.y.max(1.0) as i32);
+        positioner.set_anchor_rect(position.x as i32, position.y as i32, 1, 1);
+        positioner.set_anchor(xdg_positioner::Anchor::TopLeft);
+        positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+        positioner.set_constraint_adjustment(
+            xdg_positioner::ConstraintAdjustment::FlipX
+                | xdg_positioner::ConstraintAdjustment::FlipY
+                | xdg_positioner::ConstraintAdjustment::SlideX
+                | xdg_positioner::ConstraintAdjustment::SlideY,
+        );
+
+        let xdg_popup = xdg_surface.get_popup(Some(parent_xdg_surface), &positioner, qhandle, window_id);
+        // Do NOT grab the popup. Without a grab the compositor will not
+        // auto-dismiss the popup on outside clicks, giving the app full
+        // control over popup lifetime via explicit close.
+        base_surface.commit();
+        positioner.destroy();
+
+        let wl_egl_surface =
+            WlEglSurface::new(base_surface.id(), size.x.max(1.0) as i32, size.y.max(1.0) as i32)
+                .unwrap();
+        let egl_surface = unsafe {
+            (opengl_cx.libegl.eglCreateWindowSurface.unwrap())(
+                opengl_cx.egl_display,
+                opengl_cx.egl_config,
+                wl_egl_surface.ptr() as NativeWindowType,
+                std::ptr::null(),
+            )
+        };
+        assert!(!egl_surface.is_null(), "eglCreateWindowSurface failed");
+
+        let geom = WindowGeom {
+            xr_is_presenting: false,
+            can_fullscreen: false,
+            is_topmost: false,
+            is_fullscreen: false,
+            inner_size: size,
+            outer_size: size,
+            dpi_factor: 1.0,
+            position,
+        };
+
+        Self {
+            window_id,
+            parent_window_id,
+            base_surface,
+            xdg_surface,
+            xdg_popup,
+            viewport,
+            fractional_scale,
+            wl_egl_surface: Some(wl_egl_surface),
+            egl_surface,
+            egl_display: opengl_cx.egl_display,
+            egl_destroy_surface_fn: opengl_cx.libegl.eglDestroySurface.unwrap(),
+            window_geom: geom,
+            configured: false,
+            cal_size: Vec2d::default(),
+        }
+    }
+
+    pub fn resize_buffers(&mut self) -> bool {
+        let cal_size = Vec2d {
+            x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
+            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor,
+        };
+        if self.cal_size != cal_size {
+            self.cal_size = cal_size;
+            if let Some(ref wl_egl_surface) = self.wl_egl_surface {
+                wl_egl_surface
+                    .resize(cal_size.x.max(1.0) as i32, cal_size.y.max(1.0) as i32, 0, 0);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn close_window(&mut self) {
+        // Destroy EGL surface first — it holds a reference to the wl_egl_surface.
+        if !self.egl_surface.is_null() {
+            unsafe {
+                (self.egl_destroy_surface_fn)(self.egl_display, self.egl_surface);
+            }
+            self.egl_surface = std::ptr::null_mut();
+        }
+        // Drop wl_egl_surface before Wayland objects — wl_egl_window_destroy
+        // accesses the underlying wl_surface.
+        self.wl_egl_surface.take();
+        // Destroy Wayland objects in protocol order: role-specific first,
+        // then the base surface last.
+        self.xdg_popup.destroy();
         self.xdg_surface.destroy();
+        if let Some(viewport) = self.viewport.take() {
+            viewport.destroy();
+        }
+        if let Some(fractional_scale) = self.fractional_scale.take() {
+            fractional_scale.destroy();
+        }
+        self.base_surface.destroy();
     }
 }
 
 impl Drop for WaylandWindow {
+    fn drop(&mut self) {
+        self.close_window();
+    }
+}
+
+impl Drop for WaylandPopupWindow {
     fn drop(&mut self) {
         self.close_window();
     }
