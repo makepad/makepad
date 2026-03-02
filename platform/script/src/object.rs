@@ -205,8 +205,7 @@ impl ScriptObjectTag {
     }
 
     pub fn set_auto(&mut self) {
-        self.0 &= !Self::STORAGE_AUTO;
-        self.0 |= Self::STORAGE_MAP;
+        self.0 &= !Self::STORAGE_MASK;
     }
 
     pub fn set_map(&mut self) {

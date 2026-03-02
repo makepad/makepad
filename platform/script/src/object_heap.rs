@@ -15,6 +15,10 @@ impl ScriptHeap {
         if let Some(obj) = self.objects_free.pop() {
             // obj already has the correct generation from gc.rs sweep
             let object = &mut self.objects[obj];
+            debug_assert!(
+                object.map.is_empty() && object.vec.is_empty() && object.proto.is_nil(),
+                "reused object slot was not fully cleared before reuse"
+            );
             object.tag.set_alloced();
             object.proto = id!(object).into();
             obj
@@ -75,6 +79,10 @@ impl ScriptHeap {
                 let (o1, o2) = self.objects.slots_split_at_mut(proto_ptr.index as usize);
                 (&mut o1[index as usize].data, &mut o2[0].data)
             };
+            debug_assert!(
+                object.map.is_empty() && object.vec.is_empty() && object.proto.is_nil(),
+                "reused object slot was not fully cleared before proto allocation"
+            );
             object.tag.set_alloced();
             object.tag.set_proto_fwd(proto_fwd);
             object.proto = proto;

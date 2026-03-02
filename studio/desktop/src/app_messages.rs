@@ -1,12 +1,7 @@
 use super::*;
 
 macro_rules! ui_file_sync_trace {
-    ($($arg:tt)*) => {
-        crate::makepad_widgets::makepad_platform::makepad_error_log::log!(
-            "[studio2-ui/file-sync] {}",
-            format!($($arg)*)
-        );
-    };
+    ($($arg:tt)*) => {};
 }
 
 impl App {
@@ -160,29 +155,17 @@ impl App {
                         );
                         return;
                     }
-                    let mut queued = 0usize;
                     for open_path in open_paths {
                         if self.data.pending_reload_paths.insert(open_path.clone()) {
                             let _ = self.send_studio(UIToStudio::ReadTextFile {
                                 path: open_path.clone(),
                             });
-                            queued += 1;
                         }
                     }
-                    ui_file_sync_trace!(
-                        "mount-level FileChanged mount={} queued_reads={}",
-                        mount,
-                        queued
-                    );
                     return;
                 }
 
                 if !self.data.path_to_tab.contains_key(&path) {
-                    ui_file_sync_trace!(
-                        "ignore FileChanged path={} reason=not-open pending_reload={}",
-                        path,
-                        self.data.pending_reload_paths.contains(&path)
-                    );
                     return;
                 }
 
@@ -369,9 +352,9 @@ impl App {
                 }
                 if let Some(mount) = mount {
                     if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
-                        dock.item(tab_id)
-                            .desktop_run_view(cx, ids!(run_view))
-                            .set_run_target(cx, build_id, Some(window_id));
+                        let run_view = dock.item(tab_id).desktop_run_view(cx, ids!(run_view));
+                        run_view.set_run_target(cx, build_id, Some(window_id));
+                        run_view.rebootstrap_after_app_ready(cx, build_id, window_id);
                         dock.redraw_tab(cx, tab_id);
                     }
                 }

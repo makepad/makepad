@@ -82,6 +82,7 @@ pub struct CxDrawShaders {
     pub os_shaders: Vec<CxOsDrawShader>,
     pub compile_set: BTreeSet<usize>,
 
+    pub cache_object_reuse_epoch_seen: u64,
     pub cache_object_id_to_shader: HashMap<ScriptObject, DrawShaderId>,
     pub cache_functions_to_shader: LiveIdMap<LiveId, DrawShaderId>,
     pub cache_code_to_shader: HashMap<CxDrawShaderCode, DrawShaderId>,
