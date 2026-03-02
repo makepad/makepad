@@ -8,7 +8,7 @@ use {
     std::collections::BTreeMap,
     std::fmt,
     std::fmt::{Debug, Error, Formatter},
-    std::rc::Rc,
+    std::rc::{Rc, Weak},
     std::sync::atomic::{AtomicU64, Ordering},
     std::sync::Arc,
 };
@@ -344,6 +344,9 @@ pub struct WidgetRefInner {
 #[derive(Clone, Default)]
 pub struct WidgetRef(Rc<RefCell<Option<WidgetRefInner>>>);
 
+#[derive(Clone, Default)]
+pub struct WidgetWeakRef(Weak<RefCell<Option<WidgetRefInner>>>);
+
 impl Debug for WidgetRef {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         write!(f, "WidgetRef {}", self.widget_uid().0)
@@ -470,6 +473,21 @@ impl PartialEq for WidgetRef {
         !Rc::ptr_eq(&self.0, &other.0)
     }
 }
+
+impl PartialEq for WidgetWeakRef {
+    fn eq(&self, other: &WidgetWeakRef) -> bool {
+        Weak::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for WidgetWeakRef {}
+
+impl PartialEq<WidgetRef> for WidgetWeakRef {
+    fn eq(&self, other: &WidgetRef) -> bool {
+        let other_weak = Rc::downgrade(&other.0);
+        Weak::ptr_eq(&self.0, &other_weak)
+    }
+}
 pub trait OptionWidgetRefExt {
     fn into_ref(self) -> WidgetRef;
 }
@@ -519,6 +537,10 @@ impl WidgetRef {
 
     pub fn new_with_inner(widget: Box<dyn Widget>) -> Self {
         Self(Rc::new(RefCell::new(Some(WidgetRefInner { widget }))))
+    }
+
+    pub fn downgrade(&self) -> WidgetWeakRef {
+        WidgetWeakRef(Rc::downgrade(&self.0))
     }
     /// ## handle event with a sweep area
     ///
@@ -1087,6 +1109,16 @@ impl WidgetRef {
         if set_ui_after_apply {
             vm.with_cx_mut(|cx| set_ui_root(cx, self));
         }
+    }
+}
+
+impl WidgetWeakRef {
+    pub fn upgrade(&self) -> Option<WidgetRef> {
+        self.0.upgrade().map(WidgetRef)
+    }
+
+    pub fn to_widget_ref(&self) -> WidgetRef {
+        self.upgrade().unwrap_or_else(WidgetRef::empty)
     }
 }
 
