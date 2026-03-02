@@ -13,7 +13,23 @@ pub struct RabinKarpResult {
 }
 
 pub fn search(haystack: &[u8], needle: &[u8], indices: &mut Vec<RabinKarpResult>) {
-    if needle.len() > haystack.len() {
+    search_with_limit(haystack, needle, indices, usize::MAX);
+}
+
+/// Same as [`search`], but stops after collecting `max_results` entries.
+///
+/// The `max_results` cap is applied to the total `indices` length, so passing
+/// a non-empty `indices` allows callers to enforce a global cap across calls.
+pub fn search_with_limit(
+    haystack: &[u8],
+    needle: &[u8],
+    indices: &mut Vec<RabinKarpResult>,
+    max_results: usize,
+) {
+    if max_results == 0 || indices.len() >= max_results {
+        return;
+    }
+    if needle.is_empty() || needle.len() > haystack.len() {
         return;
     }
     const BASE: u32 = 257;
@@ -55,6 +71,9 @@ pub fn search(haystack: &[u8], needle: &[u8], indices: &mut Vec<RabinKarpResult>
                 column_byte: column_byte.saturating_sub(1),
                 byte: index,
             });
+            if indices.len() >= max_results {
+                return;
+            }
         }
         // Update the hash of the the current window of the haystack, by removing the first
         // byte from and adding the next byte to the hash.
@@ -63,5 +82,24 @@ pub fn search(haystack: &[u8], needle: &[u8], indices: &mut Vec<RabinKarpResult>
                 (haystack_hash + MODULO - (haystack[index] as u32 * base_pow) % MODULO) % MODULO;
             haystack_hash = (haystack_hash * BASE + haystack[index + needle.len()] as u32) % MODULO;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{search, search_with_limit};
+
+    #[test]
+    fn search_with_limit_caps_results() {
+        let mut results = Vec::new();
+        search_with_limit(b"aa aa aa", b"aa", &mut results, 2);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn search_keeps_existing_behavior() {
+        let mut results = Vec::new();
+        search(b"aa aa aa", b"aa", &mut results);
+        assert_eq!(results.len(), 3);
     }
 }

@@ -888,6 +888,51 @@ fn find_in_files_defaults_to_rs_md_toml_and_returns_concise_hits() {
 }
 
 #[test]
+fn find_in_files_regex_respects_max_results() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub fn alpha() {\n    let marker = \"needle\";\n    let marker2 = \"needle\";\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("README.md"), "needle in markdown\n").unwrap();
+
+    let config = BackendConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+
+    let query_id = connection.send(UIToStudio::FindInFiles {
+        mount: Some("repo".to_string()),
+        pattern: "needle".to_string(),
+        is_regex: Some(true),
+        glob: None,
+        max_results: Some(1),
+    });
+
+    let msg = wait_for_message(&connection, Duration::from_secs(4), |msg| {
+        matches!(
+            msg,
+            StudioToUI::SearchFileResults { query_id: id, done: true, .. } if *id == query_id
+        )
+    })
+    .expect("did not receive SearchFileResults");
+
+    match msg {
+        StudioToUI::SearchFileResults { results, done, .. } => {
+            assert!(done);
+            assert_eq!(results.len(), 1, "regex search should stop at max_results");
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
 fn read_text_range_returns_line_window_and_total_line_count() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
