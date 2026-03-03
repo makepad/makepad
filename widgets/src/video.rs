@@ -704,6 +704,17 @@ impl Widget for Video {
 
         let uid = self.widget_uid();
         match event {
+            Event::VideoYuvTexturesReady(event) => {
+                if event.video_id == self.id {
+                    // Bind platform-allocated YUV textures to shader slots 2, 3, 4
+                    self.tex_y = Some(event.tex_y.clone());
+                    self.tex_u = Some(event.tex_u.clone());
+                    self.tex_v = Some(event.tex_v.clone());
+                    self.draw_bg.draw_vars.set_texture(2, &event.tex_y);
+                    self.draw_bg.draw_vars.set_texture(3, &event.tex_u);
+                    self.draw_bg.draw_vars.set_texture(4, &event.tex_v);
+                }
+            }
             Event::VideoPlaybackPrepared(event) => {
                 if event.video_id == self.id {
                     self.handle_playback_prepared(cx, event);
@@ -791,21 +802,6 @@ impl Video {
         let texture = self.video_texture.as_mut().unwrap();
         self.draw_bg.draw_vars.set_texture(0, &texture);
 
-        // Create YUV plane textures for software decode path
-        if self.tex_y.is_none() {
-            self.tex_y = Some(Texture::new_with_format(cx, TextureFormat::VideoRGB));
-        }
-        if self.tex_u.is_none() {
-            self.tex_u = Some(Texture::new_with_format(cx, TextureFormat::VideoRGB));
-        }
-        if self.tex_v.is_none() {
-            self.tex_v = Some(Texture::new_with_format(cx, TextureFormat::VideoRGB));
-        }
-        // Bind to shader texture slots 2, 3, 4
-        self.draw_bg.draw_vars.set_texture(2, self.tex_y.as_ref().unwrap());
-        self.draw_bg.draw_vars.set_texture(3, self.tex_u.as_ref().unwrap());
-        self.draw_bg.draw_vars.set_texture(4, self.tex_v.as_ref().unwrap());
-
         #[cfg(target_os = "android")]
         match cx.os_type() {
             OsType::Android(params) if params.is_emulator => {
@@ -875,17 +871,11 @@ impl Video {
             let Some(texture) = self.video_texture.as_ref() else {
                 return;
             };
-            let tex_y_id = self.tex_y.as_ref().map(|t| t.texture_id()).unwrap_or_default();
-            let tex_u_id = self.tex_u.as_ref().map(|t| t.texture_id()).unwrap_or_default();
-            let tex_v_id = self.tex_v.as_ref().map(|t| t.texture_id()).unwrap_or_default();
             cx.prepare_video_playback(
                 self.id,
                 source,
                 self.video_texture_handle.unwrap_or(0),
                 texture.texture_id(),
-                tex_y_id,
-                tex_u_id,
-                tex_v_id,
                 self.autoplay,
                 self.is_looping,
             );

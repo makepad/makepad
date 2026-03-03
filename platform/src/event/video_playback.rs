@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::makepad_live_id::LiveId;
+use crate::texture::Texture;
 use crate::video::{VideoFormatId, VideoInputId};
 use crate::TextureId;
 
@@ -58,6 +59,16 @@ pub struct VideoDecodingErrorEvent {
 pub struct TextureHandleReadyEvent {
     pub texture_id: TextureId,
     pub handle: u32,
+}
+
+/// Emitted by platform backends when YUV plane textures have been allocated
+/// internally. The Video widget uses this to bind the textures to shader slots.
+#[derive(Clone, Debug)]
+pub struct VideoYuvTexturesReady {
+    pub video_id: LiveId,
+    pub tex_y: Texture,
+    pub tex_u: Texture,
+    pub tex_v: Texture,
 }
 
 /// Seekable time ranges for a video, in seconds.

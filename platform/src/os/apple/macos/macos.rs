@@ -7,10 +7,11 @@ use {
             video_playback::{
                 VideoBufferedRangesEvent, VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
                 VideoPlaybackResourcesReleasedEvent, VideoSeekableRangesEvent,
-                VideoTextureUpdatedEvent,
+                VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
             Event, GameInputEventChannel, MouseButton, MouseUpEvent, WindowGeom,
         },
+        texture::{Texture, TextureFormat},
         makepad_live_id::*,
         makepad_math::*,
         os::{
@@ -876,12 +877,16 @@ impl Cx {
                     source,
                     _gl_handle,
                     texture_id,
-                    tex_y_id,
-                    tex_u_id,
-                    tex_v_id,
                     autoplay,
                     should_loop,
                 ) => {
+                    // Allocate YUV textures internally for software/NV12 decode path
+                    let tex_y = Texture::new_with_format(self, TextureFormat::VideoRGB);
+                    let tex_u = Texture::new_with_format(self, TextureFormat::VideoRGB);
+                    let tex_v = Texture::new_with_format(self, TextureFormat::VideoRGB);
+                    let tex_y_id = tex_y.texture_id();
+                    let tex_u_id = tex_u.texture_id();
+                    let tex_v_id = tex_v.texture_id();
                     let player = AppleUnifiedVideoPlayer::new(
                         metal_cx.device,
                         video_id,
@@ -894,6 +899,15 @@ impl Cx {
                         should_loop,
                     );
                     self.os.video_players.insert(video_id, player);
+                    // Notify widget so it can bind textures to shader slots
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(
+                        VideoYuvTexturesReady {
+                            video_id,
+                            tex_y,
+                            tex_u,
+                            tex_v,
+                        },
+                    ));
                     // Keep timer alive so we can poll for video frames
                     self.ensure_timer0_started();
                 }

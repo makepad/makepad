@@ -616,9 +616,6 @@ impl Cx {
                     source,
                     _external_texture_id,
                     texture_id,
-                    _tex_y_id,
-                    _tex_u_id,
-                    _tex_v_id,
                     autoplay,
                     should_loop,
                 ) => {

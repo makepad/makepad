@@ -14,7 +14,7 @@ use {
             video_playback::{
                 VideoBufferedRangesEvent, VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
                 VideoPlaybackResourcesReleasedEvent, VideoSeekableRangesEvent,
-                VideoTextureUpdatedEvent,
+                VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
             *,
         },
@@ -22,6 +22,7 @@ use {
         makepad_live_id::*,
         makepad_math::dvec2,
         os::cx_native::EventFlow,
+        texture::TextureFormat,
         thread::SignalToUI,
         CxWindowPool,
     },
@@ -719,9 +720,6 @@ impl X11Cx {
                     source,
                     _external_texture_id,
                     texture_id,
-                    tex_y_id,
-                    tex_u_id,
-                    tex_v_id,
                     autoplay,
                     should_loop,
                 ) => {
@@ -785,6 +783,13 @@ impl X11Cx {
                         }
                     }
                     if use_software {
+                        // Allocate YUV textures internally for software decode
+                        let tex_y = cx.textures.alloc(TextureFormat::VideoRGB);
+                        let tex_u = cx.textures.alloc(TextureFormat::VideoRGB);
+                        let tex_v = cx.textures.alloc(TextureFormat::VideoRGB);
+                        let tex_y_id = tex_y.texture_id();
+                        let tex_u_id = tex_u.texture_id();
+                        let tex_v_id = tex_v.texture_id();
                         let player = crate::video_decode::software_av1::SoftwareAv1Player::new(
                             video_id,
                             texture_id,
@@ -801,6 +806,15 @@ impl X11Cx {
                                 tex_v_id,
                                 yuv_matrix: 0.0,
                             });
+                        // Notify widget so it can bind textures to shader slots
+                        cx.call_event_handler(&Event::VideoYuvTexturesReady(
+                            VideoYuvTexturesReady {
+                                video_id,
+                                tex_y,
+                                tex_u,
+                                tex_v,
+                            },
+                        ));
                     }
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {

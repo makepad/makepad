@@ -46,11 +46,13 @@ use {
             //HttpRequest,
             //HttpMethod,
             VideoTextureUpdatedEvent,
+            VideoYuvTexturesReady,
             VirtualKeyboardEvent,
             WindowGeom,
             WindowGeomChangeEvent,
         },
         gpu_info::GpuPerformance,
+        texture::TextureFormat,
         makepad_live_id::*,
         makepad_math::*,
         os::cx_native::EventFlow,
@@ -1537,12 +1539,16 @@ impl Cx {
                     source,
                     external_texture_id,
                     texture_id,
-                    tex_y_id,
-                    tex_u_id,
-                    tex_v_id,
                     autoplay,
                     should_loop,
                 ) => {
+                    // Allocate YUV textures internally for software decode path
+                    let tex_y = self.textures.alloc(TextureFormat::VideoRGB);
+                    let tex_u = self.textures.alloc(TextureFormat::VideoRGB);
+                    let tex_v = self.textures.alloc(TextureFormat::VideoRGB);
+                    let tex_y_id = tex_y.texture_id();
+                    let tex_u_id = tex_u.texture_id();
+                    let tex_v_id = tex_v.texture_id();
                     self.os.video_configs.insert(
                         video_id,
                         AndroidVideoConfig {
@@ -1578,8 +1584,27 @@ impl Cx {
                                 yuv_matrix: 0.0,
                             },
                         );
+                        // Notify widget so it can bind textures to shader slots
+                        self.call_event_handler(&Event::VideoYuvTexturesReady(
+                            VideoYuvTexturesReady {
+                                video_id,
+                                tex_y,
+                                tex_u,
+                                tex_v,
+                            },
+                        ));
                         continue;
                     }
+                    // Notify widget so it can bind textures to shader slots
+                    // (needed if native decode fails and we fall back to software)
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(
+                        VideoYuvTexturesReady {
+                            video_id,
+                            tex_y,
+                            tex_u,
+                            tex_v,
+                        },
+                    ));
 
                     unsafe {
                         let env = attach_jni_env();
