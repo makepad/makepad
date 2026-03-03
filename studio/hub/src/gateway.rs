@@ -43,7 +43,7 @@ pub fn start_http_gateway(
                     response_sender,
                 } => {
                     if headers.path == "/$studio_ui" {
-                        socket_roles.insert(web_socket_id, SocketRole::Ui);
+                        socket_roles.insert(web_socket_id, SocketRole::Client);
                         let _ = event_tx.send(HubEvent::ClientConnected {
                             web_socket_id: web_socket_id,
                             sender: ToUISender::from_sender(response_sender),
@@ -73,7 +73,7 @@ pub fn start_http_gateway(
                 HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
                     if let Some(role) = socket_roles.remove(&web_socket_id) {
                         match role {
-                            SocketRole::Ui => {
+                            SocketRole::Client => {
                                 let _ =
                                     event_tx.send(HubEvent::ClientDisconnected { web_socket_id: web_socket_id });
                             }
@@ -93,7 +93,7 @@ pub fn start_http_gateway(
                     response_sender: _,
                     data,
                 } => match socket_roles.get(&web_socket_id) {
-                    Some(SocketRole::Ui) => {
+                    Some(SocketRole::Client) => {
                         let _ = event_tx.send(HubEvent::ClientBinary {
                             web_socket_id: web_socket_id,
                             data,
@@ -118,7 +118,7 @@ pub fn start_http_gateway(
                     response_sender: _,
                     string,
                 } => match socket_roles.get(&web_socket_id) {
-                    Some(SocketRole::Ui) => {
+                    Some(SocketRole::Client) => {
                         let _ = event_tx.send(HubEvent::ClientText {
                             web_socket_id: web_socket_id,
                             text: string,
