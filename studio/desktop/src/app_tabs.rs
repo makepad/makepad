@@ -267,11 +267,23 @@ impl App {
         let (tab_bar, pos) = dock.find_tab_bar_of_tab(anchor)?;
         let created = if select {
             dock.create_and_select_tab(
-                cx, tab_bar, tab_id, pane_id, title, id!(CloseableTab), Some(pos),
+                cx,
+                tab_bar,
+                tab_id,
+                pane_id,
+                title,
+                id!(CloseableTab),
+                Some(pos),
             )
         } else {
             dock.create_tab(
-                cx, tab_bar, tab_id, pane_id, title, id!(CloseableTab), Some(pos),
+                cx,
+                tab_bar,
+                tab_id,
+                pane_id,
+                title,
+                id!(CloseableTab),
+                Some(pos),
             )
         };
         created.map(|_| ())
@@ -323,12 +335,24 @@ impl App {
         }
 
         let anchor = Self::find_anchor_tab_in(
-            &dock, id!(run_first),
-            self.data.run_tab_state.iter().map(|(id, s)| (id, s.mount.as_str())),
+            &dock,
+            id!(run_first),
+            self.data
+                .run_tab_state
+                .iter()
+                .map(|(id, s)| (id, s.mount.as_str())),
             mount,
         )?;
         let tab_id = dock.unique_id(LiveId::from_str(&format!("run/{}/{}", mount, build_id.0)).0);
-        Self::create_dock_tab(&dock, cx, anchor, tab_id, id!(RunningAppPane), package.to_string(), select)?;
+        Self::create_dock_tab(
+            &dock,
+            cx,
+            anchor,
+            tab_id,
+            id!(RunningAppPane),
+            package.to_string(),
+            select,
+        )?;
 
         self.data.run_tab_by_build.insert(build_id, tab_id);
         self.data.run_tab_state.insert(
@@ -358,7 +382,12 @@ impl App {
                 if active_mount != &state.mount {
                     return None;
                 }
-                Some((*tab_id, state.mount.clone(), state.build_id, state.window_id))
+                Some((
+                    *tab_id,
+                    state.mount.clone(),
+                    state.build_id,
+                    state.window_id,
+                ))
             })
             .collect();
 
@@ -395,12 +424,24 @@ impl App {
         }
 
         let anchor = Self::find_anchor_tab_in(
-            &dock, id!(log_first),
-            self.data.log_tab_state.iter().map(|(id, s)| (id, s.mount.as_str())),
+            &dock,
+            id!(log_first),
+            self.data
+                .log_tab_state
+                .iter()
+                .map(|(id, s)| (id, s.mount.as_str())),
             mount,
         )?;
         let tab_id = dock.unique_id(LiveId::from_str(&format!("log/{}/{}", mount, build_id.0)).0);
-        Self::create_dock_tab(&dock, cx, anchor, tab_id, id!(LogPane), title.to_string(), select)?;
+        Self::create_dock_tab(
+            &dock,
+            cx,
+            anchor,
+            tab_id,
+            id!(LogPane),
+            title.to_string(),
+            select,
+        )?;
 
         self.data.log_tab_by_build.insert(build_id, tab_id);
         self.data.log_tab_state.insert(
@@ -461,7 +502,15 @@ impl App {
 
         let anchor = self.find_profiler_anchor_tab(&dock, mount)?;
         let tab_id = dock.unique_id(LiveId::from_str(&format!("prof/{}/{}", mount, build_id.0)).0);
-        Self::create_dock_tab(&dock, cx, anchor, tab_id, id!(ProfilerPane), title.to_string(), select)?;
+        Self::create_dock_tab(
+            &dock,
+            cx,
+            anchor,
+            tab_id,
+            id!(ProfilerPane),
+            title.to_string(),
+            select,
+        )?;
 
         self.data.profiler_tab_by_build.insert(build_id, tab_id);
         self.data.profiler_tab_state.insert(
@@ -595,18 +644,22 @@ impl App {
         });
     }
 
-    pub(super) fn send_terminal_resize(&mut self, path: &str, cols: u16, rows: u16) {
-        self.data
-            .terminal_desired_size_by_path
-            .insert(path.to_string(), (cols, rows));
+    pub(super) fn request_terminal_viewport(
+        &mut self,
+        path: &str,
+        cols: u16,
+        rows: u16,
+        top_row: usize,
+    ) {
         self.ensure_terminal_session_open(path);
         if !self.data.terminal_open_paths.contains(path) {
             return;
         }
-        let _ = self.send_studio(ClientToHub::TerminalResize {
+        let _ = self.send_studio(ClientToHub::TerminalViewportRequest {
             path: path.to_string(),
             cols,
             rows,
+            top_row,
         });
     }
 
@@ -910,8 +963,13 @@ impl App {
                 DesktopTerminalViewAction::Input { path, data } => {
                     self.send_terminal_input(path, data.clone());
                 }
-                DesktopTerminalViewAction::Resize { path, cols, rows } => {
-                    self.send_terminal_resize(path, *cols, *rows);
+                DesktopTerminalViewAction::RequestViewport {
+                    path,
+                    cols,
+                    rows,
+                    top_row,
+                } => {
+                    self.request_terminal_viewport(path, *cols, *rows, *top_row);
                 }
                 DesktopTerminalViewAction::None => {}
             }

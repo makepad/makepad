@@ -118,7 +118,15 @@ fn run_terminal_loop(
                     }
                 }
                 Ok(TerminalControl::Resize { cols, rows }) => {
-                    let _ = pty.resize(cols.max(1), rows.max(1));
+                    let cols = cols.max(1);
+                    let rows = rows.max(1);
+                    if pty.resize(cols, rows).is_ok() {
+                        let _ = event_tx.send(HubEvent::TerminalResized {
+                            path: path.clone(),
+                            cols,
+                            rows,
+                        });
+                    }
                 }
                 Ok(TerminalControl::Close) => {
                     should_close = true;

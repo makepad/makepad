@@ -5,17 +5,6 @@ macro_rules! ui_file_sync_trace {
 }
 
 impl App {
-    fn apply_terminal_text(&mut self, cx: &mut Cx, path: String, content: String) {
-        let content_bytes = content.into_bytes();
-        self.data
-            .terminal_history_len_by_path
-            .insert(path.clone(), content_bytes.len());
-        self.data
-            .terminal_stream_by_path
-            .insert(path, content_bytes);
-        self.refresh_active_mount_log_panels(cx);
-    }
-
     fn apply_editor_text_update(
         &mut self,
         cx: &mut Cx,
@@ -45,7 +34,11 @@ impl App {
                 ui_file_sync_trace!("replace session text path={} tab={}", path, tab_id.0);
                 session.document().replace(content.into());
             } else {
-                ui_file_sync_trace!("skip replace path={} tab={} reason=identical", path, tab_id.0);
+                ui_file_sync_trace!(
+                    "skip replace path={} tab={} reason=identical",
+                    path,
+                    tab_id.0
+                );
             }
         } else {
             ui_file_sync_trace!("create session path={} tab={}", path, tab_id.0);
@@ -100,7 +93,6 @@ impl App {
             }
             HubToClient::TextFileOpened { path, content, .. } => {
                 if Self::is_terminal_virtual_path(&path) {
-                    self.apply_terminal_text(cx, path, content);
                     return;
                 }
                 self.apply_editor_text_update(cx, path, content, true);
@@ -111,7 +103,6 @@ impl App {
             }
             HubToClient::TextFileRead { path, content } => {
                 if Self::is_terminal_virtual_path(&path) {
-                    self.apply_terminal_text(cx, path, content);
                     return;
                 }
                 let allow_create_tab = self.data.pending_open_paths.contains(&path);
@@ -144,7 +135,8 @@ impl App {
                         .path_to_tab
                         .keys()
                         .filter(|open_path| {
-                            Self::mount_from_virtual_path(open_path.as_str()) == Some(mount.as_str())
+                            Self::mount_from_virtual_path(open_path.as_str())
+                                == Some(mount.as_str())
                         })
                         .cloned()
                         .collect();
@@ -260,10 +252,11 @@ impl App {
                 self.data
                     .active_log_build_by_mount
                     .insert(mount.clone(), build_id);
-                let run_tab_id = self.ensure_run_tab_for_build(cx, build_id, &mount, &package, true);
+                let run_tab_id =
+                    self.ensure_run_tab_for_build(cx, build_id, &mount, &package, true);
                 let _ = self.ensure_log_tab_for_build(cx, build_id, &mount, &package, true);
-                if let Some(tab_id) = run_tab_id
-                    .or_else(|| self.data.run_tab_by_build.get(&build_id).copied())
+                if let Some(tab_id) =
+                    run_tab_id.or_else(|| self.data.run_tab_by_build.get(&build_id).copied())
                 {
                     let mut window_id = None;
                     if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
@@ -321,28 +314,29 @@ impl App {
                 build_id,
                 window_id,
             } => {
-                let tab_id = if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
-                    tab_id
-                } else {
-                    let Some(mount) = self.data.build_to_mount.get(&build_id).cloned() else {
-                        return;
+                let tab_id =
+                    if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
+                        tab_id
+                    } else {
+                        let Some(mount) = self.data.build_to_mount.get(&build_id).cloned() else {
+                            return;
+                        };
+                        let package = self
+                            .data
+                            .build_package
+                            .get(&build_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("build {}", build_id.0));
+                        if self.data.active_mount.as_deref() != Some(mount.as_str()) {
+                            self.select_mount(cx, &mount);
+                        }
+                        let Some(tab_id) =
+                            self.ensure_run_tab_for_build(cx, build_id, &mount, &package, true)
+                        else {
+                            return;
+                        };
+                        tab_id
                     };
-                    let package = self
-                        .data
-                        .build_package
-                        .get(&build_id)
-                        .cloned()
-                        .unwrap_or_else(|| format!("build {}", build_id.0));
-                    if self.data.active_mount.as_deref() != Some(mount.as_str()) {
-                        self.select_mount(cx, &mount);
-                    }
-                    let Some(tab_id) =
-                        self.ensure_run_tab_for_build(cx, build_id, &mount, &package, true)
-                    else {
-                        return;
-                    };
-                    tab_id
-                };
                 let mut mount = None;
                 if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
                     mount = Some(state.mount.clone());
@@ -530,35 +524,21 @@ impl App {
                     }
                 }
             }
-            HubToClient::TerminalOpened {
-                path,
-                history,
-                grid: _,
-            } => {
+            HubToClient::TerminalOpened { path } => {
                 self.data.terminal_open_paths.insert(path.clone());
-                let desired_size = self.data.terminal_desired_size_by_path.get(&path).copied();
-                // Always replay raw terminal bytes so ANSI/control codes are preserved.
                 self.data
-                    .terminal_history_len_by_path
-                    .insert(path.clone(), history.len());
-                self.data
-                    .terminal_stream_by_path
-                    .insert(path.clone(), history);
-                if let Some((cols, rows)) = desired_size {
-                    let _ = self.send_studio(ClientToHub::TerminalResize { path, cols, rows });
-                }
+                    .terminal_framebuffer_by_path
+                    .entry(path)
+                    .or_default();
                 self.refresh_active_mount_log_panels(cx);
             }
-            HubToClient::TerminalOutput { path, data } => {
-                self.data
-                    .terminal_stream_by_path
-                    .entry(path)
-                    .or_default()
-                    .extend_from_slice(&data);
+            HubToClient::TerminalFramebuffer { path, frame } => {
+                self.data.terminal_framebuffer_by_path.insert(path, frame);
                 self.refresh_active_mount_log_panels(cx);
             }
             HubToClient::TerminalExited { path, code } => {
                 self.data.terminal_open_paths.remove(&path);
+                self.data.terminal_framebuffer_by_path.remove(&path);
                 self.set_status(cx, &format!("terminal exited ({})", code));
             }
             HubToClient::Error { message } => {

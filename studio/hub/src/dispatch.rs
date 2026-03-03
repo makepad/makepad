@@ -2,25 +2,27 @@ use crate::log_store::{
     query_log_entries, AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore,
 };
 use crate::process_manager::ProcessManager;
-use makepad_studio_protocol::hub_protocol as backend_proto;
-use backend_proto::{
-    BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec, BuildInfo, ClientId,
-    EventSample as HubEventSample, GCSample as StudioGCSample, GPUSample as StudioGPUSample, LogEntry,
-    LogSource, QueryId, RunViewInputVizKind, RunnableBuild, SaveResult, SearchResult, HubToBuildBox,
-    HubToBuildBoxVec, HubToClient, TerminalGrid, ClientToHub, ClientToHubEnvelope,
-};
 use crate::terminal_manager::TerminalManager;
 use crate::virtual_fs::VirtualFs;
 use crate::worker_pool::WorkerPool;
+use backend_proto::{
+    BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec, BuildInfo, ClientId,
+    ClientToHub, ClientToHubEnvelope, EventSample as HubEventSample, GCSample as StudioGCSample,
+    GPUSample as StudioGPUSample, HubToBuildBox, HubToBuildBoxVec, HubToClient, LogEntry,
+    LogSource, QueryId, RunViewInputVizKind, RunnableBuild, SaveResult, SearchResult,
+    TerminalFramebuffer,
+};
 use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
 use makepad_network::ToUISender;
+use makepad_studio_protocol::hub_protocol as backend_proto;
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent, KeyModifiers,
     LogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseUp, ScreenshotRequest,
     StudioToApp, StudioToAppVec, TextInputEvent, WidgetQueryRequest, WidgetTreeDumpRequest,
 };
+use makepad_terminal_core::{StyleFlags, Terminal};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -92,6 +94,11 @@ pub enum HubEvent {
     TerminalOutput {
         path: String,
         data: Vec<u8>,
+    },
+    TerminalResized {
+        path: String,
+        cols: u16,
+        rows: u16,
     },
     TerminalExited {
         path: String,
@@ -167,6 +174,27 @@ struct LiveProfilerSubscription {
     query: ProfilerQuery,
 }
 
+#[derive(Clone, Debug)]
+struct TerminalClientViewport {
+    cols: u16,
+    rows: u16,
+    top_row: usize,
+    anchor: TerminalViewportAnchor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TerminalViewportAnchor {
+    Bottom,
+    TopRow,
+}
+
+struct TerminalSession {
+    terminal: Terminal,
+    cols: u16,
+    rows: u16,
+    subscribers: HashMap<ClientId, TerminalClientViewport>,
+}
+
 pub struct HubCore {
     rx: Receiver<HubEvent>,
     event_tx: Sender<HubEvent>,
@@ -187,6 +215,7 @@ pub struct HubCore {
     profiler_store: ProfilerStore,
     process_manager: ProcessManager,
     terminal_manager: TerminalManager,
+    terminal_sessions: HashMap<String, TerminalSession>,
     live_log_queries: HashMap<QueryId, LiveLogSubscription>,
     live_profiler_queries: HashMap<QueryId, LiveProfilerSubscription>,
     cancelled_queries: HashSet<QueryId>,
@@ -236,6 +265,7 @@ impl HubCore {
             profiler_store: ProfilerStore::default(),
             process_manager: ProcessManager::default(),
             terminal_manager: TerminalManager::default(),
+            terminal_sessions: HashMap::new(),
             live_log_queries: HashMap::new(),
             live_profiler_queries: HashMap::new(),
             cancelled_queries: HashSet::new(),
@@ -275,6 +305,9 @@ impl HubCore {
                 if let Some(client_id) = self.client_by_web_socket.remove(&web_socket_id) {
                     self.ui_clients.remove(&client_id);
                     self.release_client_id(client_id);
+                    for session in self.terminal_sessions.values_mut() {
+                        session.subscribers.remove(&client_id);
+                    }
                     self.live_log_queries
                         .retain(|_, query| query.client_id != client_id);
                     self.live_profiler_queries
@@ -366,6 +399,9 @@ impl HubCore {
                 exit_code,
             } => self.on_process_exited(build_id, exit_code),
             HubEvent::TerminalOutput { path, data } => self.on_terminal_output(path, data),
+            HubEvent::TerminalResized { path, cols, rows } => {
+                self.on_terminal_resized(path, cols, rows)
+            }
             HubEvent::TerminalExited { path, exit_code } => {
                 self.on_terminal_exited(path, exit_code)
             }
@@ -386,10 +422,9 @@ impl HubCore {
                 live,
                 entries,
             } => self.on_worker_query_logs_done(client_id, query_id, query, live, entries),
-            HubEvent::WorkerLoadFileTreeDone {
-                mount,
-                result,
-            } => self.on_worker_load_file_tree_done(mount, result),
+            HubEvent::WorkerLoadFileTreeDone { mount, result } => {
+                self.on_worker_load_file_tree_done(mount, result)
+            }
             HubEvent::WorkerFileTreeDeltaDone { mount, change } => {
                 self.queue_file_tree_delta_change(mount, change);
             }
@@ -554,10 +589,8 @@ impl HubCore {
                 Ok(()) => {
                     self.reset_fs_watcher();
                     match self.vfs.load_file_tree(&name) {
-                        Ok(data) => self.send_ui_reply(
-                            client_id,
-                            HubToClient::FileTree { mount: name, data }
-                        ),
+                        Ok(data) => self
+                            .send_ui_reply(client_id, HubToClient::FileTree { mount: name, data }),
                         Err(err) => self.send_ui_error(client_id, err.to_string()),
                     }
                 }
@@ -581,14 +614,14 @@ impl HubCore {
                     HubToClient::FileTree {
                         mount: name.clone(),
                         data: backend_proto::FileTreeData { nodes: Vec::new() },
-                    }
+                    },
                 );
                 self.send_ui_reply(
                     client_id,
                     HubToClient::FileTreeDiff {
                         mount: name,
                         changes,
-                    }
+                    },
                 );
             }
             ClientToHub::ObserveMount { mount, primary } => {
@@ -599,7 +632,10 @@ impl HubCore {
                 }
             }
             ClientToHub::LoadFileTree { mount } => {
-                let waiters = self.file_tree_load_waiters.entry(mount.clone()).or_default();
+                let waiters = self
+                    .file_tree_load_waiters
+                    .entry(mount.clone())
+                    .or_default();
                 let first_request = waiters.is_empty();
                 waiters.insert(client_id);
                 if !first_request {
@@ -626,15 +662,14 @@ impl HubCore {
                         path,
                         content,
                         git_status: backend_proto::GitStatus::Unknown,
-                    }
+                    },
                 ),
                 Err(err) => self.send_ui_error(client_id, err.to_string()),
             },
             ClientToHub::ReadTextFile { path } => match self.vfs.read_text_file(&path) {
-                Ok(content) => self.send_ui_reply(
-                    client_id,
-                    HubToClient::TextFileRead { path, content }
-                ),
+                Ok(content) => {
+                    self.send_ui_reply(client_id, HubToClient::TextFileRead { path, content })
+                }
                 Err(err) => self.send_ui_error(client_id, err.to_string()),
             },
             ClientToHub::ReadTextRange {
@@ -650,7 +685,7 @@ impl HubCore {
                         end_line,
                         total_lines,
                         content,
-                    }
+                    },
                 ),
                 Err(err) => self.send_ui_error(client_id, err.to_string()),
             },
@@ -665,7 +700,7 @@ impl HubCore {
                     HubToClient::TextFileSaved {
                         path: path.clone(),
                         result,
-                    }
+                    },
                 );
                 if save_ok {
                     self.self_save_suppress_until_by_path
@@ -754,10 +789,7 @@ impl HubCore {
             }
             ClientToHub::GitLog { mount, max_count } => {
                 match self.vfs.git_log(&mount, max_count.unwrap_or(100)) {
-                    Ok(log) => self.send_ui_reply(
-                        client_id,
-                        HubToClient::GitLog { mount, log }
-                    ),
+                    Ok(log) => self.send_ui_reply(client_id, HubToClient::GitLog { mount, log }),
                     Err(err) => self.send_ui_error(client_id, err.to_string()),
                 }
             }
@@ -780,7 +812,7 @@ impl HubCore {
                     client_id,
                     HubToClient::Builds {
                         builds: self.list_all_builds(),
-                    }
+                    },
                 );
             }
             ClientToHub::LoadRunnableBuilds { mount } => {
@@ -792,10 +824,9 @@ impl HubCore {
                     }
                 };
                 match discover_runnable_builds(&cwd) {
-                    Ok(builds) => self.send_ui_reply(
-                        client_id,
-                        HubToClient::RunnableBuilds { mount, builds }
-                    ),
+                    Ok(builds) => {
+                        self.send_ui_reply(client_id, HubToClient::RunnableBuilds { mount, builds })
+                    }
                     Err(err) => self.send_ui_error(client_id, err),
                 }
             }
@@ -832,10 +863,7 @@ impl HubCore {
                         .insert(build_id, buildbox_name.clone());
                     self.remote_builds.insert(build_id, info.clone());
                     self.build_mount_by_id.insert(build_id, mount);
-                    self.set_buildbox_status(
-                        &buildbox_name,
-                        BuildBoxStatus::Building { build_id },
-                    );
+                    self.set_buildbox_status(&buildbox_name, BuildBoxStatus::Building { build_id });
                     self.broadcast_ui_message(HubToClient::BuildStarted {
                         build_id: info.build_id,
                         mount: info.mount,
@@ -906,10 +934,7 @@ impl HubCore {
                         .insert(build_id, buildbox_name.clone());
                     self.remote_builds.insert(build_id, info.clone());
                     self.build_mount_by_id.insert(build_id, mount);
-                    self.set_buildbox_status(
-                        &buildbox_name,
-                        BuildBoxStatus::Building { build_id },
-                    );
+                    self.set_buildbox_status(&buildbox_name, BuildBoxStatus::Building { build_id });
                     self.broadcast_ui_message(HubToClient::BuildStarted {
                         build_id: info.build_id,
                         mount: info.mount,
@@ -961,16 +986,18 @@ impl HubCore {
                 }
             }
             ClientToHub::ForwardToApp { build_id, msg_bin } => {
-                let is_bootstrap = StudioToAppVec::deserialize_bin(&msg_bin)
-                    .ok()
-                    .is_some_and(|msgs| {
-                        msgs.0.iter().any(|msg| {
-                            matches!(
-                                msg,
-                                StudioToApp::WindowGeomChange { .. } | StudioToApp::Swapchain(_)
-                            )
-                        })
-                    });
+                let is_bootstrap =
+                    StudioToAppVec::deserialize_bin(&msg_bin)
+                        .ok()
+                        .is_some_and(|msgs| {
+                            msgs.0.iter().any(|msg| {
+                                matches!(
+                                    msg,
+                                    StudioToApp::WindowGeomChange { .. }
+                                        | StudioToApp::Swapchain(_)
+                                )
+                            })
+                        });
                 match self.send_to_app_with_socket(build_id, msg_bin.clone()) {
                     Ok(_) => {}
                     Err(err) if err.starts_with("no app socket for build") => {
@@ -1144,6 +1171,20 @@ impl HubCore {
                 rows,
                 env,
             } => {
+                if self.terminal_sessions.contains_key(&path) {
+                    self.send_ui_reply(
+                        client_id,
+                        HubToClient::TerminalOpened { path: path.clone() },
+                    );
+                    self.send_terminal_viewport_for_client(
+                        client_id,
+                        &path,
+                        cols,
+                        rows,
+                        usize::MAX,
+                    );
+                    return;
+                }
                 let Some(mount) = mount_from_virtual_path(&path).map(ToOwned::to_owned) else {
                     self.send_ui_error(
                         client_id,
@@ -1173,14 +1214,35 @@ impl HubCore {
                     env,
                     self.event_tx.clone(),
                 ) {
-                    Ok(()) => self.send_ui_reply(
-                        client_id,
-                        HubToClient::TerminalOpened {
-                            path: path.clone(),
-                            grid: terminal_grid_from_history(&history, cols, rows),
-                            history,
+                    Ok(()) => {
+                        let cols = cols.max(1);
+                        let rows = rows.max(1);
+                        let mut terminal = Terminal::new(cols as usize, rows as usize);
+                        if !history.is_empty() {
+                            terminal.process_bytes(&history);
+                            let _ = terminal.take_outbound();
                         }
-                    ),
+                        self.terminal_sessions.insert(
+                            path.clone(),
+                            TerminalSession {
+                                terminal,
+                                cols,
+                                rows,
+                                subscribers: HashMap::new(),
+                            },
+                        );
+                        self.send_ui_reply(
+                            client_id,
+                            HubToClient::TerminalOpened { path: path.clone() },
+                        );
+                        self.send_terminal_viewport_for_client(
+                            client_id,
+                            &path,
+                            cols,
+                            rows,
+                            usize::MAX,
+                        );
+                    }
                     Err(err) => self.send_ui_error(client_id, err),
                 }
             }
@@ -1189,13 +1251,17 @@ impl HubCore {
                     self.send_ui_error(client_id, err);
                 }
             }
-            ClientToHub::TerminalResize { path, cols, rows } => {
-                if let Err(err) = self.terminal_manager.resize(&path, cols, rows) {
-                    self.send_ui_error(client_id, err);
-                }
+            ClientToHub::TerminalViewportRequest {
+                path,
+                cols,
+                rows,
+                top_row,
+            } => {
+                self.send_terminal_viewport_for_client(client_id, &path, cols, rows, top_row);
             }
             ClientToHub::TerminalClose { path } => {
                 self.terminal_manager.close_terminal(&path);
+                self.terminal_sessions.remove(&path);
             }
             ClientToHub::QueryLogs {
                 build_id,
@@ -1262,45 +1328,33 @@ impl HubCore {
                         gc_samples,
                         total_in_window,
                         done: !live,
-                    }
+                    },
                 );
                 if live {
-                    self.live_profiler_queries.insert(
-                        query_id,
-                        LiveProfilerSubscription {
-                            client_id,
-                            query,
-                        },
-                    );
+                    self.live_profiler_queries
+                        .insert(query_id, LiveProfilerSubscription { client_id, query });
                 }
             }
             ClientToHub::CancelQuery { query_id } => {
                 self.cancelled_queries.insert(query_id);
                 self.live_log_queries.remove(&query_id);
                 self.live_profiler_queries.remove(&query_id);
-                self.send_ui_reply(
-                    client_id,
-                    HubToClient::QueryCancelled { query_id }
-                );
+                self.send_ui_reply(client_id, HubToClient::QueryCancelled { query_id });
             }
             ClientToHub::LogClear => {
                 self.log_store.clear();
-                self.send_ui_reply(
-                    client_id,
-                    HubToClient::LogCleared
-                );
+                self.send_ui_reply(client_id, HubToClient::LogCleared);
             }
             ClientToHub::ListBuildBoxes => {
                 self.send_ui_reply(
                     client_id,
                     HubToClient::BuildBoxes {
                         boxes: self.list_buildboxes(),
-                    }
+                    },
                 );
             }
             ClientToHub::BuildBoxSyncNow { name } => {
-                if let Err(err) =
-                    self.send_to_buildbox_name(&name, HubToBuildBox::RequestTreeHash)
+                if let Err(err) = self.send_to_buildbox_name(&name, HubToBuildBox::RequestTreeHash)
                 {
                     self.send_ui_error(client_id, err);
                     return;
@@ -1310,14 +1364,11 @@ impl HubCore {
                     client_id,
                     HubToClient::BuildBoxes {
                         boxes: self.list_buildboxes(),
-                    }
+                    },
                 );
             }
             ClientToHub::ListScriptTasks => {
-                self.send_ui_reply(
-                    client_id,
-                    HubToClient::ScriptTasks { tasks: Vec::new() }
-                );
+                self.send_ui_reply(client_id, HubToClient::ScriptTasks { tasks: Vec::new() });
             }
             other => {
                 self.send_ui_error(
@@ -1398,7 +1449,9 @@ impl HubCore {
             }
             // Some watcher implementations only report "mount root changed".
             // Broadcast a mount-level FileChanged so UI can refresh open tabs.
-            self.broadcast_ui_message(HubToClient::FileChanged { path: mount.clone() });
+            self.broadcast_ui_message(HubToClient::FileChanged {
+                path: mount.clone(),
+            });
             self.reload_mount_file_tree_broadcast(&mount);
             return;
         }
@@ -1537,11 +1590,7 @@ impl HubCore {
         });
     }
 
-    fn should_ignore_fs_watch_virtual_path(
-        &self,
-        mount: &str,
-        virtual_path: &str,
-    ) -> bool {
+    fn should_ignore_fs_watch_virtual_path(&self, mount: &str, virtual_path: &str) -> bool {
         let prefix = format!("{}/", mount);
         let Some(rest) = virtual_path.strip_prefix(&prefix) else {
             return false;
@@ -1687,7 +1736,7 @@ impl HubCore {
                     query_id,
                     paths,
                     done: true,
-                }
+                },
             ),
             Err(err) => self.send_ui_error(client_id, err),
         }
@@ -1710,7 +1759,7 @@ impl HubCore {
                     query_id,
                     results,
                     done: true,
-                }
+                },
             ),
             Err(err) => self.send_ui_error(client_id, err),
         }
@@ -1734,17 +1783,12 @@ impl HubCore {
                 query_id,
                 entries,
                 done: !live,
-            }
+            },
         );
 
         if live && self.ui_clients.contains_key(&client_id) {
-            self.live_log_queries.insert(
-                query_id,
-                LiveLogSubscription {
-                    client_id,
-                    query,
-                },
-            );
+            self.live_log_queries
+                .insert(query_id, LiveLogSubscription { client_id, query });
         }
     }
 
@@ -1768,7 +1812,7 @@ impl HubCore {
                         HubToClient::FileTree {
                             mount: mount.clone(),
                             data: data.clone(),
-                        }
+                        },
                     );
                 }
             }
@@ -1834,7 +1878,8 @@ impl HubCore {
                     pending.remove(0);
                 }
                 Err(_) => {
-                    self.pending_forward_to_app_by_build.insert(build_id, pending);
+                    self.pending_forward_to_app_by_build
+                        .insert(build_id, pending);
                     return;
                 }
             }
@@ -1885,7 +1930,9 @@ impl HubCore {
 
     fn primary_ui_for_mount(&self, mount: &str) -> Option<ClientId> {
         let client_id = self.primary_ui_by_mount.get(mount).copied()?;
-        self.ui_clients.contains_key(&client_id).then_some(client_id)
+        self.ui_clients
+            .contains_key(&client_id)
+            .then_some(client_id)
     }
 
     fn primary_ui_for_build(&self, build_id: QueryId) -> Option<ClientId> {
@@ -2284,15 +2331,176 @@ impl HubCore {
         self.mount_suppress_fs_until
             .insert(mount, Instant::now() + Duration::from_millis(750));
         let _ = append_terminal_history_bytes(&self.vfs, &path, &data);
-        self.broadcast_ui_message(HubToClient::TerminalOutput { path, data });
+        if let Some(session) = self.terminal_sessions.get_mut(&path) {
+            session.terminal.process_bytes(&data);
+            let outbound = session.terminal.take_outbound();
+            if !outbound.is_empty() {
+                let _ = self.terminal_manager.send_input(&path, outbound);
+            }
+        }
+        self.push_terminal_frame_updates(&path, true);
+    }
+
+    fn on_terminal_resized(&mut self, path: String, cols: u16, rows: u16) {
+        if let Some(session) = self.terminal_sessions.get_mut(&path) {
+            let old_rows = session.rows;
+            session.cols = cols.max(1);
+            session.rows = rows.max(1);
+            session
+                .terminal
+                .resize(session.cols as usize, session.rows as usize);
+            Self::adjust_terminal_subscribers_for_resize(session, old_rows, session.rows);
+            self.push_terminal_frame_updates(&path, false);
+        }
     }
 
     fn on_terminal_exited(&mut self, path: String, exit_code: i32) {
         self.terminal_manager.remove_terminal(&path);
+        self.terminal_sessions.remove(&path);
         self.broadcast_ui_message(HubToClient::TerminalExited {
             path,
             code: exit_code,
         });
+    }
+
+    fn send_terminal_viewport_for_client(
+        &mut self,
+        client_id: ClientId,
+        path: &str,
+        cols: u16,
+        rows: u16,
+        top_row: usize,
+    ) {
+        if !self.terminal_sessions.contains_key(path) {
+            self.send_ui_error(client_id, format!("unknown terminal: {}", path));
+            return;
+        }
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let mut resize_error = None;
+        {
+            let session = self
+                .terminal_sessions
+                .get_mut(path)
+                .expect("session presence checked above");
+            if cols != session.cols || rows != session.rows {
+                let old_rows = session.rows;
+                session.cols = cols;
+                session.rows = rows;
+                session.terminal.resize(cols as usize, rows as usize);
+                if let Err(err) = self.terminal_manager.resize(path, cols, rows) {
+                    resize_error = Some(err);
+                }
+                Self::adjust_terminal_subscribers_for_resize(session, old_rows, rows);
+            }
+            let max_top = Self::terminal_max_top_row(&session.terminal, rows);
+            let (resolved_top, anchor) = if top_row == usize::MAX {
+                let preserved = session
+                    .subscribers
+                    .get(&client_id)
+                    .and_then(|v| match v.anchor {
+                        TerminalViewportAnchor::Bottom => Some(v.top_row),
+                        TerminalViewportAnchor::TopRow => None,
+                    })
+                    .unwrap_or(max_top);
+                (preserved.min(max_top), TerminalViewportAnchor::Bottom)
+            } else {
+                let clamped = top_row.min(max_top);
+                let anchor = if clamped >= max_top.saturating_sub(1) {
+                    TerminalViewportAnchor::Bottom
+                } else {
+                    TerminalViewportAnchor::TopRow
+                };
+                (clamped, anchor)
+            };
+            session.subscribers.insert(
+                client_id,
+                TerminalClientViewport {
+                    cols,
+                    rows,
+                    top_row: resolved_top,
+                    anchor,
+                },
+            );
+        }
+        if let Some(err) = resize_error {
+            self.send_ui_error(client_id, err);
+            return;
+        }
+        self.push_terminal_frame_updates(path, false);
+    }
+
+    fn push_terminal_frame_updates(&mut self, path: &str, force_bottom_for_sticky: bool) {
+        let updates = {
+            let Some(session) = self.terminal_sessions.get_mut(path) else {
+                return;
+            };
+            let max_top = Self::terminal_max_top_row(&session.terminal, session.rows);
+            for viewport in session.subscribers.values_mut() {
+                if viewport.anchor == TerminalViewportAnchor::Bottom && force_bottom_for_sticky {
+                    viewport.top_row = max_top;
+                }
+                viewport.top_row = viewport.top_row.min(max_top);
+            }
+
+            let subscribers: Vec<(ClientId, TerminalClientViewport)> = session
+                .subscribers
+                .iter()
+                .map(|(client_id, viewport)| (*client_id, viewport.clone()))
+                .collect();
+            let mut updates = Vec::with_capacity(subscribers.len());
+            for (client_id, viewport) in subscribers {
+                let frame = terminal_framebuffer_from_terminal(
+                    &session.terminal,
+                    viewport.cols,
+                    viewport.rows,
+                    viewport.top_row,
+                );
+                updates.push((client_id, frame));
+            }
+            updates
+        };
+
+        let path = path.to_string();
+        for (client_id, frame) in updates {
+            self.send_ui_reply(
+                client_id,
+                HubToClient::TerminalFramebuffer {
+                    path: path.clone(),
+                    frame,
+                },
+            );
+        }
+    }
+
+    fn adjust_terminal_subscribers_for_resize(
+        session: &mut TerminalSession,
+        old_rows: u16,
+        new_rows: u16,
+    ) {
+        let max_top = Self::terminal_max_top_row(&session.terminal, new_rows);
+        for viewport in session.subscribers.values_mut() {
+            viewport.cols = session.cols;
+            viewport.rows = new_rows;
+            if viewport.anchor == TerminalViewportAnchor::Bottom {
+                if new_rows > old_rows {
+                    viewport.top_row = viewport
+                        .top_row
+                        .saturating_sub((new_rows - old_rows) as usize);
+                } else if old_rows > new_rows {
+                    viewport.top_row = viewport
+                        .top_row
+                        .saturating_add((old_rows - new_rows) as usize);
+                }
+            }
+            viewport.top_row = viewport.top_row.min(max_top);
+        }
+    }
+
+    fn terminal_max_top_row(terminal: &Terminal, rows: u16) -> usize {
+        let screen = terminal.screen();
+        let effective_total = screen.scrollback_len() + screen.used_rows();
+        effective_total.saturating_sub(rows.max(1) as usize)
     }
 
     fn broadcast_live_log_entry(&self, index: usize, entry: LogEntry) {
@@ -2512,26 +2720,79 @@ fn discover_runnable_builds(root_path: &Path) -> Result<Vec<RunnableBuild>, Stri
     Ok(builds)
 }
 
-fn terminal_grid_from_history(history: &[u8], cols: u16, rows: u16) -> TerminalGrid {
-    let mut terminal =
-        makepad_terminal_core::Terminal::new(cols.max(1) as usize, rows.max(1) as usize);
-    terminal.process_bytes(history);
+fn terminal_framebuffer_from_terminal(
+    terminal: &Terminal,
+    cols: u16,
+    rows: u16,
+    requested_top_row: usize,
+) -> TerminalFramebuffer {
+    let cols = cols.max(1);
+    let rows = rows.max(1);
+    let cols_usize = cols as usize;
+    let rows_usize = rows as usize;
     let screen = terminal.screen();
-    let total_rows = screen.total_rows();
-    let start_row = total_rows.saturating_sub(rows as usize);
-    let mut text = String::new();
-    for row in start_row..total_rows {
-        if let Some(row_slice) = screen.row_slice_virtual(row) {
-            for col in 0..screen.cols() {
-                let ch = row_slice.get(col).map(|cell| cell.codepoint).unwrap_or(' ');
-                text.push(ch);
-            }
-        }
-        if row + 1 < total_rows {
-            text.push('\n');
+    let total_lines = screen.scrollback_len() + screen.used_rows();
+    let max_top = total_lines.saturating_sub(rows_usize);
+    let top_row = requested_top_row.min(max_top);
+    let mut cells = Vec::with_capacity(cols_usize * rows_usize * 7);
+    let palette = &terminal.palette.colors;
+    let default_bg = terminal.default_bg;
+    for row in 0..rows_usize {
+        let virtual_row = top_row + row;
+        let row_slice = screen.row_slice_virtual(virtual_row);
+        for col in 0..cols_usize {
+            let (codepoint, bg) = if let Some(cell) = row_slice.and_then(|slice| slice.get(col)) {
+                let mut fg_src = cell.style.fg;
+                let mut bg_src = cell.style.bg;
+                if cell.style.flags.has(StyleFlags::INVERSE) {
+                    std::mem::swap(&mut fg_src, &mut bg_src);
+                }
+                let bg = bg_src.resolve(palette, default_bg);
+                let codepoint = if cell.codepoint == '\0' {
+                    ' ' as u32
+                } else {
+                    cell.codepoint as u32
+                };
+                (codepoint, bg)
+            } else {
+                (' ' as u32, default_bg)
+            };
+            cells.extend_from_slice(&codepoint.to_le_bytes());
+            cells.push(bg.r);
+            cells.push(bg.g);
+            cells.push(bg.b);
         }
     }
-    TerminalGrid { cols, rows, text }
+
+    let cursor_virtual_row = screen.scrollback_len().saturating_add(terminal.cursor().y);
+    let cursor_row = cursor_virtual_row as isize - top_row as isize;
+    let cursor_visible =
+        terminal.modes.cursor_visible && cursor_row >= 0 && cursor_row < rows_usize as isize;
+    let default_fg = terminal.default_fg;
+    let default_bg = terminal.default_bg;
+
+    TerminalFramebuffer {
+        cols,
+        rows,
+        top_row,
+        total_lines,
+        cursor_col: terminal.cursor().x as u16,
+        cursor_row: if cursor_visible {
+            cursor_row as i32
+        } else {
+            -1
+        },
+        cursor_visible,
+        default_fg_rgb: rgb_to_u32(default_fg.r, default_fg.g, default_fg.b),
+        default_bg_rgb: rgb_to_u32(default_bg.r, default_bg.g, default_bg.b),
+        bracketed_paste: terminal.modes.bracketed_paste,
+        cursor_keys_application_mode: terminal.modes.cursor_keys,
+        cells,
+    }
+}
+
+fn rgb_to_u32(r: u8, g: u8, b: u8) -> u32 {
+    ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
 fn mount_from_virtual_path(path: &str) -> Option<&str> {
@@ -2742,9 +3003,7 @@ fn cargo_subcommand_supports_message_format(args: &[String]) -> bool {
             || arg == "--manifest-path"
             || arg == "--target-dir"
         {
-            if !arg.contains('=')
-                && iter.peek().is_some_and(|next| !next.starts_with('-'))
-            {
+            if !arg.contains('=') && iter.peek().is_some_and(|next| !next.starts_with('-')) {
                 iter.next();
             }
             continue;
@@ -3245,7 +3504,8 @@ mod tests {
 
         let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
         let mut vfs = VirtualFs::new();
-        vfs.mount("repo", dir.path().to_path_buf()).expect("mount repo");
+        vfs.mount("repo", dir.path().to_path_buf())
+            .expect("mount repo");
         let mut core = HubCore::new(event_rx, event_tx, vfs, None);
 
         let ui_rx_bin = ToUIReceiver::<Vec<u8>>::default();
@@ -3300,7 +3560,8 @@ mod tests {
 
         let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
         let mut vfs = VirtualFs::new();
-        vfs.mount("repo", dir.path().to_path_buf()).expect("mount repo");
+        vfs.mount("repo", dir.path().to_path_buf())
+            .expect("mount repo");
         let mut core = HubCore::new(event_rx, event_tx, vfs, None);
 
         let ui_rx = ToUIReceiver::<Vec<u8>>::default();
@@ -3350,7 +3611,8 @@ mod tests {
 
         let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
         let mut vfs = VirtualFs::new();
-        vfs.mount("repo", dir.path().to_path_buf()).expect("mount repo");
+        vfs.mount("repo", dir.path().to_path_buf())
+            .expect("mount repo");
         let mut core = HubCore::new(event_rx, event_tx, vfs, None);
 
         let ui_rx = ToUIReceiver::<Vec<u8>>::default();
@@ -3402,7 +3664,8 @@ mod tests {
 
         let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
         let mut vfs = VirtualFs::new();
-        vfs.mount("repo", dir.path().to_path_buf()).expect("mount repo");
+        vfs.mount("repo", dir.path().to_path_buf())
+            .expect("mount repo");
         let mut core = HubCore::new(event_rx, event_tx, vfs, None);
 
         let primary_ui = ToUIReceiver::<Vec<u8>>::default();
