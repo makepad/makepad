@@ -333,8 +333,8 @@ impl GStreamerVideoPlayer {
     }
 
     /// Check if the player has finished prerolling and is ready to play.
-    /// Returns `(width, height, duration_ms, is_seekable, video_tracks, audio_tracks)` if newly prepared.
-    pub fn check_prepared(&mut self) -> Option<(u32, u32, u128, bool, Vec<String>, Vec<String>)> {
+    /// Returns `Ok(...)` with metadata when ready, `Err(msg)` on failure, `None` if still loading.
+    pub fn check_prepared(&mut self) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
         if self.prepare_notified || self.pipeline.is_null() {
             return None;
         }
@@ -348,20 +348,25 @@ impl GStreamerVideoPlayer {
                 let mut error: *mut GError = std::ptr::null_mut();
                 let mut debug: *mut std::os::raw::c_char = std::ptr::null_mut();
                 (gst.gst_message_parse_error)(msg, &mut error, &mut debug);
-                if !error.is_null() {
+                let err_str = if !error.is_null() {
                     let msg_ptr = (*error).message;
-                    if !msg_ptr.is_null() {
-                        let msg_str = CStr::from_ptr(msg_ptr).to_string_lossy();
-                        error!("GStreamer error: {}", msg_str);
-                    }
+                    let s = if !msg_ptr.is_null() {
+                        CStr::from_ptr(msg_ptr).to_string_lossy().to_string()
+                    } else {
+                        "Unknown GStreamer error".to_string()
+                    };
                     (gst.g_error_free)(error);
-                }
+                    s
+                } else {
+                    "Unknown GStreamer error".to_string()
+                };
+                error!("GStreamer error: {}", err_str);
                 if !debug.is_null() {
                     (gst.g_free)(debug as *mut c_void);
                 }
                 (gst.gst_mini_object_unref)(msg as *mut GstMiniObject);
                 self.prepare_notified = true;
-                return None;
+                return Some(Err(err_str));
             }
 
             // Non-blocking state check
@@ -435,14 +440,14 @@ impl GStreamerVideoPlayer {
                 self.audio_only
             );
 
-            Some((
+            Some(Ok((
                 self.video_width,
                 self.video_height,
                 duration_ms,
                 is_seekable,
                 video_tracks,
                 audio_tracks,
-            ))
+            )))
         }
     }
 

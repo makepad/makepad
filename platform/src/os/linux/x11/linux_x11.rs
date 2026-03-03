@@ -296,30 +296,41 @@ impl X11Cx {
                         let mut players = std::mem::take(&mut cx.os.video_players);
                         let mut video_events = Vec::new();
                         for (_video_id, player) in players.iter_mut() {
-                            if let Some((width, height, duration, is_seekable, video_tracks, audio_tracks)) = player.check_prepared() {
-                                video_events.push(Event::VideoPlaybackPrepared(
-                                    VideoPlaybackPreparedEvent {
-                                        video_id: player.video_id,
-                                        video_width: width,
-                                        video_height: height,
-                                        duration,
-                                        is_seekable,
-                                        video_tracks,
-                                        audio_tracks,
-                                    },
-                                ));
-                                let seekable = player.seekable_ranges();
-                                if !seekable.is_empty() {
-                                    video_events.push(Event::VideoSeekableRanges(
-                                        VideoSeekableRangesEvent { video_id: player.video_id, ranges: seekable },
+                            match player.check_prepared() {
+                                Some(Ok((width, height, duration, is_seekable, video_tracks, audio_tracks))) => {
+                                    video_events.push(Event::VideoPlaybackPrepared(
+                                        VideoPlaybackPreparedEvent {
+                                            video_id: player.video_id,
+                                            video_width: width,
+                                            video_height: height,
+                                            duration,
+                                            is_seekable,
+                                            video_tracks,
+                                            audio_tracks,
+                                        },
                                     ));
-                                }
-                                let buffered = player.buffered_ranges();
-                                if !buffered.is_empty() {
-                                    video_events.push(Event::VideoBufferedRanges(
-                                        VideoBufferedRangesEvent { video_id: player.video_id, ranges: buffered },
+                                    let seekable = player.seekable_ranges();
+                                    if !seekable.is_empty() {
+                                        video_events.push(Event::VideoSeekableRanges(
+                                            VideoSeekableRangesEvent { video_id: player.video_id, ranges: seekable },
+                                        ));
+                                    }
+                                    let buffered = player.buffered_ranges();
+                                    if !buffered.is_empty() {
+                                        video_events.push(Event::VideoBufferedRanges(
+                                            VideoBufferedRangesEvent { video_id: player.video_id, ranges: buffered },
+                                        ));
+                                    }
+                                },
+                                Some(Err(err)) => {
+                                    video_events.push(Event::VideoDecodingError(
+                                        VideoDecodingErrorEvent {
+                                            video_id: player.video_id,
+                                            error: err,
+                                        },
                                     ));
-                                }
+                                },
+                                None => {},
                             }
                             if player.poll_frame(unsafe { &*gl }, &mut cx.textures) {
                                 video_events.push(Event::VideoTextureUpdated(
