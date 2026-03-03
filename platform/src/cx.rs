@@ -81,6 +81,7 @@ pub struct Cx {
     pub(crate) drag_drop: CxDragDrop,
 
     pub(crate) platform_ops: Vec<CxOsOp>,
+    pub(crate) pending_camera_playbacks: Vec<(LiveId, crate::event::VideoSource, u32, crate::texture::TextureId, bool, bool)>,
 
     pub(crate) new_next_frames: HashSet<NextFrame>,
 
@@ -365,6 +366,7 @@ impl Cx {
             ime_area: Default::default(),
             keyboard_shift: 0.0,
             platform_ops: Default::default(),
+            pending_camera_playbacks: Vec::new(),
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
 

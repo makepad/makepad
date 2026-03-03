@@ -243,6 +243,7 @@ impl Cx {
                     let tw = ToWasmPermissionResult::read_to_wasm(&mut to_wasm);
                     let permission = match tw.permission.as_str() {
                         "microphone" => Permission::AudioInput,
+                        "camera" => Permission::Camera,
                         _ => {
                             crate::log!("Unknown web permission: {}", tw.permission);
                             continue;
@@ -593,6 +594,7 @@ impl Cx {
                 } => {
                     let permission_str = match permission {
                         Permission::AudioInput => "microphone",
+                        Permission::Camera => "camera",
                     };
                     self.os.from_wasm(FromWasmCheckPermission {
                         permission: permission_str.to_string(),
@@ -605,6 +607,7 @@ impl Cx {
                 } => {
                     let permission_str = match permission {
                         Permission::AudioInput => "microphone",
+                        Permission::Camera => "camera",
                     };
                     self.os.from_wasm(FromWasmRequestPermission {
                         permission: permission_str.to_string(),

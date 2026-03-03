@@ -483,6 +483,9 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        if let Event::PermissionResult(result) = event {
+            self.handle_camera_permission_result(result);
+        }
         self.inner_call_event_handler(event);
         self.inner_key_focus_change();
         self.handle_triggers();

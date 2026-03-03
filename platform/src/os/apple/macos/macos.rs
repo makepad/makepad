@@ -995,9 +995,22 @@ impl Cx {
         }
     }
 
+    fn check_camera_permission_status(&self) -> crate::permission::PermissionStatus {
+        unsafe {
+            let permission_status: i32 = msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: AVMediaTypeVideo];
+            match permission_status {
+                3 => crate::permission::PermissionStatus::Granted,
+                2 => crate::permission::PermissionStatus::DeniedPermanent,
+                1 => crate::permission::PermissionStatus::DeniedPermanent,
+                _ => crate::permission::PermissionStatus::NotDetermined,
+            }
+        }
+    }
+
     fn handle_permission_check(&mut self, permission: Permission, request_id: i32) {
         let status = match permission {
             Permission::AudioInput => self.check_audio_permission_status(),
+            Permission::Camera => self.check_camera_permission_status(),
         };
 
         self.call_event_handler(&crate::event::Event::PermissionResult(
@@ -1010,45 +1023,25 @@ impl Cx {
     }
 
     fn handle_permission_request(&mut self, permission: Permission, request_id: i32) {
-        match permission {
-            Permission::AudioInput => {
-                let status = self.check_audio_permission_status();
-                match status {
-                    crate::permission::PermissionStatus::Granted => {
-                        // Already granted, don't re-ask
-                        self.call_event_handler(&crate::event::Event::PermissionResult(
-                            crate::permission::PermissionResult {
-                                permission,
-                                request_id,
-                                status,
-                            },
-                        ));
-                    }
-                    crate::permission::PermissionStatus::DeniedPermanent => {
-                        // Previously denied, send denied event
-                        self.call_event_handler(&crate::event::Event::PermissionResult(
-                            crate::permission::PermissionResult {
-                                permission,
-                                request_id,
-                                status,
-                            },
-                        ));
-                    }
-                    crate::permission::PermissionStatus::NotDetermined => {
-                        // Need to request permission
-                        self.macos_request_audio_permission(permission, request_id);
-                    }
-                    _ => {
-                        // For other statuses, send the result directly
-                        self.call_event_handler(&crate::event::Event::PermissionResult(
-                            crate::permission::PermissionResult {
-                                permission,
-                                request_id,
-                                status,
-                            },
-                        ));
-                    }
+        let status = match permission {
+            Permission::AudioInput => self.check_audio_permission_status(),
+            Permission::Camera => self.check_camera_permission_status(),
+        };
+        match status {
+            crate::permission::PermissionStatus::NotDetermined => {
+                match permission {
+                    Permission::AudioInput => self.macos_request_audio_permission(permission, request_id),
+                    Permission::Camera => self.macos_request_camera_permission(permission, request_id),
                 }
+            }
+            _ => {
+                self.call_event_handler(&crate::event::Event::PermissionResult(
+                    crate::permission::PermissionResult {
+                        permission,
+                        request_id,
+                        status,
+                    },
+                ));
             }
         }
     }
@@ -1072,6 +1065,26 @@ impl Cx {
             });
 
             let () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType:AVMediaTypeAudio completionHandler:&completion_handler];
+        }
+    }
+
+    fn macos_request_camera_permission(&mut self, permission: Permission, request_id: i32) {
+        unsafe {
+            let completion_handler = objc_block!(move |granted: BOOL| {
+                let permission_result = crate::permission::PermissionResult {
+                    permission,
+                    request_id,
+                    status: if granted == YES {
+                        crate::permission::PermissionStatus::Granted
+                    } else {
+                        crate::permission::PermissionStatus::DeniedPermanent
+                    },
+                };
+
+                Self::dispatch_permission_result_to_main_thread(permission_result);
+            });
+
+            let () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType:AVMediaTypeVideo completionHandler:&completion_handler];
         }
     }
 

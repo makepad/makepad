@@ -961,6 +961,12 @@ impl Cx {
         autoplay: bool,
         should_loop: bool,
     ) {
+        if let VideoSource::Camera(..) = &source {
+            // Auto-request camera permission before opening device
+            let _request_id = self.request_permission(crate::permission::Permission::Camera);
+            self.pending_camera_playbacks.push((video_id, source, external_texture_id, texture_id, autoplay, should_loop));
+            return;
+        }
         self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
             video_id,
             source,
@@ -969,6 +975,30 @@ impl Cx {
             autoplay,
             should_loop,
         ));
+    }
+
+    pub fn handle_camera_permission_result(&mut self, result: &crate::permission::PermissionResult) {
+        if result.permission != crate::permission::Permission::Camera {
+            return;
+        }
+        let pending: Vec<_> = self.pending_camera_playbacks.drain(..).collect();
+        for (video_id, source, ext_tex_id, tex_id, autoplay, should_loop) in pending {
+            match result.status {
+                crate::permission::PermissionStatus::Granted => {
+                    self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
+                        video_id, source, ext_tex_id, tex_id, autoplay, should_loop,
+                    ));
+                }
+                _ => {
+                    self.call_event_handler(&crate::event::Event::VideoDecodingError(
+                        crate::event::VideoDecodingErrorEvent {
+                            video_id,
+                            error: "Camera permission denied".to_string(),
+                        },
+                    ));
+                }
+            }
+        }
     }
 
     pub fn begin_video_playback(&mut self, video_id: LiveId) {

@@ -30,6 +30,7 @@ script_mod! {
                         camera_video := Video{
                             width: Fill
                             height: Fill
+                            autoplay: false
                         }
                     }
                 }
@@ -156,6 +157,23 @@ impl AppMain for App {
                     ev.current_position_ms,
                     ev.yuv_enabled
                 );
+            }
+            Event::PermissionResult(result) => {
+                log!("[camera-example] PermissionResult: {:?}", result);
+                use makepad_widgets::makepad_platform::permission::{Permission, PermissionStatus};
+                if result.permission == Permission::Camera {
+                    match result.status {
+                        PermissionStatus::Granted => {
+                            self.ui.label(cx, ids!(status_label)).set_text(cx, "Camera permission granted");
+                        }
+                        PermissionStatus::DeniedPermanent => {
+                            self.ui.label(cx, ids!(status_label)).set_text(cx, "Camera permission denied");
+                        }
+                        _ => {
+                            self.ui.label(cx, ids!(status_label)).set_text(cx, &format!("Camera permission: {:?}", result.status));
+                        }
+                    }
+                }
             }
             Event::VideoDecodingError(ev) => {
                 log!(
