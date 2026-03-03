@@ -34,7 +34,7 @@ pub trait WidgetNode: ScriptApply {
     /// Find a descendant by child-id path, walking through `children()`.
     /// Each segment is matched anywhere in the current subtree, i.e.
     /// `a.b` behaves like `*.a.*.b`.
-    fn find_child(&self, path: &[LiveId]) -> WidgetRef {
+    fn child_by_path(&self, path: &[LiveId]) -> WidgetRef {
         fn find_descendant_by_name_bfs(
             root: &WidgetRef,
             target: LiveId,
@@ -122,6 +122,16 @@ pub trait WidgetNode: ScriptApply {
         }
 
         current
+    }
+
+    fn child(&self, id: LiveId) -> WidgetRef {
+        let mut found = WidgetRef::empty();
+        self.children(&mut |name, child| {
+            if found.is_empty() && name == id {
+                found = child;
+            }
+        });
+        found
     }
     
     /// If true, global widget-tree search/flood will not traverse this node's descendants.
@@ -877,10 +887,19 @@ impl WidgetRef {
         }
     }
 
-    pub fn find_child(&self, path: &[LiveId]) -> WidgetRef {
+    pub fn child_by_path(&self, path: &[LiveId]) -> WidgetRef {
         if let Ok(inner) = self.0.try_borrow() {
             if let Some(inner) = inner.as_ref() {
-                return inner.widget.find_child(path);
+                return inner.widget.child_by_path(path);
+            }
+        }
+        WidgetRef::empty()
+    }
+
+    pub fn child(&self, id: LiveId) -> WidgetRef {
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                return inner.widget.child(id);
             }
         }
         WidgetRef::empty()
