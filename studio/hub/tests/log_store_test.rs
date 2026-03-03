@@ -1,9 +1,9 @@
 use makepad_live_id::LiveId;
-use makepad_studio_backend::log_store::{
+use makepad_studio_hub::log_store::{
     AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore, SAMPLE_TYPE_EVENT,
     SAMPLE_TYPE_GPU,
 };
-use makepad_studio_protocol::backend_protocol::{
+use makepad_studio_protocol::hub_protocol::{
     ClientId, EventSample, GPUSample, LogSource, QueryId,
 };
 use makepad_studio_protocol::LogLevel;

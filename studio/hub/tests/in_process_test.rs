@@ -1,15 +1,15 @@
-use makepad_studio_backend::{BackendConfig, MountConfig, StudioBackend};
-use makepad_studio_protocol::backend_protocol::{StudioToUI, UIToStudio};
+use makepad_studio_hub::{HubConfig, MountConfig, StudioHub};
+use makepad_studio_protocol::hub_protocol::{HubToClient, ClientToHub};
 use std::fs;
 use std::time::{Duration, Instant};
 
 fn wait_for_message<F>(
-    connection: &makepad_studio_backend::StudioConnection,
+    connection: &makepad_studio_hub::HubConnection,
     timeout: Duration,
     mut matcher: F,
-) -> Option<StudioToUI>
+) -> Option<HubToClient>
 where
-    F: FnMut(&StudioToUI) -> bool,
+    F: FnMut(&HubToClient) -> bool,
 {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -23,9 +23,9 @@ where
 }
 
 fn drain_messages(
-    connection: &makepad_studio_backend::StudioConnection,
+    connection: &makepad_studio_hub::HubConnection,
     duration: Duration,
-) -> Vec<StudioToUI> {
+) -> Vec<HubToClient> {
     let deadline = Instant::now() + duration;
     let mut out = Vec::new();
     while Instant::now() < deadline {
@@ -42,32 +42,32 @@ fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _tree_query = connection.send(UIToStudio::LoadFileTree {
+    let _tree_query = connection.send(ClientToHub::LoadFileTree {
         mount: "repo".to_string(),
     });
     let tree = wait_for_message(
         &connection,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"),
     )
     .expect("did not receive file tree");
     match tree {
-        StudioToUI::FileTree { data, .. } => {
+        HubToClient::FileTree { data, .. } => {
             assert!(data.nodes.iter().any(|node| node.path == "repo/src/lib.rs"));
         }
         _ => unreachable!(),
     }
 
-    let _run_query_id = connection.send(UIToStudio::Cargo {
+    let _run_query_id = connection.send(ClientToHub::Cargo {
         mount: "repo".to_string(),
         args: vec!["--version".to_string()],
         env: None,
@@ -77,21 +77,21 @@ fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
     let started = wait_for_message(
         &connection,
         Duration::from_secs(5),
-        |msg| matches!(msg, StudioToUI::BuildStarted { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::BuildStarted { mount, .. } if mount == "repo"),
     );
     let build_id = match started {
-        Some(StudioToUI::BuildStarted { build_id, .. }) => build_id,
+        Some(HubToClient::BuildStarted { build_id, .. }) => build_id,
         _ => panic!("did not receive BuildStarted"),
     };
 
     let stopped = wait_for_message(
         &connection,
         Duration::from_secs(10),
-        |msg| matches!(msg, StudioToUI::BuildStopped { build_id: id, .. } if *id == build_id),
+        |msg| matches!(msg, HubToClient::BuildStopped { build_id: id, .. } if *id == build_id),
     );
     assert!(stopped.is_some(), "did not receive BuildStopped");
 
-    let query_id = connection.send(UIToStudio::QueryLogs {
+    let query_id = connection.send(ClientToHub::QueryLogs {
         build_id: Some(build_id),
         level: None,
         source: None,
@@ -104,7 +104,7 @@ fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
     let log_results = wait_for_message(&connection, Duration::from_secs(3), |msg| {
         matches!(
             msg,
-            StudioToUI::QueryLogResults {
+            HubToClient::QueryLogResults {
                 query_id: id, ..
             } if *id == query_id
         )
@@ -112,7 +112,7 @@ fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
     .expect("did not receive QueryLogResults");
 
     match log_results {
-        StudioToUI::QueryLogResults { entries, done, .. } => {
+        HubToClient::QueryLogResults { entries, done, .. } => {
             assert!(done);
             assert!(!entries.is_empty(), "expected cargo output entries");
         }
@@ -131,17 +131,17 @@ fn terminal_large_paste_keeps_session_alive() {
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
     let path = "repo/.makepad/large_paste.term".to_string();
-    let _ = connection.send(UIToStudio::TerminalOpen {
+    let _ = connection.send(ClientToHub::TerminalOpen {
         path: path.clone(),
         cols: 120,
         rows: 30,
@@ -150,7 +150,7 @@ fn terminal_large_paste_keeps_session_alive() {
     let opened = wait_for_message(
         &connection,
         Duration::from_secs(4),
-        |msg| matches!(msg, StudioToUI::TerminalOpened { path: p, .. } if p == &path),
+        |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == &path),
     );
     assert!(opened.is_some(), "did not receive TerminalOpened");
 
@@ -162,7 +162,7 @@ fn terminal_large_paste_keeps_session_alive() {
     // Interrupt cat so we reliably return to shell even if EOF semantics vary.
     input.push(0x03);
     input.extend_from_slice(b"stty echo\necho __paste_ok__\n");
-    let _ = connection.send(UIToStudio::TerminalInput {
+    let _ = connection.send(ClientToHub::TerminalInput {
         path: path.clone(),
         data: input,
     });
@@ -175,17 +175,17 @@ fn terminal_large_paste_keeps_session_alive() {
             continue;
         };
         match msg {
-            StudioToUI::TerminalExited {
+            HubToClient::TerminalExited {
                 path: exited_path, ..
             } if exited_path == path => {
                 panic!("terminal exited during large paste");
             }
-            StudioToUI::Error { message }
+            HubToClient::Error { message }
                 if message.contains("unknown terminal") && message.contains(&path) =>
             {
                 panic!("terminal lost after large paste: {}", message);
             }
-            StudioToUI::TerminalOutput {
+            HubToClient::TerminalOutput {
                 path: output_path,
                 data,
             } if output_path == path => {
@@ -205,7 +205,7 @@ fn terminal_large_paste_keeps_session_alive() {
         }
     }
 
-    let _ = connection.send(UIToStudio::TerminalClose { path });
+    let _ = connection.send(ClientToHub::TerminalClose { path });
     assert!(saw_marker, "did not observe terminal response after large paste");
 }
 
@@ -217,27 +217,27 @@ fn file_tree_keeps_hidden_directories_for_backend() {
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
     fs::write(dir.path().join(".hidden/secret.txt"), "secret\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::LoadFileTree {
+    let _ = connection.send(ClientToHub::LoadFileTree {
         mount: "repo".to_string(),
     });
     let tree = wait_for_message(
         &connection,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"),
     )
     .expect("did not receive file tree");
 
     match tree {
-        StudioToUI::FileTree { data, .. } => {
+        HubToClient::FileTree { data, .. } => {
             assert!(
                 data.nodes.iter().any(|node| node.path == "repo/.hidden"),
                 "hidden directory should be present in backend file tree"
@@ -266,7 +266,7 @@ fn unmount_emits_file_tree_diff_scoped_to_mount() {
     fs::write(mount_a.path().join("src/a.rs"), "pub fn a() {}\n").unwrap();
     fs::write(mount_b.path().join("src/b.rs"), "pub fn b() {}\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![
             MountConfig {
                 name: "alpha".to_string(),
@@ -280,30 +280,30 @@ fn unmount_emits_file_tree_diff_scoped_to_mount() {
         ..Default::default()
     };
 
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
-    let _ = connection.send(UIToStudio::Unmount {
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+    let _ = connection.send(ClientToHub::Unmount {
         name: "alpha".to_string(),
     });
 
     let diff = wait_for_message(
         &connection,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::FileTreeDiff { mount, .. } if mount == "alpha"),
+        |msg| matches!(msg, HubToClient::FileTreeDiff { mount, .. } if mount == "alpha"),
     )
     .expect("did not receive alpha FileTreeDiff");
 
     match diff {
-        StudioToUI::FileTreeDiff { mount, changes } => {
+        HubToClient::FileTreeDiff { mount, changes } => {
             assert_eq!(mount, "alpha");
             assert!(!changes.is_empty(), "expected removed paths for alpha");
             for change in changes {
                 match change {
-                    makepad_studio_protocol::backend_protocol::FileTreeChange::Added {
+                    makepad_studio_protocol::hub_protocol::FileTreeChange::Added {
                         path,
                         ..
                     }
-                    | makepad_studio_protocol::backend_protocol::FileTreeChange::Removed { path }
-                    | makepad_studio_protocol::backend_protocol::FileTreeChange::Modified {
+                    | makepad_studio_protocol::hub_protocol::FileTreeChange::Removed { path }
+                    | makepad_studio_protocol::hub_protocol::FileTreeChange::Modified {
                         path,
                         ..
                     } => {
@@ -338,7 +338,7 @@ fn runnable_builds_are_scoped_per_mount() {
     .unwrap();
     fs::write(mount_b.path().join("src/main.rs"), "fn main() {}\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![
             MountConfig {
                 name: "alpha".to_string(),
@@ -351,19 +351,19 @@ fn runnable_builds_are_scoped_per_mount() {
         ],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::LoadRunnableBuilds {
+    let _ = connection.send(ClientToHub::LoadRunnableBuilds {
         mount: "alpha".to_string(),
     });
     let alpha = wait_for_message(
         &connection,
         Duration::from_secs(5),
-        |msg| matches!(msg, StudioToUI::RunnableBuilds { mount, .. } if mount == "alpha"),
+        |msg| matches!(msg, HubToClient::RunnableBuilds { mount, .. } if mount == "alpha"),
     )
     .expect("did not receive alpha runnable builds");
     match alpha {
-        StudioToUI::RunnableBuilds { mount, builds } => {
+        HubToClient::RunnableBuilds { mount, builds } => {
             assert_eq!(mount, "alpha");
             assert_eq!(builds.len(), 1);
             assert_eq!(builds[0].package, "alpha-app");
@@ -371,17 +371,17 @@ fn runnable_builds_are_scoped_per_mount() {
         _ => unreachable!(),
     }
 
-    let _ = connection.send(UIToStudio::LoadRunnableBuilds {
+    let _ = connection.send(ClientToHub::LoadRunnableBuilds {
         mount: "beta".to_string(),
     });
     let beta = wait_for_message(
         &connection,
         Duration::from_secs(5),
-        |msg| matches!(msg, StudioToUI::RunnableBuilds { mount, .. } if mount == "beta"),
+        |msg| matches!(msg, HubToClient::RunnableBuilds { mount, .. } if mount == "beta"),
     )
     .expect("did not receive beta runnable builds");
     match beta {
-        StudioToUI::RunnableBuilds { mount, builds } => {
+        HubToClient::RunnableBuilds { mount, builds } => {
             assert_eq!(mount, "beta");
             assert_eq!(builds.len(), 1);
             assert_eq!(builds[0].package, "beta-app");
@@ -396,26 +396,26 @@ fn file_watch_emits_single_path_delta_without_full_tree_reload() {
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::LoadFileTree {
+    let _ = connection.send(ClientToHub::LoadFileTree {
         mount: "repo".to_string(),
     });
     let _ = wait_for_message(
         &connection,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"),
     )
     .expect("did not receive initial file tree");
 
-    let _ = connection.send(UIToStudio::SaveTextFile {
+    let _ = connection.send(ClientToHub::SaveTextFile {
         path: "repo/src/lib.rs".to_string(),
         content: "pub fn hi() { let _x = 1; }\n".to_string(),
     });
@@ -423,14 +423,14 @@ fn file_watch_emits_single_path_delta_without_full_tree_reload() {
     let diff_msg = wait_for_message(&connection, Duration::from_secs(5), |msg| {
         matches!(
             msg,
-            StudioToUI::FileTreeDiff { mount, changes }
+            HubToClient::FileTreeDiff { mount, changes }
                 if mount == "repo"
                     && changes.len() == 1
                     && matches!(
                         &changes[0],
-                        makepad_studio_protocol::backend_protocol::FileTreeChange::Added { path, .. }
-                            | makepad_studio_protocol::backend_protocol::FileTreeChange::Modified { path, .. }
-                            | makepad_studio_protocol::backend_protocol::FileTreeChange::Removed { path }
+                        makepad_studio_protocol::hub_protocol::FileTreeChange::Added { path, .. }
+                            | makepad_studio_protocol::hub_protocol::FileTreeChange::Modified { path, .. }
+                            | makepad_studio_protocol::hub_protocol::FileTreeChange::Removed { path }
                             if path.starts_with("repo/")
                     )
         )
@@ -438,7 +438,7 @@ fn file_watch_emits_single_path_delta_without_full_tree_reload() {
     .expect("did not receive path-scoped filetree delta");
 
     match diff_msg {
-        StudioToUI::FileTreeDiff { changes, .. } => {
+        HubToClient::FileTreeDiff { changes, .. } => {
             assert_eq!(changes.len(), 1);
         }
         _ => unreachable!(),
@@ -448,7 +448,7 @@ fn file_watch_emits_single_path_delta_without_full_tree_reload() {
     assert!(
         !trailing
             .iter()
-            .any(|msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo")),
+            .any(|msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo")),
         "unexpected full file-tree reload after delta update"
     );
 }
@@ -459,26 +459,26 @@ fn save_text_file_does_not_echo_file_changed_to_saving_client() {
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::LoadFileTree {
+    let _ = connection.send(ClientToHub::LoadFileTree {
         mount: "repo".to_string(),
     });
     let _ = wait_for_message(
         &connection,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"),
     )
     .expect("did not receive initial file tree");
 
-    let _ = connection.send(UIToStudio::SaveTextFile {
+    let _ = connection.send(ClientToHub::SaveTextFile {
         path: "repo/src/lib.rs".to_string(),
         content: "pub fn hi() { let _x = 7; }\n".to_string(),
     });
@@ -488,7 +488,7 @@ fn save_text_file_does_not_echo_file_changed_to_saving_client() {
         messages.iter().any(|msg| {
             matches!(
                 msg,
-                StudioToUI::TextFileSaved { path, .. } if path == "repo/src/lib.rs"
+                HubToClient::TextFileSaved { path, .. } if path == "repo/src/lib.rs"
             )
         }),
         "did not receive TextFileSaved after save request"
@@ -497,7 +497,7 @@ fn save_text_file_does_not_echo_file_changed_to_saving_client() {
         !messages.iter().any(|msg| {
             matches!(
                 msg,
-                StudioToUI::FileChanged { path } if path == "repo/src/lib.rs"
+                HubToClient::FileChanged { path } if path == "repo/src/lib.rs"
             )
         }),
         "unexpected FileChanged echo for saving client"
@@ -510,26 +510,26 @@ fn file_watch_ignores_makepad_term_writes() {
     fs::create_dir_all(dir.path().join(".makepad")).unwrap();
     fs::write(dir.path().join(".makepad/a.term"), "").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::LoadFileTree {
+    let _ = connection.send(ClientToHub::LoadFileTree {
         mount: "repo".to_string(),
     });
     let _ = wait_for_message(
         &connection,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"),
     )
     .expect("did not receive initial file tree");
 
-    let _ = connection.send(UIToStudio::SaveTextFile {
+    let _ = connection.send(ClientToHub::SaveTextFile {
         path: "repo/.makepad/a.term".to_string(),
         content: "echo hi\n".to_string(),
     });
@@ -537,7 +537,7 @@ fn file_watch_ignores_makepad_term_writes() {
     let messages = drain_messages(&connection, Duration::from_millis(900));
     assert!(
         !messages.iter().any(|msg| {
-            matches!(msg, StudioToUI::FileTreeDiff { mount, .. } if mount == "repo")
+            matches!(msg, HubToClient::FileTreeDiff { mount, .. } if mount == "repo")
         }),
         "expected .makepad terminal writes to be ignored by fs delta watcher"
     );
@@ -547,26 +547,26 @@ fn file_watch_ignores_makepad_term_writes() {
 fn file_watch_emits_hidden_directory_writes() {
     let dir = tempfile::tempdir().unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::LoadFileTree {
+    let _ = connection.send(ClientToHub::LoadFileTree {
         mount: "repo".to_string(),
     });
     let _ = wait_for_message(
         &connection,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"),
     )
     .expect("did not receive initial file tree");
 
-    let _ = connection.send(UIToStudio::SaveTextFile {
+    let _ = connection.send(ClientToHub::SaveTextFile {
         path: "repo/.hidden/a.txt".to_string(),
         content: "hello\n".to_string(),
     });
@@ -574,14 +574,14 @@ fn file_watch_emits_hidden_directory_writes() {
     let diff = wait_for_message(&connection, Duration::from_secs(5), |msg| {
         matches!(
             msg,
-            StudioToUI::FileTreeDiff { mount, changes }
+            HubToClient::FileTreeDiff { mount, changes }
                 if mount == "repo"
                     && changes.iter().any(|change| {
                         matches!(
                             change,
-                            makepad_studio_protocol::backend_protocol::FileTreeChange::Added { path, .. }
-                                | makepad_studio_protocol::backend_protocol::FileTreeChange::Modified { path, .. }
-                                | makepad_studio_protocol::backend_protocol::FileTreeChange::Removed { path }
+                            makepad_studio_protocol::hub_protocol::FileTreeChange::Added { path, .. }
+                                | makepad_studio_protocol::hub_protocol::FileTreeChange::Modified { path, .. }
+                                | makepad_studio_protocol::hub_protocol::FileTreeChange::Removed { path }
                                 if path == "repo/.hidden/a.txt"
                         )
                     })
@@ -599,22 +599,22 @@ fn file_watch_picks_up_external_new_file() {
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::LoadFileTree {
+    let _ = connection.send(ClientToHub::LoadFileTree {
         mount: "repo".to_string(),
     });
     let _ = wait_for_message(
         &connection,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"),
     )
     .expect("did not receive initial file tree");
 
@@ -627,11 +627,11 @@ fn file_watch_picks_up_external_new_file() {
             continue;
         };
         match msg {
-            StudioToUI::FileTreeDiff { mount, changes } if mount == "repo" => {
+            HubToClient::FileTreeDiff { mount, changes } if mount == "repo" => {
                 if changes.iter().any(|change| {
                     matches!(
                         change,
-                        makepad_studio_protocol::backend_protocol::FileTreeChange::Added { path, .. }
+                        makepad_studio_protocol::hub_protocol::FileTreeChange::Added { path, .. }
                             if path == "repo/src/new_file.rs"
                     )
                 }) {
@@ -639,7 +639,7 @@ fn file_watch_picks_up_external_new_file() {
                     break;
                 }
             }
-            StudioToUI::FileTree { mount, data } if mount == "repo" => {
+            HubToClient::FileTree { mount, data } if mount == "repo" => {
                 if data
                     .nodes
                     .iter()
@@ -665,22 +665,22 @@ fn file_watch_emits_file_changed_for_external_write() {
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::LoadFileTree {
+    let _ = connection.send(ClientToHub::LoadFileTree {
         mount: "repo".to_string(),
     });
     let _ = wait_for_message(
         &connection,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"),
     )
     .expect("did not receive initial file tree");
 
@@ -697,7 +697,7 @@ fn file_watch_emits_file_changed_for_external_write() {
         |msg| {
             matches!(
                 msg,
-                StudioToUI::FileChanged { path }
+                HubToClient::FileChanged { path }
                     if path == "repo/src/lib.rs" || path == "repo"
             )
         },
@@ -714,22 +714,22 @@ fn read_text_file_returns_fresh_content_after_external_write() {
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::OpenTextFile {
+    let _ = connection.send(ClientToHub::OpenTextFile {
         path: "repo/src/lib.rs".to_string(),
     });
     let opened = wait_for_message(&connection, Duration::from_secs(3), |msg| {
         matches!(
             msg,
-            StudioToUI::TextFileOpened { path, content, .. }
+            HubToClient::TextFileOpened { path, content, .. }
                 if path == "repo/src/lib.rs" && content == "pub fn hi() {}\n"
         )
     });
@@ -741,13 +741,13 @@ fn read_text_file_returns_fresh_content_after_external_write() {
     )
     .unwrap();
 
-    let _ = connection.send(UIToStudio::ReadTextFile {
+    let _ = connection.send(ClientToHub::ReadTextFile {
         path: "repo/src/lib.rs".to_string(),
     });
     let read = wait_for_message(&connection, Duration::from_secs(3), |msg| {
         matches!(
             msg,
-            StudioToUI::TextFileRead { path, content }
+            HubToClient::TextFileRead { path, content }
                 if path == "repo/src/lib.rs"
                     && content == "pub fn hi() { let external = 1; }\n"
         )
@@ -764,22 +764,22 @@ fn file_watch_picks_up_external_removed_directory() {
     fs::create_dir_all(dir.path().join("src/nested")).unwrap();
     fs::write(dir.path().join("src/nested/mod.rs"), "pub fn nested() {}\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::LoadFileTree {
+    let _ = connection.send(ClientToHub::LoadFileTree {
         mount: "repo".to_string(),
     });
     let _ = wait_for_message(
         &connection,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"),
     )
     .expect("did not receive initial file tree");
 
@@ -792,11 +792,11 @@ fn file_watch_picks_up_external_removed_directory() {
             continue;
         };
         match msg {
-            StudioToUI::FileTreeDiff { mount, changes } if mount == "repo" => {
+            HubToClient::FileTreeDiff { mount, changes } if mount == "repo" => {
                 if changes.iter().any(|change| {
                     matches!(
                         change,
-                        makepad_studio_protocol::backend_protocol::FileTreeChange::Removed { path }
+                        makepad_studio_protocol::hub_protocol::FileTreeChange::Removed { path }
                             if path == "repo/src/nested" || path.starts_with("repo/src/nested/")
                     )
                 }) {
@@ -804,7 +804,7 @@ fn file_watch_picks_up_external_removed_directory() {
                     break;
                 }
             }
-            StudioToUI::FileTree { mount, data } if mount == "repo" => {
+            HubToClient::FileTree { mount, data } if mount == "repo" => {
                 if !data.nodes.iter().any(|node| {
                     node.path == "repo/src/nested" || node.path.starts_with("repo/src/nested/")
                 }) {
@@ -838,16 +838,16 @@ fn find_in_files_defaults_to_rs_md_toml_and_returns_concise_hits() {
     )
     .unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let query_id = connection.send(UIToStudio::FindInFiles {
+    let query_id = connection.send(ClientToHub::FindInFiles {
         mount: Some("repo".to_string()),
         pattern: "needle".to_string(),
         is_regex: Some(false),
@@ -858,13 +858,13 @@ fn find_in_files_defaults_to_rs_md_toml_and_returns_concise_hits() {
     let msg = wait_for_message(&connection, Duration::from_secs(4), |msg| {
         matches!(
             msg,
-            StudioToUI::SearchFileResults { query_id: id, done: true, .. } if *id == query_id
+            HubToClient::SearchFileResults { query_id: id, done: true, .. } if *id == query_id
         )
     })
     .expect("did not receive SearchFileResults");
 
     match msg {
-        StudioToUI::SearchFileResults { results, done, .. } => {
+        HubToClient::SearchFileResults { results, done, .. } => {
             assert!(done);
             assert!(
                 results.iter().any(|item| item.path == "repo/src/lib.rs"),
@@ -898,16 +898,16 @@ fn find_in_files_regex_respects_max_results() {
     .unwrap();
     fs::write(dir.path().join("README.md"), "needle in markdown\n").unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let query_id = connection.send(UIToStudio::FindInFiles {
+    let query_id = connection.send(ClientToHub::FindInFiles {
         mount: Some("repo".to_string()),
         pattern: "needle".to_string(),
         is_regex: Some(true),
@@ -918,13 +918,13 @@ fn find_in_files_regex_respects_max_results() {
     let msg = wait_for_message(&connection, Duration::from_secs(4), |msg| {
         matches!(
             msg,
-            StudioToUI::SearchFileResults { query_id: id, done: true, .. } if *id == query_id
+            HubToClient::SearchFileResults { query_id: id, done: true, .. } if *id == query_id
         )
     })
     .expect("did not receive SearchFileResults");
 
     match msg {
-        StudioToUI::SearchFileResults { results, done, .. } => {
+        HubToClient::SearchFileResults { results, done, .. } => {
             assert!(done);
             assert_eq!(results.len(), 1, "regex search should stop at max_results");
         }
@@ -942,16 +942,16 @@ fn read_text_range_returns_line_window_and_total_line_count() {
     )
     .unwrap();
 
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: dir.path().to_path_buf(),
         }],
         ..Default::default()
     };
-    let mut connection = StudioBackend::start_in_process(config).expect("start in-process backend");
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(UIToStudio::ReadTextRange {
+    let _ = connection.send(ClientToHub::ReadTextRange {
         path: "repo/src/lib.rs".to_string(),
         start_line: 2,
         end_line: 3,
@@ -960,7 +960,7 @@ fn read_text_range_returns_line_window_and_total_line_count() {
     let msg = wait_for_message(&connection, Duration::from_secs(3), |msg| {
         matches!(
             msg,
-            StudioToUI::TextFileRange {
+            HubToClient::TextFileRange {
                 path,
                 start_line,
                 end_line,

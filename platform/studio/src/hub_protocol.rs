@@ -30,13 +30,13 @@ impl QueryId {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub struct UIToStudioEnvelope {
+pub struct ClientToHubEnvelope {
     pub query_id: QueryId,
-    pub msg: UIToStudio,
+    pub msg: ClientToHub,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum UIToStudio {
+pub enum ClientToHub {
     // === File System ===
     LoadFileTree {
         mount: String,
@@ -234,7 +234,7 @@ pub enum UIToStudio {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum StudioToUI {
+pub enum HubToClient {
     // === Connection ===
     Hello {
         client_id: ClientId,
@@ -701,7 +701,7 @@ pub struct FileHash {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum StudioToBuildBox {
+pub enum HubToBuildBox {
     TreeHash {
         hash: String,
     },
@@ -722,10 +722,10 @@ pub enum StudioToBuildBox {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub struct StudioToBuildBoxVec(pub Vec<StudioToBuildBox>);
+pub struct HubToBuildBoxVec(pub Vec<HubToBuildBox>);
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub enum BuildBoxToStudio {
+pub enum BuildBoxToHub {
     Hello {
         name: String,
         platform: String,
@@ -756,4 +756,4 @@ pub enum BuildBoxToStudio {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub struct BuildBoxToStudioVec(pub Vec<BuildBoxToStudio>);
+pub struct BuildBoxToHubVec(pub Vec<BuildBoxToHub>);

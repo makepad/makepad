@@ -529,7 +529,7 @@ impl App {
                 .then(|| Box::new(ClaudeAcpAgent::new()) as Box<dyn Agent>),
             BackendType::ClaudeApi => Self::read_key_file("ANTHROPIC_API_KEY").map(|key| {
                 Box::new(StatelessBackendAdapter::new(Box::new(ClaudeBackend::new(
-                    BackendConfig::Claude {
+                    HubConfig::Claude {
                         api_key: Some(key),
                         oauth_token: None,
                         model: "claude-sonnet-4-5-20250929".to_string(),
@@ -539,7 +539,7 @@ impl App {
             BackendType::Gemini | BackendType::GeminiSplash => {
                 Self::read_key_file("GOOGLE_API_KEY").map(|key| {
                     Box::new(StatelessBackendAdapter::new(Box::new(GeminiBackend::new(
-                        BackendConfig::Gemini {
+                        HubConfig::Gemini {
                             api_key: key,
                             model: "gemini-3-pro-preview".to_string(),
                         },
@@ -548,7 +548,7 @@ impl App {
             }
             BackendType::OpenAi => Self::read_key_file("OPENAI_API_KEY").map(|key| {
                 Box::new(StatelessBackendAdapter::new(Box::new(OpenAiBackend::new(
-                    BackendConfig::OpenAI {
+                    HubConfig::OpenAI {
                         api_key: key,
                         model: "gpt-4o".to_string(),
                         base_url: None,

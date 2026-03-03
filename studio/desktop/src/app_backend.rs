@@ -1,5 +1,5 @@
 use super::*;
-use makepad_studio_protocol::backend_protocol::{FileNode, FileTreeChange};
+use makepad_studio_protocol::hub_protocol::{FileNode, FileTreeChange};
 
 fn parse_mounts_spec(spec: &str, item_sep: char, pair_sep: char) -> Vec<MountConfig> {
     spec.split(item_sep)
@@ -51,7 +51,7 @@ impl App {
         }
         let mut changed = false;
         let Some(tree) = self.mount_state_mut(mount).file_tree_data.as_mut() else {
-            let _ = self.send_studio(UIToStudio::LoadFileTree {
+            let _ = self.send_studio(ClientToHub::LoadFileTree {
                 mount: mount.to_string(),
             });
             return;
@@ -140,26 +140,26 @@ impl App {
             });
         }
 
-        let config = BackendConfig {
+        let config = HubConfig {
             mounts: mounts.clone(),
             enable_in_process_gateway: true,
             ..Default::default()
         };
 
-        match StudioBackend::start_in_process(config) {
+        match StudioHub::start_in_process(config) {
             Ok(studio) => {
                 self.data.studio = Some(studio);
                 for mount in &mounts {
                     self.data.mounts.entry(mount.name.clone()).or_default().root =
                         mount.path.clone();
                     let _ = self.ensure_mount_tab(cx, &mount.name);
-                    let _ = self.send_studio(UIToStudio::LoadFileTree {
+                    let _ = self.send_studio(ClientToHub::LoadFileTree {
                         mount: mount.name.clone(),
                     });
-                    let _ = self.send_studio(UIToStudio::LoadRunnableBuilds {
+                    let _ = self.send_studio(ClientToHub::LoadRunnableBuilds {
                         mount: mount.name.clone(),
                     });
-                    let _ = self.send_studio(UIToStudio::ObserveMount {
+                    let _ = self.send_studio(ClientToHub::ObserveMount {
                         mount: mount.name.clone(),
                         primary: Some(true),
                     });
@@ -186,7 +186,7 @@ impl App {
             .set_text(cx, label);
     }
 
-    pub(super) fn send_studio(&mut self, msg: UIToStudio) -> Option<QueryId> {
+    pub(super) fn send_studio(&mut self, msg: ClientToHub) -> Option<QueryId> {
         self.data.studio.as_mut().map(|studio| studio.send(msg))
     }
 
@@ -355,7 +355,7 @@ impl App {
         };
         if let Some(query_id) = old_query {
             self.data.file_filter_mount_by_query.remove(&query_id);
-            let _ = self.send_studio(UIToStudio::CancelQuery { query_id });
+            let _ = self.send_studio(ClientToHub::CancelQuery { query_id });
         }
     }
 
@@ -372,7 +372,7 @@ impl App {
         self.cancel_file_filter_query(cx, mount, &filter);
 
         if !filter.is_empty() {
-            if let Some(query_id) = self.send_studio(UIToStudio::FindFiles {
+            if let Some(query_id) = self.send_studio(ClientToHub::FindFiles {
                 mount: Some(mount.to_string()),
                 pattern: filter,
                 is_regex: Some(false),
@@ -430,13 +430,13 @@ impl App {
             .map(|mount_state| mount_state.log_filter.trim().to_string())
             .unwrap_or_default();
         if let Some(query_id) = self.data.live_log_query.take() {
-            let _ = self.send_studio(UIToStudio::CancelQuery { query_id });
+            let _ = self.send_studio(ClientToHub::CancelQuery { query_id });
         }
         self.data.build_log_entries.clear();
         for mount_state in self.data.mounts.values_mut() {
             mount_state.log_entries.clear();
         }
-        self.data.live_log_query = self.send_studio(UIToStudio::QueryLogs {
+        self.data.live_log_query = self.send_studio(ClientToHub::QueryLogs {
             build_id: None,
             level: None,
             source: None,
@@ -482,7 +482,7 @@ impl App {
 
     pub(super) fn request_stop_all_builds_for_mount(&mut self, cx: &mut Cx, mount: &str) {
         self.data.pending_stop_all_mount = Some(mount.to_string());
-        let _ = self.send_studio(UIToStudio::ListBuilds);
+        let _ = self.send_studio(ClientToHub::ListBuilds);
         self.set_status(cx, &format!("requesting stop-all for {}", mount));
     }
 
@@ -623,7 +623,7 @@ impl App {
             .get(path)
             .copied()
             .unwrap_or((120, 40));
-        let _ = self.send_studio(UIToStudio::TerminalOpen {
+        let _ = self.send_studio(ClientToHub::TerminalOpen {
             path: path.to_string(),
             cols,
             rows,
@@ -653,7 +653,7 @@ impl App {
             self.data.terminal_history_len_by_path.remove(&stale);
             self.data.terminal_desired_size_by_path.remove(&stale);
             if self.data.terminal_open_paths.remove(&stale) {
-                let _ = self.send_studio(UIToStudio::TerminalClose { path: stale });
+                let _ = self.send_studio(ClientToHub::TerminalClose { path: stale });
             }
         }
         let select_last = {
@@ -690,7 +690,7 @@ impl App {
                 .or_default();
             self.sync_mount_terminal_tabs(cx, mount, true);
             self.ensure_terminal_session_open(&path);
-            let _ = self.send_studio(UIToStudio::SaveTextFile {
+            let _ = self.send_studio(ClientToHub::SaveTextFile {
                 path,
                 content: String::new(),
             });
@@ -735,7 +735,7 @@ impl App {
             }
         }
 
-        let _ = self.send_studio(UIToStudio::SaveTextFile {
+        let _ = self.send_studio(ClientToHub::SaveTextFile {
             path: path.clone(),
             content: String::new(),
         });
@@ -776,8 +776,8 @@ impl App {
         self.data.terminal_stream_by_path.remove(&path);
         self.data.terminal_history_len_by_path.remove(&path);
         self.data.terminal_desired_size_by_path.remove(&path);
-        let _ = self.send_studio(UIToStudio::TerminalClose { path: path.clone() });
-        let _ = self.send_studio(UIToStudio::DeleteFile { path });
+        let _ = self.send_studio(ClientToHub::TerminalClose { path: path.clone() });
+        let _ = self.send_studio(ClientToHub::DeleteFile { path });
     }
 
     pub(super) fn select_mount(&mut self, cx: &mut Cx, mount: &str) {
@@ -793,7 +793,7 @@ impl App {
             self.refresh_active_mount_tree(cx);
             self.set_status(cx, &format!("mount ready: {}", mount));
         } else {
-            let _ = self.send_studio(UIToStudio::LoadFileTree {
+            let _ = self.send_studio(ClientToHub::LoadFileTree {
                 mount: mount.to_string(),
             });
             self.set_status(cx, &format!("loading mount: {}", mount));
@@ -804,7 +804,7 @@ impl App {
             .map(|mount| mount.runnable_builds.is_empty())
             .unwrap_or(true)
         {
-            let _ = self.send_studio(UIToStudio::LoadRunnableBuilds {
+            let _ = self.send_studio(ClientToHub::LoadRunnableBuilds {
                 mount: mount.to_string(),
             });
         }

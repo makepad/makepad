@@ -7,7 +7,7 @@ pub use mouse::{KeyModifiers, MouseButton};
 pub use shared_framebuf::*;
 pub use studio::*;
 
-pub mod backend_protocol;
+pub mod hub_protocol;
 pub mod cursor;
 pub mod keyboard;
 pub mod mouse;

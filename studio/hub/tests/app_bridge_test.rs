@@ -3,9 +3,9 @@ use makepad_micro_serde::{DeBin, SerBin};
 use makepad_network::{
     HttpMethod, HttpRequest, NetworkConfig, NetworkResponse, NetworkRuntime, WsMessage, WsSend,
 };
-use makepad_studio_backend::{BackendConfig, MountConfig, StudioBackend};
-use makepad_studio_protocol::backend_protocol::{
-    ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope,
+use makepad_studio_hub::{HubConfig, MountConfig, StudioHub};
+use makepad_studio_protocol::hub_protocol::{
+    ClientId, QueryId, HubToClient, ClientToHub, ClientToHubEnvelope,
 };
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec, WidgetQueryResponse,
@@ -69,7 +69,7 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
     let Some(port) = find_free_port() else {
         return;
     };
-    let config = BackendConfig {
+    let config = HubConfig {
         listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         post_max_size: 1024 * 1024,
         mounts: vec![MountConfig {
@@ -78,7 +78,7 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
         }],
         enable_in_process_gateway: false,
     };
-    let _backend = match StudioBackend::start_headless(config) {
+    let _backend = match StudioHub::start_headless(config) {
         Ok(v) => v,
         Err(err) => {
             if err.contains("failed to bind") {
@@ -102,9 +102,9 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
     assert!(ui_opened.is_some(), "did not receive ui WsOpened");
 
     let hello_bin = wait_for_ws_binary(&runtime, ui_socket, Duration::from_secs(3));
-    let hello = StudioToUI::deserialize_bin(&hello_bin).expect("decode hello");
+    let hello = HubToClient::deserialize_bin(&hello_bin).expect("decode hello");
     let client_id = match hello {
-        StudioToUI::Hello { client_id } => client_id,
+        HubToClient::Hello { client_id } => client_id,
         other => panic!("expected hello, got {:?}", other),
     };
     assert_ne!(client_id, ClientId(u16::MAX));
@@ -126,9 +126,9 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
     assert!(app_opened.is_some(), "did not receive app WsOpened");
 
     let query_id = QueryId::new(client_id, 1);
-    let ui_request = UIToStudioEnvelope {
+    let ui_request = ClientToHubEnvelope {
         query_id,
-        msg: UIToStudio::WidgetTreeDump { build_id },
+        msg: ClientToHub::WidgetTreeDump { build_id },
     };
     runtime
         .ws_send(ui_socket, WsSend::Binary(ui_request.serialize_bin()))
@@ -151,9 +151,9 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
         .expect("send app response");
 
     let ui_incoming = wait_for_ws_binary(&runtime, ui_socket, Duration::from_secs(3));
-    let ui_msg = StudioToUI::deserialize_bin(&ui_incoming).expect("decode ui response");
+    let ui_msg = HubToClient::deserialize_bin(&ui_incoming).expect("decode ui response");
     match ui_msg {
-        StudioToUI::WidgetTreeDump {
+        HubToClient::WidgetTreeDump {
             query_id: got_query,
             build_id: got_build,
             dump,
@@ -178,7 +178,7 @@ fn websocket_app_bridge_widget_query_roundtrip() {
     let Some(port) = find_free_port() else {
         return;
     };
-    let config = BackendConfig {
+    let config = HubConfig {
         listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         post_max_size: 1024 * 1024,
         mounts: vec![MountConfig {
@@ -187,7 +187,7 @@ fn websocket_app_bridge_widget_query_roundtrip() {
         }],
         enable_in_process_gateway: false,
     };
-    let _backend = match StudioBackend::start_headless(config) {
+    let _backend = match StudioHub::start_headless(config) {
         Ok(v) => v,
         Err(err) => {
             if err.contains("failed to bind") {
@@ -211,9 +211,9 @@ fn websocket_app_bridge_widget_query_roundtrip() {
     assert!(ui_opened.is_some(), "did not receive ui WsOpened");
 
     let hello_bin = wait_for_ws_binary(&runtime, ui_socket, Duration::from_secs(3));
-    let hello = StudioToUI::deserialize_bin(&hello_bin).expect("decode hello");
+    let hello = HubToClient::deserialize_bin(&hello_bin).expect("decode hello");
     let client_id = match hello {
-        StudioToUI::Hello { client_id } => client_id,
+        HubToClient::Hello { client_id } => client_id,
         other => panic!("expected hello, got {:?}", other),
     };
 
@@ -234,9 +234,9 @@ fn websocket_app_bridge_widget_query_roundtrip() {
     assert!(app_opened.is_some(), "did not receive app WsOpened");
 
     let query_id = QueryId::new(client_id, 2);
-    let ui_request = UIToStudioEnvelope {
+    let ui_request = ClientToHubEnvelope {
         query_id,
-        msg: UIToStudio::WidgetQuery {
+        msg: ClientToHub::WidgetQuery {
             build_id,
             query: "id:math_tab".to_string(),
         },
@@ -266,9 +266,9 @@ fn websocket_app_bridge_widget_query_roundtrip() {
         .expect("send app response");
 
     let ui_incoming = wait_for_ws_binary(&runtime, ui_socket, Duration::from_secs(3));
-    let ui_msg = StudioToUI::deserialize_bin(&ui_incoming).expect("decode ui response");
+    let ui_msg = HubToClient::deserialize_bin(&ui_incoming).expect("decode ui response");
     match ui_msg {
-        StudioToUI::WidgetQuery {
+        HubToClient::WidgetQuery {
             query_id: got_query,
             build_id: got_build,
             query,

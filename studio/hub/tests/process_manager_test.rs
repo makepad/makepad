@@ -1,13 +1,13 @@
-use makepad_studio_backend::process_manager::ProcessManager;
-use makepad_studio_backend::StudioEvent;
-use makepad_studio_protocol::backend_protocol::{ClientId, QueryId};
+use makepad_studio_hub::process_manager::ProcessManager;
+use makepad_studio_hub::HubEvent;
+use makepad_studio_protocol::hub_protocol::{ClientId, QueryId};
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[test]
 fn process_manager_emits_output_and_exit_for_cargo() {
-    let (tx, rx) = mpsc::channel::<StudioEvent>();
+    let (tx, rx) = mpsc::channel::<HubEvent>();
     let mut manager = ProcessManager::default();
     let tmp = tempfile::tempdir().unwrap();
 
@@ -34,14 +34,14 @@ fn process_manager_emits_output_and_exit_for_cargo() {
             continue;
         };
         match event {
-            StudioEvent::ProcessOutput {
+            HubEvent::ProcessOutput {
                 build_id: id, line, ..
             } if id == build_id => {
                 if line.contains("cargo") {
                     saw_output = true;
                 }
             }
-            StudioEvent::ProcessExited {
+            HubEvent::ProcessExited {
                 build_id: id,
                 exit_code,
             } if id == build_id => {

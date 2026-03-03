@@ -78,9 +78,9 @@ impl App {
         }
     }
 
-    pub(super) fn handle_studio_message(&mut self, cx: &mut Cx, msg: StudioToUI) {
+    pub(super) fn handle_studio_message(&mut self, cx: &mut Cx, msg: HubToClient) {
         match msg {
-            StudioToUI::FileTree { mount, data } => {
+            HubToClient::FileTree { mount, data } => {
                 let _ = self.ensure_mount_tab(cx, &mount);
                 self.mount_state_mut(&mount).file_tree_data = Some(data);
                 self.ensure_mount_terminal_file(cx, &mount);
@@ -98,7 +98,7 @@ impl App {
                     self.set_status(cx, &format!("file tree loaded: {}", mount));
                 }
             }
-            StudioToUI::TextFileOpened { path, content, .. } => {
+            HubToClient::TextFileOpened { path, content, .. } => {
                 if Self::is_terminal_virtual_path(&path) {
                     self.apply_terminal_text(cx, path, content);
                     return;
@@ -106,10 +106,10 @@ impl App {
                 self.apply_editor_text_update(cx, path, content, true);
                 self.set_status(cx, "opened file");
             }
-            StudioToUI::FileTreeDiff { mount, changes } => {
+            HubToClient::FileTreeDiff { mount, changes } => {
                 self.apply_mount_file_tree_diff(cx, &mount, changes);
             }
-            StudioToUI::TextFileRead { path, content } => {
+            HubToClient::TextFileRead { path, content } => {
                 if Self::is_terminal_virtual_path(&path) {
                     self.apply_terminal_text(cx, path, content);
                     return;
@@ -123,13 +123,13 @@ impl App {
                 );
                 self.apply_editor_text_update(cx, path, content, allow_create_tab);
             }
-            StudioToUI::TextFileSaved { path, result } => {
+            HubToClient::TextFileSaved { path, result } => {
                 if Self::is_terminal_virtual_path(&path) {
                     return;
                 }
                 self.set_status(cx, &format!("saved {} ({:?})", path, result));
             }
-            StudioToUI::FileChanged { path } => {
+            HubToClient::FileChanged { path } => {
                 if Self::is_terminal_virtual_path(&path) {
                     ui_file_sync_trace!("ignore FileChanged path={} reason=terminal", path);
                     return;
@@ -157,7 +157,7 @@ impl App {
                     }
                     for open_path in open_paths {
                         if self.data.pending_reload_paths.insert(open_path.clone()) {
-                            let _ = self.send_studio(UIToStudio::ReadTextFile {
+                            let _ = self.send_studio(ClientToHub::ReadTextFile {
                                 path: open_path.clone(),
                             });
                         }
@@ -171,12 +171,12 @@ impl App {
 
                 if self.data.pending_reload_paths.insert(path.clone()) {
                     ui_file_sync_trace!("queue file reload path={}", path);
-                    let _ = self.send_studio(UIToStudio::ReadTextFile { path });
+                    let _ = self.send_studio(ClientToHub::ReadTextFile { path });
                 } else {
                     ui_file_sync_trace!("coalesce file reload path={}", path);
                 }
             }
-            StudioToUI::FindFileResults {
+            HubToClient::FindFileResults {
                 query_id,
                 paths,
                 done,
@@ -202,7 +202,7 @@ impl App {
                     self.refresh_active_mount_tree(cx);
                 }
             }
-            StudioToUI::Builds { builds } => {
+            HubToClient::Builds { builds } => {
                 for build in &builds {
                     self.data
                         .build_to_mount
@@ -224,7 +224,7 @@ impl App {
                                 dock.redraw_tab(cx, tab_id);
                             }
                         }
-                        let _ = self.send_studio(UIToStudio::StopBuild {
+                        let _ = self.send_studio(ClientToHub::StopBuild {
                             build_id: build.build_id,
                         });
                         stop_count += 1;
@@ -235,14 +235,14 @@ impl App {
                     &format!("stop-all {}: {} running build(s)", mount, stop_count),
                 );
             }
-            StudioToUI::RunnableBuilds { mount, builds } => {
+            HubToClient::RunnableBuilds { mount, builds } => {
                 self.mount_state_mut(&mount).runnable_builds = builds;
                 if self.data.active_mount.as_deref() == Some(mount.as_str()) {
                     self.refresh_active_mount_run_list(cx);
                     self.set_status(cx, &format!("run targets loaded: {}", mount));
                 }
             }
-            StudioToUI::BuildStarted {
+            HubToClient::BuildStarted {
                 build_id,
                 mount,
                 package,
@@ -286,7 +286,7 @@ impl App {
                 }
                 self.set_status(cx, &format!("build started: {}", package));
             }
-            StudioToUI::BuildStopped {
+            HubToClient::BuildStopped {
                 build_id,
                 exit_code,
             } => {
@@ -317,7 +317,7 @@ impl App {
                     }
                 }
             }
-            StudioToUI::RunViewCreated {
+            HubToClient::RunViewCreated {
                 build_id,
                 window_id,
             } => {
@@ -359,7 +359,7 @@ impl App {
                     }
                 }
             }
-            StudioToUI::RunViewDrawComplete {
+            HubToClient::RunViewDrawComplete {
                 build_id,
                 window_id,
                 presentable_draw,
@@ -389,7 +389,7 @@ impl App {
                     dock.redraw_tab(cx, tab_id);
                 }
             }
-            StudioToUI::RunViewCursor { build_id, cursor } => {
+            HubToClient::RunViewCursor { build_id, cursor } => {
                 let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() else {
                     return;
                 };
@@ -407,7 +407,7 @@ impl App {
                         .set_remote_cursor(cx, Self::parse_run_view_cursor(&cursor));
                 }
             }
-            StudioToUI::RunViewInputViz {
+            HubToClient::RunViewInputViz {
                 build_id,
                 kind,
                 x,
@@ -430,7 +430,7 @@ impl App {
                         .show_input_viz(cx, kind, x, y);
                 }
             }
-            StudioToUI::QueryLogResults {
+            HubToClient::QueryLogResults {
                 query_id,
                 entries,
                 done: _,
@@ -476,7 +476,7 @@ impl App {
                 touched_mounts.retain(|mount| !mount.is_empty());
                 self.refresh_active_mount_log_panels(cx);
             }
-            StudioToUI::QueryProfilerResults {
+            HubToClient::QueryProfilerResults {
                 query_id,
                 event_samples,
                 gpu_samples,
@@ -523,14 +523,14 @@ impl App {
                     }
                 }
             }
-            StudioToUI::QueryCancelled { query_id } => {
+            HubToClient::QueryCancelled { query_id } => {
                 if let Some(build_id) = self.data.profiler_query_build_by_query.remove(&query_id) {
                     if self.data.live_profiler_query_by_build.get(&build_id) == Some(&query_id) {
                         self.data.live_profiler_query_by_build.remove(&build_id);
                     }
                 }
             }
-            StudioToUI::TerminalOpened {
+            HubToClient::TerminalOpened {
                 path,
                 history,
                 grid: _,
@@ -545,11 +545,11 @@ impl App {
                     .terminal_stream_by_path
                     .insert(path.clone(), history);
                 if let Some((cols, rows)) = desired_size {
-                    let _ = self.send_studio(UIToStudio::TerminalResize { path, cols, rows });
+                    let _ = self.send_studio(ClientToHub::TerminalResize { path, cols, rows });
                 }
                 self.refresh_active_mount_log_panels(cx);
             }
-            StudioToUI::TerminalOutput { path, data } => {
+            HubToClient::TerminalOutput { path, data } => {
                 self.data
                     .terminal_stream_by_path
                     .entry(path)
@@ -557,11 +557,11 @@ impl App {
                     .extend_from_slice(&data);
                 self.refresh_active_mount_log_panels(cx);
             }
-            StudioToUI::TerminalExited { path, code } => {
+            HubToClient::TerminalExited { path, code } => {
                 self.data.terminal_open_paths.remove(&path);
                 self.set_status(cx, &format!("terminal exited ({})", code));
             }
-            StudioToUI::Error { message } => {
+            HubToClient::Error { message } => {
                 self.data.pending_reload_paths.clear();
                 self.set_status(cx, &format!("error: {}", message));
             }
