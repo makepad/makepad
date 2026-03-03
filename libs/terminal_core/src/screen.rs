@@ -409,7 +409,7 @@ impl Screen {
     fn rows_only_resize(&mut self, rows: usize) {
         let old_rows = self.rows();
         let cols = self.cols();
-        let was_full = self.high_water_row >= old_rows - 1;
+        let was_full = self.used_rows() >= old_rows;
 
         let old_grid_rows: Vec<Vec<Cell>> = (0..old_rows)
             .map(|row| self.grid.row_slice(row).to_vec())
@@ -427,7 +427,7 @@ impl Screen {
             std::cmp::Ordering::Greater => {
                 // Pull from scrollback when the screen was full, keeping
                 // content anchored to the bottom (matches macOS Terminal).
-                // However, if a custom scroll region is active (like in a TUI),
+                let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
                 let pull_count = if was_full {
                     self.scrollback.len().min(rows - old_rows)
                 } else {
@@ -455,6 +455,18 @@ impl Screen {
                     if let Some(saved) = &mut self.saved_cursor {
                         saved.y += pull_count;
                     }
+                } else if has_custom_scroll_region {
+                    // TUI with empty scrollback! We MUST anchor to bottom!
+                    let shift = rows - old_rows;
+                    for (src_row, row) in old_grid_rows.iter().enumerate() {
+                        copy_row(row, src_row + shift, &mut new_grid);
+                        new_grid.line_wrapped[src_row + shift] = old_wrapped[src_row];
+                    }
+                    self.cursor.y += shift;
+                    self.high_water_row += shift;
+                    if let Some(saved) = &mut self.saved_cursor {
+                        saved.y += shift;
+                    }
                 } else {
                     for (src_row, row) in old_grid_rows.iter().enumerate() {
                         copy_row(row, src_row, &mut new_grid);
@@ -470,7 +482,12 @@ impl Screen {
                 let lines_removed = old_rows - rows;
                 let mut copy_start = required_scrolling.min(lines_removed);
                 
-                if copy_start == 0 && self.bottom_trimmed_rows > 0 {
+                let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
+                let has_text_below_cursor = self.last_non_empty_row() > self.cursor.y;
+                
+                if has_custom_scroll_region || has_text_below_cursor {
+                    copy_start = lines_removed; // TUI or text below cursor: Keep bottom rows anchored!
+                } else if copy_start == 0 && self.bottom_trimmed_rows > 0 {
                     copy_start = self.bottom_trimmed_rows.min(lines_removed);
                 }
 
@@ -518,17 +535,94 @@ impl Screen {
     fn reflow_resize(&mut self, new_cols: usize, new_rows: usize) {
         let old_cols = self.cols();
         let old_rows = self.rows();
-        let was_full = self.high_water_row >= old_rows - 1;
+        
+        let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
+        
+        if has_custom_scroll_region {
+            // TUI mode: do not reflow, just truncate/pad
+            let old_grid_rows: Vec<Vec<Cell>> = (0..old_rows)
+                .map(|row| self.grid.row_slice(row).to_vec())
+                .collect();
+            let old_wrapped: Vec<bool> = self.grid.line_wrapped.clone();
+            let mut new_grid = Grid::new(new_cols, new_rows);
 
-        // --- 1. Reflow scrollback at new width ---
-        let mut new_scrollback: Vec<Vec<Cell>> = Vec::new();
-        let mut new_scrollback_wrapped: Vec<bool> = Vec::new();
+            let copy_row = |src: &[Cell], dst_row: usize, grid: &mut Grid| {
+                for col in 0..new_cols.min(src.len()) {
+                    *grid.cell_mut(col, dst_row) = src[col];
+                }
+            };
+
+            // Push top rows to scrollback if shrinking
+            if new_rows < old_rows {
+                let lines_removed = old_rows - new_rows;
+                for i in 0..lines_removed {
+                    let mut row = old_grid_rows[i].clone();
+                    row.resize(new_cols, Cell::default());
+                    row.truncate(new_cols);
+                    self.scrollback.push(row);
+                    self.scrollback_wrapped.push(old_wrapped[i]);
+                }
+                if self.scrollback.len() > self.max_scrollback {
+                    let overflow = self.scrollback.len() - self.max_scrollback;
+                    self.scrollback.drain(0..overflow);
+                    self.scrollback_wrapped.drain(0..overflow);
+                }
+            }
+
+            // Anchor to the bottom for TUIs!
+            let y_offset = new_rows as isize - old_rows as isize;
+            for (src_row, row) in old_grid_rows.iter().enumerate() {
+                let dst_row = src_row as isize + y_offset;
+                if dst_row >= 0 && dst_row < new_rows as isize {
+                    copy_row(row, dst_row as usize, &mut new_grid);
+                    new_grid.line_wrapped[dst_row as usize] = old_wrapped[src_row];
+                }
+            }
+            
+            self.grid = new_grid;
+            self.cursor.x = self.cursor.x.min(new_cols.saturating_sub(1));
+            self.cursor.y = (self.cursor.y as isize + y_offset).clamp(0, new_rows as isize - 1) as usize;
+            self.high_water_row = (self.high_water_row as isize + y_offset).clamp(0, new_rows as isize - 1) as usize;
+            self.cursor.pending_wrap = false;
+            self.scroll_top = 0;
+            self.scroll_bottom = new_rows;
+            
+            if let Some(saved) = &mut self.saved_cursor {
+                saved.x = saved.x.min(new_cols.saturating_sub(1));
+                saved.y = saved.y.min(new_rows.saturating_sub(1));
+                saved.pending_wrap = false;
+            }
+
+            self.tabstops = vec![false; new_cols];
+            for i in (0..new_cols).step_by(8) {
+                self.tabstops[i] = true;
+            }
+            return;
+        }
+
+        // --- 1. Combine scrollback and grid into a single logical stream ---
+        let mut all_lines: Vec<(Vec<Cell>, bool)> = Vec::new();
+        
+        // Add scrollback lines
+        for i in 0..self.scrollback.len() {
+            let row = self.scrollback[i].clone();
+            let wrapped = self.scrollback_wrapped.get(i).copied().unwrap_or(false);
+            all_lines.push((row, wrapped));
+        }
+        
+        // Add grid lines up to the used rows
+        let used = self.used_rows();
+        for i in 0..used {
+            let row = self.grid.row_slice(i).to_vec();
+            let wrapped = self.grid.line_wrapped[i];
+            all_lines.push((row, wrapped));
+        }
+
+        // --- 2. Reflow all lines at new width ---
+        let mut new_lines: Vec<(Vec<Cell>, bool)> = Vec::new();
         {
             let mut current: Vec<Cell> = Vec::new();
-            for i in 0..self.scrollback.len() {
-                let row = &self.scrollback[i];
-                let wrapped = self.scrollback_wrapped.get(i).copied().unwrap_or(false);
-
+            for (row, wrapped) in all_lines {
                 if wrapped {
                     // Wrapped row: all columns are content.
                     let take = old_cols.min(row.len());
@@ -543,17 +637,15 @@ impl Screen {
 
                     // Emit the completed logical line, re-wrapped at new_cols.
                     if current.is_empty() {
-                        new_scrollback.push(vec![Cell::default(); new_cols]);
-                        new_scrollback_wrapped.push(false);
+                        new_lines.push((vec![Cell::default(); new_cols], false));
                     } else {
                         let num_chunks = (current.len() + new_cols - 1) / new_cols;
                         for ci in 0..num_chunks {
                             let begin = ci * new_cols;
                             let end = (begin + new_cols).min(current.len());
-                            let mut row = current[begin..end].to_vec();
-                            row.resize(new_cols, Cell::default());
-                            new_scrollback.push(row);
-                            new_scrollback_wrapped.push(ci < num_chunks - 1);
+                            let mut new_row = current[begin..end].to_vec();
+                            new_row.resize(new_cols, Cell::default());
+                            new_lines.push((new_row, ci < num_chunks - 1));
                         }
                     }
                     current.clear();
@@ -565,12 +657,34 @@ impl Screen {
                 for ci in 0..num_chunks {
                     let begin = ci * new_cols;
                     let end = (begin + new_cols).min(current.len());
-                    let mut row = current[begin..end].to_vec();
-                    row.resize(new_cols, Cell::default());
-                    new_scrollback.push(row);
-                    new_scrollback_wrapped.push(ci < num_chunks - 1);
+                    let mut new_row = current[begin..end].to_vec();
+                    new_row.resize(new_cols, Cell::default());
+                    new_lines.push((new_row, ci < num_chunks - 1));
                 }
             }
+        }
+
+        // --- 3. Split back into scrollback and grid ---
+        let mut new_grid = Grid::new(new_cols, new_rows);
+        let mut new_scrollback: Vec<Vec<Cell>> = Vec::new();
+        let mut new_scrollback_wrapped: Vec<bool> = Vec::new();
+        
+        let total_new_lines = new_lines.len();
+        let grid_lines = total_new_lines.min(new_rows);
+        let scrollback_lines = total_new_lines.saturating_sub(grid_lines);
+        
+        for i in 0..scrollback_lines {
+            let (row, wrapped) = new_lines[i].clone();
+            new_scrollback.push(row);
+            new_scrollback_wrapped.push(wrapped);
+        }
+        
+        for i in 0..grid_lines {
+            let (row, wrapped) = new_lines[scrollback_lines + i].clone();
+            for col in 0..new_cols.min(row.len()) {
+                *new_grid.cell_mut(col, i) = row[col];
+            }
+            new_grid.line_wrapped[i] = wrapped;
         }
 
         // Trim to max scrollback.
@@ -582,119 +696,31 @@ impl Screen {
 
         self.scrollback = new_scrollback;
         self.scrollback_wrapped = new_scrollback_wrapped;
-
-        // --- 2. Resize grid (truncate/pad width, same row logic as rows_only_resize) ---
-        let old_grid_rows: Vec<Vec<Cell>> = (0..old_rows)
-            .map(|row| self.grid.row_slice(row).to_vec())
-            .collect();
-        let old_wrapped: Vec<bool> = self.grid.line_wrapped.clone();
-        let mut new_grid = Grid::new(new_cols, new_rows);
-
-        let copy_row = |src: &[Cell], dst_row: usize, grid: &mut Grid| {
-            for col in 0..new_cols.min(src.len()) {
-                *grid.cell_mut(col, dst_row) = src[col];
-            }
-        };
-
-        match new_rows.cmp(&old_rows) {
-            std::cmp::Ordering::Greater => {
-                let pull_count = if was_full {
-                    self.scrollback.len().min(new_rows - old_rows)
-                } else {
-                    0
-                };
-
-                if pull_count > 0 {
-                    let sb_start = self.scrollback.len() - pull_count;
-                    let pulled_rows: Vec<Vec<Cell>> =
-                        self.scrollback.drain(sb_start..).collect();
-                    let pulled_wrapped: Vec<bool> =
-                        self.scrollback_wrapped.drain(sb_start..).collect();
-                    for (i, row) in pulled_rows.iter().enumerate() {
-                        copy_row(row, i, &mut new_grid);
-                        new_grid.line_wrapped[i] =
-                            pulled_wrapped.get(i).copied().unwrap_or(false);
-                    }
-                    for (src_row, row) in old_grid_rows.iter().enumerate() {
-                        copy_row(row, src_row + pull_count, &mut new_grid);
-                        new_grid.line_wrapped[src_row + pull_count] = old_wrapped[src_row];
-                    }
-                    self.cursor.y += pull_count;
-                    self.high_water_row += pull_count;
-                    self.bottom_trimmed_rows =
-                        self.bottom_trimmed_rows.saturating_add(pull_count);
-                    if let Some(saved) = &mut self.saved_cursor {
-                        saved.y += pull_count;
-                    }
-                } else {
-                    for (src_row, row) in old_grid_rows.iter().enumerate() {
-                        copy_row(row, src_row, &mut new_grid);
-                        new_grid.line_wrapped[src_row] = old_wrapped[src_row];
-                    }
-                    if was_full {
-                        self.high_water_row = new_rows - 1;
-                    }
-                }
-            }
-            std::cmp::Ordering::Less => {
-                let required_scrolling = (self.cursor.y + 1).saturating_sub(new_rows);
-                let lines_removed = old_rows - new_rows;
-                let mut copy_start = required_scrolling.min(lines_removed);
-                
-                if copy_start == 0 && self.bottom_trimmed_rows > 0 {
-                    copy_start = self.bottom_trimmed_rows.min(lines_removed);
-                }
-
-                if copy_start > 0 {
-                    for i in 0..copy_start {
-                        let mut row = old_grid_rows[i].clone();
-                        row.resize(new_cols, Cell::default());
-                        row.truncate(new_cols);
-                        self.scrollback.push(row);
-                        self.scrollback_wrapped.push(old_wrapped[i]);
-                    }
-                    if self.scrollback.len() > self.max_scrollback {
-                        let overflow = self.scrollback.len() - self.max_scrollback;
-                        self.scrollback.drain(0..overflow);
-                        self.scrollback_wrapped.drain(0..overflow);
-                    }
-                    let consumed = self.bottom_trimmed_rows.min(copy_start);
-                    self.bottom_trimmed_rows -= consumed;
-                }
-
-                for dst_row in 0..new_rows {
-                    copy_row(
-                        &old_grid_rows[dst_row + copy_start],
-                        dst_row,
-                        &mut new_grid,
-                    );
-                    new_grid.line_wrapped[dst_row] = old_wrapped[dst_row + copy_start];
-                }
-
-                self.cursor.y = self.cursor.y.saturating_sub(copy_start).min(new_rows - 1);
-                self.high_water_row =
-                    self.high_water_row.saturating_sub(copy_start).min(new_rows - 1);
-                if let Some(saved) = &mut self.saved_cursor {
-                    saved.y = saved.y.saturating_sub(copy_start).min(new_rows - 1);
-                }
-            }
-            std::cmp::Ordering::Equal => {
-                // Only cols changed — copy rows with truncate/pad.
-                for (src_row, row) in old_grid_rows.iter().enumerate() {
-                    copy_row(row, src_row, &mut new_grid);
-                    new_grid.line_wrapped[src_row] = old_wrapped[src_row];
-                }
-            }
-        }
-
         self.grid = new_grid;
-        self.cursor.x = self.cursor.x.min(new_cols - 1);
+        
+        // Adjust cursor
+        // For a full reflow, we just put the cursor at the end of the content
+        self.high_water_row = grid_lines.saturating_sub(1);
+        
+        // We need to figure out where the cursor ended up.
+        // A simple approximation is to put it at the end of the last line.
+        self.cursor.x = 0;
+        if grid_lines > 0 {
+            let last_row = &self.grid.row_slice(self.high_water_row);
+            let mut last_col = new_cols;
+            while last_col > 0 && last_row[last_col - 1].codepoint == ' ' {
+                last_col -= 1;
+            }
+            self.cursor.x = last_col.min(new_cols.saturating_sub(1));
+        }
+        self.cursor.y = self.high_water_row.min(new_rows.saturating_sub(1));
         self.cursor.pending_wrap = false;
         self.scroll_top = 0;
         self.scroll_bottom = new_rows;
 
         if let Some(saved) = &mut self.saved_cursor {
-            saved.x = saved.x.min(new_cols - 1);
+            saved.x = saved.x.min(new_cols.saturating_sub(1));
+            saved.y = saved.y.min(new_rows.saturating_sub(1));
             saved.pending_wrap = false;
         }
 
@@ -715,7 +741,25 @@ impl Screen {
 
     /// Number of grid rows that have been written to (based on high water mark).
     pub fn used_rows(&self) -> usize {
-        (self.high_water_row + 1).min(self.rows())
+        (self.high_water_row.max(self.cursor.y) + 1).min(self.rows())
+    }
+
+    /// Returns the index of the last row that contains non-empty text.
+    pub fn last_non_empty_row(&self) -> usize {
+        for row in (0..self.rows()).rev() {
+            let slice = self.grid.row_slice(row);
+            let mut is_empty = true;
+            for cell in slice {
+                if cell.codepoint != ' ' || cell.style != Style::default() {
+                    is_empty = false;
+                    break;
+                }
+            }
+            if !is_empty {
+                return row;
+            }
+        }
+        0
     }
 
     /// Total logical rows visible through a virtual viewport

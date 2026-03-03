@@ -649,6 +649,7 @@ impl App {
         path: &str,
         cols: u16,
         rows: u16,
+        pty_rows: u16,
         top_row: usize,
     ) {
         self.ensure_terminal_session_open(path);
@@ -659,6 +660,7 @@ impl App {
             path: path.to_string(),
             cols,
             rows,
+            pty_rows,
             top_row,
         });
     }
@@ -967,9 +969,10 @@ impl App {
                     path,
                     cols,
                     rows,
+                    pty_rows,
                     top_row,
                 } => {
-                    self.request_terminal_viewport(path, *cols, *rows, *top_row);
+                    self.request_terminal_viewport(path, *cols, *rows, *pty_rows, *top_row);
                 }
                 DesktopTerminalViewAction::None => {}
             }
