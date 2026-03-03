@@ -30,6 +30,100 @@ pub trait WidgetNode: ScriptApply {
     }
     /// Enumerate direct children for widget-tree indexing.
     fn children(&self, _visit: &mut dyn FnMut(LiveId, WidgetRef)) {}
+
+    /// Find a descendant by child-id path, walking through `children()`.
+    /// Each segment is matched anywhere in the current subtree, i.e.
+    /// `a.b` behaves like `*.a.*.b`.
+    fn find_child(&self, path: &[LiveId]) -> WidgetRef {
+        fn find_descendant_by_name_bfs(
+            root: &WidgetRef,
+            target: LiveId,
+            queue: &mut std::collections::VecDeque<WidgetRef>,
+        ) -> WidgetRef {
+            queue.clear();
+            let mut found = WidgetRef::empty();
+
+            if !root.try_children(&mut |name, child| {
+                if found.is_empty() && name == target {
+                    found = child.clone();
+                }
+                queue.push_back(child);
+            }) {
+                return WidgetRef::empty();
+            }
+            if !found.is_empty() {
+                return found;
+            }
+
+            while let Some(node) = queue.pop_front() {
+                let mut found_here = WidgetRef::empty();
+                if !node.try_children(&mut |name, child| {
+                    if found_here.is_empty() && name == target {
+                        found_here = child.clone();
+                    }
+                    queue.push_back(child);
+                }) {
+                    return WidgetRef::empty();
+                }
+                if !found_here.is_empty() {
+                    return found_here;
+                }
+            }
+
+            WidgetRef::empty()
+        }
+
+        if path.is_empty() {
+            return WidgetRef::empty();
+        }
+        let first = path[0];
+
+        let mut queue = std::collections::VecDeque::<WidgetRef>::new();
+        let mut current = WidgetRef::empty();
+
+        queue.clear();
+        self.children(&mut |name, child| {
+            if !current.is_empty() {
+                queue.push_back(child);
+                return;
+            }
+            if name == first {
+                current = child.clone();
+            }
+            queue.push_back(child);
+        });
+
+        if current.is_empty() {
+            while let Some(node) = queue.pop_front() {
+                let mut found_here = WidgetRef::empty();
+                if !node.try_children(&mut |name, child| {
+                    if found_here.is_empty() && name == first {
+                        found_here = child.clone();
+                    }
+                    queue.push_back(child);
+                }) {
+                    return WidgetRef::empty();
+                }
+                if !found_here.is_empty() {
+                    current = found_here;
+                    break;
+                }
+            }
+            if current.is_empty() {
+                return current;
+            }
+        }
+
+        for i in 1..path.len() {
+            current = find_descendant_by_name_bfs(&current, path[i], &mut queue);
+            if current.is_empty() {
+                return current;
+            }
+        }
+
+        current
+    }
+    
     /// If true, global widget-tree search/flood will not traverse this node's descendants.
     /// The node is still indexed and can still be matched directly by name/path.
     fn skip_widget_tree_search(&self) -> bool {
