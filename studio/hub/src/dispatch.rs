@@ -2395,15 +2395,11 @@ impl HubCore {
             }
             let max_top = Self::terminal_max_top_row(&session.terminal, rows);
             let (resolved_top, anchor) = if top_row == usize::MAX {
-                let preserved = session
-                    .subscribers
-                    .get(&client_id)
-                    .and_then(|v| match v.anchor {
-                        TerminalViewportAnchor::Bottom => Some(v.top_row),
-                        TerminalViewportAnchor::TopRow => None,
-                    })
-                    .unwrap_or(max_top);
-                (preserved.min(max_top), TerminalViewportAnchor::Bottom)
+                // Sticky/bottom requests should resolve against the terminal's
+                // current total rows after resize/reflow, not a preserved top row.
+                // Preserving + delta-adjusting can drift and make TUI content
+                // appear to slide during repeated height changes.
+                (max_top, TerminalViewportAnchor::Bottom)
             } else {
                 let clamped = top_row.min(max_top);
                 let anchor = if clamped >= max_top.saturating_sub(1) {
@@ -2478,20 +2474,13 @@ impl HubCore {
         old_rows: u16,
         new_rows: u16,
     ) {
+        let _ = old_rows;
         let max_top = Self::terminal_max_top_row(&session.terminal, new_rows);
         for viewport in session.subscribers.values_mut() {
             viewport.cols = session.cols;
             viewport.rows = new_rows;
             if viewport.anchor == TerminalViewportAnchor::Bottom {
-                if new_rows > old_rows {
-                    viewport.top_row = viewport
-                        .top_row
-                        .saturating_sub((new_rows - old_rows) as usize);
-                } else if old_rows > new_rows {
-                    viewport.top_row = viewport
-                        .top_row
-                        .saturating_add((old_rows - new_rows) as usize);
-                }
+                viewport.top_row = max_top;
             }
             viewport.top_row = viewport.top_row.min(max_top);
         }

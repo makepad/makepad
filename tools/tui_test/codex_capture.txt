@@ -1,0 +1,742 @@
+
+============================================================
+PHASE: STARTUP (40 bytes)
+============================================================
+
+RAW HEX (first 2000 bytes):
+  0000: 1b 5b 3f 32 30 30 34 68 1b 5b 3e 37 75 1b 5b 3f 31 30 30 34 68 1b 5b 36 6e 1b 5b 3f 75 1b 5b 63  .[?2004h.[>7u.[?1004h.[6n.[?u.[c
+  0020: 1b 5d 31 30 3b 3f 1b 5c                                                                          .]10;?.\
+
+ESCAPE SEQUENCE ANALYSIS:
+  CSI: b'\x1b[?2004h'  =>  Enable bracketed paste
+  CSI: b'\x1b[>7u'  =>  Enable kitty keyboard (flags=7)
+  CSI: b'\x1b[?1004h'  =>  Enable focus reporting
+  CSI: b'\x1b[6n'  =>  Device status report (cursor position query)
+  CSI: b'\x1b[?u'  =>  ?u
+  CSI: b'\x1b[c'  =>  c
+  OSC: b'\x1b]10;?\x1b\\'
+
+============================================================
+PHASE: AFTER_TYPING_HI (2027 bytes)
+============================================================
+
+RAW HEX (first 2000 bytes):
+  0000: 1b 5b 3f 32 30 32 36 68 1b 5b 31 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 32 3b 34 32 48 1b  .[?2026h.[1;2H.[0m.[m.[K.[2;42H.
+  0020: 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 33 3b 34 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 34 3b 34 32  [0m.[m.[K.[3;42H.[0m.[m.[K.[4;42
+  0040: 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 35 3b 34 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 36 3b  H.[0m.[m.[K.[5;42H.[0m.[m.[K.[6;
+  0060: 34 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 37 3b 34 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b  42H.[0m.[m.[K.[7;42H.[0m.[m.[K.[
+  0080: 38 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 39 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b  8;2H.[0m.[m.[K.[9;2H.[0m.[m.[K.[
+  00a0: 31 30 3b 35 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 31 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b  10;5H.[0m.[m.[K.[11;2H.[0m.[m.[K
+  00c0: 1b 5b 31 32 3b 31 31 39 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 32 3b 31 48 1b 5b 32 6d e2 95 ad  .[12;119H.[0m.[m.[K.[2;1H.[2m...
+  00e0: e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94  ................................
+  0100: 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2  ................................
+  0120: 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80  ................................
+  0140: e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 95 ae 1b 5b 33 3b 31 48 e2 94  .........................[3;1H..
+  0160: 82 20 3e 5f 20 1b 5b 32 32 6d 1b 5b 31 6d 4f 70 65 6e 41 49 20 43 6f 64 65 78 1b 5b 32 32 6d 1b  . >_ .[22m.[1mOpenAI Codex.[22m.
+  0180: 5b 32 6d 1b 5b 32 6d 20 28 76 30 2e 31 30 37 2e 30 29 20 20 20 20 20 20 20 20 20 20 20 20 e2 94  [2m.[2m (v0.107.0)            ..
+  01a0: 82 1b 5b 34 3b 31 48 e2 94 82 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20  ..[4;1H...                      
+  01c0: 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 e2 94 82 1b 5b 35 3b 31 48 e2 94 82 20 6d 6f                   ....[5;1H... mo
+  01e0: 64 65 6c 3a 20 20 20 20 20 1b 5b 33 6d 6c 6f 61 64 69 6e 67 1b 5b 32 33 6d 20 20 20 1b 5b 32 32  del:     .[3mloading.[23m   .[22
+  0200: 6d 1b 5b 3b 6d 2f 6d 6f 64 65 6c 1b 5b 32 6d 1b 5b 3b 6d 20 74 6f 20 63 68 61 6e 67 65 20 e2 94  m.[;m/model.[2m.[;m to change ..
+  0220: 82 1b 5b 36 3b 31 48 e2 94 82 20 64 69 72 65 63 74 6f 72 79 3a 20 1b 5b 32 32 6d 7e 2f 6d 61 6b  ..[6;1H... directory: .[22m~/mak
+  0240: 65 70 61 64 2f 6d 61 6b 65 70 61 64 1b 5b 32 6d 20 20 20 20 20 20 20 20 20 20 e2 94 82 1b 5b 37  epad/makepad.[2m          ....[7
+  0260: 3b 31 48 e2 95 b0 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94  ;1H.............................
+  0280: 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2  ................................
+  02a0: 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80  ................................
+  02c0: e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 95 af 1b 5b  ...............................[
+  02e0: 31 30 3b 31 48 1b 5b 32 32 6d 1b 5b 31 6d e2 80 ba 1b 5b 31 30 3b 33 48 1b 5b 32 32 6d 68 69 1b  10;1H.[22m.[1m....[10;3H.[22mhi.
+  0300: 5b 31 32 3b 31 30 32 48 1b 5b 32 6d 31 30 30 25 20 63 6f 6e 74 65 78 74 20 6c 65 66 74 1b 5b 6d  [12;102H.[2m100% context left.[m
+  0320: 1b 5b 6d 1b 5b 30 6d 1b 5b 3f 32 35 68 1b 5b 31 30 3b 35 48 1b 5b 3f 32 30 32 36 6c 1b 5b 3f 32  .[m.[0m.[?25h.[10;5H.[?2026l.[?2
+  0340: 30 32 36 68 1b 5b 31 3b 31 48 1b 5b 4a 1b 5b 31 3b 34 30 72 1b 5b 31 3b 31 48 1b 4d 1b 4d 1b 4d  026h.[1;1H.[J.[1;40r.[1;1H.M.M.M
+  0360: 1b 4d 1b 4d 1b 4d 1b 4d 1b 4d 1b 5b 72 1b 5b 31 3b 38 72 1b 5b 31 3b 31 48 0d 0a 1b 5b 3b 6d 1b  .M.M.M.M.M.[r.[1;8r.[1;1H...[;m.
+  0380: 5b 4b 1b 5b 32 6d e2 95 ad e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94  [K.[2m..........................
+  03a0: 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2  ................................
+  03c0: 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80  ................................
+  03e0: e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94  ................................
+  0400: 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2  ................................
+  0420: 94 80 e2 95 ae 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 0d 0a 1b 5b 3b 6d 1b 5b 4b 1b 5b 32 6d e2 94 82 20  ......[m.[m.[0m...[;m.[K.[2m... 
+  0440: 3e 5f 20 1b 5b 32 32 6d 1b 5b 31 6d 4f 70 65 6e 41 49 20 43 6f 64 65 78 1b 5b 32 32 6d 1b 5b 32  >_ .[22m.[1mOpenAI Codex.[22m.[2
+  0460: 6d 1b 5b 32 6d 20 28 76 30 2e 31 30 37 2e 30 29 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20  m.[2m (v0.107.0)                
+  0480: 20 20 20 20 20 20 20 20 e2 94 82 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 0d 0a 1b 5b 3b 6d 1b 5b 4b 1b 5b          ....[m.[m.[0m...[;m.[K.[
+  04a0: 32 6d e2 94 82 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20  2m...                           
+  04c0: 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 e2 94 82 1b 5b 6d 1b 5b                          ....[m.[
+  04e0: 6d 1b 5b 30 6d 0d 0a 1b 5b 3b 6d 1b 5b 4b 1b 5b 32 6d e2 94 82 20 6d 6f 64 65 6c 3a 20 20 20 20  m.[0m...[;m.[K.[2m... model:    
+  0500: 20 1b 5b 32 32 6d 67 70 74 2d 35 2e 33 2d 63 6f 64 65 78 20 78 68 69 67 68 1b 5b 32 6d 20 20 20   .[22mgpt-5.3-codex xhigh.[2m   
+  0520: 1b 5b 32 32 6d 1b 5b 3b 6d 2f 6d 6f 64 65 6c 1b 5b 32 6d 1b 5b 3b 6d 20 74 6f 20 63 68 61 6e 67  .[22m.[;m/model.[2m.[;m to chang
+  0540: 65 20 e2 94 82 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 0d 0a 1b 5b 3b 6d 1b 5b 4b 1b 5b 32 6d e2 94 82 20  e ....[m.[m.[0m...[;m.[K.[2m... 
+  0560: 64 69 72 65 63 74 6f 72 79 3a 20 1b 5b 32 32 6d 7e 2f 6d 61 6b 65 70 61 64 2f 6d 61 6b 65 70 61  directory: .[22m~/makepad/makepa
+  0580: 64 1b 5b 32 6d 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 e2 94 82 1b 5b  d.[2m                      ....[
+  05a0: 6d 1b 5b 6d 1b 5b 30 6d 0d 0a 1b 5b 3b 6d 1b 5b 4b 1b 5b 32 6d e2 95 b0 e2 94 80 e2 94 80 e2 94  m.[m.[0m...[;m.[K.[2m...........
+  05c0: 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2  ................................
+  05e0: 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80  ................................
+  0600: e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94  ................................
+  0620: 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2  ................................
+  0640: 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 94 80 e2 95 af 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 0d 0a  .....................[m.[m.[0m..
+  0660: 1b 5b 3b 6d 1b 5b 4b 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 0d 0a 1b 5b 3b 6d 1b 5b 4b 20 20 1b 5b 31 6d  .[;m.[K.[m.[m.[0m...[;m.[K  .[1m
+  0680: 54 69 70 3a 1b 5b 32 32 6d 20 4e 45 57 3a 20 50 72 65 76 65 6e 74 20 73 6c 65 65 70 20 77 68 69  Tip:.[22m NEW: Prevent sleep whi
+  06a0: 6c 65 20 72 75 6e 6e 69 6e 67 20 69 73 20 6e 6f 77 20 61 76 61 69 6c 61 62 6c 65 20 69 6e 20 2f  le running is now available in /
+  06c0: 65 78 70 65 72 69 6d 65 6e 74 61 6c 2e 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 1b 5b 72 1b 5b 31 30 3b 35  experimental..[m.[m.[0m.[r.[10;5
+  06e0: 48 1b 5b 39 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 30 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b  H.[9;2H.[0m.[m.[K.[10;2H.[0m.[m.
+  0700: 5b 4b 1b 5b 31 31 3b 35 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 32 3b 32 48 1b 5b 30 6d 1b 5b  [K.[11;5H.[0m.[m.[K.[12;2H.[0m.[
+  0720: 6d 1b 5b 4b 1b 5b 31 33 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 31 3b 31 48 1b 5b 31 6d  m.[K.[13;2H.[0m.[m.[K.[11;1H.[1m
+  0740: e2 80 ba 1b 5b 31 31 3b 33 48 1b 5b 32 32 6d 68 69 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 1b 5b 3f 32 35  ....[11;3H.[22mhi.[m.[m.[0m.[?25
+  0760: 68 1b 5b 31 31 3b 35 48 1b 5b 3f 32 30 32 36 6c 1b 5b 3f 32 30 32 36 68 1b 5b 39 3b 32 48 1b 5b  h.[11;5H.[?2026l.[?2026h.[9;2H.[
+  0780: 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 30 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 31 3b 35 48  0m.[m.[K.[10;2H.[0m.[m.[K.[11;5H
+  07a0: 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 32 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 33 3b  .[0m.[m.[K.[12;2H.[0m.[m.[K.[13;
+  07c0: 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 6d 1b                                                  2H.[0m.[m.[K.[m.
+
+ESCAPE SEQUENCE ANALYSIS:
+  CSI: b'\x1b[?2026h'  =>  Begin synchronized output
+  CSI: b'\x1b[1;2H'  =>  Cursor position: 1;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[2;42H'  =>  Cursor position: 2;42H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[3;42H'  =>  Cursor position: 3;42H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[4;42H'  =>  Cursor position: 4;42H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[5;42H'  =>  Cursor position: 5;42H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[6;42H'  =>  Cursor position: 6;42H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[7;42H'  =>  Cursor position: 7;42H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[8;2H'  =>  Cursor position: 8;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[9;2H'  =>  Cursor position: 9;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[10;5H'  =>  Cursor position: 10;5H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[11;2H'  =>  Cursor position: 11;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[12;119H'  =>  Cursor position: 12;119H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[2;1H'  =>  Cursor position: 2;1H
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '╭───────────────────────────────────────╮'
+  CSI: b'\x1b[3;1H'  =>  Cursor position: 3;1H
+  TEXT: '│ >_ '
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[1m'  =>  SGR: 1m
+  TEXT: 'OpenAI Codex'
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: ' (v0.107.0)            │'
+  CSI: b'\x1b[4;1H'  =>  Cursor position: 4;1H
+  TEXT: '│                                       │'
+  CSI: b'\x1b[5;1H'  =>  Cursor position: 5;1H
+  TEXT: '│ model:     '
+  CSI: b'\x1b[3m'  =>  SGR: 3m
+  TEXT: 'loading'
+  CSI: b'\x1b[23m'  =>  SGR: 23m
+  TEXT: '   '
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  TEXT: '/model'
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  TEXT: ' to change │'
+  CSI: b'\x1b[6;1H'  =>  Cursor position: 6;1H
+  TEXT: '│ directory: '
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  TEXT: '~/makepad/makepad'
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '          │'
+  CSI: b'\x1b[7;1H'  =>  Cursor position: 7;1H
+  TEXT: '╰───────────────────────────────────────╯'
+  CSI: b'\x1b[10;1H'  =>  Cursor position: 10;1H
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[1m'  =>  SGR: 1m
+  TEXT: '›'
+  CSI: b'\x1b[10;3H'  =>  Cursor position: 10;3H
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  TEXT: 'hi'
+  CSI: b'\x1b[12;102H'  =>  Cursor position: 12;102H
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '100% context left'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[?25h'  =>  Show cursor
+  CSI: b'\x1b[10;5H'  =>  Cursor position: 10;5H
+  CSI: b'\x1b[?2026l'  =>  End synchronized output
+  CSI: b'\x1b[?2026h'  =>  Begin synchronized output
+  CSI: b'\x1b[1;1H'  =>  Cursor position: 1;1H
+  CSI: b'\x1b[J'  =>  Erase display: J
+  CSI: b'\x1b[1;40r'  =>  1;40r
+  CSI: b'\x1b[1;1H'  =>  Cursor position: 1;1H
+  ESC 'M'
+  ESC 'M'
+  ESC 'M'
+  ESC 'M'
+  ESC 'M'
+  ESC 'M'
+  ESC 'M'
+  ESC 'M'
+  CSI: b'\x1b[r'  =>  r
+  CSI: b'\x1b[1;8r'  =>  1;8r
+  CSI: b'\x1b[1;1H'  =>  Cursor position: 1;1H
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '╭───────────────────────────────────────────────────╮'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '│ >_ '
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[1m'  =>  SGR: 1m
+  TEXT: 'OpenAI Codex'
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: ' (v0.107.0)                        │'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '│                                                   │'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '│ model:     '
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  TEXT: 'gpt-5.3-codex xhigh'
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '   '
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  TEXT: '/model'
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  TEXT: ' to change │'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '│ directory: '
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  TEXT: '~/makepad/makepad'
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '                      │'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '╰───────────────────────────────────────────────────╯'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  TEXT: '  '
+  CSI: b'\x1b[1m'  =>  SGR: 1m
+  TEXT: 'Tip:'
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  TEXT: ' NEW: Prevent sleep while running is now available in /experimental.'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[r'  =>  r
+  CSI: b'\x1b[10;5H'  =>  Cursor position: 10;5H
+  CSI: b'\x1b[9;2H'  =>  Cursor position: 9;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[10;2H'  =>  Cursor position: 10;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[11;5H'  =>  Cursor position: 11;5H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[12;2H'  =>  Cursor position: 12;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[13;2H'  =>  Cursor position: 13;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[11;1H'  =>  Cursor position: 11;1H
+  CSI: b'\x1b[1m'  =>  SGR: 1m
+  TEXT: '›'
+  CSI: b'\x1b[11;3H'  =>  Cursor position: 11;3H
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  TEXT: 'hi'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[?25h'  =>  Show cursor
+  CSI: b'\x1b[11;5H'  =>  Cursor position: 11;5H
+  CSI: b'\x1b[?2026l'  =>  End synchronized output
+  CSI: b'\x1b[?2026h'  =>  Begin synchronized output
+  CSI: b'\x1b[9;2H'  =>  Cursor position: 9;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[10;2H'  =>  Cursor position: 10;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[11;5H'  =>  Cursor position: 11;5H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[12;2H'  =>  Cursor position: 12;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[13;2H'  =>  Cursor position: 13;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[?25h'  =>  Show cursor
+  CSI: b'\x1b[11;5H'  =>  Cursor position: 11;5H
+  CSI: b'\x1b[?2026l'  =>  End synchronized output
+
+============================================================
+PHASE: AFTER_ENTER (1640 bytes)
+============================================================
+
+RAW HEX (first 2000 bytes):
+  0000: 1b 5b 3f 32 30 32 36 68 1b 5b 39 3b 34 30 72 1b 5b 39 3b 31 48 1b 4d 1b 4d 1b 4d 1b 4d 1b 5b 72  .[?2026h.[9;40r.[9;1H.M.M.M.M.[r
+  0020: 1b 5b 31 3b 31 32 72 1b 5b 38 3b 31 48 0d 0a 1b 5b 3b 6d 1b 5b 4b 1b 5b 6d 1b 5b 6d 1b 5b 30 6d  .[1;12r.[8;1H...[;m.[K.[m.[m.[0m
+  0040: 0d 0a 1b 5b 3b 6d 1b 5b 4b 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 0d 0a 1b 5b 3b 6d 1b 5b 4b 1b 5b 31 6d  ...[;m.[K.[m.[m.[0m...[;m.[K.[1m
+  0060: 1b 5b 32 6d e2 80 ba 20 1b 5b 32 32 6d 1b 5b 32 32 6d 68 69 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 0d 0a  .[2m... .[22m.[22mhi.[m.[m.[0m..
+  0080: 1b 5b 3b 6d 1b 5b 4b 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 1b 5b 72 1b 5b 31 31 3b 35 48 1b 5b 31 33 3b  .[;m.[K.[m.[m.[0m.[r.[11;5H.[13;
+  00a0: 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 34 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31  2H.[0m.[m.[K.[14;2H.[0m.[m.[K.[1
+  00c0: 35 3b 33 34 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 36 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b  5;34H.[0m.[m.[K.[16;2H.[0m.[m.[K
+  00e0: 1b 5b 31 37 3b 35 34 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 35 3b 33 48 1b 5b 32 6d 46 69 6e  .[17;54H.[0m.[m.[K.[15;3H.[2mFin
+  0100: 64 20 61 6e 64 20 66 69 78 20 61 20 62 75 67 20 69 6e 20 40 66 69 6c 65 6e 61 6d 65 1b 5b 31 37  d and fix a bug in @filename.[17
+  0120: 3b 31 48 20 20 67 70 74 2d 35 2e 33 2d 63 6f 64 65 78 20 78 68 69 67 68 20 c2 b7 20 31 30 30 25  ;1H  gpt-5.3-codex xhigh .. 100%
+  0140: 20 6c 65 66 74 20 c2 b7 20 7e 2f 6d 61 6b 65 70 61 64 2f 6d 61 6b 65 70 61 64 1b 5b 6d 1b 5b 6d   left .. ~/makepad/makepad.[m.[m
+  0160: 1b 5b 30 6d 1b 5b 3f 32 35 68 1b 5b 31 35 3b 33 48 1b 5b 3f 32 30 32 36 6c 1b 5b 3f 32 30 32 36  .[0m.[?25h.[15;3H.[?2026l.[?2026
+  0180: 68 1b 5b 31 33 3b 31 48 1b 5b 4a 1b 5b 31 33 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 34  h.[13;1H.[J.[13;2H.[0m.[m.[K.[14
+  01a0: 3b 33 34 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 35 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b  ;34H.[0m.[m.[K.[15;2H.[0m.[m.[K.
+  01c0: 5b 31 36 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 37 3b 33 34 48 1b 5b 30 6d 1b 5b 6d 1b  [16;2H.[0m.[m.[K.[17;34H.[0m.[m.
+  01e0: 5b 4b 1b 5b 31 38 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 39 3b 35 34 48 1b 5b 30 6d 1b  [K.[18;2H.[0m.[m.[K.[19;54H.[0m.
+  0200: 5b 6d 1b 5b 4b 1b 5b 31 34 3b 31 48 e2 80 a2 1b 5b 31 34 3b 33 48 1b 5b 32 6d 57 6f 72 6b 69 6e  [m.[K.[14;1H....[14;3H.[2mWorkin
+  0220: 67 1b 5b 31 34 3b 31 31 48 28 30 73 20 e2 80 a2 20 65 73 63 20 74 6f 20 69 6e 74 65 72 72 75 70  g.[14;11H(0s ... esc to interrup
+  0240: 74 29 1b 5b 31 37 3b 31 48 1b 5b 32 32 6d 1b 5b 31 6d e2 80 ba 1b 5b 31 37 3b 33 48 1b 5b 32 32  t).[17;1H.[22m.[1m....[17;3H.[22
+  0260: 6d 1b 5b 32 6d 1b 5b 32 6d 46 69 6e 64 20 61 6e 64 20 66 69 78 20 61 20 62 75 67 20 69 6e 20 40  m.[2m.[2mFind and fix a bug in @
+  0280: 66 69 6c 65 6e 61 6d 65 1b 5b 31 39 3b 31 48 20 20 67 70 74 2d 35 2e 33 2d 63 6f 64 65 78 20 78  filename.[19;1H  gpt-5.3-codex x
+  02a0: 68 69 67 68 20 c2 b7 20 31 30 30 25 20 6c 65 66 74 20 c2 b7 20 7e 2f 6d 61 6b 65 70 61 64 2f 6d  high .. 100% left .. ~/makepad/m
+  02c0: 61 6b 65 70 61 64 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 1b 5b 3f 32 35 68 1b 5b 31 37 3b 33 48 1b 5b 3f  akepad.[m.[m.[0m.[?25h.[17;3H.[?
+  02e0: 32 30 32 36 6c 1b 5b 3f 32 30 32 36 68 1b 5b 31 33 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b  2026l.[?2026h.[13;2H.[0m.[m.[K.[
+  0300: 31 34 3b 33 34 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 35 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b  14;34H.[0m.[m.[K.[15;2H.[0m.[m.[
+  0320: 4b 1b 5b 31 36 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 37 3b 33 34 48 1b 5b 30 6d 1b 5b  K.[16;2H.[0m.[m.[K.[17;34H.[0m.[
+  0340: 6d 1b 5b 4b 1b 5b 31 38 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 39 3b 35 34 48 1b 5b 30  m.[K.[18;2H.[0m.[m.[K.[19;54H.[0
+  0360: 6d 1b 5b 6d 1b 5b 4b 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 1b 5b 3f 32 35 68 1b 5b 31 37 3b 33 48 1b 5b  m.[m.[K.[m.[m.[0m.[?25h.[17;3H.[
+  0380: 3f 32 30 32 36 6c 1b 5b 3f 32 30 32 36 68 1b 5b 31 33 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b  ?2026l.[?2026h.[13;2H.[0m.[m.[K.
+  03a0: 5b 31 34 3b 33 34 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 35 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b  [14;34H.[0m.[m.[K.[15;2H.[0m.[m.
+  03c0: 5b 4b 1b 5b 31 36 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 37 3b 33 34 48 1b 5b 30 6d 1b  [K.[16;2H.[0m.[m.[K.[17;34H.[0m.
+  03e0: 5b 6d 1b 5b 4b 1b 5b 31 38 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 39 3b 35 34 48 1b 5b  [m.[K.[18;2H.[0m.[m.[K.[19;54H.[
+  0400: 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 1b 5b 3f 32 35 68 1b 5b 31 37 3b 33 48 1b  0m.[m.[K.[m.[m.[0m.[?25h.[17;3H.
+  0420: 5b 3f 32 30 32 36 6c 1b 5b 3f 32 30 32 36 68 1b 5b 31 33 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b  [?2026l.[?2026h.[13;2H.[0m.[m.[K
+  0440: 1b 5b 31 34 3b 33 34 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 35 3b 32 48 1b 5b 30 6d 1b 5b 6d  .[14;34H.[0m.[m.[K.[15;2H.[0m.[m
+  0460: 1b 5b 4b 1b 5b 31 36 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 37 3b 33 34 48 1b 5b 30 6d  .[K.[16;2H.[0m.[m.[K.[17;34H.[0m
+  0480: 1b 5b 6d 1b 5b 4b 1b 5b 31 38 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 39 3b 35 34 48 1b  .[m.[K.[18;2H.[0m.[m.[K.[19;54H.
+  04a0: 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 34 3b 31 48 1b 5b 32 6d e2 97 a6 1b 5b 31 34 3b 33 48 1b 5b  [0m.[m.[K.[14;1H.[2m....[14;3H.[
+  04c0: 32 32 6d 57 1b 5b 31 6d 6f 72 6b 69 6e 1b 5b 32 32 6d 67 1b 5b 31 34 3b 31 32 48 1b 5b 32 6d 33  22mW.[1morkin.[22mg.[14;12H.[2m3
+  04e0: 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 1b 5b 3f 32 35 68 1b 5b 31 37 3b 33 48 1b 5b 3f 32 30 32 36 6c 1b  .[m.[m.[0m.[?25h.[17;3H.[?2026l.
+  0500: 5b 3f 32 30 32 36 68 1b 5b 31 33 3b 31 48 1b 5b 4a 1b 5b 31 33 3b 34 30 72 1b 5b 31 33 3b 31 48  [?2026h.[13;1H.[J.[13;40r.[13;1H
+  0520: 1b 4d 1b 4d 1b 5b 72 1b 5b 31 3b 31 34 72 1b 5b 31 32 3b 31 48 0d 0a 1b 5b 3b 6d 1b 5b 4b 1b 5b  .M.M.[r.[1;14r.[12;1H...[;m.[K.[
+  0540: 6d 1b 5b 6d 1b 5b 30 6d 0d 0a 1b 5b 3b 6d 1b 5b 4b 1b 5b 32 6d e2 80 a2 20 1b 5b 32 32 6d 68 69  m.[m.[0m...[;m.[K.[2m... .[22mhi
+  0560: 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 1b 5b 72 1b 5b 31 37 3b 33 48 1b 5b 31 35 3b 32 48 1b 5b 30 6d 1b  .[m.[m.[0m.[r.[17;3H.[15;2H.[0m.
+  0580: 5b 6d 1b 5b 4b 1b 5b 31 36 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 37 3b 33 34 48 1b 5b  [m.[K.[16;2H.[0m.[m.[K.[17;34H.[
+  05a0: 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 38 3b 32 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 39 3b 35 33  0m.[m.[K.[18;2H.[0m.[m.[K.[19;53
+  05c0: 48 1b 5b 30 6d 1b 5b 6d 1b 5b 4b 1b 5b 31 37 3b 31 48 1b 5b 31 6d e2 80 ba 1b 5b 31 37 3b 33 48  H.[0m.[m.[K.[17;1H.[1m....[17;3H
+  05e0: 1b 5b 32 32 6d 1b 5b 32 6d 1b 5b 32 6d 46 69 6e 64 20 61 6e 64 20 66 69 78 20 61 20 62 75 67 20  .[22m.[2m.[2mFind and fix a bug 
+  0600: 69 6e 20 40 66 69 6c 65 6e 61 6d 65 1b 5b 31 39 3b 31 48 20 20 67 70 74 2d 35 2e 33 2d 63 6f 64  in @filename.[19;1H  gpt-5.3-cod
+  0620: 65 78 20 78 68 69 67 68 20 c2 b7 20 39 38 25 20 6c 65 66 74 20 c2 b7 20 7e 2f 6d 61 6b 65 70 61  ex xhigh .. 98% left .. ~/makepa
+  0640: 64 2f 6d 61 6b 65 70 61 64 1b 5b 6d 1b 5b 6d 1b 5b 30 6d 1b 5b 3f 32 35 68 1b 5b 31 37 3b 33 48  d/makepad.[m.[m.[0m.[?25h.[17;3H
+  0660: 1b 5b 3f 32 30 32 36 6c                                                                          .[?2026l
+
+ESCAPE SEQUENCE ANALYSIS:
+  CSI: b'\x1b[?2026h'  =>  Begin synchronized output
+  CSI: b'\x1b[9;40r'  =>  9;40r
+  CSI: b'\x1b[9;1H'  =>  Cursor position: 9;1H
+  ESC 'M'
+  ESC 'M'
+  ESC 'M'
+  ESC 'M'
+  CSI: b'\x1b[r'  =>  r
+  CSI: b'\x1b[1;12r'  =>  1;12r
+  CSI: b'\x1b[8;1H'  =>  Cursor position: 8;1H
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[1m'  =>  SGR: 1m
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '› '
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  TEXT: 'hi'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[r'  =>  r
+  CSI: b'\x1b[11;5H'  =>  Cursor position: 11;5H
+  CSI: b'\x1b[13;2H'  =>  Cursor position: 13;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[14;2H'  =>  Cursor position: 14;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[15;34H'  =>  Cursor position: 15;34H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[16;2H'  =>  Cursor position: 16;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[17;54H'  =>  Cursor position: 17;54H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[15;3H'  =>  Cursor position: 15;3H
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: 'Find and fix a bug in @filename'
+  CSI: b'\x1b[17;1H'  =>  Cursor position: 17;1H
+  TEXT: '  gpt-5.3-codex xhigh · 100% left · ~/makepad/makepad'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[?25h'  =>  Show cursor
+  CSI: b'\x1b[15;3H'  =>  Cursor position: 15;3H
+  CSI: b'\x1b[?2026l'  =>  End synchronized output
+  CSI: b'\x1b[?2026h'  =>  Begin synchronized output
+  CSI: b'\x1b[13;1H'  =>  Cursor position: 13;1H
+  CSI: b'\x1b[J'  =>  Erase display: J
+  CSI: b'\x1b[13;2H'  =>  Cursor position: 13;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[14;34H'  =>  Cursor position: 14;34H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[15;2H'  =>  Cursor position: 15;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[16;2H'  =>  Cursor position: 16;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[17;34H'  =>  Cursor position: 17;34H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[18;2H'  =>  Cursor position: 18;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[19;54H'  =>  Cursor position: 19;54H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[14;1H'  =>  Cursor position: 14;1H
+  TEXT: '•'
+  CSI: b'\x1b[14;3H'  =>  Cursor position: 14;3H
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: 'Working'
+  CSI: b'\x1b[14;11H'  =>  Cursor position: 14;11H
+  TEXT: '(0s • esc to interrupt)'
+  CSI: b'\x1b[17;1H'  =>  Cursor position: 17;1H
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[1m'  =>  SGR: 1m
+  TEXT: '›'
+  CSI: b'\x1b[17;3H'  =>  Cursor position: 17;3H
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: 'Find and fix a bug in @filename'
+  CSI: b'\x1b[19;1H'  =>  Cursor position: 19;1H
+  TEXT: '  gpt-5.3-codex xhigh · 100% left · ~/makepad/makepad'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[?25h'  =>  Show cursor
+  CSI: b'\x1b[17;3H'  =>  Cursor position: 17;3H
+  CSI: b'\x1b[?2026l'  =>  End synchronized output
+  CSI: b'\x1b[?2026h'  =>  Begin synchronized output
+  CSI: b'\x1b[13;2H'  =>  Cursor position: 13;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[14;34H'  =>  Cursor position: 14;34H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[15;2H'  =>  Cursor position: 15;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[16;2H'  =>  Cursor position: 16;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[17;34H'  =>  Cursor position: 17;34H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[18;2H'  =>  Cursor position: 18;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[19;54H'  =>  Cursor position: 19;54H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[?25h'  =>  Show cursor
+  CSI: b'\x1b[17;3H'  =>  Cursor position: 17;3H
+  CSI: b'\x1b[?2026l'  =>  End synchronized output
+  CSI: b'\x1b[?2026h'  =>  Begin synchronized output
+  CSI: b'\x1b[13;2H'  =>  Cursor position: 13;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[14;34H'  =>  Cursor position: 14;34H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[15;2H'  =>  Cursor position: 15;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[16;2H'  =>  Cursor position: 16;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[17;34H'  =>  Cursor position: 17;34H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[18;2H'  =>  Cursor position: 18;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[19;54H'  =>  Cursor position: 19;54H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[?25h'  =>  Show cursor
+  CSI: b'\x1b[17;3H'  =>  Cursor position: 17;3H
+  CSI: b'\x1b[?2026l'  =>  End synchronized output
+  CSI: b'\x1b[?2026h'  =>  Begin synchronized output
+  CSI: b'\x1b[13;2H'  =>  Cursor position: 13;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[14;34H'  =>  Cursor position: 14;34H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[15;2H'  =>  Cursor position: 15;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[16;2H'  =>  Cursor position: 16;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[17;34H'  =>  Cursor position: 17;34H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[18;2H'  =>  Cursor position: 18;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[19;54H'  =>  Cursor position: 19;54H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[14;1H'  =>  Cursor position: 14;1H
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '◦'
+  CSI: b'\x1b[14;3H'  =>  Cursor position: 14;3H
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  TEXT: 'W'
+  CSI: b'\x1b[1m'  =>  SGR: 1m
+  TEXT: 'orkin'
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  TEXT: 'g'
+  CSI: b'\x1b[14;12H'  =>  Cursor position: 14;12H
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '3'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[?25h'  =>  Show cursor
+  CSI: b'\x1b[17;3H'  =>  Cursor position: 17;3H
+  CSI: b'\x1b[?2026l'  =>  End synchronized output
+  CSI: b'\x1b[?2026h'  =>  Begin synchronized output
+  CSI: b'\x1b[13;1H'  =>  Cursor position: 13;1H
+  CSI: b'\x1b[J'  =>  Erase display: J
+  CSI: b'\x1b[13;40r'  =>  13;40r
+  CSI: b'\x1b[13;1H'  =>  Cursor position: 13;1H
+  ESC 'M'
+  ESC 'M'
+  CSI: b'\x1b[r'  =>  r
+  CSI: b'\x1b[1;14r'  =>  1;14r
+  CSI: b'\x1b[12;1H'  =>  Cursor position: 12;1H
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CR (\r)
+  LF (\n)
+  CSI: b'\x1b[;m'  =>  SGR: ;m
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: '• '
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  TEXT: 'hi'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[r'  =>  r
+  CSI: b'\x1b[17;3H'  =>  Cursor position: 17;3H
+  CSI: b'\x1b[15;2H'  =>  Cursor position: 15;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[16;2H'  =>  Cursor position: 16;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[17;34H'  =>  Cursor position: 17;34H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[18;2H'  =>  Cursor position: 18;2H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[19;53H'  =>  Cursor position: 19;53H
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[K'  =>  Erase to end of line
+  CSI: b'\x1b[17;1H'  =>  Cursor position: 17;1H
+  CSI: b'\x1b[1m'  =>  SGR: 1m
+  TEXT: '›'
+  CSI: b'\x1b[17;3H'  =>  Cursor position: 17;3H
+  CSI: b'\x1b[22m'  =>  SGR: 22m
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  CSI: b'\x1b[2m'  =>  SGR: 2m
+  TEXT: 'Find and fix a bug in @filename'
+  CSI: b'\x1b[19;1H'  =>  Cursor position: 19;1H
+  TEXT: '  gpt-5.3-codex xhigh · 98% left · ~/makepad/makepad'
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[0m'  =>  Reset attributes (SGR)
+  CSI: b'\x1b[?25h'  =>  Show cursor
+  CSI: b'\x1b[17;3H'  =>  Cursor position: 17;3H
+  CSI: b'\x1b[?2026l'  =>  End synchronized output
+
+============================================================
+PHASE: EXIT (0 bytes)
+============================================================
+
+RAW HEX (first 2000 bytes):
+
+ESCAPE SEQUENCE ANALYSIS:
