@@ -339,6 +339,9 @@ impl Cx {
                         VideoTextureUpdatedEvent {
                             video_id,
                             current_position_ms,
+                            yuv_enabled: 0.0,
+                            yuv_type: 0.0,
+                            yuv_biplanar: 0.0,
                         },
                     ));
                     self.redraw_all();
@@ -608,7 +611,17 @@ impl Cx {
                         request_id: request_id as u32,
                     });
                 }
-                CxOsOp::PrepareVideoPlayback(video_id, source, _external_texture_id, texture_id, autoplay, should_loop) => {
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _external_texture_id,
+                    texture_id,
+                    _tex_y_id,
+                    _tex_u_id,
+                    _tex_v_id,
+                    autoplay,
+                    should_loop,
+                ) => {
                     match source {
                         VideoSource::Network(url) => {
                             self.os.from_wasm(FromWasmPrepareVideoPlayback {

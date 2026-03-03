@@ -164,7 +164,7 @@ pub enum CxOsOp {
         request_id: LiveId,
     },
 
-    PrepareVideoPlayback(LiveId, VideoSource, u32, TextureId, bool, bool),
+    PrepareVideoPlayback(LiveId, VideoSource, u32, TextureId, TextureId, TextureId, TextureId, bool, bool),
     PrepareAudioPlayback(LiveId, VideoSource, bool, bool),
     BeginVideoPlayback(LiveId),
     PauseVideoPlayback(LiveId),
@@ -958,6 +958,9 @@ impl Cx {
         source: VideoSource,
         external_texture_id: u32,
         texture_id: TextureId,
+        tex_y_id: TextureId,
+        tex_u_id: TextureId,
+        tex_v_id: TextureId,
         autoplay: bool,
         should_loop: bool,
     ) {
@@ -966,6 +969,9 @@ impl Cx {
             source,
             external_texture_id,
             texture_id,
+            tex_y_id,
+            tex_u_id,
+            tex_v_id,
             autoplay,
             should_loop,
         ));

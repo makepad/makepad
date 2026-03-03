@@ -20,7 +20,13 @@ script_mod! {
         draw_bg +: {
             video_texture: texture_video()
             thumbnail_texture: texture_2d(float)
+            tex_y: texture_2d(float)
+            tex_u: texture_2d(float)
+            tex_v: texture_2d(float)
             show_thumbnail: uniform(0.0)
+            yuv_type: uniform(0.0)
+            yuv_enabled: uniform(0.0)
+            yuv_biplanar: uniform(0.0)
 
             opacity: instance(1.0)
             image_scale: instance(vec2(1.0, 1.0))
@@ -29,12 +35,54 @@ script_mod! {
             source_size: uniform(vec2(1.0, 1.0))
             target_size: uniform(vec2(-1.0, -1.0))
 
+            sample_yuv: fn(coord: vec2) -> vec4 {
+                let y_val = self.tex_y.sample(coord).x
+                // Biplanar NV12: U in tex_u.r, V in tex_u.g
+                // Triplanar I420: U in tex_u.r, V in tex_v.r
+                let uv_sample = self.tex_u.sample(coord)
+                let u_val = uv_sample.x
+                let v_val = mix(self.tex_v.sample(coord).x, uv_sample.y, step(0.5, self.yuv_biplanar))
+
+                // Limited range: Y [16..235] -> [0..1], UV [16..240] -> [-0.5..0.5]
+                let y = (y_val * 255.0 - 16.0) / 219.0
+                let u = (u_val * 255.0 - 128.0) / 224.0
+                let v = (v_val * 255.0 - 128.0) / 224.0
+
+                // BT.709 (yuv_type == 0.0)
+                let r709 = y + 1.5748 * v
+                let g709 = y - 0.1873 * u - 0.4681 * v
+                let b709 = y + 1.8556 * u
+
+                // BT.601 (yuv_type == 1.0)
+                let r601 = y + 1.402 * v
+                let g601 = y - 0.3441 * u - 0.7141 * v
+                let b601 = y + 1.772 * u
+
+                // BT.2020 (yuv_type == 2.0)
+                let r2020 = y + 1.4746 * v
+                let g2020 = y - 0.1646 * u - 0.5714 * v
+                let b2020 = y + 1.8814 * u
+
+                // Select matrix by yuv_type uniform
+                let is_601 = step(0.5, self.yuv_type) * step(self.yuv_type, 1.5)
+                let is_2020 = step(1.5, self.yuv_type)
+                let is_709 = 1.0 - is_601 - is_2020
+
+                let r = is_709 * r709 + is_601 * r601 + is_2020 * r2020
+                let g = is_709 * g709 + is_601 * g601 + is_2020 * g2020
+                let b = is_709 * b709 + is_601 * b601 + is_2020 * b2020
+
+                return vec4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), 1.0)
+            }
+
             get_color_scale_pan: fn() {
                 // Early return for default scaling and panning,
                 // used when walk size is not specified or non-fixed.
                 if self.target_size.x <= 0.0 || self.target_size.y <= 0.0 {
                     if self.show_thumbnail > 0.0 {
                         return self.thumbnail_texture.sample_as_bgra(self.pos).xyzw
+                    } else if self.yuv_enabled > 0.5 {
+                        return self.sample_yuv(self.pos)
                     } else {
                         return self.video_texture.sample_video(self.pos)
                     }
@@ -68,6 +116,8 @@ script_mod! {
 
                 if self.show_thumbnail > 0.5 {
                     return self.thumbnail_texture.sample_as_bgra(adjusted_pos).xyzw
+                } else if self.yuv_enabled > 0.5 {
+                    return self.sample_yuv(adjusted_pos)
                 } else {
                     return self.video_texture.sample_video(adjusted_pos)
                 }
@@ -346,6 +396,13 @@ pub struct Video {
     thumbnail_source: Option<ScriptHandleRef>,
     #[rust]
     thumbnail_texture: Option<Texture>,
+    // YUV plane textures (software AV1 path)
+    #[rust]
+    tex_y: Option<Texture>,
+    #[rust]
+    tex_u: Option<Texture>,
+    #[rust]
+    tex_v: Option<Texture>,
 
     // Playback
     #[live(false)]
@@ -666,6 +723,11 @@ impl Widget for Video {
                     } else if event.current_position_ms > 0 {
                         self.current_position_ms = event.current_position_ms;
                     }
+                    // Update YUV shader uniforms from platform event
+                    self.draw_bg.set_uniform(cx, id!(yuv_enabled), &[event.yuv_enabled]);
+                    self.draw_bg.set_uniform(cx, id!(yuv_type), &[event.yuv_type]);
+                    self.draw_bg.set_uniform(cx, id!(yuv_biplanar), &[event.yuv_biplanar]);
+
                     self.redraw(cx);
                     if self.playback_state == PlaybackState::Prepared && self.autoplay {
                         self.playback_state = PlaybackState::Playing;
@@ -728,6 +790,21 @@ impl Video {
         }
         let texture = self.video_texture.as_mut().unwrap();
         self.draw_bg.draw_vars.set_texture(0, &texture);
+
+        // Create YUV plane textures for software decode path
+        if self.tex_y.is_none() {
+            self.tex_y = Some(Texture::new_with_format(cx, TextureFormat::VideoRGB));
+        }
+        if self.tex_u.is_none() {
+            self.tex_u = Some(Texture::new_with_format(cx, TextureFormat::VideoRGB));
+        }
+        if self.tex_v.is_none() {
+            self.tex_v = Some(Texture::new_with_format(cx, TextureFormat::VideoRGB));
+        }
+        // Bind to shader texture slots 2, 3, 4
+        self.draw_bg.draw_vars.set_texture(2, self.tex_y.as_ref().unwrap());
+        self.draw_bg.draw_vars.set_texture(3, self.tex_u.as_ref().unwrap());
+        self.draw_bg.draw_vars.set_texture(4, self.tex_v.as_ref().unwrap());
 
         #[cfg(target_os = "android")]
         match cx.os_type() {
@@ -798,11 +875,17 @@ impl Video {
             let Some(texture) = self.video_texture.as_ref() else {
                 return;
             };
+            let tex_y_id = self.tex_y.as_ref().map(|t| t.texture_id()).unwrap_or_default();
+            let tex_u_id = self.tex_u.as_ref().map(|t| t.texture_id()).unwrap_or_default();
+            let tex_v_id = self.tex_v.as_ref().map(|t| t.texture_id()).unwrap_or_default();
             cx.prepare_video_playback(
                 self.id,
                 source,
                 self.video_texture_handle.unwrap_or(0),
                 texture.texture_id(),
+                tex_y_id,
+                tex_u_id,
+                tex_v_id,
                 self.autoplay,
                 self.is_looping,
             );

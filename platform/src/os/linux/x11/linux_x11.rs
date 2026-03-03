@@ -362,6 +362,9 @@ impl X11Cx {
                                     VideoTextureUpdatedEvent {
                                         video_id: player.video_id(),
                                         current_position_ms: player.current_position_ms(),
+                                        yuv_enabled: if player.is_software_mode() { 1.0 } else { 0.0 },
+                                        yuv_type: player.yuv_matrix(),
+                                        yuv_biplanar: 0.0,
                                     },
                                 ));
                             }
@@ -715,6 +718,9 @@ impl X11Cx {
                     source,
                     _external_texture_id,
                     texture_id,
+                    tex_y_id,
+                    tex_u_id,
+                    tex_v_id,
                     autoplay,
                     should_loop,
                 ) => {
@@ -778,7 +784,13 @@ impl X11Cx {
                         );
                         cx.os
                             .video_players
-                            .insert(video_id, LinuxVideoPlayer::Software(player));
+                            .insert(video_id, LinuxVideoPlayer::Software {
+                                player,
+                                tex_y_id,
+                                tex_u_id,
+                                tex_v_id,
+                                yuv_matrix: 0.0,
+                            });
                     }
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {

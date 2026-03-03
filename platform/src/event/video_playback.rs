@@ -21,6 +21,12 @@ pub struct VideoPlaybackPreparedEvent {
 pub struct VideoTextureUpdatedEvent {
     pub video_id: LiveId,
     pub current_position_ms: u128,
+    /// When > 0.0, the shader should use the YUV 3-plane path.
+    pub yuv_enabled: f32,
+    /// Color matrix selector: 0.0 = BT.709, 1.0 = BT.601, 2.0 = BT.2020.
+    pub yuv_type: f32,
+    /// When > 0.0, UV is in a single RG8 texture (NV12 biplanar).
+    pub yuv_biplanar: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -2,12 +2,12 @@
 //!
 //! Provides a fallback when native platform video players are unavailable
 //! or don't support AV1. Decodes AV1 samples from MP4 containers using
-//! dav1d, converts YUV to RGBA, and presents frames for texture upload.
+//! dav1d and presents raw YUV plane data for GPU texture upload.
 
 use {
-    super::dav1d_ffi::Dav1dDecoder,
+    super::dav1d_ffi::{Dav1dDecoder, Dav1dPicAllocator, DecodedPicture},
     super::mp4_demux::{self, Mp4Track},
-    super::yuv,
+    super::yuv::{self, YuvPlaneData},
     crate::event::video_playback::VideoSource,
     crate::makepad_live_id::LiveId,
     crate::texture::TextureId,
@@ -18,6 +18,7 @@ use {
 pub struct SoftwareAv1Player {
     pub video_id: LiveId,
     pub texture_id: TextureId,
+    allocator: Option<Dav1dPicAllocator>,
     state: PlayerState,
 }
 
@@ -46,10 +47,14 @@ struct ActivePlayer {
     pause_offset_ms: u64,
     current_sample: usize,
     // Frame buffer
-    pub rgba_buf: Vec<u8>,
+    pub yuv_frame: Option<YuvPlaneData>,
+    /// Raw decoded picture kept alive for custom allocator paths (zero-copy).
+    pub decoded_pic: Option<DecodedPicture>,
     pub frame_width: u32,
     pub frame_height: u32,
     pub has_new_frame: bool,
+    /// Whether a custom allocator is in use.
+    pub has_custom_allocator: bool,
     // Metadata
     prepared: bool,
     prepare_notified: bool,
@@ -66,6 +71,28 @@ impl SoftwareAv1Player {
         SoftwareAv1Player {
             video_id,
             texture_id,
+            allocator: None,
+            state: PlayerState::Loading {
+                source,
+                autoplay,
+                is_looping,
+            },
+        }
+    }
+
+    /// Create a player with a custom dav1d picture allocator.
+    pub fn new_with_allocator(
+        video_id: LiveId,
+        texture_id: TextureId,
+        source: VideoSource,
+        autoplay: bool,
+        is_looping: bool,
+        allocator: Dav1dPicAllocator,
+    ) -> Self {
+        SoftwareAv1Player {
+            video_id,
+            texture_id,
+            allocator: Some(allocator),
             state: PlayerState::Loading {
                 source,
                 autoplay,
@@ -92,7 +119,7 @@ impl SoftwareAv1Player {
                 _ => unreachable!(),
             };
 
-            match Self::init_active(&source, autoplay, is_looping) {
+            match Self::init_active(&source, autoplay, is_looping, self.allocator.take()) {
                 Ok(active) => {
                     self.state = PlayerState::Active(active);
                 }
@@ -140,6 +167,7 @@ impl SoftwareAv1Player {
         source: &VideoSource,
         autoplay: bool,
         is_looping: bool,
+        allocator: Option<Dav1dPicAllocator>,
     ) -> Result<ActivePlayer, String> {
         let file_data = match source {
             VideoSource::Filesystem(path) => {
@@ -157,8 +185,12 @@ impl SoftwareAv1Player {
         let mut cursor = Cursor::new(&file_data);
         let track = mp4_demux::parse_mp4(&mut cursor).map_err(|e| format!("MP4 parse: {}", e))?;
 
-        let decoder = Dav1dDecoder::new()?;
-
+        let has_custom_allocator = allocator.is_some();
+        let decoder = if let Some(alloc) = allocator {
+            Dav1dDecoder::new_with_allocator(alloc)?
+        } else {
+            Dav1dDecoder::new()?
+        };
         Ok(ActivePlayer {
             decoder,
             track,
@@ -169,17 +201,19 @@ impl SoftwareAv1Player {
             start_time: None,
             pause_offset_ms: 0,
             current_sample: 0,
-            rgba_buf: Vec::new(),
+            yuv_frame: None,
+            decoded_pic: None,
             frame_width: 0,
             frame_height: 0,
             has_new_frame: false,
+            has_custom_allocator,
             prepared: false,
             prepare_notified: false,
         })
     }
 
     /// Decode and produce the next frame if it's time. Returns true if a new
-    /// RGBA frame is available in `rgba_buf`.
+    /// YUV frame is available via `take_yuv_frame()`.
     pub fn poll_frame(&mut self) -> bool {
         let active = match &mut self.state {
             PlayerState::Active(a) => a,
@@ -227,9 +261,13 @@ impl SoftwareAv1Player {
                 Ok(false) => {
                     // EAGAIN — drain a picture first
                     if let Ok(Some(pic)) = active.decoder.get_picture() {
-                        yuv::picture_to_rgba(&pic, &mut active.rgba_buf);
-                        active.frame_width = pic.width();
-                        active.frame_height = pic.height();
+                        let planes = yuv::extract_yuv_planes(&pic);
+                        active.frame_width = planes.width;
+                        active.frame_height = planes.height;
+                        active.yuv_frame = Some(planes);
+                        if active.has_custom_allocator {
+                            active.decoded_pic = Some(pic);
+                        }
                         decoded_new = true;
                     }
                     // Retry send
@@ -240,9 +278,13 @@ impl SoftwareAv1Player {
 
             // Try to get decoded picture
             if let Ok(Some(pic)) = active.decoder.get_picture() {
-                yuv::picture_to_rgba(&pic, &mut active.rgba_buf);
-                active.frame_width = pic.width();
-                active.frame_height = pic.height();
+                let planes = yuv::extract_yuv_planes(&pic);
+                active.frame_width = planes.width;
+                active.frame_height = planes.height;
+                active.yuv_frame = Some(planes);
+                if active.has_custom_allocator {
+                    active.decoded_pic = Some(pic);
+                }
                 decoded_new = true;
             }
 
@@ -264,19 +306,29 @@ impl SoftwareAv1Player {
         decoded_new
     }
 
-    /// Get the current RGBA frame data and dimensions, if a new frame is available.
-    pub fn take_frame(&mut self) -> Option<(&[u8], u32, u32)> {
+    /// Get the current YUV frame data, if a new frame is available.
+    pub fn take_yuv_frame(&mut self) -> Option<YuvPlaneData> {
         let active = match &mut self.state {
             PlayerState::Active(a) => a,
             _ => return None,
         };
 
-        if active.has_new_frame && !active.rgba_buf.is_empty() {
+        if active.has_new_frame && active.yuv_frame.is_some() {
             active.has_new_frame = false;
-            Some((&active.rgba_buf, active.frame_width, active.frame_height))
+            active.yuv_frame.take()
         } else {
             None
         }
+    }
+
+    /// Take the raw decoded picture (only present when custom allocator is used).
+    /// The picture keeps the allocator_data (e.g. CVPixelBuffer) alive.
+    pub fn take_decoded_picture(&mut self) -> Option<DecodedPicture> {
+        let active = match &mut self.state {
+            PlayerState::Active(a) => a,
+            _ => return None,
+        };
+        active.decoded_pic.take()
     }
 
     pub fn check_eos(&mut self) -> bool {

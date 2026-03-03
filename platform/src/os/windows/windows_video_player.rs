@@ -7,6 +7,7 @@ use {
             CxTexturePool, TextureAlloc, TextureCategory, TextureFormat, TextureId, TexturePixel,
         },
         video_decode::software_av1::SoftwareAv1Player,
+        video_decode::yuv::YuvPlaneData,
         windows::{
             core::Interface,
             Win32::Graphics::{
@@ -15,7 +16,7 @@ use {
                     D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
                     D3D11_USAGE_DEFAULT,
                 },
-                Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+                Dxgi::Common::{DXGI_FORMAT_R8_UNORM, DXGI_SAMPLE_DESC},
             },
         },
     },
@@ -24,12 +25,15 @@ use {
 pub struct WindowsUnifiedVideoPlayer {
     pub(crate) video_id: LiveId,
     texture_id: TextureId,
+    tex_y_id: TextureId,
+    tex_u_id: TextureId,
+    tex_v_id: TextureId,
+    yuv_matrix: f32,
     d3d11_device: ID3D11Device,
     source: VideoSource,
     autoplay: bool,
     is_looping: bool,
     mode: WindowsPlayerMode,
-    bgra_buf: Vec<u8>,
 }
 
 enum WindowsPlayerMode {
@@ -42,6 +46,9 @@ impl WindowsUnifiedVideoPlayer {
         d3d11_device: &ID3D11Device,
         video_id: LiveId,
         texture_id: TextureId,
+        tex_y_id: TextureId,
+        tex_u_id: TextureId,
+        tex_v_id: TextureId,
         source: VideoSource,
         autoplay: bool,
         is_looping: bool,
@@ -79,12 +86,15 @@ impl WindowsUnifiedVideoPlayer {
         Self {
             video_id,
             texture_id,
+            tex_y_id,
+            tex_u_id,
+            tex_v_id,
+            yuv_matrix: 0.0,
             d3d11_device: d3d11_device.clone(),
             source,
             autoplay,
             is_looping,
             mode,
-            bgra_buf: Vec::new(),
         }
     }
 
@@ -122,48 +132,51 @@ impl WindowsUnifiedVideoPlayer {
     }
 
     pub fn poll_frame(&mut self, textures: &mut CxTexturePool) -> bool {
-        let frame = match &mut self.mode {
-            WindowsPlayerMode::Native(player) => return player.poll_frame(textures),
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.poll_frame(textures),
             WindowsPlayerMode::Software(player) => {
                 if !player.poll_frame() {
                     return false;
                 }
-                player.take_frame().map(|(rgba, w, h)| (rgba.to_vec(), w, h))
+                if let Some(planes) = player.take_yuv_frame() {
+                    self.yuv_matrix = planes.matrix.as_f32();
+                    self.upload_yuv_to_d3d11(textures, &planes);
+                    true
+                } else {
+                    false
+                }
             }
-        };
-        if let Some((rgba, width, height)) = frame {
-            self.upload_rgba_to_d3d11(textures, &rgba, width, height);
-            true
-        } else {
-            false
         }
     }
 
-    fn upload_rgba_to_d3d11(
-        &mut self,
+    fn upload_yuv_to_d3d11(
+        &self,
         textures: &mut CxTexturePool,
-        rgba: &[u8],
+        planes: &YuvPlaneData,
+    ) {
+        let (cw, ch) = planes.layout.chroma_size(planes.width, planes.height);
+        self.upload_r8_plane_to_d3d11(textures, self.tex_y_id, &planes.y, planes.width, planes.height);
+        self.upload_r8_plane_to_d3d11(textures, self.tex_u_id, &planes.u, cw, ch);
+        self.upload_r8_plane_to_d3d11(textures, self.tex_v_id, &planes.v, cw, ch);
+    }
+
+    fn upload_r8_plane_to_d3d11(
+        &self,
+        textures: &mut CxTexturePool,
+        texture_id: TextureId,
+        data: &[u8],
         width: u32,
         height: u32,
     ) {
         let w = width as usize;
         let h = height as usize;
-        let expected = w.saturating_mul(h).saturating_mul(4);
-        if rgba.len() < expected {
+        if data.len() < w * h {
             return;
         }
 
-        self.bgra_buf.resize(expected, 0);
-        for i in (0..expected).step_by(4) {
-            self.bgra_buf[i] = rgba[i + 2];
-            self.bgra_buf[i + 1] = rgba[i + 1];
-            self.bgra_buf[i + 2] = rgba[i];
-            self.bgra_buf[i + 3] = rgba[i + 3];
-        }
-
         let sub_data = D3D11_SUBRESOURCE_DATA {
-            pSysMem: self.bgra_buf.as_ptr() as *const _,
-            SysMemPitch: (width * 4) as u32,
+            pSysMem: data.as_ptr() as *const _,
+            SysMemPitch: width,
             SysMemSlicePitch: 0,
         };
 
@@ -172,7 +185,7 @@ impl WindowsUnifiedVideoPlayer {
             Height: height,
             MipLevels: 1,
             ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Format: DXGI_FORMAT_R8_UNORM,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -211,16 +224,24 @@ impl WindowsUnifiedVideoPlayer {
             return;
         }
 
-        let cxtexture = &mut textures[self.texture_id];
+        let cxtexture = &mut textures[texture_id];
         cxtexture.os.texture = Some(texture);
         cxtexture.os.shader_resource_view = shader_resource_view;
         cxtexture.format = TextureFormat::VideoRGB;
         cxtexture.alloc = Some(TextureAlloc {
             width: w,
             height: h,
-            pixel: TexturePixel::VideoRGB,
+            pixel: TexturePixel::Ru8,
             category: TextureCategory::Video,
         });
+    }
+
+    pub fn is_software_mode(&self) -> bool {
+        matches!(self.mode, WindowsPlayerMode::Software(_))
+    }
+
+    pub fn yuv_matrix(&self) -> f32 {
+        self.yuv_matrix
     }
 
     pub fn check_eos(&mut self) -> bool {

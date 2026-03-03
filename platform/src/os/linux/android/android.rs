@@ -55,9 +55,10 @@ use {
         makepad_math::*,
         os::cx_native::EventFlow,
         shared_framebuf::{PollTimer, PollTimers},
-        texture::{TextureAlloc, TextureCategory, TextureId, TexturePixel},
+        texture::TextureId,
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
+        os::linux::linux_video_player::upload_yuv_to_gl,
         video_decode::software_av1::SoftwareAv1Player,
         web_socket::WebSocketMessage,
         //web_socket::WebSocket,
@@ -611,8 +612,8 @@ impl Cx {
                         android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
                     }
                 }
-                if let Some(mut player) = self.os.software_video_players.remove(&live_id) {
-                    player.cleanup();
+                if let Some(mut asp) = self.os.software_video_players.remove(&live_id) {
+                    asp.player.cleanup();
                 }
                 self.os.video_configs.remove(&live_id);
 
@@ -632,14 +633,20 @@ impl Cx {
                             live_id.0,
                             error
                         );
-                        let player = SoftwareAv1Player::new(
-                            live_id,
-                            config.texture_id,
-                            config.source,
-                            config.autoplay,
-                            config.should_loop,
-                        );
-                        self.os.software_video_players.insert(live_id, player);
+                        let asp = AndroidSoftwarePlayer {
+                            player: SoftwareAv1Player::new(
+                                live_id,
+                                config.texture_id,
+                                config.source,
+                                config.autoplay,
+                                config.should_loop,
+                            ),
+                            tex_y_id: config.tex_y_id,
+                            tex_u_id: config.tex_u_id,
+                            tex_v_id: config.tex_v_id,
+                            yuv_matrix: 0.0,
+                        };
+                        self.os.software_video_players.insert(live_id, asp);
                         self.redraw_all();
                         return;
                     }
@@ -897,6 +904,9 @@ impl Cx {
             let e = Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
                 video_id,
                 current_position_ms,
+                yuv_enabled: 0.0,
+                yuv_type: 0.0,
+                yuv_biplanar: 0.0,
             });
             self.call_event_handler(&e);
         }
@@ -937,11 +947,11 @@ impl Cx {
         let mut players = std::mem::take(&mut self.os.software_video_players);
         let mut events = Vec::new();
 
-        for (_video_id, player) in players.iter_mut() {
-            match player.check_prepared() {
+        for (_video_id, asp) in players.iter_mut() {
+            match asp.player.check_prepared() {
                 Some(Ok((width, height, duration, is_seekable, video_tracks, audio_tracks))) => {
                     events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
-                        video_id: player.video_id,
+                        video_id: asp.player.video_id,
                         video_width: width,
                         video_height: height,
                         duration,
@@ -952,33 +962,37 @@ impl Cx {
                 }
                 Some(Err(err)) => {
                     events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
-                        video_id: player.video_id,
+                        video_id: asp.player.video_id,
                         error: err,
                     }));
                 }
                 None => {}
             }
 
-            if player.poll_frame() {
-                let texture_id = player.texture_id;
-                if let Some((rgba, width, height)) = player.take_frame() {
-                    self.upload_software_frame_to_gl(
+            if asp.player.poll_frame() {
+                if let Some(planes) = asp.player.take_yuv_frame() {
+                    asp.yuv_matrix = planes.matrix.as_f32();
+                    upload_yuv_to_gl(
                         unsafe { &*gl },
-                        texture_id,
-                        rgba,
-                        width,
-                        height,
+                        &mut self.textures,
+                        asp.tex_y_id,
+                        asp.tex_u_id,
+                        asp.tex_v_id,
+                        &planes,
                     );
                     events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
-                        video_id: player.video_id,
-                        current_position_ms: player.current_position_ms(),
+                        video_id: asp.player.video_id,
+                        current_position_ms: asp.player.current_position_ms(),
+                        yuv_enabled: 1.0,
+                        yuv_type: asp.yuv_matrix,
+                        yuv_biplanar: 0.0,
                     }));
                 }
             }
 
-            if player.check_eos() {
+            if asp.player.check_eos() {
                 events.push(Event::VideoPlaybackCompleted(VideoPlaybackCompletedEvent {
-                    video_id: player.video_id,
+                    video_id: asp.player.video_id,
                 }));
             }
         }
@@ -989,95 +1003,6 @@ impl Cx {
         }
     }
 
-    fn upload_software_frame_to_gl(
-        &mut self,
-        gl: &LibGl,
-        texture_id: TextureId,
-        rgba: &[u8],
-        width: u32,
-        height: u32,
-    ) {
-        let w = width as usize;
-        let h = height as usize;
-        unsafe {
-            let cxtexture = &mut self.textures[texture_id];
-            let needs_alloc = if cxtexture.os.gl_texture.is_none() {
-                let mut gl_texture = std::mem::MaybeUninit::uninit();
-                (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
-                let gl_texture = gl_texture.assume_init();
-                cxtexture.os.gl_texture = Some(gl_texture);
-
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
-                (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
-                    gl_sys::TEXTURE_WRAP_S,
-                    gl_sys::CLAMP_TO_EDGE as i32,
-                );
-                (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
-                    gl_sys::TEXTURE_WRAP_T,
-                    gl_sys::CLAMP_TO_EDGE as i32,
-                );
-                (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
-                    gl_sys::TEXTURE_MIN_FILTER,
-                    gl_sys::LINEAR as i32,
-                );
-                (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
-                    gl_sys::TEXTURE_MAG_FILTER,
-                    gl_sys::LINEAR as i32,
-                );
-                true
-            } else {
-                cxtexture
-                    .alloc
-                    .as_ref()
-                    .map_or(true, |a| a.width != w || a.height != h)
-            };
-
-            let gl_texture = cxtexture.os.gl_texture.unwrap();
-            (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
-            (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 4);
-            (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
-            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
-            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
-
-            if needs_alloc {
-                (gl.glTexImage2D)(
-                    gl_sys::TEXTURE_2D,
-                    0,
-                    gl_sys::RGBA as i32,
-                    w as i32,
-                    h as i32,
-                    0,
-                    gl_sys::RGBA,
-                    gl_sys::UNSIGNED_BYTE,
-                    rgba.as_ptr() as *const std::ffi::c_void,
-                );
-            } else {
-                (gl.glTexSubImage2D)(
-                    gl_sys::TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    w as i32,
-                    h as i32,
-                    gl_sys::RGBA,
-                    gl_sys::UNSIGNED_BYTE,
-                    rgba.as_ptr() as *const std::ffi::c_void,
-                );
-            }
-            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
-
-            cxtexture.alloc = Some(TextureAlloc {
-                width: w,
-                height: h,
-                pixel: TexturePixel::VideoRGB,
-                category: TextureCategory::Video,
-            });
-        }
-    }
 
     pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F)
     where
@@ -1612,6 +1537,9 @@ impl Cx {
                     source,
                     external_texture_id,
                     texture_id,
+                    tex_y_id,
+                    tex_u_id,
+                    tex_v_id,
                     autoplay,
                     should_loop,
                 ) => {
@@ -1621,6 +1549,9 @@ impl Cx {
                             video_id,
                             source: source.clone(),
                             texture_id,
+                            tex_y_id,
+                            tex_u_id,
+                            tex_v_id,
                             autoplay,
                             should_loop,
                         },
@@ -1633,13 +1564,19 @@ impl Cx {
                         );
                         self.os.software_video_players.insert(
                             video_id,
-                            SoftwareAv1Player::new(
-                                video_id,
-                                texture_id,
-                                source,
-                                autoplay,
-                                should_loop,
-                            ),
+                            AndroidSoftwarePlayer {
+                                player: SoftwareAv1Player::new(
+                                    video_id,
+                                    texture_id,
+                                    source,
+                                    autoplay,
+                                    should_loop,
+                                ),
+                                tex_y_id,
+                                tex_u_id,
+                                tex_v_id,
+                                yuv_matrix: 0.0,
+                            },
                         );
                         continue;
                     }
@@ -1657,8 +1594,8 @@ impl Cx {
                     }
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.software_video_players.get_mut(&video_id) {
-                        player.play();
+                    if let Some(asp) = self.os.software_video_players.get_mut(&video_id) {
+                        asp.player.play();
                     } else {
                         unsafe {
                             let env = attach_jni_env();
@@ -1667,8 +1604,8 @@ impl Cx {
                     }
                 }
                 CxOsOp::PauseVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.software_video_players.get_mut(&video_id) {
-                        player.pause();
+                    if let Some(asp) = self.os.software_video_players.get_mut(&video_id) {
+                        asp.player.pause();
                     } else {
                         unsafe {
                             let env = attach_jni_env();
@@ -1677,8 +1614,8 @@ impl Cx {
                     }
                 }
                 CxOsOp::ResumeVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.software_video_players.get_mut(&video_id) {
-                        player.resume();
+                    if let Some(asp) = self.os.software_video_players.get_mut(&video_id) {
+                        asp.player.resume();
                     } else {
                         unsafe {
                             let env = attach_jni_env();
@@ -1687,8 +1624,8 @@ impl Cx {
                     }
                 }
                 CxOsOp::MuteVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.software_video_players.get(&video_id) {
-                        player.mute();
+                    if let Some(asp) = self.os.software_video_players.get(&video_id) {
+                        asp.player.mute();
                     } else {
                         unsafe {
                             let env = attach_jni_env();
@@ -1697,8 +1634,8 @@ impl Cx {
                     }
                 }
                 CxOsOp::UnmuteVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.software_video_players.get(&video_id) {
-                        player.unmute();
+                    if let Some(asp) = self.os.software_video_players.get(&video_id) {
+                        asp.player.unmute();
                     } else {
                         unsafe {
                             let env = attach_jni_env();
@@ -1707,8 +1644,8 @@ impl Cx {
                     }
                 }
                 CxOsOp::CleanupVideoPlaybackResources(video_id) => {
-                    if let Some(mut player) = self.os.software_video_players.remove(&video_id) {
-                        player.cleanup();
+                    if let Some(mut asp) = self.os.software_video_players.remove(&video_id) {
+                        asp.player.cleanup();
                         self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
                             VideoPlaybackResourcesReleasedEvent { video_id },
                         ));
@@ -1728,8 +1665,8 @@ impl Cx {
                     self.os.video_configs.remove(&video_id);
                 }
                 CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
-                    if let Some(player) = self.os.software_video_players.get_mut(&video_id) {
-                        player.seek_to(position_ms);
+                    if let Some(asp) = self.os.software_video_players.get_mut(&video_id) {
+                        asp.player.seek_to(position_ms);
                     } else {
                         unsafe {
                             let env = attach_jni_env();
@@ -1738,13 +1675,13 @@ impl Cx {
                     }
                 }
                 CxOsOp::SetVideoVolume(video_id, volume) => {
-                    if let Some(player) = self.os.software_video_players.get(&video_id) {
-                        player.set_volume(volume);
+                    if let Some(asp) = self.os.software_video_players.get(&video_id) {
+                        asp.player.set_volume(volume);
                     }
                 }
                 CxOsOp::SetVideoPlaybackRate(video_id, rate) => {
-                    if let Some(player) = self.os.software_video_players.get(&video_id) {
-                        player.set_playback_rate(rate);
+                    if let Some(asp) = self.os.software_video_players.get(&video_id) {
+                        asp.player.set_playback_rate(rate);
                     }
                 }
                 CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
@@ -2040,6 +1977,14 @@ pub struct CxAndroidDisplay {
     //event_handler: Box<dyn EventHandler>,
 }
 
+pub(crate) struct AndroidSoftwarePlayer {
+    pub player: SoftwareAv1Player,
+    pub tex_y_id: TextureId,
+    pub tex_u_id: TextureId,
+    pub tex_v_id: TextureId,
+    pub yuv_matrix: f32,
+}
+
 pub struct CxOs {
     pub first_after_resize: bool,
     pub display_size: Vec2d,
@@ -2056,7 +2001,7 @@ pub struct CxOs {
     pub(crate) media: CxAndroidMedia,
     pub(crate) video_surfaces: HashMap<LiveId, jobject>,
     pub(crate) video_configs: HashMap<LiveId, AndroidVideoConfig>,
-    pub(crate) software_video_players: HashMap<LiveId, SoftwareAv1Player>,
+    pub(crate) software_video_players: HashMap<LiveId, AndroidSoftwarePlayer>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
     pub(crate) openxr: CxOpenXr,
     pub(crate) activity_thread_id: Option<u64>,

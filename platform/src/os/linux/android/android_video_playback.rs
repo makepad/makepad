@@ -5,6 +5,9 @@ pub struct AndroidVideoConfig {
     pub video_id: LiveId,
     pub source: VideoSource,
     pub texture_id: TextureId,
+    pub tex_y_id: TextureId,
+    pub tex_u_id: TextureId,
+    pub tex_v_id: TextureId,
     pub autoplay: bool,
     pub should_loop: bool,
 }

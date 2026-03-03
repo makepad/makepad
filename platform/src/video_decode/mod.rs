@@ -2,7 +2,7 @@
 //!
 //! - `dav1d_ffi`: Minimal FFI bindings for dav1d C library
 //! - `mp4_demux`: Pure Rust MP4 demuxer for AV1 sample extraction
-//! - `yuv`: YUV→RGBA pixel format conversion
+//! - `yuv`: YUV plane extraction and color matrix types for GPU upload
 //! - `software_av1`: Complete software AV1 player implementation
 
 pub mod dav1d_ffi;

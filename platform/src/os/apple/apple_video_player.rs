@@ -1,11 +1,13 @@
 use {
     super::apple_sys::*,
     super::apple_video_playback::AppleVideoPlayer,
+    super::dav1d_apple_allocator,
     crate::{
         event::video_playback::VideoSource,
         makepad_live_id::LiveId,
         texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel},
         video_decode::software_av1::SoftwareAv1Player,
+        video_decode::yuv::{YuvPlaneData, YuvColorMatrix},
     },
     std::{ffi::c_void, ptr::NonNull},
 };
@@ -13,15 +15,23 @@ use {
 pub struct AppleUnifiedVideoPlayer {
     pub(crate) video_id: LiveId,
     texture_id: TextureId,
+    tex_y_id: TextureId,
+    tex_u_id: TextureId,
+    tex_v_id: TextureId,
+    yuv_matrix: f32,
     metal_device: ObjcId,
     source: VideoSource,
     autoplay: bool,
     is_looping: bool,
     mode: ApplePlayerMode,
-    bgra_buf: Vec<u8>,
     /// Consecutive poll_frame calls with no pixel buffer after the native player is playing.
     /// Used to detect codecs (e.g. AV1) that AVPlayer can play but not expose via video output.
     null_frame_count: u32,
+    /// CVMetalTextureCache for zero-copy IOSurface wrapping.
+    texture_cache: CVMetalTextureCacheRef,
+    /// Current CVMetalTexture refs (released each frame).
+    cv_y_texture: CVMetalTextureRef,
+    cv_uv_texture: CVMetalTextureRef,
 }
 
 enum ApplePlayerMode {
@@ -34,19 +44,42 @@ impl AppleUnifiedVideoPlayer {
         metal_device: ObjcId,
         video_id: LiveId,
         texture_id: TextureId,
+        tex_y_id: TextureId,
+        tex_u_id: TextureId,
+        tex_v_id: TextureId,
         source: VideoSource,
         autoplay: bool,
         is_looping: bool,
     ) -> Self {
+        // Create CVMetalTextureCache for zero-copy IOSurface wrapping
+        let texture_cache = unsafe {
+            let mut cache: CVMetalTextureCacheRef = std::ptr::null_mut();
+            let ret = CVMetalTextureCacheCreate(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                metal_device,
+                std::ptr::null_mut(),
+                &mut cache,
+            );
+            if ret != 0 {
+                crate::log!("VIDEO: CVMetalTextureCacheCreate failed: {}", ret);
+                std::ptr::null_mut()
+            } else {
+                cache
+            }
+        };
+
         let force_software = std::env::var_os("MAKEPAD_FORCE_SOFTWARE_AV1").is_some();
         let mode = if force_software {
             crate::log!("VIDEO: MAKEPAD_FORCE_SOFTWARE_AV1 set, using software AV1 decoder");
-            ApplePlayerMode::Software(SoftwareAv1Player::new(
+            let allocator = dav1d_apple_allocator::create_cv_pic_allocator();
+            ApplePlayerMode::Software(SoftwareAv1Player::new_with_allocator(
                 video_id,
                 texture_id,
                 source.clone(),
                 autoplay,
                 is_looping,
+                allocator,
             ))
         } else {
             ApplePlayerMode::Native(AppleVideoPlayer::new(
@@ -62,13 +95,19 @@ impl AppleUnifiedVideoPlayer {
         Self {
             video_id,
             texture_id,
+            tex_y_id,
+            tex_u_id,
+            tex_v_id,
+            yuv_matrix: YuvColorMatrix::BT709.as_f32(),
             metal_device,
             source,
             autoplay,
             is_looping,
             mode,
-            bgra_buf: Vec::new(),
             null_frame_count: 0,
+            texture_cache,
+            cv_y_texture: std::ptr::null_mut(),
+            cv_uv_texture: std::ptr::null_mut(),
         }
     }
 
@@ -77,12 +116,14 @@ impl AppleUnifiedVideoPlayer {
             "VIDEO: Apple native playback failed, falling back to software AV1 decoder: {}",
             reason
         );
-        self.mode = ApplePlayerMode::Software(SoftwareAv1Player::new(
+        let allocator = dav1d_apple_allocator::create_cv_pic_allocator();
+        self.mode = ApplePlayerMode::Software(SoftwareAv1Player::new_with_allocator(
             self.video_id,
             self.texture_id,
             self.source.clone(),
             self.autoplay,
             self.is_looping,
+            allocator,
         ));
     }
 
@@ -107,7 +148,7 @@ impl AppleUnifiedVideoPlayer {
     }
 
     pub fn poll_frame(&mut self, textures: &mut CxTexturePool) -> bool {
-        let frame = match &mut self.mode {
+        match &mut self.mode {
             ApplePlayerMode::Native(player) => {
                 let got_frame = player.poll_frame(textures);
                 if got_frame {
@@ -125,59 +166,199 @@ impl AppleUnifiedVideoPlayer {
                         "native player produced no frames after 60 polls",
                     );
                     self.null_frame_count = 0;
-                    // Fall through to software path below
                 } else {
                     return false;
                 }
-                // Re-match after switching to software
-                if let ApplePlayerMode::Software(player) = &mut self.mode {
-                    if !player.poll_frame() {
-                        return false;
-                    }
-                    player.take_frame().map(|(rgba, w, h)| (rgba.to_vec(), w, h))
-                } else {
-                    return false;
-                }
+                // Fall through to software path after switch
+                self.poll_software_frame(textures)
             }
-            ApplePlayerMode::Software(player) => {
-                if !player.poll_frame() {
-                    return false;
-                }
-                player.take_frame().map(|(rgba, w, h)| (rgba.to_vec(), w, h))
+            ApplePlayerMode::Software(_) => {
+                self.poll_software_frame(textures)
             }
-        };
-        if let Some((rgba, width, height)) = frame {
-            self.upload_rgba_to_metal(textures, &rgba, width, height);
-            true
-        } else {
-            false
         }
     }
 
-    fn upload_rgba_to_metal(
+    fn poll_software_frame(&mut self, textures: &mut CxTexturePool) -> bool {
+        let player = match &mut self.mode {
+            ApplePlayerMode::Software(p) => p,
+            _ => return false,
+        };
+
+        if !player.poll_frame() {
+            return false;
+        }
+
+        // Try zero-copy path: get the CVPixelBuffer from custom allocator
+        if !self.texture_cache.is_null() {
+            if let Some(mut pic) = player.take_decoded_picture() {
+                let cv_pixel_buffer = unsafe {
+                    dav1d_apple_allocator::finalize_nv12(&mut pic.pic)
+                };
+                if !cv_pixel_buffer.is_null() {
+                    if let Some(planes) = player.take_yuv_frame() {
+                        self.yuv_matrix = planes.matrix.as_f32();
+                    }
+                    let ok = self.wrap_cv_pixel_buffer_as_metal(
+                        textures, cv_pixel_buffer,
+                        pic.width(), pic.height(),
+                    );
+                    unsafe { CVPixelBufferRelease(cv_pixel_buffer); }
+                    if ok {
+                        return true;
+                    }
+                    // Fall through to upload path
+                }
+            }
+        }
+
+        // Fallback: CPU upload via replaceRegion
+        if let Some(planes) = player.take_yuv_frame() {
+            self.yuv_matrix = planes.matrix.as_f32();
+            self.upload_yuv_to_metal(textures, &planes);
+            return true;
+        }
+        false
+    }
+
+    /// Wrap a CVPixelBuffer's NV12 planes as Metal textures via IOSurface
+    /// (zero-copy for Y plane, zero-copy for UV plane).
+    fn wrap_cv_pixel_buffer_as_metal(
         &mut self,
         textures: &mut CxTexturePool,
-        rgba: &[u8],
+        pixel_buffer: CVPixelBufferRef,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        let w = width as usize;
+        let h = height as usize;
+        let cw = (w + 1) / 2;
+        let ch = (h + 1) / 2;
+
+        unsafe {
+            // Release previous CVMetalTexture refs
+            if !self.cv_y_texture.is_null() {
+                CFRelease(self.cv_y_texture);
+                self.cv_y_texture = std::ptr::null_mut();
+            }
+            if !self.cv_uv_texture.is_null() {
+                CFRelease(self.cv_uv_texture);
+                self.cv_uv_texture = std::ptr::null_mut();
+            }
+
+            // Plane 0: Y as R8Unorm
+            let mut cv_y: CVMetalTextureRef = std::ptr::null_mut();
+            let ret_y = CVMetalTextureCacheCreateTextureFromImage(
+                std::ptr::null_mut(),
+                self.texture_cache,
+                pixel_buffer,
+                std::ptr::null_mut(),
+                MTLPixelFormat::R8Unorm as u64,
+                w,
+                h,
+                0, // plane 0
+                &mut cv_y,
+            );
+            if ret_y != 0 || cv_y.is_null() {
+                return false;
+            }
+
+            // Plane 1: UV interleaved as RG8Unorm
+            let mut cv_uv: CVMetalTextureRef = std::ptr::null_mut();
+            let ret_uv = CVMetalTextureCacheCreateTextureFromImage(
+                std::ptr::null_mut(),
+                self.texture_cache,
+                pixel_buffer,
+                std::ptr::null_mut(),
+                MTLPixelFormat::RG8Unorm as u64,
+                cw,
+                ch,
+                1, // plane 1
+                &mut cv_uv,
+            );
+            if ret_uv != 0 || cv_uv.is_null() {
+                CFRelease(cv_y);
+                return false;
+            }
+
+            // Extract Metal texture objects
+            let mtl_y: ObjcId = CVMetalTextureGetTexture(cv_y);
+            let mtl_uv: ObjcId = CVMetalTextureGetTexture(cv_uv);
+
+            if mtl_y.is_null() || mtl_uv.is_null() {
+                CFRelease(cv_y);
+                CFRelease(cv_uv);
+                return false;
+            }
+
+            // Retain Metal textures (CVMetalTextureGetTexture returns autoreleased)
+            let _: ObjcId = msg_send![mtl_y, retain];
+            let _: ObjcId = msg_send![mtl_uv, retain];
+
+            // Assign Y texture
+            {
+                let cxtex = &mut textures[self.tex_y_id];
+                // Release old texture
+                if let Some(old) = cxtex.os.texture.take() {
+                    drop(old);
+                }
+                cxtex.os.texture = Some(RcObjcId::from_owned(NonNull::new(mtl_y).unwrap()));
+                cxtex.alloc = Some(TextureAlloc {
+                    width: w,
+                    height: h,
+                    pixel: TexturePixel::Ru8,
+                    category: TextureCategory::Video,
+                });
+            }
+
+            // Assign UV texture to tex_u slot (shader samples .r for U, .g for V)
+            {
+                let cxtex = &mut textures[self.tex_u_id];
+                if let Some(old) = cxtex.os.texture.take() {
+                    drop(old);
+                }
+                cxtex.os.texture = Some(RcObjcId::from_owned(NonNull::new(mtl_uv).unwrap()));
+                cxtex.alloc = Some(TextureAlloc {
+                    width: cw,
+                    height: ch,
+                    pixel: TexturePixel::RGu8,
+                    category: TextureCategory::Video,
+                });
+            }
+
+            self.cv_y_texture = cv_y;
+            self.cv_uv_texture = cv_uv;
+
+            true
+        }
+    }
+
+    fn upload_yuv_to_metal(
+        &mut self,
+        textures: &mut CxTexturePool,
+        planes: &YuvPlaneData,
+    ) {
+        let (cw, ch) = planes.layout.chroma_size(planes.width, planes.height);
+        self.upload_r8_plane_to_metal(textures, self.tex_y_id, &planes.y, planes.width, planes.height);
+        self.upload_r8_plane_to_metal(textures, self.tex_u_id, &planes.u, cw, ch);
+        self.upload_r8_plane_to_metal(textures, self.tex_v_id, &planes.v, cw, ch);
+    }
+
+    fn upload_r8_plane_to_metal(
+        &self,
+        textures: &mut CxTexturePool,
+        texture_id: TextureId,
+        data: &[u8],
         width: u32,
         height: u32,
     ) {
         let w = width as usize;
         let h = height as usize;
-        let expected = w.saturating_mul(h).saturating_mul(4);
-        if rgba.len() < expected {
+        if data.len() < w * h {
             return;
         }
 
-        self.bgra_buf.resize(expected, 0);
-        for i in (0..expected).step_by(4) {
-            self.bgra_buf[i] = rgba[i + 2];
-            self.bgra_buf[i + 1] = rgba[i + 1];
-            self.bgra_buf[i + 2] = rgba[i];
-            self.bgra_buf[i + 3] = rgba[i + 3];
-        }
-
         unsafe {
-            let cxtexture = &mut textures[self.texture_id];
+            let cxtexture = &mut textures[texture_id];
             let need_alloc = cxtexture
                 .alloc
                 .as_ref()
@@ -192,7 +373,7 @@ impl AppleUnifiedVideoPlayer {
                 let _: () = msg_send![descriptor, setUsage: MTLTextureUsage::ShaderRead];
                 let _: () = msg_send![descriptor, setWidth: width as u64];
                 let _: () = msg_send![descriptor, setHeight: height as u64];
-                let _: () = msg_send![descriptor, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+                let _: () = msg_send![descriptor, setPixelFormat: MTLPixelFormat::R8Unorm];
                 let texture: ObjcId =
                     msg_send![self.metal_device, newTextureWithDescriptor: descriptor];
                 let _: () = msg_send![descriptor, release];
@@ -205,7 +386,7 @@ impl AppleUnifiedVideoPlayer {
                 cxtexture.alloc = Some(TextureAlloc {
                     width: w,
                     height: h,
-                    pixel: TexturePixel::VideoRGB,
+                    pixel: TexturePixel::Ru8,
                     category: TextureCategory::Video,
                 });
             }
@@ -224,10 +405,23 @@ impl AppleUnifiedVideoPlayer {
                 texture,
                 replaceRegion: region
                 mipmapLevel: 0u64
-                withBytes: self.bgra_buf.as_ptr() as *const c_void
-                bytesPerRow: (width * 4) as u64
+                withBytes: data.as_ptr() as *const c_void
+                bytesPerRow: width as u64
             ];
         }
+    }
+
+    pub fn is_software_mode(&self) -> bool {
+        matches!(self.mode, ApplePlayerMode::Software(_))
+    }
+
+    /// Returns 1.0 when the zero-copy biplanar NV12 path is active.
+    pub fn yuv_biplanar(&self) -> f32 {
+        if !self.cv_y_texture.is_null() { 1.0 } else { 0.0 }
+    }
+
+    pub fn yuv_matrix(&self) -> f32 {
+        self.yuv_matrix
     }
 
     pub fn seekable_ranges(&self) -> Vec<(f64, f64)> {
@@ -308,6 +502,20 @@ impl AppleUnifiedVideoPlayer {
     }
 
     pub fn cleanup(&mut self) {
+        unsafe {
+            if !self.cv_y_texture.is_null() {
+                CFRelease(self.cv_y_texture);
+                self.cv_y_texture = std::ptr::null_mut();
+            }
+            if !self.cv_uv_texture.is_null() {
+                CFRelease(self.cv_uv_texture);
+                self.cv_uv_texture = std::ptr::null_mut();
+            }
+            if !self.texture_cache.is_null() {
+                CFRelease(self.texture_cache);
+                self.texture_cache = std::ptr::null_mut();
+            }
+        }
         match &mut self.mode {
             ApplePlayerMode::Native(player) => player.cleanup(),
             ApplePlayerMode::Software(player) => player.cleanup(),

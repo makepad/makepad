@@ -234,6 +234,27 @@ impl Dav1dDecoder {
         }
     }
 
+    /// Create a new dav1d decoder with a custom picture allocator.
+    ///
+    /// When the allocator's `alloc_picture_callback` returns -1, dav1d
+    /// falls back to its built-in allocator for that picture.
+    pub fn new_with_allocator(allocator: Dav1dPicAllocator) -> Result<Self, String> {
+        unsafe {
+            let mut settings: Dav1dSettings = std::mem::zeroed();
+            dav1d_default_settings(&mut settings);
+            settings.n_threads = 2;
+            settings.max_frame_delay = 1;
+            settings.allocator = allocator;
+
+            let mut ctx: *mut Dav1dContext = std::ptr::null_mut();
+            let ret = dav1d_open(&mut ctx, &settings);
+            if ret < 0 || ctx.is_null() {
+                return Err(format!("dav1d_open failed: {}", ret));
+            }
+            Ok(Dav1dDecoder { ctx })
+        }
+    }
+
     /// Send compressed AV1 data to the decoder.
     /// Returns Ok(true) if consumed, Ok(false) if EAGAIN (need to drain pictures first).
     pub fn send_data(&mut self, data: &[u8], pts: i64) -> Result<bool, String> {

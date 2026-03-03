@@ -22,6 +22,8 @@ pub mod apple_media;
 pub mod apple_video_playback;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod apple_video_player;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod dav1d_apple_allocator;
 #[cfg(target_os = "macos")]
 pub mod audio_tap;
 pub mod audio_unit;

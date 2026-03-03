@@ -359,6 +359,30 @@ extern "C" {
     pub fn CVPixelBufferGetHeight(pixelBuffer: CVPixelBufferRef) -> usize;
     pub fn CVPixelBufferGetBytesPerRow(pixelBuffer: CVPixelBufferRef) -> usize;
     pub fn CVPixelBufferIsPlanar(pixelBuffer: CVPixelBufferRef) -> bool;
+    pub fn CVPixelBufferGetPlaneCount(pixelBuffer: CVPixelBufferRef) -> usize;
+    pub fn CVPixelBufferGetWidthOfPlane(pixelBuffer: CVPixelBufferRef, planeIndex: usize) -> usize;
+    pub fn CVPixelBufferGetHeightOfPlane(pixelBuffer: CVPixelBufferRef, planeIndex: usize) -> usize;
+    pub fn CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer: CVPixelBufferRef, planeIndex: usize) -> usize;
+    pub fn CVPixelBufferGetBaseAddressOfPlane(pixelBuffer: CVPixelBufferRef, planeIndex: usize) -> *mut c_void;
+    pub fn CVPixelBufferRelease(pixelBuffer: CVPixelBufferRef);
+    pub fn CVPixelBufferRetain(pixelBuffer: CVPixelBufferRef) -> CVPixelBufferRef;
+    pub fn CVPixelBufferCreateWithPlanarBytes(
+        allocator: *const c_void,
+        width: usize,
+        height: usize,
+        pixelFormatType: u32,
+        dataPtr: *mut c_void,
+        dataSize: usize,
+        numberOfPlanes: usize,
+        planeBaseAddress: *mut *mut c_void,
+        planeWidth: *mut usize,
+        planeHeight: *mut usize,
+        planeBytesPerRow: *mut usize,
+        releaseCallback: Option<unsafe extern "C" fn(*mut c_void, *const c_void, usize, usize, *const *const c_void)>,
+        releaseRefCon: *mut c_void,
+        pixelBufferAttributes: *const c_void,
+        pixelBufferOut: *mut CVPixelBufferRef,
+    ) -> CVReturn;
 
     pub fn CVMetalTextureCacheCreate(
         allocator: *mut c_void,

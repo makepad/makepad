@@ -1,9 +1,151 @@
-//! YUV to RGBA conversion for dav1d decoded frames.
+//! YUV plane data types and conversion utilities for dav1d decoded frames.
 //!
 //! Supports 8-bit and 10-bit YUV 4:2:0, 4:2:2, and 4:4:4 with
 //! BT.601, BT.709, and BT.2020 color matrices.
+//!
+//! `YuvPlaneData` holds copied plane bytes for GPU upload. Platform backends
+//! create R8 textures from each plane; the fragment shader does color conversion.
 
 use super::dav1d_ffi::{DecodedPicture, Dav1dMatrixCoefficients, Dav1dPixelLayout};
+
+/// Color matrix selector passed to the GPU shader as a uniform.
+/// Matches the `yuv_type` uniform: 0.0 = BT.709, 1.0 = BT.601, 2.0 = BT.2020.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u8)]
+pub enum YuvColorMatrix {
+    BT709 = 0,
+    BT601 = 1,
+    BT2020 = 2,
+}
+
+impl YuvColorMatrix {
+    pub fn as_f32(self) -> f32 {
+        self as u8 as f32
+    }
+
+    pub fn from_dav1d(mc: Dav1dMatrixCoefficients) -> Self {
+        match mc {
+            Dav1dMatrixCoefficients::BT709 => YuvColorMatrix::BT709,
+            Dav1dMatrixCoefficients::BT601
+            | Dav1dMatrixCoefficients::BT470BG
+            | Dav1dMatrixCoefficients::FCC => YuvColorMatrix::BT601,
+            Dav1dMatrixCoefficients::BT2020_NCL
+            | Dav1dMatrixCoefficients::BT2020_CL => YuvColorMatrix::BT2020,
+            _ => YuvColorMatrix::BT709,
+        }
+    }
+}
+
+/// Subsampling layout for chroma planes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum YuvLayout {
+    /// 4:2:0 — chroma is half width and half height of luma.
+    I420,
+    /// 4:2:2 — chroma is half width, same height as luma.
+    I422,
+    /// 4:4:4 — chroma is same size as luma.
+    I444,
+    /// Monochrome — no chroma planes.
+    I400,
+}
+
+impl YuvLayout {
+    pub fn from_dav1d(layout: Dav1dPixelLayout) -> Self {
+        match layout {
+            Dav1dPixelLayout::I400 => YuvLayout::I400,
+            Dav1dPixelLayout::I420 => YuvLayout::I420,
+            Dav1dPixelLayout::I422 => YuvLayout::I422,
+            Dav1dPixelLayout::I444 => YuvLayout::I444,
+        }
+    }
+
+    /// Chroma dimensions given luma width/height.
+    pub fn chroma_size(self, luma_w: u32, luma_h: u32) -> (u32, u32) {
+        match self {
+            YuvLayout::I420 => ((luma_w + 1) / 2, (luma_h + 1) / 2),
+            YuvLayout::I422 => ((luma_w + 1) / 2, luma_h),
+            YuvLayout::I444 => (luma_w, luma_h),
+            YuvLayout::I400 => (0, 0),
+        }
+    }
+}
+
+/// Extracted YUV plane data ready for GPU texture upload.
+///
+/// Each plane is tightly packed (stride == width) with 8-bit samples.
+/// 10-bit sources are downshifted to 8 bits during extraction.
+pub struct YuvPlaneData {
+    /// Luma plane, dimensions `width × height`.
+    pub y: Vec<u8>,
+    /// Cb (U) chroma plane.
+    pub u: Vec<u8>,
+    /// Cr (V) chroma plane.
+    pub v: Vec<u8>,
+    /// Luma width in pixels.
+    pub width: u32,
+    /// Luma height in pixels.
+    pub height: u32,
+    /// Subsampling layout.
+    pub layout: YuvLayout,
+    /// Color matrix for shader conversion.
+    pub matrix: YuvColorMatrix,
+}
+
+/// Extract Y, U, V planes from a decoded dav1d picture into tightly-packed
+/// 8-bit buffers suitable for R8 texture upload.
+pub fn extract_yuv_planes(pic: &DecodedPicture) -> YuvPlaneData {
+    let w = pic.width();
+    let h = pic.height();
+    let bpc = pic.bpc();
+    let layout = YuvLayout::from_dav1d(pic.layout());
+    let matrix = YuvColorMatrix::from_dav1d(pic.matrix_coefficients());
+    let (cw, ch) = layout.chroma_size(w, h);
+
+    let y = extract_plane_8bit(pic.plane_y(), w as usize, h as usize, bpc);
+    let u = if cw > 0 {
+        extract_plane_8bit(pic.plane_u(), cw as usize, ch as usize, bpc)
+    } else {
+        Vec::new()
+    };
+    let v = if cw > 0 {
+        extract_plane_8bit(pic.plane_v(), cw as usize, ch as usize, bpc)
+    } else {
+        Vec::new()
+    };
+
+    YuvPlaneData { y, u, v, width: w, height: h, layout, matrix }
+}
+
+/// Copy one plane from dav1d memory into a tightly packed Vec<u8>.
+/// Handles stride padding and 10-bit→8-bit downshift.
+fn extract_plane_8bit(plane: (*const u8, isize), w: usize, h: usize, bpc: i32) -> Vec<u8> {
+    let (ptr, stride) = plane;
+    let mut buf = vec![0u8; w * h];
+
+    if bpc <= 8 {
+        for row in 0..h {
+            let src = unsafe { std::slice::from_raw_parts(ptr.offset(row as isize * stride), w) };
+            buf[row * w..(row + 1) * w].copy_from_slice(src);
+        }
+    } else {
+        // 10-bit or higher: data is in 16-bit words, shift down to 8-bit.
+        let stride_px = stride / 2;
+        for row in 0..h {
+            let src = unsafe {
+                std::slice::from_raw_parts(
+                    (ptr as *const u16).offset(row as isize * stride_px),
+                    w,
+                )
+            };
+            let dst = &mut buf[row * w..(row + 1) * w];
+            for col in 0..w {
+                dst[col] = (src[col] >> 2) as u8;
+            }
+        }
+    }
+
+    buf
+}
 
 /// Color matrix coefficients for YUV→RGB conversion.
 /// Values are fixed-point with 10-bit fractional part (multiply by 1024).
