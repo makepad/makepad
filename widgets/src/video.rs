@@ -6,6 +6,7 @@ use crate::{
     makepad_platform::event::video_playback::*,
     widget::*,
 };
+use std::rc::Rc;
 script_mod! {
     use mod.prelude.widgets_internal.*
 
@@ -335,6 +336,8 @@ pub struct Video {
     #[live]
     source: VideoDataSource,
     #[rust]
+    in_memory_source: Option<Rc<Vec<u8>>>,
+    #[rust]
     video_texture: Option<Texture>,
     #[rust]
     video_texture_handle: Option<u32>,
@@ -492,6 +495,15 @@ impl VideoRef {
     pub fn set_source(&self, source: VideoDataSource) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_source(source);
+        }
+    }
+
+    /// Sets an in-memory source for the video data.
+    ///
+    /// This bypasses filesystem and network paths and is useful for embedded media assets.
+    pub fn set_source_in_memory(&self, data: Rc<Vec<u8>>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_source_in_memory(data);
         }
     }
 
@@ -757,24 +769,30 @@ impl Video {
                 return;
             }
 
-            let source = match &self.source {
-                VideoDataSource::Dependency { res } => {
-                    if let Some(handle_ref) = res {
-                        let handle = handle_ref.as_handle();
-                        match cx.get_resource(handle) {
-                            Some(data) => VideoSource::InMemory(data),
-                            None => {
-                                error!("Attempted to prepare playback: resource not found");
-                                return;
+            let source = if let Some(data) = self.in_memory_source.clone() {
+                VideoSource::InMemory(data)
+            } else {
+                match &self.source {
+                    VideoDataSource::Dependency { res } => {
+                        if let Some(handle_ref) = res {
+                            let handle = handle_ref.as_handle();
+                            match cx.get_resource(handle) {
+                                Some(data) => VideoSource::InMemory(data),
+                                None => {
+                                    error!("Attempted to prepare playback: resource not found");
+                                    return;
+                                }
                             }
+                        } else {
+                            error!("Attempted to prepare playback: no resource handle provided");
+                            return;
                         }
-                    } else {
-                        error!("Attempted to prepare playback: no resource handle provided");
-                        return;
+                    }
+                    VideoDataSource::Network { url } => VideoSource::Network(url.to_string()),
+                    VideoDataSource::Filesystem { path } => {
+                        VideoSource::Filesystem(path.to_string())
                     }
                 }
-                VideoDataSource::Network { url } => VideoSource::Network(url.to_string()),
-                VideoDataSource::Filesystem { path } => VideoSource::Filesystem(path.to_string()),
             };
 
             let Some(texture) = self.video_texture.as_ref() else {
@@ -1079,7 +1097,19 @@ impl Video {
 
     fn set_source(&mut self, source: VideoDataSource) {
         if self.playback_state == PlaybackState::Unprepared {
+            self.in_memory_source = None;
             self.source = source;
+        } else {
+            error!(
+                "Attempted to set source while player {} state is: {:?}",
+                self.id.0, self.playback_state
+            );
+        }
+    }
+
+    fn set_source_in_memory(&mut self, data: Rc<Vec<u8>>) {
+        if self.playback_state == PlaybackState::Unprepared {
+            self.in_memory_source = Some(data);
         } else {
             error!(
                 "Attempted to set source while player {} state is: {:?}",

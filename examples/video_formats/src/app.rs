@@ -1,23 +1,9 @@
 use makepad_widgets::*;
+use std::rc::Rc;
 
 app_main!(App);
 
 const AV1_MP4: &[u8] = include_bytes!("../data/av1.mp4");
-
-fn write_test_file(name: &str, data: &[u8]) -> String {
-    let dir = std::env::temp_dir().join("makepad_video_test");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(name);
-    let _ = std::fs::write(&path, data);
-    path.to_string_lossy().to_string()
-}
-
-/// Write embedded test video to temp dir. Call before app_main().
-pub fn write_test_files() {
-    write_test_file("test_av1.mp4", AV1_MP4);
-    let dir = std::env::temp_dir().join("makepad_video_test");
-    eprintln!("Test files in: {}", dir.display());
-}
 
 fn can_play_report() -> String {
     let types = ["video/mp4"];
@@ -28,14 +14,6 @@ fn can_play_report() -> String {
         parts.push(format!("{t}={r}"));
     }
     parts.join("  ")
-}
-
-fn temp_video_path(name: &str) -> String {
-    std::env::temp_dir()
-        .join("makepad_video_test")
-        .join(name)
-        .to_string_lossy()
-        .to_string()
 }
 
 script_mod! {
@@ -115,19 +93,15 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
 
         if !self.sources_set {
-            let videos: &[(&[LiveId], &str)] = &[(&[live_id!(av1_mp4_video)], "test_av1.mp4")];
+            let video_id = &[live_id!(av1_mp4_video)];
 
-            let first_ref = self.ui.video(cx, videos[0].0);
-            if first_ref.borrow().is_none() {
+            let vref = self.ui.video(cx, video_id);
+            if vref.borrow().is_none() {
                 return;
             }
 
-            for (id, name) in videos {
-                let path = temp_video_path(name);
-                let vref = self.ui.video(cx, *id);
-                vref.set_source(VideoDataSource::Filesystem { path });
-                vref.begin_playback(cx);
-            }
+            vref.set_source_in_memory(Rc::new(AV1_MP4.to_vec()));
+            vref.begin_playback(cx);
 
             self.ui
                 .label(cx, ids!(can_play_label))
