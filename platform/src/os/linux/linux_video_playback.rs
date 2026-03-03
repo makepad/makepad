@@ -305,6 +305,10 @@ impl GStreamerVideoPlayer {
                 let uri = format!("file://{}", tmp_path.to_string_lossy());
                 (uri, Some(tmp_path))
             }
+            VideoSource::Camera(..) => {
+                // Camera sources are handled by V4l2CameraPlayer, not GStreamer.
+                ("".to_string(), None)
+            }
         }
     }
 

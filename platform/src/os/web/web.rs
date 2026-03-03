@@ -647,6 +647,13 @@ impl Cx {
                                 VideoDecodingErrorEvent { video_id, error },
                             ));
                         }
+                        VideoSource::Camera(..) => {
+                            let error = "VideoSource::Camera is not supported on web".to_string();
+                            crate::error!("{}", error);
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
+                        }
                     }
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {

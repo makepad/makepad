@@ -57,6 +57,8 @@ pub mod linux_media;
 pub mod v4l2_sys;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod v4l2_camera;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod v4l2_camera_player;
 
 #[cfg(not(target_os = "android"))]
 pub mod select_timer;

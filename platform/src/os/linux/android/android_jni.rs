@@ -1256,6 +1256,10 @@ pub unsafe fn to_java_prepare_video_playback(
             let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
             url
         }
+        VideoSource::Camera(..) => {
+            crate::error!("VIDEO: Camera source not supported on Android");
+            return;
+        }
     };
 
     ndk_utils::call_void_method!(

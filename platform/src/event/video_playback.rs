@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::makepad_live_id::LiveId;
+use crate::video::{VideoFormatId, VideoInputId};
 use crate::TextureId;
 
 #[derive(Clone, Debug)]
@@ -34,6 +35,7 @@ pub enum VideoSource {
     InMemory(Rc<Vec<u8>>),
     Network(String),
     Filesystem(String),
+    Camera(VideoInputId, VideoFormatId),
 }
 
 #[derive(Clone, Debug)]

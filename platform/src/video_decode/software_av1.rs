@@ -180,6 +180,9 @@ impl SoftwareAv1Player {
                     url
                 ));
             }
+            VideoSource::Camera(..) => {
+                return Err("camera sources not supported in software player".to_string());
+            }
         };
 
         let mut cursor = Cursor::new(&file_data);

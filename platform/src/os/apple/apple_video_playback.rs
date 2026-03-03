@@ -156,6 +156,13 @@ impl AppleVideoPlayer {
                 let _: () = msg_send![ns_string, release];
                 (url, Some(tmp_path))
             }
+            VideoSource::Camera(..) => {
+                error!("VIDEO: Camera source not supported on macOS/iOS");
+                let ns_string = Self::to_nsstring("about:blank");
+                let url: ObjcId = msg_send![class!(NSURL), URLWithString: ns_string];
+                let _: () = msg_send![ns_string, release];
+                (url, None)
+            }
         }
     }
 

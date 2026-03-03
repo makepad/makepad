@@ -1,10 +1,11 @@
-//! Unified video player for Linux that wraps GStreamer native player
-//! and software rav1d fallback.
+//! Unified video player for Linux that wraps GStreamer native player,
+//! software rav1d fallback, and V4L2 camera capture.
 
 use {
     super::gl_sys::LibGl,
     super::gl_video_upload::upload_yuv_to_gl,
     super::linux_video_playback::GStreamerVideoPlayer,
+    super::v4l2_camera_player::V4l2CameraPlayer,
     crate::{
         makepad_live_id::LiveId,
         texture::{CxTexturePool, TextureId},
@@ -21,6 +22,7 @@ pub enum LinuxVideoPlayer {
         tex_v_id: TextureId,
         yuv_matrix: f32,
     },
+    Camera(V4l2CameraPlayer),
 }
 
 impl LinuxVideoPlayer {
@@ -28,6 +30,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.video_id,
             LinuxVideoPlayer::Software { player: p, .. } => p.video_id,
+            LinuxVideoPlayer::Camera(p) => p.video_id,
         }
     }
 
@@ -37,6 +40,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.check_prepared(),
             LinuxVideoPlayer::Software { player: p, .. } => p.check_prepared(),
+            LinuxVideoPlayer::Camera(p) => p.check_prepared(),
         }
     }
 
@@ -55,6 +59,7 @@ impl LinuxVideoPlayer {
                     false
                 }
             }
+            LinuxVideoPlayer::Camera(p) => p.poll_frame(gl, textures),
         }
     }
 
@@ -62,6 +67,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.check_eos(),
             LinuxVideoPlayer::Software { player: p, .. } => p.check_eos(),
+            LinuxVideoPlayer::Camera(_) => false, // camera never ends
         }
     }
 
@@ -69,6 +75,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.is_active(),
             LinuxVideoPlayer::Software { player: p, .. } => p.is_active(),
+            LinuxVideoPlayer::Camera(p) => p.is_active(),
         }
     }
 
@@ -76,6 +83,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.play(),
             LinuxVideoPlayer::Software { player: p, .. } => p.play(),
+            LinuxVideoPlayer::Camera(_) => {} // camera is always playing
         }
     }
 
@@ -83,6 +91,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.pause(),
             LinuxVideoPlayer::Software { player: p, .. } => p.pause(),
+            LinuxVideoPlayer::Camera(_) => {} // no-op for camera
         }
     }
 
@@ -90,6 +99,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.resume(),
             LinuxVideoPlayer::Software { player: p, .. } => p.resume(),
+            LinuxVideoPlayer::Camera(_) => {} // no-op for camera
         }
     }
 
@@ -97,6 +107,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.mute(),
             LinuxVideoPlayer::Software { .. } => {}
+            LinuxVideoPlayer::Camera(_) => {}
         }
     }
 
@@ -104,6 +115,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.unmute(),
             LinuxVideoPlayer::Software { .. } => {}
+            LinuxVideoPlayer::Camera(_) => {}
         }
     }
 
@@ -111,6 +123,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.seek_to(position_ms),
             LinuxVideoPlayer::Software { player: p, .. } => p.seek_to(position_ms),
+            LinuxVideoPlayer::Camera(_) => {} // camera is not seekable
         }
     }
 
@@ -118,6 +131,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.set_volume(volume),
             LinuxVideoPlayer::Software { player: p, .. } => p.set_volume(volume),
+            LinuxVideoPlayer::Camera(_) => {}
         }
     }
 
@@ -125,6 +139,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.set_playback_rate(rate),
             LinuxVideoPlayer::Software { .. } => {}
+            LinuxVideoPlayer::Camera(_) => {}
         }
     }
 
@@ -132,6 +147,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.seekable_ranges(),
             LinuxVideoPlayer::Software { player: p, .. } => p.seekable_ranges(),
+            LinuxVideoPlayer::Camera(_) => vec![],
         }
     }
 
@@ -139,6 +155,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.buffered_ranges(),
             LinuxVideoPlayer::Software { player: p, .. } => p.buffered_ranges(),
+            LinuxVideoPlayer::Camera(_) => vec![],
         }
     }
 
@@ -146,6 +163,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.current_position_ms(),
             LinuxVideoPlayer::Software { player: p, .. } => p.current_position_ms(),
+            LinuxVideoPlayer::Camera(_) => 0,
         }
     }
 
@@ -153,6 +171,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(p) => p.cleanup(),
             LinuxVideoPlayer::Software { player: p, .. } => p.cleanup(),
+            LinuxVideoPlayer::Camera(p) => p.cleanup(),
         }
     }
 
@@ -164,6 +183,7 @@ impl LinuxVideoPlayer {
         match self {
             LinuxVideoPlayer::GStreamer(_) => 0.0,
             LinuxVideoPlayer::Software { yuv_matrix, .. } => *yuv_matrix,
+            LinuxVideoPlayer::Camera(_) => 0.0,
         }
     }
 }

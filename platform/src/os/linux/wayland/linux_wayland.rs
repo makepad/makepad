@@ -14,6 +14,7 @@ use crate::opengl_cx::OpenglCx;
 use crate::os::linux::gstreamer_sys::LibGStreamer;
 use crate::os::linux::linux_video_playback::GStreamerVideoPlayer;
 use crate::os::linux::linux_video_player::LinuxVideoPlayer;
+use crate::os::linux::v4l2_camera_player::V4l2CameraPlayer;
 use crate::wayland::wayland_app::WaylandApp;
 use crate::wayland::xkb_sys;
 use crate::x11::xlib_event::XlibEvent;
@@ -24,7 +25,7 @@ use crate::{
     event::{
         video_playback::{
             VideoBufferedRangesEvent, VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
-            VideoPlaybackResourcesReleasedEvent, VideoSeekableRangesEvent,
+            VideoPlaybackResourcesReleasedEvent, VideoSeekableRangesEvent, VideoSource,
             VideoTextureUpdatedEvent,
         },
         PopupDismissReason, PopupDismissedEvent,
@@ -709,6 +710,15 @@ impl WaylandCx {
                         .get(&video_id)
                         .map_or(false, |p| p.is_active())
                     {
+                        continue;
+                    }
+                    // Camera source: use V4L2 capture player
+                    if let VideoSource::Camera(input_id, format_id) = source {
+                        let camera_access = cx.os.media.v4l2_camera();
+                        let player = V4l2CameraPlayer::new(
+                            video_id, texture_id, input_id, format_id, camera_access,
+                        );
+                        cx.os.video_players.insert(video_id, LinuxVideoPlayer::Camera(player));
                         continue;
                     }
                     // Try GStreamer first, fall back to software rav1d

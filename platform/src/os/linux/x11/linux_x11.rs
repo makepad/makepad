@@ -1,7 +1,8 @@
 use {
     self::super::super::{
         egl_sys, gstreamer_sys::LibGStreamer, linux_video_playback::GStreamerVideoPlayer,
-        linux_video_player::LinuxVideoPlayer, opengl_cx::OpenglCx, x11::x11_sys, x11::xlib_app::*,
+        linux_video_player::LinuxVideoPlayer, opengl_cx::OpenglCx,
+        v4l2_camera_player::V4l2CameraPlayer, x11::x11_sys, x11::xlib_app::*,
         x11::xlib_event::*,
     },
     self::super::opengl_x11::OpenglWindow,
@@ -731,6 +732,15 @@ impl X11Cx {
                         .get(&video_id)
                         .map_or(false, |p| p.is_active())
                     {
+                        continue;
+                    }
+                    // Camera source: use V4L2 capture player
+                    if let VideoSource::Camera(input_id, format_id) = source {
+                        let camera_access = cx.os.media.v4l2_camera();
+                        let player = V4l2CameraPlayer::new(
+                            video_id, texture_id, input_id, format_id, camera_access,
+                        );
+                        cx.os.video_players.insert(video_id, LinuxVideoPlayer::Camera(player));
                         continue;
                     }
                     // Try GStreamer first, fall back to software rav1d

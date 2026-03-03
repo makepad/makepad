@@ -591,6 +591,10 @@ impl WindowsVideoPlayer {
                 let wide: Vec<u16> = file_url.encode_utf16().chain(std::iter::once(0)).collect();
                 (wide, Some(tmp_path))
             }
+            VideoSource::Camera(..) => {
+                error!("VIDEO: Camera source not supported on Windows");
+                (vec![0], None)
+            }
         }
     }
 
