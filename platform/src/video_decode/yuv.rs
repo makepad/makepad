@@ -1,9 +1,9 @@
-//! YUV to RGBA conversion for rav1d decoded frames.
+//! YUV to RGBA conversion for dav1d decoded frames.
 //!
 //! Supports 8-bit and 10-bit YUV 4:2:0, 4:2:2, and 4:4:4 with
 //! BT.601, BT.709, and BT.2020 color matrices.
 
-use super::rav1d::{DecodedPicture, Rav1dMatrixCoefficients, Rav1dPixelLayout};
+use super::dav1d_ffi::{DecodedPicture, Dav1dMatrixCoefficients, Dav1dPixelLayout};
 
 /// Color matrix coefficients for YUV→RGB conversion.
 /// Values are fixed-point with 10-bit fractional part (multiply by 1024).
@@ -50,13 +50,13 @@ const BT2020: YuvMatrix = YuvMatrix {
     cb_g: -149,
 };
 
-fn matrix_for(mc: Rav1dMatrixCoefficients) -> &'static YuvMatrix {
+fn matrix_for(mc: Dav1dMatrixCoefficients) -> &'static YuvMatrix {
     match mc {
-        Rav1dMatrixCoefficients::BT709 => &BT709,
-        Rav1dMatrixCoefficients::BT601
-        | Rav1dMatrixCoefficients::BT470BG
-        | Rav1dMatrixCoefficients::FCC => &BT601,
-        Rav1dMatrixCoefficients::BT2020_NCL | Rav1dMatrixCoefficients::BT2020_CL => &BT2020,
+        Dav1dMatrixCoefficients::BT709 => &BT709,
+        Dav1dMatrixCoefficients::BT601
+        | Dav1dMatrixCoefficients::BT470BG
+        | Dav1dMatrixCoefficients::FCC => &BT601,
+        Dav1dMatrixCoefficients::BT2020_NCL | Dav1dMatrixCoefficients::BT2020_CL => &BT2020,
         _ => &BT709,
     }
 }
@@ -66,7 +66,7 @@ fn clamp8(v: i32) -> u8 {
     v.max(0).min(255) as u8
 }
 
-/// Convert a decoded rav1d picture to RGBA. Writes to `rgba_buf`.
+/// Convert a decoded dav1d picture to RGBA. Writes to `rgba_buf`.
 /// Returns (width, height).
 pub fn picture_to_rgba(pic: &DecodedPicture, rgba_buf: &mut Vec<u8>) -> (u32, u32) {
     let w = pic.width() as usize;
@@ -91,8 +91,8 @@ fn convert_8bit(
     pic: &DecodedPicture,
     w: usize,
     h: usize,
-    layout: Rav1dPixelLayout,
-    mc: Rav1dMatrixCoefficients,
+    layout: Dav1dPixelLayout,
+    mc: Dav1dMatrixCoefficients,
     rgba: &mut [u8],
 ) {
     let (y_ptr, y_stride) = pic.plane_y();
@@ -101,7 +101,7 @@ fn convert_8bit(
     let mat = matrix_for(mc);
 
     match layout {
-        Rav1dPixelLayout::I420 => {
+        Dav1dPixelLayout::I420 => {
             for row in 0..h {
                 let y_row =
                     unsafe { std::slice::from_raw_parts(y_ptr.offset(row as isize * y_stride), w) };
@@ -132,7 +132,7 @@ fn convert_8bit(
                 }
             }
         }
-        Rav1dPixelLayout::I422 => {
+        Dav1dPixelLayout::I422 => {
             for row in 0..h {
                 let y_row =
                     unsafe { std::slice::from_raw_parts(y_ptr.offset(row as isize * y_stride), w) };
@@ -156,7 +156,7 @@ fn convert_8bit(
                 }
             }
         }
-        Rav1dPixelLayout::I444 => {
+        Dav1dPixelLayout::I444 => {
             for row in 0..h {
                 let y_row =
                     unsafe { std::slice::from_raw_parts(y_ptr.offset(row as isize * y_stride), w) };
@@ -178,7 +178,7 @@ fn convert_8bit(
                 }
             }
         }
-        Rav1dPixelLayout::I400 => {
+        Dav1dPixelLayout::I400 => {
             // Monochrome — Y only
             for row in 0..h {
                 let y_row =
@@ -201,11 +201,11 @@ fn convert_10bit(
     pic: &DecodedPicture,
     w: usize,
     h: usize,
-    layout: Rav1dPixelLayout,
-    mc: Rav1dMatrixCoefficients,
+    layout: Dav1dPixelLayout,
+    mc: Dav1dMatrixCoefficients,
     rgba: &mut [u8],
 ) {
-    // rav1d returns 10-bit in 16-bit words (LSB-aligned)
+    // dav1d returns 10-bit in 16-bit words (LSB-aligned)
     let (y_ptr, y_stride) = pic.plane_y();
     let (u_ptr, u_stride) = pic.plane_u();
     let (v_ptr, _v_stride) = pic.plane_v();
@@ -216,7 +216,7 @@ fn convert_10bit(
     let u_stride_px = u_stride / 2;
 
     match layout {
-        Rav1dPixelLayout::I420 => {
+        Dav1dPixelLayout::I420 => {
             for row in 0..h {
                 let y_row = unsafe {
                     std::slice::from_raw_parts(
