@@ -4,6 +4,7 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_platform::event::video_playback::*,
+    makepad_platform::video::{VideoInputId, VideoFormatId},
     widget::*,
 };
 use std::rc::Rc;
@@ -555,6 +556,18 @@ impl VideoRef {
         }
     }
 
+    /// Sets a camera source for the video.
+    pub fn set_source_camera(&self, _cx: &mut Cx, input_id: VideoInputId, format_id: VideoFormatId) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.playback_state == PlaybackState::Unprepared {
+                inner.source = VideoDataSource::Camera {
+                    input_id: input_id.0,
+                    format_id: format_id.0,
+                };
+            }
+        }
+    }
+
     /// Sets an in-memory source for the video data.
     ///
     /// This bypasses filesystem and network paths and is useful for embedded media assets.
@@ -864,6 +877,9 @@ impl Video {
                     VideoDataSource::Network { url } => VideoSource::Network(url.to_string()),
                     VideoDataSource::Filesystem { path } => {
                         VideoSource::Filesystem(path.to_string())
+                    }
+                    VideoDataSource::Camera { input_id, format_id } => {
+                        VideoSource::Camera(VideoInputId(*input_id), VideoFormatId(*format_id))
                     }
                 }
             };
@@ -1615,4 +1631,6 @@ pub enum VideoDataSource {
     Network { url: String },
     #[live {path: "".to_string()}]
     Filesystem { path: String },
+    #[live {input_id: LiveId::empty(), format_id: LiveId::empty()}]
+    Camera { input_id: LiveId, format_id: LiveId },
 }

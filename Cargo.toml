@@ -20,6 +20,7 @@ workspace.members = [
     "examples/text_input",
     "examples/counter",
     "examples/video_formats",
+    "examples/camera",
 #    "examples/matrix",
     "libs/gltf",
     "libs/splat",
