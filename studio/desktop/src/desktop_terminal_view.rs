@@ -435,9 +435,10 @@ impl DesktopTerminalView {
         let render_rows = rows.min(max_visible_rows);
 
         // Compute the screen-space Y origin and the first frame row to render.
-        // For follow_output: bottom-align (last row flush with viewport bottom).
-        // For non-follow: top-align (first row at viewport top).
-        let (origin_y, start_row) = if self.follow_output {
+        // For follow_output when screen is full: bottom-align (last row flush with viewport bottom).
+        // Otherwise (not full, or scrolled up): top-align (first row at viewport top).
+        let is_full_screen = frame.total_lines >= frame.rows as usize;
+        let (origin_y, start_row) = if self.follow_output && is_full_screen {
             let grid_height = render_rows as f64 * cell_height;
             let y = screen_bottom - grid_height;
             let sr = rows.saturating_sub(render_rows);
