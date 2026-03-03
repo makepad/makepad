@@ -1,5 +1,5 @@
 //! Unified video player for Linux that wraps GStreamer native player
-//! and software dav1d fallback.
+//! and software rav1d fallback.
 
 use {
     super::gl_sys::LibGl,

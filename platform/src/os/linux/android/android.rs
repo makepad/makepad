@@ -901,7 +901,7 @@ impl Cx {
             self.call_event_handler(&e);
         }
 
-        // Software AV1 fallback updates (dav1d path)
+        // Software AV1 fallback updates (rav1d path)
         self.poll_software_video_players();
 
         // Live edits

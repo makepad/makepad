@@ -705,7 +705,7 @@ impl WaylandCx {
                     {
                         continue;
                     }
-                    // Try GStreamer first, fall back to software dav1d
+                    // Try GStreamer first, fall back to software rav1d
                     let mut use_software = std::env::var_os("MAKEPAD_FORCE_SOFTWARE_AV1").is_some();
                     if use_software {
                         crate::log!(

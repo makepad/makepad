@@ -9,9 +9,6 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
-[build-dependencies]
-cc = "1"
-
 [dependencies]
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
@@ -20,6 +17,7 @@ makepad-script = { path="./script", version="1.0.0"}
 makepad-zune-png = { path = "../libs/zune/zune-png", version = "0.5.1" }
 smallvec = { version = "1.15", path = "../libs/smallvec" }
 bitflags = { version = "2.10", path = "../libs/bitflags" }
+rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }

@@ -1,12 +1,12 @@
-//! Software AV1 player using vendored dav1d decoder.
+//! Software AV1 player using a pure-Rust rav1d decoder.
 //!
 //! Provides a fallback when native platform video players are unavailable
 //! or don't support AV1. Decodes AV1 samples from MP4 containers using
-//! dav1d, converts YUV to RGBA, and presents frames for texture upload.
+//! rav1d, converts YUV to RGBA, and presents frames for texture upload.
 
 use {
-    super::dav1d_ffi::Dav1dDecoder,
     super::mp4_demux::{self, Mp4Track},
+    super::rav1d::Rav1dDecoder,
     super::yuv,
     crate::event::video_playback::VideoSource,
     crate::makepad_live_id::LiveId,
@@ -35,7 +35,7 @@ enum PlayerState {
 }
 
 struct ActivePlayer {
-    decoder: Dav1dDecoder,
+    decoder: Rav1dDecoder,
     track: Mp4Track,
     file_data: Vec<u8>,
     autoplay: bool,
@@ -157,7 +157,7 @@ impl SoftwareAv1Player {
         let mut cursor = Cursor::new(&file_data);
         let track = mp4_demux::parse_mp4(&mut cursor).map_err(|e| format!("MP4 parse: {}", e))?;
 
-        let decoder = Dav1dDecoder::new()?;
+        let decoder = Rav1dDecoder::new()?;
 
         Ok(ActivePlayer {
             decoder,
@@ -221,7 +221,7 @@ impl SoftwareAv1Player {
                 &active.file_data[start..end]
             };
 
-            // Send to dav1d
+            // Send to rav1d
             match active.decoder.send_data(sample_data, pts_ms as i64) {
                 Ok(true) => {}
                 Ok(false) => {
