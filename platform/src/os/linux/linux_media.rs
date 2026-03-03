@@ -1,5 +1,8 @@
 use {
-    self::super::{alsa_audio::AlsaAudioAccess, alsa_midi::*, pulse_audio::PulseAudioAccess},
+    self::super::{
+        alsa_audio::AlsaAudioAccess, alsa_midi::*, pulse_audio::PulseAudioAccess,
+        v4l2_camera::V4l2CameraAccess,
+    },
     crate::{
         audio::*, cx::Cx, event::Event, media_api::CxMediaApi, midi::*, thread::SignalToUI,
         video::*,
@@ -39,6 +42,16 @@ impl Cx {
                 .get_updated_descs();
             self.call_event_handler(&Event::MidiPorts(MidiPortsEvent { descs }));
         }
+        if self.os.media.v4l2_change.check_and_clear() {
+            let descs = self
+                .os
+                .media
+                .v4l2_camera()
+                .lock()
+                .unwrap()
+                .get_updated_descs();
+            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent { descs }));
+        }
     }
 }
 
@@ -49,6 +62,8 @@ pub struct CxLinuxMedia {
     pub(crate) audio_change: SignalToUI,
     pub(crate) alsa_midi: Option<Arc<Mutex<AlsaMidiAccess>>>,
     pub(crate) alsa_midi_change: SignalToUI,
+    pub(crate) v4l2_camera: Option<Arc<Mutex<V4l2CameraAccess>>>,
+    pub(crate) v4l2_change: SignalToUI,
 }
 
 impl CxLinuxMedia {
@@ -74,6 +89,13 @@ impl CxLinuxMedia {
             self.alsa_midi = Some(AlsaMidiAccess::new(self.alsa_midi_change.clone()));
         }
         self.alsa_midi.as_ref().unwrap().clone()
+    }
+
+    pub fn v4l2_camera(&mut self) -> Arc<Mutex<V4l2CameraAccess>> {
+        if self.v4l2_camera.is_none() {
+            self.v4l2_camera = Some(V4l2CameraAccess::new(self.v4l2_change.clone()));
+        }
+        self.v4l2_camera.as_ref().unwrap().clone()
     }
 }
 
@@ -153,7 +175,18 @@ impl CxMediaApi for Cx {
             .unwrap() = Some(f);
     }
 
-    fn video_input_box(&mut self, _index: usize, _f: VideoInputFn) {}
+    fn video_input_box(&mut self, index: usize, f: VideoInputFn) {
+        *self.os.media.v4l2_camera().lock().unwrap().video_input_cb[index]
+            .lock()
+            .unwrap() = Some(f);
+    }
 
-    fn use_video_input(&mut self, _inputs: &[(VideoInputId, VideoFormatId)]) {}
+    fn use_video_input(&mut self, inputs: &[(VideoInputId, VideoFormatId)]) {
+        self.os
+            .media
+            .v4l2_camera()
+            .lock()
+            .unwrap()
+            .use_video_input(inputs);
+    }
 }

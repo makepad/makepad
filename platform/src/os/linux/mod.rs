@@ -25,6 +25,7 @@ pub mod open_harmony;
 pub mod egl_sys;
 #[macro_use]
 pub mod gl_sys;
+pub(crate) mod gl_video_upload;
 pub mod libc_sys;
 pub mod module_loader;
 pub mod opengl;
@@ -52,6 +53,10 @@ pub mod alsa_midi;
 pub mod alsa_sys;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod linux_media;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod v4l2_sys;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod v4l2_camera;
 
 #[cfg(not(target_os = "android"))]
 pub mod select_timer;
