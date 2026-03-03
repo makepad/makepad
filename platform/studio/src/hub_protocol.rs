@@ -1,7 +1,7 @@
+use crate::shared_framebuf::PresentableDraw;
+use makepad_error_log::LogLevel;
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
-use makepad_error_log::LogLevel;
-use crate::shared_framebuf::PresentableDraw;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerBin, DeBin, SerJson, DeJson)]
@@ -168,10 +168,11 @@ pub enum ClientToHub {
         path: String,
         data: Vec<u8>,
     },
-    TerminalResize {
+    TerminalViewportRequest {
         path: String,
         cols: u16,
         rows: u16,
+        top_row: usize,
     },
     TerminalClose {
         path: String,
@@ -366,12 +367,10 @@ pub enum HubToClient {
     // === Terminal ===
     TerminalOpened {
         path: String,
-        history: Vec<u8>,
-        grid: TerminalGrid,
     },
-    TerminalOutput {
+    TerminalFramebuffer {
         path: String,
-        data: Vec<u8>,
+        frame: TerminalFramebuffer,
     },
     TerminalTitle {
         path: String,
@@ -658,13 +657,6 @@ pub struct GCSample {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, Default)]
-pub struct TerminalGrid {
-    pub cols: u16,
-    pub rows: u16,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, Default)]
 pub struct TerminalCellDiff {
     pub changed: Vec<TerminalCellUpdate>,
 }
@@ -674,6 +666,24 @@ pub struct TerminalCellUpdate {
     pub x: u16,
     pub y: u16,
     pub ch: u32,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, Default)]
+pub struct TerminalFramebuffer {
+    pub cols: u16,
+    pub rows: u16,
+    pub top_row: usize,
+    pub total_lines: usize,
+    pub cursor_col: u16,
+    pub cursor_row: i32,
+    pub cursor_visible: bool,
+    pub default_fg_rgb: u32,
+    pub default_bg_rgb: u32,
+    pub bracketed_paste: bool,
+    pub cursor_keys_application_mode: bool,
+    // Tight binary payload, row-major:
+    // [codepoint_u32_le, bg_r, bg_g, bg_b] repeated `cols * rows` times.
+    pub cells: Vec<u8>,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]

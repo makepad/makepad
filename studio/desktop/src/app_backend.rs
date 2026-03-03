@@ -518,7 +518,7 @@ impl App {
                 }
             }
         }
-        for path in self.data.terminal_stream_by_path.keys() {
+        for path in self.data.terminal_framebuffer_by_path.keys() {
             if Self::is_terminal_virtual_path(path)
                 && Self::mount_from_virtual_path(path.as_str()) == Some(mount)
             {
@@ -569,8 +569,12 @@ impl App {
             let tab_id = dock.unique_id(LiveId::from_str(path).0);
             if dock
                 .create_tab(
-                    cx, tab_bar, tab_id, id!(TerminalPane),
-                    Self::terminal_tab_title(path), id!(CloseableTab),
+                    cx,
+                    tab_bar,
+                    tab_id,
+                    id!(TerminalPane),
+                    Self::terminal_tab_title(path),
+                    id!(CloseableTab),
                     Some(pos.saturating_sub(1)),
                 )
                 .is_none()
@@ -617,12 +621,7 @@ impl App {
         if self.data.terminal_open_paths.contains(path) {
             return;
         }
-        let (cols, rows) = self
-            .data
-            .terminal_desired_size_by_path
-            .get(path)
-            .copied()
-            .unwrap_or((120, 40));
+        let (cols, rows) = (120u16, 40u16);
         let _ = self.send_studio(ClientToHub::TerminalOpen {
             path: path.to_string(),
             cols,
@@ -640,7 +639,7 @@ impl App {
         let keep_paths: HashSet<String> = files.iter().cloned().collect();
         let stale_paths: Vec<String> = self
             .data
-            .terminal_stream_by_path
+            .terminal_framebuffer_by_path
             .keys()
             .filter(|path| {
                 Self::mount_from_virtual_path(path.as_str()) == Some(mount)
@@ -649,9 +648,7 @@ impl App {
             .cloned()
             .collect();
         for stale in stale_paths {
-            self.data.terminal_stream_by_path.remove(&stale);
-            self.data.terminal_history_len_by_path.remove(&stale);
-            self.data.terminal_desired_size_by_path.remove(&stale);
+            self.data.terminal_framebuffer_by_path.remove(&stale);
             if self.data.terminal_open_paths.remove(&stale) {
                 let _ = self.send_studio(ClientToHub::TerminalClose { path: stale });
             }
@@ -668,7 +665,7 @@ impl App {
 
         for path in &files {
             self.data
-                .terminal_stream_by_path
+                .terminal_framebuffer_by_path
                 .entry(path.clone())
                 .or_default();
             self.ensure_terminal_session_open(path);
@@ -679,13 +676,17 @@ impl App {
             {
                 let mount_state = self.mount_state_mut(mount);
                 mount_state.select_last_terminal_once = true;
-                if !mount_state.terminal_files.iter().any(|existing| existing == &path) {
+                if !mount_state
+                    .terminal_files
+                    .iter()
+                    .any(|existing| existing == &path)
+                {
                     mount_state.terminal_files.push(path.clone());
                     mount_state.terminal_files.sort();
                 }
             }
             self.data
-                .terminal_stream_by_path
+                .terminal_framebuffer_by_path
                 .entry(path.clone())
                 .or_default();
             self.sync_mount_terminal_tabs(cx, mount, true);
@@ -729,7 +730,11 @@ impl App {
         {
             let mount_state = self.mount_state_mut(mount);
             mount_state.select_last_terminal_once = true;
-            if !mount_state.terminal_files.iter().any(|existing| existing == &path) {
+            if !mount_state
+                .terminal_files
+                .iter()
+                .any(|existing| existing == &path)
+            {
                 mount_state.terminal_files.push(path.clone());
                 mount_state.terminal_files.sort();
             }
@@ -740,7 +745,7 @@ impl App {
             content: String::new(),
         });
         self.data
-            .terminal_stream_by_path
+            .terminal_framebuffer_by_path
             .entry(path.clone())
             .or_default();
         self.sync_mount_terminal_tabs(_cx, mount, true);
@@ -773,9 +778,7 @@ impl App {
         }
 
         self.data.terminal_open_paths.remove(&path);
-        self.data.terminal_stream_by_path.remove(&path);
-        self.data.terminal_history_len_by_path.remove(&path);
-        self.data.terminal_desired_size_by_path.remove(&path);
+        self.data.terminal_framebuffer_by_path.remove(&path);
         let _ = self.send_studio(ClientToHub::TerminalClose { path: path.clone() });
         let _ = self.send_studio(ClientToHub::DeleteFile { path });
     }

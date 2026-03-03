@@ -1,5 +1,5 @@
 use makepad_studio_hub::{HubConfig, MountConfig, StudioHub};
-use makepad_studio_protocol::hub_protocol::{HubToClient, ClientToHub};
+use makepad_studio_protocol::hub_protocol::{ClientToHub, HubToClient, TerminalFramebuffer};
 use std::fs;
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,111 @@ fn drain_messages(
         }
     }
     out
+}
+
+fn request_terminal_viewport(
+    connection: &mut makepad_studio_hub::HubConnection,
+    path: &str,
+    cols: u16,
+    rows: u16,
+    top_row: usize,
+) {
+    let _ = connection.send(ClientToHub::TerminalViewportRequest {
+        path: path.to_string(),
+        cols,
+        rows,
+        top_row,
+    });
+}
+
+fn framebuffer_to_text(frame: &TerminalFramebuffer) -> String {
+    let cols = frame.cols as usize;
+    let rows = frame.rows as usize;
+    let mut out = String::with_capacity(cols * rows + rows.saturating_sub(1));
+    for row in 0..rows {
+        for col in 0..cols {
+            let idx = (row * cols + col) * 7;
+            if idx + 6 >= frame.cells.len() {
+                out.push(' ');
+                continue;
+            }
+            let codepoint = u32::from_le_bytes([
+                frame.cells[idx],
+                frame.cells[idx + 1],
+                frame.cells[idx + 2],
+                frame.cells[idx + 3],
+            ]);
+            out.push(char::from_u32(codepoint).unwrap_or(' '));
+        }
+        if row + 1 < rows {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn wait_for_terminal_frame_contains(
+    connection: &makepad_studio_hub::HubConnection,
+    path: &str,
+    needle: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let Some(msg) = connection.recv_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
+        match msg {
+            HubToClient::TerminalFramebuffer {
+                path: output_path,
+                frame,
+            } if output_path == path => {
+                if framebuffer_to_text(&frame).contains(needle) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn wait_for_terminal_frame_where<F>(
+    connection: &makepad_studio_hub::HubConnection,
+    path: &str,
+    timeout: Duration,
+    mut predicate: F,
+) -> Option<TerminalFramebuffer>
+where
+    F: FnMut(&TerminalFramebuffer) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let Some(msg) = connection.recv_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
+        match msg {
+            HubToClient::TerminalFramebuffer {
+                path: output_path,
+                frame,
+            } if output_path == path => {
+                if predicate(&frame) {
+                    return Some(frame);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn framebuffer_last_row_text(frame: &TerminalFramebuffer) -> String {
+    framebuffer_to_text(frame)
+        .lines()
+        .last()
+        .unwrap_or("")
+        .trim_end()
+        .to_string()
 }
 
 #[test]
@@ -124,8 +229,6 @@ fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
 #[test]
 fn terminal_large_paste_keeps_session_alive() {
     const LARGE_PASTE_BYTES: usize = 512 * 1024;
-    const MARKER: &[u8] = b"__paste_ok__";
-    const MARKER_TAIL_KEEP: usize = 512;
 
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -153,6 +256,7 @@ fn terminal_large_paste_keeps_session_alive() {
         |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == &path),
     );
     assert!(opened.is_some(), "did not receive TerminalOpened");
+    request_terminal_viewport(&mut connection, &path, 120, 30, usize::MAX);
 
     // Disable echo so the large paste does not flood output, stream a large paste
     // into cat, send Ctrl-D, then run a marker command.
@@ -168,7 +272,6 @@ fn terminal_large_paste_keeps_session_alive() {
     });
 
     let mut saw_marker = false;
-    let mut tail = Vec::<u8>::new();
     let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline {
         let Some(msg) = connection.recv_timeout(Duration::from_millis(100)) else {
@@ -185,20 +288,13 @@ fn terminal_large_paste_keeps_session_alive() {
             {
                 panic!("terminal lost after large paste: {}", message);
             }
-            HubToClient::TerminalOutput {
+            HubToClient::TerminalFramebuffer {
                 path: output_path,
-                data,
+                frame,
             } if output_path == path => {
-                tail.extend_from_slice(&data);
-                if tail.windows(MARKER.len()).any(|window| window == MARKER) {
+                if framebuffer_to_text(&frame).contains("__paste_ok__") {
                     saw_marker = true;
                     break;
-                }
-                if tail.len() > 8192 {
-                    let drain_to = tail.len().saturating_sub(MARKER_TAIL_KEEP);
-                    if drain_to > 0 {
-                        tail.drain(0..drain_to);
-                    }
                 }
             }
             _ => {}
@@ -206,7 +302,351 @@ fn terminal_large_paste_keeps_session_alive() {
     }
 
     let _ = connection.send(ClientToHub::TerminalClose { path });
-    assert!(saw_marker, "did not observe terminal response after large paste");
+    assert!(
+        saw_marker,
+        "did not observe terminal response after large paste"
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn terminal_resize_delivers_sigwinch_with_updated_stty_size() {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let script_path = dir.path().join("resize_sigwinch_test.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+printf '\033[?1049h\033[2J\033[H'
+report_size() {
+    size="$(stty size 2>/dev/null || echo 0 0)"
+    printf '__SIZE__:%s\n' "$size"
+}
+trap 'report_size' WINCH
+report_size
+while :; do
+    sleep 0.2
+done
+"#,
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms).unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let path = "repo/.makepad/resize_sigwinch.term".to_string();
+    let _ = connection.send(ClientToHub::TerminalOpen {
+        path: path.clone(),
+        cols: 80,
+        rows: 10,
+        env: std::collections::HashMap::new(),
+    });
+
+    let opened = wait_for_message(
+        &connection,
+        Duration::from_secs(4),
+        |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == &path),
+    );
+    assert!(opened.is_some(), "did not receive TerminalOpened");
+    request_terminal_viewport(&mut connection, &path, 80, 10, usize::MAX);
+
+    let run_cmd = format!("sh {}\n", script_path.to_string_lossy());
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: run_cmd.into_bytes(),
+    });
+
+    assert!(
+        wait_for_terminal_frame_contains(
+            &connection,
+            &path,
+            "__SIZE__:10 80",
+            Duration::from_secs(8),
+        ),
+        "initial stty size marker was not observed"
+    );
+
+    request_terminal_viewport(&mut connection, &path, 80, 20, usize::MAX);
+    assert!(
+        wait_for_terminal_frame_contains(
+            &connection,
+            &path,
+            "__SIZE__:20 80",
+            Duration::from_secs(8),
+        ),
+        "did not observe stty size update after first resize"
+    );
+
+    request_terminal_viewport(&mut connection, &path, 120, 20, usize::MAX);
+    assert!(
+        wait_for_terminal_frame_contains(
+            &connection,
+            &path,
+            "__SIZE__:20 120",
+            Duration::from_secs(8),
+        ),
+        "did not observe stty size update after second resize"
+    );
+
+    // Stop the loop before closing the PTY session.
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: vec![0x03],
+    });
+    let _ = connection.send(ClientToHub::TerminalClose { path });
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn terminal_bash_prompt_sticks_to_bottom_after_grow_resize() {
+    let bash_available = std::process::Command::new("sh")
+        .args(["-lc", "command -v bash >/dev/null 2>&1"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !bash_available {
+        eprintln!("skipping: bash binary not found in PATH");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let path = "repo/.makepad/bash_prompt_stick.term".to_string();
+    let _ = connection.send(ClientToHub::TerminalOpen {
+        path: path.clone(),
+        cols: 80,
+        rows: 10,
+        env: std::collections::HashMap::new(),
+    });
+    let opened = wait_for_message(
+        &connection,
+        Duration::from_secs(4),
+        |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == &path),
+    );
+    assert!(opened.is_some(), "did not receive TerminalOpened");
+    request_terminal_viewport(&mut connection, &path, 80, 10, usize::MAX);
+
+    // Build deep scrollback and leave the interactive prompt at the bottom.
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: b"bash --noprofile --norc -i\nfor i in $(seq 1 180); do echo __SCROLL__$i; done\n"
+            .to_vec(),
+    });
+
+    let frame_10 =
+        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(20), |frame| {
+            frame.rows == 10
+                && frame.total_lines > 120
+                && framebuffer_to_text(frame).contains("__SCROLL__180")
+        })
+        .expect("did not observe 10-row bash viewport with deep scrollback");
+    assert!(
+        frame_10.cursor_visible && frame_10.cursor_row == 9,
+        "10-row viewport should have bash cursor on the last row before resize"
+    );
+
+    request_terminal_viewport(&mut connection, &path, 80, 15, usize::MAX);
+
+    let frame_15 =
+        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(10), |frame| {
+            frame.rows == 15
+                && frame.total_lines >= frame_10.total_lines
+                && framebuffer_to_text(frame).contains("__SCROLL__180")
+        })
+        .expect("did not observe 15-row resized viewport");
+    assert!(
+        frame_15.cursor_visible && frame_15.cursor_row == 14,
+        "15-row viewport should keep bash cursor/prompt pinned to bottom"
+    );
+    assert!(
+        frame_15.top_row <= frame_10.top_row,
+        "grow resize should keep bottom content anchored (top_row must not increase)"
+    );
+
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: b"exit\n".to_vec(),
+    });
+    let _ = connection.send(ClientToHub::TerminalClose { path });
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn terminal_bash_grow_resize_clamps_to_top_when_history_is_insufficient() {
+    let bash_available = std::process::Command::new("sh")
+        .args(["-lc", "command -v bash >/dev/null 2>&1"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !bash_available {
+        eprintln!("skipping: bash binary not found in PATH");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let path = "repo/.makepad/bash_resize_clamp_top.term".to_string();
+    let _ = connection.send(ClientToHub::TerminalOpen {
+        path: path.clone(),
+        cols: 80,
+        rows: 10,
+        env: std::collections::HashMap::new(),
+    });
+    let opened = wait_for_message(
+        &connection,
+        Duration::from_secs(4),
+        |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == &path),
+    );
+    assert!(opened.is_some(), "did not receive TerminalOpened");
+    request_terminal_viewport(&mut connection, &path, 80, 10, usize::MAX);
+
+    // Fresh shell has insufficient history to fill additional rows on grow.
+    let frame_10 =
+        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(10), |frame| {
+            frame.rows == 10
+        })
+        .expect("did not observe short-history 10-row frame");
+
+    request_terminal_viewport(&mut connection, &path, 80, 15, usize::MAX);
+
+    let frame_15 =
+        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(10), |frame| {
+            frame.rows == 15
+        })
+        .expect("did not observe short-history 15-row frame");
+
+    assert!(
+        frame_10.top_row == 0,
+        "short-history baseline should already be clamped to top"
+    );
+    assert!(
+        frame_15.top_row == 0,
+        "grow resize with insufficient history must clamp to top (top_row == 0)"
+    );
+    assert!(
+        frame_15.cursor_row < 14,
+        "with insufficient history, cursor/prompt should not be forced to bottom row"
+    );
+
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: b"exit\n".to_vec(),
+    });
+    let _ = connection.send(ClientToHub::TerminalClose { path });
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn terminal_codex_prompt_sticks_to_bottom_after_resize() {
+    let codex_available = std::process::Command::new("sh")
+        .args(["-lc", "command -v codex >/dev/null 2>&1"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !codex_available {
+        eprintln!("skipping: codex binary not found in PATH");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let path = "repo/.makepad/codex_prompt_stick.term".to_string();
+    let _ = connection.send(ClientToHub::TerminalOpen {
+        path: path.clone(),
+        cols: 80,
+        rows: 10,
+        env: std::collections::HashMap::new(),
+    });
+    let opened = wait_for_message(
+        &connection,
+        Duration::from_secs(4),
+        |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == &path),
+    );
+    assert!(opened.is_some(), "did not receive TerminalOpened");
+
+    request_terminal_viewport(&mut connection, &path, 80, 10, usize::MAX);
+
+    // Build scrollback first, then start codex.
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: b"for i in $(seq 1 220); do echo __SCROLL__$i; done\ncodex\n".to_vec(),
+    });
+
+    let frame_10 =
+        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(30), |frame| {
+            frame.rows == 10
+                && frame.total_lines > 60
+                && !framebuffer_last_row_text(frame).trim().is_empty()
+        })
+        .expect("did not observe 10-row codex viewport state");
+
+    request_terminal_viewport(&mut connection, &path, 80, 15, usize::MAX);
+
+    let frame_15 =
+        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(20), |frame| {
+            frame.rows == 15
+                && frame.total_lines >= frame_10.total_lines
+                && !framebuffer_last_row_text(frame).trim().is_empty()
+        })
+        .expect("did not observe 15-row codex viewport state");
+
+    assert!(
+        !framebuffer_last_row_text(&frame_15).trim().is_empty(),
+        "expected codex prompt/cursor to stay at bottom after resize (10 -> 15 rows)"
+    );
+
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: vec![0x03],
+    });
+    let _ = connection.send(ClientToHub::TerminalClose { path });
 }
 
 #[test]
@@ -299,8 +739,7 @@ fn unmount_emits_file_tree_diff_scoped_to_mount() {
             for change in changes {
                 match change {
                     makepad_studio_protocol::hub_protocol::FileTreeChange::Added {
-                        path,
-                        ..
+                        path, ..
                     }
                     | makepad_studio_protocol::hub_protocol::FileTreeChange::Removed { path }
                     | makepad_studio_protocol::hub_protocol::FileTreeChange::Modified {
@@ -691,17 +1130,13 @@ fn file_watch_emits_file_changed_for_external_write() {
     )
     .unwrap();
 
-    let changed = wait_for_message(
-        &connection,
-        Duration::from_secs(6),
-        |msg| {
-            matches!(
-                msg,
-                HubToClient::FileChanged { path }
-                    if path == "repo/src/lib.rs" || path == "repo"
-            )
-        },
-    );
+    let changed = wait_for_message(&connection, Duration::from_secs(6), |msg| {
+        matches!(
+            msg,
+            HubToClient::FileChanged { path }
+                if path == "repo/src/lib.rs" || path == "repo"
+        )
+    });
     assert!(
         changed.is_some(),
         "did not observe FileChanged for external write"
