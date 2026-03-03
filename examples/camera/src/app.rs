@@ -62,37 +62,109 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
 
-        if let Event::VideoInputs(ev) = event {
-            if self.started {
-                return;
+        match event {
+            Event::Startup => {
+                log!("[camera-example] Startup event received");
             }
-            if ev.descs.is_empty() {
-                self.ui
-                    .label(cx, ids!(status_label))
-                    .set_text(cx, "No camera found");
-                return;
+            Event::Draw(e) => {
+                if !self.started {
+                    log!("[camera-example] Draw event, started={}", self.started);
+                }
+                let _ = e;
             }
+            Event::VideoInputs(ev) => {
+                log!(
+                    "[camera-example] VideoInputs event: {} devices, started={}",
+                    ev.descs.len(),
+                    self.started
+                );
+                for (i, desc) in ev.descs.iter().enumerate() {
+                    log!(
+                        "[camera-example]   device[{}]: name={:?} input_id={:?} formats={}",
+                        i,
+                        desc.name,
+                        desc.input_id,
+                        desc.formats.len()
+                    );
+                    for (j, fmt) in desc.formats.iter().enumerate().take(5) {
+                        log!(
+                            "[camera-example]     format[{}]: {}x{} {:?} fps={:?}",
+                            j,
+                            fmt.width,
+                            fmt.height,
+                            fmt.pixel_format,
+                            fmt.frame_rate
+                        );
+                    }
+                }
 
-            let inputs = ev.find_highest(0);
-            if inputs.is_empty() {
-                self.ui
-                    .label(cx, ids!(status_label))
-                    .set_text(cx, "No suitable format found");
-                return;
+                if self.started {
+                    return;
+                }
+                if ev.descs.is_empty() {
+                    log!("[camera-example] No cameras found");
+                    self.ui
+                        .label(cx, ids!(status_label))
+                        .set_text(cx, "No camera found");
+                    return;
+                }
+
+                let inputs = ev.find_highest(0);
+                log!("[camera-example] find_highest(0) returned {} entries", inputs.len());
+                if inputs.is_empty() {
+                    self.ui
+                        .label(cx, ids!(status_label))
+                        .set_text(cx, "No suitable format found");
+                    return;
+                }
+
+                let (input_id, format_id) = inputs[0];
+                let desc = &ev.descs[0];
+                log!(
+                    "[camera-example] Starting camera: {:?} input_id={:?} format_id={:?}",
+                    desc.name,
+                    input_id,
+                    format_id
+                );
+
+                self.ui.label(cx, ids!(status_label)).set_text(
+                    cx,
+                    &format!("Camera: {}", desc.name),
+                );
+
+                let video_ref = self.ui.video(cx, &[live_id!(camera_video)]);
+                log!("[camera-example] Got video ref, calling set_source_camera");
+                video_ref.set_source_camera(cx, input_id, format_id);
+                log!("[camera-example] Calling begin_playback");
+                video_ref.begin_playback(cx);
+                self.started = true;
+                log!("[camera-example] Camera started");
             }
-
-            let (input_id, format_id) = inputs[0];
-            let desc = &ev.descs[0];
-            self.ui.label(cx, ids!(status_label)).set_text(
-                cx,
-                &format!("Camera: {}", desc.name),
-            );
-
-            // Allocate texture and start camera playback
-            let video_ref = self.ui.video(cx, &[live_id!(camera_video)]);
-            video_ref.set_source_camera(cx, input_id, format_id);
-            video_ref.begin_playback(cx);
-            self.started = true;
+            Event::VideoPlaybackPrepared(ev) => {
+                log!(
+                    "[camera-example] VideoPlaybackPrepared: video_id={:?} {}x{} duration={}",
+                    ev.video_id,
+                    ev.video_width,
+                    ev.video_height,
+                    ev.duration
+                );
+            }
+            Event::VideoTextureUpdated(ev) => {
+                log!(
+                    "[camera-example] VideoTextureUpdated: video_id={:?} pos={} yuv_enabled={}",
+                    ev.video_id,
+                    ev.current_position_ms,
+                    ev.yuv_enabled
+                );
+            }
+            Event::VideoDecodingError(ev) => {
+                log!(
+                    "[camera-example] VideoDecodingError: video_id={:?} error={:?}",
+                    ev.video_id,
+                    ev.error
+                );
+            }
+            _ => {}
         }
     }
 }
