@@ -2536,7 +2536,7 @@ impl HubCore {
         let screen = terminal.screen();
         let has_custom_scroll_region = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows();
         if has_custom_scroll_region {
-            screen.scrollback_len()
+            screen.scrollback_len() + screen.used_rows().saturating_sub(rows.max(1) as usize)
         } else {
             let effective_total = screen.scrollback_len() + screen.used_rows();
             effective_total.saturating_sub(rows.max(1) as usize)
@@ -2783,7 +2783,8 @@ fn terminal_framebuffer_from_terminal(
     };
     
     let max_top = if has_custom_scroll_region {
-        screen.scrollback_len()
+        // Allow scrolling down to see the full grid if it's larger than the viewport
+        screen.scrollback_len() + screen.used_rows().saturating_sub(rows_usize)
     } else {
         total_lines.saturating_sub(rows_usize)
     };
