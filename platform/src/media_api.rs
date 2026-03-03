@@ -40,5 +40,18 @@ pub trait CxMediaApi {
 
     fn video_input_box(&mut self, index: usize, f: VideoInputFn);
 
+    fn camera_frame_input<F>(&mut self, index: usize, f: F)
+    where
+        F: for<'a> FnMut(CameraFrameRef<'a>) + Send + 'static,
+    {
+        self.camera_frame_input_box(index, Box::new(f))
+    }
+
+    /// Platform-agnostic camera frame transport hook.
+    ///
+    /// Backends that support structured camera frame transport should override this.
+    /// Backends that do not support it yet can keep the default no-op implementation.
+    fn camera_frame_input_box(&mut self, _index: usize, _f: CameraFrameInputFn) {}
+
     fn use_video_input(&mut self, devices: &[(VideoInputId, VideoFormatId)]);
 }

@@ -141,6 +141,222 @@ impl VideoPixelFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CameraFrameLayout {
+    I420,
+    NV12,
+    YUY2,
+    Mjpeg,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CameraColorMatrix {
+    BT709,
+    BT601,
+    BT2020,
+    #[default]
+    Unknown,
+}
+
+impl CameraColorMatrix {
+    pub fn as_yuv_uniform(self) -> f32 {
+        match self {
+            Self::BT709 => 0.0,
+            Self::BT601 => 1.0,
+            Self::BT2020 => 2.0,
+            Self::Unknown => 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CameraFramePlaneRef<'a> {
+    pub bytes: &'a [u8],
+    pub row_stride: usize,
+    pub pixel_stride: usize,
+}
+
+impl<'a> CameraFramePlaneRef<'a> {
+    pub fn empty() -> Self {
+        Self {
+            bytes: &[],
+            row_stride: 0,
+            pixel_stride: 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CameraFrameRef<'a> {
+    pub timestamp_ns: u64,
+    pub width: usize,
+    pub height: usize,
+    pub layout: CameraFrameLayout,
+    pub matrix: CameraColorMatrix,
+    pub plane_count: usize,
+    pub planes: [CameraFramePlaneRef<'a>; 3],
+}
+
+impl<'a> CameraFrameRef<'a> {
+    pub fn empty() -> Self {
+        Self {
+            timestamp_ns: 0,
+            width: 0,
+            height: 0,
+            layout: CameraFrameLayout::Unknown,
+            matrix: CameraColorMatrix::Unknown,
+            plane_count: 0,
+            planes: [
+                CameraFramePlaneRef::empty(),
+                CameraFramePlaneRef::empty(),
+                CameraFramePlaneRef::empty(),
+            ],
+        }
+    }
+}
+
+pub type CameraFrameInputFn = Box<dyn for<'a> FnMut(CameraFrameRef<'a>) + Send + 'static>;
+
+#[derive(Default)]
+pub struct CameraFramePlaneOwned {
+    pub bytes: Vec<u8>,
+    pub row_stride: usize,
+    pub pixel_stride: usize,
+}
+
+#[derive(Default)]
+pub struct CameraFrameOwned {
+    pub timestamp_ns: u64,
+    pub width: usize,
+    pub height: usize,
+    pub layout: CameraFrameLayout,
+    pub matrix: CameraColorMatrix,
+    pub plane_count: usize,
+    pub planes: [CameraFramePlaneOwned; 3],
+}
+
+impl CameraFrameOwned {
+    pub fn reset(&mut self) {
+        self.timestamp_ns = 0;
+        self.width = 0;
+        self.height = 0;
+        self.layout = CameraFrameLayout::Unknown;
+        self.matrix = CameraColorMatrix::Unknown;
+        self.plane_count = 0;
+        for plane in &mut self.planes {
+            plane.row_stride = 0;
+            plane.pixel_stride = 1;
+            plane.bytes.clear();
+        }
+    }
+
+    pub fn copy_from_ref(&mut self, src: CameraFrameRef<'_>) {
+        self.timestamp_ns = src.timestamp_ns;
+        self.width = src.width;
+        self.height = src.height;
+        self.layout = src.layout;
+        self.matrix = src.matrix;
+        self.plane_count = src.plane_count.min(3);
+
+        for i in 0..self.plane_count {
+            let src_plane = src.planes[i];
+            let (plane_w, plane_h) = self.plane_size(i);
+            let dst_plane = &mut self.planes[i];
+            dst_plane.row_stride = plane_w;
+            dst_plane.pixel_stride = 1;
+            dst_plane.bytes.resize(plane_w * plane_h, 0);
+
+            if src_plane.bytes.is_empty() || plane_w == 0 || plane_h == 0 {
+                continue;
+            }
+
+            if src_plane.pixel_stride == 1 && src_plane.row_stride == plane_w {
+                let max_copy = dst_plane.bytes.len().min(src_plane.bytes.len());
+                dst_plane.bytes[..max_copy].copy_from_slice(&src_plane.bytes[..max_copy]);
+                continue;
+            }
+
+            for row in 0..plane_h {
+                let src_row_start = row.saturating_mul(src_plane.row_stride);
+                let dst_row_start = row * plane_w;
+                for col in 0..plane_w {
+                    let src_idx = src_row_start + col.saturating_mul(src_plane.pixel_stride.max(1));
+                    dst_plane.bytes[dst_row_start + col] =
+                        src_plane.bytes.get(src_idx).copied().unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    pub fn plane_size(&self, plane_index: usize) -> (usize, usize) {
+        if self.width == 0 || self.height == 0 {
+            return (0, 0);
+        }
+        match self.layout {
+            CameraFrameLayout::I420 | CameraFrameLayout::NV12 => {
+                if plane_index == 0 {
+                    (self.width, self.height)
+                } else {
+                    (self.width.div_ceil(2), self.height.div_ceil(2))
+                }
+            }
+            CameraFrameLayout::YUY2 => {
+                if plane_index == 0 {
+                    (self.width, self.height)
+                } else {
+                    (0, 0)
+                }
+            }
+            CameraFrameLayout::Mjpeg | CameraFrameLayout::Unknown => {
+                if plane_index == 0 {
+                    (self.width, self.height)
+                } else {
+                    (0, 0)
+                }
+            }
+        }
+    }
+}
+
+pub struct CameraFramePool {
+    free: Vec<CameraFrameOwned>,
+    latest: Option<CameraFrameOwned>,
+    max_free: usize,
+}
+
+impl CameraFramePool {
+    pub fn new(max_free: usize) -> Self {
+        Self {
+            free: Vec::new(),
+            latest: None,
+            max_free,
+        }
+    }
+
+    pub fn checkout(&mut self) -> CameraFrameOwned {
+        self.free.pop().unwrap_or_default()
+    }
+
+    pub fn publish_latest(&mut self, frame: CameraFrameOwned) {
+        if let Some(old) = self.latest.replace(frame) {
+            self.recycle(old);
+        }
+    }
+
+    pub fn take_latest(&mut self) -> Option<CameraFrameOwned> {
+        self.latest.take()
+    }
+
+    pub fn recycle(&mut self, mut frame: CameraFrameOwned) {
+        frame.reset();
+        if self.free.len() < self.max_free {
+            self.free.push(frame);
+        }
+    }
+}
+
 pub enum VideoBufferRefData<'a> {
     U8(&'a [u8]),
     U32(&'a [u32]),

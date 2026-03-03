@@ -272,12 +272,18 @@ extern "C" {
         image: *mut *mut AImage,
     ) -> media_status_t;
 
+    pub fn AImageReader_acquireLatestImage(
+        reader: *mut AImageReader,
+        image: *mut *mut AImage,
+    ) -> media_status_t;
+
     pub fn AImage_getPlaneData(
         image: *const AImage,
         planeIdx: ::std::os::raw::c_int,
         data: *mut *mut u8,
         dataLength: *mut ::std::os::raw::c_int,
     ) -> media_status_t;
+    pub fn AImage_getTimestamp(image: *const AImage, timestampNs: *mut i64) -> media_status_t;
     pub fn AImage_getPlaneRowStride(
         image: *const AImage,
         planeIdx: ::std::os::raw::c_int,

@@ -1,8 +1,5 @@
 use {
-    self::super::{
-        libc_sys,
-        v4l2_sys::*,
-    },
+    self::super::{libc_sys, v4l2_sys::*},
     crate::{makepad_live_id::*, thread::SignalToUI, video::*},
     std::ffi::CStr,
     std::os::raw::{c_char, c_int, c_void},
@@ -41,6 +38,7 @@ struct V4l2CaptureSession {
 impl V4l2CaptureSession {
     fn start(
         input_fn: Arc<Mutex<Option<VideoInputFn>>>,
+        frame_input_fn: Arc<Mutex<Option<CameraFrameInputFn>>>,
         device_path: &str,
         format: VideoFormat,
     ) -> Option<Self> {
@@ -157,11 +155,17 @@ impl V4l2CaptureSession {
             let running_clone = running.clone();
 
             // Collect buffer info for the thread (raw pointers wrapped for Send)
-            let thread_bufs: Vec<SendPtr> =
-                buffers.iter().map(|b| SendPtr(b.ptr)).collect();
+            let thread_bufs: Vec<SendPtr> = buffers.iter().map(|b| SendPtr(b.ptr)).collect();
 
             let thread = std::thread::spawn(move || {
-                Self::capture_loop(fd, format, input_fn, &thread_bufs, &running_clone);
+                Self::capture_loop(
+                    fd,
+                    format,
+                    input_fn,
+                    frame_input_fn,
+                    &thread_bufs,
+                    &running_clone,
+                );
             });
 
             Some(Self {
@@ -177,6 +181,7 @@ impl V4l2CaptureSession {
         fd: c_int,
         format: VideoFormat,
         input_fn: Arc<Mutex<Option<VideoInputFn>>>,
+        frame_input_fn: Arc<Mutex<Option<CameraFrameInputFn>>>,
         buffers: &[SendPtr],
         running: &AtomicBool,
     ) {
@@ -203,6 +208,118 @@ impl V4l2CaptureSession {
                 if idx < buffers.len() {
                     let ptr = buffers[idx].0;
                     let used = buf.bytesused as usize;
+                    let timestamp_ns = (buf.timestamp.tv_sec.max(0) as u64)
+                        .saturating_mul(1_000_000_000)
+                        .saturating_add(
+                            (buf.timestamp.tv_usec.max(0) as u64).saturating_mul(1_000),
+                        );
+
+                    if let Some(cb) = &mut *frame_input_fn.lock().unwrap() {
+                        let raw = std::slice::from_raw_parts(ptr, used);
+                        match format.pixel_format {
+                            VideoPixelFormat::YUV420 => {
+                                let y_size = format.width * format.height;
+                                let cw = format.width.div_ceil(2);
+                                let ch = format.height.div_ceil(2);
+                                let uv_size = cw * ch;
+                                if raw.len() >= y_size + uv_size * 2 {
+                                    cb(CameraFrameRef {
+                                        timestamp_ns,
+                                        width: format.width,
+                                        height: format.height,
+                                        layout: CameraFrameLayout::I420,
+                                        matrix: CameraColorMatrix::BT601,
+                                        plane_count: 3,
+                                        planes: [
+                                            CameraFramePlaneRef {
+                                                bytes: &raw[..y_size],
+                                                row_stride: format.width,
+                                                pixel_stride: 1,
+                                            },
+                                            CameraFramePlaneRef {
+                                                bytes: &raw[y_size..y_size + uv_size],
+                                                row_stride: cw,
+                                                pixel_stride: 1,
+                                            },
+                                            CameraFramePlaneRef {
+                                                bytes: &raw[y_size + uv_size..y_size + uv_size * 2],
+                                                row_stride: cw,
+                                                pixel_stride: 1,
+                                            },
+                                        ],
+                                    });
+                                }
+                            }
+                            VideoPixelFormat::NV12 => {
+                                let y_size = format.width * format.height;
+                                let cw = format.width.div_ceil(2);
+                                let ch = format.height.div_ceil(2);
+                                let uv_size = cw * ch * 2;
+                                if raw.len() >= y_size + uv_size {
+                                    cb(CameraFrameRef {
+                                        timestamp_ns,
+                                        width: format.width,
+                                        height: format.height,
+                                        layout: CameraFrameLayout::NV12,
+                                        matrix: CameraColorMatrix::BT601,
+                                        plane_count: 2,
+                                        planes: [
+                                            CameraFramePlaneRef {
+                                                bytes: &raw[..y_size],
+                                                row_stride: format.width,
+                                                pixel_stride: 1,
+                                            },
+                                            CameraFramePlaneRef {
+                                                bytes: &raw[y_size..y_size + uv_size],
+                                                row_stride: format.width,
+                                                pixel_stride: 2,
+                                            },
+                                            CameraFramePlaneRef::empty(),
+                                        ],
+                                    });
+                                }
+                            }
+                            VideoPixelFormat::YUY2 => {
+                                cb(CameraFrameRef {
+                                    timestamp_ns,
+                                    width: format.width,
+                                    height: format.height,
+                                    layout: CameraFrameLayout::YUY2,
+                                    matrix: CameraColorMatrix::BT601,
+                                    plane_count: 1,
+                                    planes: [
+                                        CameraFramePlaneRef {
+                                            bytes: raw,
+                                            row_stride: format.width * 2,
+                                            pixel_stride: 2,
+                                        },
+                                        CameraFramePlaneRef::empty(),
+                                        CameraFramePlaneRef::empty(),
+                                    ],
+                                });
+                            }
+                            VideoPixelFormat::MJPEG => {
+                                cb(CameraFrameRef {
+                                    timestamp_ns,
+                                    width: format.width,
+                                    height: format.height,
+                                    layout: CameraFrameLayout::Mjpeg,
+                                    matrix: CameraColorMatrix::Unknown,
+                                    plane_count: 1,
+                                    planes: [
+                                        CameraFramePlaneRef {
+                                            bytes: raw,
+                                            row_stride: used,
+                                            pixel_stride: 1,
+                                        },
+                                        CameraFramePlaneRef::empty(),
+                                        CameraFramePlaneRef::empty(),
+                                    ],
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
 
                     if let Some(cb) = &mut *input_fn.lock().unwrap() {
                         match format.pixel_format {
@@ -214,8 +331,7 @@ impl V4l2CaptureSession {
                                 });
                             }
                             _ => {
-                                let data =
-                                    std::slice::from_raw_parts(ptr as *const u32, used / 4);
+                                let data = std::slice::from_raw_parts(ptr as *const u32, used / 4);
                                 cb(VideoBufferRef {
                                     format,
                                     data: VideoBufferRefData::U32(data),
@@ -255,6 +371,7 @@ impl V4l2CaptureSession {
 
 pub struct V4l2CameraAccess {
     pub video_input_cb: [Arc<Mutex<Option<VideoInputFn>>>; MAX_VIDEO_DEVICE_INDEX],
+    pub camera_frame_input_cb: [Arc<Mutex<Option<CameraFrameInputFn>>>; MAX_VIDEO_DEVICE_INDEX],
     devices: Vec<V4l2CameraDevice>,
     sessions: Vec<V4l2CaptureSession>,
 }
@@ -270,6 +387,7 @@ impl V4l2CameraAccess {
 
         Arc::new(Mutex::new(Self {
             video_input_cb: Default::default(),
+            camera_frame_input_cb: Default::default(),
             devices: Default::default(),
             sessions: Default::default(),
         }))
@@ -293,6 +411,7 @@ impl V4l2CameraAccess {
                 {
                     if let Some(session) = V4l2CaptureSession::start(
                         self.video_input_cb[index].clone(),
+                        self.camera_frame_input_cb[index].clone(),
                         &device.path,
                         *format,
                     ) {
@@ -400,8 +519,7 @@ impl V4l2CameraAccess {
                         if frmival.type_ == V4L2_FRMIVAL_TYPE_DISCRETE {
                             let fract = frmival.u.discrete;
                             if fract.numerator > 0 {
-                                let frame_rate =
-                                    fract.denominator as f64 / fract.numerator as f64;
+                                let frame_rate = fract.denominator as f64 / fract.numerator as f64;
                                 let format_id = LiveId::from_str(&format!(
                                     "{} {} {:?} {}",
                                     width, height, pixel_format, frame_rate
@@ -423,11 +541,9 @@ impl V4l2CameraAccess {
 
                     // If no intervals enumerated, add format without frame rate
                     if !found_interval {
-                        let format_id = LiveId::from_str(&format!(
-                            "{} {} {:?}",
-                            width, height, pixel_format
-                        ))
-                        .into();
+                        let format_id =
+                            LiveId::from_str(&format!("{} {} {:?}", width, height, pixel_format))
+                                .into();
                         formats.push(VideoFormat {
                             format_id,
                             width: width as usize,

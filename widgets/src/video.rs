@@ -4,7 +4,7 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_platform::event::video_playback::*,
-    makepad_platform::video::{VideoInputId, VideoFormatId},
+    makepad_platform::video::{VideoFormatId, VideoInputId},
     widget::*,
 };
 use std::rc::Rc;
@@ -404,6 +404,8 @@ pub struct Video {
     tex_u: Option<Texture>,
     #[rust]
     tex_v: Option<Texture>,
+    #[rust]
+    source_mode: VideoSourceMode,
 
     // Playback
     #[live(false)]
@@ -481,6 +483,7 @@ impl ScriptHook for Video {
         _value: ScriptValue,
     ) {
         vm.with_cx_mut(|cx| {
+            self.ensure_primary_texture(cx);
             self.apply_thumbnail_settings(cx);
             // Prepare the video when autoplay is enabled (so it starts immediately) or when
             // show_idle_thumbnail is true (so the first frame is available as a thumbnail).
@@ -557,13 +560,19 @@ impl VideoRef {
     }
 
     /// Sets a camera source for the video.
-    pub fn set_source_camera(&self, _cx: &mut Cx, input_id: VideoInputId, format_id: VideoFormatId) {
+    pub fn set_source_camera(
+        &self,
+        _cx: &mut Cx,
+        input_id: VideoInputId,
+        format_id: VideoFormatId,
+    ) {
         if let Some(mut inner) = self.borrow_mut() {
             if inner.playback_state == PlaybackState::Unprepared {
                 inner.source = VideoDataSource::Camera {
                     input_id: input_id.0,
                     format_id: format_id.0,
                 };
+                inner.source_mode = VideoSourceMode::YuvPlanes;
             }
         }
     }
@@ -650,6 +659,13 @@ impl VideoRef {
 }
 
 #[derive(Default, PartialEq, Debug)]
+enum VideoSourceMode {
+    #[default]
+    ExternalTexture,
+    YuvPlanes,
+}
+
+#[derive(Default, PartialEq, Debug)]
 enum PlaybackState {
     #[default]
     Unprepared,
@@ -719,14 +735,8 @@ impl Widget for Video {
         match event {
             Event::VideoYuvTexturesReady(event) => {
                 if event.video_id == self.id {
-                    // YUV path uses tex_y/tex_u/tex_v only.
-                    // Replace slot 0 with a plain texture so platform VideoRGB setup
-                    // (e.g. Android OES external texture) is not triggered for this widget.
-                    let fallback = Texture::new(cx);
-                    self.video_texture = Some(fallback.clone());
-                    self.draw_bg.draw_vars.set_texture(0, &fallback);
-
-                    // Bind platform-allocated YUV textures to shader slots 2, 3, 4.
+                    self.source_mode = VideoSourceMode::YuvPlanes;
+                    self.ensure_primary_texture(cx);
                     self.tex_y = Some(event.tex_y.clone());
                     self.tex_u = Some(event.tex_u.clone());
                     self.tex_v = Some(event.tex_v.clone());
@@ -755,9 +765,12 @@ impl Widget for Video {
                         self.current_position_ms = event.current_position_ms;
                     }
                     // Update YUV shader uniforms from platform event
-                    self.draw_bg.set_uniform(cx, id!(yuv_enabled), &[event.yuv_enabled]);
-                    self.draw_bg.set_uniform(cx, id!(yuv_type), &[event.yuv_type]);
-                    self.draw_bg.set_uniform(cx, id!(yuv_biplanar), &[event.yuv_biplanar]);
+                    self.draw_bg
+                        .set_uniform(cx, id!(yuv_enabled), &[event.yuv_enabled]);
+                    self.draw_bg
+                        .set_uniform(cx, id!(yuv_type), &[event.yuv_type]);
+                    self.draw_bg
+                        .set_uniform(cx, id!(yuv_biplanar), &[event.yuv_biplanar]);
 
                     self.redraw(cx);
                     if self.playback_state == PlaybackState::Prepared && self.autoplay {
@@ -812,22 +825,47 @@ impl ImageCacheImpl for Video {
 }
 
 impl Video {
+    fn infer_source_mode(&self) -> VideoSourceMode {
+        if self.in_memory_source.is_some() {
+            return VideoSourceMode::ExternalTexture;
+        }
+        match &self.source {
+            VideoDataSource::Camera { .. } => VideoSourceMode::YuvPlanes,
+            _ => VideoSourceMode::ExternalTexture,
+        }
+    }
+
+    fn ensure_primary_texture(&mut self, cx: &mut Cx) {
+        let desired = self.infer_source_mode();
+        let needs_recreate = self.video_texture.is_none() || self.source_mode != desired;
+
+        if needs_recreate {
+            self.video_texture = Some(match desired {
+                VideoSourceMode::ExternalTexture => {
+                    Texture::new_with_format(cx, TextureFormat::VideoRGB)
+                }
+                VideoSourceMode::YuvPlanes => Texture::new(cx),
+            });
+        }
+
+        self.source_mode = desired;
+        if let Some(texture) = self.video_texture.as_ref() {
+            self.draw_bg.draw_vars.set_texture(0, texture);
+        }
+    }
+
     fn init_video_texture(&mut self, cx: &mut Cx) {
         self.id = LiveId::unique();
-
-        if self.video_texture.is_none() {
-            let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
-            self.video_texture = Some(new_texture);
-        }
-        let texture = self.video_texture.as_mut().unwrap();
-        self.draw_bg.draw_vars.set_texture(0, &texture);
+        self.ensure_primary_texture(cx);
 
         #[cfg(target_os = "android")]
-        match cx.os_type() {
-            OsType::Android(params) if params.is_emulator => {
-                panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
+        if self.source_mode == VideoSourceMode::ExternalTexture {
+            match cx.os_type() {
+                OsType::Android(params) if params.is_emulator => {
+                    panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
+                }
+                _ => {}
             }
-            _ => {}
         }
 
         self.should_prepare_playback = self.autoplay;
@@ -854,11 +892,13 @@ impl Video {
     }
 
     fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
+        self.ensure_primary_texture(cx);
         if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
-            // On Android, wait for GL texture handle before preparing
+            // On Android, external texture mode waits for GL texture handle.
             #[cfg(target_os = "android")]
-            if self.video_texture_handle.is_none() {
-                // texture is not yet ready, this method will be called again on TextureHandleReady
+            if self.source_mode == VideoSourceMode::ExternalTexture
+                && self.video_texture_handle.is_none()
+            {
                 return;
             }
 
@@ -885,9 +925,10 @@ impl Video {
                     VideoDataSource::Filesystem { path } => {
                         VideoSource::Filesystem(path.to_string())
                     }
-                    VideoDataSource::Camera { input_id, format_id } => {
-                        VideoSource::Camera(VideoInputId(*input_id), VideoFormatId(*format_id))
-                    }
+                    VideoDataSource::Camera {
+                        input_id,
+                        format_id,
+                    } => VideoSource::Camera(VideoInputId(*input_id), VideoFormatId(*format_id)),
                 }
             };
 
@@ -1194,6 +1235,10 @@ impl Video {
     fn set_source(&mut self, source: VideoDataSource) {
         if self.playback_state == PlaybackState::Unprepared {
             self.in_memory_source = None;
+            self.source_mode = match source {
+                VideoDataSource::Camera { .. } => VideoSourceMode::YuvPlanes,
+                _ => VideoSourceMode::ExternalTexture,
+            };
             self.source = source;
         } else {
             error!(
@@ -1205,6 +1250,7 @@ impl Video {
 
     fn set_source_in_memory(&mut self, data: Rc<Vec<u8>>) {
         if self.playback_state == PlaybackState::Unprepared {
+            self.source_mode = VideoSourceMode::ExternalTexture;
             self.in_memory_source = Some(data);
         } else {
             error!(
@@ -1472,14 +1518,18 @@ impl Video {
         let text_h = laid_out.size_in_lpxs.height as f64;
 
         let bg_h = text_h + 2.0 * pad_y;
-        self.draw_error_bg.draw_abs(cx, Rect {
-            pos: dvec2(video_rect.pos.x, video_rect.pos.y),
-            size: dvec2(video_rect.size.x, bg_h),
-        });
+        self.draw_error_bg.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(video_rect.pos.x, video_rect.pos.y),
+                size: dvec2(video_rect.size.x, bg_h),
+            },
+        );
 
         let text_x = video_rect.pos.x + ((video_rect.size.x - text_w) * 0.5).max(pad_x);
         let text_y = video_rect.pos.y + pad_y;
-        self.draw_error_text.draw_abs(cx, dvec2(text_x, text_y), msg);
+        self.draw_error_text
+            .draw_abs(cx, dvec2(text_x, text_y), msg);
     }
 
     fn seek_to_position_from_x(&mut self, cx: &mut Cx, abs_x: f64) {

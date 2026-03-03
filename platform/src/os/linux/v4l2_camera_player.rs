@@ -2,13 +2,12 @@
 
 use {
     super::gl_sys::LibGl,
-    super::gl_video_upload::upload_yuv_to_gl,
+    super::gl_video_upload::upload_i420_slices_to_gl,
     super::v4l2_camera::V4l2CameraAccess,
     crate::{
         makepad_live_id::LiveId,
         texture::{CxTexturePool, TextureId},
         video::*,
-        video_decode::yuv::{YuvColorMatrix, YuvLayout, YuvPlaneData},
     },
     std::sync::{Arc, Mutex},
 };
@@ -26,32 +25,8 @@ pub struct V4l2CameraPlayer {
     active: bool,
     prepared: bool,
     prepare_notified: bool,
-    /// Shared buffer: capture thread writes frames here, poll_frame reads them.
-    frame_buf: Arc<Mutex<CameraFrame>>,
-    /// Handle to the V4L2 camera access for cleanup.
+    frame_pool: Arc<Mutex<CameraFramePool>>,
     camera_access: Option<Arc<Mutex<V4l2CameraAccess>>>,
-}
-
-struct CameraFrame {
-    y_data: Vec<u8>,
-    u_data: Vec<u8>,
-    v_data: Vec<u8>,
-    width: usize,
-    height: usize,
-    new: bool,
-}
-
-impl Default for CameraFrame {
-    fn default() -> Self {
-        Self {
-            y_data: Vec::new(),
-            u_data: Vec::new(),
-            v_data: Vec::new(),
-            width: 0,
-            height: 0,
-            new: false,
-        }
-    }
 }
 
 impl V4l2CameraPlayer {
@@ -64,129 +39,25 @@ impl V4l2CameraPlayer {
         format_id: VideoFormatId,
         camera_access: Arc<Mutex<V4l2CameraAccess>>,
     ) -> Self {
-        let frame_buf = Arc::new(Mutex::new(CameraFrame::default()));
+        let frame_pool = Arc::new(Mutex::new(CameraFramePool::new(4)));
 
-        // Set up the capture callback that deinterleaves frames into Y/U/V planes
-        let frame_buf_clone = frame_buf.clone();
-        let cb: VideoInputFn = Box::new(move |buffer: VideoBufferRef| {
-            let w = buffer.format.width;
-            let h = buffer.format.height;
+        let frame_pool_clone = frame_pool.clone();
+        let cb: CameraFrameInputFn = Box::new(move |frame_ref: CameraFrameRef<'_>| {
+            let mut pool = frame_pool_clone.lock().unwrap();
+            let mut frame = pool.checkout();
 
-            let mut y_data = Vec::new();
-            let mut u_data = Vec::new();
-            let mut v_data = Vec::new();
-
-            match buffer.format.pixel_format {
-                VideoPixelFormat::YUY2 => {
-                    if let VideoBufferRefData::U32(data) = &buffer.data {
-                        // YUY2: packed Y0 U0 Y1 V0 per u32 (2 pixels).
-                        // Y plane: full resolution (w*h)
-                        // U,V planes after vertical subsampling: (w/2 * h/2) for I420
-                        let half_w = (w + 1) / 2;
-                        y_data = Vec::with_capacity(w * h);
-                        // Temporary full-height chroma for 4:2:2
-                        let mut u_full = Vec::with_capacity(half_w * h);
-                        let mut v_full = Vec::with_capacity(half_w * h);
-
-                        for row in 0..h {
-                            let row_off = row * (w / 2);
-                            for col_pair in 0..half_w {
-                                let i = row_off + col_pair;
-                                if i >= data.len() { break; }
-                                let packed = data[i];
-                                let y0 = (packed & 0xff) as u8;
-                                let u  = ((packed >> 8) & 0xff) as u8;
-                                let y1 = ((packed >> 16) & 0xff) as u8;
-                                let v  = ((packed >> 24) & 0xff) as u8;
-                                y_data.push(y0);
-                                if 2 * col_pair + 1 < w {
-                                    y_data.push(y1);
-                                }
-                                u_full.push(u);
-                                v_full.push(v);
-                            }
-                        }
-
-                        // Vertically subsample U and V: average pairs of rows → h/2
-                        let half_h = (h + 1) / 2;
-                        u_data = Vec::with_capacity(half_w * half_h);
-                        v_data = Vec::with_capacity(half_w * half_h);
-                        for row in 0..half_h {
-                            let r0 = row * 2;
-                            let r1 = (r0 + 1).min(h - 1);
-                            for col in 0..half_w {
-                                let u0 = u_full[r0 * half_w + col] as u16;
-                                let u1 = u_full[r1 * half_w + col] as u16;
-                                u_data.push(((u0 + u1 + 1) / 2) as u8);
-                                let v0 = v_full[r0 * half_w + col] as u16;
-                                let v1 = v_full[r1 * half_w + col] as u16;
-                                v_data.push(((v0 + v1 + 1) / 2) as u8);
-                            }
-                        }
-                    }
-                }
-                VideoPixelFormat::NV12 => {
-                    if let VideoBufferRefData::U32(data) = &buffer.data {
-                        // NV12: Y plane (w*h bytes) then interleaved UV (w/2 * h/2 pairs)
-                        let bytes: &[u8] = unsafe {
-                            std::slice::from_raw_parts(
-                                data.as_ptr() as *const u8,
-                                data.len() * 4,
-                            )
-                        };
-                        let y_size = w * h;
-                        if bytes.len() >= y_size {
-                            y_data = bytes[..y_size].to_vec();
-                        }
-                        let half_w = (w + 1) / 2;
-                        let half_h = (h + 1) / 2;
-                        let uv_start = y_size;
-                        let uv_size = half_w * half_h;
-                        u_data = Vec::with_capacity(uv_size);
-                        v_data = Vec::with_capacity(uv_size);
-                        let uv_bytes = &bytes[uv_start..];
-                        for i in 0..uv_size {
-                            let idx = i * 2;
-                            if idx + 1 < uv_bytes.len() {
-                                u_data.push(uv_bytes[idx]);
-                                v_data.push(uv_bytes[idx + 1]);
-                            } else {
-                                u_data.push(128);
-                                v_data.push(128);
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    // MJPEG, RGB24, etc.: fill with black YUV as fallback
-                    y_data = vec![16; w * h];
-                    let half_w = (w + 1) / 2;
-                    let half_h = (h + 1) / 2;
-                    u_data = vec![128; half_w * half_h];
-                    v_data = vec![128; half_w * half_h];
-                }
+            if !convert_to_i420(&mut frame, frame_ref) {
+                pool.recycle(frame);
+                return;
             }
 
-            let half_w = (w + 1) / 2;
-            let half_h = (h + 1) / 2;
-            if y_data.len() == w * h
-                && u_data.len() == half_w * half_h
-                && v_data.len() == half_w * half_h
-            {
-                let mut frame = frame_buf_clone.lock().unwrap();
-                frame.y_data = y_data;
-                frame.u_data = u_data;
-                frame.v_data = v_data;
-                frame.width = w;
-                frame.height = h;
-                frame.new = true;
-            }
+            pool.publish_latest(frame);
         });
 
-        // Start the V4L2 capture by registering callback at index 0 and calling use_video_input
         {
             let mut cam = camera_access.lock().unwrap();
-            *cam.video_input_cb[0].lock().unwrap() = Some(cb);
+            *cam.camera_frame_input_cb[0].lock().unwrap() = Some(cb);
+            *cam.video_input_cb[0].lock().unwrap() = None;
             cam.use_video_input(&[(input_id, format_id)]);
         }
 
@@ -202,7 +73,7 @@ impl V4l2CameraPlayer {
             active: true,
             prepared: false,
             prepare_notified: false,
-            frame_buf,
+            frame_pool,
             camera_access: Some(camera_access),
         }
     }
@@ -217,14 +88,13 @@ impl V4l2CameraPlayer {
         if self.prepare_notified {
             return None;
         }
-        let frame = self.frame_buf.lock().unwrap();
-        if !frame.new || frame.width == 0 {
-            return None;
-        }
+        let mut pool = self.frame_pool.lock().unwrap();
+        let frame = pool.take_latest()?;
         self.width = frame.width as u32;
         self.height = frame.height as u32;
         self.prepared = true;
         self.prepare_notified = true;
+        pool.publish_latest(frame);
         Some(Ok((
             self.width,
             self.height,
@@ -236,27 +106,38 @@ impl V4l2CameraPlayer {
     }
 
     pub fn poll_frame(&mut self, gl: &LibGl, textures: &mut CxTexturePool) -> bool {
-        let mut frame = self.frame_buf.lock().unwrap();
-        if !frame.new || frame.width == 0 || frame.height == 0 {
+        let frame = {
+            let mut pool = self.frame_pool.lock().unwrap();
+            match pool.take_latest() {
+                Some(frame) => frame,
+                None => return false,
+            }
+        };
+
+        if frame.width == 0 || frame.height == 0 || frame.plane_count < 3 {
+            let mut pool = self.frame_pool.lock().unwrap();
+            pool.recycle(frame);
             return false;
         }
-        frame.new = false;
+
         let width = frame.width as u32;
         let height = frame.height as u32;
-
-        let planes = YuvPlaneData {
-            y: std::mem::take(&mut frame.y_data),
-            u: std::mem::take(&mut frame.u_data),
-            v: std::mem::take(&mut frame.v_data),
+        upload_i420_slices_to_gl(
+            gl,
+            textures,
+            self.tex_y_id,
+            self.tex_u_id,
+            self.tex_v_id,
+            &frame.planes[0].bytes,
+            &frame.planes[1].bytes,
+            &frame.planes[2].bytes,
             width,
             height,
-            layout: YuvLayout::I420,
-            matrix: YuvColorMatrix::BT601,
-        };
-        // Drop lock before GL calls
-        drop(frame);
+        );
 
-        upload_yuv_to_gl(gl, textures, self.tex_y_id, self.tex_u_id, self.tex_v_id, &planes);
+        let mut pool = self.frame_pool.lock().unwrap();
+        pool.recycle(frame);
+
         self.width = width;
         self.height = height;
         true
@@ -266,6 +147,7 @@ impl V4l2CameraPlayer {
         if let Some(cam) = self.camera_access.take() {
             let mut cam = cam.lock().unwrap();
             cam.use_video_input(&[]);
+            *cam.camera_frame_input_cb[0].lock().unwrap() = None;
             *cam.video_input_cb[0].lock().unwrap() = None;
         }
         self.active = false;
@@ -275,5 +157,141 @@ impl V4l2CameraPlayer {
 impl Drop for V4l2CameraPlayer {
     fn drop(&mut self) {
         self.cleanup();
+    }
+}
+
+fn copy_strided_plane(
+    src: CameraFramePlaneRef<'_>,
+    width: usize,
+    height: usize,
+    dst: &mut Vec<u8>,
+) {
+    dst.resize(width * height, 0);
+    if src.bytes.is_empty() || width == 0 || height == 0 {
+        return;
+    }
+
+    if src.pixel_stride == 1 && src.row_stride == width {
+        let n = dst.len().min(src.bytes.len());
+        dst[..n].copy_from_slice(&src.bytes[..n]);
+        return;
+    }
+
+    for row in 0..height {
+        let src_row = row.saturating_mul(src.row_stride);
+        let dst_row = row * width;
+        for col in 0..width {
+            let src_idx = src_row + col.saturating_mul(src.pixel_stride.max(1));
+            dst[dst_row + col] = src.bytes.get(src_idx).copied().unwrap_or(0);
+        }
+    }
+}
+
+fn convert_to_i420(dst: &mut CameraFrameOwned, src: CameraFrameRef<'_>) -> bool {
+    let w = src.width;
+    let h = src.height;
+    if w == 0 || h == 0 {
+        return false;
+    }
+
+    dst.timestamp_ns = src.timestamp_ns;
+    dst.width = w;
+    dst.height = h;
+    dst.layout = CameraFrameLayout::I420;
+    dst.matrix = src.matrix;
+    dst.plane_count = 3;
+    dst.planes[0].row_stride = w;
+    dst.planes[0].pixel_stride = 1;
+    dst.planes[1].row_stride = w.div_ceil(2);
+    dst.planes[1].pixel_stride = 1;
+    dst.planes[2].row_stride = w.div_ceil(2);
+    dst.planes[2].pixel_stride = 1;
+
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
+
+    match src.layout {
+        CameraFrameLayout::I420 => {
+            if src.plane_count < 3 {
+                return false;
+            }
+            copy_strided_plane(src.planes[0], w, h, &mut dst.planes[0].bytes);
+            copy_strided_plane(src.planes[1], cw, ch, &mut dst.planes[1].bytes);
+            copy_strided_plane(src.planes[2], cw, ch, &mut dst.planes[2].bytes);
+            true
+        }
+        CameraFrameLayout::NV12 => {
+            if src.plane_count < 2 {
+                return false;
+            }
+            copy_strided_plane(src.planes[0], w, h, &mut dst.planes[0].bytes);
+
+            dst.planes[1].bytes.resize(cw * ch, 128);
+            dst.planes[2].bytes.resize(cw * ch, 128);
+            let uv = src.planes[1];
+            for row in 0..ch {
+                let src_row = row.saturating_mul(uv.row_stride);
+                let dst_row = row * cw;
+                for col in 0..cw {
+                    let base = src_row + col.saturating_mul(uv.pixel_stride.max(2));
+                    dst.planes[1].bytes[dst_row + col] = uv.bytes.get(base).copied().unwrap_or(128);
+                    dst.planes[2].bytes[dst_row + col] =
+                        uv.bytes.get(base + 1).copied().unwrap_or(128);
+                }
+            }
+            true
+        }
+        CameraFrameLayout::YUY2 => {
+            if src.plane_count < 1 {
+                return false;
+            }
+            let packed = src.planes[0];
+            dst.planes[0].bytes.resize(w * h, 16);
+            dst.planes[1].bytes.resize(cw * ch, 128);
+            dst.planes[2].bytes.resize(cw * ch, 128);
+
+            let half_w = w.div_ceil(2);
+            let mut u_full = vec![128u8; half_w * h];
+            let mut v_full = vec![128u8; half_w * h];
+
+            for row in 0..h {
+                let src_row = row.saturating_mul(packed.row_stride);
+                for pair in 0..half_w {
+                    let base = src_row + pair * 4;
+                    let y0 = packed.bytes.get(base).copied().unwrap_or(16);
+                    let u = packed.bytes.get(base + 1).copied().unwrap_or(128);
+                    let y1 = packed.bytes.get(base + 2).copied().unwrap_or(16);
+                    let v = packed.bytes.get(base + 3).copied().unwrap_or(128);
+
+                    let px0 = row * w + pair * 2;
+                    if px0 < dst.planes[0].bytes.len() {
+                        dst.planes[0].bytes[px0] = y0;
+                    }
+                    let px1 = px0 + 1;
+                    if px1 < dst.planes[0].bytes.len() {
+                        dst.planes[0].bytes[px1] = y1;
+                    }
+
+                    u_full[row * half_w + pair] = u;
+                    v_full[row * half_w + pair] = v;
+                }
+            }
+
+            for row in 0..ch {
+                let r0 = row * 2;
+                let r1 = (r0 + 1).min(h - 1);
+                for col in 0..cw {
+                    let u0 = u_full[r0 * half_w + col.min(half_w - 1)] as u16;
+                    let u1 = u_full[r1 * half_w + col.min(half_w - 1)] as u16;
+                    dst.planes[1].bytes[row * cw + col] = ((u0 + u1 + 1) / 2) as u8;
+
+                    let v0 = v_full[r0 * half_w + col.min(half_w - 1)] as u16;
+                    let v1 = v_full[r1 * half_w + col.min(half_w - 1)] as u16;
+                    dst.planes[2].bytes[row * cw + col] = ((v0 + v1 + 1) / 2) as u8;
+                }
+            }
+            true
+        }
+        _ => false,
     }
 }

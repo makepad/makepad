@@ -19,9 +19,63 @@ pub(crate) fn upload_yuv_to_gl(
     planes: &YuvPlaneData,
 ) {
     let (cw, ch) = planes.layout.chroma_size(planes.width, planes.height);
-    upload_r8_plane_to_gl(gl, textures, tex_y_id, &planes.y, planes.width, planes.height);
+    upload_r8_plane_to_gl(
+        gl,
+        textures,
+        tex_y_id,
+        &planes.y,
+        planes.width,
+        planes.height,
+    );
     upload_r8_plane_to_gl(gl, textures, tex_u_id, &planes.u, cw, ch);
     upload_r8_plane_to_gl(gl, textures, tex_v_id, &planes.v, cw, ch);
+}
+
+pub(crate) fn upload_i420_slices_to_gl(
+    gl: &LibGl,
+    textures: &mut CxTexturePool,
+    tex_y_id: TextureId,
+    tex_u_id: TextureId,
+    tex_v_id: TextureId,
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    width: u32,
+    height: u32,
+) {
+    let cw = width.div_ceil(2);
+    let ch = height.div_ceil(2);
+    upload_r8_plane_to_gl(gl, textures, tex_y_id, y, width, height);
+    upload_r8_plane_to_gl(gl, textures, tex_u_id, u, cw, ch);
+    upload_r8_plane_to_gl(gl, textures, tex_v_id, v, cw, ch);
+}
+
+#[allow(dead_code)]
+pub(crate) fn upload_i420_packed_to_gl(
+    gl: &LibGl,
+    textures: &mut CxTexturePool,
+    tex_y_id: TextureId,
+    tex_u_id: TextureId,
+    tex_v_id: TextureId,
+    packed: &[u8],
+    width: u32,
+    height: u32,
+) {
+    let y_size = width as usize * height as usize;
+    let cw = width.div_ceil(2);
+    let ch = height.div_ceil(2);
+    let uv_size = cw as usize * ch as usize;
+    if packed.len() < y_size + uv_size * 2 {
+        return;
+    }
+
+    let y = &packed[..y_size];
+    let u = &packed[y_size..y_size + uv_size];
+    let v = &packed[y_size + uv_size..y_size + uv_size * 2];
+
+    upload_r8_plane_to_gl(gl, textures, tex_y_id, y, width, height);
+    upload_r8_plane_to_gl(gl, textures, tex_u_id, u, cw, ch);
+    upload_r8_plane_to_gl(gl, textures, tex_v_id, v, cw, ch);
 }
 
 pub(crate) fn upload_r8_plane_to_gl(
