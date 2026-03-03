@@ -980,8 +980,8 @@ impl Cx {
                 events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
                     video_id: player.video_id,
                     current_position_ms: 0,
-                    yuv_enabled: 0.0,
-                    yuv_type: 0.0,
+                    yuv_enabled: 1.0,
+                    yuv_type: 1.0,
                     yuv_biplanar: 0.0,
                 }));
             }
@@ -1595,20 +1595,34 @@ impl Cx {
                     autoplay,
                     should_loop,
                 ) => {
-                    // Camera source: use NDK camera player
+                    // Camera source: use NDK camera player with YUV plane textures
                     if let VideoSource::Camera(input_id, format_id) = source {
+                        let tex_y = self.textures.alloc(TextureFormat::Unknown);
+                        let tex_u = self.textures.alloc(TextureFormat::Unknown);
+                        let tex_v = self.textures.alloc(TextureFormat::Unknown);
+                        let tex_y_id = tex_y.texture_id();
+                        let tex_u_id = tex_u.texture_id();
+                        let tex_v_id = tex_v.texture_id();
                         let camera_access = self.os.media.android_camera();
                         let player = AndroidCameraPlayer::new(
-                            video_id, texture_id, input_id, format_id, camera_access,
+                            video_id, tex_y_id, tex_u_id, tex_v_id, input_id, format_id, camera_access,
                         );
                         self.os.camera_players.insert(video_id, player);
+                        self.call_event_handler(&Event::VideoYuvTexturesReady(
+                            VideoYuvTexturesReady {
+                                video_id,
+                                tex_y,
+                                tex_u,
+                                tex_v,
+                            },
+                        ));
                         continue;
                     }
 
                     // Allocate YUV textures internally for software decode path
-                    let tex_y = self.textures.alloc(TextureFormat::VideoRGB);
-                    let tex_u = self.textures.alloc(TextureFormat::VideoRGB);
-                    let tex_v = self.textures.alloc(TextureFormat::VideoRGB);
+                    let tex_y = self.textures.alloc(TextureFormat::Unknown);
+                    let tex_u = self.textures.alloc(TextureFormat::Unknown);
+                    let tex_v = self.textures.alloc(TextureFormat::Unknown);
                     let tex_y_id = tex_y.texture_id();
                     let tex_u_id = tex_u.texture_id();
                     let tex_v_id = tex_v.texture_id();

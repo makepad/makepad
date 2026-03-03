@@ -179,11 +179,15 @@ impl LinuxVideoPlayer {
         matches!(self, LinuxVideoPlayer::Software { .. })
     }
 
+    pub fn is_camera_mode(&self) -> bool {
+        matches!(self, LinuxVideoPlayer::Camera(_))
+    }
+
     pub fn yuv_matrix(&self) -> f32 {
         match self {
             LinuxVideoPlayer::GStreamer(_) => 0.0,
             LinuxVideoPlayer::Software { yuv_matrix, .. } => *yuv_matrix,
-            LinuxVideoPlayer::Camera(_) => 0.0,
+            LinuxVideoPlayer::Camera(_) => 1.0, // BT.601
         }
     }
 }

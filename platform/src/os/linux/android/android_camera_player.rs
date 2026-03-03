@@ -1,25 +1,24 @@
-//! Android NDK camera as a video playback source — captures frames and uploads to GL texture.
+//! Android NDK camera as a video playback source — captures YUV frames and uploads to GL textures.
 
 use {
     super::android_camera::AndroidCameraAccess,
-    super::super::gl_sys,
     super::super::gl_sys::LibGl,
+    super::super::gl_video_upload::upload_yuv_to_gl,
     crate::{
         makepad_live_id::LiveId,
-        texture::{CxTexturePool, TextureAlloc, TextureCategory, TexturePixel, TextureId},
+        texture::{CxTexturePool, TextureId},
         video::*,
+        video_decode::yuv::{YuvColorMatrix, YuvLayout, YuvPlaneData},
     },
-    std::{
-        ffi::c_void,
-        sync::{Arc, Mutex},
-    },
+    std::sync::{Arc, Mutex},
 };
 
-/// Camera player that captures Android NDK camera frames into a GL texture,
-/// matching the video playback texture path.
+/// Camera player that captures Android NDK camera frames and uploads YUV planes to GL textures.
 pub struct AndroidCameraPlayer {
     pub video_id: LiveId,
-    texture_id: TextureId,
+    tex_y_id: TextureId,
+    tex_u_id: TextureId,
+    tex_v_id: TextureId,
     width: u32,
     height: u32,
     active: bool,
@@ -30,7 +29,9 @@ pub struct AndroidCameraPlayer {
 }
 
 struct CameraFrame {
-    data: Vec<u8>,
+    y_data: Vec<u8>,
+    u_data: Vec<u8>,
+    v_data: Vec<u8>,
     width: usize,
     height: usize,
     new: bool,
@@ -39,7 +40,9 @@ struct CameraFrame {
 impl Default for CameraFrame {
     fn default() -> Self {
         Self {
-            data: Vec::new(),
+            y_data: Vec::new(),
+            u_data: Vec::new(),
+            v_data: Vec::new(),
             width: 0,
             height: 0,
             new: false,
@@ -50,7 +53,9 @@ impl Default for CameraFrame {
 impl AndroidCameraPlayer {
     pub fn new(
         video_id: LiveId,
-        texture_id: TextureId,
+        tex_y_id: TextureId,
+        tex_u_id: TextureId,
+        tex_v_id: TextureId,
         input_id: VideoInputId,
         format_id: VideoFormatId,
         camera_access: Arc<Mutex<AndroidCameraAccess>>,
@@ -61,36 +66,34 @@ impl AndroidCameraPlayer {
         let cb: VideoInputFn = Box::new(move |buffer: VideoBufferRef| {
             let w = buffer.format.width;
             let h = buffer.format.height;
-            let mut rgba = Vec::with_capacity(w * h * 4);
 
             match buffer.format.pixel_format {
                 VideoPixelFormat::YUV420 => {
-                    // Android YUV_420_888 arrives as u32 via AImageReader
-                    if let VideoBufferRefData::U32(data) = &buffer.data {
-                        // Each u32 is an RGBA pixel from the NV21-style conversion
-                        for &pixel in data.iter() {
-                            rgba.push((pixel & 0xff) as u8);
-                            rgba.push(((pixel >> 8) & 0xff) as u8);
-                            rgba.push(((pixel >> 16) & 0xff) as u8);
-                            rgba.push(((pixel >> 24) & 0xff) as u8);
+                    // Data arrives as concatenated [Y|U|V] packed in U8
+                    if let VideoBufferRefData::U8(data) = &buffer.data {
+                        let y_size = w * h;
+                        let uv_size = (w / 2) * (h / 2);
+                        if data.len() >= y_size + uv_size * 2 {
+                            let mut frame = frame_buf_clone.lock().unwrap();
+                            frame.y_data = data[..y_size].to_vec();
+                            frame.u_data = data[y_size..y_size + uv_size].to_vec();
+                            frame.v_data = data[y_size + uv_size..y_size + uv_size * 2].to_vec();
+                            frame.width = w;
+                            frame.height = h;
+                            frame.new = true;
                         }
                     }
                 }
-                VideoPixelFormat::MJPEG => {
-                    // MJPEG: skip, fill black
-                    rgba.resize(w * h * 4, 0);
-                }
                 _ => {
-                    rgba.resize(w * h * 4, 0);
+                    // MJPEG or other: store empty planes to signal frame arrival
+                    let mut frame = frame_buf_clone.lock().unwrap();
+                    frame.y_data = vec![0u8; w * h];
+                    frame.u_data = vec![128u8; (w / 2) * (h / 2)];
+                    frame.v_data = vec![128u8; (w / 2) * (h / 2)];
+                    frame.width = w;
+                    frame.height = h;
+                    frame.new = true;
                 }
-            }
-
-            if rgba.len() == w * h * 4 {
-                let mut frame = frame_buf_clone.lock().unwrap();
-                frame.data = rgba;
-                frame.width = w;
-                frame.height = h;
-                frame.new = true;
             }
         });
 
@@ -102,7 +105,9 @@ impl AndroidCameraPlayer {
 
         Self {
             video_id,
-            texture_id,
+            tex_y_id,
+            tex_u_id,
+            tex_v_id,
             width: 0,
             height: 0,
             active: true,
@@ -147,60 +152,23 @@ impl AndroidCameraPlayer {
             return false;
         }
         frame.new = false;
-        let width = frame.width;
-        let height = frame.height;
-        let expected = width * height * 4;
-        if frame.data.len() != expected {
-            return false;
-        }
+        let width = frame.width as u32;
+        let height = frame.height as u32;
 
-        unsafe {
-            let cxtexture = &mut textures[self.texture_id];
+        let planes = YuvPlaneData {
+            y: std::mem::take(&mut frame.y_data),
+            u: std::mem::take(&mut frame.u_data),
+            v: std::mem::take(&mut frame.v_data),
+            width,
+            height,
+            layout: YuvLayout::I420,
+            matrix: YuvColorMatrix::BT601,
+        };
 
-            // Mark alloc so setup_video_texture in the draw loop doesn't
-            // free our texture and create an empty one.
-            if cxtexture.alloc.is_none() {
-                cxtexture.alloc = Some(TextureAlloc {
-                    width: 0,
-                    height: 0,
-                    pixel: TexturePixel::VideoRGB,
-                    category: TextureCategory::Video,
-                });
-            }
+        upload_yuv_to_gl(gl, textures, self.tex_y_id, self.tex_u_id, self.tex_v_id, &planes);
 
-            // Ensure GL texture exists
-            if cxtexture.os.gl_texture.is_none() {
-                let mut gl_texture = std::mem::MaybeUninit::uninit();
-                (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
-                let gl_texture = gl_texture.assume_init();
-                cxtexture.os.gl_texture = Some(gl_texture);
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-            }
-
-            let gl_texture = cxtexture.os.gl_texture.unwrap();
-            (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
-            (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 4);
-            (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
-            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
-            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
-
-            // Always use glTexImage2D — glTexSubImage2D returns GL_INVALID_OPERATION
-            // on some GL ES drivers when the texture was created in a prior draw cycle.
-            (gl.glTexImage2D)(
-                gl_sys::TEXTURE_2D, 0, gl_sys::RGBA as i32,
-                width as i32, height as i32, 0,
-                gl_sys::RGBA, gl_sys::UNSIGNED_BYTE,
-                frame.data.as_ptr() as *const c_void,
-            );
-            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
-
-            self.width = width as u32;
-            self.height = height as u32;
-        }
+        self.width = width;
+        self.height = height;
         true
     }
 

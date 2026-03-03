@@ -1,25 +1,24 @@
-//! V4L2 camera as a video playback source — captures frames and uploads to GL texture.
+//! V4L2 camera as a video playback source — captures frames and uploads YUV planes to GL.
 
 use {
-    super::gl_sys,
     super::gl_sys::LibGl,
+    super::gl_video_upload::upload_yuv_to_gl,
     super::v4l2_camera::V4l2CameraAccess,
     crate::{
         makepad_live_id::LiveId,
-        texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel},
+        texture::{CxTexturePool, TextureId},
         video::*,
+        video_decode::yuv::{YuvColorMatrix, YuvLayout, YuvPlaneData},
     },
-    std::{
-        ffi::c_void,
-        sync::{Arc, Mutex},
-    },
+    std::sync::{Arc, Mutex},
 };
 
-/// Camera player that captures V4L2 frames into a GL texture,
-/// matching the video playback texture path.
+/// Camera player that captures V4L2 frames and uploads Y/U/V planes to GL textures.
 pub struct V4l2CameraPlayer {
     pub video_id: LiveId,
-    texture_id: TextureId,
+    tex_y_id: TextureId,
+    tex_u_id: TextureId,
+    tex_v_id: TextureId,
     _input_id: VideoInputId,
     _format_id: VideoFormatId,
     width: u32,
@@ -34,7 +33,9 @@ pub struct V4l2CameraPlayer {
 }
 
 struct CameraFrame {
-    data: Vec<u8>,
+    y_data: Vec<u8>,
+    u_data: Vec<u8>,
+    v_data: Vec<u8>,
     width: usize,
     height: usize,
     new: bool,
@@ -43,7 +44,9 @@ struct CameraFrame {
 impl Default for CameraFrame {
     fn default() -> Self {
         Self {
-            data: Vec::new(),
+            y_data: Vec::new(),
+            u_data: Vec::new(),
+            v_data: Vec::new(),
             width: 0,
             height: 0,
             new: false,
@@ -54,89 +57,126 @@ impl Default for CameraFrame {
 impl V4l2CameraPlayer {
     pub fn new(
         video_id: LiveId,
-        texture_id: TextureId,
+        tex_y_id: TextureId,
+        tex_u_id: TextureId,
+        tex_v_id: TextureId,
         input_id: VideoInputId,
         format_id: VideoFormatId,
         camera_access: Arc<Mutex<V4l2CameraAccess>>,
     ) -> Self {
         let frame_buf = Arc::new(Mutex::new(CameraFrame::default()));
 
-        // Set up the capture callback that converts frames to RGBA and stores them
+        // Set up the capture callback that deinterleaves frames into Y/U/V planes
         let frame_buf_clone = frame_buf.clone();
         let cb: VideoInputFn = Box::new(move |buffer: VideoBufferRef| {
             let w = buffer.format.width;
             let h = buffer.format.height;
-            let mut rgba = Vec::with_capacity(w * h * 4);
+
+            let mut y_data = Vec::new();
+            let mut u_data = Vec::new();
+            let mut v_data = Vec::new();
 
             match buffer.format.pixel_format {
-                VideoPixelFormat::NV12 => {
-                    if let VideoBufferRefData::U32(data) = &buffer.data {
-                        // NV12: Y plane followed by interleaved UV
-                        let mut tmp = Vec::new();
-                        buffer.format.pixel_format.buffer_to_bgra_32(data, w, h, &mut tmp);
-                        // buffer_to_bgra_32 produces BGRA u32, convert to RGBA u8
-                        for pixel in &tmp {
-                            let b = (pixel & 0xff) as u8;
-                            let g = ((pixel >> 8) & 0xff) as u8;
-                            let r = ((pixel >> 16) & 0xff) as u8;
-                            let a = ((pixel >> 24) & 0xff) as u8;
-                            rgba.push(r);
-                            rgba.push(g);
-                            rgba.push(b);
-                            rgba.push(a);
-                        }
-                    }
-                }
                 VideoPixelFormat::YUY2 => {
                     if let VideoBufferRefData::U32(data) = &buffer.data {
-                        // YUY2: packed YUYV, 2 pixels per u32
-                        for i in 0..(w * h / 2) {
-                            if i >= data.len() { break; }
-                            let packed = data[i];
-                            let y0 = (packed & 0xff) as i32;
-                            let u  = ((packed >> 8) & 0xff) as i32;
-                            let y1 = ((packed >> 16) & 0xff) as i32;
-                            let v  = ((packed >> 24) & 0xff) as i32;
-                            for y in [y0, y1] {
-                                let c = y - 16;
-                                let d = u - 128;
-                                let e = v - 128;
-                                let r = ((298 * c + 409 * e + 128) >> 8).clamp(0, 255) as u8;
-                                let g = ((298 * c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u8;
-                                let b = ((298 * c + 516 * d + 128) >> 8).clamp(0, 255) as u8;
-                                rgba.push(r);
-                                rgba.push(g);
-                                rgba.push(b);
-                                rgba.push(255);
+                        // YUY2: packed Y0 U0 Y1 V0 per u32 (2 pixels).
+                        // Y plane: full resolution (w*h)
+                        // U,V planes after vertical subsampling: (w/2 * h/2) for I420
+                        let half_w = (w + 1) / 2;
+                        y_data = Vec::with_capacity(w * h);
+                        // Temporary full-height chroma for 4:2:2
+                        let mut u_full = Vec::with_capacity(half_w * h);
+                        let mut v_full = Vec::with_capacity(half_w * h);
+
+                        for row in 0..h {
+                            let row_off = row * (w / 2);
+                            for col_pair in 0..half_w {
+                                let i = row_off + col_pair;
+                                if i >= data.len() { break; }
+                                let packed = data[i];
+                                let y0 = (packed & 0xff) as u8;
+                                let u  = ((packed >> 8) & 0xff) as u8;
+                                let y1 = ((packed >> 16) & 0xff) as u8;
+                                let v  = ((packed >> 24) & 0xff) as u8;
+                                y_data.push(y0);
+                                if 2 * col_pair + 1 < w {
+                                    y_data.push(y1);
+                                }
+                                u_full.push(u);
+                                v_full.push(v);
+                            }
+                        }
+
+                        // Vertically subsample U and V: average pairs of rows → h/2
+                        let half_h = (h + 1) / 2;
+                        u_data = Vec::with_capacity(half_w * half_h);
+                        v_data = Vec::with_capacity(half_w * half_h);
+                        for row in 0..half_h {
+                            let r0 = row * 2;
+                            let r1 = (r0 + 1).min(h - 1);
+                            for col in 0..half_w {
+                                let u0 = u_full[r0 * half_w + col] as u16;
+                                let u1 = u_full[r1 * half_w + col] as u16;
+                                u_data.push(((u0 + u1 + 1) / 2) as u8);
+                                let v0 = v_full[r0 * half_w + col] as u16;
+                                let v1 = v_full[r1 * half_w + col] as u16;
+                                v_data.push(((v0 + v1 + 1) / 2) as u8);
                             }
                         }
                     }
                 }
-                VideoPixelFormat::RGB24 => {
-                    if let VideoBufferRefData::U8(data) = &buffer.data {
-                        for chunk in data.chunks(3) {
-                            if chunk.len() == 3 {
-                                rgba.push(chunk[0]);
-                                rgba.push(chunk[1]);
-                                rgba.push(chunk[2]);
-                                rgba.push(255);
+                VideoPixelFormat::NV12 => {
+                    if let VideoBufferRefData::U32(data) = &buffer.data {
+                        // NV12: Y plane (w*h bytes) then interleaved UV (w/2 * h/2 pairs)
+                        let bytes: &[u8] = unsafe {
+                            std::slice::from_raw_parts(
+                                data.as_ptr() as *const u8,
+                                data.len() * 4,
+                            )
+                        };
+                        let y_size = w * h;
+                        if bytes.len() >= y_size {
+                            y_data = bytes[..y_size].to_vec();
+                        }
+                        let half_w = (w + 1) / 2;
+                        let half_h = (h + 1) / 2;
+                        let uv_start = y_size;
+                        let uv_size = half_w * half_h;
+                        u_data = Vec::with_capacity(uv_size);
+                        v_data = Vec::with_capacity(uv_size);
+                        let uv_bytes = &bytes[uv_start..];
+                        for i in 0..uv_size {
+                            let idx = i * 2;
+                            if idx + 1 < uv_bytes.len() {
+                                u_data.push(uv_bytes[idx]);
+                                v_data.push(uv_bytes[idx + 1]);
+                            } else {
+                                u_data.push(128);
+                                v_data.push(128);
                             }
                         }
                     }
-                }
-                VideoPixelFormat::MJPEG => {
-                    // MJPEG: skip — would need a JPEG decoder.
-                    // Fill with black as a safe fallback.
-                    rgba.resize(w * h * 4, 0);
                 }
                 _ => {
-                    rgba.resize(w * h * 4, 0);
+                    // MJPEG, RGB24, etc.: fill with black YUV as fallback
+                    y_data = vec![16; w * h];
+                    let half_w = (w + 1) / 2;
+                    let half_h = (h + 1) / 2;
+                    u_data = vec![128; half_w * half_h];
+                    v_data = vec![128; half_w * half_h];
                 }
             }
 
-            if rgba.len() == w * h * 4 {
+            let half_w = (w + 1) / 2;
+            let half_h = (h + 1) / 2;
+            if y_data.len() == w * h
+                && u_data.len() == half_w * half_h
+                && v_data.len() == half_w * half_h
+            {
                 let mut frame = frame_buf_clone.lock().unwrap();
-                frame.data = rgba;
+                frame.y_data = y_data;
+                frame.u_data = u_data;
+                frame.v_data = v_data;
                 frame.width = w;
                 frame.height = h;
                 frame.new = true;
@@ -146,14 +186,15 @@ impl V4l2CameraPlayer {
         // Start the V4L2 capture by registering callback at index 0 and calling use_video_input
         {
             let mut cam = camera_access.lock().unwrap();
-            // Use a dedicated callback slot (index 0) for camera playback
             *cam.video_input_cb[0].lock().unwrap() = Some(cb);
             cam.use_video_input(&[(input_id, format_id)]);
         }
 
         Self {
             video_id,
-            texture_id,
+            tex_y_id,
+            tex_u_id,
+            tex_v_id,
             _input_id: input_id,
             _format_id: format_id,
             width: 0,
@@ -176,7 +217,6 @@ impl V4l2CameraPlayer {
         if self.prepare_notified {
             return None;
         }
-        // Wait for first frame to know dimensions
         let frame = self.frame_buf.lock().unwrap();
         if !frame.new || frame.width == 0 {
             return None;
@@ -188,8 +228,8 @@ impl V4l2CameraPlayer {
         Some(Ok((
             self.width,
             self.height,
-            0, // duration: live camera has no duration
-            false, // not seekable
+            0,
+            false,
             vec!["camera".to_string()],
             vec![],
         )))
@@ -201,68 +241,31 @@ impl V4l2CameraPlayer {
             return false;
         }
         frame.new = false;
-        let width = frame.width;
-        let height = frame.height;
-        let expected = width * height * 4;
-        if frame.data.len() != expected {
-            return false;
-        }
+        let width = frame.width as u32;
+        let height = frame.height as u32;
 
-        unsafe {
-            let cxtexture = &mut textures[self.texture_id];
+        let planes = YuvPlaneData {
+            y: std::mem::take(&mut frame.y_data),
+            u: std::mem::take(&mut frame.u_data),
+            v: std::mem::take(&mut frame.v_data),
+            width,
+            height,
+            layout: YuvLayout::I420,
+            matrix: YuvColorMatrix::BT601,
+        };
+        // Drop lock before GL calls
+        drop(frame);
 
-            // Mark alloc so setup_video_texture in the draw loop doesn't
-            // free our texture and create an empty one.
-            if cxtexture.alloc.is_none() {
-                cxtexture.alloc = Some(TextureAlloc {
-                    width: 0,
-                    height: 0,
-                    pixel: TexturePixel::VideoRGB,
-                    category: TextureCategory::Video,
-                });
-            }
-
-            // Ensure GL texture exists (setup_video_texture may have created it already)
-            if cxtexture.os.gl_texture.is_none() {
-                let mut gl_texture = std::mem::MaybeUninit::uninit();
-                (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
-                let gl_texture = gl_texture.assume_init();
-                cxtexture.os.gl_texture = Some(gl_texture);
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-            }
-
-            let gl_texture = cxtexture.os.gl_texture.unwrap();
-            (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
-
-            (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 4);
-            (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
-            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
-            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
-
-            // Always use glTexImage2D — glTexSubImage2D returns GL_INVALID_OPERATION
-            // on some EGL/Wayland drivers when the texture was created in a prior draw cycle.
-            (gl.glTexImage2D)(
-                gl_sys::TEXTURE_2D, 0, gl_sys::RGBA as i32,
-                width as i32, height as i32, 0,
-                gl_sys::RGBA, gl_sys::UNSIGNED_BYTE,
-                frame.data.as_ptr() as *const c_void,
-            );
-            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
-
-            self.width = width as u32;
-            self.height = height as u32;
-        }
+        upload_yuv_to_gl(gl, textures, self.tex_y_id, self.tex_u_id, self.tex_v_id, &planes);
+        self.width = width;
+        self.height = height;
         true
     }
 
     pub fn cleanup(&mut self) {
         if let Some(cam) = self.camera_access.take() {
             let mut cam = cam.lock().unwrap();
-            cam.use_video_input(&[]); // stop all sessions
+            cam.use_video_input(&[]);
             *cam.video_input_cb[0].lock().unwrap() = None;
         }
         self.active = false;

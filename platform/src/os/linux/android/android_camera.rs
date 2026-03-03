@@ -45,15 +45,17 @@ impl AndroidCaptureSession {
         let context = &*(context as *mut AndroidCaptureContext);
 
         let mut image = std::ptr::null_mut();
-        AImageReader_acquireNextImage(reader, &mut image);
-        let mut data = std::ptr::null_mut();
-        let mut len = 0;
-        AImage_getPlaneData(image, 0, &mut data, &mut len);
+        if AImageReader_acquireNextImage(reader, &mut image) != 0 || image.is_null() {
+            return;
+        }
 
         match context.format.pixel_format {
             VideoPixelFormat::MJPEG => {
+                let mut data = std::ptr::null_mut();
+                let mut len = 0;
+                AImage_getPlaneData(image, 0, &mut data, &mut len);
                 if let Some(cb) = &mut *context.input_fn.lock().unwrap() {
-                    let data = std::slice::from_raw_parts_mut(data as *mut u8, len as usize);
+                    let data = std::slice::from_raw_parts(data as *const u8, len as usize);
                     cb(VideoBufferRef {
                         format: context.format,
                         data: VideoBufferRefData::U8(data),
@@ -61,18 +63,96 @@ impl AndroidCaptureSession {
                 }
             }
             VideoPixelFormat::YUV420 => {
-                if let Some(cb) = &mut *context.input_fn.lock().unwrap() {
-                    let data = std::slice::from_raw_parts_mut(data as *mut u32, (len as usize) / 4);
-                    cb(VideoBufferRef {
-                        format: context.format,
-                        data: VideoBufferRefData::U32(data),
-                    })
+                let w = context.format.width;
+                let h = context.format.height;
+
+                // Get Y plane
+                let mut y_data = std::ptr::null_mut();
+                let mut y_len = 0i32;
+                let mut y_row_stride = 0i32;
+                AImage_getPlaneData(image, 0, &mut y_data, &mut y_len);
+                AImage_getPlaneRowStride(image, 0, &mut y_row_stride);
+
+                // Get U plane
+                let mut u_data = std::ptr::null_mut();
+                let mut u_len = 0i32;
+                let mut u_row_stride = 0i32;
+                let mut u_pixel_stride = 0i32;
+                AImage_getPlaneData(image, 1, &mut u_data, &mut u_len);
+                AImage_getPlaneRowStride(image, 1, &mut u_row_stride);
+                AImage_getPlanePixelStride(image, 1, &mut u_pixel_stride);
+
+                // Get V plane
+                let mut v_data = std::ptr::null_mut();
+                let mut v_len = 0i32;
+                let mut v_row_stride = 0i32;
+                AImage_getPlaneData(image, 2, &mut v_data, &mut v_len);
+                AImage_getPlaneRowStride(image, 2, &mut v_row_stride);
+
+                if !y_data.is_null() && !u_data.is_null() && !v_data.is_null() {
+                    let y_stride = y_row_stride as usize;
+                    let uv_row_stride = u_row_stride as usize;
+                    let v_uv_row_stride = v_row_stride as usize;
+                    let uv_pixel_stride = u_pixel_stride as usize;
+                    let cw = w / 2;
+                    let ch = h / 2;
+                    let y_size = w * h;
+                    let uv_size = cw * ch;
+
+                    // Pack [Y | U | V] into a single buffer for the callback
+                    let mut packed = Vec::with_capacity(y_size + uv_size * 2);
+
+                    // Extract Y plane row-by-row (strip row stride padding)
+                    let y_slice = std::slice::from_raw_parts(y_data, y_len as usize);
+                    for row in 0..h {
+                        let src_start = row * y_stride;
+                        packed.extend_from_slice(&y_slice[src_start..src_start + w]);
+                    }
+
+                    // Extract U plane, handling pixel_stride
+                    let u_slice = std::slice::from_raw_parts(u_data, u_len as usize);
+                    if uv_pixel_stride == 1 {
+                        for row in 0..ch {
+                            let src_start = row * uv_row_stride;
+                            packed.extend_from_slice(&u_slice[src_start..src_start + cw]);
+                        }
+                    } else {
+                        // Interleaved (NV12-style): extract every other byte
+                        for row in 0..ch {
+                            for col in 0..cw {
+                                let idx = row * uv_row_stride + col * uv_pixel_stride;
+                                packed.push(u_slice.get(idx).copied().unwrap_or(128));
+                            }
+                        }
+                    }
+
+                    // Extract V plane, same handling as U
+                    let v_slice = std::slice::from_raw_parts(v_data, v_len as usize);
+                    if uv_pixel_stride == 1 {
+                        for row in 0..ch {
+                            let src_start = row * v_uv_row_stride;
+                            packed.extend_from_slice(&v_slice[src_start..src_start + cw]);
+                        }
+                    } else {
+                        for row in 0..ch {
+                            for col in 0..cw {
+                                let idx = row * v_uv_row_stride + col * uv_pixel_stride;
+                                packed.push(v_slice.get(idx).copied().unwrap_or(128));
+                            }
+                        }
+                    }
+
+                    if let Some(cb) = &mut *context.input_fn.lock().unwrap() {
+                        cb(VideoBufferRef {
+                            format: context.format,
+                            data: VideoBufferRefData::U8(&packed),
+                        })
+                    }
                 }
             }
             _ => (),
         }
 
-        // here we have an image!
         AImage_delete(image);
     }
 

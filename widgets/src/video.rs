@@ -719,7 +719,14 @@ impl Widget for Video {
         match event {
             Event::VideoYuvTexturesReady(event) => {
                 if event.video_id == self.id {
-                    // Bind platform-allocated YUV textures to shader slots 2, 3, 4
+                    // YUV path uses tex_y/tex_u/tex_v only.
+                    // Replace slot 0 with a plain texture so platform VideoRGB setup
+                    // (e.g. Android OES external texture) is not triggered for this widget.
+                    let fallback = Texture::new(cx);
+                    self.video_texture = Some(fallback.clone());
+                    self.draw_bg.draw_vars.set_texture(0, &fallback);
+
+                    // Bind platform-allocated YUV textures to shader slots 2, 3, 4.
                     self.tex_y = Some(event.tex_y.clone());
                     self.tex_u = Some(event.tex_u.clone());
                     self.tex_v = Some(event.tex_v.clone());

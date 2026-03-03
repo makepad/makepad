@@ -396,7 +396,7 @@ impl WaylandCx {
                                     VideoTextureUpdatedEvent {
                                         video_id: player.video_id(),
                                         current_position_ms: player.current_position_ms(),
-                                        yuv_enabled: if player.is_software_mode() { 1.0 } else { 0.0 },
+                                        yuv_enabled: if player.is_software_mode() || player.is_camera_mode() { 1.0 } else { 0.0 },
                                         yuv_type: player.yuv_matrix(),
                                         yuv_biplanar: 0.0,
                                     },
@@ -710,13 +710,22 @@ impl WaylandCx {
                     {
                         continue;
                     }
-                    // Camera source: use V4L2 capture player
+                    // Camera source: use V4L2 capture player with YUV plane textures
                     if let VideoSource::Camera(input_id, format_id) = source {
                         let camera_access = cx.os.media.v4l2_camera();
+                        let tex_y = cx.textures.alloc(TextureFormat::Unknown);
+                        let tex_u = cx.textures.alloc(TextureFormat::Unknown);
+                        let tex_v = cx.textures.alloc(TextureFormat::Unknown);
+                        let tex_y_id = tex_y.texture_id();
+                        let tex_u_id = tex_u.texture_id();
+                        let tex_v_id = tex_v.texture_id();
                         let player = V4l2CameraPlayer::new(
-                            video_id, texture_id, input_id, format_id, camera_access,
+                            video_id, tex_y_id, tex_u_id, tex_v_id, input_id, format_id, camera_access,
                         );
                         cx.os.video_players.insert(video_id, LinuxVideoPlayer::Camera(player));
+                        cx.call_event_handler(&Event::VideoYuvTexturesReady(
+                            VideoYuvTexturesReady { video_id, tex_y, tex_u, tex_v },
+                        ));
                         continue;
                     }
                     // Try GStreamer first, fall back to software rav1d
@@ -762,9 +771,9 @@ impl WaylandCx {
                     }
                     if use_software {
                         // Allocate YUV textures internally for software decode
-                        let tex_y = cx.textures.alloc(TextureFormat::VideoRGB);
-                        let tex_u = cx.textures.alloc(TextureFormat::VideoRGB);
-                        let tex_v = cx.textures.alloc(TextureFormat::VideoRGB);
+                        let tex_y = cx.textures.alloc(TextureFormat::Unknown);
+                        let tex_u = cx.textures.alloc(TextureFormat::Unknown);
+                        let tex_v = cx.textures.alloc(TextureFormat::Unknown);
                         let tex_y_id = tex_y.texture_id();
                         let tex_u_id = tex_u.texture_id();
                         let tex_v_id = tex_v.texture_id();

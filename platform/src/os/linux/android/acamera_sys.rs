@@ -278,6 +278,16 @@ extern "C" {
         data: *mut *mut u8,
         dataLength: *mut ::std::os::raw::c_int,
     ) -> media_status_t;
+    pub fn AImage_getPlaneRowStride(
+        image: *const AImage,
+        planeIdx: ::std::os::raw::c_int,
+        rowStride: *mut ::std::os::raw::c_int,
+    ) -> media_status_t;
+    pub fn AImage_getPlanePixelStride(
+        image: *const AImage,
+        planeIdx: ::std::os::raw::c_int,
+        pixelStride: *mut ::std::os::raw::c_int,
+    ) -> media_status_t;
     pub fn AImage_delete(image: *mut AImage);
 
 }
