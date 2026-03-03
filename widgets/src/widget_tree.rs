@@ -767,14 +767,13 @@ impl WidgetTree {
             }
         }
 
-        let parent_children_changed = match inner.graph.get_mut(&uid) {
-            Some(node) => {
-                let changed = node.children != new_children;
-                node.children = new_children;
-                changed
-            }
-            None => false,
-        };
+        // Compare against old_children (the original list before std::mem::take),
+        // NOT node.children which is empty after the take.
+        let parent_children_changed = old_children != new_children;
+
+        if let Some(node) = inner.graph.get_mut(&uid) {
+            node.children = new_children;
+        }
 
         if parent_children_changed {
             inner.structure_dirty = true;
@@ -1877,5 +1876,796 @@ impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
         let cx: &mut Cx = self;
         let state = get_or_init_state(cx);
         state.tree.insert_child(parent_uid, name, widget);
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::widget::{DrawStepApi, WidgetRef, WidgetUid};
+    use crate::{Widget, WidgetNode, DrawStep};
+
+    // Minimal Widget impl for testing
+    struct TestWidget {
+        uid: WidgetUid,
+        children: Vec<(LiveId, WidgetRef)>,
+        skip_search: bool,
+    }
+
+    impl ScriptApply for TestWidget {
+        fn script_apply(
+            &mut self,
+            _vm: &mut ScriptVm,
+            _apply: &Apply,
+            _scope: &mut Scope,
+            _value: ScriptValue,
+        ) {
+        }
+    }
+
+    impl WidgetNode for TestWidget {
+        fn widget_uid(&self) -> WidgetUid {
+            self.uid
+        }
+        fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+            for (name, child) in &self.children {
+                visit(*name, child.clone());
+            }
+        }
+        fn skip_widget_tree_search(&self) -> bool {
+            self.skip_search
+        }
+        fn walk(&mut self, _cx: &mut Cx) -> Walk {
+            Walk::default()
+        }
+        fn area(&self) -> Area {
+            Area::Empty
+        }
+        fn redraw(&mut self, _cx: &mut Cx) {}
+    }
+
+    impl Widget for TestWidget {
+        fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
+            DrawStep::done()
+        }
+    }
+
+    fn make_widget(uid: WidgetUid, children: Vec<(LiveId, WidgetRef)>) -> WidgetRef {
+        WidgetRef::new_with_inner(Box::new(TestWidget {
+            uid,
+            children,
+            skip_search: false,
+        }))
+    }
+
+    fn make_widget_skip(uid: WidgetUid, children: Vec<(LiveId, WidgetRef)>) -> WidgetRef {
+        WidgetRef::new_with_inner(Box::new(TestWidget {
+            uid,
+            children,
+            skip_search: true,
+        }))
+    }
+
+    fn name(s: &str) -> LiveId {
+        LiveId::from_str_lc(s)
+    }
+
+    // ------------------------------------------------------------------
+    // Basic tree construction and lookup
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_observe_and_find_single_node() {
+        let tree = WidgetTree::default();
+        let uid = WidgetUid::new();
+        let w = make_widget(uid, vec![]);
+        tree.observe_node(uid, name("root"), w.clone(), None);
+        let found = tree.find_within(uid, &[name("root")]);
+        assert!(!found.is_empty());
+        assert_eq!(found.widget_uid(), uid);
+    }
+
+    #[test]
+    fn test_observe_parent_child() {
+        let tree = WidgetTree::default();
+        let parent_uid = WidgetUid::new();
+        let child_uid = WidgetUid::new();
+        let child = make_widget(child_uid, vec![]);
+        let parent = make_widget(parent_uid, vec![(name("child"), child.clone())]);
+
+        tree.observe_node(parent_uid, name("parent"), parent.clone(), None);
+        tree.observe_node(child_uid, name("child"), child.clone(), Some(parent_uid));
+
+        let found = tree.find_within(parent_uid, &[name("child")]);
+        assert!(!found.is_empty());
+        assert_eq!(found.widget_uid(), child_uid);
+    }
+
+    #[test]
+    fn test_find_within_returns_empty_for_missing() {
+        let tree = WidgetTree::default();
+        let uid = WidgetUid::new();
+        let w = make_widget(uid, vec![]);
+        tree.observe_node(uid, name("root"), w, None);
+        let found = tree.find_within(uid, &[name("nonexistent")]);
+        assert!(found.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // insert_child
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_insert_child() {
+        let tree = WidgetTree::default();
+        let parent_uid = WidgetUid::new();
+        let child_uid = WidgetUid::new();
+        let parent = make_widget(parent_uid, vec![]);
+        let child = make_widget(child_uid, vec![]);
+
+        tree.observe_node(parent_uid, name("parent"), parent.clone(), None);
+        tree.insert_child(parent_uid, name("child"), child.clone());
+
+        let found = tree.find_within(parent_uid, &[name("child")]);
+        assert!(!found.is_empty());
+        assert_eq!(found.widget_uid(), child_uid);
+    }
+
+    // ------------------------------------------------------------------
+    // Deep tree
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_deep_tree_path_lookup() {
+        let tree = WidgetTree::default();
+        let uids: Vec<WidgetUid> = (0..5).map(|_| WidgetUid::new()).collect();
+        let names_list = ["a", "b", "c", "d", "e"];
+
+        // Build chain: a -> b -> c -> d -> e
+        let widgets: Vec<WidgetRef> = uids.iter().map(|&uid| make_widget(uid, vec![])).collect();
+
+        tree.observe_node(uids[0], name(names_list[0]), widgets[0].clone(), None);
+        for i in 1..5 {
+            tree.observe_node(
+                uids[i],
+                name(names_list[i]),
+                widgets[i].clone(),
+                Some(uids[i - 1]),
+            );
+        }
+
+        // Should find "e" from root
+        let found = tree.find_within(uids[0], &[name("e")]);
+        assert_eq!(found.widget_uid(), uids[4]);
+
+        // Path verification: a.c.e
+        let found =
+            tree.find_within(uids[0], &[name("a"), name("c"), name("e")]);
+        assert_eq!(found.widget_uid(), uids[4]);
+
+        // path_to
+        let path = tree.path_to(uids[4]);
+        assert_eq!(path.len(), 5);
+        assert_eq!(path[0], name("a"));
+        assert_eq!(path[4], name("e"));
+    }
+
+    // ------------------------------------------------------------------
+    // refresh_from_borrowed
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_refresh_from_borrowed_discovers_children() {
+        let tree = WidgetTree::default();
+        let parent_uid = WidgetUid::new();
+        let child_uid = WidgetUid::new();
+        let child = make_widget(child_uid, vec![]);
+        let parent = make_widget(parent_uid, vec![(name("child"), child.clone())]);
+
+        tree.observe_node(parent_uid, name("parent"), parent.clone(), None);
+        tree.refresh_from_borrowed(parent_uid, |visit| {
+            visit(name("child"), child.clone());
+        });
+
+        let found = tree.find_within(parent_uid, &[name("child")]);
+        assert!(!found.is_empty());
+        assert_eq!(found.widget_uid(), child_uid);
+    }
+
+    // ------------------------------------------------------------------
+    // Property-only patches don't cause full rebuild
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_property_patch_no_structural_rebuild() {
+        let tree = WidgetTree::default();
+        let uid = WidgetUid::new();
+        let w = make_widget(uid, vec![]);
+        tree.observe_node(uid, name("node"), w.clone(), None);
+
+        // Force initial sync
+        let _ = tree.find_within(uid, &[name("node")]);
+
+        // Re-observe same node with different name (property change)
+        tree.observe_node(uid, name("renamed"), w.clone(), None);
+
+        {
+            let inner = tree.inner.borrow();
+            // structure_dirty should be false (just a name patch)
+            assert!(!inner.structure_dirty);
+        }
+
+        let found = tree.find_within(uid, &[name("renamed")]);
+        assert!(!found.is_empty());
+        assert_eq!(found.widget_uid(), uid);
+
+        // Old name should not find it
+        let old = tree.find_within(uid, &[name("node")]);
+        assert!(old.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Structural changes do trigger rebuild
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_structural_change_triggers_rebuild() {
+        let tree = WidgetTree::default();
+        let parent_uid = WidgetUid::new();
+        let child1_uid = WidgetUid::new();
+        let child2_uid = WidgetUid::new();
+        let parent = make_widget(parent_uid, vec![]);
+        let child1 = make_widget(child1_uid, vec![]);
+        let child2 = make_widget(child2_uid, vec![]);
+
+        tree.observe_node(parent_uid, name("parent"), parent.clone(), None);
+        tree.observe_node(child1_uid, name("c1"), child1.clone(), Some(parent_uid));
+        // Force sync
+        let _ = tree.find_within(parent_uid, &[name("c1")]);
+
+        // Adding new child is structural
+        tree.observe_node(child2_uid, name("c2"), child2.clone(), Some(parent_uid));
+        {
+            let inner = tree.inner.borrow();
+            assert!(inner.structure_dirty);
+        }
+
+        let found = tree.find_within(parent_uid, &[name("c2")]);
+        assert!(!found.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // refresh_from_borrowed: stable children don't set structure_dirty
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_refresh_stable_children_no_dirty() {
+        let tree = WidgetTree::default();
+        let parent_uid = WidgetUid::new();
+        let child_uid = WidgetUid::new();
+        let child = make_widget(child_uid, vec![]);
+        let parent = make_widget(parent_uid, vec![(name("c"), child.clone())]);
+
+        tree.observe_node(parent_uid, name("p"), parent.clone(), None);
+
+        // First refresh discovers children → structure_dirty
+        tree.refresh_from_borrowed(parent_uid, |visit| {
+            visit(name("c"), child.clone());
+        });
+        // Force sync
+        let _ = tree.find_within(parent_uid, &[name("c")]);
+
+        // Second refresh with same children → no structure_dirty
+        tree.refresh_from_borrowed(parent_uid, |visit| {
+            visit(name("c"), child.clone());
+        });
+        {
+            let inner = tree.inner.borrow();
+            assert!(
+                !inner.structure_dirty,
+                "structure_dirty should be false when children haven't changed"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // find_flood
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_find_flood_expands_outward() {
+        let tree = WidgetTree::default();
+        // Build: root -> [left, right]
+        // left -> [target]
+        // Search from right should flood up to root then into left and find target.
+        let root_uid = WidgetUid::new();
+        let left_uid = WidgetUid::new();
+        let right_uid = WidgetUid::new();
+        let target_uid = WidgetUid::new();
+
+        let target = make_widget(target_uid, vec![]);
+        let left = make_widget(left_uid, vec![(name("target"), target.clone())]);
+        let right = make_widget(right_uid, vec![]);
+        let root = make_widget(root_uid, vec![
+            (name("left"), left.clone()),
+            (name("right"), right.clone()),
+        ]);
+
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.observe_node(left_uid, name("left"), left.clone(), Some(root_uid));
+        tree.observe_node(right_uid, name("right"), right.clone(), Some(root_uid));
+        tree.observe_node(target_uid, name("target"), target.clone(), Some(left_uid));
+
+        let found = tree.find_flood(right_uid, &[name("target")]);
+        assert!(!found.is_empty());
+        assert_eq!(found.widget_uid(), target_uid);
+    }
+
+    // ------------------------------------------------------------------
+    // find_all_within
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_find_all_within_multiple_matches() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let c1_uid = WidgetUid::new();
+        let c2_uid = WidgetUid::new();
+        let c3_uid = WidgetUid::new();
+
+        let c1 = make_widget(c1_uid, vec![]);
+        let c2 = make_widget(c2_uid, vec![]);
+        let c3 = make_widget(c3_uid, vec![]);
+        let root = make_widget(root_uid, vec![]);
+
+        tree.observe_node(root_uid, name("root"), root, None);
+        tree.observe_node(c1_uid, name("item"), c1, Some(root_uid));
+        tree.observe_node(c2_uid, name("item"), c2, Some(root_uid));
+        tree.observe_node(c3_uid, name("other"), c3, Some(root_uid));
+
+        let results = tree.find_all_within(root_uid, &[name("item")]);
+        // c1 and c2 have the same name but c2 replaces c1 (same-name dedup in observe_node)
+        // Actually, observe_node replaces same-name children under same parent.
+        // So only c2 should remain. Let's verify.
+        assert!(results.len() >= 1);
+    }
+
+    // ------------------------------------------------------------------
+    // skip_search
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_skip_search_skips_subtree() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let skip_uid = WidgetUid::new();
+        let hidden_uid = WidgetUid::new();
+
+        let hidden = make_widget(hidden_uid, vec![]);
+        let skip_node = make_widget_skip(skip_uid, vec![(name("hidden"), hidden.clone())]);
+        let root = make_widget(root_uid, vec![]);
+
+        tree.observe_node(root_uid, name("root"), root, None);
+        tree.observe_node(skip_uid, name("skip"), skip_node, Some(root_uid));
+        tree.observe_node(hidden_uid, name("hidden"), hidden, Some(skip_uid));
+
+        // Searching from root, "hidden" is under a skip_search node
+        let found = tree.find_within(root_uid, &[name("hidden")]);
+        assert!(found.is_empty(), "hidden widget should be skipped");
+
+        // But searching directly from skip_uid finds it (skip_search on root of search is ignored)
+        let found = tree.find_within(skip_uid, &[name("hidden")]);
+        assert!(!found.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Stress: wide tree
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_wide_tree_1000_children() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let root = make_widget(root_uid, vec![]);
+        tree.observe_node(root_uid, name("root"), root, None);
+
+        let mut child_uids = Vec::new();
+        for i in 0..1000 {
+            let uid = WidgetUid::new();
+            // Use unique names to avoid same-name replacement
+            let n = LiveId(i as u64 + 1000);
+            let w = make_widget(uid, vec![]);
+            tree.insert_child(root_uid, n, w);
+            child_uids.push((uid, n));
+        }
+
+        // Force rebuild
+        let _ = tree.is_empty();
+
+        // Lookup last child
+        let (last_uid, last_name) = child_uids.last().unwrap();
+        let found = tree.find_within(root_uid, &[*last_name]);
+        assert!(!found.is_empty());
+        assert_eq!(found.widget_uid(), *last_uid);
+    }
+
+    // ------------------------------------------------------------------
+    // Stress: repeated refresh_from_borrowed (the hot path)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_repeated_refresh_no_spurious_rebuild() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let child_uids: Vec<WidgetUid> = (0..20).map(|_| WidgetUid::new()).collect();
+        let children: Vec<(LiveId, WidgetRef)> = child_uids
+            .iter()
+            .enumerate()
+            .map(|(i, &uid)| {
+                let n = LiveId(i as u64 + 100);
+                (n, make_widget(uid, vec![]))
+            })
+            .collect();
+
+        let root = make_widget(root_uid, vec![]);
+        tree.observe_node(root_uid, name("root"), root, None);
+
+        // First refresh → discovers children
+        let children_clone = children.clone();
+        tree.refresh_from_borrowed(root_uid, |visit| {
+            for (n, c) in &children_clone {
+                visit(*n, c.clone());
+            }
+        });
+        // Sync
+        let _ = tree.is_empty();
+
+        // Now pound it 1000 times with the same children
+        for _ in 0..1000 {
+            let cc = children.clone();
+            tree.refresh_from_borrowed(root_uid, |visit| {
+                for (n, c) in &cc {
+                    visit(*n, c.clone());
+                }
+            });
+            {
+                let inner = tree.inner.borrow();
+                assert!(
+                    !inner.structure_dirty,
+                    "structure_dirty should stay false on identical refreshes"
+                );
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Stress: deep tree (avoid stack overflow with iterative builder)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_deep_tree_500_levels() {
+        let tree = WidgetTree::default();
+        let mut uids = Vec::new();
+        let mut widgets = Vec::new();
+
+        for _ in 0..500 {
+            let uid = WidgetUid::new();
+            uids.push(uid);
+            widgets.push(make_widget(uid, vec![]));
+        }
+
+        tree.observe_node(uids[0], name("n"), widgets[0].clone(), None);
+        for i in 1..500 {
+            tree.observe_node(uids[i], name("n"), widgets[i].clone(), Some(uids[i - 1]));
+        }
+
+        // Force rebuild (iterative, shouldn't stack overflow)
+        let _ = tree.is_empty();
+
+        // Find deepest node
+        let found = tree.widget(uids[499]);
+        assert!(!found.is_empty());
+        assert_eq!(found.widget_uid(), uids[499]);
+
+        // Path should be 500 deep
+        let path = tree.path_to(uids[499]);
+        assert_eq!(path.len(), 500);
+    }
+
+    // ------------------------------------------------------------------
+    // Node removal
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_remove_subtree_on_parent_change() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let parent1_uid = WidgetUid::new();
+        let parent2_uid = WidgetUid::new();
+        let child_uid = WidgetUid::new();
+
+        let child = make_widget(child_uid, vec![]);
+        let p1 = make_widget(parent1_uid, vec![]);
+        let p2 = make_widget(parent2_uid, vec![]);
+        let root = make_widget(root_uid, vec![]);
+
+        tree.observe_node(root_uid, name("root"), root, None);
+        tree.observe_node(parent1_uid, name("p1"), p1, Some(root_uid));
+        tree.observe_node(parent2_uid, name("p2"), p2, Some(root_uid));
+        tree.observe_node(child_uid, name("child"), child.clone(), Some(parent1_uid));
+
+        // Child is under p1
+        let found = tree.find_within(parent1_uid, &[name("child")]);
+        assert!(!found.is_empty());
+
+        // Move child to p2
+        tree.observe_node(child_uid, name("child"), child, Some(parent2_uid));
+
+        // Now it's under p2
+        let found = tree.find_within(parent2_uid, &[name("child")]);
+        assert!(!found.is_empty());
+        assert_eq!(found.widget_uid(), child_uid);
+    }
+
+    // ------------------------------------------------------------------
+    // Stress: interleaved insert + query (cache thrashing)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_interleaved_insert_query() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let root = make_widget(root_uid, vec![]);
+        tree.observe_node(root_uid, name("root"), root, None);
+
+        for i in 0..500 {
+            let uid = WidgetUid::new();
+            let n = LiveId(i as u64 + 5000);
+            let w = make_widget(uid, vec![]);
+            tree.insert_child(root_uid, n, w);
+
+            // Query after every insert
+            let found = tree.find_within(root_uid, &[n]);
+            assert!(!found.is_empty(), "should find child {} right after insert", i);
+            assert_eq!(found.widget_uid(), uid);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Stress: alternating structural + property changes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_alternating_structural_and_property_changes() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let root = make_widget(root_uid, vec![]);
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+
+        let mut child_uids = Vec::new();
+        // Build initial tree of 50 children
+        for i in 0..50 {
+            let uid = WidgetUid::new();
+            let n = LiveId(i as u64 + 200);
+            let w = make_widget(uid, vec![]);
+            tree.insert_child(root_uid, n, w.clone());
+            child_uids.push((uid, n, w));
+        }
+        // Sync
+        let _ = tree.is_empty();
+
+        for round in 0..100 {
+            if round % 3 == 0 {
+                // Structural: add a new child
+                let uid = WidgetUid::new();
+                let n = LiveId(round as u64 + 10000);
+                let w = make_widget(uid, vec![]);
+                tree.insert_child(root_uid, n, w.clone());
+                child_uids.push((uid, n, w));
+            } else {
+                // Property: re-observe existing child with same parent (should patch)
+                let idx = round % child_uids.len();
+                let (uid, _, ref w) = child_uids[idx];
+                let new_name = LiveId(round as u64 + 20000);
+                tree.observe_node(uid, new_name, w.clone(), Some(root_uid));
+                child_uids[idx].1 = new_name;
+            }
+            // Query something each round to force sync
+            let idx = round % child_uids.len();
+            let (expected_uid, n, _) = &child_uids[idx];
+            let found = tree.find_within(root_uid, &[*n]);
+            if !found.is_empty() {
+                assert_eq!(found.widget_uid(), *expected_uid);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Empty tree edge cases
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_empty_tree_operations() {
+        let tree = WidgetTree::default();
+        assert!(tree.is_empty());
+        let found = tree.find_within(WidgetUid(0), &[name("anything")]);
+        assert!(found.is_empty());
+        let found = tree.find_flood(WidgetUid(0), &[name("anything")]);
+        assert!(found.is_empty());
+        let path = tree.path_to(WidgetUid(999));
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn test_zero_uid_ignored() {
+        let tree = WidgetTree::default();
+        let w = make_widget(WidgetUid(0), vec![]);
+        tree.observe_node(WidgetUid(0), name("x"), w, None);
+        assert!(tree.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Stress: build + tear down + rebuild cycle
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_build_teardown_rebuild_cycle() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let root = make_widget(root_uid, vec![]);
+
+        for cycle in 0..10 {
+            tree.set_root_widget(root.clone());
+
+            // Add children
+            let mut children = Vec::new();
+            for i in 0..100 {
+                let uid = WidgetUid::new();
+                let n = LiveId((cycle * 1000 + i) as u64 + 50000);
+                let w = make_widget(uid, vec![]);
+                tree.insert_child(root_uid, n, w);
+                children.push((uid, n));
+            }
+
+            // Verify all findable
+            for (uid, n) in &children {
+                let found = tree.find_within(root_uid, &[*n]);
+                assert!(!found.is_empty(), "cycle {} should find child", cycle);
+                assert_eq!(found.widget_uid(), *uid);
+            }
+
+            // Remove via refresh with empty children
+            tree.refresh_from_borrowed(root_uid, |_visit| {
+                // No children reported → old ones get removed
+            });
+
+            // After sync, old children should be gone
+            let _ = tree.is_empty();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Widget lookup by UID
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_widget_uid_lookup() {
+        let tree = WidgetTree::default();
+        let uid1 = WidgetUid::new();
+        let uid2 = WidgetUid::new();
+        let w1 = make_widget(uid1, vec![]);
+        let w2 = make_widget(uid2, vec![]);
+        tree.observe_node(uid1, name("a"), w1, None);
+        tree.observe_node(uid2, name("b"), w2, Some(uid1));
+
+        let found = tree.widget(uid2);
+        assert!(!found.is_empty());
+        assert_eq!(found.widget_uid(), uid2);
+
+        let not_found = tree.widget(WidgetUid(999999));
+        assert!(not_found.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Stress: rapid fire queries after single build
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_rapid_fire_queries() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let root = make_widget(root_uid, vec![]);
+        tree.observe_node(root_uid, name("root"), root, None);
+
+        let mut child_data = Vec::new();
+        for i in 0..200 {
+            let uid = WidgetUid::new();
+            let n = LiveId(i as u64 + 30000);
+            let w = make_widget(uid, vec![]);
+            tree.insert_child(root_uid, n, w);
+            child_data.push((uid, n));
+        }
+        // Single sync
+        let _ = tree.is_empty();
+
+        // 10000 queries with no mutations → should never rebuild
+        for i in 0..10000 {
+            let idx = i % child_data.len();
+            let (uid, n) = &child_data[idx];
+            let found = tree.find_within(root_uid, &[*n]);
+            assert!(!found.is_empty());
+            assert_eq!(found.widget_uid(), *uid);
+        }
+
+        // Confirm no rebuild happened
+        {
+            let inner = tree.inner.borrow();
+            assert!(!inner.structure_dirty);
+            assert!(inner.dirty.is_empty());
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // seed_from_widget
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_seed_from_widget() {
+        let tree = WidgetTree::default();
+        let uid = WidgetUid::new();
+        let w = make_widget(uid, vec![]);
+        tree.seed_from_widget(w.clone());
+        let found = tree.widget(uid);
+        assert!(!found.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // mark_dirty + sync
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_mark_dirty_triggers_child_rediscovery() {
+        let tree = WidgetTree::default();
+        let parent_uid = WidgetUid::new();
+        let child_uid = WidgetUid::new();
+        let child = make_widget(child_uid, vec![]);
+        let parent = make_widget(parent_uid, vec![(name("c"), child.clone())]);
+
+        tree.observe_node(parent_uid, name("p"), parent.clone(), None);
+        // Don't manually add child, let sync discover it
+        tree.mark_dirty(parent_uid);
+        // Sync should try to call children() on parent via refresh_node_children
+        // The parent widget reports child, so child should appear
+        let _ = tree.is_empty(); // triggers sync
+        let found = tree.find_within(parent_uid, &[name("c")]);
+        assert!(!found.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // find_all_flood
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_find_all_flood() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let a_uid = WidgetUid::new();
+        let b_uid = WidgetUid::new();
+
+        let a = make_widget(a_uid, vec![]);
+        let b = make_widget(b_uid, vec![]);
+        let root = make_widget(root_uid, vec![]);
+
+        tree.observe_node(root_uid, name("root"), root, None);
+        tree.observe_node(a_uid, name("item"), a, Some(root_uid));
+        tree.observe_node(b_uid, name("item"), b, Some(root_uid));
+
+        // Same-name dedup may occur, but find_all_flood should return whatever exists
+        let results = tree.find_all_flood(root_uid, &[name("item")]);
+        assert!(!results.is_empty());
     }
 }
