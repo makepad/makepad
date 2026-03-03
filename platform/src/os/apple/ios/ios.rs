@@ -30,6 +30,8 @@ use {
         permission::PermissionResult,
         thread::SignalToUI,
         window::CxWindowPool,
+        DVec2,
+        Rect,
     },
     std::{
         cell::RefCell,

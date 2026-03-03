@@ -19,6 +19,9 @@ pub struct AppleUnifiedVideoPlayer {
     is_looping: bool,
     mode: ApplePlayerMode,
     bgra_buf: Vec<u8>,
+    /// Consecutive poll_frame calls with no pixel buffer after the native player is playing.
+    /// Used to detect codecs (e.g. AV1) that AVPlayer can play but not expose via video output.
+    null_frame_count: u32,
 }
 
 enum ApplePlayerMode {
@@ -65,6 +68,7 @@ impl AppleUnifiedVideoPlayer {
             is_looping,
             mode,
             bgra_buf: Vec::new(),
+            null_frame_count: 0,
         }
     }
 
@@ -85,7 +89,7 @@ impl AppleUnifiedVideoPlayer {
     pub fn check_prepared(
         &mut self,
     ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
-        match &mut self.mode {
+        let result = match &mut self.mode {
             ApplePlayerMode::Native(player) => match player.check_prepared() {
                 Some(Err(err)) => {
                     self.switch_to_software(&err);
@@ -98,12 +102,43 @@ impl AppleUnifiedVideoPlayer {
                 other => other,
             },
             ApplePlayerMode::Software(player) => player.check_prepared(),
-        }
+        };
+        result
     }
 
     pub fn poll_frame(&mut self, textures: &mut CxTexturePool) -> bool {
         let frame = match &mut self.mode {
-            ApplePlayerMode::Native(player) => return player.poll_frame(textures),
+            ApplePlayerMode::Native(player) => {
+                let got_frame = player.poll_frame(textures);
+                if got_frame {
+                    self.null_frame_count = 0;
+                    return true;
+                }
+                // Track consecutive null frames. AVPlayer may report ready and
+                // advance time but never produce pixel buffers for codecs it
+                // cannot expose via AVPlayerItemVideoOutput (e.g. AV1 on some
+                // macOS versions). After enough failed polls, fall back to
+                // software decoding.
+                self.null_frame_count += 1;
+                if self.null_frame_count >= 60 {
+                    self.switch_to_software(
+                        "native player produced no frames after 60 polls",
+                    );
+                    self.null_frame_count = 0;
+                    // Fall through to software path below
+                } else {
+                    return false;
+                }
+                // Re-match after switching to software
+                if let ApplePlayerMode::Software(player) = &mut self.mode {
+                    if !player.poll_frame() {
+                        return false;
+                    }
+                    player.take_frame().map(|(rgba, w, h)| (rgba.to_vec(), w, h))
+                } else {
+                    return false;
+                }
+            }
             ApplePlayerMode::Software(player) => {
                 if !player.poll_frame() {
                     return false;
