@@ -41,8 +41,8 @@ pub enum AlignEntry {
     SkipTurtle {
         skip: usize,
     },
-    BeginTurtle(Vec2d, Vec2d),
-    EndTurtle,
+    BeginClip(Vec2d, Vec2d),
+    EndClip,
 }
 
 /// Specifies how a turtle should walk.
@@ -1289,7 +1289,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     /// Starts a root turtle.
     pub fn begin_root_turtle(&mut self, size: Vec2d, layout: Layout) {
         self.align_list
-            .push(AlignEntry::BeginTurtle(dvec2(0.0, 0.0), size));
+            .push(AlignEntry::BeginClip(dvec2(0.0, 0.0), size));
 
         let turtle = Turtle {
             walk: Walk::fixed(size.x, size.y),
@@ -1390,7 +1390,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         let origin = origin - layout.scroll;
 
         self.align_list
-            .push(AlignEntry::BeginTurtle(clip_min, clip_max));
+            .push(AlignEntry::BeginClip(clip_min, clip_max));
 
         let turtle = Turtle {
             walk,
@@ -1578,7 +1578,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             }
         }
 
-        self.align_list.push(AlignEntry::EndTurtle);
+        self.align_list.push(AlignEntry::EndClip);
         self.finished_rows.truncate(turtle.finished_rows_start);
         self.finished_walks.truncate(turtle.finished_walks_start);
         let turtle = self.turtles.pop().unwrap();
@@ -1624,7 +1624,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     }
                 }
             }
-            if let AlignEntry::BeginTurtle(clip_min, clip_max) =
+            if let AlignEntry::BeginClip(clip_min, clip_max) =
                 &mut self.align_list[turtle.align_start]
             {
                 clip_max.x = clip_min.x + turtle.width();
@@ -1650,7 +1650,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     }
                 }
             }
-            if let AlignEntry::BeginTurtle(clip_min, clip_max) =
+            if let AlignEntry::BeginClip(clip_min, clip_max) =
                 &mut self.align_list[turtle.align_start]
             {
                 clip_max.y = clip_min.y + turtle.height();
@@ -1838,7 +1838,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn end_pass_sized_turtle(&mut self) {
         let turtle = self.turtles.pop().unwrap();
         // lets perform clipping on our alignlist.
-        self.align_list.push(AlignEntry::EndTurtle);
+        self.align_list.push(AlignEntry::EndClip);
 
         self.clip_and_shift_align_list(turtle.align_start, self.align_list.len());
         //log!("{:?}", self.align_list[turtle.align_start]);
@@ -1851,7 +1851,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn end_pass_sized_turtle_with_shift(&mut self, area: Area, shift: Vec2d) {
         let turtle = self.turtles.pop().unwrap();
         // lets perform clipping on our alignlist.
-        self.align_list.push(AlignEntry::EndTurtle);
+        self.align_list.push(AlignEntry::EndClip);
 
         self.clip_and_shift_align_list(turtle.align_start, self.align_list.len());
         //log!("{:?}", self.align_list[turtle.align_start]);
@@ -2106,7 +2106,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                         rect_area.draw_clip.1 += d;
                     }
                 }
-                AlignEntry::BeginTurtle(clip0, clip1) => {
+                AlignEntry::BeginClip(clip0, clip1) => {
                     *clip0 += d;
                     *clip1 += d;
                 }
@@ -2143,7 +2143,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     i = skip;
                     continue;
                 }
-                AlignEntry::BeginTurtle(clip0, clip1) => {
+                AlignEntry::BeginClip(clip0, clip1) => {
                     if let Some((tclip0, tclip1)) = self.turtle_clips.last() {
                         self.turtle_clips.push((
                             dvec2(clip0.x.max(tclip0.x), clip0.y.max(tclip0.y)),
@@ -2153,7 +2153,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                         self.turtle_clips.push((*clip0, *clip1));
                     }
                 }
-                AlignEntry::EndTurtle => {
+                AlignEntry::EndClip => {
                     self.turtle_clips.pop().unwrap();
                 }
                 AlignEntry::Area(Area::Instance(inst)) => {
@@ -2214,6 +2214,18 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn add_rect_area(&mut self, area: &mut Area, rect: Rect) {
         //let turtle = self.turtle();
         self.add_aligned_rect_area(area, rect)
+    }
+
+    /// Push a clip rectangle onto the clip stack. All draw calls until the
+    /// matching `pop_clip_rect` will have their GPU `draw_clip` intersected
+    /// with this rect. Must be balanced with `pop_clip_rect`.
+    pub fn push_clip_rect(&mut self, rect: Rect) {
+        self.align_list.push(AlignEntry::BeginClip(rect.pos, rect.pos + rect.size));
+    }
+
+    /// Pop a clip rectangle previously pushed by `push_clip_rect`.
+    pub fn pop_clip_rect(&mut self) {
+        self.align_list.push(AlignEntry::EndClip);
     }
 }
 
