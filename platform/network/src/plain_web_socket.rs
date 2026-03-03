@@ -1,28 +1,31 @@
 use crate::types::{HttpRequest, WebSocketMessage};
-use makepad_live_id::LiveId;
 use crate::web_socket_parser::{
-    WebSocketParser, ServerWebSocketMessage, ServerWebSocketMessageFormat,
-    ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PONG_MESSAGE,
+    WebSocketMessage as ParsedWebSocketMessage, WebSocketMessageFormat, WebSocketMessageHeader,
+    WebSocketParser, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
+use makepad_live_id::LiveId;
 use std::{
     io::{Read, Write},
+    net::{Shutdown, TcpStream},
     sync::mpsc::{channel, Sender, TryRecvError},
     time::{Duration, Instant},
 };
 
-use super::socket_stream::SocketStream;
-
-pub struct LinuxWebSocket {
+pub struct PlainWebSocket {
     sender: Option<Sender<WebSocketMessage>>,
+    stream: Option<TcpStream>,
 }
 
-impl Drop for LinuxWebSocket {
+impl Drop for PlainWebSocket {
     fn drop(&mut self) {
         self.sender.take();
+        if let Some(stream) = self.stream.take() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
     }
 }
 
-impl LinuxWebSocket {
+impl PlainWebSocket {
     pub fn send_message(&mut self, message: WebSocketMessage) -> Result<(), ()> {
         if let Some(sender) = &mut self.sender {
             if sender.send(message).is_err() {
@@ -35,37 +38,54 @@ impl LinuxWebSocket {
 
     pub fn close(&mut self) {
         self.sender.take();
+        if let Some(stream) = self.stream.take() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
     }
 
     pub fn open(
         _socket_id: LiveId,
         request: HttpRequest,
         rx_sender: Sender<WebSocketMessage>,
-    ) -> LinuxWebSocket {
+    ) -> PlainWebSocket {
         let split = request.split_url();
-        let is_tls = match split.proto {
-            "ws" | "http" => false,
-            "wss" | "https" => true,
+        match split.proto {
+            "http" | "ws" => {}
+            "https" | "wss" => {
+                let _ = rx_sender.send(WebSocketMessage::Error(
+                    "TLS websocket is not supported by this client; use ws/http".to_string(),
+                ));
+                return PlainWebSocket {
+                    sender: None,
+                    stream: None,
+                };
+            }
             _ => {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(
                     "unsupported websocket scheme: {}",
                     split.proto
                 )));
-                return LinuxWebSocket { sender: None };
+                return PlainWebSocket {
+                    sender: None,
+                    stream: None,
+                };
+            }
+        }
+
+        let mut stream = match TcpStream::connect(format!("{}:{}", split.host, split.port)) {
+            Ok(stream) => stream,
+            Err(err) => {
+                let _ = rx_sender.send(WebSocketMessage::Error(format!(
+                    "Error connecting websocket stream: {err}"
+                )));
+                return PlainWebSocket {
+                    sender: None,
+                    stream: None,
+                };
             }
         };
 
-        let mut stream =
-            match SocketStream::connect(split.host, split.port, is_tls, request.ignore_ssl_cert) {
-                Ok(stream) => stream,
-                Err(err) => {
-                    let _ = rx_sender.send(WebSocketMessage::Error(format!(
-                        "Error connecting websocket stream: {err}"
-                    )));
-                    return LinuxWebSocket { sender: None };
-                }
-            };
-
+        let _ = stream.set_nodelay(true);
         let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
 
@@ -74,8 +94,7 @@ impl LinuxWebSocket {
         } else {
             format!("/{}", split.file)
         };
-        let default_port = if is_tls { "443" } else { "80" };
-        let host_header = if split.port == default_port {
+        let host_header = if split.port == "80" {
             split.host.to_string()
         } else {
             format!("{}:{}", split.host, split.port)
@@ -91,26 +110,44 @@ impl LinuxWebSocket {
             let _ = rx_sender.send(WebSocketMessage::Error(
                 "Error writing request to websocket".into(),
             ));
-            return LinuxWebSocket { sender: None };
+            return PlainWebSocket {
+                sender: None,
+                stream: None,
+            };
         }
 
         let leftover = match read_websocket_handshake_response(&mut stream) {
             Ok(leftover) => leftover,
             Err(err) => {
                 let _ = rx_sender.send(WebSocketMessage::Error(err));
-                return LinuxWebSocket { sender: None };
+                return PlainWebSocket {
+                    sender: None,
+                    stream: None,
+                };
+            }
+        };
+
+        let mut io_stream = match stream.try_clone() {
+            Ok(stream) => stream,
+            Err(err) => {
+                let _ = rx_sender.send(WebSocketMessage::Error(format!(
+                    "Error cloning websocket stream: {err}"
+                )));
+                return PlainWebSocket {
+                    sender: None,
+                    stream: None,
+                };
             }
         };
 
         let (sender, receiver) = channel();
-
         let _io_thread = std::thread::spawn(move || {
             let mut web_socket = WebSocketParser::new();
             let mut done = false;
             if !leftover.is_empty() {
                 parse_incoming(
                     &mut web_socket,
-                    &mut stream,
+                    &mut io_stream,
                     &rx_sender,
                     &mut done,
                     &leftover,
@@ -121,7 +158,7 @@ impl LinuxWebSocket {
                 loop {
                     match receiver.try_recv() {
                         Ok(msg) => {
-                            if handle_outgoing_message(&mut stream, msg) {
+                            if handle_outgoing_message(&mut io_stream, msg) {
                                 done = true;
                                 break;
                             }
@@ -139,14 +176,14 @@ impl LinuxWebSocket {
                 }
 
                 let mut buffer = [0u8; 65535];
-                match stream.read(&mut buffer) {
+                match io_stream.read(&mut buffer) {
                     Ok(0) => {
                         let _ = rx_sender.send(WebSocketMessage::Closed);
                         done = true;
                     }
                     Ok(bytes_read) => parse_incoming(
                         &mut web_socket,
-                        &mut stream,
+                        &mut io_stream,
                         &rx_sender,
                         &mut done,
                         &buffer[0..bytes_read],
@@ -167,31 +204,26 @@ impl LinuxWebSocket {
                     }
                 }
             }
-            stream.shutdown();
+            let _ = io_stream.shutdown(Shutdown::Both);
         });
 
-        LinuxWebSocket {
+        PlainWebSocket {
             sender: Some(sender),
+            stream: Some(stream),
         }
     }
 }
 
-fn handle_outgoing_message(stream: &mut SocketStream, msg: WebSocketMessage) -> bool {
+fn handle_outgoing_message(stream: &mut TcpStream, msg: WebSocketMessage) -> bool {
     match msg {
         WebSocketMessage::Binary(data) => {
-            let header = ServerWebSocketMessageHeader::from_len(
-                data.len(),
-                ServerWebSocketMessageFormat::Binary,
-                false,
-            );
+            let header =
+                WebSocketMessageHeader::from_len(data.len(), WebSocketMessageFormat::Binary, false);
             write_all_no_error(stream, header.as_slice()) || write_all_no_error(stream, &data)
         }
         WebSocketMessage::String(data) => {
-            let header = ServerWebSocketMessageHeader::from_len(
-                data.len(),
-                ServerWebSocketMessageFormat::Text,
-                false,
-            );
+            let header =
+                WebSocketMessageHeader::from_len(data.len(), WebSocketMessageFormat::Text, false);
             write_all_no_error(stream, header.as_slice())
                 || write_all_no_error(stream, data.as_bytes())
         }
@@ -203,20 +235,20 @@ fn handle_outgoing_message(stream: &mut SocketStream, msg: WebSocketMessage) -> 
 
 fn parse_incoming(
     web_socket: &mut WebSocketParser,
-    stream: &mut SocketStream,
+    stream: &mut TcpStream,
     rx_sender: &Sender<WebSocketMessage>,
     done: &mut bool,
     bytes: &[u8],
 ) {
     web_socket.parse(bytes, |result| match result {
-        Ok(ServerWebSocketMessage::Ping(_)) => {
+        Ok(ParsedWebSocketMessage::Ping(_)) => {
             if write_all_no_error(stream, &SERVER_WEB_SOCKET_PONG_MESSAGE) {
                 *done = true;
                 let _ = rx_sender.send(WebSocketMessage::Error("Pong message send failed".into()));
             }
         }
-        Ok(ServerWebSocketMessage::Pong(_)) => {}
-        Ok(ServerWebSocketMessage::Text(text)) => {
+        Ok(ParsedWebSocketMessage::Pong(_)) => {}
+        Ok(ParsedWebSocketMessage::Text(text)) => {
             if rx_sender
                 .send(WebSocketMessage::String(text.into()))
                 .is_err()
@@ -224,7 +256,7 @@ fn parse_incoming(
                 *done = true;
             }
         }
-        Ok(ServerWebSocketMessage::Binary(data)) => {
+        Ok(ParsedWebSocketMessage::Binary(data)) => {
             if rx_sender
                 .send(WebSocketMessage::Binary(data.into()))
                 .is_err()
@@ -232,7 +264,7 @@ fn parse_incoming(
                 *done = true;
             }
         }
-        Ok(ServerWebSocketMessage::Close) => {
+        Ok(ParsedWebSocketMessage::Close) => {
             let _ = rx_sender.send(WebSocketMessage::Closed);
             *done = true;
         }
@@ -244,7 +276,7 @@ fn parse_incoming(
     });
 }
 
-fn read_websocket_handshake_response(stream: &mut SocketStream) -> Result<Vec<u8>, String> {
+fn read_websocket_handshake_response(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut data = Vec::with_capacity(4096);
     let mut buf = [0u8; 4096];
@@ -282,7 +314,7 @@ fn read_websocket_handshake_response(stream: &mut SocketStream) -> Result<Vec<u8
     }
 }
 
-fn write_all_no_error(stream: &mut SocketStream, bytes: &[u8]) -> bool {
+fn write_all_no_error(stream: &mut TcpStream, bytes: &[u8]) -> bool {
     let mut offset = 0usize;
     while offset < bytes.len() {
         match stream.write(&bytes[offset..]) {
@@ -296,7 +328,7 @@ fn write_all_no_error(stream: &mut SocketStream, bytes: &[u8]) -> bool {
                         | std::io::ErrorKind::Interrupted
                 ) =>
             {
-                continue;
+                std::thread::sleep(Duration::from_millis(1));
             }
             Err(_) => return true,
         }
@@ -306,6 +338,6 @@ fn write_all_no_error(stream: &mut SocketStream, bytes: &[u8]) -> bool {
 
 fn find_header_end(data: &[u8]) -> Option<usize> {
     data.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
 }
