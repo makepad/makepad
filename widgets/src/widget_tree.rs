@@ -1556,8 +1556,6 @@ impl WidgetTree {
 
         let mut out = String::new();
         let _ = writeln!(&mut out, "W3 {}", dump_nodes.len());
-        // Keep the origin metadata line for protocol compatibility.
-        let _ = writeln!(&mut out, "O 0 0 1000");
         for (new_index, node) in dump_nodes.iter().enumerate() {
             let mut parent = node.parent;
             let mut parent_index = -1i64;
