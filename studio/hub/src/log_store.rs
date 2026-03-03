@@ -1,4 +1,4 @@
-use makepad_studio_protocol::backend_protocol::{
+use makepad_studio_protocol::hub_protocol::{
     EventSample, GCSample, GPUSample, LogEntry, LogSource, QueryId,
 };
 use makepad_studio_protocol::LogLevel;

@@ -1,4 +1,4 @@
-use makepad_studio_backend::{BackendConfig, StudioBackend};
+use makepad_studio_hub::{HubConfig, StudioHub};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 
@@ -15,14 +15,14 @@ fn find_occupied_port_below_max() -> (TcpListener, u16) {
 #[test]
 fn headless_backend_falls_back_to_higher_port_when_requested_port_is_busy() {
     let (_busy_listener, busy_port) = find_occupied_port_below_max();
-    let config = BackendConfig {
+    let config = HubConfig {
         listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), busy_port),
         enable_in_process_gateway: false,
         ..Default::default()
     };
 
     let backend =
-        StudioBackend::start_headless(config).expect("headless backend should bind with fallback");
+        StudioHub::start_headless(config).expect("headless backend should bind with fallback");
     assert_eq!(backend.listen_address.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     assert!(
         backend.listen_address.port() > busy_port,

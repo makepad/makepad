@@ -3,8 +3,8 @@ use makepad_network::{
     ServerWebSocketError, ServerWebSocketMessage, ServerWebSocketMessageFormat,
     ServerWebSocketMessageHeader, WebSocketParser, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
-use makepad_studio_protocol::backend_protocol::{
-    ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope,
+use makepad_studio_protocol::hub_protocol::{
+    ClientId, QueryId, HubToClient, ClientToHub, ClientToHubEnvelope,
 };
 use std::collections::{HashSet, VecDeque};
 use std::env;
@@ -30,10 +30,10 @@ fn show_studio_help() {
     eprintln!("  cargo makepad studio [--studio=IP:PORT]");
     eprintln!();
     eprintln!("Stdin JSON lines accepted:");
-    eprintln!("  UIToStudio");
+    eprintln!("  ClientToHub");
     eprintln!();
     eprintln!("Stdout JSON lines emitted:");
-    eprintln!("  StudioToUI");
+    eprintln!("  HubToClient");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  echo '{{\"ListBuilds\":[]}}' | cargo makepad studio");
@@ -169,10 +169,10 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
         while let Ok(line) = stdin_rx.try_recv() {
             match line {
                 Some(line) => {
-                    match UIToStudio::deserialize_json(&line) {
+                    match ClientToHub::deserialize_json(&line) {
                         Ok(msg) => pending_requests.push_back(msg),
                         Err(err) => {
-                            eprintln!("studio remote: invalid request json (expected UIToStudio): {err:?}");
+                            eprintln!("studio remote: invalid request json (expected ClientToHub): {err:?}");
                         }
                     }
                     shutdown_deadline = None;
@@ -239,18 +239,18 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
     Ok(())
 }
 
-fn make_envelope(state: &mut BridgeState, msg: UIToStudio) -> Result<UIToStudioEnvelope, String> {
+fn make_envelope(state: &mut BridgeState, msg: ClientToHub) -> Result<ClientToHubEnvelope, String> {
     let client_id = state
         .client_id
         .ok_or_else(|| "missing studio hello/client_id".to_string())?;
     let query_id = QueryId::new(client_id, state.next_counter);
     state.next_counter = state.next_counter.wrapping_add(1);
-    Ok(UIToStudioEnvelope { query_id, msg })
+    Ok(ClientToHubEnvelope { query_id, msg })
 }
 
 fn send_ui_envelope(
     write_stream: &Arc<Mutex<TcpStream>>,
-    envelope: UIToStudioEnvelope,
+    envelope: ClientToHubEnvelope,
 ) -> Result<(), String> {
     send_binary_frame(write_stream, &envelope.serialize_bin())
         .map_err(|e| format!("failed to send studio request: {e}"))
@@ -260,7 +260,7 @@ fn parse_incoming_frames(
     stream: &Arc<Mutex<TcpStream>>,
     web_socket: &mut WebSocketParser,
     state: &mut BridgeState,
-    pending_requests: &mut VecDeque<UIToStudio>,
+    pending_requests: &mut VecDeque<ClientToHub>,
     out: &mut io::Stdout,
     bytes: &[u8],
 ) -> Result<(), String> {
@@ -272,15 +272,15 @@ fn parse_incoming_frames(
         }
         Ok(ServerWebSocketMessage::Pong(_)) => {}
         Ok(ServerWebSocketMessage::Text(text)) => {
-            if let Ok(msg) = StudioToUI::deserialize_json(text) {
+            if let Ok(msg) = HubToClient::deserialize_json(text) {
                 let _ = emit_protocol_response(out, state, pending_requests, msg);
             }
         }
         Ok(ServerWebSocketMessage::Binary(data)) => {
-            if let Ok(msg) = StudioToUI::deserialize_bin(data) {
+            if let Ok(msg) = HubToClient::deserialize_bin(data) {
                 let _ = emit_protocol_response(out, state, pending_requests, msg);
             } else if let Ok(text) = std::str::from_utf8(data) {
-                if let Ok(msg) = StudioToUI::deserialize_json(text) {
+                if let Ok(msg) = HubToClient::deserialize_json(text) {
                     let _ = emit_protocol_response(out, state, pending_requests, msg);
                 } else {
                     eprintln!("studio remote: unrecognized utf8 binary websocket payload");
@@ -303,27 +303,27 @@ fn parse_incoming_frames(
 fn emit_protocol_response(
     out: &mut io::Stdout,
     state: &mut BridgeState,
-    pending_requests: &mut VecDeque<UIToStudio>,
-    msg: StudioToUI,
+    pending_requests: &mut VecDeque<ClientToHub>,
+    msg: HubToClient,
 ) -> Result<(), String> {
     if !should_emit_for_client(state, &msg) {
         return Ok(());
     }
 
     match msg {
-        StudioToUI::Hello { client_id } => {
+        HubToClient::Hello { client_id } => {
             state.client_id = Some(client_id);
             state.next_counter = 0;
             state.auto_log_subscriptions.clear();
-            write_protocol_response(out, StudioToUI::Hello { client_id })
+            write_protocol_response(out, HubToClient::Hello { client_id })
         }
-        StudioToUI::BuildStarted {
+        HubToClient::BuildStarted {
             build_id,
             mount,
             package,
         } => {
             if state.auto_log_subscriptions.insert(build_id) {
-                pending_requests.push_back(UIToStudio::QueryLogs {
+                pending_requests.push_back(ClientToHub::QueryLogs {
                     build_id: Some(build_id),
                     level: None,
                     source: None,
@@ -336,28 +336,28 @@ fn emit_protocol_response(
             }
             write_protocol_response(
                 out,
-                StudioToUI::BuildStarted {
+                HubToClient::BuildStarted {
                     build_id,
                     mount,
                     package,
                 },
             )
         }
-        StudioToUI::BuildStopped {
+        HubToClient::BuildStopped {
             build_id,
             exit_code,
         } => {
             state.auto_log_subscriptions.remove(&build_id);
-            write_protocol_response(out, StudioToUI::BuildStopped { build_id, exit_code })
+            write_protocol_response(out, HubToClient::BuildStopped { build_id, exit_code })
         }
-        StudioToUI::AppStarted { build_id } => {
-            write_protocol_response(out, StudioToUI::AppStarted { build_id })
+        HubToClient::AppStarted { build_id } => {
+            write_protocol_response(out, HubToClient::AppStarted { build_id })
         }
         other => write_protocol_response(out, other),
     }
 }
 
-fn write_protocol_response(out: &mut io::Stdout, msg: StudioToUI) -> Result<(), String> {
+fn write_protocol_response(out: &mut io::Stdout, msg: HubToClient) -> Result<(), String> {
     if !should_emit_protocol_response(&msg) {
         return Ok(());
     }
@@ -372,30 +372,30 @@ fn write_protocol_response(out: &mut io::Stdout, msg: StudioToUI) -> Result<(), 
     Ok(())
 }
 
-fn should_emit_protocol_response(msg: &StudioToUI) -> bool {
+fn should_emit_protocol_response(msg: &HubToClient) -> bool {
     matches!(
         msg,
-        StudioToUI::Hello { .. }
-            | StudioToUI::Error { .. }
-            | StudioToUI::TextFileRead { .. }
-            | StudioToUI::TextFileRange { .. }
-            | StudioToUI::FindFileResults { .. }
-            | StudioToUI::SearchFileResults { .. }
-            | StudioToUI::Builds { .. }
-            | StudioToUI::RunnableBuilds { .. }
-            | StudioToUI::BuildStarted { .. }
-            | StudioToUI::BuildStopped { .. }
-            | StudioToUI::AppStarted { .. }
-            | StudioToUI::RunViewCreated { .. }
-            | StudioToUI::QueryLogResults { .. }
-            | StudioToUI::Screenshot { .. }
-            | StudioToUI::WidgetTreeDump { .. }
-            | StudioToUI::WidgetQuery { .. }
-            | StudioToUI::QueryCancelled { .. }
+        HubToClient::Hello { .. }
+            | HubToClient::Error { .. }
+            | HubToClient::TextFileRead { .. }
+            | HubToClient::TextFileRange { .. }
+            | HubToClient::FindFileResults { .. }
+            | HubToClient::SearchFileResults { .. }
+            | HubToClient::Builds { .. }
+            | HubToClient::RunnableBuilds { .. }
+            | HubToClient::BuildStarted { .. }
+            | HubToClient::BuildStopped { .. }
+            | HubToClient::AppStarted { .. }
+            | HubToClient::RunViewCreated { .. }
+            | HubToClient::QueryLogResults { .. }
+            | HubToClient::Screenshot { .. }
+            | HubToClient::WidgetTreeDump { .. }
+            | HubToClient::WidgetQuery { .. }
+            | HubToClient::QueryCancelled { .. }
     )
 }
 
-fn should_emit_for_client(state: &BridgeState, msg: &StudioToUI) -> bool {
+fn should_emit_for_client(state: &BridgeState, msg: &HubToClient) -> bool {
     let Some(query_id) = message_query_id(msg) else {
         return true;
     };
@@ -405,16 +405,16 @@ fn should_emit_for_client(state: &BridgeState, msg: &StudioToUI) -> bool {
     query_id.client_id() == client_id
 }
 
-fn message_query_id(msg: &StudioToUI) -> Option<QueryId> {
+fn message_query_id(msg: &HubToClient) -> Option<QueryId> {
     match msg {
-        StudioToUI::Screenshot { query_id, .. }
-        | StudioToUI::WidgetTreeDump { query_id, .. }
-        | StudioToUI::WidgetQuery { query_id, .. }
-        | StudioToUI::FindFileResults { query_id, .. }
-        | StudioToUI::SearchFileResults { query_id, .. }
-        | StudioToUI::QueryLogResults { query_id, .. }
-        | StudioToUI::QueryProfilerResults { query_id, .. }
-        | StudioToUI::QueryCancelled { query_id } => Some(*query_id),
+        HubToClient::Screenshot { query_id, .. }
+        | HubToClient::WidgetTreeDump { query_id, .. }
+        | HubToClient::WidgetQuery { query_id, .. }
+        | HubToClient::FindFileResults { query_id, .. }
+        | HubToClient::SearchFileResults { query_id, .. }
+        | HubToClient::QueryLogResults { query_id, .. }
+        | HubToClient::QueryProfilerResults { query_id, .. }
+        | HubToClient::QueryCancelled { query_id } => Some(*query_id),
         _ => None,
     }
 }

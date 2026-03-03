@@ -267,12 +267,31 @@ impl Cx {
         }*/
     }
 
-    pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId) -> Vec2d {
+    pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId, to_texture: bool) -> Vec2d {
         self.passes[draw_pass_id].paint_dirty = false;
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
-        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
-        self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        let pass = &mut self.passes[draw_pass_id];
+        pass.set_dpi_factor(dpi_factor);
+        if to_texture {
+            // WebGL render-to-texture coordinates are vertically inverted relative to
+            // onscreen canvas rendering. Flip Y in the projection for offscreen passes.
+            let offset = pass_rect.pos + pass.view_shift;
+            let size = pass_rect.size * pass.view_scale;
+            pass.pass_uniforms.camera_projection = Mat4f::ortho(
+                offset.x as f32,
+                (offset.x + size.x) as f32,
+                (offset.y + size.y) as f32,
+                offset.y as f32,
+                100.0,
+                -100.0,
+                1.0,
+                1.0,
+            );
+            pass.pass_uniforms.camera_view = Mat4f::identity();
+        } else {
+            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        }
         pass_rect.size
     }
 
@@ -298,7 +317,7 @@ impl Cx {
             clear_depth,
         });
 
-        self.setup_render_pass(draw_pass_id);
+        self.setup_render_pass(draw_pass_id, false);
 
         self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
 
@@ -311,7 +330,7 @@ impl Cx {
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        let pass_size = self.setup_render_pass(draw_pass_id);
+        let pass_size = self.setup_render_pass(draw_pass_id, true);
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         /*
         self.platform.from_wasm(FromWasmBeginRenderTargets {

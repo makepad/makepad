@@ -1,5 +1,5 @@
-use crate::dispatch::StudioEvent;
-use makepad_studio_protocol::backend_protocol::{BuildInfo, QueryId};
+use crate::dispatch::HubEvent;
+use makepad_studio_protocol::hub_protocol::{BuildInfo, QueryId};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -27,7 +27,7 @@ impl ProcessManager {
         args: Vec<String>,
         env: HashMap<String, String>,
         studio_addr: Option<String>,
-        event_tx: std::sync::mpsc::Sender<StudioEvent>,
+        event_tx: std::sync::mpsc::Sender<HubEvent>,
     ) -> Result<BuildInfo, String> {
         if self.builds.contains_key(&build_id) {
             return Err(format!("build already exists: {}", build_id.0));
@@ -130,7 +130,7 @@ fn spawn_reader<R: Read + Send + 'static>(
     build_id: QueryId,
     is_stderr: bool,
     reader: R,
-    event_tx: std::sync::mpsc::Sender<StudioEvent>,
+    event_tx: std::sync::mpsc::Sender<HubEvent>,
 ) {
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
@@ -141,7 +141,7 @@ fn spawn_reader<R: Read + Send + 'static>(
                 Ok(0) => break,
                 Ok(_) => {
                     let line = line.trim_end_matches(&['\r', '\n'][..]).to_string();
-                    let _ = event_tx.send(StudioEvent::ProcessOutput {
+                    let _ = event_tx.send(HubEvent::ProcessOutput {
                         build_id,
                         is_stderr,
                         line,
@@ -156,7 +156,7 @@ fn spawn_reader<R: Read + Send + 'static>(
 fn spawn_waiter(
     build_id: QueryId,
     child: Arc<Mutex<Child>>,
-    event_tx: std::sync::mpsc::Sender<StudioEvent>,
+    event_tx: std::sync::mpsc::Sender<HubEvent>,
 ) {
     thread::spawn(move || loop {
         let exited = {
@@ -172,7 +172,7 @@ fn spawn_waiter(
         };
 
         if let Some(exit_code) = exited {
-            let _ = event_tx.send(StudioEvent::ProcessExited {
+            let _ = event_tx.send(HubEvent::ProcessExited {
                 build_id,
                 exit_code,
             });

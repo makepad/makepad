@@ -17,7 +17,7 @@ makepad-shell = { path = "../../libs/shell", version = "1.0.0" }
 makepad-network = { path = "../../platform/network", version = "1.0.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 makepad-wasm-strip = { path = "../../libs/wasm_strip", version = "1.0.0"}
-makepad-studio-protocol = { path = "../../platform/studio_protocol", version = "0.1.0" }
+makepad-studio-protocol = { path = "../../platform/studio", version = "0.1.0" }
 brotli = "5.0"
 
 [features]

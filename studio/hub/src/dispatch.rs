@@ -2,12 +2,12 @@ use crate::log_store::{
     query_log_entries, AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore,
 };
 use crate::process_manager::ProcessManager;
-use makepad_studio_protocol::backend_protocol as backend_proto;
+use makepad_studio_protocol::hub_protocol as backend_proto;
 use backend_proto::{
-    BuildBoxInfo, BuildBoxStatus, BuildBoxToStudio, BuildBoxToStudioVec, BuildInfo, ClientId,
-    EventSample as StudioEventSample, GCSample as StudioGCSample, GPUSample as StudioGPUSample, LogEntry,
-    LogSource, QueryId, RunViewInputVizKind, RunnableBuild, SaveResult, SearchResult, StudioToBuildBox,
-    StudioToBuildBoxVec, StudioToUI, TerminalGrid, UIToStudio, UIToStudioEnvelope,
+    BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec, BuildInfo, ClientId,
+    EventSample as HubEventSample, GCSample as StudioGCSample, GPUSample as StudioGPUSample, LogEntry,
+    LogSource, QueryId, RunViewInputVizKind, RunnableBuild, SaveResult, SearchResult, HubToBuildBox,
+    HubToBuildBoxVec, HubToClient, TerminalGrid, ClientToHub, ClientToHubEnvelope,
 };
 use crate::terminal_manager::TerminalManager;
 use crate::virtual_fs::VirtualFs;
@@ -36,24 +36,24 @@ pub enum WireFormat {
 }
 
 #[derive(Debug)]
-pub enum StudioEvent {
-    UiConnected {
+pub enum HubEvent {
+    ClientConnected {
         web_socket_id: u64,
         sender: ToUISender<Vec<u8>>,
-        typed_sender: Option<ToUISender<StudioToUI>>,
+        typed_sender: Option<ToUISender<HubToClient>>,
     },
-    UiDisconnected {
+    ClientDisconnected {
         web_socket_id: u64,
     },
-    UiEnvelope {
+    ClientEnvelope {
         web_socket_id: u64,
-        envelope: UIToStudioEnvelope,
+        envelope: ClientToHubEnvelope,
     },
-    UiBinary {
+    ClientBinary {
         web_socket_id: u64,
         data: Vec<u8>,
     },
-    UiText {
+    ClientText {
         web_socket_id: u64,
         text: String,
     },
@@ -142,7 +142,7 @@ const MAX_UI_CLIENT_IDS: usize = backend_proto::QUERY_ID_CLIENT_LANES as usize;
 
 struct UiClient {
     sender: ToUISender<Vec<u8>>,
-    typed_sender: Option<ToUISender<StudioToUI>>,
+    typed_sender: Option<ToUISender<HubToClient>>,
     format: WireFormat,
 }
 
@@ -167,9 +167,9 @@ struct LiveProfilerSubscription {
     query: ProfilerQuery,
 }
 
-pub struct StudioCore {
-    rx: Receiver<StudioEvent>,
-    event_tx: Sender<StudioEvent>,
+pub struct HubCore {
+    rx: Receiver<HubEvent>,
+    event_tx: Sender<HubEvent>,
     pub vfs: VirtualFs,
     studio_addr: Option<String>,
     client_id_in_use: [bool; MAX_UI_CLIENT_IDS],
@@ -204,10 +204,10 @@ pub struct StudioCore {
     pending_forward_to_app_by_build: HashMap<QueryId, Vec<Vec<u8>>>,
 }
 
-impl StudioCore {
+impl HubCore {
     pub fn new(
-        rx: Receiver<StudioEvent>,
-        event_tx: Sender<StudioEvent>,
+        rx: Receiver<HubEvent>,
+        event_tx: Sender<HubEvent>,
         vfs: VirtualFs,
         studio_addr: Option<String>,
     ) -> Self {
@@ -264,14 +264,14 @@ impl StudioCore {
         }
     }
 
-    pub fn handle_event(&mut self, event: StudioEvent) -> bool {
+    pub fn handle_event(&mut self, event: HubEvent) -> bool {
         match event {
-            StudioEvent::UiConnected {
+            HubEvent::ClientConnected {
                 web_socket_id,
                 sender,
                 typed_sender,
             } => self.on_ui_connected(web_socket_id, sender, typed_sender),
-            StudioEvent::UiDisconnected { web_socket_id } => {
+            HubEvent::ClientDisconnected { web_socket_id } => {
                 if let Some(client_id) = self.client_by_web_socket.remove(&web_socket_id) {
                     self.ui_clients.remove(&client_id);
                     self.release_client_id(client_id);
@@ -286,7 +286,7 @@ impl StudioCore {
                         .retain(|_, observer_id| *observer_id != client_id);
                 }
             }
-            StudioEvent::UiEnvelope {
+            HubEvent::ClientEnvelope {
                 web_socket_id,
                 envelope,
             } => {
@@ -294,7 +294,7 @@ impl StudioCore {
                     self.on_ui_envelope(client_id, envelope);
                 }
             }
-            StudioEvent::UiBinary {
+            HubEvent::ClientBinary {
                 web_socket_id,
                 data,
             } => {
@@ -302,7 +302,7 @@ impl StudioCore {
                     self.on_ui_message(client_id, WireFormat::Binary, &data);
                 }
             }
-            StudioEvent::UiText {
+            HubEvent::ClientText {
                 web_socket_id,
                 text,
             } => {
@@ -310,7 +310,7 @@ impl StudioCore {
                     self.on_ui_message(client_id, WireFormat::Text, text.as_bytes());
                 }
             }
-            StudioEvent::AppConnected {
+            HubEvent::AppConnected {
                 web_socket_id,
                 build_id,
                 sender,
@@ -319,10 +319,10 @@ impl StudioCore {
                     .insert(web_socket_id, AppSocket { build_id, sender });
                 self.flush_pending_forward_to_app(build_id);
             }
-            StudioEvent::AppDisconnected { web_socket_id } => {
+            HubEvent::AppDisconnected { web_socket_id } => {
                 self.app_sockets.remove(&web_socket_id);
             }
-            StudioEvent::AppBinary {
+            HubEvent::AppBinary {
                 web_socket_id,
                 data,
             } => {
@@ -332,7 +332,7 @@ impl StudioCore {
                 };
                 self.on_app_binary(build_id, data);
             }
-            StudioEvent::BuildBoxConnected {
+            HubEvent::BuildBoxConnected {
                 web_socket_id,
                 sender,
             } => {
@@ -345,10 +345,10 @@ impl StudioCore {
                     },
                 );
             }
-            StudioEvent::BuildBoxDisconnected { web_socket_id } => {
+            HubEvent::BuildBoxDisconnected { web_socket_id } => {
                 self.on_buildbox_disconnected(web_socket_id);
             }
-            StudioEvent::BuildBoxBinary {
+            HubEvent::BuildBoxBinary {
                 web_socket_id,
                 data,
             } => {
@@ -356,46 +356,46 @@ impl StudioCore {
                     self.on_buildbox_binary(web_socket_id, data);
                 }
             }
-            StudioEvent::ProcessOutput {
+            HubEvent::ProcessOutput {
                 build_id,
                 is_stderr,
                 line,
             } => self.on_process_output(build_id, is_stderr, line),
-            StudioEvent::ProcessExited {
+            HubEvent::ProcessExited {
                 build_id,
                 exit_code,
             } => self.on_process_exited(build_id, exit_code),
-            StudioEvent::TerminalOutput { path, data } => self.on_terminal_output(path, data),
-            StudioEvent::TerminalExited { path, exit_code } => {
+            HubEvent::TerminalOutput { path, data } => self.on_terminal_output(path, data),
+            HubEvent::TerminalExited { path, exit_code } => {
                 self.on_terminal_exited(path, exit_code)
             }
-            StudioEvent::WorkerFindFilesDone {
+            HubEvent::WorkerFindFilesDone {
                 client_id,
                 query_id,
                 result,
             } => self.on_worker_find_files_done(client_id, query_id, result),
-            StudioEvent::WorkerFindInFilesDone {
+            HubEvent::WorkerFindInFilesDone {
                 client_id,
                 query_id,
                 result,
             } => self.on_worker_find_in_files_done(client_id, query_id, result),
-            StudioEvent::WorkerQueryLogsDone {
+            HubEvent::WorkerQueryLogsDone {
                 client_id,
                 query_id,
                 query,
                 live,
                 entries,
             } => self.on_worker_query_logs_done(client_id, query_id, query, live, entries),
-            StudioEvent::WorkerLoadFileTreeDone {
+            HubEvent::WorkerLoadFileTreeDone {
                 mount,
                 result,
             } => self.on_worker_load_file_tree_done(mount, result),
-            StudioEvent::WorkerFileTreeDeltaDone { mount, change } => {
+            HubEvent::WorkerFileTreeDeltaDone { mount, change } => {
                 self.queue_file_tree_delta_change(mount, change);
             }
-            StudioEvent::FlushPendingFileTreeDiffs => self.flush_pending_file_tree_diffs(),
-            StudioEvent::MountFsChanged { mount, path } => self.on_mount_fs_changed(mount, path),
-            StudioEvent::Shutdown => return false,
+            HubEvent::FlushPendingFileTreeDiffs => self.flush_pending_file_tree_diffs(),
+            HubEvent::MountFsChanged { mount, path } => self.on_mount_fs_changed(mount, path),
+            HubEvent::Shutdown => return false,
         }
         true
     }
@@ -439,18 +439,18 @@ impl StudioCore {
         &mut self,
         web_socket_id: u64,
         sender: ToUISender<Vec<u8>>,
-        typed_sender: Option<ToUISender<StudioToUI>>,
+        typed_sender: Option<ToUISender<HubToClient>>,
     ) {
         let client_id = if web_socket_id == IN_PROCESS_UI_WEB_SOCKET_ID {
             let reserved = ClientId(0);
             if !self.reserve_client_id(reserved) {
                 if let Some(typed_sender) = &typed_sender {
-                    let _ = typed_sender.send(StudioToUI::Error {
+                    let _ = typed_sender.send(HubToClient::Error {
                         message: "client id 0 already in use".to_string(),
                     });
                 } else {
                     let _ = sender.send(
-                        StudioToUI::Error {
+                        HubToClient::Error {
                             message: "client id 0 already in use".to_string(),
                         }
                         .serialize_bin(),
@@ -471,12 +471,12 @@ impl StudioCore {
         if self.ui_clients.contains_key(&client_id) {
             self.release_client_id(client_id);
             if let Some(typed_sender) = &typed_sender {
-                let _ = typed_sender.send(StudioToUI::Error {
+                let _ = typed_sender.send(HubToClient::Error {
                     message: format!("client id {:?} already in use", client_id),
                 });
             } else {
                 let _ = sender.send(
-                    StudioToUI::Error {
+                    HubToClient::Error {
                         message: format!("client id {:?} already in use", client_id),
                     }
                     .serialize_bin(),
@@ -497,12 +497,12 @@ impl StudioCore {
         );
         self.send_ui_message(
             client_id,
-            StudioToUI::Hello { client_id },
+            HubToClient::Hello { client_id },
             WireFormat::Binary,
         );
     }
 
-    fn on_ui_envelope(&mut self, client_id: ClientId, envelope: UIToStudioEnvelope) {
+    fn on_ui_envelope(&mut self, client_id: ClientId, envelope: ClientToHubEnvelope) {
         if !self.ui_clients.contains_key(&client_id) {
             return;
         }
@@ -522,10 +522,10 @@ impl StudioCore {
         };
         client.format = format;
         let envelope = match format {
-            WireFormat::Binary => UIToStudioEnvelope::deserialize_bin(data).map_err(|e| e.msg),
+            WireFormat::Binary => ClientToHubEnvelope::deserialize_bin(data).map_err(|e| e.msg),
             WireFormat::Text => std::str::from_utf8(data)
                 .map_err(|err| err.to_string())
-                .and_then(|text| UIToStudioEnvelope::deserialize_json(text).map_err(|e| e.msg)),
+                .and_then(|text| ClientToHubEnvelope::deserialize_json(text).map_err(|e| e.msg)),
         };
 
         let envelope = match envelope {
@@ -547,23 +547,23 @@ impl StudioCore {
         self.handle_ui_message(client_id, envelope);
     }
 
-    fn handle_ui_message(&mut self, client_id: ClientId, envelope: UIToStudioEnvelope) {
+    fn handle_ui_message(&mut self, client_id: ClientId, envelope: ClientToHubEnvelope) {
         let query_id = envelope.query_id;
         match envelope.msg {
-            UIToStudio::Mount { name, path } => match self.vfs.mount(&name, path) {
+            ClientToHub::Mount { name, path } => match self.vfs.mount(&name, path) {
                 Ok(()) => {
                     self.reset_fs_watcher();
                     match self.vfs.load_file_tree(&name) {
                         Ok(data) => self.send_ui_reply(
                             client_id,
-                            StudioToUI::FileTree { mount: name, data }
+                            HubToClient::FileTree { mount: name, data }
                         ),
                         Err(err) => self.send_ui_error(client_id, err.to_string()),
                     }
                 }
                 Err(err) => self.send_ui_error(client_id, err.to_string()),
             },
-            UIToStudio::Unmount { name } => {
+            ClientToHub::Unmount { name } => {
                 let changes = match self.vfs.load_file_tree(&name) {
                     Ok(tree) => tree
                         .nodes
@@ -578,27 +578,27 @@ impl StudioCore {
                 self.build_mount_by_id.retain(|_, mount| mount != &name);
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::FileTree {
+                    HubToClient::FileTree {
                         mount: name.clone(),
                         data: backend_proto::FileTreeData { nodes: Vec::new() },
                     }
                 );
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::FileTreeDiff {
+                    HubToClient::FileTreeDiff {
                         mount: name,
                         changes,
                     }
                 );
             }
-            UIToStudio::ObserveMount { mount, primary } => {
+            ClientToHub::ObserveMount { mount, primary } => {
                 if primary.unwrap_or(true) {
                     self.primary_ui_by_mount.insert(mount, client_id);
                 } else if self.primary_ui_by_mount.get(&mount) == Some(&client_id) {
                     self.primary_ui_by_mount.remove(&mount);
                 }
             }
-            UIToStudio::LoadFileTree { mount } => {
+            ClientToHub::LoadFileTree { mount } => {
                 let waiters = self.file_tree_load_waiters.entry(mount.clone()).or_default();
                 let first_request = waiters.is_empty();
                 waiters.insert(client_id);
@@ -613,16 +613,16 @@ impl StudioCore {
                     let result = vfs
                         .load_file_tree(&mount_name)
                         .map_err(|err| err.to_string());
-                    let _ = event_tx.send(StudioEvent::WorkerLoadFileTreeDone {
+                    let _ = event_tx.send(HubEvent::WorkerLoadFileTreeDone {
                         mount: mount_name,
                         result,
                     });
                 });
             }
-            UIToStudio::OpenTextFile { path } => match self.vfs.open_text_file(&path) {
+            ClientToHub::OpenTextFile { path } => match self.vfs.open_text_file(&path) {
                 Ok(content) => self.send_ui_reply(
                     client_id,
-                    StudioToUI::TextFileOpened {
+                    HubToClient::TextFileOpened {
                         path,
                         content,
                         git_status: backend_proto::GitStatus::Unknown,
@@ -630,21 +630,21 @@ impl StudioCore {
                 ),
                 Err(err) => self.send_ui_error(client_id, err.to_string()),
             },
-            UIToStudio::ReadTextFile { path } => match self.vfs.read_text_file(&path) {
+            ClientToHub::ReadTextFile { path } => match self.vfs.read_text_file(&path) {
                 Ok(content) => self.send_ui_reply(
                     client_id,
-                    StudioToUI::TextFileRead { path, content }
+                    HubToClient::TextFileRead { path, content }
                 ),
                 Err(err) => self.send_ui_error(client_id, err.to_string()),
             },
-            UIToStudio::ReadTextRange {
+            ClientToHub::ReadTextRange {
                 path,
                 start_line,
                 end_line,
             } => match self.vfs.read_text_range(&path, start_line, end_line) {
                 Ok((content, total_lines)) => self.send_ui_reply(
                     client_id,
-                    StudioToUI::TextFileRange {
+                    HubToClient::TextFileRange {
                         path,
                         start_line,
                         end_line,
@@ -654,7 +654,7 @@ impl StudioCore {
                 ),
                 Err(err) => self.send_ui_error(client_id, err.to_string()),
             },
-            UIToStudio::SaveTextFile { path, content } => {
+            ClientToHub::SaveTextFile { path, content } => {
                 let result = match self.vfs.save_text_file(&path, &content) {
                     Ok(()) => SaveResult::Ok,
                     Err(err) => SaveResult::Err(err.into()),
@@ -662,7 +662,7 @@ impl StudioCore {
                 let save_ok = matches!(result, SaveResult::Ok);
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::TextFileSaved {
+                    HubToClient::TextFileSaved {
                         path: path.clone(),
                         result,
                     }
@@ -672,12 +672,12 @@ impl StudioCore {
                         .insert(path.clone(), Instant::now() + FS_SELF_SAVE_SUPPRESS);
                     self.broadcast_ui_message_except(
                         client_id,
-                        StudioToUI::FileChanged { path: path.clone() },
+                        HubToClient::FileChanged { path: path.clone() },
                     );
                     self.enqueue_file_tree_delta_for_virtual_path(&path);
                 }
             }
-            UIToStudio::DeleteFile { path } => {
+            ClientToHub::DeleteFile { path } => {
                 self.terminal_manager.close_terminal(&path);
                 let disk_path = self.vfs.resolve_path(&path).ok();
                 if let Err(err) = self.vfs.delete_path(&path) {
@@ -686,7 +686,7 @@ impl StudioCore {
                     self.enqueue_file_tree_delta_for_known_path(&path, disk_path);
                 }
             }
-            UIToStudio::FindFiles {
+            ClientToHub::FindFiles {
                 mount,
                 pattern,
                 is_regex: _,
@@ -701,21 +701,21 @@ impl StudioCore {
                     let result = vfs
                         .find_files(mount.as_deref(), &pattern, max_results)
                         .map_err(|err| err.to_string());
-                    let _ = event_tx.send(StudioEvent::WorkerFindFilesDone {
+                    let _ = event_tx.send(HubEvent::WorkerFindFilesDone {
                         client_id,
                         query_id,
                         result,
                     });
                 });
             }
-            UIToStudio::SearchFiles {
+            ClientToHub::SearchFiles {
                 mount,
                 pattern,
                 is_regex,
                 glob,
                 max_results,
             }
-            | UIToStudio::FindInFiles {
+            | ClientToHub::FindInFiles {
                 mount,
                 pattern,
                 is_regex,
@@ -745,23 +745,23 @@ impl StudioCore {
                             },
                         )
                         .map_err(|err| err.to_string());
-                    let _ = event_tx.send(StudioEvent::WorkerFindInFilesDone {
+                    let _ = event_tx.send(HubEvent::WorkerFindInFilesDone {
                         client_id,
                         query_id,
                         result,
                     });
                 });
             }
-            UIToStudio::GitLog { mount, max_count } => {
+            ClientToHub::GitLog { mount, max_count } => {
                 match self.vfs.git_log(&mount, max_count.unwrap_or(100)) {
                     Ok(log) => self.send_ui_reply(
                         client_id,
-                        StudioToUI::GitLog { mount, log }
+                        HubToClient::GitLog { mount, log }
                     ),
                     Err(err) => self.send_ui_error(client_id, err.to_string()),
                 }
             }
-            UIToStudio::CreateBranch {
+            ClientToHub::CreateBranch {
                 mount,
                 name,
                 from_ref,
@@ -770,20 +770,20 @@ impl StudioCore {
                 let result = self.vfs.create_branch(&mount, &name, from_ref.as_deref());
                 self.send_branch_op_result(client_id, mount, before, result);
             }
-            UIToStudio::DeleteBranch { mount, name } => {
+            ClientToHub::DeleteBranch { mount, name } => {
                 let before = self.vfs.load_file_tree(&mount).ok();
                 let result = self.vfs.delete_branch(&mount, &name);
                 self.send_branch_op_result(client_id, mount, before, result);
             }
-            UIToStudio::ListBuilds => {
+            ClientToHub::ListBuilds => {
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::Builds {
+                    HubToClient::Builds {
                         builds: self.list_all_builds(),
                     }
                 );
             }
-            UIToStudio::LoadRunnableBuilds { mount } => {
+            ClientToHub::LoadRunnableBuilds { mount } => {
                 let cwd = match self.vfs.resolve_mount(&mount) {
                     Ok(cwd) => cwd,
                     Err(err) => {
@@ -794,12 +794,12 @@ impl StudioCore {
                 match discover_runnable_builds(&cwd) {
                     Ok(builds) => self.send_ui_reply(
                         client_id,
-                        StudioToUI::RunnableBuilds { mount, builds }
+                        HubToClient::RunnableBuilds { mount, builds }
                     ),
                     Err(err) => self.send_ui_error(client_id, err),
                 }
             }
-            UIToStudio::Cargo {
+            ClientToHub::Cargo {
                 mount,
                 args: raw_args,
                 env,
@@ -811,7 +811,7 @@ impl StudioCore {
                     let package =
                         parse_package_name(&args).unwrap_or_else(|| "unknown".to_string());
                     let env = env.unwrap_or_default();
-                    let msg = StudioToBuildBox::CargoBuild {
+                    let msg = HubToBuildBox::CargoBuild {
                         build_id,
                         mount: mount.clone(),
                         args,
@@ -836,7 +836,7 @@ impl StudioCore {
                         &buildbox_name,
                         BuildBoxStatus::Building { build_id },
                     );
-                    self.broadcast_ui_message(StudioToUI::BuildStarted {
+                    self.broadcast_ui_message(HubToClient::BuildStarted {
                         build_id: info.build_id,
                         mount: info.mount,
                         package: info.package,
@@ -863,7 +863,7 @@ impl StudioCore {
                     Ok(info) => {
                         self.build_mount_by_id
                             .insert(info.build_id, info.mount.clone());
-                        self.broadcast_ui_message(StudioToUI::BuildStarted {
+                        self.broadcast_ui_message(HubToClient::BuildStarted {
                             build_id: info.build_id,
                             mount: info.mount,
                             package: info.package,
@@ -872,7 +872,7 @@ impl StudioCore {
                     Err(err) => self.send_ui_error(client_id, err),
                 }
             }
-            UIToStudio::Run {
+            ClientToHub::Run {
                 mount,
                 process,
                 args: app_args,
@@ -885,7 +885,7 @@ impl StudioCore {
                 let build_id = self.alloc_build_id();
                 if let Some(buildbox_name) = buildbox {
                     let env = env.unwrap_or_default();
-                    let msg = StudioToBuildBox::CargoBuild {
+                    let msg = HubToBuildBox::CargoBuild {
                         build_id,
                         mount: mount.clone(),
                         args: cargo_args,
@@ -910,7 +910,7 @@ impl StudioCore {
                         &buildbox_name,
                         BuildBoxStatus::Building { build_id },
                     );
-                    self.broadcast_ui_message(StudioToUI::BuildStarted {
+                    self.broadcast_ui_message(HubToClient::BuildStarted {
                         build_id: info.build_id,
                         mount: info.mount,
                         package: info.package,
@@ -937,7 +937,7 @@ impl StudioCore {
                     Ok(info) => {
                         self.build_mount_by_id
                             .insert(info.build_id, info.mount.clone());
-                        self.broadcast_ui_message(StudioToUI::BuildStarted {
+                        self.broadcast_ui_message(HubToClient::BuildStarted {
                             build_id: info.build_id,
                             mount: info.mount,
                             package: info.package,
@@ -946,7 +946,7 @@ impl StudioCore {
                     Err(err) => self.send_ui_error(client_id, err),
                 }
             }
-            UIToStudio::StopBuild { build_id } => {
+            ClientToHub::StopBuild { build_id } => {
                 if self.process_manager.stop_build(build_id).is_ok() {
                     return;
                 }
@@ -955,12 +955,12 @@ impl StudioCore {
                     return;
                 };
                 if let Err(err) = self
-                    .send_to_buildbox_name(&buildbox_name, StudioToBuildBox::StopBuild { build_id })
+                    .send_to_buildbox_name(&buildbox_name, HubToBuildBox::StopBuild { build_id })
                 {
                     self.send_ui_error(client_id, err);
                 }
             }
-            UIToStudio::ForwardToApp { build_id, msg_bin } => {
+            ClientToHub::ForwardToApp { build_id, msg_bin } => {
                 let is_bootstrap = StudioToAppVec::deserialize_bin(&msg_bin)
                     .ok()
                     .is_some_and(|msgs| {
@@ -979,7 +979,7 @@ impl StudioCore {
                     Err(err) => self.send_ui_error(client_id, err),
                 }
             }
-            UIToStudio::TypeText { build_id, text } => {
+            ClientToHub::TypeText { build_id, text } => {
                 if let Err(err) = self.send_app_msg(
                     build_id,
                     StudioToApp::TextInput(TextInputEvent {
@@ -993,7 +993,7 @@ impl StudioCore {
                 } else {
                     self.send_runview_message(
                         build_id,
-                        StudioToUI::RunViewInputViz {
+                        HubToClient::RunViewInputViz {
                             build_id,
                             kind: RunViewInputVizKind::TypeText,
                             x: None,
@@ -1002,7 +1002,7 @@ impl StudioCore {
                     );
                 }
             }
-            UIToStudio::Return {
+            ClientToHub::Return {
                 build_id,
                 auto_dump: _,
             } => {
@@ -1020,7 +1020,7 @@ impl StudioCore {
                 } else {
                     self.send_runview_message(
                         build_id,
-                        StudioToUI::RunViewInputViz {
+                        HubToClient::RunViewInputViz {
                             build_id,
                             kind: RunViewInputVizKind::Return,
                             x: None,
@@ -1029,7 +1029,7 @@ impl StudioCore {
                     );
                 }
             }
-            UIToStudio::Click { build_id, x, y } => {
+            ClientToHub::Click { build_id, x, y } => {
                 let mouse_down = RemoteMouseDown {
                     button_raw_bits: MouseButton::PRIMARY.bits(),
                     x: x as f64,
@@ -1057,7 +1057,7 @@ impl StudioCore {
                     let y = y as f64;
                     self.send_runview_message(
                         build_id,
-                        StudioToUI::RunViewInputViz {
+                        HubToClient::RunViewInputViz {
                             build_id,
                             kind: RunViewInputVizKind::ClickDown,
                             x: Some(x),
@@ -1066,7 +1066,7 @@ impl StudioCore {
                     );
                     self.send_runview_message(
                         build_id,
-                        StudioToUI::RunViewInputViz {
+                        HubToClient::RunViewInputViz {
                             build_id,
                             kind: RunViewInputVizKind::ClickUp,
                             x: Some(x),
@@ -1075,7 +1075,7 @@ impl StudioCore {
                     );
                 }
             }
-            UIToStudio::Screenshot { build_id, kind_id } => {
+            ClientToHub::Screenshot { build_id, kind_id } => {
                 if let Err(err) = self.send_app_msg(
                     build_id,
                     StudioToApp::Screenshot(ScreenshotRequest {
@@ -1086,7 +1086,7 @@ impl StudioCore {
                     self.send_ui_error(client_id, err);
                 }
             }
-            UIToStudio::WidgetTreeDump { build_id } => {
+            ClientToHub::WidgetTreeDump { build_id } => {
                 if let Err(err) = self.send_app_msg(
                     build_id,
                     StudioToApp::WidgetTreeDump(WidgetTreeDumpRequest {
@@ -1096,7 +1096,7 @@ impl StudioCore {
                     self.send_ui_error(client_id, err);
                 }
             }
-            UIToStudio::WidgetQuery { build_id, query } => {
+            ClientToHub::WidgetQuery { build_id, query } => {
                 if let Err(err) = self.send_app_msg(
                     build_id,
                     StudioToApp::WidgetQuery(WidgetQueryRequest {
@@ -1107,7 +1107,7 @@ impl StudioCore {
                     self.send_ui_error(client_id, err);
                 }
             }
-            UIToStudio::RunViewInput {
+            ClientToHub::RunViewInput {
                 build_id,
                 window_id,
                 msg_bin,
@@ -1117,7 +1117,7 @@ impl StudioCore {
                     self.send_ui_error(client_id, err);
                 }
             }
-            UIToStudio::RunViewResize {
+            ClientToHub::RunViewResize {
                 build_id,
                 window_id,
                 width,
@@ -1138,7 +1138,7 @@ impl StudioCore {
                     self.send_ui_error(client_id, err);
                 }
             }
-            UIToStudio::TerminalOpen {
+            ClientToHub::TerminalOpen {
                 path,
                 cols,
                 rows,
@@ -1175,7 +1175,7 @@ impl StudioCore {
                 ) {
                     Ok(()) => self.send_ui_reply(
                         client_id,
-                        StudioToUI::TerminalOpened {
+                        HubToClient::TerminalOpened {
                             path: path.clone(),
                             grid: terminal_grid_from_history(&history, cols, rows),
                             history,
@@ -1184,20 +1184,20 @@ impl StudioCore {
                     Err(err) => self.send_ui_error(client_id, err),
                 }
             }
-            UIToStudio::TerminalInput { path, data } => {
+            ClientToHub::TerminalInput { path, data } => {
                 if let Err(err) = self.terminal_manager.send_input(&path, data) {
                     self.send_ui_error(client_id, err);
                 }
             }
-            UIToStudio::TerminalResize { path, cols, rows } => {
+            ClientToHub::TerminalResize { path, cols, rows } => {
                 if let Err(err) = self.terminal_manager.resize(&path, cols, rows) {
                     self.send_ui_error(client_id, err);
                 }
             }
-            UIToStudio::TerminalClose { path } => {
+            ClientToHub::TerminalClose { path } => {
                 self.terminal_manager.close_terminal(&path);
             }
-            UIToStudio::QueryLogs {
+            ClientToHub::QueryLogs {
                 build_id,
                 level,
                 source,
@@ -1226,7 +1226,7 @@ impl StudioCore {
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         query_log_entries(&entries, &query)
                     };
-                    let _ = event_tx.send(StudioEvent::WorkerQueryLogsDone {
+                    let _ = event_tx.send(HubEvent::WorkerQueryLogsDone {
                         client_id,
                         query_id,
                         query,
@@ -1235,7 +1235,7 @@ impl StudioCore {
                     });
                 });
             }
-            UIToStudio::QueryProfiler {
+            ClientToHub::QueryProfiler {
                 build_id,
                 sample_type,
                 time_start,
@@ -1255,7 +1255,7 @@ impl StudioCore {
                     self.profiler_store.query(&query);
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::QueryProfilerResults {
+                    HubToClient::QueryProfilerResults {
                         query_id,
                         event_samples,
                         gpu_samples,
@@ -1274,33 +1274,33 @@ impl StudioCore {
                     );
                 }
             }
-            UIToStudio::CancelQuery { query_id } => {
+            ClientToHub::CancelQuery { query_id } => {
                 self.cancelled_queries.insert(query_id);
                 self.live_log_queries.remove(&query_id);
                 self.live_profiler_queries.remove(&query_id);
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::QueryCancelled { query_id }
+                    HubToClient::QueryCancelled { query_id }
                 );
             }
-            UIToStudio::LogClear => {
+            ClientToHub::LogClear => {
                 self.log_store.clear();
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::LogCleared
+                    HubToClient::LogCleared
                 );
             }
-            UIToStudio::ListBuildBoxes => {
+            ClientToHub::ListBuildBoxes => {
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::BuildBoxes {
+                    HubToClient::BuildBoxes {
                         boxes: self.list_buildboxes(),
                     }
                 );
             }
-            UIToStudio::BuildBoxSyncNow { name } => {
+            ClientToHub::BuildBoxSyncNow { name } => {
                 if let Err(err) =
-                    self.send_to_buildbox_name(&name, StudioToBuildBox::RequestTreeHash)
+                    self.send_to_buildbox_name(&name, HubToBuildBox::RequestTreeHash)
                 {
                     self.send_ui_error(client_id, err);
                     return;
@@ -1308,15 +1308,15 @@ impl StudioCore {
                 self.set_buildbox_status(&name, BuildBoxStatus::Syncing);
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::BuildBoxes {
+                    HubToClient::BuildBoxes {
                         boxes: self.list_buildboxes(),
                     }
                 );
             }
-            UIToStudio::ListScriptTasks => {
+            ClientToHub::ListScriptTasks => {
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::ScriptTasks { tasks: Vec::new() }
+                    HubToClient::ScriptTasks { tasks: Vec::new() }
                 );
             }
             other => {
@@ -1353,7 +1353,7 @@ impl StudioCore {
 
         let event_tx = self.event_tx.clone();
         match FileSystemWatcher::start(roots, move |event| {
-            let _ = event_tx.send(StudioEvent::MountFsChanged {
+            let _ = event_tx.send(HubEvent::MountFsChanged {
                 mount: event.mount,
                 path: event.path,
             });
@@ -1398,7 +1398,7 @@ impl StudioCore {
             }
             // Some watcher implementations only report "mount root changed".
             // Broadcast a mount-level FileChanged so UI can refresh open tabs.
-            self.broadcast_ui_message(StudioToUI::FileChanged { path: mount.clone() });
+            self.broadcast_ui_message(HubToClient::FileChanged { path: mount.clone() });
             self.reload_mount_file_tree_broadcast(&mount);
             return;
         }
@@ -1406,7 +1406,7 @@ impl StudioCore {
             return;
         }
         if path_is_file && !self.should_ignore_virtual_path(&mount, &virtual_path) {
-            self.broadcast_ui_message(StudioToUI::FileChanged {
+            self.broadcast_ui_message(HubToClient::FileChanged {
                 path: virtual_path.clone(),
             });
         }
@@ -1533,7 +1533,7 @@ impl StudioCore {
         let event_tx = self.event_tx.clone();
         self.worker_pool.execute(move || {
             let change = compute_filetree_change_for_path(&disk_path, virtual_path);
-            let _ = event_tx.send(StudioEvent::WorkerFileTreeDeltaDone { mount, change });
+            let _ = event_tx.send(HubEvent::WorkerFileTreeDeltaDone { mount, change });
         });
     }
 
@@ -1583,11 +1583,11 @@ impl StudioCore {
         }
         self.fs_event_last_by_path.insert(reload_key, now);
         match self.vfs.load_file_tree(mount) {
-            Ok(data) => self.broadcast_ui_message(StudioToUI::FileTree {
+            Ok(data) => self.broadcast_ui_message(HubToClient::FileTree {
                 mount: mount.to_string(),
                 data,
             }),
-            Err(err) => self.broadcast_ui_message(StudioToUI::Error {
+            Err(err) => self.broadcast_ui_message(HubToClient::Error {
                 message: format!("file tree reload failed for {}: {}", mount, err),
             }),
         }
@@ -1619,7 +1619,7 @@ impl StudioCore {
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             std::thread::sleep(FS_DELTA_FLUSH_DELAY);
-            let _ = event_tx.send(StudioEvent::FlushPendingFileTreeDiffs);
+            let _ = event_tx.send(HubEvent::FlushPendingFileTreeDiffs);
         });
     }
 
@@ -1637,7 +1637,7 @@ impl StudioCore {
                 continue;
             }
             changes.sort_by(|a, b| file_tree_change_path(a).cmp(file_tree_change_path(b)));
-            self.broadcast_ui_message(StudioToUI::FileTreeDiff { mount, changes });
+            self.broadcast_ui_message(HubToClient::FileTreeDiff { mount, changes });
         }
     }
 
@@ -1683,7 +1683,7 @@ impl StudioCore {
         match result {
             Ok(paths) => self.send_ui_reply(
                 client_id,
-                StudioToUI::FindFileResults {
+                HubToClient::FindFileResults {
                     query_id,
                     paths,
                     done: true,
@@ -1706,7 +1706,7 @@ impl StudioCore {
         match result {
             Ok(results) => self.send_ui_reply(
                 client_id,
-                StudioToUI::SearchFileResults {
+                HubToClient::SearchFileResults {
                     query_id,
                     results,
                     done: true,
@@ -1730,7 +1730,7 @@ impl StudioCore {
 
         self.send_ui_reply(
             client_id,
-            StudioToUI::QueryLogResults {
+            HubToClient::QueryLogResults {
                 query_id,
                 entries,
                 done: !live,
@@ -1765,7 +1765,7 @@ impl StudioCore {
                 for client_id in waiters {
                     self.send_ui_reply(
                         client_id,
-                        StudioToUI::FileTree {
+                        HubToClient::FileTree {
                             mount: mount.clone(),
                             data: data.clone(),
                         }
@@ -1853,7 +1853,7 @@ impl StudioCore {
         self.send_to_app(build_id, StudioToAppVec(msgs).serialize_bin())
     }
 
-    fn send_to_buildbox_name(&self, name: &str, msg: StudioToBuildBox) -> Result<(), String> {
+    fn send_to_buildbox_name(&self, name: &str, msg: HubToBuildBox) -> Result<(), String> {
         let Some(web_socket_id) = self.buildbox_by_name.get(name).copied() else {
             return Err(format!("buildbox '{}' is not connected", name));
         };
@@ -1862,7 +1862,7 @@ impl StudioCore {
         };
         socket
             .sender
-            .send(StudioToBuildBoxVec(vec![msg]).serialize_bin())
+            .send(HubToBuildBoxVec(vec![msg]).serialize_bin())
             .map_err(|_| format!("failed to send message to buildbox '{}'", name))
     }
 
@@ -1893,7 +1893,7 @@ impl StudioCore {
         self.primary_ui_for_mount(mount)
     }
 
-    fn send_runview_message(&self, build_id: QueryId, msg: StudioToUI) {
+    fn send_runview_message(&self, build_id: QueryId, msg: HubToClient) {
         if let Some(client_id) = self.primary_ui_for_build(build_id) {
             self.send_ui_message(client_id, msg, self.ui_format(client_id));
         } else {
@@ -1911,7 +1911,7 @@ impl StudioCore {
         if let Some(info) = socket.info.as_mut() {
             info.status = status;
         }
-        self.broadcast_ui_message(StudioToUI::BuildBoxes {
+        self.broadcast_ui_message(HubToClient::BuildBoxes {
             boxes: self.list_buildboxes(),
         });
     }
@@ -1925,7 +1925,7 @@ impl StudioCore {
         };
 
         self.buildbox_by_name.remove(&info.name);
-        self.broadcast_ui_message(StudioToUI::BuildBoxDisconnected {
+        self.broadcast_ui_message(HubToClient::BuildBoxDisconnected {
             name: info.name.clone(),
         });
 
@@ -1938,19 +1938,19 @@ impl StudioCore {
             self.remote_build_owner.remove(&build_id);
             self.remote_builds.remove(&build_id);
             self.build_mount_by_id.remove(&build_id);
-            self.broadcast_ui_message(StudioToUI::BuildStopped {
+            self.broadcast_ui_message(HubToClient::BuildStopped {
                 build_id,
                 exit_code: None,
             });
         }
 
-        self.broadcast_ui_message(StudioToUI::BuildBoxes {
+        self.broadcast_ui_message(HubToClient::BuildBoxes {
             boxes: self.list_buildboxes(),
         });
     }
 
     fn on_buildbox_binary(&mut self, web_socket_id: u64, data: Vec<u8>) {
-        let messages = match BuildBoxToStudioVec::deserialize_bin(&data) {
+        let messages = match BuildBoxToHubVec::deserialize_bin(&data) {
             Ok(messages) => messages.0,
             Err(err) => {
                 let (index, entry) = self.log_store.append(AppendLogEntry {
@@ -1973,9 +1973,9 @@ impl StudioCore {
         }
     }
 
-    fn handle_buildbox_message(&mut self, web_socket_id: u64, msg: BuildBoxToStudio) {
+    fn handle_buildbox_message(&mut self, web_socket_id: u64, msg: BuildBoxToHub) {
         match msg {
-            BuildBoxToStudio::Hello {
+            BuildBoxToHub::Hello {
                 name,
                 platform,
                 arch,
@@ -1992,12 +1992,12 @@ impl StudioCore {
                     socket.tree_hash = Some(tree_hash);
                 }
                 self.buildbox_by_name.insert(name.clone(), web_socket_id);
-                self.broadcast_ui_message(StudioToUI::BuildBoxConnected { info });
-                self.broadcast_ui_message(StudioToUI::BuildBoxes {
+                self.broadcast_ui_message(HubToClient::BuildBoxConnected { info });
+                self.broadcast_ui_message(HubToClient::BuildBoxes {
                     boxes: self.list_buildboxes(),
                 });
             }
-            BuildBoxToStudio::BuildOutput { build_id, line } => {
+            BuildBoxToHub::BuildOutput { build_id, line } => {
                 let (index, entry) = self.log_store.append(AppendLogEntry {
                     build_id: Some(build_id),
                     level: LogLevel::Log,
@@ -2010,12 +2010,12 @@ impl StudioCore {
                 });
                 self.broadcast_live_log_entry(index, entry);
             }
-            BuildBoxToStudio::BuildStarted { build_id } => {
+            BuildBoxToHub::BuildStarted { build_id } => {
                 if let Some(buildbox_name) = self.remote_build_owner.get(&build_id).cloned() {
                     self.set_buildbox_status(&buildbox_name, BuildBoxStatus::Building { build_id });
                 }
             }
-            BuildBoxToStudio::BuildStopped {
+            BuildBoxToHub::BuildStopped {
                 build_id,
                 exit_code,
             } => {
@@ -2024,23 +2024,23 @@ impl StudioCore {
                     self.set_buildbox_status(&buildbox_name, BuildBoxStatus::Idle);
                 }
                 self.build_mount_by_id.remove(&build_id);
-                self.broadcast_ui_message(StudioToUI::BuildStopped {
+                self.broadcast_ui_message(HubToClient::BuildStopped {
                     build_id,
                     exit_code,
                 });
             }
-            BuildBoxToStudio::SyncComplete { tree_hash } => {
+            BuildBoxToHub::SyncComplete { tree_hash } => {
                 if let Some(socket) = self.buildbox_sockets.get_mut(&web_socket_id) {
                     socket.tree_hash = Some(tree_hash);
                     if let Some(info) = socket.info.as_mut() {
                         info.status = BuildBoxStatus::Idle;
                     }
                 }
-                self.broadcast_ui_message(StudioToUI::BuildBoxes {
+                self.broadcast_ui_message(HubToClient::BuildBoxes {
                     boxes: self.list_buildboxes(),
                 });
             }
-            BuildBoxToStudio::SyncError { error } => {
+            BuildBoxToHub::SyncError { error } => {
                 let (index, entry) = self.log_store.append(AppendLogEntry {
                     build_id: None,
                     level: LogLevel::Warning,
@@ -2053,8 +2053,8 @@ impl StudioCore {
                 });
                 self.broadcast_live_log_entry(index, entry);
             }
-            BuildBoxToStudio::Pong => {}
-            BuildBoxToStudio::FileHashes { .. } => {}
+            BuildBoxToHub::Pong => {}
+            BuildBoxToHub::FileHashes { .. } => {}
         }
     }
 
@@ -2118,7 +2118,7 @@ impl StudioCore {
                     match write_screenshot_png(build_id, 0, request_id, &response.png) {
                         Ok(path) => self.send_to_query_owner(
                             query_id,
-                            StudioToUI::Screenshot {
+                            HubToClient::Screenshot {
                                 query_id,
                                 build_id,
                                 kind_id: 0,
@@ -2129,7 +2129,7 @@ impl StudioCore {
                         ),
                         Err(err) => self.send_to_query_owner(
                             query_id,
-                            StudioToUI::Error {
+                            HubToClient::Error {
                                 message: format!("failed to persist screenshot: {}", err),
                             },
                         ),
@@ -2140,7 +2140,7 @@ impl StudioCore {
                 let query_id = QueryId(response.request_id);
                 self.send_to_query_owner(
                     query_id,
-                    StudioToUI::WidgetTreeDump {
+                    HubToClient::WidgetTreeDump {
                         query_id,
                         build_id,
                         dump: response.dump,
@@ -2151,7 +2151,7 @@ impl StudioCore {
                 let query_id = QueryId(response.request_id);
                 self.send_to_query_owner(
                     query_id,
-                    StudioToUI::WidgetQuery {
+                    HubToClient::WidgetQuery {
                         query_id,
                         build_id,
                         query: response.query,
@@ -2165,19 +2165,19 @@ impl StudioCore {
             } => {
                 self.send_runview_message(
                     build_id,
-                    StudioToUI::RunViewCreated {
+                    HubToClient::RunViewCreated {
                         build_id,
                         window_id,
                     },
                 );
             }
             AppToStudio::AfterStartup => {
-                self.broadcast_ui_message(StudioToUI::AppStarted { build_id });
+                self.broadcast_ui_message(HubToClient::AppStarted { build_id });
             }
             AppToStudio::SetCursor(cursor) => {
                 self.send_runview_message(
                     build_id,
-                    StudioToUI::RunViewCursor {
+                    HubToClient::RunViewCursor {
                         build_id,
                         cursor: format!("{:?}", cursor),
                     },
@@ -2186,7 +2186,7 @@ impl StudioCore {
             AppToStudio::DrawCompleteAndFlip(presentable_draw) => {
                 self.send_runview_message(
                     build_id,
-                    StudioToUI::RunViewDrawComplete {
+                    HubToClient::RunViewDrawComplete {
                         build_id,
                         window_id: presentable_draw.window_id,
                         presentable_draw,
@@ -2264,7 +2264,7 @@ impl StudioCore {
             return;
         }
         self.build_mount_by_id.remove(&build_id);
-        self.broadcast_ui_message(StudioToUI::BuildStopped {
+        self.broadcast_ui_message(HubToClient::BuildStopped {
             build_id,
             exit_code,
         });
@@ -2284,12 +2284,12 @@ impl StudioCore {
         self.mount_suppress_fs_until
             .insert(mount, Instant::now() + Duration::from_millis(750));
         let _ = append_terminal_history_bytes(&self.vfs, &path, &data);
-        self.broadcast_ui_message(StudioToUI::TerminalOutput { path, data });
+        self.broadcast_ui_message(HubToClient::TerminalOutput { path, data });
     }
 
     fn on_terminal_exited(&mut self, path: String, exit_code: i32) {
         self.terminal_manager.remove_terminal(&path);
-        self.broadcast_ui_message(StudioToUI::TerminalExited {
+        self.broadcast_ui_message(HubToClient::TerminalExited {
             path,
             code: exit_code,
         });
@@ -2302,7 +2302,7 @@ impl StudioCore {
             }
             self.send_ui_reply(
                 live.client_id,
-                StudioToUI::QueryLogResults {
+                HubToClient::QueryLogResults {
                     query_id: *query_id,
                     entries: vec![(index, entry.clone())],
                     done: false,
@@ -2311,14 +2311,14 @@ impl StudioCore {
         }
     }
 
-    fn broadcast_ui_message(&self, msg: StudioToUI) {
+    fn broadcast_ui_message(&self, msg: HubToClient) {
         let ids: Vec<ClientId> = self.ui_clients.keys().copied().collect();
         for client_id in ids {
             self.send_ui_message(client_id, msg.clone(), self.ui_format(client_id));
         }
     }
 
-    fn broadcast_ui_message_except(&self, excluded: ClientId, msg: StudioToUI) {
+    fn broadcast_ui_message_except(&self, excluded: ClientId, msg: HubToClient) {
         let ids: Vec<ClientId> = self.ui_clients.keys().copied().collect();
         for client_id in ids {
             if client_id == excluded {
@@ -2328,7 +2328,7 @@ impl StudioCore {
         }
     }
 
-    fn send_to_query_owner(&self, query_id: QueryId, msg: StudioToUI) {
+    fn send_to_query_owner(&self, query_id: QueryId, msg: HubToClient) {
         let client_id = query_id.client_id();
         self.send_ui_reply(client_id, msg);
     }
@@ -2339,7 +2339,7 @@ impl StudioCore {
                 self.profiler_store.query(&live.query);
             self.send_ui_reply(
                 live.client_id,
-                StudioToUI::QueryProfilerResults {
+                HubToClient::QueryProfilerResults {
                     query_id: *query_id,
                     event_samples,
                     gpu_samples,
@@ -2372,7 +2372,7 @@ impl StudioCore {
         match self.vfs.load_file_tree(&mount) {
             Ok(data) => self.send_ui_reply(
                 client_id,
-                StudioToUI::FileTree {
+                HubToClient::FileTree {
                     mount: mount.clone(),
                     data: data.clone(),
                 },
@@ -2383,7 +2383,7 @@ impl StudioCore {
             if let Ok(after) = self.vfs.load_file_tree(&mount) {
                 self.send_ui_reply(
                     client_id,
-                    StudioToUI::FileTreeDiff {
+                    HubToClient::FileTreeDiff {
                         mount,
                         changes: file_tree_diff(&before, &after),
                     },
@@ -2392,15 +2392,15 @@ impl StudioCore {
         }
     }
 
-    fn send_ui_reply(&self, client_id: ClientId, msg: StudioToUI) {
+    fn send_ui_reply(&self, client_id: ClientId, msg: HubToClient) {
         self.send_ui_message(client_id, msg, self.ui_format(client_id));
     }
 
     fn send_ui_error(&self, client_id: ClientId, message: String) {
-        self.send_ui_reply(client_id, StudioToUI::Error { message });
+        self.send_ui_reply(client_id, HubToClient::Error { message });
     }
 
-    fn send_ui_message(&self, client_id: ClientId, msg: StudioToUI, format: WireFormat) {
+    fn send_ui_message(&self, client_id: ClientId, msg: HubToClient, format: WireFormat) {
         let Some(client) = self.ui_clients.get(&client_id) else {
             return;
         };
@@ -2580,8 +2580,8 @@ fn map_platform_log_level(level: LogLevel) -> LogLevel {
     }
 }
 
-fn map_platform_event_sample(sample: EventSample) -> StudioEventSample {
-    StudioEventSample {
+fn map_platform_event_sample(sample: EventSample) -> HubEventSample {
+    HubEventSample {
         at: sample.end,
         label: LiveId(sample.event_u32 as u64),
         event_u32: sample.event_u32,
@@ -3189,14 +3189,14 @@ mod tests {
         assert_eq!(normalized, args);
     }
 
-    fn test_core_with_ui(root: &Path) -> (StudioCore, ToUIReceiver<Vec<u8>>) {
-        let (event_tx, event_rx) = mpsc::channel::<StudioEvent>();
+    fn test_core_with_ui(root: &Path) -> (HubCore, ToUIReceiver<Vec<u8>>) {
+        let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
         let mut vfs = VirtualFs::new();
         vfs.mount("repo", root.to_path_buf()).expect("mount repo");
-        let mut core = StudioCore::new(event_rx, event_tx, vfs, None);
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None);
 
         let ui_rx = ToUIReceiver::<Vec<u8>>::default();
-        core.handle_event(StudioEvent::UiConnected {
+        core.handle_event(HubEvent::ClientConnected {
             web_socket_id: 1,
             sender: ui_rx.sender(),
             typed_sender: None,
@@ -3205,7 +3205,7 @@ mod tests {
         (core, ui_rx)
     }
 
-    fn pump_core(core: &mut StudioCore, max_wait: Duration) {
+    fn pump_core(core: &mut HubCore, max_wait: Duration) {
         let deadline = Instant::now() + max_wait;
         while Instant::now() < deadline {
             match core.rx.recv_timeout(Duration::from_millis(20)) {
@@ -3220,13 +3220,13 @@ mod tests {
         }
     }
 
-    fn recv_ui_messages(rx: &ToUIReceiver<Vec<u8>>, max_wait: Duration) -> Vec<StudioToUI> {
+    fn recv_ui_messages(rx: &ToUIReceiver<Vec<u8>>, max_wait: Duration) -> Vec<HubToClient> {
         let deadline = Instant::now() + max_wait;
         let mut out = Vec::new();
         while Instant::now() < deadline {
             match rx.receiver.recv_timeout(Duration::from_millis(25)) {
                 Ok(data) => {
-                    if let Ok(msg) = StudioToUI::deserialize_bin(&data) {
+                    if let Ok(msg) = HubToClient::deserialize_bin(&data) {
                         out.push(msg);
                     }
                 }
@@ -3243,14 +3243,14 @@ mod tests {
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-        let (event_tx, event_rx) = mpsc::channel::<StudioEvent>();
+        let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
         let mut vfs = VirtualFs::new();
         vfs.mount("repo", dir.path().to_path_buf()).expect("mount repo");
-        let mut core = StudioCore::new(event_rx, event_tx, vfs, None);
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None);
 
         let ui_rx_bin = ToUIReceiver::<Vec<u8>>::default();
-        let ui_rx_typed = ToUIReceiver::<StudioToUI>::default();
-        core.handle_event(StudioEvent::UiConnected {
+        let ui_rx_typed = ToUIReceiver::<HubToClient>::default();
+        core.handle_event(HubEvent::ClientConnected {
             web_socket_id: 1,
             sender: ui_rx_bin.sender(),
             typed_sender: Some(ui_rx_typed.sender()),
@@ -3261,16 +3261,16 @@ mod tests {
             .recv_timeout(Duration::from_millis(250))
             .expect("typed hello");
         let client_id = match hello {
-            StudioToUI::Hello { client_id } => client_id,
+            HubToClient::Hello { client_id } => client_id,
             other => panic!("expected Hello, got {:?}", other),
         };
 
         let query_id = QueryId::new(client_id, 0);
-        core.handle_event(StudioEvent::UiEnvelope {
+        core.handle_event(HubEvent::ClientEnvelope {
             web_socket_id: 1,
-            envelope: UIToStudioEnvelope {
+            envelope: ClientToHubEnvelope {
                 query_id,
-                msg: UIToStudio::LoadFileTree {
+                msg: ClientToHub::LoadFileTree {
                     mount: "repo".to_string(),
                 },
             },
@@ -3282,7 +3282,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("typed FileTree");
         match msg {
-            StudioToUI::FileTree { mount, data } => {
+            HubToClient::FileTree { mount, data } => {
                 assert_eq!(mount, "repo");
                 assert!(data.nodes.iter().any(|node| node.path == "repo/src/lib.rs"));
             }
@@ -3298,13 +3298,13 @@ mod tests {
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-        let (event_tx, event_rx) = mpsc::channel::<StudioEvent>();
+        let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
         let mut vfs = VirtualFs::new();
         vfs.mount("repo", dir.path().to_path_buf()).expect("mount repo");
-        let mut core = StudioCore::new(event_rx, event_tx, vfs, None);
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None);
 
         let ui_rx = ToUIReceiver::<Vec<u8>>::default();
-        core.handle_event(StudioEvent::UiConnected {
+        core.handle_event(HubEvent::ClientConnected {
             web_socket_id: 1,
             sender: ui_rx.sender(),
             typed_sender: None,
@@ -3313,8 +3313,8 @@ mod tests {
             .receiver
             .recv_timeout(Duration::from_millis(250))
             .expect("hello");
-        let client_id = match StudioToUI::deserialize_bin(&hello_bin).expect("deserialize hello") {
-            StudioToUI::Hello { client_id } => client_id,
+        let client_id = match HubToClient::deserialize_bin(&hello_bin).expect("deserialize hello") {
+            HubToClient::Hello { client_id } => client_id,
             other => panic!("expected Hello, got {:?}", other),
         };
         let wrong_client_id = if client_id.0 == 0 {
@@ -3323,11 +3323,11 @@ mod tests {
             ClientId(0)
         };
 
-        core.handle_event(StudioEvent::UiEnvelope {
+        core.handle_event(HubEvent::ClientEnvelope {
             web_socket_id: 1,
-            envelope: UIToStudioEnvelope {
+            envelope: ClientToHubEnvelope {
                 query_id: QueryId::new(wrong_client_id, 0),
-                msg: UIToStudio::ListBuilds,
+                msg: ClientToHub::ListBuilds,
             },
         });
 
@@ -3336,7 +3336,7 @@ mod tests {
         assert!(messages.iter().any(|msg| {
             matches!(
                 msg,
-                StudioToUI::Error { message }
+                HubToClient::Error { message }
                     if message.contains("query_id.client_id does not match assigned client")
             )
         }));
@@ -3348,13 +3348,13 @@ mod tests {
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-        let (event_tx, event_rx) = mpsc::channel::<StudioEvent>();
+        let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
         let mut vfs = VirtualFs::new();
         vfs.mount("repo", dir.path().to_path_buf()).expect("mount repo");
-        let mut core = StudioCore::new(event_rx, event_tx, vfs, None);
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None);
 
         let ui_rx = ToUIReceiver::<Vec<u8>>::default();
-        core.handle_event(StudioEvent::UiConnected {
+        core.handle_event(HubEvent::ClientConnected {
             web_socket_id: 1,
             sender: ui_rx.sender(),
             typed_sender: None,
@@ -3363,8 +3363,8 @@ mod tests {
             .receiver
             .recv_timeout(Duration::from_millis(250))
             .expect("hello");
-        let client_id = match StudioToUI::deserialize_bin(&hello_bin).expect("deserialize hello") {
-            StudioToUI::Hello { client_id } => client_id,
+        let client_id = match HubToClient::deserialize_bin(&hello_bin).expect("deserialize hello") {
+            HubToClient::Hello { client_id } => client_id,
             other => panic!("expected Hello, got {:?}", other),
         };
         let wrong_client_id = if client_id.0 == 0 {
@@ -3372,13 +3372,13 @@ mod tests {
         } else {
             ClientId(0)
         };
-        let data = UIToStudioEnvelope {
+        let data = ClientToHubEnvelope {
             query_id: QueryId::new(wrong_client_id, 0),
-            msg: UIToStudio::ListBuilds,
+            msg: ClientToHub::ListBuilds,
         }
         .serialize_bin();
 
-        core.handle_event(StudioEvent::UiBinary {
+        core.handle_event(HubEvent::ClientBinary {
             web_socket_id: 1,
             data,
         });
@@ -3388,7 +3388,7 @@ mod tests {
         assert!(messages.iter().any(|msg| {
             matches!(
                 msg,
-                StudioToUI::Error { message }
+                HubToClient::Error { message }
                     if message.contains("query_id.client_id does not match assigned client")
             )
         }));
@@ -3400,18 +3400,18 @@ mod tests {
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
-        let (event_tx, event_rx) = mpsc::channel::<StudioEvent>();
+        let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
         let mut vfs = VirtualFs::new();
         vfs.mount("repo", dir.path().to_path_buf()).expect("mount repo");
-        let mut core = StudioCore::new(event_rx, event_tx, vfs, None);
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None);
 
         let primary_ui = ToUIReceiver::<Vec<u8>>::default();
-        core.handle_event(StudioEvent::UiConnected {
+        core.handle_event(HubEvent::ClientConnected {
             web_socket_id: 1,
             sender: primary_ui.sender(),
             typed_sender: None,
         });
-        let primary_client_id = match StudioToUI::deserialize_bin(
+        let primary_client_id = match HubToClient::deserialize_bin(
             &primary_ui
                 .receiver
                 .recv_timeout(Duration::from_millis(250))
@@ -3419,17 +3419,17 @@ mod tests {
         )
         .expect("decode primary hello")
         {
-            StudioToUI::Hello { client_id } => client_id,
+            HubToClient::Hello { client_id } => client_id,
             other => panic!("expected Hello, got {:?}", other),
         };
 
         let secondary_ui = ToUIReceiver::<Vec<u8>>::default();
-        core.handle_event(StudioEvent::UiConnected {
+        core.handle_event(HubEvent::ClientConnected {
             web_socket_id: 2,
             sender: secondary_ui.sender(),
             typed_sender: None,
         });
-        let secondary_client_id = match StudioToUI::deserialize_bin(
+        let secondary_client_id = match HubToClient::deserialize_bin(
             &secondary_ui
                 .receiver
                 .recv_timeout(Duration::from_millis(250))
@@ -3437,7 +3437,7 @@ mod tests {
         )
         .expect("decode secondary hello")
         {
-            StudioToUI::Hello { client_id } => client_id,
+            HubToClient::Hello { client_id } => client_id,
             other => panic!("expected Hello, got {:?}", other),
         };
 
@@ -3445,28 +3445,28 @@ mod tests {
         core.build_mount_by_id.insert(build_id, "repo".to_string());
 
         let (app_tx, app_rx) = mpsc::channel::<Vec<u8>>();
-        core.handle_event(StudioEvent::AppConnected {
+        core.handle_event(HubEvent::AppConnected {
             build_id,
             web_socket_id: 77,
             sender: app_tx,
         });
 
-        core.handle_event(StudioEvent::UiEnvelope {
+        core.handle_event(HubEvent::ClientEnvelope {
             web_socket_id: 1,
-            envelope: UIToStudioEnvelope {
+            envelope: ClientToHubEnvelope {
                 query_id: QueryId::new(primary_client_id, 0),
-                msg: UIToStudio::ObserveMount {
+                msg: ClientToHub::ObserveMount {
                     mount: "repo".to_string(),
                     primary: Some(true),
                 },
             },
         });
 
-        core.handle_event(StudioEvent::UiEnvelope {
+        core.handle_event(HubEvent::ClientEnvelope {
             web_socket_id: 2,
-            envelope: UIToStudioEnvelope {
+            envelope: ClientToHubEnvelope {
                 query_id: QueryId::new(secondary_client_id, 0),
-                msg: UIToStudio::Click {
+                msg: ClientToHub::Click {
                     build_id,
                     x: 12,
                     y: 34,
@@ -3490,7 +3490,7 @@ mod tests {
         assert!(primary_messages.iter().any(|msg| {
             matches!(
                 msg,
-                StudioToUI::RunViewInputViz {
+                HubToClient::RunViewInputViz {
                     build_id: id,
                     kind: RunViewInputVizKind::ClickDown,
                     x: Some(x),
@@ -3501,7 +3501,7 @@ mod tests {
         assert!(primary_messages.iter().any(|msg| {
             matches!(
                 msg,
-                StudioToUI::RunViewInputViz {
+                HubToClient::RunViewInputViz {
                     build_id: id,
                     kind: RunViewInputVizKind::ClickUp,
                     x: Some(x),
@@ -3513,7 +3513,7 @@ mod tests {
         let secondary_messages = recv_ui_messages(&secondary_ui, Duration::from_millis(300));
         assert!(!secondary_messages
             .iter()
-            .any(|msg| matches!(msg, StudioToUI::Error { .. })));
+            .any(|msg| matches!(msg, HubToClient::Error { .. })));
     }
 
     #[test]
@@ -3524,7 +3524,7 @@ mod tests {
 
         let (mut core, ui_rx) = test_core_with_ui(dir.path());
         fs::write(dir.path().join("src/new_file.rs"), "pub fn new_file() {}\n").unwrap();
-        core.handle_event(StudioEvent::MountFsChanged {
+        core.handle_event(HubEvent::MountFsChanged {
             mount: "repo".to_string(),
             path: dir.path().join("src/new_file.rs"),
         });
@@ -3535,7 +3535,7 @@ mod tests {
             messages.iter().any(|msg| {
                 matches!(
                     msg,
-                    StudioToUI::FileTreeDiff { mount, changes }
+                    HubToClient::FileTreeDiff { mount, changes }
                         if mount == "repo"
                             && changes.iter().any(|change| {
                                 matches!(
@@ -3560,7 +3560,7 @@ mod tests {
         core.mount_suppress_fs_until
             .insert("repo".to_string(), Instant::now() + Duration::from_secs(2));
         fs::write(dir.path().join("src/new_file.rs"), "pub fn new_file() {}\n").unwrap();
-        core.handle_event(StudioEvent::MountFsChanged {
+        core.handle_event(HubEvent::MountFsChanged {
             mount: "repo".to_string(),
             path: dir.path().join("src/new_file.rs"),
         });
@@ -3571,7 +3571,7 @@ mod tests {
             messages.iter().any(|msg| {
                 matches!(
                     msg,
-                    StudioToUI::FileTreeDiff { mount, changes }
+                    HubToClient::FileTreeDiff { mount, changes }
                         if mount == "repo"
                             && changes.iter().any(|change| {
                                 matches!(
@@ -3595,7 +3595,7 @@ mod tests {
         let (mut core, ui_rx) = test_core_with_ui(dir.path());
         core.mount_suppress_fs_until
             .insert("repo".to_string(), Instant::now() + Duration::from_secs(2));
-        core.handle_event(StudioEvent::MountFsChanged {
+        core.handle_event(HubEvent::MountFsChanged {
             mount: "repo".to_string(),
             path: dir.path().to_path_buf(),
         });
@@ -3605,9 +3605,9 @@ mod tests {
             !messages.iter().any(|msg| {
                 matches!(
                     msg,
-                    StudioToUI::FileTree { mount, .. } | StudioToUI::FileTreeDiff { mount, .. }
+                    HubToClient::FileTree { mount, .. } | HubToClient::FileTreeDiff { mount, .. }
                         if mount == "repo"
-                ) || matches!(msg, StudioToUI::FileChanged { path } if path == "repo")
+                ) || matches!(msg, HubToClient::FileChanged { path } if path == "repo")
             }),
             "expected mount-root fs event to remain suppressed"
         );
@@ -3621,7 +3621,7 @@ mod tests {
 
         let (mut core, ui_rx) = test_core_with_ui(dir.path());
         fs::write(dir.path().join("src/from_dir_event.rs"), "pub fn d() {}\n").unwrap();
-        core.handle_event(StudioEvent::MountFsChanged {
+        core.handle_event(HubEvent::MountFsChanged {
             mount: "repo".to_string(),
             path: dir.path().join("src"),
         });
@@ -3631,7 +3631,7 @@ mod tests {
             messages.iter().any(|msg| {
                 matches!(
                     msg,
-                    StudioToUI::FileTree { mount, data }
+                    HubToClient::FileTree { mount, data }
                         if mount == "repo"
                             && data
                                 .nodes
@@ -3651,7 +3651,7 @@ mod tests {
 
         let (mut core, ui_rx) = test_core_with_ui(dir.path());
         fs::remove_dir_all(dir.path().join("src/nested")).unwrap();
-        core.handle_event(StudioEvent::MountFsChanged {
+        core.handle_event(HubEvent::MountFsChanged {
             mount: "repo".to_string(),
             path: dir.path().join("src/nested"),
         });
@@ -3662,7 +3662,7 @@ mod tests {
             messages.iter().any(|msg| {
                 matches!(
                     msg,
-                    StudioToUI::FileTreeDiff { mount, changes }
+                    HubToClient::FileTreeDiff { mount, changes }
                         if mount == "repo"
                             && changes.iter().any(|change| {
                                 matches!(
@@ -3683,25 +3683,25 @@ mod tests {
         fs::create_dir_all(dir.path().join("src/nested")).unwrap();
         let (mut core, ui_rx) = test_core_with_ui(dir.path());
 
-        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+        core.handle_event(HubEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
             change: backend_proto::FileTreeChange::Removed {
                 path: "repo/src/nested/a.rs".to_string(),
             },
         });
-        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+        core.handle_event(HubEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
             change: backend_proto::FileTreeChange::Removed {
                 path: "repo/src/nested/b.rs".to_string(),
             },
         });
-        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+        core.handle_event(HubEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
             change: backend_proto::FileTreeChange::Removed {
                 path: "repo/src/nested".to_string(),
             },
         });
-        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+        core.handle_event(HubEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
             change: backend_proto::FileTreeChange::Removed {
                 path: "repo/src/nested/c.rs".to_string(),
@@ -3713,7 +3713,7 @@ mod tests {
         let diffs: Vec<Vec<backend_proto::FileTreeChange>> = messages
             .into_iter()
             .filter_map(|msg| match msg {
-                StudioToUI::FileTreeDiff { mount, changes } if mount == "repo" => Some(changes),
+                HubToClient::FileTreeDiff { mount, changes } if mount == "repo" => Some(changes),
                 _ => None,
             })
             .collect();
@@ -3736,13 +3736,13 @@ mod tests {
         fs::create_dir_all(dir.path().join("src")).unwrap();
         let (mut core, ui_rx) = test_core_with_ui(dir.path());
 
-        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+        core.handle_event(HubEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
             change: backend_proto::FileTreeChange::Removed {
                 path: "repo/src/lib.rs".to_string(),
             },
         });
-        core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+        core.handle_event(HubEvent::WorkerFileTreeDeltaDone {
             mount: "repo".to_string(),
             change: backend_proto::FileTreeChange::Added {
                 path: "repo/src/lib.rs".to_string(),
@@ -3756,7 +3756,7 @@ mod tests {
         let diffs: Vec<Vec<backend_proto::FileTreeChange>> = messages
             .into_iter()
             .filter_map(|msg| match msg {
-                StudioToUI::FileTreeDiff { mount, changes } if mount == "repo" => Some(changes),
+                HubToClient::FileTreeDiff { mount, changes } if mount == "repo" => Some(changes),
                 _ => None,
             })
             .collect();
@@ -3776,7 +3776,7 @@ mod tests {
 
         let (mut core, ui_rx) = test_core_with_ui(dir.path());
         for index in 0..(FS_DELTA_RELOAD_THRESHOLD + 16) {
-            core.handle_event(StudioEvent::WorkerFileTreeDeltaDone {
+            core.handle_event(HubEvent::WorkerFileTreeDeltaDone {
                 mount: "repo".to_string(),
                 change: backend_proto::FileTreeChange::Removed {
                     path: format!("repo/src/storm/file_{index}.rs"),
@@ -3788,10 +3788,10 @@ mod tests {
         let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
         let saw_reload = messages
             .iter()
-            .any(|msg| matches!(msg, StudioToUI::FileTree { mount, .. } if mount == "repo"));
+            .any(|msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"));
         let saw_diff = messages
             .iter()
-            .any(|msg| matches!(msg, StudioToUI::FileTreeDiff { mount, .. } if mount == "repo"));
+            .any(|msg| matches!(msg, HubToClient::FileTreeDiff { mount, .. } if mount == "repo"));
         assert!(
             saw_reload,
             "expected full tree reload for large delta storm"
@@ -3810,7 +3810,7 @@ fn write_screenshot_png(
     png: &[u8],
 ) -> Result<String, String> {
     let mut dir = std::env::temp_dir();
-    dir.push("makepad_studio_backend");
+    dir.push("makepad_studio_hub");
     fs::create_dir_all(&dir)
         .map_err(|err| format!("failed to create screenshot dir {}: {}", dir.display(), err))?;
 
