@@ -2,6 +2,7 @@ use std::env;
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn latest_versioned_subdir(parent: &Path) -> Option<PathBuf> {
     if !parent.is_dir() {
@@ -126,7 +127,7 @@ fn build_dav1d() {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
-    let dav1d_dir = Path::new("src/os/vendor/dav1d");
+    let dav1d_dir = Path::new("../libs/dav1d");
     let src_dir = dav1d_dir.join("src");
     let include_dir = dav1d_dir.join("include");
 
@@ -451,6 +452,164 @@ fn apply_dav1d_defines(build: &mut cc::Build, target_arch: &str, target_os: &str
     }
 }
 
+fn build_svt_av1() {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "linux" && target_os != "android" {
+        return;
+    }
+
+    let svt_root = Path::new("../libs/svt-av1");
+    if !svt_root.exists() {
+        println!(
+            "cargo:warning=svt-av1 source tree missing: {}",
+            svt_root.display()
+        );
+        return;
+    }
+
+    let mut lib_dir = svt_root.join("Bin").join("Release");
+    let mut lib_path = if target_os == "linux" {
+        lib_dir.join("libSvtAv1Enc.a")
+    } else {
+        PathBuf::new()
+    };
+
+    if target_os == "android" {
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap()).join("svt-av1-android");
+        let _ = std::fs::create_dir_all(&out_dir);
+
+        let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        let abi = match target_arch.as_str() {
+            "aarch64" => "arm64-v8a",
+            "arm" => "armeabi-v7a",
+            "x86_64" => "x86_64",
+            "x86" => "x86",
+            _ => {
+                println!(
+                    "cargo:warning=unsupported android arch for svt-av1: {}",
+                    target_arch
+                );
+                return;
+            }
+        };
+
+        let prebuilt_candidates = [
+            svt_root
+                .join("Bin")
+                .join("Android")
+                .join(abi)
+                .join("libSvtAv1Enc.a"),
+            svt_root
+                .join("Bin")
+                .join("Release")
+                .join(abi)
+                .join("libSvtAv1Enc.a"),
+        ];
+        if let Some(found) = prebuilt_candidates.iter().find(|p| p.exists()) {
+            lib_path = found.clone();
+            lib_dir = found.parent().unwrap().to_path_buf();
+        }
+
+        if !lib_path.exists() {
+            let Some(ndk_root) = detect_android_ndk_root() else {
+                println!("cargo:warning=ANDROID_NDK not found, svt-av1 disabled");
+                return;
+            };
+
+            let api = env::var("ANDROID_API_LEVEL")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(29);
+
+            let cmake_toolchain = ndk_root
+                .join("build")
+                .join("cmake")
+                .join("android.toolchain.cmake");
+
+            let configure = Command::new("cmake")
+                .arg("-S")
+                .arg(svt_root)
+                .arg("-B")
+                .arg(&out_dir)
+                .arg("-DCMAKE_BUILD_TYPE=Release")
+                .arg("-DBUILD_SHARED_LIBS=OFF")
+                .arg("-DSVT_AV1_LTO=OFF")
+                .arg("-DCMAKE_SYSTEM_NAME=Android")
+                .arg(format!("-DANDROID_ABI={abi}"))
+                .arg(format!("-DANDROID_PLATFORM=android-{api}"))
+                .arg(format!("-DCMAKE_ANDROID_NDK={}", ndk_root.display()))
+                .arg(format!(
+                    "-DCMAKE_TOOLCHAIN_FILE={}",
+                    cmake_toolchain.display()
+                ))
+                .status();
+
+            if !matches!(configure, Ok(s) if s.success()) {
+                println!("cargo:warning=cmake configure failed for svt-av1 android");
+                return;
+            }
+
+            let build = Command::new("cmake")
+                .arg("--build")
+                .arg(&out_dir)
+                .arg("--config")
+                .arg("Release")
+                .arg("--target")
+                .arg("SvtAv1Enc")
+                .status();
+
+            if !matches!(build, Ok(s) if s.success()) {
+                println!("cargo:warning=cmake build failed for svt-av1 android");
+                return;
+            }
+
+            let candidates = [
+                out_dir.join("Bin").join("Release").join("libSvtAv1Enc.a"),
+                out_dir.join("Release").join("libSvtAv1Enc.a"),
+                out_dir.join("libSvtAv1Enc.a"),
+            ];
+            if let Some(found) = candidates.iter().find(|p| p.exists()) {
+                lib_path = found.clone();
+                lib_dir = found.parent().unwrap().to_path_buf();
+            }
+        }
+
+        if !lib_path.exists() {
+            println!("cargo:warning=svt-av1 android static library not found");
+            return;
+        }
+    }
+
+    if !lib_path.exists() {
+        println!(
+            "cargo:warning=libSvtAv1Enc.a not found at {}",
+            lib_path.display()
+        );
+        return;
+    }
+
+    let mut wrapper = cc::Build::new();
+    wrapper
+        .warnings(false)
+        .include(svt_root.join("Source").join("API"))
+        .file("src/video_encode/svt_av1_wrapper.c");
+    if target_os == "android" {
+        let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        configure_android_cc(&mut wrapper, &target_arch);
+    }
+    wrapper.compile("mp_svt_av1_wrapper");
+
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!("cargo:rustc-link-lib=static=SvtAv1Enc");
+    println!("cargo:rustc-cfg=has_svt_av1");
+    println!("cargo:rerun-if-changed=src/video_encode/svt_av1_wrapper.c");
+    println!(
+        "cargo:rerun-if-changed={}",
+        svt_root.join("Source/API/EbSvtAv1Enc.h").display()
+    );
+    println!("cargo:rerun-if-changed={}", lib_path.display());
+}
+
 fn main() {
     // write a path to makepad platform into our output dir
     let out_dir = env::var("OUT_DIR").unwrap();
@@ -504,7 +663,7 @@ pub static CUSTOM_ICON_ICO: &'static [u8] = {};\n",
         include_or_empty(&icons[6]),
     );
     std::fs::write(Path::new(&out_dir).join("app_icon_gen.rs"), icon_gen).unwrap();
-    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,use_gles_3,use_vulkan,linux_direct,quest,no_android_choreographer,ohos_sim,headless,use_unstable_unix_socket_ancillary_data_2021)");
+    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,use_gles_3,use_vulkan,linux_direct,quest,no_android_choreographer,ohos_sim,headless,use_unstable_unix_socket_ancillary_data_2021,has_svt_av1)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
     for var in icon_vars {
@@ -534,6 +693,7 @@ pub static CUSTOM_ICON_ICO: &'static [u8] = {};\n",
     // Build vendored dav1d (not for wasm or ohos)
     if target_os != "unknown" && !target.contains("wasm") && !target.contains("ohos") {
         build_dav1d();
+        build_svt_av1();
     }
 
     match target_os.as_str() {

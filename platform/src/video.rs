@@ -219,6 +219,51 @@ impl<'a> CameraFrameRef<'a> {
 
 pub type CameraFrameInputFn = Box<dyn for<'a> FnMut(CameraFrameRef<'a>) + Send + 'static>;
 
+#[derive(Clone, Copy, Debug)]
+pub struct CameraAv1EncoderConfig {
+    pub width: u32,
+    pub height: u32,
+    pub fps_num: u32,
+    pub fps_den: u32,
+    pub target_bitrate: u32,
+    pub keyint: i32,
+    pub enc_mode: i32,
+    pub queue_capacity: usize,
+}
+
+impl Default for CameraAv1EncoderConfig {
+    fn default() -> Self {
+        Self {
+            width: 1280,
+            height: 720,
+            fps_num: 30,
+            fps_den: 1,
+            target_bitrate: 2_000_000,
+            keyint: 120,
+            enc_mode: 8,
+            queue_capacity: 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EncodedAv1PacketRef<'a> {
+    pub pts_ns: u64,
+    pub is_key: bool,
+    pub is_eos: bool,
+    pub data: &'a [u8],
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EncodedAv1PacketOwned {
+    pub pts_ns: u64,
+    pub is_key: bool,
+    pub is_eos: bool,
+    pub data: Vec<u8>,
+}
+
+pub type CameraAv1OutputFn = Box<dyn for<'a> FnMut(EncodedAv1PacketRef<'a>) + Send + 'static>;
+
 #[derive(Default)]
 pub struct CameraFramePlaneOwned {
     pub bytes: Vec<u8>,

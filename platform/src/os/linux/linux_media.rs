@@ -196,6 +196,18 @@ impl CxMediaApi for Cx {
             .unwrap() = Some(f);
     }
 
+    fn camera_av1_output_box(
+        &mut self,
+        index: usize,
+        config: CameraAv1EncoderConfig,
+        f: CameraAv1OutputFn,
+    ) {
+        let camera = self.os.media.v4l2_camera();
+        let camera = camera.lock().unwrap();
+        *camera.camera_av1_config[index].lock().unwrap() = Some(config);
+        *camera.camera_av1_output_cb[index].lock().unwrap() = Some(f);
+    }
+
     fn use_video_input(&mut self, inputs: &[(VideoInputId, VideoFormatId)]) {
         self.os
             .media

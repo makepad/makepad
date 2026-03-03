@@ -1,6 +1,9 @@
 use {
     self::super::acamera_sys::*,
-    crate::{makepad_live_id::*, thread::SignalToUI, video::*},
+    crate::{
+        makepad_live_id::*, thread::SignalToUI, video::*,
+        video_encode::camera_av1_encoder::CameraAv1Encoder,
+    },
     std::ffi::{CStr, CString},
     std::os::raw::{c_int, c_void},
     std::sync::{Arc, Mutex},
@@ -26,6 +29,7 @@ pub struct AndroidCaptureSession {
 pub struct AndroidCaptureContext {
     input_fn: Arc<Mutex<Option<VideoInputFn>>>,
     frame_input_fn: Arc<Mutex<Option<CameraFrameInputFn>>>,
+    av1_encoder: Arc<Mutex<Option<CameraAv1Encoder>>>,
     format: VideoFormat,
 }
 
@@ -60,24 +64,28 @@ impl AndroidCaptureSession {
                 AImage_getPlaneData(image, 0, &mut data, &mut len);
                 if !data.is_null() {
                     let data = std::slice::from_raw_parts(data as *const u8, len as usize);
+                    let frame_ref = CameraFrameRef {
+                        timestamp_ns: timestamp_ns.max(0) as u64,
+                        width: context.format.width,
+                        height: context.format.height,
+                        layout: CameraFrameLayout::Mjpeg,
+                        matrix: CameraColorMatrix::Unknown,
+                        plane_count: 1,
+                        planes: [
+                            CameraFramePlaneRef {
+                                bytes: data,
+                                row_stride: len.max(0) as usize,
+                                pixel_stride: 1,
+                            },
+                            CameraFramePlaneRef::empty(),
+                            CameraFramePlaneRef::empty(),
+                        ],
+                    };
                     if let Some(cb) = &mut *context.frame_input_fn.lock().unwrap() {
-                        cb(CameraFrameRef {
-                            timestamp_ns: timestamp_ns.max(0) as u64,
-                            width: context.format.width,
-                            height: context.format.height,
-                            layout: CameraFrameLayout::Mjpeg,
-                            matrix: CameraColorMatrix::Unknown,
-                            plane_count: 1,
-                            planes: [
-                                CameraFramePlaneRef {
-                                    bytes: data,
-                                    row_stride: len.max(0) as usize,
-                                    pixel_stride: 1,
-                                },
-                                CameraFramePlaneRef::empty(),
-                                CameraFramePlaneRef::empty(),
-                            ],
-                        });
+                        cb(frame_ref);
+                    }
+                    if let Some(enc) = &*context.av1_encoder.lock().unwrap() {
+                        enc.push_frame(frame_ref);
                     }
                     if let Some(cb) = &mut *context.input_fn.lock().unwrap() {
                         cb(VideoBufferRef {
@@ -118,32 +126,37 @@ impl AndroidCaptureSession {
                     let u_slice = std::slice::from_raw_parts(u_data, u_len.max(0) as usize);
                     let v_slice = std::slice::from_raw_parts(v_data, v_len.max(0) as usize);
 
+                    let frame_ref = CameraFrameRef {
+                        timestamp_ns: timestamp_ns.max(0) as u64,
+                        width: w,
+                        height: h,
+                        layout: CameraFrameLayout::I420,
+                        matrix: CameraColorMatrix::BT601,
+                        plane_count: 3,
+                        planes: [
+                            CameraFramePlaneRef {
+                                bytes: y_slice,
+                                row_stride: y_row_stride.max(0) as usize,
+                                pixel_stride: 1,
+                            },
+                            CameraFramePlaneRef {
+                                bytes: u_slice,
+                                row_stride: u_row_stride.max(0) as usize,
+                                pixel_stride: u_pixel_stride.max(1) as usize,
+                            },
+                            CameraFramePlaneRef {
+                                bytes: v_slice,
+                                row_stride: v_row_stride.max(0) as usize,
+                                pixel_stride: v_pixel_stride.max(1) as usize,
+                            },
+                        ],
+                    };
+
                     if let Some(cb) = &mut *context.frame_input_fn.lock().unwrap() {
-                        cb(CameraFrameRef {
-                            timestamp_ns: timestamp_ns.max(0) as u64,
-                            width: w,
-                            height: h,
-                            layout: CameraFrameLayout::I420,
-                            matrix: CameraColorMatrix::BT601,
-                            plane_count: 3,
-                            planes: [
-                                CameraFramePlaneRef {
-                                    bytes: y_slice,
-                                    row_stride: y_row_stride.max(0) as usize,
-                                    pixel_stride: 1,
-                                },
-                                CameraFramePlaneRef {
-                                    bytes: u_slice,
-                                    row_stride: u_row_stride.max(0) as usize,
-                                    pixel_stride: u_pixel_stride.max(1) as usize,
-                                },
-                                CameraFramePlaneRef {
-                                    bytes: v_slice,
-                                    row_stride: v_row_stride.max(0) as usize,
-                                    pixel_stride: v_pixel_stride.max(1) as usize,
-                                },
-                            ],
-                        });
+                        cb(frame_ref);
+                    }
+                    if let Some(enc) = &*context.av1_encoder.lock().unwrap() {
+                        enc.push_frame(frame_ref);
                     }
 
                     // Legacy callback compatibility (packed I420), used by external callers.
@@ -260,6 +273,7 @@ impl AndroidCaptureSession {
     unsafe fn start(
         input_fn: Arc<Mutex<Option<VideoInputFn>>>,
         frame_input_fn: Arc<Mutex<Option<CameraFrameInputFn>>>,
+        av1_encoder: Arc<Mutex<Option<CameraAv1Encoder>>>,
         manager: *mut ACameraManager,
         camera_id: &CString,
         format: VideoFormat,
@@ -268,6 +282,7 @@ impl AndroidCaptureSession {
             format,
             input_fn,
             frame_input_fn,
+            av1_encoder,
         }));
 
         let mut device_callbacks = ACameraDevice_StateCallbacks {
@@ -402,6 +417,9 @@ impl AndroidCaptureSession {
 pub struct AndroidCameraAccess {
     pub video_input_cb: [Arc<Mutex<Option<VideoInputFn>>>; MAX_VIDEO_DEVICE_INDEX],
     pub camera_frame_input_cb: [Arc<Mutex<Option<CameraFrameInputFn>>>; MAX_VIDEO_DEVICE_INDEX],
+    pub camera_av1_output_cb: [Arc<Mutex<Option<CameraAv1OutputFn>>>; MAX_VIDEO_DEVICE_INDEX],
+    pub camera_av1_config: [Arc<Mutex<Option<CameraAv1EncoderConfig>>>; MAX_VIDEO_DEVICE_INDEX],
+    camera_av1_encoder: [Arc<Mutex<Option<CameraAv1Encoder>>>; MAX_VIDEO_DEVICE_INDEX],
     manager: *mut ACameraManager,
     devices: Vec<AndroidCameraDevice>,
     sessions: Vec<AndroidCaptureSession>,
@@ -417,6 +435,9 @@ impl AndroidCameraAccess {
             let camera_access = Arc::new(Mutex::new(Self {
                 video_input_cb: Default::default(),
                 camera_frame_input_cb: Default::default(),
+                camera_av1_output_cb: Default::default(),
+                camera_av1_config: Default::default(),
+                camera_av1_encoder: Default::default(),
                 devices: Default::default(),
                 sessions: Default::default(),
                 manager,
@@ -427,10 +448,14 @@ impl AndroidCameraAccess {
     }
 
     pub fn use_video_input(&mut self, inputs: &[(VideoInputId, VideoFormatId)]) {
-        // lets just shut down all capture sessions
         while let Some(item) = self.sessions.pop() {
             unsafe { item.stop() };
         }
+
+        for slot in &self.camera_av1_encoder {
+            *slot.lock().unwrap() = None;
+        }
+
         for (index, (input_id, format_id)) in inputs.iter().enumerate() {
             if let Some(device) = self.devices.iter().find(|v| v.desc.input_id == *input_id) {
                 if let Some(format) = device
@@ -439,10 +464,32 @@ impl AndroidCameraAccess {
                     .iter()
                     .find(|v| v.format_id == *format_id)
                 {
+                    if let (Some(mut config), true) = (
+                        *self.camera_av1_config[index].lock().unwrap(),
+                        self.camera_av1_output_cb[index].lock().unwrap().is_some(),
+                    ) {
+                        config.width = format.width as u32;
+                        config.height = format.height as u32;
+                        if let Some(fps) = format.frame_rate {
+                            config.fps_num = fps.max(1.0).round() as u32;
+                            config.fps_den = 1;
+                        }
+                        let output_cb = self.camera_av1_output_cb[index].clone();
+                        *self.camera_av1_encoder[index].lock().unwrap() = CameraAv1Encoder::start(
+                            config,
+                            Box::new(move |packet| {
+                                if let Some(cb) = &mut *output_cb.lock().unwrap() {
+                                    cb(packet);
+                                }
+                            }),
+                        );
+                    }
+
                     if let Some(session) = unsafe {
                         AndroidCaptureSession::start(
                             self.video_input_cb[index].clone(),
                             self.camera_frame_input_cb[index].clone(),
+                            self.camera_av1_encoder[index].clone(),
                             self.manager,
                             &device.camera_id_str,
                             *format,

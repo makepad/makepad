@@ -21,6 +21,8 @@ pub mod video;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod video_decode;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod video_encode;
 
 mod draw_list;
 mod draw_matrix;

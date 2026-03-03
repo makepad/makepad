@@ -104,6 +104,49 @@ Apple and Windows implementations can be added without API break by wiring their
 
 No API signature changes are required for this extension.
 
-## Next step toward SVT-AV1
+## Camera -> SVT-AV1 integration (current)
 
-Add encoder ingestion stage that consumes `CameraFrameOwned` from the same transport boundary and converts/feeds into SVT-AV1 input frames. The preview path remains independent.
+The platform now includes a shared camera AV1 encoder worker:
+
+- module: `platform/src/video_encode/camera_av1_encoder.rs`
+- SVT wrapper: `platform/src/video_encode/svt_av1_wrapper.c`
+- FFI: `platform/src/video_encode/svt_av1_ffi.rs`
+
+### API surface
+
+`makepad_platform::video` now exposes:
+
+- `CameraAv1EncoderConfig`
+- `EncodedAv1PacketRef`
+- `EncodedAv1PacketOwned`
+- `CameraAv1OutputFn`
+
+`CxMediaApi` now exposes:
+
+- `camera_av1_output(index, config, callback)`
+- `camera_av1_output_box(index, config, callback)`
+
+### Backpressure / latency policy
+
+The encoder worker uses one bounded frame queue per stream.
+
+- queue capacity: `config.queue_capacity` (default `2`)
+- policy on overflow: **drop oldest** frame, keep newest
+- capture callback never blocks on encoder
+
+This keeps capture latency bounded under encoder overload.
+
+### Platform wiring
+
+- Linux (V4L2): native `CameraFrameRef` -> shared encoder worker -> AV1 packets
+- Android (NDK camera): native `CameraFrameRef` -> shared encoder worker -> AV1 packets
+- Apple (AVFoundation): now emits `CameraFrameRef` with timestamp + layout + stride (NV12/YUY2) and can feed shared encoder worker
+- Windows (Media Foundation): now emits `CameraFrameRef` with timestamp + layout + stride (NV12/YUY2/MJPEG) and can feed shared encoder worker
+
+All platforms use the same I420 normalization + queue/backpressure + SVT packet output path.
+
+### Build/link behavior
+
+- Linux: links vendored `libs/svt-av1/Bin/Release/libSvtAv1Enc.a` and builds a thin wrapper C object.
+- Android: uses prebuilt library when available; otherwise build script attempts CMake Android build of vendored SVT and links resulting static archive.
+- Other platforms: camera frame transport and API are available; AV1 encoder registration falls back cleanly when `has_svt_av1` is not enabled.

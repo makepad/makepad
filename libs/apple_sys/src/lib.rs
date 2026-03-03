@@ -325,6 +325,7 @@ extern "C" {
     ) -> CMVideoDimensions;
     pub fn CMFormatDescriptionGetMediaSubType(desc: CMFormatDescriptionRef) -> u32;
     pub fn CMSampleBufferGetImageBuffer(sbuf: CMSampleBufferRef) -> CVImageBufferRef;
+    pub fn CMSampleBufferGetPresentationTimeStamp(sbuf: CMSampleBufferRef) -> CMTime;
     pub fn CMTimeMakeWithSeconds(seconds: f64, preferredTimescale: i32) -> CMTime;
     pub fn CMTimeGetSeconds(time: CMTime) -> f64;
 }
