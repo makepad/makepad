@@ -94,6 +94,7 @@ pub enum DesktopTerminalViewAction {
         path: String,
         cols: u16,
         rows: u16,
+        pty_rows: u16,
         top_row: usize,
     },
     #[default]
@@ -205,7 +206,7 @@ pub struct DesktopTerminalView {
     #[rust]
     follow_output: bool,
     #[rust]
-    last_requested: Option<(String, u16, u16, usize)>,
+    last_requested: Option<(String, u16, u16, u16, usize)>,
     #[rust]
     last_total_lines: usize,
     #[rust]
@@ -299,11 +300,20 @@ impl DesktopTerminalView {
     fn content_height_for_total_lines(&self, total_lines: usize) -> f64 {
         let (_, cell_height) = self.cell_metrics();
         let content_rows_h = total_lines.max(1) as f64 * cell_height;
-        (content_rows_h + self.pad_y * 2.0).max(self.viewport_rect.size.y)
+        // The content height should include the padding.
+        let content_height = content_rows_h + self.pad_y * 2.0;
+        content_height
     }
 
     fn max_scroll_pixels_for_total_lines(&self, total_lines: usize) -> f64 {
-        (self.content_height_for_total_lines(total_lines) - self.viewport_rect.size.y).max(0.0)
+        let content_height = self.content_height_for_total_lines(total_lines);
+        
+        // If content height is basically the same or less than viewport, no scroll.
+        if content_height <= self.viewport_rect.size.y + 0.1 {
+            return 0.0;
+        }
+        
+        (content_height - self.viewport_rect.size.y).max(0.0)
     }
 
     fn is_scrolled_to_bottom(&self, total_lines: usize) -> bool {
@@ -398,9 +408,10 @@ impl DesktopTerminalView {
         path: &str,
         cols: u16,
         rows: u16,
+        pty_rows: u16,
         top_row: usize,
     ) {
-        let request = (path.to_string(), cols, rows, top_row);
+        let request = (path.to_string(), cols, rows, pty_rows, top_row);
         if self.last_requested.as_ref() == Some(&request) {
             return;
         }
@@ -411,7 +422,8 @@ impl DesktopTerminalView {
                 path: request.0,
                 cols: request.1,
                 rows: request.2,
-                top_row: request.3,
+                pty_rows: request.3,
+                top_row: request.4,
             },
         );
     }
@@ -437,7 +449,9 @@ impl DesktopTerminalView {
         // Compute the screen-space Y origin and the first frame row to render.
         // For follow_output when screen is full: bottom-align (last row flush with viewport bottom).
         // Otherwise (not full, or scrolled up): top-align (first row at viewport top).
-        let is_full_screen = frame.total_lines >= frame.rows as usize;
+        let max_scroll = self.max_scroll_pixels_for_total_lines(frame.total_lines);
+        let is_full_screen = max_scroll > 0.0;
+        
         let (origin_y, start_row) = if self.follow_output && is_full_screen {
             let grid_height = render_rows as f64 * cell_height;
             let y = screen_bottom - grid_height;
@@ -463,7 +477,17 @@ impl DesktopTerminalView {
             // So we don't need to change `start_row` (it's always 0 relative to the frame we received),
             // but we might need to request an extra row from the backend in `send_viewport_request`.
             
-            (screen_top - sub_pixel_y, 0)
+            // If we have fewer lines than the viewport height, we don't want to start halfway
+            // down if the scroll is somehow non-zero (though it shouldn't be).
+            // But more importantly, we want to align to the top.
+            let max_scroll = self.max_scroll_pixels_for_total_lines(frame.total_lines);
+            let y = if max_scroll <= 0.0 {
+                screen_top
+            } else {
+                screen_top - sub_pixel_y
+            };
+            
+            (y, 0)
         };
 
         let origin_x = self.unscrolled_rect.pos.x + self.pad_x;
@@ -811,6 +835,10 @@ impl Widget for DesktopTerminalView {
             .ceil()
             .max(1.0) as u16 + 1; // Request 1 extra row to cover sub-pixel scrolling
 
+        let pty_rows = ((self.viewport_rect.size.y - self.pad_y * 2.0) / cell_height)
+            .floor()
+            .max(1.0) as u16;
+
         // We only care if the cols match and if the rows are AT LEAST what we need.
         // The backend might send us slightly more rows if we're near the bottom.
         let frame_matches_viewport = frame
@@ -826,9 +854,16 @@ impl Widget for DesktopTerminalView {
 
         let total_lines_for_scroll = frame
             .as_ref()
-            .map(|frame| frame.total_lines)
-            .unwrap_or(req_rows as usize);
-        self.last_total_lines = total_lines_for_scroll.max(req_rows as usize);
+            .map(|frame| {
+                if frame.is_tui {
+                    frame.total_lines.min(pty_rows as usize)
+                } else {
+                    frame.total_lines
+                }
+            })
+            .unwrap_or(0);
+        self.last_total_lines = total_lines_for_scroll;
+        
         if self.follow_output {
             self.stick_to_bottom(cx, self.last_total_lines);
         } else {
@@ -844,10 +879,10 @@ impl Widget for DesktopTerminalView {
                     .max(0.0) as usize;
                 let max_top = self
                     .last_total_lines
-                    .saturating_sub(req_rows.max(1) as usize);
+                    .saturating_sub(pty_rows.max(1) as usize);
                 top.min(max_top)
             };
-            self.send_viewport_request(cx, path, req_cols, req_rows, top_row);
+            self.send_viewport_request(cx, path, req_cols, req_rows, pty_rows, top_row);
         }
 
         if let Some(frame) = frame.as_ref() {
@@ -857,14 +892,23 @@ impl Widget for DesktopTerminalView {
                 .set_uniform(cx, id!(color), &[bg.x, bg.y, bg.z, bg.w]);
             self.draw_bg.draw_abs(cx, self.unscrolled_rect);
             self.draw_framebuffer(cx, frame);
-            self.last_total_lines = frame.total_lines.max(frame.rows as usize);
+            self.last_total_lines = total_lines_for_scroll;
         } else {
             self.draw_bg.draw_abs(cx, self.unscrolled_rect);
         }
 
         let content_height = self.content_height_for_total_lines(self.last_total_lines);
+        
+        // If content height is smaller than viewport, we don't want a scrollbar.
+        // The scrollbar visibility is determined by whether the used height > viewport height.
+        let used_height = if content_height <= self.viewport_rect.size.y + 0.1 {
+            self.viewport_rect.size.y
+        } else {
+            content_height
+        };
+        
         cx.turtle_mut()
-            .set_used(self.viewport_rect.size.x.max(1.0), content_height);
+            .set_used(self.viewport_rect.size.x.max(1.0), used_height);
         self.scroll_bars.end(cx);
         self.area = self.scroll_bars.area();
         DrawStep::done()
@@ -1003,7 +1047,7 @@ impl DesktopTerminalViewRef {
         out
     }
 
-    pub fn viewport_request(&self, actions: &Actions) -> Option<(String, u16, u16, usize)> {
+    pub fn viewport_request(&self, actions: &Actions) -> Option<(String, u16, u16, u16, usize)> {
         for item in
             actions.filter_widget_actions_cast::<DesktopTerminalViewAction>(self.widget_uid())
         {
@@ -1011,10 +1055,11 @@ impl DesktopTerminalViewRef {
                 path,
                 cols,
                 rows,
+                pty_rows,
                 top_row,
             } = item
             {
-                return Some((path, cols, rows, top_row));
+                return Some((path, cols, rows, pty_rows, top_row));
             }
         }
         None
