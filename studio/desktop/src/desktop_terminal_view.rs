@@ -425,7 +425,17 @@ impl DesktopTerminalView {
 
         let (cell_width, cell_height) = self.cell_metrics();
         let origin_x = self.viewport_rect.pos.x + self.pad_x;
-        let origin_y = self.viewport_rect.pos.y + self.pad_y;
+        
+        let scroll_y = self.current_scroll_pixels();
+        let origin_y = if self.follow_output {
+            let viewport_bottom = self.viewport_rect.pos.y + self.viewport_rect.size.y - self.pad_y;
+            let total_text_height = self.last_total_lines as f64 * cell_height;
+            let top_of_text = (self.viewport_rect.pos.y + self.pad_y).min(viewport_bottom - total_text_height);
+            top_of_text + scroll_y
+        } else {
+            self.viewport_rect.pos.y + self.pad_y
+        };
+
         // ScrollBars applies a content transform based on scroll position.
         // Keep rendering visually fixed by drawing at virtual-row coordinates
         // (top_row + row), so the transform is canceled and scrolling is purely
@@ -837,6 +847,17 @@ impl Widget for DesktopTerminalView {
             }
         }
 
+        let (path, frame) = scope
+            .data
+            .get::<AppData>()
+            .and_then(|data| {
+                Self::terminal_path_for_widget(cx, data, self.widget_uid()).map(|path| {
+                    let frame = data.terminal_framebuffer_by_path.get(&path).cloned();
+                    (path, frame)
+                })
+            })
+            .unwrap_or_else(|| (String::new(), None));
+
         let scroll_actions = self.scroll_bars.handle_event(cx, event, scope);
         if !scroll_actions.is_empty() {
             let user_scroll_event = Self::is_user_scroll_event(event);
@@ -852,17 +873,6 @@ impl Widget for DesktopTerminalView {
             }
             self.draw_bg.redraw(cx);
         }
-
-        let (path, frame) = scope
-            .data
-            .get::<AppData>()
-            .and_then(|data| {
-                Self::terminal_path_for_widget(cx, data, self.widget_uid()).map(|path| {
-                    let frame = data.terminal_framebuffer_by_path.get(&path).cloned();
-                    (path, frame)
-                })
-            })
-            .unwrap_or_else(|| (String::new(), None));
 
         let cursor_keys_application_mode = frame
             .as_ref()

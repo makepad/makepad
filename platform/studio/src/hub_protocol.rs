@@ -682,6 +682,7 @@ pub struct TerminalFramebuffer {
     pub default_bg_rgb: u32,
     pub bracketed_paste: bool,
     pub cursor_keys_application_mode: bool,
+    pub is_tui: bool,
     // Tight binary payload, row-major:
     // [codepoint_u32_le, bg_r, bg_g, bg_b] repeated `cols * rows` times.
     pub cells: Vec<u8>,

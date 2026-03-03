@@ -2840,6 +2840,7 @@ fn terminal_framebuffer_from_terminal(
         default_bg_rgb: rgb_to_u32(default_bg.r, default_bg.g, default_bg.b),
         bracketed_paste: terminal.modes.bracketed_paste,
         cursor_keys_application_mode: terminal.modes.cursor_keys,
+        is_tui: has_custom_scroll_region,
         cells,
     }
 }
