@@ -2536,9 +2536,6 @@ impl HubCore {
         let screen = terminal.screen();
         let has_custom_scroll_region = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows();
         if has_custom_scroll_region {
-            // For TUIs, anchor the viewport to the top of the grid, not the bottom.
-            // This prevents scrollback from appearing at the top when the window grows
-            // before the PTY has resized.
             screen.scrollback_len()
         } else {
             let effective_total = screen.scrollback_len() + screen.used_rows();
