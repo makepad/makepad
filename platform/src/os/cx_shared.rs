@@ -191,7 +191,7 @@ impl Cx {
             let Some(first) = parts.next() else {
                 continue;
             };
-            if first.starts_with('W') || first == "O" {
+            if first.starts_with('W') {
                 continue;
             }
             let tokens: Vec<&str> = line.split_whitespace().collect();
