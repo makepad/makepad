@@ -18,6 +18,7 @@ use {
         super::libc_sys,
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
+        android_camera_player::AndroidCameraPlayer,
         android_media::CxAndroidMedia,
         android_video_playback::{force_native_av1, force_software_av1, AndroidVideoConfig},
         ndk_sys,
@@ -43,6 +44,7 @@ use {
             VideoPlaybackCompletedEvent,
             VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent,
+            VideoSource,
             //HttpRequest,
             //HttpMethod,
             VideoTextureUpdatedEvent,
@@ -913,6 +915,9 @@ impl Cx {
             self.call_event_handler(&e);
         }
 
+        // Camera player updates
+        self.poll_camera_players();
+
         // Software AV1 fallback updates (rav1d path)
         self.poll_software_video_players();
 
@@ -938,6 +943,54 @@ impl Cx {
             }
         }
         videos_to_update
+    }
+
+    fn poll_camera_players(&mut self) {
+        if self.os.camera_players.is_empty() {
+            return;
+        }
+
+        let gl: *const LibGl = self.os.gl();
+        let mut players = std::mem::take(&mut self.os.camera_players);
+        let mut events = Vec::new();
+
+        for (_video_id, player) in players.iter_mut() {
+            match player.check_prepared() {
+                Some(Ok((width, height, duration, is_seekable, video_tracks, audio_tracks))) => {
+                    events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
+                        video_id: player.video_id,
+                        video_width: width,
+                        video_height: height,
+                        duration,
+                        is_seekable,
+                        video_tracks,
+                        audio_tracks,
+                    }));
+                }
+                Some(Err(err)) => {
+                    events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
+                        video_id: player.video_id,
+                        error: err,
+                    }));
+                }
+                None => {}
+            }
+
+            if player.poll_frame(unsafe { &*gl }, &mut self.textures) {
+                events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                    video_id: player.video_id,
+                    current_position_ms: 0,
+                    yuv_enabled: 0.0,
+                    yuv_type: 0.0,
+                    yuv_biplanar: 0.0,
+                }));
+            }
+        }
+
+        self.os.camera_players = players;
+        for event in events {
+            self.call_event_handler(&event);
+        }
     }
 
     fn poll_software_video_players(&mut self) {
@@ -1542,6 +1595,16 @@ impl Cx {
                     autoplay,
                     should_loop,
                 ) => {
+                    // Camera source: use NDK camera player
+                    if let VideoSource::Camera(input_id, format_id) = source {
+                        let camera_access = self.os.media.android_camera();
+                        let player = AndroidCameraPlayer::new(
+                            video_id, texture_id, input_id, format_id, camera_access,
+                        );
+                        self.os.camera_players.insert(video_id, player);
+                        continue;
+                    }
+
                     // Allocate YUV textures internally for software decode path
                     let tex_y = self.textures.alloc(TextureFormat::VideoRGB);
                     let tex_u = self.textures.alloc(TextureFormat::VideoRGB);
@@ -1669,6 +1732,13 @@ impl Cx {
                     }
                 }
                 CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    if let Some(mut player) = self.os.camera_players.remove(&video_id) {
+                        player.cleanup();
+                        self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id },
+                        ));
+                        continue;
+                    }
                     if let Some(mut asp) = self.os.software_video_players.remove(&video_id) {
                         asp.player.cleanup();
                         self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
@@ -1986,6 +2056,7 @@ impl Default for CxOs {
             timers: Default::default(),
             video_surfaces: HashMap::new(),
             video_configs: HashMap::new(),
+            camera_players: HashMap::new(),
             software_video_players: HashMap::new(),
             websocket_parsers: HashMap::new(),
             openxr: CxOpenXr::default(),
@@ -2032,6 +2103,7 @@ pub struct CxOs {
     pub(crate) media: CxAndroidMedia,
     pub(crate) video_surfaces: HashMap<LiveId, jobject>,
     pub(crate) video_configs: HashMap<LiveId, AndroidVideoConfig>,
+    pub(crate) camera_players: HashMap<LiveId, AndroidCameraPlayer>,
     pub(crate) software_video_players: HashMap<LiveId, AndroidSoftwarePlayer>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
     pub(crate) openxr: CxOpenXr,
