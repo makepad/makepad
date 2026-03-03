@@ -1,7 +1,125 @@
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+fn latest_versioned_subdir(parent: &Path) -> Option<PathBuf> {
+    if !parent.is_dir() {
+        return None;
+    }
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    candidates.sort();
+    candidates.pop()
+}
+
+fn detect_android_ndk_root() -> Option<PathBuf> {
+    for key in [
+        "ANDROID_NDK_HOME",
+        "ANDROID_NDK_ROOT",
+        "ANDROID_NDK",
+        "NDK_HOME",
+        "NDK_ROOT",
+    ] {
+        if let Ok(val) = env::var(key) {
+            let p = PathBuf::from(val);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+    }
+
+    // SDK-root style: <sdk>/ndk/<version>
+    for key in ["ANDROID_SDK_ROOT", "ANDROID_HOME"] {
+        if let Ok(val) = env::var(key) {
+            let ndk_parent = PathBuf::from(val).join("ndk");
+            if let Some(p) = latest_versioned_subdir(&ndk_parent) {
+                return Some(p);
+            }
+        }
+    }
+
+    // cargo-makepad managed SDK in repo: tools/cargo_makepad/android_33_<host>/ndk/<version>
+    if let Ok(cwd) = env::current_dir() {
+        for host in ["linux_x64", "macos_x64", "macos_aarch64", "windows_x64"] {
+            let ndk_parent = cwd
+                .join("tools")
+                .join("cargo_makepad")
+                .join(format!("android_33_{host}"))
+                .join("ndk");
+            if let Some(p) = latest_versioned_subdir(&ndk_parent) {
+                return Some(p);
+            }
+        }
+    }
+
+    // Fallback: ~/Android-Sdk/ndk/<version>
+    if let Ok(home) = env::var("HOME") {
+        let ndk_parent = Path::new(&home).join("Android-Sdk").join("ndk");
+        if let Some(p) = latest_versioned_subdir(&ndk_parent) {
+            return Some(p);
+        }
+    }
+
+    None
+}
+
+fn configure_android_cc(build: &mut cc::Build, target_arch: &str) {
+    let Some(ndk_root) = detect_android_ndk_root() else {
+        return;
+    };
+
+    let host_tags: &[&str] = if cfg!(target_os = "linux") {
+        &["linux-x86_64"]
+    } else if cfg!(target_os = "macos") {
+        &["darwin-x86_64", "darwin-aarch64"]
+    } else if cfg!(target_os = "windows") {
+        &["windows-x86_64"]
+    } else {
+        return;
+    };
+
+    let Some(llvm_root) = host_tags
+        .iter()
+        .map(|tag| {
+            ndk_root
+                .join("toolchains")
+                .join("llvm")
+                .join("prebuilt")
+                .join(tag)
+        })
+        .find(|p| p.is_dir())
+    else {
+        return;
+    };
+    let sysroot = llvm_root.join("sysroot");
+    if sysroot.is_dir() {
+        build.flag(&format!("--sysroot={}", sysroot.display()));
+    }
+
+    let api = env::var("ANDROID_API_LEVEL")
+        .ok()
+        .or_else(|| env::var("ANDROID_PLATFORM").ok())
+        .and_then(|s| s.trim_start_matches("android-").parse::<u32>().ok())
+        .unwrap_or(33);
+
+    let clang_bin = llvm_root.join("bin");
+    let tool = match target_arch {
+        "aarch64" => format!("aarch64-linux-android{api}-clang"),
+        "arm" => format!("armv7a-linux-androideabi{api}-clang"),
+        "x86_64" => format!("x86_64-linux-android{api}-clang"),
+        "x86" => format!("i686-linux-android{api}-clang"),
+        _ => return,
+    };
+    let tool_path = clang_bin.join(tool);
+    if tool_path.is_file() {
+        build.compiler(tool_path);
+    }
+}
 
 /// Build vendored dav1d C library (scalar-only, no ASM).
 fn build_dav1d() {
@@ -174,6 +292,10 @@ fn build_dav1d() {
         build.file(src_dir.join(src));
     }
 
+    if target_os == "android" {
+        configure_android_cc(&mut build, &target_arch);
+    }
+
     build.compile("dav1d_core");
 
     // Compile template sources for 8-bit
@@ -189,6 +311,9 @@ fn build_dav1d() {
     for src in &tmpl_sources {
         build_8.file(src_dir.join(src));
     }
+    if target_os == "android" {
+        configure_android_cc(&mut build_8, &target_arch);
+    }
     build_8.compile("dav1d_tmpl_8");
 
     // Compile template sources for 16-bit
@@ -202,6 +327,9 @@ fn build_dav1d() {
     apply_dav1d_defines(&mut build_16, &target_arch, &target_os);
     for src in &tmpl_sources {
         build_16.file(src_dir.join(src));
+    }
+    if target_os == "android" {
+        configure_android_cc(&mut build_16, &target_arch);
     }
     build_16.compile("dav1d_tmpl_16");
 
