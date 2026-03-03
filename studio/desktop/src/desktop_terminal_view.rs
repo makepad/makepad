@@ -431,7 +431,7 @@ impl DesktopTerminalView {
         let screen_top = self.unscrolled_rect.pos.y + self.pad_y;
         let screen_bottom = self.unscrolled_rect.pos.y + self.unscrolled_rect.size.y - self.pad_y;
         let usable_height = (screen_bottom - screen_top).max(0.0);
-        let max_visible_rows = (usable_height / cell_height).floor().max(1.0) as usize;
+        let max_visible_rows = (usable_height / cell_height).ceil().max(1.0) as usize + 1;
         let render_rows = rows.min(max_visible_rows);
 
         // Compute the screen-space Y origin and the first frame row to render.
@@ -444,7 +444,11 @@ impl DesktopTerminalView {
             let sr = rows.saturating_sub(render_rows);
             (y, sr)
         } else {
-            (screen_top, 0)
+            // When top-aligned, we need to apply the sub-pixel scroll offset
+            // so that scrolling is smooth and doesn't snap to cell boundaries.
+            let scroll_y = self.current_scroll_pixels();
+            let sub_pixel_y = scroll_y % cell_height;
+            (screen_top - sub_pixel_y, 0)
         };
 
         let origin_x = self.unscrolled_rect.pos.x + self.pad_x;
