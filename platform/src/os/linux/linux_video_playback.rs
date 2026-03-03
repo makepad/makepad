@@ -66,6 +66,8 @@ pub struct GStreamerVideoPlayer {
     /// Used to choose between glTexImage2D (realloc) and glTexSubImage2D (update).
     tex_width: usize,
     tex_height: usize,
+    /// Log first successful upload once per player.
+    logged_first_upload: bool,
 }
 
 impl GStreamerVideoPlayer {
@@ -77,7 +79,9 @@ impl GStreamerVideoPlayer {
         autoplay: bool,
         is_looping: bool,
     ) -> Self {
-        Self::new_impl(gst, video_id, texture_id, source, autoplay, is_looping, false)
+        Self::new_impl(
+            gst, video_id, texture_id, source, autoplay, is_looping, false,
+        )
     }
 
     pub fn new_audio_only(
@@ -88,7 +92,15 @@ impl GStreamerVideoPlayer {
         is_looping: bool,
     ) -> Self {
         // Use a placeholder texture_id — audio-only never uploads frames
-        Self::new_impl(gst, video_id, TextureId::default(), source, autoplay, is_looping, true)
+        Self::new_impl(
+            gst,
+            video_id,
+            TextureId::default(),
+            source,
+            autoplay,
+            is_looping,
+            true,
+        )
     }
 
     fn new_impl(
@@ -104,19 +116,35 @@ impl GStreamerVideoPlayer {
 
         // Resolve the URI from the source
         let (uri, temp_file_path) = Self::uri_from_source(video_id, &source);
+        crate::log!(
+            "VIDEO: setup id={} audio_only={} autoplay={} loop={} uri={}",
+            video_id.0,
+            audio_only,
+            autoplay,
+            is_looping,
+            uri
+        );
 
         // Build pipeline: create playbin and appsink separately, then set
         // the appsink as the video-sink property. playbin's internal playsink
         // automatically inserts videoconvert to satisfy our caps.
         let (pipeline, video_sink, bus) = unsafe {
             let playbin_name = CString::new("playbin").unwrap();
-            let pipeline = (gst.gst_element_factory_make)(
-                playbin_name.as_ptr(),
-                std::ptr::null(),
-            );
+            let pipeline = (gst.gst_element_factory_make)(playbin_name.as_ptr(), std::ptr::null());
             if pipeline.is_null() {
-                error!("Failed to create GStreamer playbin for video {:?}", video_id);
-                return Self::null_player(gst_ptr, video_id, texture_id, autoplay, is_looping, audio_only, temp_file_path);
+                error!(
+                    "Failed to create GStreamer playbin for video {:?}",
+                    video_id
+                );
+                return Self::null_player(
+                    gst_ptr,
+                    video_id,
+                    texture_id,
+                    autoplay,
+                    is_looping,
+                    audio_only,
+                    temp_file_path,
+                );
             }
 
             // Set the URI on playbin
@@ -132,10 +160,8 @@ impl GStreamerVideoPlayer {
             let video_sink = if audio_only {
                 // Audio-only: discard video with fakesink
                 let fakesink_type = CString::new("fakesink").unwrap();
-                let fakesink = (gst.gst_element_factory_make)(
-                    fakesink_type.as_ptr(),
-                    std::ptr::null(),
-                );
+                let fakesink =
+                    (gst.gst_element_factory_make)(fakesink_type.as_ptr(), std::ptr::null());
                 if !fakesink.is_null() {
                     let video_sink_prop = CString::new("video-sink").unwrap();
                     (gst.g_object_set_ptr)(
@@ -150,14 +176,23 @@ impl GStreamerVideoPlayer {
                 // Create appsink element
                 let appsink_type = CString::new("appsink").unwrap();
                 let appsink_name = CString::new("videosink").unwrap();
-                let video_sink = (gst.gst_element_factory_make)(
-                    appsink_type.as_ptr(),
-                    appsink_name.as_ptr(),
-                );
+                let video_sink =
+                    (gst.gst_element_factory_make)(appsink_type.as_ptr(), appsink_name.as_ptr());
                 if video_sink.is_null() {
-                    error!("Failed to create GStreamer appsink for video {:?}", video_id);
+                    error!(
+                        "Failed to create GStreamer appsink for video {:?}",
+                        video_id
+                    );
                     (gst.gst_object_unref)(pipeline as *mut c_void);
-                    return Self::null_player(gst_ptr, video_id, texture_id, autoplay, is_looping, audio_only, temp_file_path);
+                    return Self::null_player(
+                        gst_ptr,
+                        video_id,
+                        texture_id,
+                        autoplay,
+                        is_looping,
+                        audio_only,
+                        temp_file_path,
+                    );
                 }
 
                 // Request RGBA frames — matches GL's RGBA upload format directly.
@@ -214,6 +249,7 @@ impl GStreamerVideoPlayer {
             pixel_buf: Vec::new(),
             tex_width: 0,
             tex_height: 0,
+            logged_first_upload: false,
         }
     }
 
@@ -246,6 +282,7 @@ impl GStreamerVideoPlayer {
             pixel_buf: Vec::new(),
             tex_width: 0,
             tex_height: 0,
+            logged_first_upload: false,
         }
     }
 
@@ -275,9 +312,13 @@ impl GStreamerVideoPlayer {
     fn extract_dims_from_sample(&mut self, gst: &LibGStreamer, sample: *mut GstSample) {
         unsafe {
             let caps = (gst.gst_sample_get_caps)(sample);
-            if caps.is_null() { return; }
+            if caps.is_null() {
+                return;
+            }
             let structure = (gst.gst_caps_get_structure)(caps, 0);
-            if structure.is_null() { return; }
+            if structure.is_null() {
+                return;
+            }
             let width_key = CString::new("width").unwrap();
             let height_key = CString::new("height").unwrap();
             let mut w: i32 = 0;
@@ -375,22 +416,45 @@ impl GStreamerVideoPlayer {
                 (gst.gst_element_set_state)(self.pipeline, GST_STATE_PLAYING);
             }
 
-            let video_tracks = if self.audio_only || (self.video_width == 0 && self.video_height == 0) {
-                vec![]
-            } else {
-                vec!["video".to_string()]
-            };
+            let video_tracks =
+                if self.audio_only || (self.video_width == 0 && self.video_height == 0) {
+                    vec![]
+                } else {
+                    vec!["video".to_string()]
+                };
             let audio_tracks = vec!["audio".to_string()];
 
-            Some((self.video_width, self.video_height, duration_ms, is_seekable, video_tracks, audio_tracks))
+            crate::log!(
+                "VIDEO: prepared id={} {}x{} duration={}ms seekable={} autoplay={} audio_only={}",
+                self.video_id.0,
+                self.video_width,
+                self.video_height,
+                duration_ms,
+                is_seekable,
+                self.autoplay,
+                self.audio_only
+            );
+
+            Some((
+                self.video_width,
+                self.video_height,
+                duration_ms,
+                is_seekable,
+                video_tracks,
+                audio_tracks,
+            ))
         }
     }
 
     /// Query GStreamer for whether the current source is seekable.
     unsafe fn query_is_seekable(&self, gst: &LibGStreamer) -> bool {
-        if self.pipeline.is_null() { return false; }
+        if self.pipeline.is_null() {
+            return false;
+        }
         let query = (gst.gst_query_new_seeking)(GST_FORMAT_TIME);
-        if query.is_null() { return false; }
+        if query.is_null() {
+            return false;
+        }
         let res = (gst.gst_element_query)(self.pipeline, query);
         if res == 0 {
             (gst.gst_mini_object_unref)(query as *mut GstMiniObject);
@@ -414,17 +478,11 @@ impl GStreamerVideoPlayer {
 
         let gst = unsafe { &*self.gst };
 
-        // Check actual GStreamer pipeline state — only pull frames when PLAYING.
-        // This is more robust than relying on an internal flag which could become stale
-        // if the player is replaced or state gets out of sync.
-        unsafe {
-            let mut state: u32 = 0;
-            let mut pending: u32 = 0;
-            (gst.gst_element_get_state)(self.pipeline, &mut state, &mut pending, 0);
-            if state < GST_STATE_PLAYING {
-                return false;
-            }
-        }
+        // Do not gate frame pulls on gst_element_get_state(timeout=0):
+        // PLAYING transitions are asynchronous and can stay in PAUSED/ASYNC while
+        // decoded samples are already available on appsink (common on desktop setups
+        // without a stable audio sink). Non-blocking try_pull_sample below naturally
+        // returns null when no new frame is ready.
 
         // Check for EOS and loop if needed
         if self.is_looping {
@@ -468,9 +526,7 @@ impl GStreamerVideoPlayer {
             let row_bytes = width * 4; // RGBA = 4 bytes per pixel
             let packed_size = row_bytes * height;
 
-            if map_info.data.is_null() || width == 0 || height == 0
-                || map_info.size < packed_size
-            {
+            if map_info.data.is_null() || width == 0 || height == 0 || map_info.size < packed_size {
                 (gst.gst_buffer_unmap)(buffer, &mut map_info);
                 (gst.gst_mini_object_unref)(sample as *mut GstMiniObject);
                 return false;
@@ -493,7 +549,8 @@ impl GStreamerVideoPlayer {
             } else {
                 for y in 0..height {
                     let row_start = y * stride;
-                    self.pixel_buf.extend_from_slice(&src[row_start..row_start + row_bytes]);
+                    self.pixel_buf
+                        .extend_from_slice(&src[row_start..row_start + row_bytes]);
                 }
             }
 
@@ -511,10 +568,26 @@ impl GStreamerVideoPlayer {
 
                 // Set texture parameters once at creation
                 (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_WRAP_S,
+                    gl_sys::CLAMP_TO_EDGE as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_WRAP_T,
+                    gl_sys::CLAMP_TO_EDGE as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_MIN_FILTER,
+                    gl_sys::LINEAR as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_MAG_FILTER,
+                    gl_sys::LINEAR as i32,
+                );
                 true
             } else {
                 self.tex_width != width || self.tex_height != height
@@ -534,9 +607,14 @@ impl GStreamerVideoPlayer {
             if needs_alloc {
                 // First frame or dimension change — allocate new texture storage
                 (gl.glTexImage2D)(
-                    gl_sys::TEXTURE_2D, 0, gl_sys::RGBA as i32,
-                    width as i32, height as i32, 0,
-                    gl_sys::RGBA, gl_sys::UNSIGNED_BYTE,
+                    gl_sys::TEXTURE_2D,
+                    0,
+                    gl_sys::RGBA as i32,
+                    width as i32,
+                    height as i32,
+                    0,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
                     self.pixel_buf.as_ptr() as *const c_void,
                 );
                 self.tex_width = width;
@@ -544,9 +622,14 @@ impl GStreamerVideoPlayer {
             } else {
                 // Same dimensions — update in place (faster, no realloc)
                 (gl.glTexSubImage2D)(
-                    gl_sys::TEXTURE_2D, 0,
-                    0, 0, width as i32, height as i32,
-                    gl_sys::RGBA, gl_sys::UNSIGNED_BYTE,
+                    gl_sys::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
                     self.pixel_buf.as_ptr() as *const c_void,
                 );
             }
@@ -560,6 +643,17 @@ impl GStreamerVideoPlayer {
                 pixel: TexturePixel::VideoRGB,
                 category: TextureCategory::Video,
             });
+
+            if !self.logged_first_upload {
+                self.logged_first_upload = true;
+                crate::log!(
+                    "VIDEO: first-upload id={} tex={} size={}x{}",
+                    self.video_id.0,
+                    self.texture_id.0,
+                    width,
+                    height
+                );
+            }
 
             true
         }
@@ -584,13 +678,21 @@ impl GStreamerVideoPlayer {
     }
 
     pub fn play(&self) {
-        if self.pipeline.is_null() { return; }
-        unsafe { ((*self.gst).gst_element_set_state)(self.pipeline, GST_STATE_PLAYING); }
+        if self.pipeline.is_null() {
+            return;
+        }
+        unsafe {
+            ((*self.gst).gst_element_set_state)(self.pipeline, GST_STATE_PLAYING);
+        }
     }
 
     pub fn pause(&self) {
-        if self.pipeline.is_null() { return; }
-        unsafe { ((*self.gst).gst_element_set_state)(self.pipeline, GST_STATE_PAUSED); }
+        if self.pipeline.is_null() {
+            return;
+        }
+        unsafe {
+            ((*self.gst).gst_element_set_state)(self.pipeline, GST_STATE_PAUSED);
+        }
     }
 
     pub fn resume(&self) {
@@ -598,7 +700,9 @@ impl GStreamerVideoPlayer {
     }
 
     pub fn mute(&self) {
-        if self.pipeline.is_null() { return; }
+        if self.pipeline.is_null() {
+            return;
+        }
         unsafe {
             let prop = CString::new("mute").unwrap();
             ((*self.gst).g_object_set_int)(self.pipeline, prop.as_ptr(), 1, std::ptr::null());
@@ -606,7 +710,9 @@ impl GStreamerVideoPlayer {
     }
 
     pub fn unmute(&self) {
-        if self.pipeline.is_null() { return; }
+        if self.pipeline.is_null() {
+            return;
+        }
         unsafe {
             let prop = CString::new("mute").unwrap();
             ((*self.gst).g_object_set_int)(self.pipeline, prop.as_ptr(), 0, std::ptr::null());
@@ -614,7 +720,9 @@ impl GStreamerVideoPlayer {
     }
 
     pub fn seek_to(&self, position_ms: u64) {
-        if self.pipeline.is_null() { return; }
+        if self.pipeline.is_null() {
+            return;
+        }
         unsafe {
             let position_ns = position_ms as i64 * 1_000_000;
             ((*self.gst).gst_element_seek_simple)(
@@ -627,7 +735,9 @@ impl GStreamerVideoPlayer {
     }
 
     pub fn set_volume(&self, volume: f64) {
-        if self.pipeline.is_null() { return; }
+        if self.pipeline.is_null() {
+            return;
+        }
         unsafe {
             // GStreamer playbin "volume" property: 0.0–10.0, 1.0 = 100%
             let prop = CString::new("volume").unwrap();
@@ -641,28 +751,36 @@ impl GStreamerVideoPlayer {
     }
 
     pub fn set_playback_rate(&self, rate: f64) {
-        if self.pipeline.is_null() { return; }
+        if self.pipeline.is_null() {
+            return;
+        }
         let rate = if rate == 0.0 { 1.0 } else { rate };
         unsafe {
             let gst = &*self.gst;
             // Query current position to seek in-place with new rate
             let mut pos_ns: i64 = 0;
             (gst.gst_element_query_position)(self.pipeline, GST_FORMAT_TIME, &mut pos_ns);
-            if pos_ns < 0 { pos_ns = 0; }
+            if pos_ns < 0 {
+                pos_ns = 0;
+            }
             (gst.gst_element_seek)(
                 self.pipeline,
                 rate,
                 GST_FORMAT_TIME,
                 GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE,
-                GST_SEEK_TYPE_SET, pos_ns,
-                GST_SEEK_TYPE_NONE, -1,
+                GST_SEEK_TYPE_SET,
+                pos_ns,
+                GST_SEEK_TYPE_NONE,
+                -1,
             );
         }
     }
 
     /// Returns seekable time ranges as (start_secs, end_secs) pairs.
     pub fn seekable_ranges(&self) -> Vec<(f64, f64)> {
-        if self.pipeline.is_null() || self.duration_ns <= 0 { return vec![]; }
+        if self.pipeline.is_null() || self.duration_ns <= 0 {
+            return vec![];
+        }
         let gst = unsafe { &*self.gst };
         let is_seekable = unsafe { self.query_is_seekable(gst) };
         if is_seekable {
@@ -675,11 +793,15 @@ impl GStreamerVideoPlayer {
 
     /// Returns buffered time ranges as (start_secs, end_secs) pairs.
     pub fn buffered_ranges(&self) -> Vec<(f64, f64)> {
-        if self.pipeline.is_null() { return vec![]; }
+        if self.pipeline.is_null() {
+            return vec![];
+        }
         let gst = unsafe { &*self.gst };
         unsafe {
             let query = (gst.gst_query_new_buffering)(GST_FORMAT_TIME);
-            if query.is_null() { return vec![]; }
+            if query.is_null() {
+                return vec![];
+            }
             let ok = (gst.gst_element_query)(self.pipeline, query);
             if ok == 0 {
                 (gst.gst_mini_object_unref)(query as *mut GstMiniObject);
@@ -705,12 +827,18 @@ impl GStreamerVideoPlayer {
     }
 
     pub fn current_position_ms(&self) -> u128 {
-        if self.pipeline.is_null() { return 0; }
+        if self.pipeline.is_null() {
+            return 0;
+        }
         unsafe {
             let mut position_ns: i64 = 0;
             if ((*self.gst).gst_element_query_position)(
-                self.pipeline, GST_FORMAT_TIME, &mut position_ns,
-            ) != 0 && position_ns >= 0 {
+                self.pipeline,
+                GST_FORMAT_TIME,
+                &mut position_ns,
+            ) != 0
+                && position_ns >= 0
+            {
                 (position_ns / 1_000_000) as u128
             } else {
                 0
