@@ -109,6 +109,7 @@ fn run_terminal_loop(
 ) {
     let mut should_close = false;
     let mut pending_input = VecDeque::<PendingInput>::new();
+    let mut pending_resize: Option<(u16, u16)> = None;
     loop {
         loop {
             match control_rx.try_recv() {
@@ -120,13 +121,8 @@ fn run_terminal_loop(
                 Ok(TerminalControl::Resize { cols, rows }) => {
                     let cols = cols.max(1);
                     let rows = rows.max(1);
-                    if pty.resize(cols, rows).is_ok() {
-                        let _ = event_tx.send(HubEvent::TerminalResized {
-                            path: path.clone(),
-                            cols,
-                            rows,
-                        });
-                    }
+                    // Coalesce resize bursts; apply latest size once per loop.
+                    pending_resize = Some((cols, rows));
                 }
                 Ok(TerminalControl::Close) => {
                     should_close = true;
@@ -175,6 +171,18 @@ fn run_terminal_loop(
                 let _ = event_tx.send(HubEvent::TerminalOutput {
                     path: path.clone(),
                     data,
+                });
+            }
+        }
+
+        // Apply one coalesced resize after I/O so buffered output is consumed
+        // before switching the terminal model geometry.
+        if let Some((cols, rows)) = pending_resize.take() {
+            if pty.resize(cols, rows).is_ok() {
+                let _ = event_tx.send(HubEvent::TerminalResized {
+                    path: path.clone(),
+                    cols,
+                    rows,
                 });
             }
         }

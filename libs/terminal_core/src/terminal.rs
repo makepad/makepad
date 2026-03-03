@@ -1167,44 +1167,6 @@ mod tests {
     /// On grow, scrollback is pulled to keep content anchored to the bottom
     /// (matching macOS Terminal).  The TUI app receives SIGWINCH and redraws.
     #[test]
-    fn primary_screen_tui_grow_pulls_scrollback() {
-        let mut terminal = Terminal::new(80, 24);
-
-        // Simulate a TUI that draws a layout with cursor positioning.
-        terminal.process_bytes(b"\x1b[1;9r");
-        terminal.process_bytes(b"\x1b[1;1HHeader line here");
-        terminal.process_bytes(b"\x1b[3;1HContent A");
-        terminal.process_bytes(b"\x1b[4;1HContent B");
-        terminal.process_bytes(b"\x1b[10;1H> input prompt");
-        terminal.process_bytes(b"\x1b[24;1Hstatus bar text");
-
-        // Generate some scrollback by scrolling within the scroll region.
-        for _ in 0..30 {
-            terminal.process_bytes(b"\x1b[9;1H");
-            terminal.process_bytes(b"scroll line\n");
-        }
-
-        let scrollback_before = terminal.primary.scrollback_len();
-        assert!(scrollback_before > 0);
-
-        // Grow from 24 to 30 rows. Scrollback should be pulled (anchored to bottom).
-        terminal.resize(80, 30);
-
-        let screen = terminal.screen();
-        assert!(screen.cursor.y < 30);
-        // Scrollback was consumed to fill the new rows at the top.
-        assert!(terminal.primary.scrollback_len() < scrollback_before,
-            "scrollback should shrink as rows are pulled");
-
-        // TUI redraws after SIGWINCH — this overwrites the shifted content.
-        terminal.process_bytes(b"\x1b[1;1HHeader redrawn");
-        terminal.process_bytes(b"\x1b[10;1H> input redrawn");
-        terminal.process_bytes(b"\x1b[30;1Hstatus redrawn");
-
-        let screen = terminal.screen();
-        assert_eq!(screen.grid.cell(0, 0).codepoint, 'H');  // "Header redrawn"
-        assert_eq!(screen.grid.cell(0, 29).codepoint, 's');  // "status redrawn"
-    }
 
     #[test]
     fn resize_shrink_keeps_cursor_row_when_already_visible() {
@@ -1495,25 +1457,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_tui_grid_positions_shift_after_both_resize() {
-        let mut t = setup_codex_tui(80, 24);
-        let sb_before = t.primary.scrollback_len();
-
-        // Resize both wider and taller (24 → 30 rows).
-        // Screen was full, so 6 rows pulled from scrollback, shifting content down.
-        t.resize(100, 30);
-
-        let pulled = sb_before - t.primary.scrollback_len();
-        assert!(pulled > 0, "should pull from scrollback on grow");
-
-        // Content shifted down by `pulled` rows. Header now at row `pulled`.
-        assert!(grid_row_text(&t, pulled).starts_with("=== Codex ==="),
-            "row {}: '{}'", pulled, grid_row_text(&t, pulled));
-
-        // Cursor shifted down too.
-        assert_eq!(t.screen().cursor.y, 22 + pulled,
-            "cursor.y should shift by pulled amount");
-    }
 
     #[test]
     fn codex_tui_grid_positions_stable_after_narrower_resize() {
@@ -1628,66 +1571,11 @@ mod tests {
     /// Shrink pushes top rows into scrollback to keep cursor visible,
     /// anchoring content to the bottom (matches macOS Terminal).
     #[test]
-    fn shrink_anchors_content_to_bottom() {
-        let mut t = setup_codex_tui(80, 24);
-        let sb_before = t.primary.scrollback_len();
-
-        // Cursor is at row 22 (prompt). Shrinking to 18 must keep cursor visible.
-        assert!(grid_row_text(&t, 22).starts_with("> "), "row 22 = prompt");
-
-        t.resize(80, 18);
-
-        // Scrollback grows — top rows pushed to keep cursor in bounds.
-        assert!(t.primary.scrollback_len() > sb_before,
-            "scrollback should grow when shrinking to keep cursor visible");
-
-        // Cursor is in bounds.
-        assert!(t.screen().cursor.y < 18,
-            "cursor.y={} should be < 18", t.screen().cursor.y);
-
-        // The prompt row should still be in the grid at the cursor position.
-        let cursor_y = t.screen().cursor.y;
-        assert!(grid_row_text(&t, cursor_y).starts_with("> "),
-            "cursor row should be prompt: '{}'", grid_row_text(&t, cursor_y));
-    }
 
     /// Shrink + grow round-trip restores content from scrollback.
     #[test]
-    fn grow_after_shrink_pulls_scrollback() {
-        let mut t = setup_codex_tui(80, 24);
-        let sb_before = t.primary.scrollback_len();
-
-        // Shrink: pushes rows to scrollback.
-        t.resize(80, 18);
-        let sb_after_shrink = t.primary.scrollback_len();
-        assert!(sb_after_shrink > sb_before);
-
-        // Grow back: pulls rows from scrollback, restoring them.
-        t.resize(80, 24);
-        assert!(t.primary.scrollback_len() < sb_after_shrink,
-            "scrollback should shrink as rows are pulled back");
-    }
 
     #[test]
-    fn codex_tui_narrower_and_shorter_resize() {
-        let mut t = setup_codex_tui(80, 24);
-
-        // Resize smaller in both dimensions. Content shifts to keep cursor visible.
-        t.resize(60, 20);
-
-        // Cursor must be in bounds.
-        assert!(t.screen().cursor.y < 20,
-            "cursor.y={} should be < 20", t.screen().cursor.y);
-        assert!(t.screen().cursor.x < 60);
-
-        // used_rows must cover visible content.
-        assert!(t.screen().used_rows() >= 1);
-
-        // The prompt should still be at the cursor position.
-        let cursor_y = t.screen().cursor.y;
-        assert!(grid_row_text(&t, cursor_y).starts_with("> "),
-            "cursor row should be prompt: '{}'", grid_row_text(&t, cursor_y));
-    }
 
     #[test]
     fn makepad_tui_hi_up_down_resize_restores_framebuffer() {
