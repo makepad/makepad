@@ -837,6 +837,7 @@ impl FontFamily {
                             index: 0,
                             ascender_fudge_in_ems: member.asc,
                             descender_fudge_in_ems: member.desc,
+                            variations: Vec::new(),
                         },
                     );
                 }

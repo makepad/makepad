@@ -136,11 +136,15 @@ impl Loader {
             .font_definitions
             .remove(&id)
             .expect("font is not defined");
+        let mut face = FontFace::from_data_and_index(definition.data, definition.index)
+            .expect("failed to load font from definition");
+        if !definition.variations.is_empty() {
+            face.set_variations(&definition.variations);
+        }
         Font::new(
             id.clone(),
             self.rasterizer.clone(),
-            FontFace::from_data_and_index(definition.data, definition.index)
-                .expect("failed to load font from definition"),
+            face,
             definition.ascender_fudge_in_ems,
             definition.descender_fudge_in_ems,
         )
@@ -165,4 +169,6 @@ pub struct FontDefinition {
     pub index: u32,
     pub ascender_fudge_in_ems: f32,
     pub descender_fudge_in_ems: f32,
+    /// Font variation axis settings as (tag_u32, value) pairs.
+    pub variations: Vec<(u32, f32)>,
 }
