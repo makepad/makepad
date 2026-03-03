@@ -428,8 +428,7 @@ impl Screen {
                 // Pull from scrollback when the screen was full, keeping
                 // content anchored to the bottom (matches macOS Terminal).
                 // However, if a custom scroll region is active (like in a TUI),
-                let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
-                let pull_count = if was_full && !has_custom_scroll_region {
+                let pull_count = if was_full {
                     self.scrollback.len().min(rows - old_rows)
                 } else {
                     0
@@ -471,7 +470,10 @@ impl Screen {
                 let lines_removed = old_rows - rows;
                 let mut copy_start = required_scrolling.min(lines_removed);
                 
-                if copy_start == 0 && self.bottom_trimmed_rows > 0 {
+                let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
+                if has_custom_scroll_region {
+                    copy_start = lines_removed;
+                } else if copy_start == 0 && self.bottom_trimmed_rows > 0 {
                     copy_start = self.bottom_trimmed_rows.min(lines_removed);
                 }
 
@@ -599,8 +601,7 @@ impl Screen {
 
         match new_rows.cmp(&old_rows) {
             std::cmp::Ordering::Greater => {
-                let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
-                let pull_count = if was_full && !has_custom_scroll_region {
+                let pull_count = if was_full {
                     self.scrollback.len().min(new_rows - old_rows)
                 } else {
                     0
@@ -643,7 +644,10 @@ impl Screen {
                 let lines_removed = old_rows - new_rows;
                 let mut copy_start = required_scrolling.min(lines_removed);
                 
-                if copy_start == 0 && self.bottom_trimmed_rows > 0 {
+                let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
+                if has_custom_scroll_region {
+                    copy_start = lines_removed;
+                } else if copy_start == 0 && self.bottom_trimmed_rows > 0 {
                     copy_start = self.bottom_trimmed_rows.min(lines_removed);
                 }
 

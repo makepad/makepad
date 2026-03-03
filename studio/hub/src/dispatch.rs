@@ -2431,12 +2431,7 @@ impl HubCore {
                     resize_error = Some(err);
                 }
             }
-            let anchor_rows = if session.applied_rows == rows {
-                rows
-            } else {
-                session.applied_rows
-            };
-            let max_top = Self::terminal_max_top_row(&session.terminal, anchor_rows);
+            let max_top = Self::terminal_max_top_row(&session.terminal, rows);
             let (resolved_top, anchor) = if top_row == usize::MAX {
                 // Sticky/bottom requests should resolve against the terminal's
                 // current total rows after resize/reflow, not a preserved top row.
@@ -2535,12 +2530,12 @@ impl HubCore {
     fn terminal_max_top_row(terminal: &Terminal, rows: u16) -> usize {
         let screen = terminal.screen();
         let has_custom_scroll_region = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows();
-        if has_custom_scroll_region {
-            screen.scrollback_len()
+        let total_lines = if has_custom_scroll_region {
+            screen.scrollback_len() + screen.rows()
         } else {
-            let effective_total = screen.scrollback_len() + screen.used_rows();
-            effective_total.saturating_sub(rows.max(1) as usize)
-        }
+            screen.scrollback_len() + screen.used_rows()
+        };
+        total_lines.saturating_sub(rows.max(1) as usize)
     }
 
     fn broadcast_live_log_entry(&self, index: usize, entry: LogEntry) {
@@ -2775,16 +2770,12 @@ fn terminal_framebuffer_from_terminal(
     let has_custom_scroll_region = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows();
     
     let total_lines = if has_custom_scroll_region {
-        screen.scrollback_len() + rows_usize
+        screen.scrollback_len() + screen.rows()
     } else {
         screen.scrollback_len() + screen.used_rows()
     };
     
-    let max_top = if has_custom_scroll_region {
-        screen.scrollback_len()
-    } else {
-        total_lines.saturating_sub(rows_usize)
-    };
+    let max_top = total_lines.saturating_sub(rows_usize);
     let top_row = requested_top_row.min(max_top);
     let mut cells = Vec::with_capacity(cols_usize * rows_usize * 7);
     let palette = &terminal.palette.colors;
