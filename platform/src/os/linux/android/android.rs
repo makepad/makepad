@@ -58,7 +58,7 @@ use {
         texture::TextureId,
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
-        os::linux::linux_video_player::upload_yuv_to_gl,
+        os::linux::gl_video_upload::upload_yuv_to_gl,
         video_decode::software_av1::SoftwareAv1Player,
         web_socket::WebSocketMessage,
         //web_socket::WebSocket,
