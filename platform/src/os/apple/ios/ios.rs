@@ -302,13 +302,21 @@ impl Cx {
                             None => {}
                         }
                         if player.poll_frame(&mut self.textures) {
+                            let yuv_en = if player.is_software_mode() { 1.0 } else { 0.0 };
+                            let yuv_bi = player.yuv_biplanar();
+                            let yuv_ty = player.yuv_matrix();
+                            let pos_ms = player.current_position_ms();
+                            crate::log!(
+                                "VIDEO: iOS TextureUpdated id={} pos={}ms yuv_enabled={} yuv_biplanar={} yuv_type={}",
+                                player.video_id.0, pos_ms, yuv_en, yuv_bi, yuv_ty
+                            );
                             video_events.push(Event::VideoTextureUpdated(
                                 VideoTextureUpdatedEvent {
                                     video_id: player.video_id,
-                                    current_position_ms: player.current_position_ms(),
-                                    yuv_enabled: if player.is_software_mode() { 1.0 } else { 0.0 },
-                                    yuv_type: player.yuv_matrix(),
-                                    yuv_biplanar: player.yuv_biplanar(),
+                                    current_position_ms: pos_ms,
+                                    yuv_enabled: yuv_en,
+                                    yuv_type: yuv_ty,
+                                    yuv_biplanar: yuv_bi,
                                 },
                             ));
                         }

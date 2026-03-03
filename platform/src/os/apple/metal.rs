@@ -439,6 +439,24 @@ impl Cx {
                                 atIndex: i as u64
                             ]
                         };
+                    } else {
+                        // No Metal texture backing yet — bind nil to avoid
+                        // sampling stale/uninitialized data. On older GPUs (A8)
+                        // this prevents command buffer abort.
+                        let () = unsafe {
+                            msg_send![
+                                encoder,
+                                setFragmentTexture: nil
+                                atIndex: i as u64
+                            ]
+                        };
+                        let () = unsafe {
+                            msg_send![
+                                encoder,
+                                setVertexTexture: nil
+                                atIndex: i as u64
+                            ]
+                        };
                     }
                 }
 

@@ -26,6 +26,13 @@ pub struct PicAlloc {
     pub pixel_buffer: CVPixelBufferRef,
     /// Whether U/V have been interleaved into the NV12 UV plane.
     pub finalized: bool,
+    /// Whether the CVPixelBuffer base address has been unlocked after finalize.
+    pub unlocked: bool,
+}
+
+#[inline]
+fn align_128(v: usize) -> usize {
+    (v + 127) & !127
 }
 
 /// Create a `Dav1dPicAllocator` for CVPixelBuffer-backed allocation.
@@ -78,6 +85,14 @@ pub unsafe fn finalize_nv12(pic: &mut Dav1dPicture) -> CVPixelBufferRef {
 
     alloc.finalized = true;
 
+    // Unlock CPU access — we are done writing. The GPU needs the buffer
+    // unlocked to create Metal textures via CVMetalTextureCacheCreateTextureFromImage.
+    // On older iOS devices (A8/A9), the GPU cannot access a CPU-locked IOSurface.
+    if !alloc.unlocked {
+        CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+        alloc.unlocked = true;
+    }
+
     // Retain so the caller can hold a reference after picture unref
     CVPixelBufferRetain(pixel_buffer);
     pixel_buffer
@@ -93,13 +108,15 @@ unsafe extern "C" fn alloc_picture_callback(
     let layout = pic.p.layout;
     let bpc = pic.p.bpc;
 
-    // Only 8-bit 4:2:0 for NV12 zero-copy path.
+    // Zero-copy path only supports 8-bit 4:2:0.
     if bpc != 8 || layout != Dav1dPixelLayout::I420 {
         return -1;
     }
 
-    let chroma_w = (w + 1) / 2;
-    let chroma_h = (h + 1) / 2;
+    // dav1d allocator contract requires storage to be sized to multiples of 128.
+    let aligned_w = align_128(w);
+    let aligned_h = align_128(h);
+    let chroma_h = aligned_h / 2;
 
     // Dictionary: Metal + IOSurface compatible
     let keys: [*const c_void; 2] = [
@@ -108,10 +125,7 @@ unsafe extern "C" fn alloc_picture_callback(
     ];
     let true_val: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
     let empty_dict: ObjcId = msg_send![class!(NSDictionary), dictionary];
-    let values: [*const c_void; 2] = [
-        true_val as *const c_void,
-        empty_dict as *const c_void,
-    ];
+    let values: [*const c_void; 2] = [true_val as *const c_void, empty_dict as *const c_void];
     let attrs: ObjcId = msg_send![class!(NSDictionary),
         dictionaryWithObjects: values.as_ptr()
         forKeys: keys.as_ptr()
@@ -121,14 +135,15 @@ unsafe extern "C" fn alloc_picture_callback(
     let mut pixel_buffer: CVPixelBufferRef = ptr::null_mut();
     let ret = CVPixelBufferCreate(
         ptr::null(),
-        w,
-        h,
+        aligned_w,
+        aligned_h,
         NV12_VIDEO_RANGE,
         attrs as *const c_void,
         &mut pixel_buffer,
     );
 
     if ret != 0 || pixel_buffer.is_null() {
+        // NOTE: no crate::log! here — this runs on dav1d worker thread (no autorelease pool on iOS)
         return -1;
     }
 
@@ -141,14 +156,36 @@ unsafe extern "C" fn alloc_picture_callback(
 
     // Y plane: direct into CVPixelBuffer plane 0
     let y_base = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0);
-    let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0) as isize;
+    let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0) as usize;
 
-    // U and V: separate heap buffers (interleaved later by finalize_nv12)
-    let u_buf = libc_alloc(chroma_w * chroma_h);
-    let v_buf = libc_alloc(chroma_w * chroma_h);
+    // Require dav1d alignment guarantees.
+    if y_base.is_null() || ((y_base as usize) & (DAV1D_PICTURE_ALIGNMENT as usize - 1)) != 0 {
+        CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+        CVPixelBufferRelease(pixel_buffer);
+        return -1;
+    }
+
+    // UV plane in NV12 is interleaved [U,V,U,V,...]. Its byte stride is 2x
+    // the per-plane U/V stride expected by dav1d.
+    let uv_row_bytes = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1) as usize;
+    if uv_row_bytes == 0 || (uv_row_bytes & 1) != 0 {
+        CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+        CVPixelBufferRelease(pixel_buffer);
+        return -1;
+    }
+    let uv_stride = uv_row_bytes / 2;
+
+    // U and V: separate aligned heap buffers (interleaved into NV12 in finalize_nv12).
+    let uv_size = uv_stride.saturating_mul(chroma_h).saturating_add(DAV1D_PICTURE_ALIGNMENT as usize);
+    let u_buf = libc_aligned_alloc(DAV1D_PICTURE_ALIGNMENT as usize, uv_size);
+    let v_buf = libc_aligned_alloc(DAV1D_PICTURE_ALIGNMENT as usize, uv_size);
     if u_buf.is_null() || v_buf.is_null() {
-        if !u_buf.is_null() { libc_free(u_buf); }
-        if !v_buf.is_null() { libc_free(v_buf); }
+        if !u_buf.is_null() {
+            libc_free(u_buf);
+        }
+        if !v_buf.is_null() {
+            libc_free(v_buf);
+        }
         CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
         CVPixelBufferRelease(pixel_buffer);
         return -1;
@@ -157,12 +194,13 @@ unsafe extern "C" fn alloc_picture_callback(
     pic.data[0] = y_base;
     pic.data[1] = u_buf;
     pic.data[2] = v_buf;
-    pic.stride[0] = y_stride;
-    pic.stride[1] = chroma_w as isize;
+    pic.stride[0] = y_stride as isize;
+    pic.stride[1] = uv_stride as isize;
 
     let alloc_ctx = Box::new(PicAlloc {
         pixel_buffer,
         finalized: false,
+        unlocked: false,
     });
     pic.allocator_data = Box::into_raw(alloc_ctx) as *mut c_void;
 
@@ -184,18 +222,24 @@ unsafe extern "C" fn release_picture_callback(
     libc_free(pic.data[1]);
     libc_free(pic.data[2]);
 
-    // Unlock and release CVPixelBuffer
-    CVPixelBufferUnlockBaseAddress(alloc.pixel_buffer, 0);
+    // Unlock (if not already done by finalize_nv12) and release CVPixelBuffer
+    if !alloc.unlocked {
+        CVPixelBufferUnlockBaseAddress(alloc.pixel_buffer, 0);
+    }
     CVPixelBufferRelease(alloc.pixel_buffer);
 
     pic.allocator_data = ptr::null_mut();
 }
 
-unsafe fn libc_alloc(size: usize) -> *mut c_void {
+unsafe fn libc_aligned_alloc(alignment: usize, size: usize) -> *mut c_void {
     extern "C" {
-        fn malloc(size: usize) -> *mut c_void;
+        fn posix_memalign(memptr: *mut *mut c_void, alignment: usize, size: usize) -> i32;
     }
-    malloc(size)
+    let mut ptr: *mut c_void = ptr::null_mut();
+    if posix_memalign(&mut ptr, alignment, size) != 0 {
+        return ptr::null_mut();
+    }
+    ptr
 }
 
 unsafe fn libc_free(ptr: *mut c_void) {
