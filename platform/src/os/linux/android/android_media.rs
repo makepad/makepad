@@ -41,7 +41,9 @@ impl Cx {
                 self.call_event_handler(&Event::MidiPorts(MidiPortsEvent { descs }));
             }
         }
-        if self.os.media.android_camera_change.check_and_clear() {
+        // Lazily initialize camera subsystem on first media signal check.
+        let camera_first = self.os.media.android_camera.is_none();
+        if camera_first || self.os.media.android_camera_change.check_and_clear() {
             let descs = self
                 .os
                 .media

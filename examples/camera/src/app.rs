@@ -65,7 +65,8 @@ impl AppMain for App {
 
         match event {
             Event::Startup => {
-                log!("[camera-example] Startup event received");
+                log!("[camera-example] Startup event received, requesting camera permission");
+                cx.request_permission(makepad_widgets::makepad_platform::permission::Permission::Camera);
             }
             Event::Draw(e) => {
                 if !self.started {

@@ -895,6 +895,21 @@ impl WaylandCx {
                 CxOsOp::UpdateVideoSurfaceTexture(_) => {
                     // Not needed on Linux desktop (Android-only)
                 }
+                CxOsOp::CheckPermission {
+                    permission,
+                    request_id,
+                } | CxOsOp::RequestPermission {
+                    permission,
+                    request_id,
+                } => {
+                    cx.call_event_handler(&Event::PermissionResult(
+                        crate::permission::PermissionResult {
+                            permission,
+                            request_id,
+                            status: crate::permission::PermissionStatus::Granted,
+                        },
+                    ));
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }

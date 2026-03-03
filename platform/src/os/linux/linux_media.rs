@@ -42,7 +42,10 @@ impl Cx {
                 .get_updated_descs();
             self.call_event_handler(&Event::MidiPorts(MidiPortsEvent { descs }));
         }
-        if self.os.media.v4l2_change.check_and_clear() {
+        // Lazily initialize V4L2 camera subsystem on first media signal check.
+        // This starts the /dev watcher which sets v4l2_change on device changes.
+        let v4l2_first = self.os.media.v4l2_camera.is_none();
+        if v4l2_first || self.os.media.v4l2_change.check_and_clear() {
             let descs = self
                 .os
                 .media

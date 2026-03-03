@@ -210,7 +210,20 @@ impl V4l2CameraPlayer {
 
         unsafe {
             let cxtexture = &mut textures[self.texture_id];
-            let needs_alloc = if cxtexture.os.gl_texture.is_none() {
+
+            // Mark alloc so setup_video_texture in the draw loop doesn't
+            // free our texture and create an empty one.
+            if cxtexture.alloc.is_none() {
+                cxtexture.alloc = Some(TextureAlloc {
+                    width: 0,
+                    height: 0,
+                    pixel: TexturePixel::VideoRGB,
+                    category: TextureCategory::Video,
+                });
+            }
+
+            // Ensure GL texture exists (setup_video_texture may have created it already)
+            if cxtexture.os.gl_texture.is_none() {
                 let mut gl_texture = std::mem::MaybeUninit::uninit();
                 (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                 let gl_texture = gl_texture.assume_init();
@@ -220,41 +233,25 @@ impl V4l2CameraPlayer {
                 (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
                 (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
                 (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-                true
-            } else {
-                self.width as usize != width || self.height as usize != height
-            };
+            }
 
             let gl_texture = cxtexture.os.gl_texture.unwrap();
             (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
+
             (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 4);
             (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
             (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
             (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
 
-            if needs_alloc {
-                (gl.glTexImage2D)(
-                    gl_sys::TEXTURE_2D, 0, gl_sys::RGBA as i32,
-                    width as i32, height as i32, 0,
-                    gl_sys::RGBA, gl_sys::UNSIGNED_BYTE,
-                    frame.data.as_ptr() as *const c_void,
-                );
-            } else {
-                (gl.glTexSubImage2D)(
-                    gl_sys::TEXTURE_2D, 0, 0, 0,
-                    width as i32, height as i32,
-                    gl_sys::RGBA, gl_sys::UNSIGNED_BYTE,
-                    frame.data.as_ptr() as *const c_void,
-                );
-            }
+            // Always use glTexImage2D — glTexSubImage2D returns GL_INVALID_OPERATION
+            // on some EGL/Wayland drivers when the texture was created in a prior draw cycle.
+            (gl.glTexImage2D)(
+                gl_sys::TEXTURE_2D, 0, gl_sys::RGBA as i32,
+                width as i32, height as i32, 0,
+                gl_sys::RGBA, gl_sys::UNSIGNED_BYTE,
+                frame.data.as_ptr() as *const c_void,
+            );
             (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
-
-            cxtexture.alloc = Some(TextureAlloc {
-                width,
-                height,
-                pixel: TexturePixel::VideoRGB,
-                category: TextureCategory::Video,
-            });
 
             self.width = width as u32;
             self.height = height as u32;
