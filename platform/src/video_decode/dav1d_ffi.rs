@@ -189,6 +189,9 @@ pub struct Dav1dPicture {
     pub allocator_data: *mut c_void,
 }
 
+/// Minimum alignment/padding for picture buffers (matches dav1d headers).
+pub const DAV1D_PICTURE_ALIGNMENT: i32 = 64;
+
 // EAGAIN error code (negated on POSIX)
 pub const DAV1D_ERR_EAGAIN: i32 = -libc_eagain();
 
