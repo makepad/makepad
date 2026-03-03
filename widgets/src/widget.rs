@@ -877,6 +877,15 @@ impl WidgetRef {
         }
     }
 
+    pub fn find_child(&self, path: &[LiveId]) -> WidgetRef {
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                return inner.widget.find_child(path);
+            }
+        }
+        WidgetRef::empty()
+    }
+
     pub fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
         let tree = cx.widget_tree();
         if let Ok(inner) = self.0.try_borrow() {
