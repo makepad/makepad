@@ -423,15 +423,12 @@ impl Screen {
             }
         };
 
-        let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
-
         match rows.cmp(&old_rows) {
             std::cmp::Ordering::Greater => {
                 // Pull from scrollback when the screen was full, keeping
                 // content anchored to the bottom (matches macOS Terminal).
                 // However, if a custom scroll region is active (like in a TUI),
-                // do not pull from scrollback, as TUIs expect the grid to remain
-                // anchored to the top and will redraw their own layout.
+                let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
                 let pull_count = if was_full && !has_custom_scroll_region {
                     self.scrollback.len().min(rows - old_rows)
                 } else {
@@ -474,9 +471,7 @@ impl Screen {
                 let lines_removed = old_rows - rows;
                 let mut copy_start = required_scrolling.min(lines_removed);
                 
-                if has_custom_scroll_region {
-                    copy_start = 0;
-                } else if copy_start == 0 && self.bottom_trimmed_rows > 0 {
+                if copy_start == 0 && self.bottom_trimmed_rows > 0 {
                     copy_start = self.bottom_trimmed_rows.min(lines_removed);
                 }
 
@@ -525,7 +520,6 @@ impl Screen {
         let old_cols = self.cols();
         let old_rows = self.rows();
         let was_full = self.high_water_row >= old_rows - 1;
-        let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
 
         // --- 1. Reflow scrollback at new width ---
         let mut new_scrollback: Vec<Vec<Cell>> = Vec::new();
@@ -605,6 +599,7 @@ impl Screen {
 
         match new_rows.cmp(&old_rows) {
             std::cmp::Ordering::Greater => {
+                let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
                 let pull_count = if was_full && !has_custom_scroll_region {
                     self.scrollback.len().min(new_rows - old_rows)
                 } else {
@@ -648,9 +643,7 @@ impl Screen {
                 let lines_removed = old_rows - new_rows;
                 let mut copy_start = required_scrolling.min(lines_removed);
                 
-                if has_custom_scroll_region {
-                    copy_start = 0;
-                } else if copy_start == 0 && self.bottom_trimmed_rows > 0 {
+                if copy_start == 0 && self.bottom_trimmed_rows > 0 {
                     copy_start = self.bottom_trimmed_rows.min(lines_removed);
                 }
 
