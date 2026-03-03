@@ -32,7 +32,6 @@ pub struct AppleUnifiedVideoPlayer {
     /// Current CVMetalTexture refs (released each frame).
     cv_y_texture: CVMetalTextureRef,
     cv_uv_texture: CVMetalTextureRef,
-    zero_copy_logged_ok: bool,
     zero_copy_fail_count: u32,
 }
 
@@ -64,10 +63,9 @@ impl AppleUnifiedVideoPlayer {
                 &mut cache,
             );
             if ret != 0 {
-                crate::log!("VIDEO: CVMetalTextureCacheCreate failed: {} device={:p}", ret, metal_device);
+                crate::log!("VIDEO: CVMetalTextureCacheCreate failed: {}", ret);
                 std::ptr::null_mut()
             } else {
-                crate::log!("VIDEO: CVMetalTextureCacheCreate OK cache={:p} device={:p}", cache, metal_device);
                 cache
             }
         };
@@ -111,7 +109,6 @@ impl AppleUnifiedVideoPlayer {
             texture_cache,
             cv_y_texture: std::ptr::null_mut(),
             cv_uv_texture: std::ptr::null_mut(),
-            zero_copy_logged_ok: false,
             zero_copy_fail_count: 0,
         }
     }
@@ -130,7 +127,6 @@ impl AppleUnifiedVideoPlayer {
             self.is_looping,
             allocator,
         ));
-        self.zero_copy_logged_ok = false;
         self.zero_copy_fail_count = 0;
     }
 
@@ -208,22 +204,6 @@ impl AppleUnifiedVideoPlayer {
             if let Some(mut pic) = decoded_pic.take() {
                 let cv_pixel_buffer = unsafe { dav1d_apple_allocator::finalize_nv12(&mut pic.pic) };
                 if !cv_pixel_buffer.is_null() {
-                    if self.zero_copy_fail_count == 0 && !self.zero_copy_logged_ok {
-                        // Log CVPixelBuffer properties once from main thread
-                        unsafe {
-                            let plane_count = CVPixelBufferGetPlaneCount(cv_pixel_buffer);
-                            let y_stride = CVPixelBufferGetBytesPerRowOfPlane(cv_pixel_buffer, 0);
-                            let y_base = CVPixelBufferGetBaseAddressOfPlane(cv_pixel_buffer, 0);
-                            let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(cv_pixel_buffer, 1);
-                            let uv_base = CVPixelBufferGetBaseAddressOfPlane(cv_pixel_buffer, 1);
-                            crate::log!(
-                                "VIDEO: CVPixelBuffer {:p} {}x{} planes={} Y(base={:p} stride={} align={}) UV(base={:p} stride={})",
-                                cv_pixel_buffer, pic.width(), pic.height(), plane_count,
-                                y_base, y_stride, (y_base as usize) & 63,
-                                uv_base, uv_stride
-                            );
-                        }
-                    }
                     let ok = self.wrap_cv_pixel_buffer_as_metal(
                         textures,
                         cv_pixel_buffer,
@@ -234,14 +214,6 @@ impl AppleUnifiedVideoPlayer {
                         CVPixelBufferRelease(cv_pixel_buffer);
                     }
                     if ok {
-                        if !self.zero_copy_logged_ok {
-                            crate::log!(
-                                "VIDEO: zero-copy YUV path active ({}x{})",
-                                pic.width(),
-                                pic.height()
-                            );
-                            self.zero_copy_logged_ok = true;
-                        }
                         return true;
                     }
                     self.zero_copy_fail_count += 1;
@@ -294,11 +266,6 @@ impl AppleUnifiedVideoPlayer {
         let h = height as usize;
         let cw = (w + 1) / 2;
         let ch = (h + 1) / 2;
-
-        crate::log!(
-            "VIDEO: wrap_cv_pixel_buffer_as_metal pb={:p} {}x{} chroma={}x{} cache={:p}",
-            pixel_buffer, w, h, cw, ch, self.texture_cache
-        );
 
         unsafe {
             // Release previous CVMetalTexture refs
@@ -357,11 +324,6 @@ impl AppleUnifiedVideoPlayer {
             // Extract Metal texture objects
             let mtl_y: ObjcId = CVMetalTextureGetTexture(cv_y);
             let mtl_uv: ObjcId = CVMetalTextureGetTexture(cv_uv);
-
-            crate::log!(
-                "VIDEO: wrap_cv OK Y={}x{} UV={}x{} mtl_y={:p} mtl_uv={:p}",
-                w, h, cw, ch, mtl_y, mtl_uv
-            );
 
             if mtl_y.is_null() || mtl_uv.is_null() {
                 crate::log!("VIDEO: CVMetalTextureGetTexture returned null (y={:p} uv={:p})", mtl_y, mtl_uv);
@@ -436,11 +398,6 @@ impl AppleUnifiedVideoPlayer {
 
             self.cv_y_texture = cv_y;
             self.cv_uv_texture = cv_uv;
-
-            crate::log!(
-                "VIDEO: textures assigned to pool: tex_y={:?} tex_u={:?} (biplanar NV12)",
-                self.tex_y_id, self.tex_u_id
-            );
 
             true
         }
