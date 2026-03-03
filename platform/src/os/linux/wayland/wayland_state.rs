@@ -639,6 +639,21 @@ impl Dispatch<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1, ()> 
     ) {
         // We only set primary selection, not read it.
     }
+
+    fn event_created_child(
+        opcode: u16,
+        qhandle: &QueueHandle<Self>,
+    ) -> Arc<dyn wayland_client::backend::ObjectData> {
+        match opcode {
+            zwp_primary_selection_device_v1::EVT_DATA_OFFER_OPCODE => {
+                qhandle.make_data::<zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1, ()>(())
+            }
+            _ => unreachable!(
+                "zwp_primary_selection_device_v1 created unknown child for opcode {}",
+                opcode
+            ),
+        }
+    }
 }
 
 impl Dispatch<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1, ()> for WaylandState {
