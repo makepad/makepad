@@ -424,23 +424,29 @@ impl DesktopTerminalView {
         }
 
         let (cell_width, cell_height) = self.cell_metrics();
-        let origin_x = self.viewport_rect.pos.x + self.pad_x;
-        
-        let scroll_y = self.current_scroll_pixels();
-        let origin_y = if self.follow_output {
-            let viewport_bottom = self.viewport_rect.pos.y + self.viewport_rect.size.y - self.pad_y;
-            let total_text_height = self.last_total_lines as f64 * cell_height;
-            let top_of_text = (self.viewport_rect.pos.y + self.pad_y).min(viewport_bottom - total_text_height);
-            top_of_text + scroll_y
+
+        // Use unscrolled_rect (actual screen coordinates) for all positioning.
+        // This decouples rendering from the scroll offset entirely, preventing
+        // sub-pixel jitter when the scroll position changes during resize.
+        let screen_top = self.unscrolled_rect.pos.y + self.pad_y;
+        let screen_bottom = self.unscrolled_rect.pos.y + self.unscrolled_rect.size.y - self.pad_y;
+        let usable_height = (screen_bottom - screen_top).max(0.0);
+        let max_visible_rows = (usable_height / cell_height).floor().max(1.0) as usize;
+        let render_rows = rows.min(max_visible_rows);
+
+        // Compute the screen-space Y origin and the first frame row to render.
+        // For follow_output: bottom-align (last row flush with viewport bottom).
+        // For non-follow: top-align (first row at viewport top).
+        let (origin_y, start_row) = if self.follow_output {
+            let grid_height = render_rows as f64 * cell_height;
+            let y = screen_bottom - grid_height;
+            let sr = rows.saturating_sub(render_rows);
+            (y, sr)
         } else {
-            self.viewport_rect.pos.y + self.pad_y
+            (screen_top, 0)
         };
 
-        // ScrollBars applies a content transform based on scroll position.
-        // Keep rendering visually fixed by drawing at virtual-row coordinates
-        // (top_row + row), so the transform is canceled and scrolling is purely
-        // viewport selection via backend requests.
-        let virtual_row_base = frame.top_row as f64;
+        let origin_x = self.unscrolled_rect.pos.x + self.pad_x;
         let default_bg = Self::decode_rgb(frame.default_bg_rgb);
         let default_fg = Self::decode_rgb(frame.default_fg_rgb);
         let has_focus = cx.has_key_focus(self.scroll_bars.area());
@@ -452,10 +458,11 @@ impl DesktopTerminalView {
         self.draw_text.begin_many_instances(cx);
         self.invalidate_glyph_cache_if_needed(cx);
 
-        for row in 0..rows {
-            let y = origin_y + (virtual_row_base + row as f64) * cell_height;
+        for i in 0..render_rows {
+            let frame_row = start_row + i;
+            let y = origin_y + i as f64 * cell_height;
             for col in 0..cols {
-                let Some((ch, bg_color)) = Self::decode_cell(frame, row, col) else {
+                let Some((ch, bg_color)) = Self::decode_cell(frame, frame_row, col) else {
                     continue;
                 };
                 let x = origin_x + col as f64 * cell_width;
@@ -504,11 +511,13 @@ impl DesktopTerminalView {
 
         if self.cursor_blink_on && frame.cursor_visible && frame.cursor_row >= 0 {
             let cursor_row = frame.cursor_row as usize;
-            if cursor_row < rows {
+            // Map cursor's frame row to our render range
+            if cursor_row >= start_row && cursor_row < start_row + render_rows {
+                let visible_row = cursor_row - start_row;
                 let cursor_col = (frame.cursor_col as usize).min(cols.saturating_sub(1));
                 let cx_x = origin_x + cursor_col as f64 * cell_width;
                 let cx_y = origin_y
-                    + (virtual_row_base + cursor_row as f64) * cell_height
+                    + visible_row as f64 * cell_height
                     + self.cursor_y_offset;
                 self.draw_cursor.focus = if has_focus { 1.0 } else { 0.0 };
                 let cursor_rect = if has_focus {
