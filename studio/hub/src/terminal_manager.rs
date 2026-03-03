@@ -110,6 +110,9 @@ fn run_terminal_loop(
     let mut should_close = false;
     let mut pending_input = VecDeque::<PendingInput>::new();
     let mut pending_resize: Option<(u16, u16)> = None;
+    let mut last_resize_time = std::time::Instant::now() - Duration::from_secs(1);
+    let resize_throttle = Duration::from_millis(50); // Throttle to 20fps to prevent TUI garbling
+
     loop {
         loop {
             match control_rx.try_recv() {
@@ -177,13 +180,20 @@ fn run_terminal_loop(
 
         // Apply one coalesced resize after I/O so buffered output is consumed
         // before switching the terminal model geometry.
-        if let Some((cols, rows)) = pending_resize.take() {
-            if pty.resize(cols, rows).is_ok() {
-                let _ = event_tx.send(HubEvent::TerminalResized {
-                    path: path.clone(),
-                    cols,
-                    rows,
-                });
+        // Throttle rapid resizes to prevent TUI apps from receiving a storm of SIGWINCH
+        // signals, which causes them to draw intermediate UI states that are left behind.
+        if let Some((cols, rows)) = pending_resize {
+            let now = std::time::Instant::now();
+            if now.duration_since(last_resize_time) >= resize_throttle {
+                pending_resize = None;
+                last_resize_time = now;
+                if pty.resize(cols, rows).is_ok() {
+                    let _ = event_tx.send(HubEvent::TerminalResized {
+                        path: path.clone(),
+                        cols,
+                        rows,
+                    });
+                }
             }
         }
 
