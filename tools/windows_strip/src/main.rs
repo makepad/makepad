@@ -2509,7 +2509,7 @@ fn main() {
         "./libs/terminal_core/Cargo.toml",
     )));
     enabled_features.extend(load_enabled_windows_features(Path::new(
-        "./libs/network/Cargo.toml",
+        "./platform/network/Cargo.toml",
     )));
 
     let mut explicit_imports = HashSet::new();
@@ -2535,7 +2535,7 @@ fn main() {
         glob_imports.extend(file_globs);
         collect_method_usage_from_file(terminal_pty_path, &mut used_methods);
     }
-    let network_windows_src_dir = Path::new("./libs/network/src/backend/windows");
+    let network_windows_src_dir = Path::new("./platform/network/src/backend/windows");
     if network_windows_src_dir.is_dir() {
         for entry in fs::read_dir(network_windows_src_dir).unwrap() {
             let entry = entry.unwrap();

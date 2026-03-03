@@ -2,8 +2,8 @@
 
 use crate::utils::*;
 pub use crate::web_socket_parser::{
-    WebSocketParser, ServerWebSocketMessage, ServerWebSocketMessageFormat,
-    ServerWebSocketMessageHeader, SERVER_WEB_SOCKET_PING_MESSAGE, SERVER_WEB_SOCKET_PONG_MESSAGE,
+    WebSocketMessage, WebSocketMessageFormat, WebSocketMessageHeader, WebSocketParser,
+    SERVER_WEB_SOCKET_PING_MESSAGE, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
 use std::io::prelude::*;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -182,9 +182,9 @@ fn handle_web_socket(
                     if data.is_empty() {
                         break;
                     }
-                    let header = ServerWebSocketMessageHeader::from_len(
+                    let header = WebSocketMessageHeader::from_len(
                         data.len(),
-                        ServerWebSocketMessageFormat::Binary,
+                        WebSocketMessageFormat::Binary,
                         false,
                     );
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, header.as_slice());
@@ -226,11 +226,11 @@ fn handle_web_socket(
                     break;
                 }
                 web_socket.parse(&data[0..n], |result| match result {
-                    Ok(ServerWebSocketMessage::Ping(_)) => {
+                    Ok(WebSocketMessage::Ping(_)) => {
                         let _ = tx_socket.send(SERVER_WEB_SOCKET_PONG_MESSAGE.to_vec());
                     }
-                    Ok(ServerWebSocketMessage::Pong(_)) => {}
-                    Ok(ServerWebSocketMessage::Text(text)) => {
+                    Ok(WebSocketMessage::Pong(_)) => {}
+                    Ok(WebSocketMessage::Text(text)) => {
                         if http_server
                             .request
                             .send(HttpServerRequest::TextMessage {
@@ -245,7 +245,7 @@ fn handle_web_socket(
                             let _ = tx_socket.send(Vec::new());
                         };
                     }
-                    Ok(ServerWebSocketMessage::Binary(data)) => {
+                    Ok(WebSocketMessage::Binary(data)) => {
                         if http_server
                             .request
                             .send(HttpServerRequest::BinaryMessage {
@@ -260,7 +260,7 @@ fn handle_web_socket(
                             let _ = tx_socket.send(Vec::new());
                         };
                     }
-                    Ok(ServerWebSocketMessage::Close) => {
+                    Ok(WebSocketMessage::Close) => {
                         let _ = tcp_stream.shutdown(Shutdown::Both);
                     }
                     Err(e) => {

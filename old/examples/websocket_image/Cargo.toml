@@ -9,4 +9,4 @@ metadata.makepad-auto-version = "ZqeDZpAdLhw4WhZynLn1aT7-HfM="
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "1.0.0" }
-makepad-network = { path = "../../libs/network", version = "1.0.0" } 
+makepad-network = { path = "../../../platform/network", version = "1.0.0" } 
