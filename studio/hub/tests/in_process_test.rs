@@ -150,6 +150,12 @@ fn framebuffer_row_text(frame: &TerminalFramebuffer, row: usize) -> String {
         .to_string()
 }
 
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
 #[test]
 fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
@@ -717,45 +723,242 @@ fn terminal_codex_fast_resize_roundtrip_preserves_top_and_bottom_rows() {
     let baseline_bottom = framebuffer_last_row_text(&baseline);
     let baseline_text = framebuffer_to_text(&baseline);
 
-    // Rapid resize burst: up then back down without waiting for each frame.
-    for rows in 21..=40 {
-        request_terminal_viewport(&mut connection, &path, 80, rows, usize::MAX);
+    // Repeat rapid resize bursts to catch fast-drag race behavior.
+    for cycle in 0..5 {
+        for rows in 21..=40 {
+            request_terminal_viewport(&mut connection, &path, 80, rows, usize::MAX);
+        }
+        for rows in (20..40).rev() {
+            request_terminal_viewport(&mut connection, &path, 80, rows, usize::MAX);
+        }
+        request_terminal_viewport(&mut connection, &path, 80, 20, usize::MAX);
+
+        let final_frame =
+            wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(8), |frame| {
+                frame.rows == 20 && !framebuffer_last_row_text(frame).trim().is_empty()
+            })
+            .expect("did not observe final 20-row codex frame after fast resize burst");
+
+        let final_top = framebuffer_row_text(&final_frame, 0);
+        let final_sep = framebuffer_row_text(&final_frame, 1);
+        let final_bottom = framebuffer_last_row_text(&final_frame);
+
+        assert_eq!(
+            final_top.trim(),
+            baseline_top.trim(),
+            "top row changed after fast resize roundtrip cycle {}",
+            cycle
+        );
+        assert_eq!(
+            final_sep.trim(),
+            baseline_sep.trim(),
+            "separator row changed after fast resize roundtrip cycle {}",
+            cycle
+        );
+        assert_eq!(
+            final_bottom.trim(),
+            baseline_bottom.trim(),
+            "bottom row changed after fast resize roundtrip cycle {}",
+            cycle
+        );
+        assert_eq!(
+            framebuffer_to_text(&final_frame),
+            baseline_text,
+            "full framebuffer changed after fast resize roundtrip cycle {}",
+            cycle
+        );
     }
-    for rows in (20..40).rev() {
-        request_terminal_viewport(&mut connection, &path, 80, rows, usize::MAX);
+
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: vec![0x03],
+    });
+    let _ = connection.send(ClientToHub::TerminalClose { path });
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn terminal_codex_fast_vs_slow_wiggle_same_final_frame() {
+    let codex_available = std::process::Command::new("sh")
+        .args(["-lc", "command -v codex >/dev/null 2>&1"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !codex_available {
+        eprintln!("skipping: codex binary not found in PATH");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let wiggle: &[u16] = &[30, 12, 28, 10, 26, 14, 29, 11, 27, 13, 30, 20];
+
+    let mut run_mode = |path: &str, slow: bool| -> String {
+        let tui_log_path = format!(
+            "/tmp/{}.{}.log",
+            path.replace('/', "_"),
+            std::process::id()
+        );
+        let mut env = std::collections::HashMap::new();
+        env.insert("TUI_LOG".to_string(), tui_log_path.clone());
+        let _ = connection.send(ClientToHub::TerminalOpen {
+            path: path.to_string(),
+            cols: 80,
+            rows: 20,
+            env,
+        });
+        let opened = wait_for_message(
+            &connection,
+            Duration::from_secs(5),
+            |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == path),
+        );
+        assert!(opened.is_some(), "did not receive TerminalOpened for {}", path);
+
+        request_terminal_viewport(&mut connection, path, 80, 20, usize::MAX);
+        let _ = connection.send(ClientToHub::TerminalInput {
+            path: path.to_string(),
+            data: b"for i in $(seq 1 260); do echo __SCROLL__$i; done\ncodex\n".to_vec(),
+        });
+        let _baseline =
+            wait_for_terminal_frame_where(&connection, path, Duration::from_secs(35), |frame| {
+                frame.rows == 20
+                    && frame.total_lines > 80
+                    && !framebuffer_last_row_text(frame).trim().is_empty()
+            })
+            .expect("did not observe baseline codex frame");
+
+        if slow {
+            for rows in wiggle {
+                request_terminal_viewport(&mut connection, path, 80, *rows, usize::MAX);
+                let _ = wait_for_terminal_frame_where(
+                    &connection,
+                    path,
+                    Duration::from_secs(6),
+                    |frame| frame.rows == *rows && !framebuffer_last_row_text(frame).trim().is_empty(),
+                )
+                .expect("did not observe slow wiggle step frame");
+            }
+        } else {
+            for rows in wiggle {
+                request_terminal_viewport(&mut connection, path, 80, *rows, usize::MAX);
+            }
+        }
+
+        request_terminal_viewport(&mut connection, path, 80, 20, usize::MAX);
+        let final_frame =
+            wait_for_terminal_frame_where(&connection, path, Duration::from_secs(10), |frame| {
+                frame.rows == 20 && !framebuffer_last_row_text(frame).trim().is_empty()
+            })
+            .expect("did not observe final 20-row frame");
+
+        let _ = connection.send(ClientToHub::TerminalInput {
+            path: path.to_string(),
+            data: vec![0x03],
+        });
+        let _ = connection.send(ClientToHub::TerminalClose {
+            path: path.to_string(),
+        });
+        framebuffer_to_text(&final_frame)
+    };
+
+    let slow_text = run_mode("repo/.makepad/codex_slow_wiggle.term", true);
+    let fast_text = run_mode("repo/.makepad/codex_fast_wiggle.term", false);
+    assert_eq!(
+        fast_text, slow_text,
+        "fast wiggle final frame diverged from slow wiggle final frame"
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn terminal_makepad_tui_fast_wiggle_preserves_framebuffer() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root");
+    let tui_bin = workspace_root.join("target/release/makepad-tui-test");
+    if !tui_bin.exists() {
+        eprintln!(
+            "skipping: makepad-tui-test binary not found at {}",
+            tui_bin.display()
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let path = "repo/.makepad/tui_fast_wiggle.term".to_string();
+    let _ = connection.send(ClientToHub::TerminalOpen {
+        path: path.clone(),
+        cols: 80,
+        rows: 20,
+        env: std::collections::HashMap::new(),
+    });
+    let opened = wait_for_message(
+        &connection,
+        Duration::from_secs(5),
+        |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == &path),
+    );
+    assert!(opened.is_some(), "did not receive TerminalOpened");
+
+    request_terminal_viewport(&mut connection, &path, 80, 20, usize::MAX);
+
+    let launch = format!("{}\n", tui_bin.display());
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: launch.into_bytes(),
+    });
+
+    let baseline =
+        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(20), |frame| {
+            frame.rows == 20
+                && framebuffer_to_text(frame).contains("TUI Test")
+                && framebuffer_to_text(frame).contains("directory:")
+        })
+        .expect("did not observe baseline makepad-tui frame");
+    let baseline_text = framebuffer_to_text(&baseline);
+
+    // Rapid wiggle with jumps between 10..30 rows, repeated to amplify races.
+    let jumps: &[u16] = &[30, 12, 28, 10, 26, 14, 29, 11, 27, 13, 30, 20];
+    for _ in 0..6 {
+        for rows in jumps {
+            request_terminal_viewport(&mut connection, &path, 80, *rows, usize::MAX);
+        }
     }
     request_terminal_viewport(&mut connection, &path, 80, 20, usize::MAX);
 
-    // Wait for the next explicit 20-row frame after the final request.
     let final_frame =
-        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(8), |frame| {
-            frame.rows == 20 && !framebuffer_last_row_text(frame).trim().is_empty()
+        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(10), |frame| {
+            frame.rows == 20 && framebuffer_to_text(frame).contains("TUI Test")
         })
-        .expect("did not observe final 20-row codex frame after fast resize burst");
-
-    let final_top = framebuffer_row_text(&final_frame, 0);
-    let final_sep = framebuffer_row_text(&final_frame, 1);
-    let final_bottom = framebuffer_last_row_text(&final_frame);
+        .expect("did not observe final 20-row makepad-tui frame");
+    let final_text = framebuffer_to_text(&final_frame);
 
     assert_eq!(
-        final_top.trim(),
-        baseline_top.trim(),
-        "top row changed after fast resize roundtrip"
-    );
-    assert_eq!(
-        final_sep.trim(),
-        baseline_sep.trim(),
-        "separator row changed after fast resize roundtrip"
-    );
-    assert_eq!(
-        final_bottom.trim(),
-        baseline_bottom.trim(),
-        "bottom row changed after fast resize roundtrip"
-    );
-    assert_eq!(
-        framebuffer_to_text(&final_frame),
-        baseline_text,
-        "full framebuffer changed after fast resize roundtrip"
+        final_text, baseline_text,
+        "makepad-tui framebuffer changed after fast wiggle resize burst"
     );
 
     let _ = connection.send(ClientToHub::TerminalInput {
@@ -763,6 +966,370 @@ fn terminal_codex_fast_resize_roundtrip_preserves_top_and_bottom_rows() {
         data: vec![0x03],
     });
     let _ = connection.send(ClientToHub::TerminalClose { path });
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+#[ignore = "stress diagnostic: intermittently reproduces fast-resize garbling"]
+fn terminal_makepad_tui_fast_resize_during_output_matches_no_resize() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root");
+    let tui_bin = workspace_root.join("target/release/makepad-tui-test");
+    if !tui_bin.exists() {
+        eprintln!(
+            "skipping: makepad-tui-test binary not found at {}",
+            tui_bin.display()
+        );
+        return;
+    }
+
+    let short_mount = std::path::PathBuf::from("/tmp").join(format!(
+        "mpt_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    ));
+    let _ = fs::remove_dir_all(&short_mount);
+    fs::create_dir_all(short_mount.join("src")).unwrap();
+    fs::write(short_mount.join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: short_mount.clone(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let mut run_mode = |path: &str, fast_resize: bool| -> String {
+        let tui_log_path = format!(
+            "/tmp/{}.{}.log",
+            path.replace('/', "_"),
+            std::process::id()
+        );
+        let mut env = std::collections::HashMap::new();
+        env.insert("TUI_LOG".to_string(), tui_log_path.clone());
+        let _ = connection.send(ClientToHub::TerminalOpen {
+            path: path.to_string(),
+            cols: 80,
+            rows: 20,
+            env,
+        });
+        let opened = wait_for_message(
+            &connection,
+            Duration::from_secs(5),
+            |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == path),
+        );
+        assert!(opened.is_some(), "did not receive TerminalOpened for {}", path);
+
+        request_terminal_viewport(&mut connection, path, 80, 20, usize::MAX);
+        let launch = format!("{}\n", tui_bin.display());
+        let _ = connection.send(ClientToHub::TerminalInput {
+            path: path.to_string(),
+            data: launch.into_bytes(),
+        });
+
+        let _baseline =
+            wait_for_terminal_frame_where(&connection, path, Duration::from_secs(20), |frame| {
+                frame.rows == 20
+                    && framebuffer_to_text(frame).contains("TUI Test")
+                    && framebuffer_to_text(frame).contains("directory:")
+            })
+            .expect("did not observe baseline makepad-tui frame");
+
+        let _ = connection.send(ClientToHub::TerminalInput {
+            path: path.to_string(),
+            data: b"hi\r".to_vec(),
+        });
+
+        // 10 cycles of multi-line jump scales between 10 and 40 rows.
+        let jumps: &[u16] = &[40, 10, 38, 12, 36, 14, 34, 16, 32, 18, 30, 20];
+        for _ in 0..10 {
+            for rows in jumps {
+                request_terminal_viewport(&mut connection, path, 80, *rows, usize::MAX);
+                if !fast_resize {
+                    let _ = wait_for_terminal_frame_where(
+                        &connection,
+                        path,
+                        Duration::from_secs(2),
+                        |frame| frame.rows == *rows,
+                    )
+                    .expect("did not observe slow resize step frame");
+                }
+            }
+        }
+
+        request_terminal_viewport(&mut connection, path, 80, 20, usize::MAX);
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut next_poll = Instant::now();
+        let mut final_text = None;
+        let mut last_20_text = String::new();
+        while Instant::now() < deadline {
+            if Instant::now() >= next_poll {
+                request_terminal_viewport(&mut connection, path, 80, 20, usize::MAX);
+                next_poll = Instant::now() + Duration::from_millis(200);
+            }
+            let Some(msg) = connection.recv_timeout(Duration::from_millis(100)) else {
+                continue;
+            };
+            let HubToClient::TerminalFramebuffer {
+                path: output_path,
+                frame,
+            } = msg
+            else {
+                continue;
+            };
+            if output_path != path {
+                continue;
+            }
+            if frame.rows != 20 {
+                continue;
+            }
+            let text = framebuffer_to_text(&frame);
+            last_20_text = text.clone();
+            if text.contains("[10/10] hi")
+                && text.contains("Enter a prompt...")
+                && text.contains("fake-model")
+                && !text.contains("Working (")
+            {
+                final_text = Some(text);
+                break;
+            }
+        }
+        let _completed_text = final_text.unwrap_or_else(|| {
+            let log_tail = fs::read_to_string(&tui_log_path)
+                .map(|s| tail_lines(&s, 40))
+                .unwrap_or_else(|_| "<missing TUI_LOG>".to_string());
+            panic!(
+                "did not observe completed 20-row frame after resize burst; last 20-row frame:\n{}\n\nTUI_LOG tail:\n{}",
+                last_20_text, log_tail
+            )
+        });
+        // Force a deterministic post-resize redraw cycle before comparing.
+        request_terminal_viewport(&mut connection, path, 80, 21, usize::MAX);
+        let _ = wait_for_terminal_frame_where(&connection, path, Duration::from_secs(3), |frame| {
+            frame.rows == 21
+        })
+        .expect("did not observe settle 21-row frame");
+        request_terminal_viewport(&mut connection, path, 80, 20, usize::MAX);
+        let settled = wait_for_terminal_frame_where(
+            &connection,
+            path,
+            Duration::from_secs(3),
+            |frame| frame.rows == 20,
+        )
+        .expect("did not observe settle 20-row frame");
+        let final_text = framebuffer_to_text(&settled);
+
+        let _ = connection.send(ClientToHub::TerminalInput {
+            path: path.to_string(),
+            data: vec![0x03],
+        });
+        let _ = connection.send(ClientToHub::TerminalClose {
+            path: path.to_string(),
+        });
+        final_text
+    };
+
+    let slow_text = run_mode("repo/.makepad/tui_slow_resize_during_output.term", false);
+    let fast_text = run_mode("repo/.makepad/tui_fast_resize_during_output.term", true);
+    let _ = fs::remove_dir_all(&short_mount);
+    assert_eq!(
+        fast_text, slow_text,
+        "fast resize during output diverged from slow resize reference"
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+#[ignore = "stress diagnostic: reproduces persistent corruption after fast resize"]
+fn terminal_makepad_tui_fast_then_slow_same_session_matches_slow_only() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root");
+    let tui_bin = workspace_root.join("target/release/makepad-tui-test");
+    if !tui_bin.exists() {
+        eprintln!(
+            "skipping: makepad-tui-test binary not found at {}",
+            tui_bin.display()
+        );
+        return;
+    }
+
+    let mount = std::path::PathBuf::from("/tmp").join(format!(
+        "mpp_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    ));
+    let _ = fs::remove_dir_all(&mount);
+    fs::create_dir_all(mount.join("src")).unwrap();
+    fs::write(mount.join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: mount.clone(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let jumps: &[u16] = &[40, 10, 38, 12, 36, 14, 34, 16, 32, 18, 30, 20];
+
+    let run_session = |connection: &mut makepad_studio_hub::HubConnection,
+                       path: &str,
+                       do_fast_first: bool|
+     -> String {
+        let tui_log_path = format!(
+            "/tmp/{}.{}.log",
+            path.replace('/', "_"),
+            std::process::id()
+        );
+        let mut env = std::collections::HashMap::new();
+        env.insert("TUI_LOG".to_string(), tui_log_path.clone());
+        let _ = connection.send(ClientToHub::TerminalOpen {
+            path: path.to_string(),
+            cols: 80,
+            rows: 20,
+            env,
+        });
+        let opened = wait_for_message(
+            connection,
+            Duration::from_secs(5),
+            |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == path),
+        );
+        assert!(opened.is_some(), "did not receive TerminalOpened for {}", path);
+
+        request_terminal_viewport(connection, path, 80, 20, usize::MAX);
+        let launch = format!("{}\n", tui_bin.display());
+        let _ = connection.send(ClientToHub::TerminalInput {
+            path: path.to_string(),
+            data: launch.into_bytes(),
+        });
+        let _baseline =
+            wait_for_terminal_frame_where(connection, path, Duration::from_secs(20), |frame| {
+                frame.rows == 20
+                    && framebuffer_to_text(frame).contains("TUI Test")
+                    && framebuffer_to_text(frame).contains("directory:")
+            })
+            .expect("did not observe baseline makepad-tui frame");
+
+        let _ = connection.send(ClientToHub::TerminalInput {
+            path: path.to_string(),
+            data: b"hi\r".to_vec(),
+        });
+
+        if do_fast_first {
+            for _ in 0..10 {
+                for rows in jumps {
+                    request_terminal_viewport(connection, path, 80, *rows, usize::MAX);
+                }
+            }
+        }
+
+        // Slow pass after potential corruption.
+        for _ in 0..2 {
+            for rows in jumps {
+                request_terminal_viewport(connection, path, 80, *rows, usize::MAX);
+                let _ = wait_for_terminal_frame_where(
+                    connection,
+                    path,
+                    Duration::from_secs(2),
+                    |frame| frame.rows == *rows,
+                )
+                .expect("did not observe slow resize step frame");
+            }
+        }
+
+        request_terminal_viewport(connection, path, 80, 20, usize::MAX);
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut final_text = None;
+        let mut last_text = String::new();
+        while Instant::now() < deadline {
+            request_terminal_viewport(connection, path, 80, 20, usize::MAX);
+            let Some(msg) = connection.recv_timeout(Duration::from_millis(120)) else {
+                continue;
+            };
+            let HubToClient::TerminalFramebuffer {
+                path: output_path,
+                frame,
+            } = msg
+            else {
+                continue;
+            };
+            if output_path != path || frame.rows != 20 {
+                continue;
+            }
+            let text = framebuffer_to_text(&frame);
+            last_text = text.clone();
+            if text.contains("[10/10] hi")
+                && text.contains("Enter a prompt...")
+                && text.contains("fake-model")
+                && !text.contains("Working (")
+            {
+                final_text = Some(text);
+                break;
+            }
+        }
+        let _completed_text = final_text.unwrap_or_else(|| {
+            let log_tail = fs::read_to_string(&tui_log_path)
+                .map(|s| tail_lines(&s, 40))
+                .unwrap_or_else(|_| "<missing TUI_LOG>".to_string());
+            panic!(
+                "did not observe completed frame:\n{}\n\nTUI_LOG tail:\n{}",
+                last_text, log_tail
+            )
+        });
+        request_terminal_viewport(connection, path, 80, 21, usize::MAX);
+        let _ = wait_for_terminal_frame_where(connection, path, Duration::from_secs(3), |frame| {
+            frame.rows == 21
+        })
+        .expect("did not observe settle 21-row frame");
+        request_terminal_viewport(connection, path, 80, 20, usize::MAX);
+        let settled = wait_for_terminal_frame_where(
+            connection,
+            path,
+            Duration::from_secs(3),
+            |frame| frame.rows == 20,
+        )
+        .expect("did not observe settle 20-row frame");
+        let final_text = framebuffer_to_text(&settled);
+
+        let _ = connection.send(ClientToHub::TerminalInput {
+            path: path.to_string(),
+            data: vec![0x03],
+        });
+        let _ = connection.send(ClientToHub::TerminalClose {
+            path: path.to_string(),
+        });
+        final_text
+    };
+
+    let slow_only = run_session(
+        &mut connection,
+        "repo/.makepad/tui_slow_only_after_input.term",
+        false,
+    );
+    let fast_then_slow = run_session(
+        &mut connection,
+        "repo/.makepad/tui_fast_then_slow_after_input.term",
+        true,
+    );
+    let _ = fs::remove_dir_all(&mount);
+
+    assert_eq!(
+        fast_then_slow, slow_only,
+        "fast-first corruption persisted into subsequent slow resize"
+    );
 }
 
 #[test]

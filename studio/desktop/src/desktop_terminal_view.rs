@@ -809,7 +809,7 @@ impl Widget for DesktopTerminalView {
             self.send_viewport_request(cx, path, req_cols, req_rows, top_row);
         }
 
-        if let Some(frame) = frame.as_ref().filter(|_| frame_matches_viewport) {
+        if let Some(frame) = frame.as_ref() {
             let bg = Self::decode_rgb(frame.default_bg_rgb);
             self.draw_bg
                 .draw_vars

@@ -190,8 +190,14 @@ enum TerminalViewportAnchor {
 
 struct TerminalSession {
     terminal: Terminal,
+    // Latest viewport size requested by UI (desired PTY size).
     cols: u16,
     rows: u16,
+    // Size currently applied to the terminal emulator model.
+    applied_cols: u16,
+    applied_rows: u16,
+    // Monotonic frame sequence to let clients drop stale frames.
+    frame_seq: u64,
     subscribers: HashMap<ClientId, TerminalClientViewport>,
 }
 
@@ -1228,6 +1234,9 @@ impl HubCore {
                                 terminal,
                                 cols,
                                 rows,
+                                applied_cols: cols,
+                                applied_rows: rows,
+                                frame_seq: 0,
                                 subscribers: HashMap::new(),
                             },
                         );
@@ -2331,25 +2340,53 @@ impl HubCore {
         self.mount_suppress_fs_until
             .insert(mount, Instant::now() + Duration::from_millis(750));
         let _ = append_terminal_history_bytes(&self.vfs, &path, &data);
+        let mut force_bottom_for_sticky = true;
         if let Some(session) = self.terminal_sessions.get_mut(&path) {
+            let old_total_rows = {
+                let screen = session.terminal.screen();
+                screen.scrollback_len() + screen.used_rows()
+            };
             session.terminal.process_bytes(&data);
             let outbound = session.terminal.take_outbound();
             if !outbound.is_empty() {
                 let _ = self.terminal_manager.send_input(&path, outbound);
             }
+            let new_total_rows = {
+                let screen = session.terminal.screen();
+                screen.scrollback_len() + screen.used_rows()
+            };
+            // Only auto-stick to bottom when output actually extends history.
+            // TUI redraw bursts mostly rewrite in-place and should not force a
+            // viewport jump during rapid resize sequences.
+            force_bottom_for_sticky = new_total_rows > old_total_rows;
         }
-        self.push_terminal_frame_updates(&path, true);
+        self.push_terminal_frame_updates(&path, force_bottom_for_sticky);
     }
 
     fn on_terminal_resized(&mut self, path: String, cols: u16, rows: u16) {
         if let Some(session) = self.terminal_sessions.get_mut(&path) {
-            let old_rows = session.rows;
-            session.cols = cols.max(1);
-            session.rows = rows.max(1);
+            let cols = cols.max(1);
+            let rows = rows.max(1);
+            if session.applied_cols == cols && session.applied_rows == rows {
+                return;
+            }
+            let old_rows = session.applied_rows;
+            session.applied_cols = cols;
+            session.applied_rows = rows;
             session
                 .terminal
-                .resize(session.cols as usize, session.rows as usize);
-            Self::adjust_terminal_subscribers_for_resize(session, old_rows, session.rows);
+                .resize(cols as usize, rows as usize);
+            Self::adjust_terminal_subscribers_for_resize(session, old_rows, rows);
+            if cols != session.cols || rows != session.rows {
+                if self
+                    .terminal_manager
+                    .resize(&path, session.cols, session.rows)
+                    .is_err()
+                {
+                    // Ignore retry errors here; primary resize request path reports
+                    // user-visible errors.
+                };
+            }
             self.push_terminal_frame_updates(&path, false);
         }
     }
@@ -2383,17 +2420,23 @@ impl HubCore {
                 .terminal_sessions
                 .get_mut(path)
                 .expect("session presence checked above");
-            if cols != session.cols || rows != session.rows {
-                let old_rows = session.rows;
-                session.cols = cols;
-                session.rows = rows;
-                session.terminal.resize(cols as usize, rows as usize);
+            let needs_resize_request = cols != session.cols
+                || rows != session.rows
+                || session.applied_cols != cols
+                || session.applied_rows != rows;
+            session.cols = cols;
+            session.rows = rows;
+            if needs_resize_request {
                 if let Err(err) = self.terminal_manager.resize(path, cols, rows) {
                     resize_error = Some(err);
                 }
-                Self::adjust_terminal_subscribers_for_resize(session, old_rows, rows);
             }
-            let max_top = Self::terminal_max_top_row(&session.terminal, rows);
+            let anchor_rows = if session.applied_rows == rows {
+                rows
+            } else {
+                session.applied_rows
+            };
+            let max_top = Self::terminal_max_top_row(&session.terminal, anchor_rows);
             let (resolved_top, anchor) = if top_row == usize::MAX {
                 // Sticky/bottom requests should resolve against the terminal's
                 // current total rows after resize/reflow, not a preserved top row.
@@ -2431,8 +2474,8 @@ impl HubCore {
             let Some(session) = self.terminal_sessions.get_mut(path) else {
                 return;
             };
-            let max_top = Self::terminal_max_top_row(&session.terminal, session.rows);
             for viewport in session.subscribers.values_mut() {
+                let max_top = Self::terminal_max_top_row(&session.terminal, viewport.rows);
                 if viewport.anchor == TerminalViewportAnchor::Bottom && force_bottom_for_sticky {
                     viewport.top_row = max_top;
                 }
@@ -2446,11 +2489,13 @@ impl HubCore {
                 .collect();
             let mut updates = Vec::with_capacity(subscribers.len());
             for (client_id, viewport) in subscribers {
+                session.frame_seq = session.frame_seq.wrapping_add(1);
                 let frame = terminal_framebuffer_from_terminal(
                     &session.terminal,
                     viewport.cols,
                     viewport.rows,
                     viewport.top_row,
+                    session.frame_seq,
                 );
                 updates.push((client_id, frame));
             }
@@ -2475,10 +2520,11 @@ impl HubCore {
         new_rows: u16,
     ) {
         let _ = old_rows;
-        let max_top = Self::terminal_max_top_row(&session.terminal, new_rows);
+        let _ = new_rows;
+        let max_top = Self::terminal_max_top_row(&session.terminal, session.rows);
         for viewport in session.subscribers.values_mut() {
             viewport.cols = session.cols;
-            viewport.rows = new_rows;
+            viewport.rows = session.rows;
             if viewport.anchor == TerminalViewportAnchor::Bottom {
                 viewport.top_row = max_top;
             }
@@ -2488,8 +2534,16 @@ impl HubCore {
 
     fn terminal_max_top_row(terminal: &Terminal, rows: u16) -> usize {
         let screen = terminal.screen();
-        let effective_total = screen.scrollback_len() + screen.used_rows();
-        effective_total.saturating_sub(rows.max(1) as usize)
+        let has_custom_scroll_region = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows();
+        if has_custom_scroll_region {
+            // For TUIs, anchor the viewport to the top of the grid, not the bottom.
+            // This prevents scrollback from appearing at the top when the window grows
+            // before the PTY has resized.
+            screen.scrollback_len()
+        } else {
+            let effective_total = screen.scrollback_len() + screen.used_rows();
+            effective_total.saturating_sub(rows.max(1) as usize)
+        }
     }
 
     fn broadcast_live_log_entry(&self, index: usize, entry: LogEntry) {
@@ -2714,14 +2768,28 @@ fn terminal_framebuffer_from_terminal(
     cols: u16,
     rows: u16,
     requested_top_row: usize,
+    frame_id: u64,
 ) -> TerminalFramebuffer {
     let cols = cols.max(1);
     let rows = rows.max(1);
     let cols_usize = cols as usize;
     let rows_usize = rows as usize;
     let screen = terminal.screen();
-    let total_lines = screen.scrollback_len() + screen.used_rows();
-    let max_top = total_lines.saturating_sub(rows_usize);
+    let has_custom_scroll_region = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows();
+    
+    let total_lines = if has_custom_scroll_region {
+        // For TUIs, pretend the total lines includes the full requested viewport height
+        // so the frontend scrollbar allows scrolling down to anchor the grid to the top.
+        screen.scrollback_len() + rows_usize.max(screen.used_rows())
+    } else {
+        screen.scrollback_len() + screen.used_rows()
+    };
+    
+    let max_top = if has_custom_scroll_region {
+        screen.scrollback_len()
+    } else {
+        total_lines.saturating_sub(rows_usize)
+    };
     let top_row = requested_top_row.min(max_top);
     let mut cells = Vec::with_capacity(cols_usize * rows_usize * 7);
     let palette = &terminal.palette.colors;
@@ -2761,6 +2829,7 @@ fn terminal_framebuffer_from_terminal(
     let default_bg = terminal.default_bg;
 
     TerminalFramebuffer {
+        frame_id,
         cols,
         rows,
         top_row,

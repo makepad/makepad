@@ -526,6 +526,7 @@ impl App {
             }
             HubToClient::TerminalOpened { path } => {
                 self.data.terminal_open_paths.insert(path.clone());
+                self.data.terminal_frame_id_by_path.remove(&path);
                 self.data
                     .terminal_framebuffer_by_path
                     .entry(path)
@@ -533,11 +534,20 @@ impl App {
                 self.refresh_active_mount_log_panels(cx);
             }
             HubToClient::TerminalFramebuffer { path, frame } => {
+                if let Some(last_frame_id) = self.data.terminal_frame_id_by_path.get(&path) {
+                    if frame.frame_id <= *last_frame_id {
+                        return;
+                    }
+                }
+                self.data
+                    .terminal_frame_id_by_path
+                    .insert(path.clone(), frame.frame_id);
                 self.data.terminal_framebuffer_by_path.insert(path, frame);
                 self.refresh_active_mount_log_panels(cx);
             }
             HubToClient::TerminalExited { path, code } => {
                 self.data.terminal_open_paths.remove(&path);
+                self.data.terminal_frame_id_by_path.remove(&path);
                 self.data.terminal_framebuffer_by_path.remove(&path);
                 self.set_status(cx, &format!("terminal exited ({})", code));
             }

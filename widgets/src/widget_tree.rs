@@ -39,7 +39,9 @@ struct WidgetTreeInner {
     // Persistent graph, lazily synced from WidgetNode::children()
     graph: HashMap<WidgetUid, GraphNode>,
     dirty: HashSet<WidgetUid>,
-    dense_dirty: bool,
+    // Only set when tree topology changes (nodes added/removed, parent changes).
+    // Property-only changes (name, widget ref, skip_search) are patched in-place.
+    structure_dirty: bool,
 }
 
 struct WidgetTreeNode {
@@ -67,6 +69,25 @@ impl Default for WidgetTree {
 }
 
 impl WidgetTree {
+    // Patch a property in-place in the dense index (no structural rebuild needed).
+    fn patch_name(inner: &mut WidgetTreeInner, uid: WidgetUid, name: LiveId) {
+        if let Some(&idx) = inner.uid_map.get(&uid) {
+            inner.names[idx as usize] = name;
+        }
+    }
+
+    fn patch_widget(inner: &mut WidgetTreeInner, uid: WidgetUid, widget: &WidgetRef) {
+        if let Some(&idx) = inner.uid_map.get(&uid) {
+            inner.nodes[idx as usize].widget = widget.downgrade();
+        }
+    }
+
+    fn patch_skip_search(inner: &mut WidgetTreeInner, uid: WidgetUid, skip_search: bool) {
+        if let Some(&idx) = inner.uid_map.get(&uid) {
+            inner.skip_search[idx as usize] = skip_search;
+        }
+    }
+
     pub fn observe_node(
         &self,
         uid: WidgetUid,
@@ -125,8 +146,20 @@ impl WidgetTree {
             }
         }
 
-        if node_is_new || name_changed || skip_search_changed || parent_changed {
-            inner.dense_dirty = true;
+        // Structural change: new node or parent changed → full rebuild needed
+        if node_is_new || parent_changed {
+            inner.structure_dirty = true;
+        } else {
+            // Property-only changes: patch in-place
+            if name_changed {
+                Self::patch_name(&mut inner, uid, name);
+            }
+            if skip_search_changed {
+                Self::patch_skip_search(&mut inner, uid, skip_search);
+            }
+            if widget_changed {
+                Self::patch_widget(&mut inner, uid, &widget);
+            }
         }
 
         if parent.is_none() && inner.root_uid == WidgetUid(0) {
@@ -138,7 +171,7 @@ impl WidgetTree {
                 if let Some(prev_parent) = inner.graph.get_mut(&prev_parent_uid) {
                     if let Some(pos) = prev_parent.children.iter().position(|child| *child == uid) {
                         prev_parent.children.remove(pos);
-                        inner.dense_dirty = true;
+                        inner.structure_dirty = true;
                     }
                 }
             }
@@ -146,12 +179,13 @@ impl WidgetTree {
 
         if let Some(parent_uid) = parent {
             let mut replaced_same_name = Vec::new();
-            let existing_children = inner
+            let num_children = inner
                 .graph
                 .get(&parent_uid)
-                .map(|parent| parent.children.clone())
-                .unwrap_or_default();
-            for existing_uid in existing_children {
+                .map(|p| p.children.len())
+                .unwrap_or(0);
+            for i in 0..num_children {
+                let existing_uid = inner.graph.get(&parent_uid).unwrap().children[i];
                 if existing_uid == uid {
                     continue;
                 }
@@ -164,7 +198,7 @@ impl WidgetTree {
             if let Some(parent_node) = inner.graph.get_mut(&parent_uid) {
                 if !parent_node.children.iter().any(|child| *child == uid) {
                     parent_node.children.push(uid);
-                    inner.dense_dirty = true;
+                    inner.structure_dirty = true;
                 }
                 inner.dirty.insert(parent_uid);
             }
@@ -184,7 +218,7 @@ impl WidgetTree {
                         Self::remove_subtree(&mut inner, old_uid);
                     }
                 }
-                inner.dense_dirty = true;
+                inner.structure_dirty = true;
             }
         }
 
@@ -222,11 +256,12 @@ impl WidgetTree {
             if inner.root_uid == WidgetUid(0) {
                 inner.root_uid = parent_uid;
             }
-            inner.dense_dirty = true;
+            inner.structure_dirty = true;
         }
 
         let mut old_parent = None;
         let mut child_is_new = false;
+        let mut widget_changed = false;
         let mut name_changed = false;
         let mut skip_search_changed = false;
         let mut parent_changed = false;
@@ -241,6 +276,7 @@ impl WidgetTree {
                 if node.placeholder || node.widget != widget {
                     node.widget = widget.downgrade();
                     node.placeholder = false;
+                    widget_changed = true;
                 }
                 if node.skip_search != child_skip_search {
                     node.skip_search = child_skip_search;
@@ -267,8 +303,20 @@ impl WidgetTree {
             }
         }
 
-        if child_is_new || name_changed || skip_search_changed || parent_changed {
-            inner.dense_dirty = true;
+        // Structural: new node or parent changed
+        if child_is_new || parent_changed {
+            inner.structure_dirty = true;
+        } else {
+            // Property-only: patch in-place
+            if name_changed {
+                Self::patch_name(&mut inner, child_uid, name);
+            }
+            if skip_search_changed {
+                Self::patch_skip_search(&mut inner, child_uid, child_skip_search);
+            }
+            if widget_changed {
+                Self::patch_widget(&mut inner, child_uid, &widget);
+            }
         }
 
         if old_parent != Some(parent_uid) {
@@ -280,19 +328,20 @@ impl WidgetTree {
                         .position(|entry| *entry == child_uid)
                     {
                         prev_parent.children.remove(pos);
-                        inner.dense_dirty = true;
+                        inner.structure_dirty = true;
                     }
                 }
             }
         }
 
         let mut replaced_same_name = Vec::new();
-        let existing_children = inner
+        let num_children = inner
             .graph
             .get(&parent_uid)
-            .map(|parent| parent.children.clone())
-            .unwrap_or_default();
-        for existing_uid in existing_children {
+            .map(|p| p.children.len())
+            .unwrap_or(0);
+        for i in 0..num_children {
+            let existing_uid = inner.graph.get(&parent_uid).unwrap().children[i];
             if existing_uid == child_uid {
                 continue;
             }
@@ -305,7 +354,7 @@ impl WidgetTree {
         if let Some(parent_node) = inner.graph.get_mut(&parent_uid) {
             if !parent_node.children.iter().any(|entry| *entry == child_uid) {
                 parent_node.children.push(child_uid);
-                inner.dense_dirty = true;
+                inner.structure_dirty = true;
             }
         }
 
@@ -324,7 +373,7 @@ impl WidgetTree {
                     Self::remove_subtree(&mut inner, old_uid);
                 }
             }
-            inner.dense_dirty = true;
+            inner.structure_dirty = true;
         }
 
         inner.dirty.insert(child_uid);
@@ -364,12 +413,13 @@ impl WidgetTree {
                 node.skip_search = skip_search;
                 skip_search_changed = true;
             }
+            // Property-only: patch in-place
             if widget_changed {
                 inner.dirty.insert(uid);
-                inner.dense_dirty = true;
+                Self::patch_widget(&mut inner, uid, &widget);
             }
             if skip_search_changed {
-                inner.dense_dirty = true;
+                Self::patch_skip_search(&mut inner, uid, skip_search);
             }
             if inner.root_uid == WidgetUid(0) {
                 inner.root_uid = uid;
@@ -377,6 +427,7 @@ impl WidgetTree {
             return;
         }
 
+        // New node → structural change
         inner.graph.insert(
             uid,
             GraphNode {
@@ -392,7 +443,7 @@ impl WidgetTree {
             inner.root_uid = uid;
         }
         inner.dirty.insert(uid);
-        inner.dense_dirty = true;
+        inner.structure_dirty = true;
     }
 
     pub fn set_root_widget(&self, widget: WidgetRef) {
@@ -458,19 +509,31 @@ impl WidgetTree {
                 if let Some(prev_parent) = inner.graph.get_mut(&prev_parent_uid) {
                     if let Some(pos) = prev_parent.children.iter().position(|child| *child == uid) {
                         prev_parent.children.remove(pos);
-                        inner.dense_dirty = true;
+                        inner.structure_dirty = true;
                     }
                 }
             }
         }
 
+        // Root change or new node or parent change → structural
         if inner.root_uid != uid {
             inner.root_uid = uid;
-            inner.dense_dirty = true;
+            inner.structure_dirty = true;
         }
 
-        if node_is_new || widget_changed || name_changed || skip_search_changed || parent_changed {
-            inner.dense_dirty = true;
+        if node_is_new || parent_changed {
+            inner.structure_dirty = true;
+        } else {
+            // Property-only: patch in-place
+            if name_changed {
+                Self::patch_name(&mut inner, uid, LiveId(0));
+            }
+            if widget_changed {
+                Self::patch_widget(&mut inner, uid, &widget);
+            }
+            if skip_search_changed {
+                Self::patch_skip_search(&mut inner, uid, skip_search);
+            }
         }
 
         inner.dirty.insert(uid);
@@ -510,7 +573,7 @@ impl WidgetTree {
             if inner.root_uid == WidgetUid(0) {
                 inner.root_uid = uid;
             }
-            inner.dense_dirty = true;
+            inner.structure_dirty = true;
         }
 
         let mut pending = Vec::new();
@@ -531,7 +594,7 @@ impl WidgetTree {
 
     fn sync_dirty(&self) {
         let mut inner = self.inner.borrow_mut();
-        if inner.dirty.is_empty() && !inner.dense_dirty {
+        if inner.dirty.is_empty() && !inner.structure_dirty {
             return;
         }
 
@@ -547,7 +610,7 @@ impl WidgetTree {
             inner.dirty.insert(uid);
         }
 
-        if inner.dense_dirty {
+        if inner.structure_dirty {
             Self::rebuild_dense(&mut inner);
         }
     }
@@ -623,14 +686,16 @@ impl WidgetTree {
             let mut old_parent = None;
             let mut child_is_new = false;
             let mut child_widget_changed = false;
+            let mut child_name_changed = false;
             let mut child_skip_search_changed = false;
+            let mut child_parent_changed = false;
 
             match inner.graph.get_mut(&child_uid) {
                 Some(child_node) => {
                     old_parent = child_node.parent;
                     if child_node.name != child_name {
                         child_node.name = child_name;
-                        inner.dense_dirty = true;
+                        child_name_changed = true;
                     }
                     if child_node.placeholder || child_node.widget != child_widget {
                         child_node.widget = child_widget.downgrade();
@@ -643,7 +708,7 @@ impl WidgetTree {
                     }
                     if child_node.parent != Some(uid) {
                         child_node.parent = Some(uid);
-                        inner.dense_dirty = true;
+                        child_parent_changed = true;
                     }
                 }
                 None => {
@@ -659,7 +724,25 @@ impl WidgetTree {
                         },
                     );
                     child_is_new = true;
-                    inner.dense_dirty = true;
+                    inner.structure_dirty = true;
+                }
+            }
+
+            // Structural: new node or parent changed
+            if child_parent_changed {
+                inner.structure_dirty = true;
+            }
+
+            if !child_is_new && !child_parent_changed {
+                // Property-only: patch in-place
+                if child_name_changed {
+                    Self::patch_name(inner, child_uid, child_name);
+                }
+                if child_skip_search_changed {
+                    Self::patch_skip_search(inner, child_uid, child_skip_search);
+                }
+                if child_widget_changed {
+                    Self::patch_widget(inner, child_uid, &child_widget);
                 }
             }
 
@@ -672,14 +755,10 @@ impl WidgetTree {
                             .position(|entry| *entry == child_uid)
                         {
                             prev_parent.children.remove(pos);
-                            inner.dense_dirty = true;
+                            inner.structure_dirty = true;
                         }
                     }
                 }
-            }
-
-            if child_skip_search_changed {
-                inner.dense_dirty = true;
             }
 
             if child_is_new || child_widget_changed {
@@ -698,7 +777,7 @@ impl WidgetTree {
         };
 
         if parent_children_changed {
-            inner.dense_dirty = true;
+            inner.structure_dirty = true;
         }
 
         for removed_uid in old_children {
@@ -727,7 +806,7 @@ impl WidgetTree {
         };
 
         inner.dirty.remove(&uid);
-        inner.dense_dirty = true;
+        inner.structure_dirty = true;
 
         for child_uid in node.children {
             let has_same_parent = inner
@@ -749,7 +828,7 @@ impl WidgetTree {
 
         if inner.graph.is_empty() {
             inner.root_uid = WidgetUid(0);
-            inner.dense_dirty = false;
+            inner.structure_dirty = false;
             return;
         }
 
@@ -762,17 +841,24 @@ impl WidgetTree {
                 .unwrap_or(WidgetUid(0));
         }
 
-        let mut visited = HashSet::new();
+        // Reserve capacity based on graph size to avoid repeated reallocation
+        let cap = inner.graph.len();
+        inner.names.reserve(cap);
+        inner.subtree_end.reserve(cap);
+        inner.skip_search.reserve(cap);
+        inner.nodes.reserve(cap);
+        inner.uid_map.reserve(cap);
 
         if inner.root_uid != WidgetUid(0) {
-            Self::build_dense_from(inner, inner.root_uid, NONE, &mut visited);
+            Self::build_dense_from_iterative(inner, inner.root_uid, NONE);
         }
 
+        // Handle orphan roots (nodes with no parent not yet visited)
         let roots: Vec<WidgetUid> = inner
             .graph
             .iter()
             .filter_map(|(uid, node)| {
-                if node.parent.is_none() && !visited.contains(uid) {
+                if node.parent.is_none() && !inner.uid_map.contains_key(uid) {
                     Some(*uid)
                 } else {
                     None
@@ -781,48 +867,110 @@ impl WidgetTree {
             .collect();
 
         for uid in roots {
-            Self::build_dense_from(inner, uid, NONE, &mut visited);
+            Self::build_dense_from_iterative(inner, uid, NONE);
         }
-        inner.dense_dirty = false;
+        inner.structure_dirty = false;
     }
 
-    fn build_dense_from(
+    /// Iterative DFS dense-index builder. Reads children by index directly from
+    /// the graph — no Vec cloning, no recursive stack frames.
+    fn build_dense_from_iterative(
         inner: &mut WidgetTreeInner,
-        uid: WidgetUid,
-        parent_idx: u32,
-        visited: &mut HashSet<WidgetUid>,
+        root_uid: WidgetUid,
+        root_parent_idx: u32,
     ) {
-        if !visited.insert(uid) {
-            return;
+        #[derive(Clone, Copy)]
+        struct Frame {
+            uid: WidgetUid,
+            dense_idx: u32,
+            child_pos: u32,
+            num_children: u32,
         }
 
-        let Some(node) = inner.graph.get(&uid) else {
+        let mut frames: Vec<Frame> = Vec::with_capacity(64);
+
+        // Emit root node
+        if inner.uid_map.contains_key(&root_uid) {
+            return; // Already visited (cycle guard)
+        }
+        let Some(root_node) = inner.graph.get(&root_uid) else {
             return;
         };
 
-        let name = node.name;
-        let widget = node.widget.clone();
-        let skip_search = node.skip_search;
-        let children = node.children.clone();
-
-        let idx = inner.names.len() as u32;
-        inner.names.push(name);
-        inner.subtree_end.push(idx + 1);
-        inner.skip_search.push(skip_search);
+        let root_dense_idx = inner.names.len() as u32;
+        inner.names.push(root_node.name);
+        inner.subtree_end.push(root_dense_idx + 1); // placeholder
+        inner.skip_search.push(root_node.skip_search);
         inner.nodes.push(WidgetTreeNode {
-            uid,
-            widget,
-            parent: parent_idx,
+            uid: root_uid,
+            widget: root_node.widget.clone(),
+            parent: root_parent_idx,
         });
-        inner.uid_map.insert(uid, idx);
+        inner.uid_map.insert(root_uid, root_dense_idx);
 
-        for child_uid in children {
-            if inner.graph.contains_key(&child_uid) {
-                Self::build_dense_from(inner, child_uid, idx, visited);
+        let root_num_children = root_node.children.len() as u32;
+        frames.push(Frame {
+            uid: root_uid,
+            dense_idx: root_dense_idx,
+            child_pos: 0,
+            num_children: root_num_children,
+        });
+
+        while let Some(frame) = frames.last_mut() {
+            if frame.child_pos >= frame.num_children {
+                // All children processed — fixup subtree_end
+                let dense_idx = frame.dense_idx;
+                inner.subtree_end[dense_idx as usize] = inner.names.len() as u32;
+                frames.pop();
+                continue;
+            }
+
+            // Get next child uid from the graph (borrow graph, read child at position)
+            let child_pos = frame.child_pos as usize;
+            frame.child_pos += 1;
+            let parent_dense_idx = frame.dense_idx;
+            let parent_uid = frame.uid;
+
+            let child_uid = match inner.graph.get(&parent_uid) {
+                Some(parent_node) if child_pos < parent_node.children.len() => {
+                    parent_node.children[child_pos]
+                }
+                _ => continue, // parent removed or child index out of bounds
+            };
+
+            // Skip if already visited (cycle guard) or not in graph
+            if inner.uid_map.contains_key(&child_uid) {
+                continue;
+            }
+            let Some(child_node) = inner.graph.get(&child_uid) else {
+                continue;
+            };
+
+            // Emit child node
+            let child_dense_idx = inner.names.len() as u32;
+            inner.names.push(child_node.name);
+            inner.subtree_end.push(child_dense_idx + 1); // placeholder
+            inner.skip_search.push(child_node.skip_search);
+            inner.nodes.push(WidgetTreeNode {
+                uid: child_uid,
+                widget: child_node.widget.clone(),
+                parent: parent_dense_idx,
+            });
+            inner.uid_map.insert(child_uid, child_dense_idx);
+
+            let child_num_children = child_node.children.len() as u32;
+            if child_num_children > 0 {
+                frames.push(Frame {
+                    uid: child_uid,
+                    dense_idx: child_dense_idx,
+                    child_pos: 0,
+                    num_children: child_num_children,
+                });
+            } else {
+                // Leaf node — subtree_end is already correct (idx + 1)
             }
         }
 
-        inner.subtree_end[idx as usize] = inner.names.len() as u32;
     }
 
     pub fn find_within_from_borrowed<F>(
