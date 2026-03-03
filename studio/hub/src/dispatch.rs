@@ -1187,6 +1187,7 @@ impl HubCore {
                         &path,
                         cols,
                         rows,
+                        rows,
                         usize::MAX,
                     );
                     return;
@@ -1249,6 +1250,7 @@ impl HubCore {
                             &path,
                             cols,
                             rows,
+                            rows,
                             usize::MAX,
                         );
                     }
@@ -1264,9 +1266,10 @@ impl HubCore {
                 path,
                 cols,
                 rows,
+                pty_rows,
                 top_row,
             } => {
-                self.send_terminal_viewport_for_client(client_id, &path, cols, rows, top_row);
+                self.send_terminal_viewport_for_client(client_id, &path, cols, rows, pty_rows, top_row);
             }
             ClientToHub::TerminalClose { path } => {
                 self.terminal_manager.close_terminal(&path);
@@ -2406,6 +2409,7 @@ impl HubCore {
         path: &str,
         cols: u16,
         rows: u16,
+        pty_rows: u16,
         top_row: usize,
     ) {
         if !self.terminal_sessions.contains_key(path) {
@@ -2414,6 +2418,7 @@ impl HubCore {
         }
         let cols = cols.max(1);
         let rows = rows.max(1);
+        let pty_rows = pty_rows.max(1);
         let mut resize_error = None;
         {
             let session = self
@@ -2421,13 +2426,13 @@ impl HubCore {
                 .get_mut(path)
                 .expect("session presence checked above");
             let needs_resize_request = cols != session.cols
-                || rows != session.rows
+                || pty_rows != session.rows
                 || session.applied_cols != cols
-                || session.applied_rows != rows;
+                || session.applied_rows != pty_rows;
             session.cols = cols;
-            session.rows = rows;
+            session.rows = pty_rows;
             if needs_resize_request {
-                if let Err(err) = self.terminal_manager.resize(path, cols, rows) {
+                if let Err(err) = self.terminal_manager.resize(path, cols, pty_rows) {
                     resize_error = Some(err);
                 }
             }
@@ -2516,10 +2521,12 @@ impl HubCore {
     ) {
         let _ = old_rows;
         let _ = new_rows;
-        let max_top = Self::terminal_max_top_row(&session.terminal, session.rows);
         for viewport in session.subscribers.values_mut() {
             viewport.cols = session.cols;
-            viewport.rows = session.rows;
+            // Do NOT overwrite viewport.rows with session.rows (pty_rows).
+            // viewport.rows is the requested render height, which is typically
+            // slightly larger than pty_rows to cover sub-pixel scrolling.
+            let max_top = Self::terminal_max_top_row(&session.terminal, viewport.rows);
             if viewport.anchor == TerminalViewportAnchor::Bottom {
                 viewport.top_row = max_top;
             }
@@ -2529,8 +2536,8 @@ impl HubCore {
 
     fn terminal_max_top_row(terminal: &Terminal, rows: u16) -> usize {
         let screen = terminal.screen();
-        let has_custom_scroll_region = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows();
-        let total_lines = if has_custom_scroll_region {
+        let is_tui = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows() || terminal.modes.alt_screen;
+        let total_lines = if is_tui {
             screen.scrollback_len() + screen.rows()
         } else {
             screen.scrollback_len() + screen.used_rows()
@@ -2767,9 +2774,9 @@ fn terminal_framebuffer_from_terminal(
     let cols_usize = cols as usize;
     let rows_usize = rows as usize;
     let screen = terminal.screen();
-    let has_custom_scroll_region = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows();
+    let is_tui = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows() || terminal.modes.alt_screen;
     
-    let total_lines = if has_custom_scroll_region {
+    let total_lines = if is_tui {
         screen.scrollback_len() + screen.rows()
     } else {
         screen.scrollback_len() + screen.used_rows()
@@ -2831,7 +2838,7 @@ fn terminal_framebuffer_from_terminal(
         default_bg_rgb: rgb_to_u32(default_bg.r, default_bg.g, default_bg.b),
         bracketed_paste: terminal.modes.bracketed_paste,
         cursor_keys_application_mode: terminal.modes.cursor_keys,
-        is_tui: has_custom_scroll_region,
+        is_tui,
         cells,
     }
 }

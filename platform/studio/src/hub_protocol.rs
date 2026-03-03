@@ -172,6 +172,7 @@ pub enum ClientToHub {
         path: String,
         cols: u16,
         rows: u16,
+        pty_rows: u16,
         top_row: usize,
     },
     TerminalClose {
