@@ -10,7 +10,7 @@ pub mod desktop_run_view;
 pub mod desktop_terminal_view;
 
 pub use makepad_code_editor;
-pub use makepad_studio_backend;
+pub use makepad_studio_hub;
 pub use makepad_widgets;
 pub use makepad_widgets::makepad_draw;
 pub use makepad_widgets::makepad_platform;

@@ -1,9 +1,9 @@
 use crate::{
     makepad_code_editor::CodeSession,
-    makepad_studio_backend::StudioConnection,
+    makepad_studio_hub::HubConnection,
     makepad_widgets::{file_tree::GitStatusDotKind, *},
 };
-use makepad_studio_protocol::backend_protocol::{
+use makepad_studio_protocol::hub_protocol::{
     EventSample, FileNodeType, FileTreeData, GCSample, GPUSample, GitStatus, LogSource, QueryId,
     RunnableBuild,
 };
@@ -106,7 +106,7 @@ impl Default for MountState {
 
 #[derive(Default)]
 pub struct AppData {
-    pub studio: Option<StudioConnection>,
+    pub studio: Option<HubConnection>,
     pub mounts: HashMap<String, MountState>,
     pub tab_to_mount: HashMap<LiveId, String>,
     pub active_mount: Option<String>,
@@ -360,7 +360,7 @@ fn git_status_rank(status: GitStatus) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_studio_protocol::backend_protocol::FileNode;
+    use makepad_studio_protocol::hub_protocol::FileNode;
 
     fn dir(path: &str) -> FileNode {
         FileNode {

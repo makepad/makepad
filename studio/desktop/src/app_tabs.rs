@@ -230,7 +230,7 @@ impl App {
         }
         self.set_status(cx, &format!("opening {}", path));
         self.data.pending_open_paths.insert(path.clone());
-        let _ = self.send_studio(UIToStudio::OpenTextFile { path });
+        let _ = self.send_studio(ClientToHub::OpenTextFile { path });
     }
 
     pub(super) fn open_node_in_editor(&mut self, cx: &mut Cx, node_id: LiveId) {
@@ -251,7 +251,7 @@ impl App {
             return;
         };
         let content = session.document().as_text().to_string();
-        let _ = self.send_studio(UIToStudio::SaveTextFile { path, content });
+        let _ = self.send_studio(ClientToHub::SaveTextFile { path, content });
         self.set_status(cx, "saving...");
     }
 
@@ -481,7 +481,7 @@ impl App {
             self.data
                 .profiler_query_build_by_query
                 .remove(&prev_query_id);
-            let _ = self.send_studio(UIToStudio::CancelQuery {
+            let _ = self.send_studio(ClientToHub::CancelQuery {
                 query_id: prev_query_id,
             });
         }
@@ -490,7 +490,7 @@ impl App {
             .profiler_time_start_by_build
             .get(&build_id)
             .copied();
-        let Some(query_id) = self.send_studio(UIToStudio::QueryProfiler {
+        let Some(query_id) = self.send_studio(ClientToHub::QueryProfiler {
             build_id: Some(build_id),
             sample_type: None,
             time_start,
@@ -523,7 +523,7 @@ impl App {
     pub(super) fn stop_profiler_query_for_build(&mut self, build_id: QueryId) {
         if let Some(query_id) = self.data.live_profiler_query_by_build.remove(&build_id) {
             self.data.profiler_query_build_by_query.remove(&query_id);
-            let _ = self.send_studio(UIToStudio::CancelQuery { query_id });
+            let _ = self.send_studio(ClientToHub::CancelQuery { query_id });
         }
     }
 
@@ -589,7 +589,7 @@ impl App {
 
     pub(super) fn send_terminal_input(&mut self, path: &str, data: Vec<u8>) {
         self.ensure_terminal_session_open(path);
-        let _ = self.send_studio(UIToStudio::TerminalInput {
+        let _ = self.send_studio(ClientToHub::TerminalInput {
             path: path.to_string(),
             data,
         });
@@ -603,7 +603,7 @@ impl App {
         if !self.data.terminal_open_paths.contains(path) {
             return;
         }
-        let _ = self.send_studio(UIToStudio::TerminalResize {
+        let _ = self.send_studio(ClientToHub::TerminalResize {
             path: path.to_string(),
             cols,
             rows,
@@ -663,7 +663,7 @@ impl App {
             .insert(path.to_string(), (line, column));
         if !self.data.pending_open_paths.contains(path) {
             self.data.pending_open_paths.insert(path.to_string());
-            let _ = self.send_studio(UIToStudio::OpenTextFile {
+            let _ = self.send_studio(ClientToHub::OpenTextFile {
                 path: path.to_string(),
             });
         }
@@ -772,7 +772,7 @@ impl App {
         if !outside_studio {
             self.close_mount_run_and_log_tabs(cx, mount);
         }
-        let Some(build_id) = self.send_studio(UIToStudio::Run {
+        let Some(build_id) = self.send_studio(ClientToHub::Run {
             mount: mount.to_string(),
             process: package.to_string(),
             args: Vec::new(),
@@ -811,7 +811,7 @@ impl App {
             };
             match run_action {
                 DesktopRunViewAction::ForwardToApp { build_id, msg_bin } => {
-                    let _ = self.send_studio(UIToStudio::ForwardToApp {
+                    let _ = self.send_studio(ClientToHub::ForwardToApp {
                         build_id: *build_id,
                         msg_bin: msg_bin.clone(),
                     });
@@ -924,7 +924,7 @@ impl App {
         };
         self.data.run_tab_by_build.remove(&state.build_id);
         self.data.build_to_mount.remove(&state.build_id);
-        let _ = self.send_studio(UIToStudio::StopBuild {
+        let _ = self.send_studio(ClientToHub::StopBuild {
             build_id: state.build_id,
         });
         if let Some(dock) = self.mount_workspace_dock(cx, &state.mount) {

@@ -3,9 +3,9 @@ use makepad_micro_serde::{DeBin, SerBin};
 use makepad_network::{
     HttpMethod, HttpRequest, NetworkConfig, NetworkResponse, NetworkRuntime, WsMessage, WsSend,
 };
-use makepad_studio_backend::{BackendConfig, MountConfig, StudioBackend};
-use makepad_studio_protocol::backend_protocol::{
-    ClientId, QueryId, StudioToUI, UIToStudio, UIToStudioEnvelope,
+use makepad_studio_hub::{HubConfig, MountConfig, StudioHub};
+use makepad_studio_protocol::hub_protocol::{
+    ClientId, QueryId, HubToClient, ClientToHub, ClientToHubEnvelope,
 };
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -65,7 +65,7 @@ fn websocket_ui_hello_and_load_file_tree_roundtrip() {
     let Some(port) = find_free_port() else {
         return;
     };
-    let config = BackendConfig {
+    let config = HubConfig {
         listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         post_max_size: 1024 * 1024,
         mounts: vec![MountConfig {
@@ -75,7 +75,7 @@ fn websocket_ui_hello_and_load_file_tree_roundtrip() {
         enable_in_process_gateway: false,
     };
 
-    let _backend = match StudioBackend::start_headless(config) {
+    let _backend = match StudioHub::start_headless(config) {
         Ok(v) => v,
         Err(err) => {
             if err.contains("failed to bind") {
@@ -100,16 +100,16 @@ fn websocket_ui_hello_and_load_file_tree_roundtrip() {
     assert!(opened.is_some(), "did not receive WsOpened");
 
     let hello_bin = wait_for_ws_binary(&runtime, socket_id, Duration::from_secs(3));
-    let hello = StudioToUI::deserialize_bin(&hello_bin).expect("decode hello");
+    let hello = HubToClient::deserialize_bin(&hello_bin).expect("decode hello");
     let client_id = match hello {
-        StudioToUI::Hello { client_id } => client_id,
+        HubToClient::Hello { client_id } => client_id,
         other => panic!("expected hello, got {:?}", other),
     };
     assert_ne!(client_id, ClientId(u16::MAX));
 
-    let envelope = UIToStudioEnvelope {
+    let envelope = ClientToHubEnvelope {
         query_id: QueryId::new(client_id, 0),
-        msg: UIToStudio::LoadFileTree {
+        msg: ClientToHub::LoadFileTree {
             mount: "repo".to_string(),
         },
     };
@@ -118,9 +118,9 @@ fn websocket_ui_hello_and_load_file_tree_roundtrip() {
         .expect("ws_send");
 
     let tree_bin = wait_for_ws_binary(&runtime, socket_id, Duration::from_secs(3));
-    let tree_msg = StudioToUI::deserialize_bin(&tree_bin).expect("decode tree");
+    let tree_msg = HubToClient::deserialize_bin(&tree_bin).expect("decode tree");
     match tree_msg {
-        StudioToUI::FileTree { mount, data } => {
+        HubToClient::FileTree { mount, data } => {
             assert_eq!(mount, "repo");
             assert!(data.nodes.iter().any(|n| n.path == "repo/src/lib.rs"));
         }

@@ -10,10 +10,10 @@ use crate::{
         code_editor::CodeEditorAction, decoration::DecorationSet, history::NewGroup,
         selection::Affinity, session::SelectionMode, text::Position, CodeDocument, CodeSession,
     },
-    makepad_studio_backend::{BackendConfig, MountConfig, StudioBackend},
+    makepad_studio_hub::{HubConfig, MountConfig, StudioHub},
     makepad_widgets::*,
 };
-use makepad_studio_protocol::backend_protocol::{FileNodeType, LogEntry, QueryId, StudioToUI, UIToStudio};
+use makepad_studio_protocol::hub_protocol::{FileNodeType, LogEntry, QueryId, HubToClient, ClientToHub};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Component, Path};

@@ -1,4 +1,4 @@
-use crate::dispatch::StudioEvent;
+use crate::dispatch::HubEvent;
 use makepad_terminal_core::Pty;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -36,7 +36,7 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
         env: HashMap<String, String>,
-        event_tx: Sender<StudioEvent>,
+        event_tx: Sender<HubEvent>,
     ) -> Result<(), String> {
         if let Some(existing) = self.terminals.get(&path) {
             let _ = existing
@@ -105,7 +105,7 @@ fn run_terminal_loop(
     path: String,
     pty: Pty,
     control_rx: Receiver<TerminalControl>,
-    event_tx: Sender<StudioEvent>,
+    event_tx: Sender<HubEvent>,
 ) {
     let mut should_close = false;
     let mut pending_input = VecDeque::<PendingInput>::new();
@@ -164,7 +164,7 @@ fn run_terminal_loop(
 
         if let Some(data) = pty.try_read() {
             if !data.is_empty() {
-                let _ = event_tx.send(StudioEvent::TerminalOutput {
+                let _ = event_tx.send(HubEvent::TerminalOutput {
                     path: path.clone(),
                     data,
                 });
@@ -178,5 +178,5 @@ fn run_terminal_loop(
         }
     }
 
-    let _ = event_tx.send(StudioEvent::TerminalExited { path, exit_code: 0 });
+    let _ = event_tx.send(HubEvent::TerminalExited { path, exit_code: 0 });
 }

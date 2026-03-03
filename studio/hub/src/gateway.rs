@@ -1,5 +1,5 @@
-use crate::dispatch::StudioEvent;
-use makepad_studio_protocol::backend_protocol::QueryId;
+use crate::dispatch::HubEvent;
+use makepad_studio_protocol::hub_protocol::QueryId;
 use makepad_network::{
     start_http_server, HttpServer, HttpServerRequest, HttpServerResponse, ToUISender,
 };
@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
 
 enum SocketRole {
-    Ui,
+    Client,
     App,
     BuildBox,
 }
@@ -23,7 +23,7 @@ pub struct GatewayHandle {
 pub fn start_http_gateway(
     listen_address: SocketAddr,
     post_max_size: u64,
-    event_tx: Sender<StudioEvent>,
+    event_tx: Sender<HubEvent>,
 ) -> Result<GatewayHandle, String> {
     let (request_tx, request_rx) = mpsc::channel::<HttpServerRequest>();
     let http_thread = start_http_server(HttpServer {
@@ -44,7 +44,7 @@ pub fn start_http_gateway(
                 } => {
                     if headers.path == "/$studio_ui" {
                         socket_roles.insert(web_socket_id, SocketRole::Ui);
-                        let _ = event_tx.send(StudioEvent::UiConnected {
+                        let _ = event_tx.send(HubEvent::ClientConnected {
                             web_socket_id: web_socket_id,
                             sender: ToUISender::from_sender(response_sender),
                             typed_sender: None,
@@ -53,7 +53,7 @@ pub fn start_http_gateway(
                     }
                     if let Some(build_id) = parse_app_path(&headers.path) {
                         socket_roles.insert(web_socket_id, SocketRole::App);
-                        let _ = event_tx.send(StudioEvent::AppConnected {
+                        let _ = event_tx.send(HubEvent::AppConnected {
                             build_id,
                             web_socket_id: web_socket_id,
                             sender: response_sender,
@@ -62,7 +62,7 @@ pub fn start_http_gateway(
                     }
                     if headers.path == "/$studio_buildbox" {
                         socket_roles.insert(web_socket_id, SocketRole::BuildBox);
-                        let _ = event_tx.send(StudioEvent::BuildBoxConnected {
+                        let _ = event_tx.send(HubEvent::BuildBoxConnected {
                             web_socket_id: web_socket_id,
                             sender: response_sender,
                         });
@@ -75,15 +75,15 @@ pub fn start_http_gateway(
                         match role {
                             SocketRole::Ui => {
                                 let _ =
-                                    event_tx.send(StudioEvent::UiDisconnected { web_socket_id: web_socket_id });
+                                    event_tx.send(HubEvent::ClientDisconnected { web_socket_id: web_socket_id });
                             }
                             SocketRole::App => {
                                 let _ =
-                                    event_tx.send(StudioEvent::AppDisconnected { web_socket_id: web_socket_id });
+                                    event_tx.send(HubEvent::AppDisconnected { web_socket_id: web_socket_id });
                             }
                             SocketRole::BuildBox => {
                                 let _ = event_tx
-                                    .send(StudioEvent::BuildBoxDisconnected { web_socket_id: web_socket_id });
+                                    .send(HubEvent::BuildBoxDisconnected { web_socket_id: web_socket_id });
                             }
                         }
                     }
@@ -94,19 +94,19 @@ pub fn start_http_gateway(
                     data,
                 } => match socket_roles.get(&web_socket_id) {
                     Some(SocketRole::Ui) => {
-                        let _ = event_tx.send(StudioEvent::UiBinary {
+                        let _ = event_tx.send(HubEvent::ClientBinary {
                             web_socket_id: web_socket_id,
                             data,
                         });
                     }
                     Some(SocketRole::App) => {
-                        let _ = event_tx.send(StudioEvent::AppBinary {
+                        let _ = event_tx.send(HubEvent::AppBinary {
                             web_socket_id: web_socket_id,
                             data,
                         });
                     }
                     Some(SocketRole::BuildBox) => {
-                        let _ = event_tx.send(StudioEvent::BuildBoxBinary {
+                        let _ = event_tx.send(HubEvent::BuildBoxBinary {
                             web_socket_id: web_socket_id,
                             data,
                         });
@@ -119,7 +119,7 @@ pub fn start_http_gateway(
                     string,
                 } => match socket_roles.get(&web_socket_id) {
                     Some(SocketRole::Ui) => {
-                        let _ = event_tx.send(StudioEvent::UiText {
+                        let _ = event_tx.send(HubEvent::ClientText {
                             web_socket_id: web_socket_id,
                             text: string,
                         });

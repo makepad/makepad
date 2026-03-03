@@ -1,5 +1,5 @@
 use crate::worker_pool::WorkerPool;
-use makepad_studio_protocol::backend_protocol::{
+use makepad_studio_protocol::hub_protocol::{
     FileError, FileNode, FileNodeType, FileTreeData, GitCommitInfo, GitLog, GitStatus, SearchResult,
 };
 use makepad_git::{FileStatus as GitFileStatus, GitError, Repository as GitRepository};

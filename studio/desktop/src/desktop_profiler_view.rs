@@ -2,7 +2,7 @@ use crate::{
     app_data::{AppData, UiProfilerSamples},
     makepad_widgets::*,
 };
-use makepad_studio_protocol::backend_protocol::QueryId;
+use makepad_studio_protocol::hub_protocol::QueryId;
 use std::fmt::Write;
 
 script_mod! {

@@ -1,11 +1,11 @@
-use makepad_studio_backend::{BackendConfig, MountConfig, StudioBackend};
-use makepad_studio_protocol::backend_protocol::{StudioToUI, UIToStudio};
+use makepad_studio_hub::{HubConfig, MountConfig, StudioHub};
+use makepad_studio_protocol::hub_protocol::{HubToClient, ClientToHub};
 use std::time::Duration;
 
 #[test]
 fn load_file_tree_smoke() {
     let root = std::env::current_dir().expect("current_dir");
-    let config = BackendConfig {
+    let config = HubConfig {
         mounts: vec![MountConfig {
             name: "repo".to_string(),
             path: root,
@@ -13,8 +13,8 @@ fn load_file_tree_smoke() {
         enable_in_process_gateway: false,
         ..Default::default()
     };
-    let mut conn = StudioBackend::start_in_process(config).expect("start backend");
-    let _query_id = conn.send(UIToStudio::LoadFileTree {
+    let mut conn = StudioHub::start_in_process(config).expect("start backend");
+    let _query_id = conn.send(ClientToHub::LoadFileTree {
         mount: "repo".to_string(),
     });
 
@@ -24,12 +24,12 @@ fn load_file_tree_smoke() {
         assert!(now < deadline, "timed out waiting for FileTree response");
         if let Some(msg) = conn.recv_timeout(Duration::from_millis(150)) {
             match msg {
-                StudioToUI::FileTree { mount, data } => {
+                HubToClient::FileTree { mount, data } => {
                     assert_eq!(mount, "repo");
                     assert!(!data.nodes.is_empty(), "expected non-empty file tree");
                     break;
                 }
-                StudioToUI::Error { message } => {
+                HubToClient::Error { message } => {
                     panic!("backend returned error: {}", message);
                 }
                 _ => {}

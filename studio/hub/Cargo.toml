@@ -1,14 +1,14 @@
 [package]
-name = "makepad-studio-backend"
+name = "makepad-studio-hub"
 version = "0.1.0"
 edition = "2021"
-description = "Studio2 backend (protocol + gateway + virtual fs)"
+description = "Studio2 hub (protocol + gateway + virtual fs)"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-network = { path = "../../platform/network", version = "1.0.0" }
 makepad-script = { path = "../../platform/script", version = "1.0.0" }
-makepad-studio-protocol = { path = "../../platform/studio_protocol", version = "0.1.0" }
+makepad-studio-protocol = { path = "../../platform/studio", version = "0.1.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 makepad-git = { path = "../../libs/git", version = "0.1.0" }
 makepad-live-id = { path = "../../libs/live_id", version = "1.0.0" }

@@ -8,6 +8,6 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
 makepad-code-editor = { path = "../../code_editor", version = "2.0.0" }
-makepad-studio-backend = { path = "../backend", version = "0.1.0" }
-makepad-studio-protocol = { path = "../../platform/studio_protocol", version = "0.1.0" }
+makepad-studio-hub = { path = "../hub", version = "0.1.0" }
+makepad-studio-protocol = { path = "../../platform/studio", version = "0.1.0" }
 makepad-terminal-core = { path = "../../libs/terminal_core", version = "1.0.0" }

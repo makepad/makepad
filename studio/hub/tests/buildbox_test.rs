@@ -3,10 +3,10 @@ use makepad_micro_serde::{DeBin, SerBin};
 use makepad_network::{
     HttpMethod, HttpRequest, NetworkConfig, NetworkResponse, NetworkRuntime, WsMessage, WsSend,
 };
-use makepad_studio_backend::{BackendConfig, MountConfig, StudioBackend};
-use makepad_studio_protocol::backend_protocol::{
-    BuildBoxToStudio, BuildBoxToStudioVec, ClientId, QueryId, StudioToBuildBox,
-    StudioToBuildBoxVec, StudioToUI, UIToStudio, UIToStudioEnvelope,
+use makepad_studio_hub::{HubConfig, MountConfig, StudioHub};
+use makepad_studio_protocol::hub_protocol::{
+    BuildBoxToHub, BuildBoxToHubVec, ClientId, QueryId, HubToBuildBox,
+    HubToBuildBoxVec, HubToClient, ClientToHub, ClientToHubEnvelope,
 };
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -41,9 +41,9 @@ fn wait_for_ui_message<F>(
     socket_id: LiveId,
     timeout: Duration,
     mut matcher: F,
-) -> Option<StudioToUI>
+) -> Option<HubToClient>
 where
-    F: FnMut(&StudioToUI) -> bool,
+    F: FnMut(&HubToClient) -> bool,
 {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -56,7 +56,7 @@ where
             if id != socket_id {
                 continue;
             }
-            if let Ok(msg) = StudioToUI::deserialize_bin(&data) {
+            if let Ok(msg) = HubToClient::deserialize_bin(&data) {
                 if matcher(&msg) {
                     return Some(msg);
                 }
@@ -70,7 +70,7 @@ fn wait_for_buildbox_message(
     runtime: &NetworkRuntime,
     socket_id: LiveId,
     timeout: Duration,
-) -> Option<StudioToBuildBoxVec> {
+) -> Option<HubToBuildBoxVec> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let event = runtime.recv_timeout(Duration::from_millis(50))?;
@@ -82,7 +82,7 @@ fn wait_for_buildbox_message(
             if id != socket_id {
                 continue;
             }
-            if let Ok(msgs) = StudioToBuildBoxVec::deserialize_bin(&data) {
+            if let Ok(msgs) = HubToBuildBoxVec::deserialize_bin(&data) {
                 return Some(msgs);
             }
         }
@@ -99,7 +99,7 @@ fn websocket_buildbox_remote_build_roundtrip() {
     let Some(port) = find_free_port() else {
         return;
     };
-    let config = BackendConfig {
+    let config = HubConfig {
         listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         post_max_size: 1024 * 1024,
         mounts: vec![MountConfig {
@@ -109,7 +109,7 @@ fn websocket_buildbox_remote_build_roundtrip() {
         enable_in_process_gateway: false,
     };
 
-    let _backend = match StudioBackend::start_headless(config) {
+    let _backend = match StudioHub::start_headless(config) {
         Ok(v) => v,
         Err(err) => {
             if err.contains("failed to bind") {
@@ -134,11 +134,11 @@ fn websocket_buildbox_remote_build_roundtrip() {
     assert!(ui_opened.is_some(), "did not receive ui WsOpened");
 
     let hello = wait_for_ui_message(&runtime, ui_socket, Duration::from_secs(3), |msg| {
-        matches!(msg, StudioToUI::Hello { .. })
+        matches!(msg, HubToClient::Hello { .. })
     })
     .expect("did not receive hello");
     let client_id = match hello {
-        StudioToUI::Hello { client_id } => client_id,
+        HubToClient::Hello { client_id } => client_id,
         _ => unreachable!(),
     };
     assert_ne!(client_id, ClientId(u16::MAX));
@@ -158,7 +158,7 @@ fn websocket_buildbox_remote_build_roundtrip() {
     );
     assert!(bb_opened.is_some(), "did not receive buildbox WsOpened");
 
-    let hello = BuildBoxToStudioVec(vec![BuildBoxToStudio::Hello {
+    let hello = BuildBoxToHubVec(vec![BuildBoxToHub::Hello {
         name: "linux".to_string(),
         platform: "linux".to_string(),
         arch: "x86_64".to_string(),
@@ -171,14 +171,14 @@ fn websocket_buildbox_remote_build_roundtrip() {
     let connected = wait_for_ui_message(&runtime, ui_socket, Duration::from_secs(3), |msg| {
         matches!(
             msg,
-            StudioToUI::BuildBoxConnected { info } if info.name == "linux"
+            HubToClient::BuildBoxConnected { info } if info.name == "linux"
         )
     });
     assert!(connected.is_some(), "did not receive BuildBoxConnected");
 
-    let list_query = UIToStudioEnvelope {
+    let list_query = ClientToHubEnvelope {
         query_id: QueryId::new(client_id, 0),
-        msg: UIToStudio::ListBuildBoxes,
+        msg: ClientToHub::ListBuildBoxes,
     };
     runtime
         .ws_send(ui_socket, WsSend::Binary(list_query.serialize_bin()))
@@ -186,21 +186,21 @@ fn websocket_buildbox_remote_build_roundtrip() {
     let boxes = wait_for_ui_message(&runtime, ui_socket, Duration::from_secs(3), |msg| {
         matches!(
             msg,
-            StudioToUI::BuildBoxes { boxes } if boxes.iter().any(|b| b.name == "linux")
+            HubToClient::BuildBoxes { boxes } if boxes.iter().any(|b| b.name == "linux")
         )
     })
     .expect("did not receive BuildBoxes");
     match boxes {
-        StudioToUI::BuildBoxes { boxes } => {
+        HubToClient::BuildBoxes { boxes } => {
             let linux = boxes.iter().find(|b| b.name == "linux").unwrap();
             assert_eq!(linux.platform, "linux");
         }
         _ => unreachable!(),
     }
 
-    let sync_query = UIToStudioEnvelope {
+    let sync_query = ClientToHubEnvelope {
         query_id: QueryId::new(client_id, 1),
-        msg: UIToStudio::BuildBoxSyncNow {
+        msg: ClientToHub::BuildBoxSyncNow {
             name: "linux".to_string(),
         },
     };
@@ -210,12 +210,12 @@ fn websocket_buildbox_remote_build_roundtrip() {
     let sync_cmd = wait_for_buildbox_message(&runtime, buildbox_socket, Duration::from_secs(3))
         .expect("did not receive buildbox sync command");
     assert_eq!(sync_cmd.0.len(), 1);
-    assert!(matches!(sync_cmd.0[0], StudioToBuildBox::RequestTreeHash));
+    assert!(matches!(sync_cmd.0[0], HubToBuildBox::RequestTreeHash));
 
     let run_query_id = QueryId::new(client_id, 2);
-    let run_query = UIToStudioEnvelope {
+    let run_query = ClientToHubEnvelope {
         query_id: run_query_id,
-        msg: UIToStudio::Cargo {
+        msg: ClientToHub::Cargo {
             mount: "repo".to_string(),
             args: vec!["-p".to_string(), "remote-app".to_string()],
             env: None,
@@ -230,10 +230,10 @@ fn websocket_buildbox_remote_build_roundtrip() {
         &runtime,
         ui_socket,
         Duration::from_secs(3),
-        |msg| matches!(msg, StudioToUI::BuildStarted { mount, .. } if mount == "repo"),
+        |msg| matches!(msg, HubToClient::BuildStarted { mount, .. } if mount == "repo"),
     );
     let build_id = match started {
-        Some(StudioToUI::BuildStarted { build_id, .. }) => build_id,
+        Some(HubToClient::BuildStarted { build_id, .. }) => build_id,
         _ => panic!("did not receive BuildStarted"),
     };
 
@@ -241,7 +241,7 @@ fn websocket_buildbox_remote_build_roundtrip() {
         .expect("did not receive buildbox cargo command");
     assert_eq!(cargo_cmd.0.len(), 1);
     match &cargo_cmd.0[0] {
-        StudioToBuildBox::CargoBuild {
+        HubToBuildBox::CargoBuild {
             build_id: id,
             mount,
             args,
@@ -254,7 +254,7 @@ fn websocket_buildbox_remote_build_roundtrip() {
         other => panic!("unexpected buildbox command: {:?}", other),
     }
 
-    let output = BuildBoxToStudioVec(vec![BuildBoxToStudio::BuildOutput {
+    let output = BuildBoxToHubVec(vec![BuildBoxToHub::BuildOutput {
         build_id,
         line: "remote build line".to_string(),
     }]);
@@ -263,9 +263,9 @@ fn websocket_buildbox_remote_build_roundtrip() {
         .expect("send buildbox output");
 
     let log_query_id = QueryId::new(client_id, 3);
-    let query_logs = UIToStudioEnvelope {
+    let query_logs = ClientToHubEnvelope {
         query_id: log_query_id,
-        msg: UIToStudio::QueryLogs {
+        msg: ClientToHub::QueryLogs {
             build_id: Some(build_id),
             level: None,
             source: None,
@@ -280,11 +280,11 @@ fn websocket_buildbox_remote_build_roundtrip() {
         .ws_send(ui_socket, WsSend::Binary(query_logs.serialize_bin()))
         .expect("send log query");
     let log_result = wait_for_ui_message(&runtime, ui_socket, Duration::from_secs(3), |msg| {
-        matches!(msg, StudioToUI::QueryLogResults { query_id, .. } if *query_id == log_query_id)
+        matches!(msg, HubToClient::QueryLogResults { query_id, .. } if *query_id == log_query_id)
     })
     .expect("did not receive QueryLogResults");
     match log_result {
-        StudioToUI::QueryLogResults { entries, .. } => {
+        HubToClient::QueryLogResults { entries, .. } => {
             assert!(entries
                 .iter()
                 .any(|(_, e)| e.message.contains("remote build line")));
@@ -292,7 +292,7 @@ fn websocket_buildbox_remote_build_roundtrip() {
         _ => unreachable!(),
     }
 
-    let stopped = BuildBoxToStudioVec(vec![BuildBoxToStudio::BuildStopped {
+    let stopped = BuildBoxToHubVec(vec![BuildBoxToHub::BuildStopped {
         build_id,
         exit_code: Some(0),
     }]);
@@ -302,7 +302,7 @@ fn websocket_buildbox_remote_build_roundtrip() {
     let stopped = wait_for_ui_message(&runtime, ui_socket, Duration::from_secs(3), |msg| {
         matches!(
             msg,
-            StudioToUI::BuildStopped {
+            HubToClient::BuildStopped {
                 build_id: id,
                 exit_code: Some(0)
             } if *id == build_id

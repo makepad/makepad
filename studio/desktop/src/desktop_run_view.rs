@@ -3,7 +3,7 @@ use crate::makepad_widgets::makepad_platform::shared_framebuf::{
     shared_swapchain_from_host_swapchain, HostSwapchain,
 };
 use crate::makepad_widgets::*;
-use makepad_studio_protocol::backend_protocol::{QueryId, RunViewInputVizKind};
+use makepad_studio_protocol::hub_protocol::{QueryId, RunViewInputVizKind};
 use makepad_studio_protocol::{
     MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
     RemoteMouseUp, RemoteScroll, StudioToApp, StudioToAppVec,
