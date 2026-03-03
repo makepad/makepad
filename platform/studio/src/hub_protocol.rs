@@ -670,6 +670,7 @@ pub struct TerminalCellUpdate {
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, Default)]
 pub struct TerminalFramebuffer {
+    pub frame_id: u64,
     pub cols: u16,
     pub rows: u16,
     pub top_row: usize,

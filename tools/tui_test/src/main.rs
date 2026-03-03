@@ -549,10 +549,12 @@ impl App {
                     if let Some(entry) = self.transcript.last_mut() {
                         entry.responses.push(format!("[{i}/10] {text}"));
                     }
+                    tlog!("RESP: [{}/10] {}", i, text);
                     self.render()?;
                 }
 
                 self.working = false;
+                tlog!("RESP: done");
                 self.render()?;
             }
             InputEvent::Backspace => {
@@ -692,6 +694,15 @@ fn run() -> io::Result<()> {
             app.rows = new_rows;
             app.cols = new_cols;
             app.scroll_bottom = new_rows.saturating_sub(PINNED_ROWS).max(1);
+            if app.content_row > app.scroll_bottom {
+                app.content_row = app.scroll_bottom;
+            } else if app.content_row == 0 {
+                app.content_row = 1;
+            }
+            // Force a deterministic full redraw on resize, like real TUIs.
+            app.header_committed = false;
+            app.printed_lines = 0;
+            app.content_row = 1;
             let mut stdout = io::stdout();
             write!(stdout, "\x1b[1;{}r", app.scroll_bottom)?;
             stdout.flush()?;
