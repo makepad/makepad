@@ -2,7 +2,7 @@ use {
     super::{
         font::Font,
         intern::Intern,
-        shaper::{ShapeParams, ShapedText, Shaper},
+        shaper::{Direction, Ems, ShapeParams, ShapedText, Shaper},
         substr::Substr,
     },
     std::{
@@ -47,6 +47,10 @@ impl FontFamily {
         self.shaper.borrow_mut().get_or_shape(ShapeParams {
             text: text.into(),
             fonts: self.fonts.clone(),
+            direction: Direction::default(),
+            letter_spacing: Ems(0.0),
+            word_spacing: Ems(0.0),
+            features: Rc::new(Vec::new()),
         })
     }
 
