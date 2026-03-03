@@ -1087,6 +1087,12 @@ fn func_key(ss3_char: u8, csi_num: u16, modifier: u8) -> Vec<u8> {
 mod tests {
     use super::{Color, Terminal};
 
+    fn write_line(screen: &mut crate::screen::Screen, ch: char) {
+        screen.write_char(ch);
+        screen.do_linefeed();
+        screen.do_carriage_return();
+    }
+
     #[test]
     fn dsr_cursor_position_reply() {
         let mut terminal = Terminal::new(80, 24);
@@ -1130,5 +1136,138 @@ mod tests {
         assert_eq!(terminal.default_fg.r, 0xab);
         assert_eq!(terminal.default_fg.g, 0xcd);
         assert_eq!(terminal.default_fg.b, 0xef);
+    }
+
+    #[test]
+    fn resize_grow_pulls_scrollback_if_at_bottom() {
+        let mut terminal = Terminal::new(4, 3);
+        write_line(&mut terminal.primary, 'A');
+        write_line(&mut terminal.primary, 'B');
+        write_line(&mut terminal.primary, 'C');
+        write_line(&mut terminal.primary, 'D');
+        terminal.primary.write_char('E');
+
+        // A and B scrolled off; C D E visible at rows 0-2.
+        assert_eq!(terminal.primary.scrollback_len(), 2);
+        terminal.resize(4, 5);
+
+        let screen = terminal.screen();
+        // Cursor was at the bottom, so scrollback is pulled into the grid.
+        assert_eq!(screen.grid.cell(0, 0).codepoint, 'A');
+        assert_eq!(screen.grid.cell(0, 1).codepoint, 'B');
+        assert_eq!(screen.grid.cell(0, 2).codepoint, 'C');
+        assert_eq!(screen.grid.cell(0, 3).codepoint, 'D');
+        assert_eq!(screen.grid.cell(0, 4).codepoint, 'E');
+        // Scrollback consumed
+        assert_eq!(screen.scrollback_len(), 0);
+        // Cursor moves down
+        assert_eq!(screen.cursor.y, 4);
+    }
+
+    /// Reproduces the Codex resize glitch: Codex runs in primary screen (no
+    /// alternate screen), uses scroll regions and cursor positioning, and only
+    /// partially redraws after SIGWINCH.  If resize shifts content by pulling
+    /// scrollback into the grid, Codex's partial redraw leaves ghost artifacts.
+    #[test]
+    fn primary_screen_tui_resize_no_content_shift() {
+        let mut terminal = Terminal::new(80, 24);
+
+        // Simulate a TUI that draws a layout with cursor positioning.
+        // Set scroll region to rows 1-9.
+        terminal.process_bytes(b"\x1b[1;9r");
+        // Draw header at row 1
+        terminal.process_bytes(b"\x1b[1;1HHeader line here");
+        // Draw content in scroll region
+        terminal.process_bytes(b"\x1b[3;1HContent A");
+        terminal.process_bytes(b"\x1b[4;1HContent B");
+        // Draw input prompt at row 10
+        terminal.process_bytes(b"\x1b[10;1H> input prompt");
+        // Draw status bar at row 24
+        terminal.process_bytes(b"\x1b[24;1Hstatus bar text");
+
+        // Verify initial state.
+        let screen = terminal.screen();
+        assert_eq!(screen.grid.cell(0, 0).codepoint, 'H'); // row 0 = "Header..."
+        assert_eq!(screen.grid.cell(2, 9).codepoint, 'i');  // row 9 = "> input..."
+        assert_eq!(screen.grid.cell(0, 23).codepoint, 's'); // row 23 = "status..."
+
+        // Generate some scrollback by scrolling within the scroll region.
+        for _ in 0..30 {
+            terminal.process_bytes(b"\x1b[9;1H");
+            terminal.process_bytes(b"scroll line\n");
+        }
+
+        let scrollback_before = terminal.primary.scrollback_len();
+
+        // --- Resize: grow from 24 to 30 rows ---
+        terminal.resize(80, 30);
+
+        let screen = terminal.screen();
+        // Content must NOT have shifted — row 9 should still be the input prompt
+        // area (or whatever the TUI last drew there), not old scrollback content.
+        // The cursor.y must remain unchanged so the TUI's coordinate system is stable.
+        assert!(screen.cursor.y < 30);
+        // Scrollback must not have been consumed (it stays available for scroll-back viewing).
+        assert_eq!(terminal.primary.scrollback_len(), scrollback_before);
+
+        // Simulate Codex's partial redraw after SIGWINCH: it only updates a few rows.
+        terminal.process_bytes(b"\x1b[10;1H> input redrawn");
+        terminal.process_bytes(b"\x1b[30;1Hstatus redrawn");
+
+        let screen = terminal.screen();
+        assert_eq!(screen.grid.cell(2, 9).codepoint, 'i');  // "> input redrawn"
+        assert_eq!(screen.grid.cell(0, 29).codepoint, 's'); // "status redrawn" at new bottom
+    }
+
+    #[test]
+    fn resize_shrink_keeps_cursor_row_when_already_visible() {
+        let mut terminal = Terminal::new(4, 5);
+        write_line(&mut terminal.primary, 'A');
+        write_line(&mut terminal.primary, 'B');
+        write_line(&mut terminal.primary, 'C');
+        write_line(&mut terminal.primary, 'D');
+        terminal.primary.write_char('E');
+
+        // Cursor is already in the future 0..3 viewport, so shrinking should
+        // trim bottom rows instead of pushing top rows into scrollback.
+        terminal.primary.move_cursor_to(0, 1);
+        terminal.resize(4, 3);
+
+        let screen = terminal.screen();
+        assert_eq!(screen.grid.cell(0, 0).codepoint, 'A');
+        assert_eq!(screen.grid.cell(0, 1).codepoint, 'B');
+        assert_eq!(screen.grid.cell(0, 2).codepoint, 'C');
+        assert_eq!(screen.scrollback_len(), 0);
+        assert_eq!(screen.cursor.y, 1);
+    }
+
+    #[test]
+    fn resize_grow_preserves_row_positions_if_not_at_bottom() {
+        let mut terminal = Terminal::new(4, 3);
+        write_line(&mut terminal.primary, 'A');
+        write_line(&mut terminal.primary, 'B');
+        write_line(&mut terminal.primary, 'C');
+        write_line(&mut terminal.primary, 'D');
+        terminal.primary.write_char('E');
+
+        // A and B scrolled off; C D E visible at rows 0-2.
+        assert_eq!(terminal.primary.scrollback_len(), 2);
+        
+        // Move cursor to top
+        terminal.primary.move_cursor_to(0, 0);
+        
+        terminal.resize(4, 5);
+
+        let screen = terminal.screen();
+        // Cursor was NOT at the bottom, so scrollback is NOT pulled into the grid.
+        assert_eq!(screen.grid.cell(0, 0).codepoint, 'C');
+        assert_eq!(screen.grid.cell(0, 1).codepoint, 'D');
+        assert_eq!(screen.grid.cell(0, 2).codepoint, 'E');
+        assert_eq!(screen.grid.cell(0, 3).codepoint, ' ');
+        assert_eq!(screen.grid.cell(0, 4).codepoint, ' ');
+        // Scrollback preserved
+        assert_eq!(screen.scrollback_len(), 2);
+        // Cursor stays at original row
+        assert_eq!(screen.cursor.y, 0);
     }
 }

@@ -61,6 +61,10 @@ pub struct Screen {
 
     // Tab stops
     pub tabstops: Vec<bool>,
+
+    // Highest grid row that has been written to (0-based, inclusive).
+    // Tracks content extent independent of where the cursor happens to be.
+    pub high_water_row: usize,
 }
 
 impl Screen {
@@ -79,6 +83,7 @@ impl Screen {
             scrollback: Vec::new(),
             max_scrollback: if with_scrollback { 10000 } else { 0 },
             tabstops,
+            high_water_row: 0,
         }
     }
 
@@ -113,6 +118,9 @@ impl Screen {
             cell.codepoint = c;
             cell.style = self.cursor.style;
             cell.flags = crate::cell::CellFlags::default();
+            if row > self.high_water_row {
+                self.high_water_row = row;
+            }
         }
 
         if self.cursor.x >= self.cols() - 1 {
@@ -127,8 +135,16 @@ impl Screen {
     pub fn do_linefeed(&mut self) {
         if self.cursor.y + 1 >= self.scroll_bottom {
             self.scroll_up(1);
+            // Scrolling means content reached the bottom of the scroll region
+            let bottom = self.scroll_bottom.saturating_sub(1);
+            if bottom > self.high_water_row {
+                self.high_water_row = bottom;
+            }
         } else {
             self.cursor.y += 1;
+            if self.cursor.y > self.high_water_row {
+                self.high_water_row = self.cursor.y;
+            }
         }
     }
 
@@ -324,19 +340,140 @@ impl Screen {
 
     /// Resize the screen
     pub fn resize(&mut self, cols: usize, rows: usize) {
-        self.grid.resize(cols, rows);
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let old_cols = self.cols();
+        let old_rows = self.rows();
+
+        if cols == old_cols && rows == old_rows {
+            return;
+        }
+
+        // Alternate screen (max_scrollback == 0): the TUI app will fully redraw
+        // after receiving SIGWINCH, so just create a fresh grid and clamp the
+        // cursor. This matches Rio (reflow: false for alt screen) and WezTerm
+        // (allow_scrollback == false path).
+        if self.max_scrollback == 0 {
+            self.grid = Grid::new(cols, rows);
+            self.cursor.x = self.cursor.x.min(cols - 1);
+            self.cursor.y = self.cursor.y.min(rows - 1);
+            self.cursor.pending_wrap = false;
+            if let Some(saved) = &mut self.saved_cursor {
+                saved.x = saved.x.min(cols - 1);
+                saved.y = saved.y.min(rows - 1);
+                saved.pending_wrap = false;
+            }
+            self.scroll_top = 0;
+            self.scroll_bottom = rows;
+            self.high_water_row = 0;
+            self.tabstops = vec![false; cols];
+            for i in (0..cols).step_by(8) {
+                self.tabstops[i] = true;
+            }
+            return;
+        }
+
+        // Primary screen: preserve content and manage scrollback.
+        let old_grid_rows: Vec<Vec<Cell>> = (0..old_rows)
+            .map(|row| self.grid.row_slice(row).to_vec())
+            .collect();
+        let mut new_grid = Grid::new(cols, rows);
+
+        let copy_row = |src: &[Cell], dst_row: usize, grid: &mut Grid| {
+            let copy_cols = src.len().min(cols);
+            for col in 0..copy_cols {
+                *grid.cell_mut(col, dst_row) = src[col];
+            }
+        };
+
+        match rows.cmp(&old_rows) {
+            std::cmp::Ordering::Greater => {
+                // If we are at the bottom of the screen and have scrollback,
+                // and we are not in a restricted scroll region, pull from scrollback.
+                let pull_count = if self.cursor.y == old_rows - 1
+                    && self.scroll_top == 0
+                    && self.scroll_bottom == old_rows
+                {
+                    self.scrollback.len().min(rows - old_rows)
+                } else {
+                    0
+                };
+
+                if pull_count > 0 {
+                    // Pull rows from scrollback
+                    let start_idx = self.scrollback.len() - pull_count;
+                    for (i, row) in self.scrollback.drain(start_idx..).enumerate() {
+                        copy_row(&row, i, &mut new_grid);
+                    }
+                    // Shift old grid rows down
+                    for (src_row, row) in old_grid_rows.iter().enumerate() {
+                        copy_row(row, src_row + pull_count, &mut new_grid);
+                    }
+                    self.cursor.y += pull_count;
+                    self.high_water_row += pull_count;
+                    if let Some(saved) = &mut self.saved_cursor {
+                        saved.y += pull_count;
+                    }
+                } else {
+                    for (src_row, row) in old_grid_rows.iter().enumerate() {
+                        copy_row(row, src_row, &mut new_grid);
+                    }
+                }
+            }
+            std::cmp::Ordering::Less => {
+                let required_scrolling = (self.cursor.y + 1).saturating_sub(rows);
+                let lines_removed = old_rows - rows;
+                let copy_start = required_scrolling.min(lines_removed);
+
+                // Move rows into scrollback when needed to keep the cursor
+                // inside the new viewport.
+                if copy_start > 0 {
+                    for row in old_grid_rows.iter().take(copy_start) {
+                        self.scrollback.push(row.clone());
+                    }
+                    if self.scrollback.len() > self.max_scrollback {
+                        let overflow = self.scrollback.len() - self.max_scrollback;
+                        self.scrollback.drain(0..overflow);
+                    }
+                }
+
+                for dst_row in 0..rows {
+                    copy_row(&old_grid_rows[dst_row + copy_start], dst_row, &mut new_grid);
+                }
+
+                self.cursor.y = self.cursor.y.saturating_sub(copy_start).min(rows - 1);
+                self.high_water_row = self.high_water_row.saturating_sub(copy_start).min(rows - 1);
+                if let Some(saved) = &mut self.saved_cursor {
+                    saved.y = saved.y.saturating_sub(copy_start).min(rows - 1);
+                }
+            }
+            std::cmp::Ordering::Equal => {
+                for (row_idx, row) in old_grid_rows.iter().enumerate() {
+                    copy_row(row, row_idx, &mut new_grid);
+                }
+            }
+        }
+
+        self.grid = new_grid;
         self.scroll_top = 0;
         self.scroll_bottom = rows;
-        self.cursor.x = self.cursor.x.min(cols.saturating_sub(1));
-        self.cursor.y = self.cursor.y.min(rows.saturating_sub(1));
+        self.cursor.x = self.cursor.x.min(cols - 1);
+        if cols != old_cols {
+            self.cursor.pending_wrap = false;
+        }
+        if let Some(saved) = &mut self.saved_cursor {
+            saved.x = saved.x.min(cols - 1);
+            if cols != old_cols {
+                saved.pending_wrap = false;
+            }
+        }
 
-        // Keep historical rows width-aligned with the active grid width so viewport
-        // rendering can index columns uniformly across scrollback + live grid.
+        // Keep historical rows width-aligned with the active grid width.
         for row in &mut self.scrollback {
             row.resize(cols, Cell::default());
         }
 
-        // Reset tabstops
+        // Reset tabstops.
         self.tabstops = vec![false; cols];
         for i in (0..cols).step_by(8) {
             self.tabstops[i] = true;
@@ -350,6 +487,11 @@ impl Screen {
 
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
+    }
+
+    /// Number of grid rows that have been written to (based on high water mark).
+    pub fn used_rows(&self) -> usize {
+        (self.high_water_row + 1).min(self.rows())
     }
 
     /// Total logical rows visible through a virtual viewport

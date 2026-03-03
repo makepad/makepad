@@ -5,7 +5,7 @@ use crate::{
 };
 use makepad_studio_protocol::hub_protocol::{
     EventSample, FileNodeType, FileTreeData, GCSample, GPUSample, GitStatus, LogSource, QueryId,
-    RunnableBuild,
+    RunnableBuild, TerminalFramebuffer,
 };
 use makepad_studio_protocol::LogLevel;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -133,9 +133,7 @@ pub struct AppData {
     pub live_log_query: Option<QueryId>,
     pub live_profiler_query_by_build: HashMap<QueryId, QueryId>,
     pub profiler_query_build_by_query: HashMap<QueryId, QueryId>,
-    pub terminal_stream_by_path: HashMap<String, Vec<u8>>,
-    pub terminal_history_len_by_path: HashMap<String, usize>,
-    pub terminal_desired_size_by_path: HashMap<String, (u16, u16)>,
+    pub terminal_framebuffer_by_path: HashMap<String, TerminalFramebuffer>,
     pub terminal_open_paths: HashSet<String>,
     pub file_filter_mount_by_query: HashMap<QueryId, String>,
     pub pending_stop_all_mount: Option<String>,
