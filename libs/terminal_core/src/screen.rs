@@ -470,10 +470,7 @@ impl Screen {
                 let lines_removed = old_rows - rows;
                 let mut copy_start = required_scrolling.min(lines_removed);
                 
-                let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
-                if has_custom_scroll_region {
-                    copy_start = lines_removed;
-                } else if copy_start == 0 && self.bottom_trimmed_rows > 0 {
+                if copy_start == 0 && self.bottom_trimmed_rows > 0 {
                     copy_start = self.bottom_trimmed_rows.min(lines_removed);
                 }
 
@@ -644,10 +641,7 @@ impl Screen {
                 let lines_removed = old_rows - new_rows;
                 let mut copy_start = required_scrolling.min(lines_removed);
                 
-                let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
-                if has_custom_scroll_region {
-                    copy_start = lines_removed;
-                } else if copy_start == 0 && self.bottom_trimmed_rows > 0 {
+                if copy_start == 0 && self.bottom_trimmed_rows > 0 {
                     copy_start = self.bottom_trimmed_rows.min(lines_removed);
                 }
 
