@@ -141,6 +141,15 @@ fn framebuffer_last_row_text(frame: &TerminalFramebuffer) -> String {
         .to_string()
 }
 
+fn framebuffer_row_text(frame: &TerminalFramebuffer, row: usize) -> String {
+    framebuffer_to_text(frame)
+        .lines()
+        .nth(row)
+        .unwrap_or("")
+        .trim_end()
+        .to_string()
+}
+
 #[test]
 fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
@@ -640,6 +649,113 @@ fn terminal_codex_prompt_sticks_to_bottom_after_resize() {
     assert!(
         !framebuffer_last_row_text(&frame_15).trim().is_empty(),
         "expected codex prompt/cursor to stay at bottom after resize (10 -> 15 rows)"
+    );
+
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: vec![0x03],
+    });
+    let _ = connection.send(ClientToHub::TerminalClose { path });
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn terminal_codex_fast_resize_roundtrip_preserves_top_and_bottom_rows() {
+    let codex_available = std::process::Command::new("sh")
+        .args(["-lc", "command -v codex >/dev/null 2>&1"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !codex_available {
+        eprintln!("skipping: codex binary not found in PATH");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let path = "repo/.makepad/codex_fast_resize.term".to_string();
+    let _ = connection.send(ClientToHub::TerminalOpen {
+        path: path.clone(),
+        cols: 80,
+        rows: 20,
+        env: std::collections::HashMap::new(),
+    });
+    let opened = wait_for_message(
+        &connection,
+        Duration::from_secs(5),
+        |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == &path),
+    );
+    assert!(opened.is_some(), "did not receive TerminalOpened");
+
+    request_terminal_viewport(&mut connection, &path, 80, 20, usize::MAX);
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: b"for i in $(seq 1 260); do echo __SCROLL__$i; done\ncodex\n".to_vec(),
+    });
+
+    let baseline =
+        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(35), |frame| {
+            frame.rows == 20
+                && frame.total_lines > 80
+                && !framebuffer_last_row_text(frame).trim().is_empty()
+        })
+        .expect("did not observe baseline 20-row codex frame");
+
+    let baseline_top = framebuffer_row_text(&baseline, 0);
+    let baseline_sep = framebuffer_row_text(&baseline, 1);
+    let baseline_bottom = framebuffer_last_row_text(&baseline);
+    let baseline_text = framebuffer_to_text(&baseline);
+
+    // Rapid resize burst: up then back down without waiting for each frame.
+    for rows in 21..=40 {
+        request_terminal_viewport(&mut connection, &path, 80, rows, usize::MAX);
+    }
+    for rows in (20..40).rev() {
+        request_terminal_viewport(&mut connection, &path, 80, rows, usize::MAX);
+    }
+    request_terminal_viewport(&mut connection, &path, 80, 20, usize::MAX);
+
+    // Wait for the next explicit 20-row frame after the final request.
+    let final_frame =
+        wait_for_terminal_frame_where(&connection, &path, Duration::from_secs(8), |frame| {
+            frame.rows == 20 && !framebuffer_last_row_text(frame).trim().is_empty()
+        })
+        .expect("did not observe final 20-row codex frame after fast resize burst");
+
+    let final_top = framebuffer_row_text(&final_frame, 0);
+    let final_sep = framebuffer_row_text(&final_frame, 1);
+    let final_bottom = framebuffer_last_row_text(&final_frame);
+
+    assert_eq!(
+        final_top.trim(),
+        baseline_top.trim(),
+        "top row changed after fast resize roundtrip"
+    );
+    assert_eq!(
+        final_sep.trim(),
+        baseline_sep.trim(),
+        "separator row changed after fast resize roundtrip"
+    );
+    assert_eq!(
+        final_bottom.trim(),
+        baseline_bottom.trim(),
+        "bottom row changed after fast resize roundtrip"
+    );
+    assert_eq!(
+        framebuffer_to_text(&final_frame),
+        baseline_text,
+        "full framebuffer changed after fast resize roundtrip"
     );
 
     let _ = connection.send(ClientToHub::TerminalInput {

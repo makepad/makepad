@@ -772,6 +772,17 @@ impl Widget for DesktopTerminalView {
             .floor()
             .max(1.0) as u16;
 
+        let frame_matches_viewport = frame
+            .as_ref()
+            .map(|frame| frame.cols == req_cols && frame.rows == req_rows)
+            .unwrap_or(false);
+        if frame.is_some() && !frame_matches_viewport {
+            // During rapid window drags we can briefly receive older-size
+            // framebuffers. Invalidate request dedupe so we force-refresh to
+            // the current viewport dimensions.
+            self.last_requested = None;
+        }
+
         let total_lines_for_scroll = frame
             .as_ref()
             .map(|frame| frame.total_lines)
@@ -798,7 +809,7 @@ impl Widget for DesktopTerminalView {
             self.send_viewport_request(cx, path, req_cols, req_rows, top_row);
         }
 
-        if let Some(frame) = frame.as_ref() {
+        if let Some(frame) = frame.as_ref().filter(|_| frame_matches_viewport) {
             let bg = Self::decode_rgb(frame.default_bg_rgb);
             self.draw_bg
                 .draw_vars

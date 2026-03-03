@@ -1,0 +1,10 @@
+[package]
+name = "makepad-tui-test"
+version = "0.1.0"
+edition = "2021"
+description = "Codex-like terminal layout test tool"
+license = "MIT OR Apache-2.0"
+
+#[workspace]
+
+[dependencies]
