@@ -122,19 +122,20 @@ impl WindowsUnifiedVideoPlayer {
     }
 
     pub fn poll_frame(&mut self, textures: &mut CxTexturePool) -> bool {
-        match &mut self.mode {
-            WindowsPlayerMode::Native(player) => player.poll_frame(textures),
+        let frame = match &mut self.mode {
+            WindowsPlayerMode::Native(player) => return player.poll_frame(textures),
             WindowsPlayerMode::Software(player) => {
                 if !player.poll_frame() {
                     return false;
                 }
-                if let Some((rgba, width, height)) = player.take_frame() {
-                    self.upload_rgba_to_d3d11(textures, rgba, width, height);
-                    true
-                } else {
-                    false
-                }
+                player.take_frame().map(|(rgba, w, h)| (rgba.to_vec(), w, h))
             }
+        };
+        if let Some((rgba, width, height)) = frame {
+            self.upload_rgba_to_d3d11(textures, &rgba, width, height);
+            true
+        } else {
+            false
         }
     }
 

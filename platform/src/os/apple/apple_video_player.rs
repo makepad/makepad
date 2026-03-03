@@ -108,11 +108,11 @@ impl AppleUnifiedVideoPlayer {
                 if !player.poll_frame() {
                     return false;
                 }
-                player.take_frame()
+                player.take_frame().map(|(rgba, w, h)| (rgba.to_vec(), w, h))
             }
         };
         if let Some((rgba, width, height)) = frame {
-            self.upload_rgba_to_metal(textures, rgba, width, height);
+            self.upload_rgba_to_metal(textures, &rgba, width, height);
             true
         } else {
             false
