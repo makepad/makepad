@@ -59,6 +59,7 @@ pub mod display_context;
 #[macro_use]
 mod app_main;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
+pub use crate::cx_api::can_play_type;
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;

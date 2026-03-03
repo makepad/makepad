@@ -672,7 +672,7 @@ impl WindowsVideoPlayer {
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
-    pub fn check_prepared(&mut self) -> Option<(u32, u32, u128, bool, Vec<String>, Vec<String>)> {
+    pub fn check_prepared(&mut self) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
         if self.prepare_notified {
             return None;
         }
@@ -704,7 +704,7 @@ impl WindowsVideoPlayer {
             let is_seekable = duration_ms > 0;
             let video_tracks = if w > 0 && h > 0 { vec!["video".to_string()] } else { vec![] };
             let audio_tracks = vec!["audio".to_string()];
-            Some((w, h, duration_ms, is_seekable, video_tracks, audio_tracks))
+            Some(Ok((w, h, duration_ms, is_seekable, video_tracks, audio_tracks)))
         }
     }
 

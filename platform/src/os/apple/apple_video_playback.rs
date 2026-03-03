@@ -10,18 +10,21 @@ use {
 };
 
 /// Returns the canPlayType string for the given MIME type on Apple platforms (AVPlayer backend).
+/// AVFoundation supports MP4/MOV/M4V containers with H.264/H.265/AV1 video and AAC/ALAC/FLAC/MP3
+/// audio. It does **not** support WebM, Ogg, or Matroska containers.
 pub fn can_play_type(mime: &str) -> &'static str {
     let base = mime.split(';').next().unwrap_or("").trim();
     match base {
         // AVPlayer handles these natively
         "video/mp4" | "video/x-m4v" | "video/quicktime" => "probably",
-        "video/x-matroska" => "maybe",
-        "video/webm" => "maybe", // limited: VP9 on newer Apple, AV1 on A17+
         "audio/mp4" | "audio/x-m4a" | "audio/aac" => "probably",
         "audio/mpeg" => "probably",
         "audio/wav" | "audio/x-wav" => "probably",
         "audio/flac" | "audio/x-flac" => "probably",
-        "audio/ogg" | "audio/vorbis" | "audio/opus" => "maybe",
+        // AVFoundation cannot play these container formats
+        "video/webm" | "video/ogg" | "video/x-matroska" => "",
+        "audio/webm" | "audio/ogg" | "audio/vorbis" | "audio/opus" => "",
+        // Unknown audio/video type — AVFoundation might handle it
         _ if base.starts_with("video/") || base.starts_with("audio/") => "maybe",
         _ => "",
     }
@@ -137,9 +140,10 @@ impl AppleVideoPlayer {
                 (url, None)
             }
             VideoSource::InMemory(data) => {
-                // Write data to a temporary file (deleted on cleanup)
-                let tmp_path =
-                    std::env::temp_dir().join(format!("makepad_video_{}.mp4", LiveId::unique().0));
+                // Detect container format from magic bytes for correct file extension.
+                let ext = detect_container_extension(data);
+                let tmp_path = std::env::temp_dir()
+                    .join(format!("makepad_video_{}.{}", LiveId::unique().0, ext));
                 let tmp_path_str = tmp_path.to_string_lossy().to_string();
                 std::fs::write(&tmp_path, data.as_ref()).unwrap_or_else(|e| {
                     error!("Failed to write video to temp file: {}", e);
@@ -185,9 +189,9 @@ impl AppleVideoPlayer {
         }
     }
 
-    /// Check if the player item has become ready to play.
-    /// Returns `(width, height, duration_ms, is_seekable, video_tracks, audio_tracks)` if newly prepared.
-    pub fn check_prepared(&mut self) -> Option<(u32, u32, u128, bool, Vec<String>, Vec<String>)> {
+    /// Check if the player item has become ready to play or has failed.
+    /// Returns `Ok(...)` with metadata when ready, `Err(msg)` on failure, `None` if still loading.
+    pub fn check_prepared(&mut self) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
         if self.prepare_notified {
             return None;
         }
@@ -249,23 +253,28 @@ impl AppleVideoPlayer {
                     vec![]
                 };
 
-                return Some((width, height, duration_ms, is_seekable, video_tracks, audio_tracks));
+                return Some(Ok((width, height, duration_ms, is_seekable, video_tracks, audio_tracks)));
             }
 
             // AVPlayerItemStatusFailed = 2
             if status == 2 {
+                self.prepare_notified = true;
                 let error: ObjcId = msg_send![self.player_item.as_id(), error];
-                if error != nil {
+                let err_str = if error != nil {
                     let desc: ObjcId = msg_send![error, localizedDescription];
                     let c_str: *const u8 = msg_send![desc, UTF8String];
                     if !c_str.is_null() {
-                        let err_str = std::ffi::CStr::from_ptr(c_str as *const _)
+                        std::ffi::CStr::from_ptr(c_str as *const _)
                             .to_string_lossy()
-                            .to_string();
-                        error!("AVPlayer failed to prepare: {}", err_str);
+                            .to_string()
+                    } else {
+                        "Unknown playback error".to_string()
                     }
-                }
-                self.prepare_notified = true;
+                } else {
+                    "Unknown playback error".to_string()
+                };
+                error!("AVPlayer failed to prepare: {}", err_str);
+                return Some(Err(err_str));
             }
         }
         None
@@ -322,16 +331,18 @@ impl AppleVideoPlayer {
         }
 
         unsafe {
-            let current_time: CMTime = msg_send![self.player_item.as_id(), currentTime];
-            let has_new: BOOL = msg_send![
-                self.video_output.as_id(),
-                hasNewPixelBufferForItemTime: current_time
-            ];
-
-            if has_new == NO {
-                return false;
+            // Force play if rate dropped to 0 (e.g. AVPlayer stalled or was never started)
+            let rate: f32 = msg_send![self.player.as_id(), rate];
+            if rate == 0.0 && self.autoplay {
+                let _: () = msg_send![self.player.as_id(), play];
             }
 
+            let current_time: CMTime = msg_send![self.player_item.as_id(), currentTime];
+
+            // Try to copy the pixel buffer directly. hasNewPixelBufferForItemTime:
+            // can return NO even when frames are available (observed with AV1 content
+            // and short videos). copyPixelBufferForItemTime: returns null when there
+            // is genuinely no frame, so it is the reliable check.
             let pixel_buffer: CVPixelBufferRef = msg_send![
                 self.video_output.as_id(),
                 copyPixelBufferForItemTime: current_time
@@ -496,4 +507,44 @@ impl Drop for AppleVideoPlayer {
     fn drop(&mut self) {
         self.cleanup();
     }
+}
+
+/// Detect container format from magic bytes and return an appropriate file extension.
+fn detect_container_extension(data: &[u8]) -> &'static str {
+    if data.len() < 12 {
+        return "mp4";
+    }
+    // WebM/Matroska: starts with EBML header 0x1A45DFA3
+    if data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return "webm";
+    }
+    // Ogg: starts with "OggS"
+    if data.starts_with(b"OggS") {
+        return "ogg";
+    }
+    // RIFF/AVI/WAV: starts with "RIFF"
+    if data.starts_with(b"RIFF") {
+        if data.len() >= 12 && &data[8..12] == b"AVI " {
+            return "avi";
+        }
+        return "wav";
+    }
+    // FLAC: starts with "fLaC"
+    if data.starts_with(b"fLaC") {
+        return "flac";
+    }
+    // MP3: ID3 tag or sync word
+    if data.starts_with(b"ID3") || (data[0] == 0xFF && (data[1] & 0xE0) == 0xE0) {
+        return "mp3";
+    }
+    // QuickTime/MP4: check for ftyp box
+    if data.len() >= 8 && &data[4..8] == b"ftyp" {
+        let brand = &data[8..12];
+        if brand == b"qt  " {
+            return "mov";
+        }
+        return "mp4";
+    }
+    // Default to mp4
+    "mp4"
 }

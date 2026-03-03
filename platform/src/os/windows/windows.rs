@@ -184,18 +184,29 @@ impl Cx {
                     let mut players = std::mem::take(&mut self.os.video_players);
                     let mut video_events = Vec::new();
                     for (_id, player) in players.iter_mut() {
-                        if let Some((width, height, duration, is_seekable, video_tracks, audio_tracks)) = player.check_prepared() {
-                            video_events.push(Event::VideoPlaybackPrepared(
-                                VideoPlaybackPreparedEvent {
-                                    video_id: player.video_id,
-                                    video_width: width,
-                                    video_height: height,
-                                    duration,
-                                    is_seekable,
-                                    video_tracks,
-                                    audio_tracks,
-                                },
-                            ));
+                        match player.check_prepared() {
+                            Some(Ok((width, height, duration, is_seekable, video_tracks, audio_tracks))) => {
+                                video_events.push(Event::VideoPlaybackPrepared(
+                                    VideoPlaybackPreparedEvent {
+                                        video_id: player.video_id,
+                                        video_width: width,
+                                        video_height: height,
+                                        duration,
+                                        is_seekable,
+                                        video_tracks,
+                                        audio_tracks,
+                                    },
+                                ));
+                            },
+                            Some(Err(err)) => {
+                                video_events.push(Event::VideoDecodingError(
+                                    VideoDecodingErrorEvent {
+                                        video_id: player.video_id,
+                                        error: err,
+                                    },
+                                ));
+                            },
+                            None => {},
                         }
                         if player.poll_frame(&mut self.textures) {
                             video_events.push(Event::VideoTextureUpdated(
