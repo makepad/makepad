@@ -431,7 +431,7 @@ impl DesktopTerminalView {
         let screen_top = self.unscrolled_rect.pos.y + self.pad_y;
         let screen_bottom = self.unscrolled_rect.pos.y + self.unscrolled_rect.size.y - self.pad_y;
         let usable_height = (screen_bottom - screen_top).max(0.0);
-        let max_visible_rows = (usable_height / cell_height).ceil().max(1.0) as usize + 1;
+        let max_visible_rows = (usable_height / cell_height).ceil().max(1.0) as usize + 2;
         let render_rows = rows.min(max_visible_rows);
 
         // Compute the screen-space Y origin and the first frame row to render.
@@ -442,12 +442,27 @@ impl DesktopTerminalView {
             let grid_height = render_rows as f64 * cell_height;
             let y = screen_bottom - grid_height;
             let sr = rows.saturating_sub(render_rows);
-            (y, sr)
+            // If the grid height is slightly larger than the viewport (due to ceil),
+            // we need to push the origin up slightly to ensure the bottom row is exactly at screen_bottom.
+            // However, we MUST NOT apply sub_pixel_y here, because bottom-aligned text
+            // should always be perfectly flush with the bottom of the viewport, regardless
+            // of where the scrollbar happens to be animating.
+            let bottom_overflow = (y + grid_height) - screen_bottom;
+            (y - bottom_overflow, sr)
         } else {
             // When top-aligned, we need to apply the sub-pixel scroll offset
             // so that scrolling is smooth and doesn't snap to cell boundaries.
             let scroll_y = self.current_scroll_pixels();
             let sub_pixel_y = scroll_y % cell_height;
+            
+            // To prevent the top line from being cut off early when scrolling,
+            // we start rendering one row *before* the top row requested from the backend,
+            // and shift the origin up by one cell height.
+            // However, `frame.top_row` is already the requested top row.
+            // When we scroll, `frame.top_row` increases, and `sub_pixel_y` goes from 0 to cell_height.
+            // So we don't need to change `start_row` (it's always 0 relative to the frame we received),
+            // but we might need to request an extra row from the backend in `send_viewport_request`.
+            
             (screen_top - sub_pixel_y, 0)
         };
 
@@ -793,12 +808,14 @@ impl Widget for DesktopTerminalView {
             .floor()
             .max(1.0) as u16;
         let req_rows = ((self.viewport_rect.size.y - self.pad_y * 2.0) / cell_height)
-            .floor()
-            .max(1.0) as u16;
+            .ceil()
+            .max(1.0) as u16 + 1; // Request 1 extra row to cover sub-pixel scrolling
 
+        // We only care if the cols match and if the rows are AT LEAST what we need.
+        // The backend might send us slightly more rows if we're near the bottom.
         let frame_matches_viewport = frame
             .as_ref()
-            .map(|frame| frame.cols == req_cols && frame.rows == req_rows)
+            .map(|frame| frame.cols == req_cols && frame.rows >= req_rows)
             .unwrap_or(false);
         if frame.is_some() && !frame_matches_viewport {
             // During rapid window drags we can briefly receive older-size
