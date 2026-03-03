@@ -18,7 +18,7 @@ use {
                 apple_classes::init_apple_classes_global,
                 apple_game_input::AppleGameInput,
                 apple_sys::*,
-                apple_video_playback::AppleVideoPlayer,
+                apple_video_player::AppleUnifiedVideoPlayer,
                 macos::{
                     macos_app::{init_macos_app_global, with_macos_app, MacosApp},
                     macos_event::MacosEvent,
@@ -470,7 +470,14 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         match player.check_prepared() {
-                            Some(Ok((width, height, duration, is_seekable, video_tracks, audio_tracks))) => {
+                            Some(Ok((
+                                width,
+                                height,
+                                duration,
+                                is_seekable,
+                                video_tracks,
+                                audio_tracks,
+                            ))) => {
                                 video_events.push(Event::VideoPlaybackPrepared(
                                     VideoPlaybackPreparedEvent {
                                         video_id: player.video_id,
@@ -485,16 +492,22 @@ impl Cx {
                                 let seekable = player.seekable_ranges();
                                 if !seekable.is_empty() {
                                     video_events.push(Event::VideoSeekableRanges(
-                                        VideoSeekableRangesEvent { video_id: player.video_id, ranges: seekable },
+                                        VideoSeekableRangesEvent {
+                                            video_id: player.video_id,
+                                            ranges: seekable,
+                                        },
                                     ));
                                 }
                                 let buffered = player.buffered_ranges();
                                 if !buffered.is_empty() {
                                     video_events.push(Event::VideoBufferedRanges(
-                                        VideoBufferedRangesEvent { video_id: player.video_id, ranges: buffered },
+                                        VideoBufferedRangesEvent {
+                                            video_id: player.video_id,
+                                            ranges: buffered,
+                                        },
                                     ));
                                 }
-                            },
+                            }
                             Some(Err(err)) => {
                                 video_events.push(Event::VideoDecodingError(
                                     VideoDecodingErrorEvent {
@@ -502,8 +515,8 @@ impl Cx {
                                         error: err,
                                     },
                                 ));
-                            },
-                            None => {},
+                            }
+                            None => {}
                         }
                         if player.poll_frame(&mut self.textures) {
                             video_events.push(Event::VideoTextureUpdated(
@@ -686,8 +699,13 @@ impl Cx {
                         .find(|w| w.window_id == parent_window_id)
                         .map(|w| w.cocoa_window.window)
                         .unwrap_or(nil);
-                    let metal_window =
-                        MetalWindow::new_popup(window_id, &metal_cx, size, position, parent_ns_window);
+                    let metal_window = MetalWindow::new_popup(
+                        window_id,
+                        &metal_cx,
+                        size,
+                        position,
+                        parent_ns_window,
+                    );
                     window.window_geom = metal_window.window_geom.clone();
                     metal_windows.push(metal_window);
                     window.is_created = true;
@@ -858,7 +876,7 @@ impl Cx {
                     autoplay,
                     should_loop,
                 ) => {
-                    let player = AppleVideoPlayer::new(
+                    let player = AppleUnifiedVideoPlayer::new(
                         metal_cx.device,
                         video_id,
                         texture_id,
@@ -871,17 +889,17 @@ impl Cx {
                     self.ensure_timer0_started();
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.play();
                     }
                 }
                 CxOsOp::PauseVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.pause();
                     }
                 }
                 CxOsOp::ResumeVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.resume();
                     }
                 }
@@ -904,7 +922,7 @@ impl Cx {
                     }
                 }
                 CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.seek_to(position_ms);
                     }
                 }
@@ -920,7 +938,7 @@ impl Cx {
                 }
                 CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
                     use crate::texture::TextureId;
-                    let player = AppleVideoPlayer::new(
+                    let player = AppleUnifiedVideoPlayer::new(
                         metal_cx.device,
                         video_id,
                         TextureId::default(),
@@ -1038,7 +1056,7 @@ impl Cx {
             let result_clone = permission_result.clone();
 
             // Create a block that will be executed on the main thread
-            let main_thread_block = objc_block!(move | | {
+            let main_thread_block = objc_block!(move || {
                 MacosApp::do_callback(MacosEvent::PermissionResult(result_clone.clone()));
             });
 
@@ -1139,5 +1157,5 @@ pub struct CxOs {
     pub metal_device: Option<ObjcId>,
     pub(crate) game_input_events: GameInputEventChannel,
     pub(crate) apple_game_input: Option<AppleGameInput>,
-    pub(crate) video_players: HashMap<LiveId, AppleVideoPlayer>,
+    pub(crate) video_players: HashMap<LiveId, AppleUnifiedVideoPlayer>,
 }

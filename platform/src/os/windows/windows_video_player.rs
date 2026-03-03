@@ -1,0 +1,314 @@
+use {
+    super::windows_video_playback::WindowsVideoPlayer,
+    crate::{
+        event::video_playback::VideoSource,
+        makepad_live_id::LiveId,
+        texture::{
+            CxTexturePool, TextureAlloc, TextureCategory, TextureFormat, TextureId, TexturePixel,
+        },
+        video_decode::software_av1::SoftwareAv1Player,
+        windows::{
+            core::Interface,
+            Win32::Graphics::{
+                Direct3D11::{
+                    ID3D11Device, ID3D11Resource, ID3D11ShaderResourceView, ID3D11Texture2D,
+                    D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+                    D3D11_USAGE_DEFAULT,
+                },
+                Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+            },
+        },
+    },
+};
+
+pub struct WindowsUnifiedVideoPlayer {
+    pub(crate) video_id: LiveId,
+    texture_id: TextureId,
+    d3d11_device: ID3D11Device,
+    source: VideoSource,
+    autoplay: bool,
+    is_looping: bool,
+    mode: WindowsPlayerMode,
+    bgra_buf: Vec<u8>,
+}
+
+enum WindowsPlayerMode {
+    Native(WindowsVideoPlayer),
+    Software(SoftwareAv1Player),
+}
+
+impl WindowsUnifiedVideoPlayer {
+    pub fn new(
+        d3d11_device: &ID3D11Device,
+        video_id: LiveId,
+        texture_id: TextureId,
+        source: VideoSource,
+        autoplay: bool,
+        is_looping: bool,
+    ) -> Self {
+        let force_software = std::env::var_os("MAKEPAD_FORCE_SOFTWARE_AV1").is_some();
+        let mode = if force_software {
+            crate::log!("VIDEO: MAKEPAD_FORCE_SOFTWARE_AV1 set, using software AV1 decoder");
+            WindowsPlayerMode::Software(SoftwareAv1Player::new(
+                video_id,
+                texture_id,
+                source.clone(),
+                autoplay,
+                is_looping,
+            ))
+        } else if let Some(native) = WindowsVideoPlayer::new(
+            d3d11_device,
+            video_id,
+            texture_id,
+            source.clone(),
+            autoplay,
+            is_looping,
+        ) {
+            WindowsPlayerMode::Native(native)
+        } else {
+            crate::log!("VIDEO: Windows native playback unavailable, using software AV1 decoder");
+            WindowsPlayerMode::Software(SoftwareAv1Player::new(
+                video_id,
+                texture_id,
+                source.clone(),
+                autoplay,
+                is_looping,
+            ))
+        };
+
+        Self {
+            video_id,
+            texture_id,
+            d3d11_device: d3d11_device.clone(),
+            source,
+            autoplay,
+            is_looping,
+            mode,
+            bgra_buf: Vec::new(),
+        }
+    }
+
+    fn switch_to_software(&mut self, reason: &str) {
+        crate::log!(
+            "VIDEO: Windows native playback failed, falling back to software AV1 decoder: {}",
+            reason
+        );
+        self.mode = WindowsPlayerMode::Software(SoftwareAv1Player::new(
+            self.video_id,
+            self.texture_id,
+            self.source.clone(),
+            self.autoplay,
+            self.is_looping,
+        ));
+    }
+
+    pub fn check_prepared(
+        &mut self,
+    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => match player.check_prepared() {
+                Some(Err(err)) => {
+                    self.switch_to_software(&err);
+                    if let WindowsPlayerMode::Software(software) = &mut self.mode {
+                        software.check_prepared()
+                    } else {
+                        Some(Err(err))
+                    }
+                }
+                other => other,
+            },
+            WindowsPlayerMode::Software(player) => player.check_prepared(),
+        }
+    }
+
+    pub fn poll_frame(&mut self, textures: &mut CxTexturePool) -> bool {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.poll_frame(textures),
+            WindowsPlayerMode::Software(player) => {
+                if !player.poll_frame() {
+                    return false;
+                }
+                if let Some((rgba, width, height)) = player.take_frame() {
+                    self.upload_rgba_to_d3d11(textures, rgba, width, height);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn upload_rgba_to_d3d11(
+        &mut self,
+        textures: &mut CxTexturePool,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        let w = width as usize;
+        let h = height as usize;
+        let expected = w.saturating_mul(h).saturating_mul(4);
+        if rgba.len() < expected {
+            return;
+        }
+
+        self.bgra_buf.resize(expected, 0);
+        for i in (0..expected).step_by(4) {
+            self.bgra_buf[i] = rgba[i + 2];
+            self.bgra_buf[i + 1] = rgba[i + 1];
+            self.bgra_buf[i + 2] = rgba[i];
+            self.bgra_buf[i + 3] = rgba[i + 3];
+        }
+
+        let sub_data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: self.bgra_buf.as_ptr() as *const _,
+            SysMemPitch: (width * 4) as u32,
+            SysMemSlicePitch: 0,
+        };
+
+        let texture_desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+
+        let mut texture: Option<ID3D11Texture2D> = None;
+        if self
+            .d3d11_device
+            .CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture))
+            .is_err()
+        {
+            return;
+        }
+
+        let texture = match texture {
+            Some(t) => t,
+            None => return,
+        };
+
+        let resource: ID3D11Resource = match texture.cast() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let mut shader_resource_view: Option<ID3D11ShaderResourceView> = None;
+        if self
+            .d3d11_device
+            .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
+            .is_err()
+        {
+            return;
+        }
+
+        let cxtexture = &mut textures[self.texture_id];
+        cxtexture.os.texture = Some(texture);
+        cxtexture.os.shader_resource_view = shader_resource_view;
+        cxtexture.format = TextureFormat::VideoRGB;
+        cxtexture.alloc = Some(TextureAlloc {
+            width: w,
+            height: h,
+            pixel: TexturePixel::VideoRGB,
+            category: TextureCategory::Video,
+        });
+    }
+
+    pub fn check_eos(&mut self) -> bool {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.check_eos(),
+            WindowsPlayerMode::Software(player) => player.check_eos(),
+        }
+    }
+
+    pub fn is_playing(&self) -> bool {
+        match &self.mode {
+            WindowsPlayerMode::Native(player) => player.is_playing(),
+            WindowsPlayerMode::Software(player) => player.is_playing(),
+        }
+    }
+
+    pub fn play(&mut self) {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.play(),
+            WindowsPlayerMode::Software(player) => player.play(),
+        }
+    }
+
+    pub fn pause(&mut self) {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.pause(),
+            WindowsPlayerMode::Software(player) => player.pause(),
+        }
+    }
+
+    pub fn resume(&mut self) {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.resume(),
+            WindowsPlayerMode::Software(player) => player.resume(),
+        }
+    }
+
+    pub fn mute(&mut self) {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.mute(),
+            WindowsPlayerMode::Software(player) => player.mute(),
+        }
+    }
+
+    pub fn unmute(&mut self) {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.unmute(),
+            WindowsPlayerMode::Software(player) => player.unmute(),
+        }
+    }
+
+    pub fn seek_to(&mut self, position_ms: u64) {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.seek_to(position_ms),
+            WindowsPlayerMode::Software(player) => player.seek_to(position_ms),
+        }
+    }
+
+    pub fn set_volume(&mut self, volume: f64) {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.set_volume(volume),
+            WindowsPlayerMode::Software(player) => player.set_volume(volume),
+        }
+    }
+
+    pub fn set_playback_rate(&mut self, rate: f64) {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.set_playback_rate(rate),
+            WindowsPlayerMode::Software(player) => player.set_playback_rate(rate),
+        }
+    }
+
+    pub fn current_position_ms(&self) -> u128 {
+        match &self.mode {
+            WindowsPlayerMode::Native(player) => player.current_position_ms(),
+            WindowsPlayerMode::Software(player) => player.current_position_ms(),
+        }
+    }
+
+    pub fn cleanup(&mut self) {
+        match &mut self.mode {
+            WindowsPlayerMode::Native(player) => player.cleanup(),
+            WindowsPlayerMode::Software(player) => player.cleanup(),
+        }
+    }
+}
+
+impl Drop for WindowsUnifiedVideoPlayer {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}

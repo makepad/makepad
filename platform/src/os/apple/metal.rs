@@ -18,8 +18,8 @@ use {
         script::vm::*,
         texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel},
     },
-    makepad_studio_protocol::{AppToStudio, GPUSample},
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
+    makepad_studio_protocol::{AppToStudio, GPUSample},
     makepad_zune_png::{
         makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},
         PngEncoder,
@@ -1973,8 +1973,9 @@ impl CxTexture {
             let _: () = msg_send![dict, setObject: pf_val forKey: pf_key];
 
             // Required for CoreVideo + OpenGLES texture cache interop on iOS.
-            let gl_tex_compat_key =
-                crate::os::apple::apple_util::str_to_nsstring("IOSurfaceOpenGLESTextureCompatibility");
+            let gl_tex_compat_key = crate::os::apple::apple_util::str_to_nsstring(
+                "IOSurfaceOpenGLESTextureCompatibility",
+            );
             let gl_tex_compat_val: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
             let _: () = msg_send![dict, setObject: gl_tex_compat_val forKey: gl_tex_compat_key];
 
@@ -2002,13 +2003,16 @@ impl CxTexture {
         }
 
         if iosurface.is_null() {
-            crate::error!("Failed to create IOSurface {}x{}", alloc.width, alloc.height);
+            crate::error!(
+                "Failed to create IOSurface {}x{}",
+                alloc.width,
+                alloc.height
+            );
             return 0;
         }
 
         // Get the global IOSurface ID for cross-process sharing
         let iosurface_id = unsafe { IOSurfaceGetID(iosurface) };
-
 
         // Create Metal texture descriptor
         let descriptor = RcObjcId::from_owned(
@@ -2268,10 +2272,14 @@ impl CglRenderBridge {
 
         unsafe {
             let attribs: &[u32] = &[
-                K_CGL_PFA_OPENGL_PROFILE, K_CGL_OGL_PVERSION_3_2_CORE,
-                K_CGL_PFA_COLOR_SIZE, 24,
-                K_CGL_PFA_DEPTH_SIZE, 24,
-                K_CGL_PFA_STENCIL_SIZE, 8,
+                K_CGL_PFA_OPENGL_PROFILE,
+                K_CGL_OGL_PVERSION_3_2_CORE,
+                K_CGL_PFA_COLOR_SIZE,
+                24,
+                K_CGL_PFA_DEPTH_SIZE,
+                24,
+                K_CGL_PFA_STENCIL_SIZE,
+                8,
                 K_CGL_PFA_ACCELERATED,
                 K_CGL_PFA_DOUBLE_BUFFER,
                 0,
@@ -2280,11 +2288,19 @@ impl CglRenderBridge {
             let mut pix: CGLPixelFormatObj = std::ptr::null_mut();
             let mut npix: i32 = 0;
             let err = CGLChoosePixelFormat(attribs.as_ptr(), &mut pix, &mut npix);
-            assert!(err == 0 && !pix.is_null(), "CGLChoosePixelFormat failed: {}", err);
+            assert!(
+                err == 0 && !pix.is_null(),
+                "CGLChoosePixelFormat failed: {}",
+                err
+            );
 
             let mut ctx: CGLContextObj = std::ptr::null_mut();
             let err = CGLCreateContext(pix, std::ptr::null_mut(), &mut ctx);
-            assert!(err == 0 && !ctx.is_null(), "CGLCreateContext failed: {}", err);
+            assert!(
+                err == 0 && !ctx.is_null(),
+                "CGLCreateContext failed: {}",
+                err
+            );
 
             // Load OpenGL.framework for dlsym-based proc address lookup
             extern "C" {
@@ -2292,7 +2308,10 @@ impl CglRenderBridge {
             }
             let framework_path = b"/System/Library/Frameworks/OpenGL.framework/OpenGL\0";
             let opengl_framework = dlopen(framework_path.as_ptr() as *const i8, 1); // RTLD_LAZY
-            assert!(!opengl_framework.is_null(), "Failed to load OpenGL.framework");
+            assert!(
+                !opengl_framework.is_null(),
+                "Failed to load OpenGL.framework"
+            );
 
             CglRenderBridge {
                 cgl_context: ctx,
@@ -2426,7 +2445,10 @@ impl EaglRenderBridge {
 
             let framework_path = b"/System/Library/Frameworks/OpenGLES.framework/OpenGLES\0";
             let opengles_framework = dlopen(framework_path.as_ptr() as *const i8, 1); // RTLD_LAZY
-            assert!(!opengles_framework.is_null(), "Failed to load OpenGLES.framework");
+            assert!(
+                !opengles_framework.is_null(),
+                "Failed to load OpenGLES.framework"
+            );
 
             EaglRenderBridge {
                 eagl_context: ctx,
@@ -2436,9 +2458,8 @@ impl EaglRenderBridge {
     }
 
     pub fn make_current(&self) {
-        let success: bool = unsafe {
-            msg_send![class!(EAGLContext), setCurrentContext: self.eagl_context]
-        };
+        let success: bool =
+            unsafe { msg_send![class!(EAGLContext), setCurrentContext: self.eagl_context] };
         assert!(success, "EAGLContext setCurrentContext failed");
     }
 
@@ -2468,17 +2489,11 @@ impl EaglRenderBridge {
         height: usize,
     ) -> (u32, ObjcId) {
         use crate::os::apple::apple_sys::{
-            kCVPixelBufferOpenGLESCompatibilityKey,
-            kCVPixelBufferMetalCompatibilityKey,
-            kCVPixelBufferIOSurfacePropertiesKey,
-            kCVPixelFormatType_32BGRA,
-            CVPixelBufferCreate,
-            CVPixelBufferRef,
-            CVMetalTextureCacheCreate,
-            CVMetalTextureCacheRef,
-            CVMetalTextureRef,
-            CVMetalTextureCacheCreateTextureFromImage,
-            CVMetalTextureGetTexture,
+            kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
+            kCVPixelBufferOpenGLESCompatibilityKey, kCVPixelFormatType_32BGRA,
+            CVMetalTextureCacheCreate, CVMetalTextureCacheCreateTextureFromImage,
+            CVMetalTextureCacheRef, CVMetalTextureGetTexture, CVMetalTextureRef,
+            CVPixelBufferCreate, CVPixelBufferRef,
         };
 
         const GL_TEXTURE_2D: u32 = 0x0DE1;
@@ -2552,7 +2567,10 @@ impl EaglRenderBridge {
             let _: () = msg_send![pb_attrs, release];
             assert!(
                 status == 0 && !pixel_buffer.is_null(),
-                "CVPixelBufferCreate failed: {} ({}x{})", status, width, height,
+                "CVPixelBufferCreate failed: {} ({}x{})",
+                status,
+                width,
+                height,
             );
 
             // -- 2. GL texture from CVPixelBuffer -----------------------------
@@ -2566,7 +2584,8 @@ impl EaglRenderBridge {
             );
             assert!(
                 status == 0 && !gl_cache.is_null(),
-                "CVOpenGLESTextureCacheCreate failed: {}", status,
+                "CVOpenGLESTextureCacheCreate failed: {}",
+                status,
             );
 
             let mut cv_gl_tex: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -2587,7 +2606,9 @@ impl EaglRenderBridge {
             assert!(
                 status == 0 && !cv_gl_tex.is_null(),
                 "CVOpenGLESTextureCacheCreateTextureFromImage failed: {} ({}x{})",
-                status, width, height,
+                status,
+                width,
+                height,
             );
 
             let gl_texture_id = CVOpenGLESTextureGetName(cv_gl_tex);
@@ -2608,7 +2629,8 @@ impl EaglRenderBridge {
             );
             assert!(
                 status == 0 && !mtl_cache.is_null(),
-                "CVMetalTextureCacheCreate failed: {}", status,
+                "CVMetalTextureCacheCreate failed: {}",
+                status,
             );
 
             let mut cv_mtl_tex: CVMetalTextureRef = std::ptr::null_mut();
@@ -2626,11 +2648,16 @@ impl EaglRenderBridge {
             assert!(
                 status == 0 && !cv_mtl_tex.is_null(),
                 "CVMetalTextureCacheCreateTextureFromImage failed: {} ({}x{})",
-                status, width, height,
+                status,
+                width,
+                height,
             );
 
             let metal_texture: ObjcId = CVMetalTextureGetTexture(cv_mtl_tex);
-            assert!(!metal_texture.is_null(), "CVMetalTextureGetTexture returned null");
+            assert!(
+                !metal_texture.is_null(),
+                "CVMetalTextureGetTexture returned null"
+            );
             // Retain — CVMetalTextureGetTexture returns unretained reference.
             let _: () = msg_send![metal_texture, retain];
 

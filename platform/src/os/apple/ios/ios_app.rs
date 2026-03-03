@@ -295,10 +295,13 @@ impl IosApp {
             let () = msg_send![window_obj, makeKeyAndVisible];
 
             // Initialize UIEditMenuInteraction for clipboard actions (iOS 16+)
-            let edit_menu_cls: ObjcId = makepad_objc_sys::runtime::objc_getClass(b"UIEditMenuInteraction\0".as_ptr() as *const _) as ObjcId;
+            let edit_menu_cls: ObjcId = makepad_objc_sys::runtime::objc_getClass(
+                b"UIEditMenuInteraction\0".as_ptr() as *const _,
+            ) as ObjcId;
             if !edit_menu_cls.is_null() {
                 // Store MTKView reference in the delegate for accessing menu rect
-                (*self.edit_menu_delegate_instance).set_ivar("mtk_view", mtk_view_obj as *mut c_void);
+                (*self.edit_menu_delegate_instance)
+                    .set_ivar("mtk_view", mtk_view_obj as *mut c_void);
 
                 // Create UIEditMenuInteraction with our delegate
                 let edit_menu_interaction: ObjcId = msg_send![edit_menu_cls, alloc];
@@ -849,10 +852,17 @@ impl IosApp {
                 let () = msg_send![edit_menu_interaction, presentEditMenuWithConfiguration: config];
             } else {
                 // iOS 15: UIMenuController fallback
-                let menu_controller: ObjcId = msg_send![class!(UIMenuController), sharedMenuController];
+                let menu_controller: ObjcId =
+                    msg_send![class!(UIMenuController), sharedMenuController];
                 let target_rect = NSRect {
-                    origin: NSPoint { x: rect.pos.x, y: rect.pos.y },
-                    size: NSSize { width: rect.size.x.max(1.0), height: rect.size.y.max(1.0) },
+                    origin: NSPoint {
+                        x: rect.pos.x,
+                        y: rect.pos.y,
+                    },
+                    size: NSSize {
+                        width: rect.size.x.max(1.0),
+                        height: rect.size.y.max(1.0),
+                    },
                 };
                 let () = msg_send![mtk_view, becomeFirstResponder];
                 let () = msg_send![menu_controller, setTargetRect: target_rect inView: mtk_view];
@@ -885,7 +895,8 @@ impl IosApp {
                 let () = msg_send![edit_menu_interaction, dismissMenu];
             } else {
                 // iOS 15: UIMenuController fallback
-                let menu_controller: ObjcId = msg_send![class!(UIMenuController), sharedMenuController];
+                let menu_controller: ObjcId =
+                    msg_send![class!(UIMenuController), sharedMenuController];
                 let () = msg_send![menu_controller, setMenuVisible: NO animated: YES];
             }
         }

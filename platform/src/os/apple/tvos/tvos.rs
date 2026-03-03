@@ -8,11 +8,9 @@ use {
         os::{
             apple::apple_sys::*,
             apple::apple_util::{nsstring_to_string, str_to_nsstring},
-            apple::{
-                tvos::{
-                    tvos_app::{get_tvos_app_global, init_tvos_app_global, TvosApp},
-                    tvos_event::TvosEvent,
-                },
+            apple::tvos::{
+                tvos_app::{get_tvos_app_global, init_tvos_app_global, TvosApp},
+                tvos_event::TvosEvent,
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,

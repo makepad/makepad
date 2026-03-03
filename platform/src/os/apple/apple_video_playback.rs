@@ -142,8 +142,11 @@ impl AppleVideoPlayer {
             VideoSource::InMemory(data) => {
                 // Detect container format from magic bytes for correct file extension.
                 let ext = detect_container_extension(data);
-                let tmp_path = std::env::temp_dir()
-                    .join(format!("makepad_video_{}.{}", LiveId::unique().0, ext));
+                let tmp_path = std::env::temp_dir().join(format!(
+                    "makepad_video_{}.{}",
+                    LiveId::unique().0,
+                    ext
+                ));
                 let tmp_path_str = tmp_path.to_string_lossy().to_string();
                 std::fs::write(&tmp_path, data.as_ref()).unwrap_or_else(|e| {
                     error!("Failed to write video to temp file: {}", e);
@@ -191,7 +194,9 @@ impl AppleVideoPlayer {
 
     /// Check if the player item has become ready to play or has failed.
     /// Returns `Ok(...)` with metadata when ready, `Err(msg)` on failure, `None` if still loading.
-    pub fn check_prepared(&mut self) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    pub fn check_prepared(
+        &mut self,
+    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
         if self.prepare_notified {
             return None;
         }
@@ -206,7 +211,8 @@ impl AppleVideoPlayer {
                 // Get video dimensions from the asset's video track
                 let asset: ObjcId = msg_send![self.player_item.as_id(), asset];
                 let media_type_vid = Self::to_nsstring("vide");
-                let video_tracks_obj: ObjcId = msg_send![asset, tracksWithMediaType: media_type_vid];
+                let video_tracks_obj: ObjcId =
+                    msg_send![asset, tracksWithMediaType: media_type_vid];
                 let _: () = msg_send![media_type_vid, release];
 
                 let video_track_count: usize = msg_send![video_tracks_obj, count];
@@ -220,7 +226,8 @@ impl AppleVideoPlayer {
 
                 // Check for audio tracks
                 let media_type_aud = Self::to_nsstring("soun");
-                let audio_tracks_obj: ObjcId = msg_send![asset, tracksWithMediaType: media_type_aud];
+                let audio_tracks_obj: ObjcId =
+                    msg_send![asset, tracksWithMediaType: media_type_aud];
                 let _: () = msg_send![media_type_aud, release];
                 let audio_track_count: usize = msg_send![audio_tracks_obj, count];
 
@@ -234,7 +241,8 @@ impl AppleVideoPlayer {
                 };
 
                 // Query seekable ranges
-                let seekable_ranges: ObjcId = msg_send![self.player_item.as_id(), seekableTimeRanges];
+                let seekable_ranges: ObjcId =
+                    msg_send![self.player_item.as_id(), seekableTimeRanges];
                 let seekable_count: usize = msg_send![seekable_ranges, count];
                 let is_seekable = seekable_count > 0 && duration_ms > 0;
 
@@ -253,7 +261,14 @@ impl AppleVideoPlayer {
                     vec![]
                 };
 
-                return Some(Ok((width, height, duration_ms, is_seekable, video_tracks, audio_tracks)));
+                return Some(Ok((
+                    width,
+                    height,
+                    duration_ms,
+                    is_seekable,
+                    video_tracks,
+                    audio_tracks,
+                )));
             }
 
             // AVPlayerItemStatusFailed = 2
@@ -282,7 +297,9 @@ impl AppleVideoPlayer {
 
     /// Returns seekable time ranges as (start_secs, end_secs) pairs.
     pub fn seekable_ranges(&self) -> Vec<(f64, f64)> {
-        if !self.is_prepared { return vec![]; }
+        if !self.is_prepared {
+            return vec![];
+        }
         unsafe {
             let ranges: ObjcId = msg_send![self.player_item.as_id(), seekableTimeRanges];
             let count: usize = msg_send![ranges, count];
@@ -302,7 +319,9 @@ impl AppleVideoPlayer {
 
     /// Returns buffered (loaded) time ranges as (start_secs, end_secs) pairs.
     pub fn buffered_ranges(&self) -> Vec<(f64, f64)> {
-        if !self.is_prepared { return vec![]; }
+        if !self.is_prepared {
+            return vec![];
+        }
         unsafe {
             let ranges: ObjcId = msg_send![self.player_item.as_id(), loadedTimeRanges];
             let count: usize = msg_send![ranges, count];

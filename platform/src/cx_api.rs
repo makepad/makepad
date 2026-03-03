@@ -136,8 +136,14 @@ pub enum CxOsOp {
     HideClipboardActions,
     CopyToClipboard(String),
     SetPrimarySelection(String),
-    ShowSelectionHandles { start: Vec2d, end: Vec2d },
-    UpdateSelectionHandles { start: Vec2d, end: Vec2d },
+    ShowSelectionHandles {
+        start: Vec2d,
+        end: Vec2d,
+    },
+    UpdateSelectionHandles {
+        start: Vec2d,
+        end: Vec2d,
+    },
     HideSelectionHandles,
     AccessibilityUpdate(AccessibilityUpdatePayload),
 
@@ -532,7 +538,10 @@ impl Cx {
     /// The `update` is a type-erased `accesskit::TreeUpdate`. Platform backends
     /// downcast it when an accessibility adapter is active.
     pub fn update_accessibility_tree(&mut self, update: Box<dyn std::any::Any + Send>) {
-        self.platform_ops.push(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(update)));
+        self.platform_ops
+            .push(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(
+                update,
+            )));
     }
 
     /// Show native selection handles at the given start and end positions (mobile).
@@ -1054,9 +1063,14 @@ pub fn can_play_type(mime: &str) -> &'static str {
     can_play_type_impl(mime)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(all(target_os = "linux", not(target_os = "android")))]
 fn can_play_type_impl(mime: &str) -> &'static str {
     crate::os::linux::linux_video_playback::can_play_type(mime)
+}
+
+#[cfg(target_os = "android")]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::linux::android::android_video_playback::can_play_type(mime)
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]

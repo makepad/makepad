@@ -41,6 +41,8 @@ pub mod gstreamer_sys;
 pub mod ipc;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod linux_video_playback;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod linux_video_player;
 
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod alsa_audio;

@@ -2,9 +2,6 @@ use makepad_widgets::*;
 
 app_main!(App);
 
-const VP8_WEBM: &[u8] = include_bytes!("../data/vp8.webm");
-const VP9_WEBM: &[u8] = include_bytes!("../data/vp9.webm");
-const AV1_WEBM: &[u8] = include_bytes!("../data/av1.webm");
 const AV1_MP4: &[u8] = include_bytes!("../data/av1.mp4");
 
 fn write_test_file(name: &str, data: &[u8]) -> String {
@@ -15,22 +12,15 @@ fn write_test_file(name: &str, data: &[u8]) -> String {
     path.to_string_lossy().to_string()
 }
 
-/// Write embedded test videos to temp dir. Call before app_main().
+/// Write embedded test video to temp dir. Call before app_main().
 pub fn write_test_files() {
     write_test_file("test_av1.mp4", AV1_MP4);
-    write_test_file("test_vp8.webm", VP8_WEBM);
-    write_test_file("test_vp9.webm", VP9_WEBM);
-    write_test_file("test_av1.webm", AV1_WEBM);
     let dir = std::env::temp_dir().join("makepad_video_test");
     eprintln!("Test files in: {}", dir.display());
 }
 
 fn can_play_report() -> String {
-    let types = [
-        "video/mp4", "video/webm", "video/ogg", "video/quicktime",
-        "video/x-matroska", "audio/mp4", "audio/webm", "audio/ogg",
-        "audio/mpeg", "audio/flac",
-    ];
+    let types = ["video/mp4"];
     let mut parts = Vec::new();
     for t in &types {
         let r = makepad_widgets::makepad_platform::can_play_type(t);
@@ -41,8 +31,11 @@ fn can_play_report() -> String {
 }
 
 fn temp_video_path(name: &str) -> String {
-    std::env::temp_dir().join("makepad_video_test").join(name)
-        .to_string_lossy().to_string()
+    std::env::temp_dir()
+        .join("makepad_video_test")
+        .join(name)
+        .to_string_lossy()
+        .to_string()
 }
 
 script_mod! {
@@ -52,7 +45,7 @@ script_mod! {
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
-                window.inner_size: vec2(950, 700)
+                window.inner_size: vec2(500, 400)
                 body +: {
                     main_view := View{
                         width: Fill
@@ -62,7 +55,7 @@ script_mod! {
                         padding: 16
 
                         Label{
-                            text: "Video Format Test"
+                            text: "Video Format Test — AV1/MP4"
                             draw_text.text_style.font_size: 18
                         }
                         can_play_label := Label{
@@ -77,56 +70,14 @@ script_mod! {
                             spacing: 16
 
                             View{
-                                width: 200
+                                width: 400
                                 height: Fit
                                 flow: Down
                                 spacing: 4
                                 Label{ text: "AV1 (MP4)" }
                                 av1_mp4_video := Video{
-                                    width: 200
-                                    height: 150
-                                    is_looping: true
-                                    mute: true
-                                }
-                            }
-
-                            View{
-                                width: 200
-                                height: Fit
-                                flow: Down
-                                spacing: 4
-                                Label{ text: "VP8 (WebM)" }
-                                vp8_video := Video{
-                                    width: 200
-                                    height: 150
-                                    is_looping: true
-                                    mute: true
-                                }
-                            }
-
-                            View{
-                                width: 200
-                                height: Fit
-                                flow: Down
-                                spacing: 4
-                                Label{ text: "VP9 (WebM)" }
-                                vp9_video := Video{
-                                    width: 200
-                                    height: 150
-                                    is_looping: true
-                                    mute: true
-                                }
-                            }
-
-                            View{
-                                width: 200
-                                height: Fit
-                                flow: Down
-                                spacing: 4
-                                Label{ text: "AV1 (WebM)" }
-                                av1_webm_video := Video{
-                                    width: 200
-                                    height: 150
+                                    width: 400
+                                    height: 300
                                     is_looping: true
                                     mute: true
                                 }
@@ -163,17 +114,9 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
 
-        // Set video sources after widgets are instantiated (first paint cycle).
-        // Video widgets inside script_mod are not borrowable until after first draw.
         if !self.sources_set {
-            let videos: &[(&[LiveId], &str)] = &[
-                (&[live_id!(av1_mp4_video)], "test_av1.mp4"),
-                (&[live_id!(vp8_video)], "test_vp8.webm"),
-                (&[live_id!(vp9_video)], "test_vp9.webm"),
-                (&[live_id!(av1_webm_video)], "test_av1.webm"),
-            ];
+            let videos: &[(&[LiveId], &str)] = &[(&[live_id!(av1_mp4_video)], "test_av1.mp4")];
 
-            // Check if any video widget is instantiated yet
             let first_ref = self.ui.video(cx, videos[0].0);
             if first_ref.borrow().is_none() {
                 return;
@@ -186,7 +129,9 @@ impl AppMain for App {
                 vref.begin_playback(cx);
             }
 
-            self.ui.label(cx, ids!(can_play_label)).set_text(cx, &can_play_report());
+            self.ui
+                .label(cx, ids!(can_play_label))
+                .set_text(cx, &can_play_report());
             self.sources_set = true;
         }
     }

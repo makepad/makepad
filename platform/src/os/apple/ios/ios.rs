@@ -16,7 +16,7 @@ use {
         os::{
             apple::{
                 apple_sys::*,
-                apple_video_playback::AppleVideoPlayer,
+                apple_video_player::AppleUnifiedVideoPlayer,
                 ios::{
                     ios_app::{self, init_ios_app_global, with_ios_app, IosApp},
                     ios_event::IosEvent,
@@ -112,11 +112,16 @@ impl Cx {
 
                     // Draw popup window passes as overlays on the same MTKView
                     for popup_pass_id in &passes_todo.clone() {
-                        if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent {
+                        if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent
+                        {
                             let pw = &self.windows[pw_id];
                             if pw.is_popup && pw.popup_parent == Some(window_id) {
                                 let mtk_view = with_ios_app(|app| app.mtk_view.unwrap());
-                                self.draw_pass(*popup_pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
+                                self.draw_pass(
+                                    *popup_pass_id,
+                                    metal_cx,
+                                    DrawPassMode::MTKView(mtk_view),
+                                );
                             }
                         }
                     }
@@ -246,7 +251,14 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         match player.check_prepared() {
-                            Some(Ok((width, height, duration, is_seekable, video_tracks, audio_tracks))) => {
+                            Some(Ok((
+                                width,
+                                height,
+                                duration,
+                                is_seekable,
+                                video_tracks,
+                                audio_tracks,
+                            ))) => {
                                 video_events.push(Event::VideoPlaybackPrepared(
                                     VideoPlaybackPreparedEvent {
                                         video_id: player.video_id,
@@ -261,16 +273,22 @@ impl Cx {
                                 let seekable = player.seekable_ranges();
                                 if !seekable.is_empty() {
                                     video_events.push(Event::VideoSeekableRanges(
-                                        VideoSeekableRangesEvent { video_id: player.video_id, ranges: seekable },
+                                        VideoSeekableRangesEvent {
+                                            video_id: player.video_id,
+                                            ranges: seekable,
+                                        },
                                     ));
                                 }
                                 let buffered = player.buffered_ranges();
                                 if !buffered.is_empty() {
                                     video_events.push(Event::VideoBufferedRanges(
-                                        VideoBufferedRangesEvent { video_id: player.video_id, ranges: buffered },
+                                        VideoBufferedRangesEvent {
+                                            video_id: player.video_id,
+                                            ranges: buffered,
+                                        },
                                     ));
                                 }
-                            },
+                            }
                             Some(Err(err)) => {
                                 video_events.push(Event::VideoDecodingError(
                                     VideoDecodingErrorEvent {
@@ -278,8 +296,8 @@ impl Cx {
                                         error: err,
                                     },
                                 ));
-                            },
-                            None => {},
+                            }
+                            None => {}
                         }
                         if player.poll_frame(&mut self.textures) {
                             video_events.push(Event::VideoTextureUpdated(
@@ -308,9 +326,15 @@ impl Cx {
             }
             IosEvent::TouchUpdate(e) => {
                 // Check for outside-click popup dismiss on touch start
-                if e.touches.iter().any(|t| t.state == crate::event::TouchState::Start) {
+                if e.touches
+                    .iter()
+                    .any(|t| t.state == crate::event::TouchState::Start)
+                {
                     if let Some(popup_window_id) = self.find_popup_to_dismiss_on_touch(&e.touches) {
-                        self.dismiss_popup_window(popup_window_id, crate::event::PopupDismissReason::OutsideClick);
+                        self.dismiss_popup_window(
+                            popup_window_id,
+                            crate::event::PopupDismissReason::OutsideClick,
+                        );
                     }
                 }
                 self.fingers.process_touch_update_start(e.time, &e.touches);
@@ -329,7 +353,10 @@ impl Cx {
             IosEvent::MouseDown(e) => {
                 // Check for outside-click popup dismiss
                 if let Some(popup_window_id) = self.find_popup_to_dismiss_on_mouse(e.abs) {
-                    self.dismiss_popup_window(popup_window_id, crate::event::PopupDismissReason::OutsideClick);
+                    self.dismiss_popup_window(
+                        popup_window_id,
+                        crate::event::PopupDismissReason::OutsideClick,
+                    );
                 }
                 self.fingers.process_tap_count(e.abs, e.time);
                 self.fingers.mouse_down(e.button, e.window_id);
@@ -493,7 +520,7 @@ impl Cx {
                     autoplay,
                     should_loop,
                 ) => {
-                    let player = AppleVideoPlayer::new(
+                    let player = AppleUnifiedVideoPlayer::new(
                         metal_cx.device,
                         video_id,
                         texture_id,
@@ -504,17 +531,17 @@ impl Cx {
                     self.os.video_players.insert(video_id, player);
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.play();
                     }
                 }
                 CxOsOp::PauseVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.pause();
                     }
                 }
                 CxOsOp::ResumeVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.resume();
                     }
                 }
@@ -537,7 +564,7 @@ impl Cx {
                     }
                 }
                 CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.seek_to(position_ms);
                     }
                 }
@@ -553,7 +580,7 @@ impl Cx {
                 }
                 CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
                     use crate::texture::TextureId;
-                    let player = AppleVideoPlayer::new(
+                    let player = AppleUnifiedVideoPlayer::new(
                         metal_cx.device,
                         video_id,
                         TextureId::default(),
@@ -694,7 +721,10 @@ impl Cx {
 }
 
 impl Cx {
-    fn find_popup_to_dismiss_on_touch(&self, touches: &[crate::event::TouchPoint]) -> Option<crate::window::WindowId> {
+    fn find_popup_to_dismiss_on_touch(
+        &self,
+        touches: &[crate::event::TouchPoint],
+    ) -> Option<crate::window::WindowId> {
         use crate::window::CxWindowPool;
         for i in (0..self.windows.len()).rev() {
             let window_id = CxWindowPool::from_usize(i);
@@ -732,7 +762,11 @@ impl Cx {
         None
     }
 
-    fn dismiss_popup_window(&mut self, window_id: crate::window::WindowId, reason: crate::event::PopupDismissReason) {
+    fn dismiss_popup_window(
+        &mut self,
+        window_id: crate::window::WindowId,
+        reason: crate::event::PopupDismissReason,
+    ) {
         use crate::window::CxWindowPool;
         // First dismiss any child popups
         let children: Vec<crate::window::WindowId> = (0..self.windows.len())
@@ -753,7 +787,9 @@ impl Cx {
             window_id,
             reason,
         }));
-        self.call_event_handler(&Event::WindowClosed(crate::event::WindowClosedEvent { window_id }));
+        self.call_event_handler(&Event::WindowClosed(crate::event::WindowClosedEvent {
+            window_id,
+        }));
         self.windows[window_id].is_created = false;
     }
 }
@@ -817,7 +853,7 @@ pub struct CxOs {
     pub(crate) texture_bytes_uploaded: u64,
     pub(crate) permission_response: PermissionResultChannel,
     pub(crate) apple_game_input: Option<crate::os::apple::apple_game_input::AppleGameInput>,
-    pub(crate) video_players: HashMap<LiveId, AppleVideoPlayer>,
+    pub(crate) video_players: HashMap<LiveId, AppleUnifiedVideoPlayer>,
 }
 
 pub struct PermissionResultChannel {

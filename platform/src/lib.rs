@@ -1,6 +1,6 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
-pub mod os;
 pub mod gl_render_bridge;
+pub mod os;
 
 #[macro_use]
 pub mod log;
@@ -19,12 +19,17 @@ pub mod script;
 pub mod thread;
 pub mod video;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod video_decode;
+
 mod draw_list;
 mod draw_matrix;
 mod draw_pass;
 mod draw_shader;
 mod draw_vars;
 
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+mod app_icon;
 mod area;
 pub mod component;
 mod component_list;
@@ -41,8 +46,6 @@ mod performance_stats;
 pub mod permission;
 mod texture;
 mod window;
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-mod app_icon;
 
 pub mod web_socket;
 
@@ -177,7 +180,9 @@ pub use {
         ui_runner::*,
         video::*,
         web_socket::{WebSocket, WebSocketMessage},
-        window::{CxWindowPool, ScriptWindowHandle, WindowHandle, WindowIcon, WindowIconBuffer, WindowId},
+        window::{
+            CxWindowPool, ScriptWindowHandle, WindowHandle, WindowIcon, WindowIconBuffer, WindowId,
+        },
     },
     app_main::*,
     arc_string_mut::ArcStringMut,
@@ -185,11 +190,11 @@ pub use {
     component_map::ComponentMap,
     //makepad_image_formats::image,
     log::*,
+    makepad_math::makepad_micro_serde,
+    makepad_math::*,
     makepad_network::{
         HttpError, HttpMethod, HttpProgress, HttpRequest, HttpResponse, NetworkResponse,
     },
-    makepad_math::makepad_micro_serde,
-    makepad_math::*,
     makepad_script,
     makepad_script::{
         apply::*, handle::*, heap::*, makepad_error_log, makepad_live_id, makepad_live_id::*,

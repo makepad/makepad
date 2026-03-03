@@ -44,15 +44,25 @@ const GL_TEXTURE_2D: u32 = 0x0DE1;
 
 // EGL function pointer types
 type FnGetProcAddress = unsafe extern "system" fn(*const i8) -> *const c_void;
-type FnGetPlatformDisplayEXT = unsafe extern "system" fn(EGLenum, *mut c_void, *const EGLint) -> EGLDisplay;
+type FnGetPlatformDisplayEXT =
+    unsafe extern "system" fn(EGLenum, *mut c_void, *const EGLint) -> EGLDisplay;
 type FnInitialize = unsafe extern "system" fn(EGLDisplay, *mut EGLint, *mut EGLint) -> EGLBoolean;
 type FnTerminate = unsafe extern "system" fn(EGLDisplay) -> EGLBoolean;
 type FnBindAPI = unsafe extern "system" fn(EGLenum) -> EGLBoolean;
-type FnChooseConfig = unsafe extern "system" fn(EGLDisplay, *const EGLint, *mut EGLConfig, EGLint, *mut EGLint) -> EGLBoolean;
-type FnCreateContext = unsafe extern "system" fn(EGLDisplay, EGLConfig, EGLContext, *const EGLint) -> EGLContext;
+type FnChooseConfig = unsafe extern "system" fn(
+    EGLDisplay,
+    *const EGLint,
+    *mut EGLConfig,
+    EGLint,
+    *mut EGLint,
+) -> EGLBoolean;
+type FnCreateContext =
+    unsafe extern "system" fn(EGLDisplay, EGLConfig, EGLContext, *const EGLint) -> EGLContext;
 type FnDestroyContext = unsafe extern "system" fn(EGLDisplay, EGLContext) -> EGLBoolean;
-type FnMakeCurrent = unsafe extern "system" fn(EGLDisplay, EGLSurface, EGLSurface, EGLContext) -> EGLBoolean;
-type FnCreateDeviceANGLE = unsafe extern "system" fn(EGLenum, *mut c_void, *const EGLAttrib) -> EGLDeviceEXT;
+type FnMakeCurrent =
+    unsafe extern "system" fn(EGLDisplay, EGLSurface, EGLSurface, EGLContext) -> EGLBoolean;
+type FnCreateDeviceANGLE =
+    unsafe extern "system" fn(EGLenum, *mut c_void, *const EGLAttrib) -> EGLDeviceEXT;
 type FnReleaseDeviceANGLE = unsafe extern "system" fn(EGLDeviceEXT) -> EGLBoolean;
 
 /// EGL function table loaded from libEGL.dll at runtime.
@@ -77,34 +87,41 @@ impl EglFns {
     /// via mozangle's build_dlls feature). The library handle is intentionally leaked
     /// so the DLL stays loaded for the process lifetime.
     fn load() -> Self {
-        use windows::Win32::System::LibraryLoader::{LoadLibraryA, GetProcAddress};
         use windows::core::PCSTR;
+        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
         let module = unsafe { LoadLibraryA(PCSTR::from_raw(b"libEGL.dll\0".as_ptr())) }
             .expect("Failed to load libEGL.dll — ANGLE DLLs must be present");
 
         let get = |name: &str| -> *const c_void {
             let cname = CString::new(name).unwrap();
-            let ptr = unsafe { GetProcAddress(module, PCSTR::from_raw(cname.as_ptr() as *const u8)) };
+            let ptr =
+                unsafe { GetProcAddress(module, PCSTR::from_raw(cname.as_ptr() as *const u8)) };
             match ptr {
                 Some(f) => f as *const c_void,
                 None => panic!("libEGL.dll missing symbol: {name}"),
             }
         };
 
-        let get_proc_address: FnGetProcAddress = unsafe { std::mem::transmute(get("eglGetProcAddress")) };
+        let get_proc_address: FnGetProcAddress =
+            unsafe { std::mem::transmute(get("eglGetProcAddress")) };
 
         // Some ANGLE extension functions are only available via eglGetProcAddress.
         let get_ext = |name: &str| -> *const c_void {
             let cname = CString::new(name).unwrap();
             let ptr = unsafe { (get_proc_address)(cname.as_ptr()) };
-            assert!(!ptr.is_null(), "eglGetProcAddress returned null for: {name}");
+            assert!(
+                !ptr.is_null(),
+                "eglGetProcAddress returned null for: {name}"
+            );
             ptr
         };
 
         EglFns {
             get_proc_address,
-            get_platform_display_ext: unsafe { std::mem::transmute(get_ext("eglGetPlatformDisplayEXT")) },
+            get_platform_display_ext: unsafe {
+                std::mem::transmute(get_ext("eglGetPlatformDisplayEXT"))
+            },
             initialize: unsafe { std::mem::transmute(get("eglInitialize")) },
             terminate: unsafe { std::mem::transmute(get("eglTerminate")) },
             bind_api: unsafe { std::mem::transmute(get("eglBindAPI")) },
@@ -146,11 +163,8 @@ impl AngleRenderBridge {
                 windows::Win32::Graphics::Direct3D11::ID3D11Device,
                 *mut c_void,
             >(&d3d11_device);
-            let egl_device = (egl.create_device_angle)(
-                EGL_D3D11_DEVICE_ANGLE,
-                d3d11_raw,
-                std::ptr::null(),
-            );
+            let egl_device =
+                (egl.create_device_angle)(EGL_D3D11_DEVICE_ANGLE, d3d11_raw, std::ptr::null());
             assert!(!egl_device.is_null(), "eglCreateDeviceANGLE failed");
 
             // Create EGL display from device
@@ -173,13 +187,20 @@ impl AngleRenderBridge {
 
             // Choose config
             let config_attribs: &[EGLint] = &[
-                EGL_RED_SIZE, 8,
-                EGL_GREEN_SIZE, 8,
-                EGL_BLUE_SIZE, 8,
-                EGL_ALPHA_SIZE, 8,
-                EGL_DEPTH_SIZE, 24,
-                EGL_STENCIL_SIZE, 8,
-                EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                EGL_RED_SIZE,
+                8,
+                EGL_GREEN_SIZE,
+                8,
+                EGL_BLUE_SIZE,
+                8,
+                EGL_ALPHA_SIZE,
+                8,
+                EGL_DEPTH_SIZE,
+                24,
+                EGL_STENCIL_SIZE,
+                8,
+                EGL_RENDERABLE_TYPE,
+                EGL_OPENGL_ES2_BIT,
                 EGL_NONE,
             ];
 
@@ -197,8 +218,10 @@ impl AngleRenderBridge {
 
             // Create GLES 3.0 context
             let context_attribs: &[EGLint] = &[
-                EGL_CONTEXT_MAJOR_VERSION, 3,
-                EGL_CONTEXT_MINOR_VERSION, 0,
+                EGL_CONTEXT_MAJOR_VERSION,
+                3,
+                EGL_CONTEXT_MINOR_VERSION,
+                0,
                 EGL_NONE,
             ];
 
@@ -266,24 +289,27 @@ impl AngleRenderBridge {
         self.make_current();
 
         // Create a makepad render target texture (D3D11 texture with RTV + SRV)
-        let texture = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 {
-            size: TextureSize::Fixed { width, height },
-            initial: true,
-        });
+        let texture = Texture::new_with_format(
+            cx,
+            TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Fixed { width, height },
+                initial: true,
+            },
+        );
 
         // Force allocation of the D3D11 texture
         {
             let d3d11_device = cx.os.d3d11_device.as_ref().unwrap();
             let cxtexture = &mut cx.textures[texture.texture_id()];
 
+            use windows::core::Interface;
             use windows::Win32::Graphics::Direct3D11::{
-                D3D11_TEXTURE2D_DESC, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
-                D3D11_USAGE_DEFAULT, ID3D11Resource,
+                ID3D11Resource, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+                D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
             };
             use windows::Win32::Graphics::Dxgi::Common::{
                 DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
             };
-            use windows::core::Interface;
 
             let texture_desc = D3D11_TEXTURE2D_DESC {
                 Width: width as u32,
@@ -291,7 +317,10 @@ impl AngleRenderBridge {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE_DEFAULT,
                 BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
                 CPUAccessFlags: 0,
@@ -300,7 +329,9 @@ impl AngleRenderBridge {
 
             let mut d3d11_texture = None;
             unsafe {
-                d3d11_device.CreateTexture2D(&texture_desc, None, Some(&mut d3d11_texture)).unwrap();
+                d3d11_device
+                    .CreateTexture2D(&texture_desc, None, Some(&mut d3d11_texture))
+                    .unwrap();
             }
             let d3d11_texture = d3d11_texture.unwrap();
 
@@ -308,35 +339,39 @@ impl AngleRenderBridge {
             let resource: ID3D11Resource = d3d11_texture.clone().cast().unwrap();
             let mut shader_resource_view = None;
             unsafe {
-                d3d11_device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap();
+                d3d11_device
+                    .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
+                    .unwrap();
             }
 
             cxtexture.os.texture = Some(d3d11_texture.clone());
             cxtexture.os.shader_resource_view = shader_resource_view;
 
             // Import the D3D11 texture into ANGLE via EGLImage
-            let d3d11_texture_raw: *mut c_void = unsafe { std::mem::transmute_copy(&d3d11_texture) };
+            let d3d11_texture_raw: *mut c_void =
+                unsafe { std::mem::transmute_copy(&d3d11_texture) };
 
             // Load extension functions via eglGetProcAddress
             type EglCreateImageKHRFn = unsafe extern "system" fn(
-                *mut c_void, *mut c_void, u32, *mut c_void, *const i32,
+                *mut c_void,
+                *mut c_void,
+                u32,
+                *mut c_void,
+                *const i32,
             ) -> *mut c_void;
             type GlEGLImageTargetTexture2DOESFn = unsafe extern "system" fn(u32, *mut c_void);
             type GlGenTexturesFn = unsafe extern "system" fn(i32, *mut u32);
             type GlBindTextureFn = unsafe extern "system" fn(u32, u32);
 
-            let egl_create_image_khr: EglCreateImageKHRFn = unsafe {
-                std::mem::transmute(self.egl.get_proc_address("eglCreateImageKHR"))
-            };
+            let egl_create_image_khr: EglCreateImageKHRFn =
+                unsafe { std::mem::transmute(self.egl.get_proc_address("eglCreateImageKHR")) };
             let gl_egl_image_target_texture_2d_oes: GlEGLImageTargetTexture2DOESFn = unsafe {
                 std::mem::transmute(self.egl.get_proc_address("glEGLImageTargetTexture2DOES"))
             };
-            let gl_gen_textures: GlGenTexturesFn = unsafe {
-                std::mem::transmute(self.egl.get_proc_address("glGenTextures"))
-            };
-            let gl_bind_texture: GlBindTextureFn = unsafe {
-                std::mem::transmute(self.egl.get_proc_address("glBindTexture"))
-            };
+            let gl_gen_textures: GlGenTexturesFn =
+                unsafe { std::mem::transmute(self.egl.get_proc_address("glGenTextures")) };
+            let gl_bind_texture: GlBindTextureFn =
+                unsafe { std::mem::transmute(self.egl.get_proc_address("glBindTexture")) };
 
             // Create EGLImage from D3D11 texture
             let image_attribs: &[EGLint] = &[EGL_NONE];

@@ -4,11 +4,11 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
+            game_input::*,
             video_playback::{
                 VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
                 VideoPlaybackResourcesReleasedEvent, VideoTextureUpdatedEvent,
             },
-            game_input::*,
             *,
         },
         game_input::*,
@@ -23,7 +23,7 @@ use {
                 win32_window::Win32Window,
                 windows_game_input::WindowsGameInput,
                 windows_media::CxWindowsMedia,
-                windows_video_playback::WindowsVideoPlayer,
+                windows_video_player::WindowsUnifiedVideoPlayer,
             },
         },
         //permission::{PermissionResult, PermissionStatus},
@@ -160,9 +160,7 @@ impl Cx {
                         window_id: popup_id,
                     }));
                     self.windows[popup_id].is_created = false;
-                    if let Some(idx) =
-                        d3d11_windows.iter().position(|w| w.window_id == popup_id)
-                    {
+                    if let Some(idx) = d3d11_windows.iter().position(|w| w.window_id == popup_id) {
                         d3d11_windows[idx].win32_window.close_window();
                         d3d11_windows.remove(idx);
                     }
@@ -185,7 +183,14 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_id, player) in players.iter_mut() {
                         match player.check_prepared() {
-                            Some(Ok((width, height, duration, is_seekable, video_tracks, audio_tracks))) => {
+                            Some(Ok((
+                                width,
+                                height,
+                                duration,
+                                is_seekable,
+                                video_tracks,
+                                audio_tracks,
+                            ))) => {
                                 video_events.push(Event::VideoPlaybackPrepared(
                                     VideoPlaybackPreparedEvent {
                                         video_id: player.video_id,
@@ -197,7 +202,7 @@ impl Cx {
                                         audio_tracks,
                                     },
                                 ));
-                            },
+                            }
                             Some(Err(err)) => {
                                 video_events.push(Event::VideoDecodingError(
                                     VideoDecodingErrorEvent {
@@ -205,8 +210,8 @@ impl Cx {
                                         error: err,
                                     },
                                 ));
-                            },
-                            None => {},
+                            }
+                            None => {}
                         }
                         if player.poll_frame(&mut self.textures) {
                             video_events.push(Event::VideoTextureUpdated(
@@ -442,8 +447,9 @@ impl Cx {
                     window.popup_grab_keyboard = grab_keyboard;
 
                     // Convert parent-relative position to screen coordinates
-                    let screen_position = if let Some(parent_d3d11) =
-                        d3d11_windows.iter().find(|w| w.window_id == parent_window_id)
+                    let screen_position = if let Some(parent_d3d11) = d3d11_windows
+                        .iter()
+                        .find(|w| w.window_id == parent_window_id)
                     {
                         let parent_pos = parent_d3d11.win32_window.get_position();
                         let parent_dpi = parent_d3d11.win32_window.get_dpi_factor();
@@ -456,12 +462,8 @@ impl Cx {
                         position
                     };
 
-                    let d3d11_window = D3d11Window::new_popup(
-                        window_id,
-                        &d3d11_cx,
-                        size,
-                        screen_position,
-                    );
+                    let d3d11_window =
+                        D3d11Window::new_popup(window_id, &d3d11_cx, size, screen_position);
                     window.window_geom = d3d11_window.window_geom.clone();
                     d3d11_windows.push(d3d11_window);
                     window.is_created = true;
@@ -619,32 +621,21 @@ impl Cx {
                         continue;
                     }
                     if let Some(ref device) = self.os.d3d11_device {
-                        if let Some(player) = WindowsVideoPlayer::new(
+                        let player = WindowsUnifiedVideoPlayer::new(
                             device,
                             video_id,
                             texture_id,
                             source,
                             autoplay,
                             should_loop,
-                        ) {
-                            self.os.video_players.insert(video_id, player);
-                        } else {
-                            self.call_event_handler(&Event::VideoDecodingError(
-                                VideoDecodingErrorEvent {
-                                    video_id,
-                                    error: "Failed to initialize Windows Media Foundation video playback".to_string(),
-                                },
-                            ));
-                            crate::error!(
-                                "VIDEO: WindowsVideoPlayer::new failed for {:?} during PrepareVideoPlayback",
-                                video_id
-                            );
-                        }
+                        );
+                        self.os.video_players.insert(video_id, player);
                     } else {
                         self.call_event_handler(&Event::VideoDecodingError(
                             VideoDecodingErrorEvent {
                                 video_id,
-                                error: "D3D11 device unavailable for Windows video playback".to_string(),
+                                error: "D3D11 device unavailable for Windows video playback"
+                                    .to_string(),
                             },
                         ));
                         crate::error!(
@@ -798,5 +789,5 @@ pub struct CxOs {
     pub(crate) d3d11_device: Option<ID3D11Device>,
     pub(crate) game_input_events: GameInputEventChannel,
     pub(crate) windows_game_input: Option<WindowsGameInput>,
-    pub(crate) video_players: HashMap<LiveId, WindowsVideoPlayer>,
+    pub(crate) video_players: HashMap<LiveId, WindowsUnifiedVideoPlayer>,
 }

@@ -19,6 +19,7 @@ use {
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
         android_media::CxAndroidMedia,
+        android_video_playback::{force_native_av1, force_software_av1, AndroidVideoConfig},
         ndk_sys,
     },
     crate::{
@@ -50,17 +51,19 @@ use {
             WindowGeomChangeEvent,
         },
         gpu_info::GpuPerformance,
-        HttpError,
-        HttpResponse,
         makepad_live_id::*,
         makepad_math::*,
         os::cx_native::EventFlow,
         shared_framebuf::{PollTimer, PollTimers},
+        texture::{TextureAlloc, TextureCategory, TextureId, TexturePixel},
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
+        video_decode::software_av1::SoftwareAv1Player,
         web_socket::WebSocketMessage,
         //web_socket::WebSocket,
         window::CxWindowPool,
+        HttpError,
+        HttpResponse,
     },
     jni_sys::jobject,
     makepad_network::{
@@ -317,9 +320,15 @@ impl Cx {
                 }
 
                 // Check for outside-click popup dismiss on touch start
-                if touches.iter().any(|t| t.state == crate::event::finger::TouchState::Start) {
+                if touches
+                    .iter()
+                    .any(|t| t.state == crate::event::finger::TouchState::Start)
+                {
                     if let Some(popup_window_id) = self.find_popup_to_dismiss_on_touch(&touches) {
-                        self.dismiss_popup_window(popup_window_id, crate::event::PopupDismissReason::OutsideClick);
+                        self.dismiss_popup_window(
+                            popup_window_id,
+                            crate::event::PopupDismissReason::OutsideClick,
+                        );
                     }
                 }
 
@@ -575,7 +584,11 @@ impl Cx {
                     video_height,
                     duration,
                     is_seekable: duration > 0,
-                    video_tracks: if video_width > 0 && video_height > 0 { vec!["video".to_string()] } else { vec![] },
+                    video_tracks: if video_width > 0 && video_height > 0 {
+                        vec!["video".to_string()]
+                    } else {
+                        vec![]
+                    },
                     audio_tracks: vec!["audio".to_string()],
                 });
 
@@ -591,22 +604,49 @@ impl Cx {
                 self.call_event_handler(&e);
             }
             FromJavaMessage::VideoPlayerReleased { video_id } => {
-                if let Some(decoder_ref) = self.os.video_surfaces.remove(&LiveId(video_id)) {
+                let live_id = LiveId(video_id);
+                if let Some(decoder_ref) = self.os.video_surfaces.remove(&live_id) {
                     unsafe {
                         let env = attach_jni_env();
                         android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
                     }
                 }
+                if let Some(mut player) = self.os.software_video_players.remove(&live_id) {
+                    player.cleanup();
+                }
+                self.os.video_configs.remove(&live_id);
 
                 let e =
                     Event::VideoPlaybackResourcesReleased(VideoPlaybackResourcesReleasedEvent {
-                        video_id: LiveId(video_id),
+                        video_id: live_id,
                     });
                 self.call_event_handler(&e);
             }
             FromJavaMessage::VideoDecodingError { video_id, error } => {
+                let live_id = LiveId(video_id);
+                let force_native = force_native_av1();
+                if !force_native && !self.os.software_video_players.contains_key(&live_id) {
+                    if let Some(config) = self.os.video_configs.get(&live_id).cloned() {
+                        crate::log!(
+                            "VIDEO: Android native decode failed for {}, falling back to software AV1: {}",
+                            live_id.0,
+                            error
+                        );
+                        let player = SoftwareAv1Player::new(
+                            live_id,
+                            config.texture_id,
+                            config.source,
+                            config.autoplay,
+                            config.should_loop,
+                        );
+                        self.os.software_video_players.insert(live_id, player);
+                        self.redraw_all();
+                        return;
+                    }
+                }
+
                 let e = Event::VideoDecodingError(VideoDecodingErrorEvent {
-                    video_id: LiveId(video_id),
+                    video_id: live_id,
                     error,
                 });
                 self.call_event_handler(&e);
@@ -847,7 +887,7 @@ impl Cx {
 
         self.dispatch_network_runtime_events();
 
-        // Video updates
+        // Native video updates (SurfaceTexture path)
         let to_dispatch = self.get_video_updates();
         for video_id in to_dispatch {
             let current_position_ms = unsafe {
@@ -860,6 +900,9 @@ impl Cx {
             });
             self.call_event_handler(&e);
         }
+
+        // Software AV1 fallback updates (dav1d path)
+        self.poll_software_video_players();
 
         // Live edits
         if self.handle_live_edit() {
@@ -883,6 +926,157 @@ impl Cx {
             }
         }
         videos_to_update
+    }
+
+    fn poll_software_video_players(&mut self) {
+        if self.os.software_video_players.is_empty() {
+            return;
+        }
+
+        let gl: *const LibGl = self.os.gl();
+        let mut players = std::mem::take(&mut self.os.software_video_players);
+        let mut events = Vec::new();
+
+        for (_video_id, player) in players.iter_mut() {
+            match player.check_prepared() {
+                Some(Ok((width, height, duration, is_seekable, video_tracks, audio_tracks))) => {
+                    events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
+                        video_id: player.video_id,
+                        video_width: width,
+                        video_height: height,
+                        duration,
+                        is_seekable,
+                        video_tracks,
+                        audio_tracks,
+                    }));
+                }
+                Some(Err(err)) => {
+                    events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
+                        video_id: player.video_id,
+                        error: err,
+                    }));
+                }
+                None => {}
+            }
+
+            if player.poll_frame() {
+                let texture_id = player.texture_id;
+                if let Some((rgba, width, height)) = player.take_frame() {
+                    self.upload_software_frame_to_gl(
+                        unsafe { &*gl },
+                        texture_id,
+                        rgba,
+                        width,
+                        height,
+                    );
+                    events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                        video_id: player.video_id,
+                        current_position_ms: player.current_position_ms(),
+                    }));
+                }
+            }
+
+            if player.check_eos() {
+                events.push(Event::VideoPlaybackCompleted(VideoPlaybackCompletedEvent {
+                    video_id: player.video_id,
+                }));
+            }
+        }
+
+        self.os.software_video_players = players;
+        for event in events {
+            self.call_event_handler(&event);
+        }
+    }
+
+    fn upload_software_frame_to_gl(
+        &mut self,
+        gl: &LibGl,
+        texture_id: TextureId,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        let w = width as usize;
+        let h = height as usize;
+        unsafe {
+            let cxtexture = &mut self.textures[texture_id];
+            let needs_alloc = if cxtexture.os.gl_texture.is_none() {
+                let mut gl_texture = std::mem::MaybeUninit::uninit();
+                (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
+                let gl_texture = gl_texture.assume_init();
+                cxtexture.os.gl_texture = Some(gl_texture);
+
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_WRAP_S,
+                    gl_sys::CLAMP_TO_EDGE as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_WRAP_T,
+                    gl_sys::CLAMP_TO_EDGE as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_MIN_FILTER,
+                    gl_sys::LINEAR as i32,
+                );
+                (gl.glTexParameteri)(
+                    gl_sys::TEXTURE_2D,
+                    gl_sys::TEXTURE_MAG_FILTER,
+                    gl_sys::LINEAR as i32,
+                );
+                true
+            } else {
+                cxtexture
+                    .alloc
+                    .as_ref()
+                    .map_or(true, |a| a.width != w || a.height != h)
+            };
+
+            let gl_texture = cxtexture.os.gl_texture.unwrap();
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
+            (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 4);
+            (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
+            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
+            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
+
+            if needs_alloc {
+                (gl.glTexImage2D)(
+                    gl_sys::TEXTURE_2D,
+                    0,
+                    gl_sys::RGBA as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
+                    rgba.as_ptr() as *const std::ffi::c_void,
+                );
+            } else {
+                (gl.glTexSubImage2D)(
+                    gl_sys::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
+                    rgba.as_ptr() as *const std::ffi::c_void,
+                );
+            }
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+
+            cxtexture.alloc = Some(TextureAlloc {
+                width: w,
+                height: h,
+                pixel: TexturePixel::VideoRGB,
+                category: TextureCategory::Video,
+            });
+        }
     }
 
     pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F)
@@ -1234,7 +1428,8 @@ impl Cx {
 
                     // Draw popup window passes as overlays on the same surface
                     for popup_pass_id in &passes_todo.clone() {
-                        if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent {
+                        if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent
+                        {
                             let pw = &self.windows[pw_id];
                             if pw.is_popup && pw.popup_parent == Some(window_id) {
                                 let saved = self.passes[*popup_pass_id].dont_clear;
@@ -1416,54 +1611,144 @@ impl Cx {
                     video_id,
                     source,
                     external_texture_id,
-                    _texture_id,
+                    texture_id,
                     autoplay,
                     should_loop,
-                ) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_prepare_video_playback(
-                        env,
+                ) => {
+                    self.os.video_configs.insert(
                         video_id,
-                        source,
-                        external_texture_id,
-                        autoplay,
-                        should_loop,
+                        AndroidVideoConfig {
+                            video_id,
+                            source: source.clone(),
+                            texture_id,
+                            autoplay,
+                            should_loop,
+                        },
                     );
-                },
-                CxOsOp::BeginVideoPlayback(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_begin_video_playback(env, video_id);
-                },
-                CxOsOp::PauseVideoPlayback(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_pause_video_playback(env, video_id);
-                },
-                CxOsOp::ResumeVideoPlayback(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_resume_video_playback(env, video_id);
-                },
-                CxOsOp::MuteVideoPlayback(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_mute_video_playback(env, video_id);
-                },
-                CxOsOp::UnmuteVideoPlayback(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_unmute_video_playback(env, video_id);
-                },
-                CxOsOp::CleanupVideoPlaybackResources(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_cleanup_video_playback_resources(env, video_id);
-                },
-                CxOsOp::SeekVideoPlayback(video_id, position_ms) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_seek_video_playback(env, video_id, position_ms);
-                },
-                // New ops — no-op on Android (not yet implemented)
-                CxOsOp::SetVideoVolume(_, _) => {}
-                CxOsOp::SetVideoPlaybackRate(_, _) => {}
+
+                    let force_software = force_software_av1();
+                    if force_software {
+                        crate::log!(
+                            "VIDEO: MAKEPAD_FORCE_SOFTWARE_AV1 set, using software AV1 decoder"
+                        );
+                        self.os.software_video_players.insert(
+                            video_id,
+                            SoftwareAv1Player::new(
+                                video_id,
+                                texture_id,
+                                source,
+                                autoplay,
+                                should_loop,
+                            ),
+                        );
+                        continue;
+                    }
+
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_prepare_video_playback(
+                            env,
+                            video_id,
+                            source,
+                            external_texture_id,
+                            autoplay,
+                            should_loop,
+                        );
+                    }
+                }
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.software_video_players.get_mut(&video_id) {
+                        player.play();
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_begin_video_playback(env, video_id);
+                        }
+                    }
+                }
+                CxOsOp::PauseVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.software_video_players.get_mut(&video_id) {
+                        player.pause();
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_pause_video_playback(env, video_id);
+                        }
+                    }
+                }
+                CxOsOp::ResumeVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.software_video_players.get_mut(&video_id) {
+                        player.resume();
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_resume_video_playback(env, video_id);
+                        }
+                    }
+                }
+                CxOsOp::MuteVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.software_video_players.get(&video_id) {
+                        player.mute();
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_mute_video_playback(env, video_id);
+                        }
+                    }
+                }
+                CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.software_video_players.get(&video_id) {
+                        player.unmute();
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_unmute_video_playback(env, video_id);
+                        }
+                    }
+                }
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    if let Some(mut player) = self.os.software_video_players.remove(&video_id) {
+                        player.cleanup();
+                        self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id },
+                        ));
+                    }
+                    if let Some(decoder_ref) = self.os.video_surfaces.remove(&video_id) {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
+                            android_jni::to_java_cleanup_video_playback_resources(env, video_id);
+                        }
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_cleanup_video_playback_resources(env, video_id);
+                        }
+                    }
+                    self.os.video_configs.remove(&video_id);
+                }
+                CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
+                    if let Some(player) = self.os.software_video_players.get_mut(&video_id) {
+                        player.seek_to(position_ms);
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_seek_video_playback(env, video_id, position_ms);
+                        }
+                    }
+                }
+                CxOsOp::SetVideoVolume(video_id, volume) => {
+                    if let Some(player) = self.os.software_video_players.get(&video_id) {
+                        player.set_volume(volume);
+                    }
+                }
+                CxOsOp::SetVideoPlaybackRate(video_id, rate) => {
+                    if let Some(player) = self.os.software_video_players.get(&video_id) {
+                        player.set_playback_rate(rate);
+                    }
+                }
                 CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
                     // Android: treat same as video but without a texture
-                    use crate::texture::TextureId;
                     let _ = (video_id, source, autoplay, should_loop);
                     // TODO: implement via MediaPlayer when needed
                 }
@@ -1565,7 +1850,10 @@ fn to_android_permission(permission: crate::permission::Permission) -> &'static 
 }
 
 impl Cx {
-    fn find_popup_to_dismiss_on_touch(&self, touches: &[crate::event::finger::TouchPoint]) -> Option<crate::window::WindowId> {
+    fn find_popup_to_dismiss_on_touch(
+        &self,
+        touches: &[crate::event::finger::TouchPoint],
+    ) -> Option<crate::window::WindowId> {
         for i in (0..self.windows.len()).rev() {
             let window_id = CxWindowPool::from_usize(i);
             let window = &self.windows[window_id];
@@ -1573,9 +1861,14 @@ impl Cx {
                 continue;
             }
             if let (Some(pos), Some(size)) = (window.popup_position, window.popup_size) {
-                let rect = Rect { pos: pos, size: size };
+                let rect = Rect {
+                    pos: pos,
+                    size: size,
+                };
                 for touch in touches {
-                    if touch.state == crate::event::finger::TouchState::Start && !rect.contains(touch.abs) {
+                    if touch.state == crate::event::finger::TouchState::Start
+                        && !rect.contains(touch.abs)
+                    {
                         return Some(window_id);
                     }
                 }
@@ -1584,7 +1877,11 @@ impl Cx {
         None
     }
 
-    fn dismiss_popup_window(&mut self, window_id: crate::window::WindowId, reason: crate::event::PopupDismissReason) {
+    fn dismiss_popup_window(
+        &mut self,
+        window_id: crate::window::WindowId,
+        reason: crate::event::PopupDismissReason,
+    ) {
         // First dismiss any child popups
         let children: Vec<crate::window::WindowId> = (0..self.windows.len())
             .filter_map(|i| {
@@ -1604,7 +1901,9 @@ impl Cx {
             window_id,
             reason,
         }));
-        self.call_event_handler(&Event::WindowClosed(crate::event::WindowClosedEvent { window_id }));
+        self.call_event_handler(&Event::WindowClosed(crate::event::WindowClosedEvent {
+            window_id,
+        }));
         self.windows[window_id].is_created = false;
     }
 
@@ -1718,6 +2017,8 @@ impl Default for CxOs {
             fullscreen: false,
             timers: Default::default(),
             video_surfaces: HashMap::new(),
+            video_configs: HashMap::new(),
+            software_video_players: HashMap::new(),
             websocket_parsers: HashMap::new(),
             openxr: CxOpenXr::default(),
             activity_thread_id: None,
@@ -1754,6 +2055,8 @@ pub struct CxOs {
     pub(crate) vulkan: Option<CxVulkan>,
     pub(crate) media: CxAndroidMedia,
     pub(crate) video_surfaces: HashMap<LiveId, jobject>,
+    pub(crate) video_configs: HashMap<LiveId, AndroidVideoConfig>,
+    pub(crate) software_video_players: HashMap<LiveId, SoftwareAv1Player>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
     pub(crate) openxr: CxOpenXr,
     pub(crate) activity_thread_id: Option<u64>,
