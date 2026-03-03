@@ -17,7 +17,11 @@ use windows::{
 pub struct WindowsHttpSocket;
 
 impl WindowsHttpSocket {
-    pub fn open(request_id: LiveId, request: HttpRequest, response_sender: Sender<NetworkResponse>) {
+    pub fn open(
+        request_id: LiveId,
+        request: HttpRequest,
+        response_sender: Sender<NetworkResponse>,
+    ) {
         async fn create_request(
             request: &HttpRequest,
         ) -> windows::core::Result<HttpRequestMessage> {
@@ -145,7 +149,8 @@ impl WindowsHttpSocket {
             if request.is_streaming {
                 let _ = executor::block_on(streaming_request(request_id, request, response_sender));
             } else {
-                let _ = executor::block_on(non_streaming_request(request_id, request, response_sender));
+                let _ =
+                    executor::block_on(non_streaming_request(request_id, request, response_sender));
             }
         });
     }

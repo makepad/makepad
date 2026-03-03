@@ -137,9 +137,10 @@ impl WinHttpWebSocket {
         }
         let (buffer_type, bytes): (u32, Vec<u8>) = match message {
             WebSocketMessage::Binary(data) => (WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE, data),
-            WebSocketMessage::String(data) => {
-                (WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE, data.into_bytes())
-            }
+            WebSocketMessage::String(data) => (
+                WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                data.into_bytes(),
+            ),
             WebSocketMessage::Closed => {
                 self.request_close();
                 return Ok(());

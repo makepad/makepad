@@ -39,7 +39,8 @@ impl NetworkRuntime {
     }
 
     pub fn http_start(&self, request_id: LiveId, request: HttpRequest) -> Result<(), NetworkError> {
-        self.backend.http_start(request_id, request, self.sink.clone())
+        self.backend
+            .http_start(request_id, request, self.sink.clone())
     }
 
     pub fn http_cancel(&self, request_id: LiveId) -> Result<(), NetworkError> {
@@ -58,7 +59,10 @@ impl NetworkRuntime {
         self.backend.ws_close(socket_id)
     }
 
-    pub fn start_http_server(&self, http_server: HttpServer) -> Option<std::thread::JoinHandle<()>> {
+    pub fn start_http_server(
+        &self,
+        http_server: HttpServer,
+    ) -> Option<std::thread::JoinHandle<()>> {
         crate::http_server::start_http_server(http_server)
     }
 
@@ -87,10 +91,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::backend::{EventSink, NetworkBackend};
+    use crate::types::{HttpMethod, HttpRequest, HttpResponse, NetworkResponse, WsSend};
     use makepad_live_id::LiveId;
-    use crate::types::{
-        HttpMethod, HttpRequest, HttpResponse, NetworkResponse, WsSend,
-    };
 
     use super::NetworkRuntime;
 

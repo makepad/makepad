@@ -25,8 +25,9 @@ pub use crate::ui_signal::{
 pub use crate::utils::HttpServerHeaders;
 pub use crate::web_socket_parser::{
     ServerWebSocketError, ServerWebSocketMessage, ServerWebSocketMessageFormat,
-    ServerWebSocketMessageHeader, WebSocketParser, SERVER_WEB_SOCKET_PING_MESSAGE,
-    SERVER_WEB_SOCKET_PONG_MESSAGE,
+    ServerWebSocketMessageHeader, WebSocketError, WebSocketMessage as ParsedWebSocketMessage,
+    WebSocketMessageFormat, WebSocketMessageHeader, WebSocketParser,
+    SERVER_WEB_SOCKET_PING_MESSAGE, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
 
 #[cfg(target_os = "android")]

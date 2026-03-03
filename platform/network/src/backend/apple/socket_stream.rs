@@ -1,9 +1,8 @@
 use makepad_apple_sys::{
-    errSSLClosedAbort, errSSLClosedGraceful, errSSLWouldBlock, kSSLClientSide, kSSLStreamType,
-    CFRelease, OSStatus, SSLClose, SSLConnectionRef, SSLContextRef, SSLCreateContext, SSLHandshake,
-    SSLRead, SSLSetConnection, SSLSetIOFuncs, SSLSetPeerDomainName,
-    SSLSetSessionOption, kSSLSessionOptionBreakOnServerAuth, errSSLServerAuthCompleted,
-    SSLWrite,
+    errSSLClosedAbort, errSSLClosedGraceful, errSSLServerAuthCompleted, errSSLWouldBlock,
+    kSSLClientSide, kSSLSessionOptionBreakOnServerAuth, kSSLStreamType, CFRelease, OSStatus,
+    SSLClose, SSLConnectionRef, SSLContextRef, SSLCreateContext, SSLHandshake, SSLRead,
+    SSLSetConnection, SSLSetIOFuncs, SSLSetPeerDomainName, SSLSetSessionOption, SSLWrite,
 };
 use std::{
     io,
