@@ -102,19 +102,20 @@ impl AppleUnifiedVideoPlayer {
     }
 
     pub fn poll_frame(&mut self, textures: &mut CxTexturePool) -> bool {
-        match &mut self.mode {
-            ApplePlayerMode::Native(player) => player.poll_frame(textures),
+        let frame = match &mut self.mode {
+            ApplePlayerMode::Native(player) => return player.poll_frame(textures),
             ApplePlayerMode::Software(player) => {
                 if !player.poll_frame() {
                     return false;
                 }
-                if let Some((rgba, width, height)) = player.take_frame() {
-                    self.upload_rgba_to_metal(textures, rgba, width, height);
-                    true
-                } else {
-                    false
-                }
+                player.take_frame()
             }
+        };
+        if let Some((rgba, width, height)) = frame {
+            self.upload_rgba_to_metal(textures, rgba, width, height);
+            true
+        } else {
+            false
         }
     }
 
