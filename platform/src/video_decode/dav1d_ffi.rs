@@ -200,6 +200,7 @@ const fn libc_eagain() -> i32 {
     11
 }
 
+#[cfg(has_dav1d)]
 extern "C" {
     pub fn dav1d_default_settings(s: *mut Dav1dSettings);
     pub fn dav1d_open(c_out: *mut *mut Dav1dContext, s: *const Dav1dSettings) -> i32;
@@ -221,6 +222,7 @@ unsafe impl Send for Dav1dDecoder {}
 
 impl Dav1dDecoder {
     /// Create a new dav1d decoder with default settings.
+    #[cfg(has_dav1d)]
     pub fn new() -> Result<Self, String> {
         unsafe {
             let mut settings: Dav1dSettings = std::mem::zeroed();
@@ -237,10 +239,16 @@ impl Dav1dDecoder {
         }
     }
 
+    #[cfg(not(has_dav1d))]
+    pub fn new() -> Result<Self, String> {
+        Err("dav1d support disabled: enable makepad-platform feature 'dav1d'".to_string())
+    }
+
     /// Create a new dav1d decoder with a custom picture allocator.
     ///
     /// When the allocator's `alloc_picture_callback` returns -1, dav1d
     /// falls back to its built-in allocator for that picture.
+    #[cfg(has_dav1d)]
     pub fn new_with_allocator(allocator: Dav1dPicAllocator) -> Result<Self, String> {
         unsafe {
             let mut settings: Dav1dSettings = std::mem::zeroed();
@@ -258,8 +266,14 @@ impl Dav1dDecoder {
         }
     }
 
+    #[cfg(not(has_dav1d))]
+    pub fn new_with_allocator(_allocator: Dav1dPicAllocator) -> Result<Self, String> {
+        Err("dav1d support disabled: enable makepad-platform feature 'dav1d'".to_string())
+    }
+
     /// Send compressed AV1 data to the decoder.
     /// Returns Ok(true) if consumed, Ok(false) if EAGAIN (need to drain pictures first).
+    #[cfg(has_dav1d)]
     pub fn send_data(&mut self, data: &[u8], pts: i64) -> Result<bool, String> {
         unsafe {
             let mut dav1d_data: Dav1dData = std::mem::zeroed();
@@ -284,7 +298,13 @@ impl Dav1dDecoder {
         }
     }
 
+    #[cfg(not(has_dav1d))]
+    pub fn send_data(&mut self, _data: &[u8], _pts: i64) -> Result<bool, String> {
+        Err("dav1d support disabled: enable makepad-platform feature 'dav1d'".to_string())
+    }
+
     /// Try to get a decoded picture. Returns None if EAGAIN.
+    #[cfg(has_dav1d)]
     pub fn get_picture(&mut self) -> Result<Option<DecodedPicture>, String> {
         unsafe {
             let mut pic: Dav1dPicture = std::mem::zeroed();
@@ -299,15 +319,25 @@ impl Dav1dDecoder {
         }
     }
 
+    #[cfg(not(has_dav1d))]
+    pub fn get_picture(&mut self) -> Result<Option<DecodedPicture>, String> {
+        Err("dav1d support disabled: enable makepad-platform feature 'dav1d'".to_string())
+    }
+
     /// Flush the decoder (for seeking).
+    #[cfg(has_dav1d)]
     pub fn flush(&mut self) {
         unsafe {
             dav1d_flush(self.ctx);
         }
     }
+
+    #[cfg(not(has_dav1d))]
+    pub fn flush(&mut self) {}
 }
 
 impl Drop for Dav1dDecoder {
+    #[cfg(has_dav1d)]
     fn drop(&mut self) {
         if !self.ctx.is_null() {
             unsafe {
@@ -315,6 +345,9 @@ impl Drop for Dav1dDecoder {
             }
         }
     }
+
+    #[cfg(not(has_dav1d))]
+    fn drop(&mut self) {}
 }
 
 /// A decoded picture from dav1d. Automatically unrefs on drop.
@@ -376,9 +409,13 @@ impl DecodedPicture {
 }
 
 impl Drop for DecodedPicture {
+    #[cfg(has_dav1d)]
     fn drop(&mut self) {
         unsafe {
             dav1d_picture_unref(&mut self.pic);
         }
     }
+
+    #[cfg(not(has_dav1d))]
+    fn drop(&mut self) {}
 }

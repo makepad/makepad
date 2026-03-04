@@ -11,6 +11,8 @@ metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
 [features]
 default = []
+# Enables software AV1 decode support via vendored dav1d.
+dav1d = []
 # Enables SVT-AV1 camera encoder build/link support.
 # Current backend support: linux, android.
 svt-av1 = []

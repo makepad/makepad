@@ -344,6 +344,8 @@ fn build_dav1d() {
     if target_os == "linux" || target_os == "android" {
         println!("cargo:rustc-link-lib=dl");
     }
+
+    println!("cargo:rustc-cfg=has_dav1d");
 }
 
 fn apply_dav1d_defines(build: &mut cc::Build, target_arch: &str, target_os: &str) {
@@ -667,7 +669,7 @@ pub static CUSTOM_ICON_ICO: &'static [u8] = {};\n",
         include_or_empty(&icons[6]),
     );
     std::fs::write(Path::new(&out_dir).join("app_icon_gen.rs"), icon_gen).unwrap();
-    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,use_gles_3,use_vulkan,linux_direct,quest,no_android_choreographer,ohos_sim,headless,use_unstable_unix_socket_ancillary_data_2021,has_svt_av1)");
+    println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,use_gles_3,use_vulkan,linux_direct,quest,no_android_choreographer,ohos_sim,headless,use_unstable_unix_socket_ancillary_data_2021,has_svt_av1,has_dav1d)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
     for var in icon_vars {
@@ -694,19 +696,30 @@ pub static CUSTOM_ICON_ICO: &'static [u8] = {};\n",
         }
     }
 
+    let dav1d_enabled = env::var_os("CARGO_FEATURE_DAV1D").is_some();
     let svt_av1_enabled = env::var_os("CARGO_FEATURE_SVT_AV1").is_some();
 
-    // Build vendored dav1d (not for wasm or ohos)
+    // Build vendored codec backends (not for wasm or ohos)
     if target_os != "unknown" && !target.contains("wasm") && !target.contains("ohos") {
-        build_dav1d();
+        if dav1d_enabled {
+            build_dav1d();
+        }
         if svt_av1_enabled {
             build_svt_av1();
         }
-    } else if svt_av1_enabled {
-        println!(
-            "cargo:warning=svt-av1 feature enabled, but target '{}' is unsupported",
-            target
-        );
+    } else {
+        if dav1d_enabled {
+            println!(
+                "cargo:warning=dav1d feature enabled, but target '{}' is unsupported",
+                target
+            );
+        }
+        if svt_av1_enabled {
+            println!(
+                "cargo:warning=svt-av1 feature enabled, but target '{}' is unsupported",
+                target
+            );
+        }
     }
 
     match target_os.as_str() {
