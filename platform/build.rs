@@ -455,6 +455,10 @@ fn apply_dav1d_defines(build: &mut cc::Build, target_arch: &str, target_os: &str
 fn build_svt_av1() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "linux" && target_os != "android" {
+        println!(
+            "cargo:warning=svt-av1 feature enabled, but target_os '{}' is unsupported (supported: linux, android)",
+            target_os
+        );
         return;
     }
 
@@ -690,10 +694,19 @@ pub static CUSTOM_ICON_ICO: &'static [u8] = {};\n",
         }
     }
 
+    let svt_av1_enabled = env::var_os("CARGO_FEATURE_SVT_AV1").is_some();
+
     // Build vendored dav1d (not for wasm or ohos)
     if target_os != "unknown" && !target.contains("wasm") && !target.contains("ohos") {
         build_dav1d();
-        build_svt_av1();
+        if svt_av1_enabled {
+            build_svt_av1();
+        }
+    } else if svt_av1_enabled {
+        println!(
+            "cargo:warning=svt-av1 feature enabled, but target '{}' is unsupported",
+            target
+        );
     }
 
     match target_os.as_str() {
