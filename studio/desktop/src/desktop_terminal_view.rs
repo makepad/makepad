@@ -351,7 +351,11 @@ impl DesktopTerminalView {
         Some(cached)
     }
 
-    fn decode_cell(frame: &TerminalFramebuffer, row: usize, col: usize) -> Option<(char, Vec4f, Vec4f)> {
+    fn decode_cell(
+        frame: &TerminalFramebuffer,
+        row: usize,
+        col: usize,
+    ) -> Option<(char, Vec4f, Vec4f)> {
         let cols = frame.cols as usize;
         let rows = frame.rows as usize;
         if row >= rows || col >= cols {
@@ -435,7 +439,7 @@ impl DesktopTerminalView {
 
         let max_scroll = self.max_scroll_pixels_for_total_lines(frame.total_lines);
         let is_full_screen = max_scroll > 0.0;
-        
+
         let (origin_y, start_row) = if self.follow_output && is_full_screen {
             let grid_height = render_rows as f64 * cell_height;
             let y = screen_bottom - grid_height;
@@ -450,7 +454,7 @@ impl DesktopTerminalView {
             } else {
                 screen_top - (scroll_y - frame_top_pixels)
             };
-            
+
             (y, 0)
         };
 
@@ -469,7 +473,8 @@ impl DesktopTerminalView {
             let virtual_row = frame.top_row + frame_row;
             let y = origin_y + i as f64 * cell_height;
             for col in 0..cols {
-                let Some((ch, fg_color, bg_color)) = Self::decode_cell(frame, frame_row, col) else {
+                let Some((ch, fg_color, bg_color)) = Self::decode_cell(frame, frame_row, col)
+                else {
                     continue;
                 };
                 let x = origin_x + col as f64 * cell_width;
@@ -537,14 +542,15 @@ impl DesktopTerminalView {
                 let visible_row = cursor_row - start_row;
                 let cursor_col = (frame.cursor_col as usize).min(cols.saturating_sub(1));
                 let cx_x = origin_x + cursor_col as f64 * cell_width;
-                let cx_y = origin_y
-                    + visible_row as f64 * cell_height
-                    + self.cursor_y_offset;
+                let cx_y = origin_y + visible_row as f64 * cell_height + self.cursor_y_offset;
                 self.draw_cursor.focus = if has_focus { 1.0 } else { 0.0 };
-                self.draw_cursor.draw_abs(cx, Rect {
-                    pos: dvec2(cx_x, cx_y),
-                    size: dvec2(cell_width, cell_height),
-                });
+                self.draw_cursor.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(cx_x, cx_y),
+                        size: dvec2(cell_width, cell_height),
+                    },
+                );
             }
         }
     }
@@ -769,7 +775,11 @@ impl DesktopTerminalView {
         }
     }
 
-    fn word_range_at_in_frame(frame: &TerminalFramebuffer, row: usize, col: usize) -> Option<(usize, usize)> {
+    fn word_range_at_in_frame(
+        frame: &TerminalFramebuffer,
+        row: usize,
+        col: usize,
+    ) -> Option<(usize, usize)> {
         let cols = frame.cols as usize;
         let rows = frame.rows as usize;
         let frame_row = row.checked_sub(frame.top_row)?;
@@ -835,8 +845,7 @@ impl DesktopTerminalView {
     }
 
     fn is_cell_selected(&self, row: usize, col: usize) -> bool {
-        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered()
-        else {
+        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered() else {
             return false;
         };
         if row < start_row || row > end_row {
@@ -860,8 +869,7 @@ impl DesktopTerminalView {
         if cols == 0 {
             return None;
         }
-        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered()
-        else {
+        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered() else {
             return None;
         };
 
@@ -960,7 +968,8 @@ impl Widget for DesktopTerminalView {
             .max(1.0) as u16;
         let req_rows = ((self.viewport_rect.size.y - self.pad_y * 2.0) / cell_height)
             .ceil()
-            .max(1.0) as u16 + 1;
+            .max(1.0) as u16
+            + 1;
 
         let pty_rows = ((self.viewport_rect.size.y - self.pad_y * 2.0) / cell_height)
             .floor()
@@ -984,7 +993,7 @@ impl Widget for DesktopTerminalView {
             })
             .unwrap_or(0);
         self.last_total_lines = total_lines_for_scroll;
-        
+
         if self.follow_output {
             self.stick_to_bottom(cx, self.last_total_lines);
         } else {
@@ -1024,7 +1033,7 @@ impl Widget for DesktopTerminalView {
         } else {
             content_height
         };
-        
+
         cx.turtle_mut()
             .set_used(self.viewport_rect.size.x.max(1.0), used_height);
         self.scroll_bars.end(cx);
@@ -1086,14 +1095,22 @@ impl Widget for DesktopTerminalView {
                 let bottom_trigger = vp_bottom - edge_band;
 
                 if abs.y <= top_trigger {
-                    let delta = (top_trigger - abs.y).max(cell_height * 0.25).min(scroll_speed);
+                    let delta = (top_trigger - abs.y)
+                        .max(cell_height * 0.25)
+                        .min(scroll_speed);
                     let new_y = (self.current_scroll_pixels() - delta).max(0.0);
-                    let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
+                    let _ = self
+                        .scroll_bars
+                        .set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
                 } else if abs.y >= bottom_trigger {
-                    let delta = (abs.y - bottom_trigger).max(cell_height * 0.25).min(scroll_speed);
+                    let delta = (abs.y - bottom_trigger)
+                        .max(cell_height * 0.25)
+                        .min(scroll_speed);
                     let max = self.max_scroll_pixels_for_total_lines(self.last_total_lines);
                     let new_y = (self.current_scroll_pixels() + delta).min(max);
-                    let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
+                    let _ = self
+                        .scroll_bars
+                        .set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
                 }
 
                 self.follow_output = self.is_scrolled_to_bottom(self.last_total_lines);
@@ -1108,7 +1125,9 @@ impl Widget for DesktopTerminalView {
                 let pos = self.pick(abs);
                 if tap_count == 2 {
                     if let Some(frame) = self.last_frame.as_ref() {
-                        if let Some((start_col, end_col)) = Self::word_range_at_in_frame(frame, pos.0, pos.1) {
+                        if let Some((start_col, end_col)) =
+                            Self::word_range_at_in_frame(frame, pos.0, pos.1)
+                        {
                             self.selection_anchor = Some((pos.0, start_col));
                             self.selection_cursor = Some((pos.0, end_col));
                         } else {
@@ -1149,11 +1168,12 @@ impl Widget for DesktopTerminalView {
                 if path.is_empty() {
                     return;
                 }
-                
+
                 if Self::is_clipboard_paste_shortcut(e.key_code, &e.modifiers) {
                     return;
                 }
-                let is_enter = e.key_code == KeyCode::ReturnKey || e.key_code == KeyCode::NumpadEnter;
+                let is_enter =
+                    e.key_code == KeyCode::ReturnKey || e.key_code == KeyCode::NumpadEnter;
                 if is_enter && e.is_repeat && (e.time - self.last_enter_time) < 0.08 {
                     return;
                 }
@@ -1188,15 +1208,19 @@ impl Widget for DesktopTerminalView {
                 if path.is_empty() {
                     return;
                 }
-                
+
                 if e.replace_last {
                     return;
                 }
-                
+
                 if e.was_paste {
                     self.emit_paste_text(cx, &path, &e.input, bracketed_paste);
                 } else {
-                    let filtered: String = e.input.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+                    let filtered: String = e
+                        .input
+                        .chars()
+                        .filter(|c| *c != '\n' && *c != '\r')
+                        .collect();
                     if filtered.is_empty() {
                         return;
                     }
