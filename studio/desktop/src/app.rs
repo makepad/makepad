@@ -13,7 +13,9 @@ use crate::{
     makepad_studio_hub::{HubConfig, MountConfig, StudioHub},
     makepad_widgets::*,
 };
-use makepad_studio_protocol::hub_protocol::{FileNodeType, LogEntry, QueryId, HubToClient, ClientToHub};
+use makepad_studio_protocol::hub_protocol::{
+    ClientToHub, FileNodeType, HubToClient, LogEntry, QueryId,
+};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Component, Path};
@@ -220,11 +222,16 @@ impl MatchEvent for App {
                             }
                         }
                     }
-                    DockAction::SplitPanelChanged { .. }
-                    | DockAction::ShouldTabStartDrag(_)
-                    | DockAction::Drag(_)
-                    | DockAction::Drop(_)
-                    | DockAction::None => {}
+                    DockAction::ShouldTabStartDrag(tab_id) => {
+                        self.start_workspace_tab_drag(cx, tab_id);
+                    }
+                    DockAction::Drag(drag_event) => {
+                        self.handle_workspace_tab_drag(cx, drag_event);
+                    }
+                    DockAction::Drop(drop_event) => {
+                        self.handle_workspace_tab_drop(cx, drop_event);
+                    }
+                    DockAction::SplitPanelChanged { .. } | DockAction::None => {}
                 }
 
                 match action.cast() {
