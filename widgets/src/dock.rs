@@ -671,7 +671,7 @@ impl Dock {
             let cx = vm.cx_mut();
             self.items
                 .get_or_insert(cx, entry_id, |_cx| (template, widget.clone()));
-            cx.widget_tree_mark_dirty(self.uid);
+            cx.widget_tree_insert_child_deep(self.uid, entry_id, widget.clone());
             Some(widget)
         } else {
             warning!("Template not found: {template}. Did you add it to the <Dock> instance?");
@@ -831,7 +831,7 @@ impl Dock {
                 cx.with_vm(|vm| (template, WidgetRef::script_from_value(vm, template_value)))
             });
             if !existed {
-                cx.widget_tree_mark_dirty(self.uid);
+                cx.widget_tree_insert_child_deep(self.uid, entry_id, entry.1.clone());
             }
             Some(entry.1.clone())
         } else {
