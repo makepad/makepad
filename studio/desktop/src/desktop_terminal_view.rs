@@ -351,14 +351,14 @@ impl DesktopTerminalView {
         Some(cached)
     }
 
-    fn decode_cell(frame: &TerminalFramebuffer, row: usize, col: usize) -> Option<(char, Vec4f)> {
+    fn decode_cell(frame: &TerminalFramebuffer, row: usize, col: usize) -> Option<(char, Vec4f, Vec4f)> {
         let cols = frame.cols as usize;
         let rows = frame.rows as usize;
         if row >= rows || col >= cols {
             return None;
         }
-        let idx = (row * cols + col) * 7;
-        if idx + 6 >= frame.cells.len() {
+        let idx = (row * cols + col) * 10;
+        if idx + 9 >= frame.cells.len() {
             return None;
         }
         let codepoint = u32::from_le_bytes([
@@ -368,13 +368,19 @@ impl DesktopTerminalView {
             frame.cells[idx + 3],
         ]);
         let ch = char::from_u32(codepoint).unwrap_or(' ');
-        let bg = vec4(
+        let fg = vec4(
             frame.cells[idx + 4] as f32 / 255.0,
             frame.cells[idx + 5] as f32 / 255.0,
             frame.cells[idx + 6] as f32 / 255.0,
             1.0,
         );
-        Some((if ch == '\0' { ' ' } else { ch }, bg))
+        let bg = vec4(
+            frame.cells[idx + 7] as f32 / 255.0,
+            frame.cells[idx + 8] as f32 / 255.0,
+            frame.cells[idx + 9] as f32 / 255.0,
+            1.0,
+        );
+        Some((if ch == '\0' { ' ' } else { ch }, fg, bg))
     }
 
     fn decode_rgb(rgb: u32) -> Vec4f {
@@ -450,7 +456,6 @@ impl DesktopTerminalView {
 
         let origin_x = self.unscrolled_rect.pos.x + self.pad_x;
         let default_bg = Self::decode_rgb(frame.default_bg_rgb);
-        let default_fg = Self::decode_rgb(frame.default_fg_rgb);
         let has_focus = cx.has_key_focus(self.scroll_bars.area());
 
         self.draw_cell_bg.new_draw_call(cx);
@@ -464,7 +469,7 @@ impl DesktopTerminalView {
             let virtual_row = frame.top_row + frame_row;
             let y = origin_y + i as f64 * cell_height;
             for col in 0..cols {
-                let Some((ch, bg_color)) = Self::decode_cell(frame, frame_row, col) else {
+                let Some((ch, fg_color, bg_color)) = Self::decode_cell(frame, frame_row, col) else {
                     continue;
                 };
                 let x = origin_x + col as f64 * cell_width;
@@ -508,12 +513,12 @@ impl DesktopTerminalView {
                             ),
                             glyph.font_size_in_lpxs,
                             glyph.rasterized,
-                            default_fg,
+                            fg_color,
                         );
                     } else {
                         let mut s = [0u8; 4];
                         let text = ch.encode_utf8(&mut s);
-                        self.draw_text.color = default_fg;
+                        self.draw_text.color = fg_color;
                         self.draw_text.draw_abs(
                             cx,
                             dvec2(x, y + self.cell_offset_y + self.text_y_offset),
@@ -803,8 +808,8 @@ impl DesktopTerminalView {
 
     fn frame_char(frame: &TerminalFramebuffer, frame_row: usize, col: usize) -> Option<char> {
         let cols = frame.cols as usize;
-        let idx = (frame_row * cols + col) * 7;
-        if idx + 6 >= frame.cells.len() {
+        let idx = (frame_row * cols + col) * 10;
+        if idx + 9 >= frame.cells.len() {
             return None;
         }
         let codepoint = u32::from_le_bytes([
