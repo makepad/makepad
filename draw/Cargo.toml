@@ -30,6 +30,8 @@ serde = { version = "1.0", optional = true, features = ["derive"] }
 
 [features]
 default = []
+dav1d = ["makepad-platform/dav1d"]
+svt-av1 = ["makepad-platform/svt-av1"]
 
 ## Enables certain public-facing types to derive serde serialization traits.
 serde = ["dep:serde", "makepad-live-id/serde"]

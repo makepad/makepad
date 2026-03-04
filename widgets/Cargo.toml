@@ -30,6 +30,8 @@ serde = { version = "1.0", optional = true, features = ["derive"] }
 
 [features]
 default = []
+dav1d = ["makepad-draw/dav1d"]
+svt-av1 = ["makepad-draw/svt-av1"]
 
 voice = ["dep:makepad-voice"]
 maps = ["dep:makepad-mbtile-reader", "dep:makepad-fast-inflate"]
