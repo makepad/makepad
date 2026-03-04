@@ -438,11 +438,11 @@ impl DesktopTerminalView {
             (y - bottom_overflow, sr)
         } else {
             let scroll_y = self.current_scroll_pixels();
-            let sub_pixel_y = scroll_y % cell_height;
+            let frame_top_pixels = frame.top_row as f64 * cell_height;
             let y = if max_scroll <= 0.0 {
                 screen_top
             } else {
-                screen_top - sub_pixel_y
+                screen_top - (scroll_y - frame_top_pixels)
             };
             
             (y, 0)
