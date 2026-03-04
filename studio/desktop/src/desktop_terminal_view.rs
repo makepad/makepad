@@ -211,6 +211,8 @@ pub struct DesktopTerminalView {
     last_total_lines: usize,
     #[rust]
     last_path: Option<String>,
+    #[rust]
+    last_enter_time: f64,
 }
 
 impl ScriptHook for DesktopTerminalView {
@@ -976,6 +978,10 @@ impl Widget for DesktopTerminalView {
                 if Self::is_clipboard_paste_shortcut(e.key_code, &e.modifiers) {
                     return;
                 }
+                let is_enter = e.key_code == KeyCode::ReturnKey || e.key_code == KeyCode::NumpadEnter;
+                if is_enter && e.is_repeat && (e.time - self.last_enter_time) < 0.08 {
+                    return;
+                }
                 let sends_special_key = Self::is_special_pty_key(e.key_code);
                 let sends_ctrl_char = e.modifiers.control && e.key_code.to_char(false).is_some();
                 if sends_special_key {
@@ -986,6 +992,9 @@ impl Widget for DesktopTerminalView {
                         &e.modifiers,
                         cursor_keys_application_mode,
                     );
+                    if is_enter {
+                        self.last_enter_time = e.time;
+                    }
                     self.cursor_blink_on = true;
                     self.draw_bg.redraw(cx);
                 } else if sends_ctrl_char {
@@ -1008,22 +1017,20 @@ impl Widget for DesktopTerminalView {
                 }
                 
                 if e.replace_last {
-                    // We don't support IME replace yet in terminal
-                    return;
-                }
-                
-                let is_newline_text = e.input.chars().all(|c| c == '\n' || c == '\r');
-                if !e.was_paste && is_newline_text {
                     return;
                 }
                 
                 if e.was_paste {
                     self.emit_paste_text(cx, &path, &e.input, bracketed_paste);
                 } else {
+                    let filtered: String = e.input.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+                    if filtered.is_empty() {
+                        return;
+                    }
                     self.send_text_to_terminal(
                         cx,
                         &path,
-                        &e.input,
+                        &filtered,
                         &KeyModifiers::default(),
                         cursor_keys_application_mode,
                     );
