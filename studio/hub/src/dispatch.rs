@@ -2829,11 +2829,9 @@ fn terminal_framebuffer_from_terminal(
                 }
                 let fg = fg_src.resolve(palette, default_fg);
                 let bg = bg_src.resolve(palette, default_bg);
-                let codepoint = if cell.codepoint == '\0' {
-                    ' ' as u32
-                } else {
-                    cell.codepoint as u32
-                };
+                // Preserve raw terminal codepoints so clients can distinguish
+                // placeholder/continuation cells (e.g. '\0') during copy.
+                let codepoint = cell.codepoint as u32;
                 (codepoint, fg, bg)
             } else {
                 (' ' as u32, default_fg, default_bg)
@@ -3608,6 +3606,30 @@ mod tests {
             out.push(char::from_u32(codepoint).unwrap_or(' '));
         }
         out.trim_end().to_string()
+    }
+
+    fn decode_frame_codepoint(frame: &TerminalFramebuffer, row: usize, col: usize) -> u32 {
+        let cols = frame.cols as usize;
+        let idx = (row * cols + col) * 10;
+        u32::from_le_bytes([
+            frame.cells[idx],
+            frame.cells[idx + 1],
+            frame.cells[idx + 2],
+            frame.cells[idx + 3],
+        ])
+    }
+
+    #[test]
+    fn terminal_framebuffer_preserves_nul_cells() {
+        let mut term = Terminal::new(4, 1);
+        term.screen_mut().grid.cell_mut(0, 0).codepoint = 'A';
+        term.screen_mut().grid.cell_mut(1, 0).codepoint = '\0';
+        term.screen_mut().grid.cell_mut(2, 0).codepoint = 'B';
+
+        let frame = terminal_framebuffer_from_terminal(&term, 4, 1, 0, 1);
+        assert_eq!(decode_frame_codepoint(&frame, 0, 0), 'A' as u32);
+        assert_eq!(decode_frame_codepoint(&frame, 0, 1), 0);
+        assert_eq!(decode_frame_codepoint(&frame, 0, 2), 'B' as u32);
     }
 
     #[test]
