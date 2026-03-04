@@ -156,16 +156,22 @@ impl ScriptHook for SlidesView {
 
         // Create all slides upfront (slides need to be available for navigation)
         if apply.is_new() || apply.is_reload() {
+            let mut new_slides = Vec::new();
             for (slide_id, template_ref) in self.templates.iter() {
                 if !self.slides.contains_key(slide_id) {
                     let template_value: ScriptValue = template_ref.as_object().into();
                     let slide = WidgetRef::script_from_value_scoped(vm, scope, template_value);
-                    self.slides.insert(*slide_id, slide);
+                    self.slides.insert(*slide_id, slide.clone());
+                    new_slides.push((*slide_id, slide));
                 }
             }
+            let cx = vm.cx_mut();
+            for (slide_id, slide) in new_slides {
+                cx.widget_tree_insert_child_deep(self.uid, slide_id, slide);
+            }
+        } else {
+            vm.cx_mut().widget_tree_mark_dirty(self.uid);
         }
-
-        vm.cx_mut().widget_tree_mark_dirty(self.uid);
     }
 }
 
