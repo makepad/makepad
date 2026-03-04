@@ -2373,13 +2373,12 @@ impl HubCore {
             if session.applied_cols == cols && session.applied_rows == rows {
                 return;
             }
-            let old_rows = session.applied_rows;
             session.applied_cols = cols;
             session.applied_rows = rows;
             session
                 .terminal
                 .resize(cols as usize, rows as usize);
-            Self::adjust_terminal_subscribers_for_resize(session, old_rows, rows);
+            Self::adjust_terminal_subscribers_for_resize(session);
             if cols != session.cols || rows != session.rows {
                 if self
                     .terminal_manager
@@ -2438,10 +2437,6 @@ impl HubCore {
             }
             let max_top = Self::terminal_max_top_row(&session.terminal, rows);
             let (resolved_top, anchor) = if top_row == usize::MAX {
-                // Sticky/bottom requests should resolve against the terminal's
-                // current total rows after resize/reflow, not a preserved top row.
-                // Preserving + delta-adjusting can drift and make TUI content
-                // appear to slide during repeated height changes.
                 (max_top, TerminalViewportAnchor::Bottom)
             } else {
                 let clamped = top_row.min(max_top);
@@ -2514,18 +2509,9 @@ impl HubCore {
         }
     }
 
-    fn adjust_terminal_subscribers_for_resize(
-        session: &mut TerminalSession,
-        old_rows: u16,
-        new_rows: u16,
-    ) {
-        let _ = old_rows;
-        let _ = new_rows;
+    fn adjust_terminal_subscribers_for_resize(session: &mut TerminalSession) {
         for viewport in session.subscribers.values_mut() {
             viewport.cols = session.cols;
-            // Do NOT overwrite viewport.rows with session.rows (pty_rows).
-            // viewport.rows is the requested render height, which is typically
-            // slightly larger than pty_rows to cover sub-pixel scrolling.
             let max_top = Self::terminal_max_top_row(&session.terminal, viewport.rows);
             if viewport.anchor == TerminalViewportAnchor::Bottom {
                 viewport.top_row = max_top;
@@ -2536,7 +2522,14 @@ impl HubCore {
 
     fn terminal_max_top_row(terminal: &Terminal, rows: u16) -> usize {
         let screen = terminal.screen();
-        let total_lines = screen.scrollback_len() + screen.used_rows();
+        let is_tui = screen.scroll_top != 0
+            || screen.scroll_bottom != screen.rows()
+            || terminal.modes.alt_screen;
+        let total_lines = if is_tui {
+            screen.scrollback_len() + screen.rows()
+        } else {
+            screen.scrollback_len() + screen.used_rows()
+        };
         total_lines.saturating_sub(rows.max(1) as usize)
     }
 
@@ -2771,12 +2764,16 @@ fn terminal_framebuffer_from_terminal(
     let screen = terminal.screen();
     let is_tui = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows() || terminal.modes.alt_screen;
     
-    let total_lines = screen.scrollback_len() + screen.used_rows();
-    
+    let total_lines = if is_tui {
+        screen.scrollback_len() + screen.rows()
+    } else {
+        screen.scrollback_len() + screen.used_rows()
+    };
     let max_top = total_lines.saturating_sub(rows_usize);
     let top_row = requested_top_row.min(max_top);
     let mut cells = Vec::with_capacity(cols_usize * rows_usize * 7);
     let palette = &terminal.palette.colors;
+    let default_fg = terminal.default_fg;
     let default_bg = terminal.default_bg;
     for row in 0..rows_usize {
         let virtual_row = top_row + row;
@@ -2809,8 +2806,6 @@ fn terminal_framebuffer_from_terminal(
     let cursor_row = cursor_virtual_row as isize - top_row as isize;
     let cursor_visible =
         terminal.modes.cursor_visible && cursor_row >= 0 && cursor_row < rows_usize as isize;
-    let default_fg = terminal.default_fg;
-    let default_bg = terminal.default_bg;
 
     TerminalFramebuffer {
         frame_id,

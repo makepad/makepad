@@ -47,6 +47,7 @@ fn request_terminal_viewport(
         path: path.to_string(),
         cols,
         rows,
+        pty_rows: rows,
         top_row,
     });
 }
