@@ -1,0 +1,8 @@
+[package]
+name = "space-lobby-test"
+version = "0.1.0"
+edition = "2021"
+description = "Isolated test for the SpaceLobbyScreen widget from Robrix"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }

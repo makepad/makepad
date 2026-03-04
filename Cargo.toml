@@ -5,6 +5,7 @@ workspace.members = [
     "examples/map",
     "examples/arracing",
     "examples/splash",
+    "examples/space_lobby_test",
     "examples/uizoo",
     "examples/charts",
     "examples/scratchpad",

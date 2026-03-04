@@ -280,13 +280,13 @@ item.apply_over(cx, live!{
 // New system (script_apply_eval! macro)
 script_apply_eval!(cx, item, {
     height: #(height)
-    draw_bg: {is_even: #(if is_even {1.0} else {0.0})}
+    draw_bg +: {is_even: #(if is_even {1.0} else {0.0})}
 });
 
 // For colors, use #(color) syntax
 let color = self.color_focus;
 script_apply_eval!(cx, item, {
-    draw_bg: {
+    draw_bg +: {
         color: #(color)
     }
 });
