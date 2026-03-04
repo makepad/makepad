@@ -62,8 +62,10 @@ script_mod! {
                     }
                 }
             }
-            // Apply cached SVG transform on GPU, then any custom hooks
-            let transformed = self.transform_svg_point(pos * self.svg_scale + self.svg_offset);
+            // Keep tessellated SVG geometry relative and apply rect_pos as the
+            // final anchor so turtle alignment can move it like DrawQuad.
+            let transformed_local = self.transform_svg_point(pos * self.svg_scale + self.svg_offset);
+            let transformed = transformed_local + self.rect_pos;
             self.v_tcoord = vec2(self.geom.u, self.geom.v);
             self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
             self.v_stroke_mult = self.geom.stroke_mult;
@@ -75,23 +77,23 @@ script_mod! {
             let grad_type = self.geom.param0;
             if grad_type > 0.5 && grad_type < 1.5 {
                 // Linear gradient: p1,p2 = start point, p3,p4 = end point
-                let p0 = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset);
-                let p1 = self.transform_svg_point(vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset);
+                let p0 = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset) + self.rect_pos;
+                let p1 = self.transform_svg_point(vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset) + self.rect_pos;
                 self.v_param1 = p0.x;
                 self.v_param2 = p0.y;
                 self.v_param3 = p1.x;
                 self.v_param4 = p1.y;
             } else if grad_type > 1.5 {
                 // Radial gradient: p1,p2 = center, p3,p4 = rx, ry
-                let center = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset);
+                let center = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset) + self.rect_pos;
                 self.v_param1 = center.x;
                 self.v_param2 = center.y;
                 self.v_param3 = self.geom.param3 * self.svg_scale.x;
                 self.v_param4 = self.geom.param4 * self.svg_scale.y;
             } else if self.geom.shape_id > 0.5 {
                 // Effect shape with bbox in params: transform bbox by svg_scale/svg_offset
-                let bbox_min = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset);
-                let bbox_max = self.transform_svg_point(vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset);
+                let bbox_min = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset) + self.rect_pos;
+                let bbox_max = self.transform_svg_point(vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset) + self.rect_pos;
                 self.v_param1 = bbox_min.x;
                 self.v_param2 = bbox_min.y;
                 self.v_param3 = bbox_max.x;
@@ -105,7 +107,7 @@ script_mod! {
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
 
-            // Early clip rejection in transformed space.
+            // Early clip rejection in final draw space.
             let cr = self.geom.clip_radius * max(abs(self.svg_scale.x), abs(self.svg_scale.y));
             let is_shadow = self.geom.stroke_mult < -0.5;
             if cr > 0.0 && !is_shadow {
@@ -261,8 +263,9 @@ impl DrawSvg {
                 (tw / bw, th / bh)
             };
 
-            let offset_x = rect.pos.x as f32 + (tw - bw * sx) * 0.5 - bmin_x * sx;
-            let offset_y = rect.pos.y as f32 + (th - bh * sy) * 0.5 - bmin_y * sy;
+            // Keep geometry local; rect_pos is the final anchor applied in the shader.
+            let offset_x = (tw - bw * sx) * 0.5 - bmin_x * sx;
+            let offset_y = (th - bh * sy) * 0.5 - bmin_y * sy;
 
             // svg_scale at uniform offset 0..1, svg_offset at 2..3, svg_time at 4
             let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
@@ -275,8 +278,8 @@ impl DrawSvg {
             let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
             uniforms[0] = 1.0;
             uniforms[1] = 1.0;
-            uniforms[2] = rect.pos.x as f32;
-            uniforms[3] = rect.pos.y as f32;
+            uniforms[2] = 0.0;
+            uniforms[3] = 0.0;
             uniforms[4] = time;
         }
 
