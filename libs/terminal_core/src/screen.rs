@@ -425,8 +425,6 @@ impl Screen {
 
         match rows.cmp(&old_rows) {
             std::cmp::Ordering::Greater => {
-                // Pull from scrollback when the screen was full, keeping
-                // content anchored to the bottom (matches macOS Terminal).
                 let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
                 let pull_count = if was_full {
                     self.scrollback.len().min(rows - old_rows)
@@ -456,10 +454,15 @@ impl Screen {
                         saved.y += pull_count;
                     }
                 } else if has_custom_scroll_region {
-                    // TUI with empty scrollback! We MUST anchor to top!
+                    let shift = rows - old_rows;
                     for (src_row, row) in old_grid_rows.iter().enumerate() {
-                        copy_row(row, src_row, &mut new_grid);
-                        new_grid.line_wrapped[src_row] = old_wrapped[src_row];
+                        copy_row(row, src_row + shift, &mut new_grid);
+                        new_grid.line_wrapped[src_row + shift] = old_wrapped[src_row];
+                    }
+                    self.cursor.y += shift;
+                    self.high_water_row += shift;
+                    if let Some(saved) = &mut self.saved_cursor {
+                        saved.y += shift;
                     }
                 } else {
                     for (src_row, row) in old_grid_rows.iter().enumerate() {
@@ -477,9 +480,10 @@ impl Screen {
                 let mut copy_start = required_scrolling.min(lines_removed);
                 
                 let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
+                let has_text_below_cursor = self.last_non_empty_row() > self.cursor.y;
                 
-                if has_custom_scroll_region {
-                    copy_start = lines_removed; // TUI: Keep bottom rows anchored!
+                if has_custom_scroll_region || has_text_below_cursor {
+                    copy_start = lines_removed;
                 } else if copy_start == 0 && self.bottom_trimmed_rows > 0 {
                     copy_start = self.bottom_trimmed_rows.min(lines_removed);
                 }
@@ -532,7 +536,6 @@ impl Screen {
         let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
         
         if has_custom_scroll_region {
-            // TUI mode: do not reflow, just truncate/pad
             let old_grid_rows: Vec<Vec<Cell>> = (0..old_rows)
                 .map(|row| self.grid.row_slice(row).to_vec())
                 .collect();
@@ -545,7 +548,6 @@ impl Screen {
                 }
             };
 
-            // Push top rows to scrollback if shrinking
             if new_rows < old_rows {
                 let lines_removed = old_rows - new_rows;
                 for i in 0..lines_removed {
@@ -562,7 +564,6 @@ impl Screen {
                 }
             }
 
-            // Anchor to the bottom for TUIs!
             let y_offset = new_rows as isize - old_rows as isize;
             for (src_row, row) in old_grid_rows.iter().enumerate() {
                 let dst_row = src_row as isize + y_offset;
@@ -593,17 +594,13 @@ impl Screen {
             return;
         }
 
-        // --- 1. Combine scrollback and grid into a single logical stream ---
         let mut all_lines: Vec<(Vec<Cell>, bool)> = Vec::new();
-        
-        // Add scrollback lines
         for i in 0..self.scrollback.len() {
             let row = self.scrollback[i].clone();
             let wrapped = self.scrollback_wrapped.get(i).copied().unwrap_or(false);
             all_lines.push((row, wrapped));
         }
         
-        // Add grid lines up to the used rows
         let used = self.used_rows();
         for i in 0..used {
             let row = self.grid.row_slice(i).to_vec();
@@ -611,7 +608,6 @@ impl Screen {
             all_lines.push((row, wrapped));
         }
 
-        // --- 2. Reflow all lines at new width ---
         let mut new_lines: Vec<(Vec<Cell>, bool)> = Vec::new();
         {
             let mut current: Vec<Cell> = Vec::new();
@@ -657,7 +653,6 @@ impl Screen {
             }
         }
 
-        // --- 3. Split back into scrollback and grid ---
         let mut new_grid = Grid::new(new_cols, new_rows);
         let mut new_scrollback: Vec<Vec<Cell>> = Vec::new();
         let mut new_scrollback_wrapped: Vec<bool> = Vec::new();
@@ -680,7 +675,6 @@ impl Screen {
             new_grid.line_wrapped[i] = wrapped;
         }
 
-        // Trim to max scrollback.
         if new_scrollback.len() > self.max_scrollback {
             let overflow = new_scrollback.len() - self.max_scrollback;
             new_scrollback.drain(0..overflow);
@@ -691,12 +685,7 @@ impl Screen {
         self.scrollback_wrapped = new_scrollback_wrapped;
         self.grid = new_grid;
         
-        // Adjust cursor
-        // For a full reflow, we just put the cursor at the end of the content
         self.high_water_row = grid_lines.saturating_sub(1);
-        
-        // We need to figure out where the cursor ended up.
-        // A simple approximation is to put it at the end of the last line.
         self.cursor.x = 0;
         if grid_lines > 0 {
             let last_row = &self.grid.row_slice(self.high_water_row);
@@ -737,28 +726,16 @@ impl Screen {
         (self.high_water_row.max(self.cursor.y) + 1).min(self.rows())
     }
 
-    /// Returns the index of the last row that contains non-empty text.
     pub fn last_non_empty_row(&self) -> usize {
         for row in (0..self.rows()).rev() {
             let slice = self.grid.row_slice(row);
-            let mut is_empty = true;
             for cell in slice {
                 if cell.codepoint != ' ' || cell.style != Style::default() {
-                    is_empty = false;
-                    break;
+                    return row;
                 }
-            }
-            if !is_empty {
-                return row;
             }
         }
         0
-    }
-
-    /// Total logical rows visible through a virtual viewport
-    /// (`scrollback` + active grid rows).
-    pub fn total_rows(&self) -> usize {
-        self.scrollback.len() + self.rows()
     }
 
     /// Row slice by virtual row index where:

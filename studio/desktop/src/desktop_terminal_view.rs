@@ -19,14 +19,6 @@ script_mod! {
         }
     }
 
-    set_type_default() do #(DrawTerminalDecor::script_shader(vm)) {
-        ..mod.draw.DrawQuad
-        color: #xc5c8c6
-        pixel: fn() {
-            return vec4(self.color.rgb * self.color.a, self.color.a)
-        }
-    }
-
     set_type_default() do #(DrawTerminalCursor::script_shader(vm)) {
         ..mod.draw.DrawQuad
         color: #fff7
@@ -64,6 +56,8 @@ script_mod! {
         pad_y: 2.0
         text_y_offset: 0.0
         cursor_y_offset: 0.0
+        selection_color_focus: theme.color_outset_active
+        selection_color_unfocus: theme.color_outset_active * 0.65
         scroll_bars: mod.widgets.ScrollBars {
             show_scroll_x: false
             show_scroll_y: true
@@ -79,7 +73,6 @@ script_mod! {
             text_style: theme.font_code
         }
         draw_cell_bg +: {}
-        draw_decor +: {}
         draw_cursor +: {}
     }
 }
@@ -104,15 +97,6 @@ pub enum DesktopTerminalViewAction {
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 struct DrawTerminalCellBg {
-    #[deref]
-    draw_super: DrawQuad,
-    #[live]
-    color: Vec4f,
-}
-
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-struct DrawTerminalDecor {
     #[deref]
     draw_super: DrawQuad,
     #[live]
@@ -163,8 +147,6 @@ pub struct DesktopTerminalView {
     draw_cursor: DrawTerminalCursor,
     #[live]
     draw_cell_bg: DrawTerminalCellBg,
-    #[live]
-    draw_decor: DrawTerminalDecor,
     #[live(9.0)]
     font_size: f64,
     #[live(0.6)]
@@ -200,10 +182,6 @@ pub struct DesktopTerminalView {
     #[rust]
     glyph_cache_dpi_factor: f64,
     #[rust]
-    cursor_blink_timer: Timer,
-    #[rust]
-    cursor_blink_on: bool,
-    #[rust]
     follow_output: bool,
     #[rust]
     last_requested: Option<(String, u16, u16, u16, usize)>,
@@ -213,15 +191,25 @@ pub struct DesktopTerminalView {
     last_path: Option<String>,
     #[rust]
     last_enter_time: f64,
+    #[live]
+    selection_color_focus: Vec4f,
+    #[live]
+    selection_color_unfocus: Vec4f,
+    #[rust]
+    selection_anchor: Option<(usize, usize)>,
+    #[rust]
+    selection_cursor: Option<(usize, usize)>,
+    #[rust]
+    selecting: bool,
+    #[rust]
+    select_scroll_next_frame: NextFrame,
+    #[rust]
+    last_finger_abs: Option<Vec2d>,
+    #[rust]
+    last_frame: Option<TerminalFramebuffer>,
 }
 
-impl ScriptHook for DesktopTerminalView {
-    fn on_after_new(&mut self, vm: &mut ScriptVm) {
-        vm.with_cx_mut(|cx| {
-            self.cursor_blink_timer = cx.start_interval(0.45);
-        });
-    }
-}
+impl ScriptHook for DesktopTerminalView {}
 
 impl DesktopTerminalView {
     fn terminal_path_for_widget(cx: &Cx, data: &AppData, widget_uid: WidgetUid) -> Option<String> {
@@ -301,21 +289,15 @@ impl DesktopTerminalView {
 
     fn content_height_for_total_lines(&self, total_lines: usize) -> f64 {
         let (_, cell_height) = self.cell_metrics();
-        let content_rows_h = total_lines.max(1) as f64 * cell_height;
-        // The content height should include the padding.
-        let content_height = content_rows_h + self.pad_y * 2.0;
-        content_height
+        total_lines.max(1) as f64 * cell_height + self.pad_y * 2.0
     }
 
     fn max_scroll_pixels_for_total_lines(&self, total_lines: usize) -> f64 {
         let content_height = self.content_height_for_total_lines(total_lines);
-        
-        // If content height is basically the same or less than viewport, no scroll.
         if content_height <= self.viewport_rect.size.y + 0.1 {
             return 0.0;
         }
-        
-        (content_height - self.viewport_rect.size.y).max(0.0)
+        content_height - self.viewport_rect.size.y
     }
 
     fn is_scrolled_to_bottom(&self, total_lines: usize) -> bool {
@@ -439,51 +421,25 @@ impl DesktopTerminalView {
 
         let (cell_width, cell_height) = self.cell_metrics();
 
-        // Use unscrolled_rect (actual screen coordinates) for all positioning.
-        // This decouples rendering from the scroll offset entirely, preventing
-        // sub-pixel jitter when the scroll position changes during resize.
         let screen_top = self.unscrolled_rect.pos.y + self.pad_y;
         let screen_bottom = self.unscrolled_rect.pos.y + self.unscrolled_rect.size.y - self.pad_y;
         let usable_height = (screen_bottom - screen_top).max(0.0);
         let max_visible_rows = (usable_height / cell_height).ceil().max(1.0) as usize + 2;
         let render_rows = rows.min(max_visible_rows);
 
-        // Compute the screen-space Y origin and the first frame row to render.
-        // For follow_output when screen is full: bottom-align (last row flush with viewport bottom).
-        // Otherwise (not full, or scrolled up): top-align (first row at viewport top).
         let max_scroll = self.max_scroll_pixels_for_total_lines(frame.total_lines);
         let is_full_screen = max_scroll > 0.0;
         
-        let (origin_y, start_row) = if self.follow_output && is_full_screen && !frame.is_tui {
+        let (origin_y, start_row) = if self.follow_output && is_full_screen {
             let grid_height = render_rows as f64 * cell_height;
             let y = screen_bottom - grid_height;
             let sr = rows.saturating_sub(render_rows);
-            // If the grid height is slightly larger than the viewport (due to ceil),
-            // we need to push the origin up slightly to ensure the bottom row is exactly at screen_bottom.
-            // However, we MUST NOT apply sub_pixel_y here, because bottom-aligned text
-            // should always be perfectly flush with the bottom of the viewport, regardless
-            // of where the scrollbar happens to be animating.
             let bottom_overflow = (y + grid_height) - screen_bottom;
             (y - bottom_overflow, sr)
         } else {
-            // When top-aligned, we need to apply the sub-pixel scroll offset
-            // so that scrolling is smooth and doesn't snap to cell boundaries.
             let scroll_y = self.current_scroll_pixels();
             let sub_pixel_y = scroll_y % cell_height;
-            
-            // To prevent the top line from being cut off early when scrolling,
-            // we start rendering one row *before* the top row requested from the backend,
-            // and shift the origin up by one cell height.
-            // However, `frame.top_row` is already the requested top row.
-            // When we scroll, `frame.top_row` increases, and `sub_pixel_y` goes from 0 to cell_height.
-            // So we don't need to change `start_row` (it's always 0 relative to the frame we received),
-            // but we might need to request an extra row from the backend in `send_viewport_request`.
-            
-            // If we have fewer lines than the viewport height, we don't want to start halfway
-            // down if the scroll is somehow non-zero (though it shouldn't be).
-            // But more importantly, we want to align to the top.
-            let max_scroll = self.max_scroll_pixels_for_total_lines(frame.total_lines);
-            let y = if max_scroll <= 0.0 || frame.is_tui {
+            let y = if max_scroll <= 0.0 {
                 screen_top
             } else {
                 screen_top - sub_pixel_y
@@ -500,12 +456,12 @@ impl DesktopTerminalView {
         self.draw_cell_bg.new_draw_call(cx);
         self.draw_cursor.new_draw_call(cx);
         self.draw_text.new_draw_call(cx);
-        self.draw_decor.new_draw_call(cx);
         self.draw_text.begin_many_instances(cx);
         self.invalidate_glyph_cache_if_needed(cx);
 
         for i in 0..render_rows {
             let frame_row = start_row + i;
+            let virtual_row = frame.top_row + frame_row;
             let y = origin_y + i as f64 * cell_height;
             for col in 0..cols {
                 let Some((ch, bg_color)) = Self::decode_cell(frame, frame_row, col) else {
@@ -513,7 +469,21 @@ impl DesktopTerminalView {
                 };
                 let x = origin_x + col as f64 * cell_width;
 
-                if bg_color != default_bg {
+                let selected = self.is_cell_selected(virtual_row, col);
+                if selected {
+                    self.draw_cell_bg.color = if has_focus {
+                        self.selection_color_focus
+                    } else {
+                        self.selection_color_unfocus
+                    };
+                    self.draw_cell_bg.draw_abs(
+                        cx,
+                        Rect {
+                            pos: dvec2(x, y),
+                            size: dvec2(cell_width, cell_height),
+                        },
+                    );
+                } else if bg_color != default_bg {
                     self.draw_cell_bg.color = bg_color;
                     self.draw_cell_bg.draw_abs(
                         cx,
@@ -555,7 +525,7 @@ impl DesktopTerminalView {
         }
         self.draw_text.end_many_instances(cx);
 
-        if self.cursor_blink_on && frame.cursor_visible && frame.cursor_row >= 0 {
+        if frame.cursor_visible && frame.cursor_row >= 0 {
             let cursor_row = frame.cursor_row as usize;
             // Map cursor's frame row to our render range
             if cursor_row >= start_row && cursor_row < start_row + render_rows {
@@ -566,18 +536,10 @@ impl DesktopTerminalView {
                     + visible_row as f64 * cell_height
                     + self.cursor_y_offset;
                 self.draw_cursor.focus = if has_focus { 1.0 } else { 0.0 };
-                let cursor_rect = if has_focus {
-                    Rect {
-                        pos: dvec2(cx_x, cx_y),
-                        size: dvec2(2.0, cell_height),
-                    }
-                } else {
-                    Rect {
-                        pos: dvec2(cx_x, cx_y),
-                        size: dvec2(cell_width, cell_height),
-                    }
-                };
-                self.draw_cursor.draw_abs(cx, cursor_rect);
+                self.draw_cursor.draw_abs(cx, Rect {
+                    pos: dvec2(cx_x, cx_y),
+                    size: dvec2(cell_width, cell_height),
+                });
             }
         }
     }
@@ -775,6 +737,165 @@ impl DesktopTerminalView {
         )
     }
 
+    fn pick(&self, abs: Vec2d) -> (usize, usize) {
+        let frame = match self.last_frame.as_ref() {
+            Some(f) => f,
+            None => return (0, 0),
+        };
+        let cols = (frame.cols as usize).max(1);
+        let total_rows = frame.total_lines.max(1);
+        let (cell_width, cell_height) = self.cell_metrics();
+        let local_x = abs.x - self.unscrolled_rect.pos.x - self.pad_x;
+        let local_y =
+            abs.y - self.unscrolled_rect.pos.y - self.pad_y + self.current_scroll_pixels();
+
+        let col = (local_x / cell_width).floor().max(0.0) as usize;
+        let row = (local_y / cell_height).floor().max(0.0) as usize;
+        let col = col.min(cols.saturating_sub(1));
+        let row = row.min(total_rows.saturating_sub(1));
+        (row, col)
+    }
+
+    fn word_kind(ch: char) -> Option<bool> {
+        if ch == '\0' || ch.is_whitespace() {
+            None
+        } else {
+            Some(ch.is_alphanumeric() || ch == '_')
+        }
+    }
+
+    fn word_range_at_in_frame(frame: &TerminalFramebuffer, row: usize, col: usize) -> Option<(usize, usize)> {
+        let cols = frame.cols as usize;
+        let rows = frame.rows as usize;
+        let frame_row = row.checked_sub(frame.top_row)?;
+        if frame_row >= rows || cols == 0 {
+            return None;
+        }
+        let col = col.min(cols.saturating_sub(1));
+        let ch = Self::frame_char(frame, frame_row, col)?;
+        let kind = Self::word_kind(ch)?;
+
+        let mut start = col;
+        while start > 0 {
+            if let Some(prev_ch) = Self::frame_char(frame, frame_row, start - 1) {
+                if Self::word_kind(prev_ch) != Some(kind) {
+                    break;
+                }
+            } else {
+                break;
+            }
+            start -= 1;
+        }
+
+        let mut end = col + 1;
+        while end < cols {
+            if let Some(next_ch) = Self::frame_char(frame, frame_row, end) {
+                if Self::word_kind(next_ch) != Some(kind) {
+                    break;
+                }
+            } else {
+                break;
+            }
+            end += 1;
+        }
+        Some((start, end))
+    }
+
+    fn frame_char(frame: &TerminalFramebuffer, frame_row: usize, col: usize) -> Option<char> {
+        let cols = frame.cols as usize;
+        let idx = (frame_row * cols + col) * 7;
+        if idx + 6 >= frame.cells.len() {
+            return None;
+        }
+        let codepoint = u32::from_le_bytes([
+            frame.cells[idx],
+            frame.cells[idx + 1],
+            frame.cells[idx + 2],
+            frame.cells[idx + 3],
+        ]);
+        char::from_u32(codepoint)
+    }
+
+    fn selection_ordered(&self) -> Option<((usize, usize), (usize, usize))> {
+        let anchor = self.selection_anchor?;
+        let cursor = self.selection_cursor?;
+        if anchor == cursor {
+            return None;
+        }
+        if anchor <= cursor {
+            Some((anchor, cursor))
+        } else {
+            Some((cursor, anchor))
+        }
+    }
+
+    fn is_cell_selected(&self, row: usize, col: usize) -> bool {
+        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered()
+        else {
+            return false;
+        };
+        if row < start_row || row > end_row {
+            return false;
+        }
+        if start_row == end_row {
+            return col >= start_col && col < end_col;
+        }
+        if row == start_row {
+            return col >= start_col;
+        }
+        if row == end_row {
+            return col < end_col;
+        }
+        true
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let frame = self.last_frame.as_ref()?;
+        let cols = frame.cols as usize;
+        if cols == 0 {
+            return None;
+        }
+        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered()
+        else {
+            return None;
+        };
+
+        let mut out = String::new();
+        for row in start_row..=end_row {
+            let frame_row = match row.checked_sub(frame.top_row) {
+                Some(fr) if fr < frame.rows as usize => fr,
+                _ => {
+                    if row < end_row {
+                        out.push('\n');
+                    }
+                    continue;
+                }
+            };
+            let from_col = if row == start_row { start_col } else { 0 };
+            let to_col_exclusive = if row == end_row { end_col } else { cols };
+            if from_col >= to_col_exclusive {
+                continue;
+            }
+            for col in from_col..to_col_exclusive {
+                if let Some(ch) = Self::frame_char(frame, frame_row, col) {
+                    if ch != '\0' {
+                        out.push(ch);
+                    }
+                }
+            }
+            let trimmed_len = out.trim_end().len();
+            if row < end_row {
+                out.truncate(trimmed_len);
+                out.push('\n');
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
     fn handle_drop(
         &mut self,
         cx: &mut Cx,
@@ -795,7 +916,6 @@ impl DesktopTerminalView {
                     return false;
                 };
                 self.emit_paste_text(cx, path, &payload, bracketed_paste);
-                self.cursor_blink_on = true;
                 self.draw_bg.redraw(cx);
                 true
             }
@@ -835,28 +955,28 @@ impl Widget for DesktopTerminalView {
             .max(1.0) as u16;
         let req_rows = ((self.viewport_rect.size.y - self.pad_y * 2.0) / cell_height)
             .ceil()
-            .max(1.0) as u16 + 1; // Request 1 extra row to cover sub-pixel scrolling
+            .max(1.0) as u16 + 1;
 
         let pty_rows = ((self.viewport_rect.size.y - self.pad_y * 2.0) / cell_height)
             .floor()
             .max(1.0) as u16;
-
-        // We only care if the cols match and if the rows are AT LEAST what we need.
-        // The backend might send us slightly more rows if we're near the bottom.
         let frame_matches_viewport = frame
             .as_ref()
             .map(|frame| frame.cols == req_cols && frame.rows >= req_rows)
             .unwrap_or(false);
         if frame.is_some() && !frame_matches_viewport {
-            // During rapid window drags we can briefly receive older-size
-            // framebuffers. Invalidate request dedupe so we force-refresh to
-            // the current viewport dimensions.
             self.last_requested = None;
         }
 
         let total_lines_for_scroll = frame
             .as_ref()
-            .map(|frame| frame.total_lines)
+            .map(|frame| {
+                if frame.is_tui {
+                    frame.total_lines.min(pty_rows as usize)
+                } else {
+                    frame.total_lines
+                }
+            })
             .unwrap_or(0);
         self.last_total_lines = total_lines_for_scroll;
         
@@ -881,6 +1001,7 @@ impl Widget for DesktopTerminalView {
             self.send_viewport_request(cx, path, req_cols, req_rows, pty_rows, top_row);
         }
 
+        self.last_frame = frame.clone();
         if let Some(frame) = frame.as_ref() {
             let bg = Self::decode_rgb(frame.default_bg_rgb);
             self.draw_bg
@@ -888,15 +1009,11 @@ impl Widget for DesktopTerminalView {
                 .set_uniform(cx, id!(color), &[bg.x, bg.y, bg.z, bg.w]);
             self.draw_bg.draw_abs(cx, self.unscrolled_rect);
             self.draw_framebuffer(cx, frame);
-            self.last_total_lines = total_lines_for_scroll;
         } else {
             self.draw_bg.draw_abs(cx, self.unscrolled_rect);
         }
 
         let content_height = self.content_height_for_total_lines(self.last_total_lines);
-        
-        // If content height is smaller than viewport, we don't want a scrollbar.
-        // The scrollbar visibility is determined by whether the used height > viewport height.
         let used_height = if content_height <= self.viewport_rect.size.y + 0.1 {
             self.viewport_rect.size.y
         } else {
@@ -911,13 +1028,6 @@ impl Widget for DesktopTerminalView {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if let Event::Timer(timer_event) = event {
-            if self.cursor_blink_timer.is_timer(timer_event).is_some() {
-                self.cursor_blink_on = !self.cursor_blink_on;
-                self.draw_bg.redraw(cx);
-            }
-        }
-
         let (path, frame) = scope
             .data
             .get::<AppData>()
@@ -958,13 +1068,73 @@ impl Widget for DesktopTerminalView {
             return;
         }
 
-        match event.hits(cx, self.scroll_bars.area()) {
-            Hit::FingerDown(_) => {
-                cx.set_key_focus(self.scroll_bars.area());
-                self.cursor_blink_on = true;
+        if self.selecting && self.select_scroll_next_frame.is_event(event).is_some() {
+            self.select_scroll_next_frame = cx.new_next_frame();
+            if let Some(abs) = self.last_finger_abs {
+                let vp_rect = self.scroll_bars.area().clipped_rect(cx);
+                let vp_top = vp_rect.pos.y;
+                let vp_bottom = vp_top + vp_rect.size.y;
+                let (_, cell_height) = self.cell_metrics();
+                let scroll_speed = cell_height * 2.0;
+                let edge_band = cell_height.max(4.0);
+                let top_trigger = vp_top + edge_band;
+                let bottom_trigger = vp_bottom - edge_band;
+
+                if abs.y <= top_trigger {
+                    let delta = (top_trigger - abs.y).max(cell_height * 0.25).min(scroll_speed);
+                    let new_y = (self.current_scroll_pixels() - delta).max(0.0);
+                    let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
+                } else if abs.y >= bottom_trigger {
+                    let delta = (abs.y - bottom_trigger).max(cell_height * 0.25).min(scroll_speed);
+                    let max = self.max_scroll_pixels_for_total_lines(self.last_total_lines);
+                    let new_y = (self.current_scroll_pixels() + delta).min(max);
+                    let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, new_y));
+                }
+
+                self.follow_output = self.is_scrolled_to_bottom(self.last_total_lines);
+                self.selection_cursor = Some(self.pick(abs));
                 self.draw_bg.redraw(cx);
             }
-            Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) | Hit::FingerMove(_) => {
+        }
+
+        match event.hits(cx, self.scroll_bars.area()) {
+            Hit::FingerDown(FingerDownEvent { abs, tap_count, .. }) => {
+                cx.set_key_focus(self.scroll_bars.area());
+                let pos = self.pick(abs);
+                if tap_count == 2 {
+                    if let Some(frame) = self.last_frame.as_ref() {
+                        if let Some((start_col, end_col)) = Self::word_range_at_in_frame(frame, pos.0, pos.1) {
+                            self.selection_anchor = Some((pos.0, start_col));
+                            self.selection_cursor = Some((pos.0, end_col));
+                        } else {
+                            self.selection_anchor = Some(pos);
+                            self.selection_cursor = Some(pos);
+                        }
+                    }
+                    self.selecting = false;
+                    self.last_finger_abs = None;
+                } else {
+                    self.selection_anchor = Some(pos);
+                    self.selection_cursor = Some(pos);
+                    self.selecting = true;
+                    self.last_finger_abs = Some(abs);
+                    self.select_scroll_next_frame = cx.new_next_frame();
+                }
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+                cx.set_cursor(MouseCursor::Text);
+                if self.selecting {
+                    self.selection_cursor = Some(self.pick(abs));
+                    self.last_finger_abs = Some(abs);
+                    self.draw_bg.redraw(cx);
+                }
+            }
+            Hit::FingerUp(_) => {
+                self.selecting = false;
+                self.last_finger_abs = None;
+            }
+            Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Text);
             }
             Hit::KeyFocus(_) | Hit::KeyFocusLost(_) => {
@@ -995,7 +1165,6 @@ impl Widget for DesktopTerminalView {
                     if is_enter {
                         self.last_enter_time = e.time;
                     }
-                    self.cursor_blink_on = true;
                     self.draw_bg.redraw(cx);
                 } else if sends_ctrl_char {
                     if let Some(ch) = e.key_code.to_char(false) {
@@ -1006,7 +1175,6 @@ impl Widget for DesktopTerminalView {
                             &e.modifiers,
                             cursor_keys_application_mode,
                         );
-                        self.cursor_blink_on = true;
                         self.draw_bg.redraw(cx);
                     }
                 }
@@ -1035,8 +1203,12 @@ impl Widget for DesktopTerminalView {
                         cursor_keys_application_mode,
                     );
                 }
-                self.cursor_blink_on = true;
                 self.draw_bg.redraw(cx);
+            }
+            Hit::TextCopy(copy_event) => {
+                if let Some(text) = self.selected_text() {
+                    *copy_event.response.borrow_mut() = Some(text);
+                }
             }
             _ => {}
         }
