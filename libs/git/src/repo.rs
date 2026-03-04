@@ -469,6 +469,87 @@ impl Repository {
         })
     }
 
+    /// Compute status for a single path with file-tree semantics.
+    ///
+    /// This avoids full worktree traversal and is suitable for fs-delta updates.
+    pub fn status_for_path_for_file_tree(
+        &mut self,
+        path: &str,
+    ) -> Result<Option<worktree::FileStatus>, GitError> {
+        let path = normalize_rel_path(path);
+        if path.is_empty() {
+            return Ok(None);
+        }
+        let index = self.read_index()?;
+        let options = worktree::StatusOptions {
+            skip_hidden: true,
+            skip_target_dirs: true,
+            skip_worktree_content_compare: true,
+        };
+
+        let head_oid = match self.head_blob_oid_for_path(&path) {
+            Ok(oid) => oid,
+            Err(GitError::ObjectNotFound(_)) => {
+                return worktree::compute_status_for_path_worktree_only_with_options(
+                    &index,
+                    &self.workdir,
+                    &path,
+                    options,
+                );
+            }
+            Err(err) => return Err(err),
+        };
+
+        match worktree::compute_status_for_path_with_options(
+            head_oid,
+            &index,
+            &self.workdir,
+            &path,
+            options,
+        ) {
+            Ok(status) => Ok(status),
+            Err(GitError::ObjectNotFound(_)) => {
+                worktree::compute_status_for_path_worktree_only_with_options(
+                    &index,
+                    &self.workdir,
+                    &path,
+                    options,
+                )
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn head_blob_oid_for_path(&mut self, path: &str) -> Result<Option<ObjectId>, GitError> {
+        let head_oid = match self.head_oid() {
+            Ok(head_oid) => head_oid,
+            Err(GitError::RefNotFound(_)) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let commit = self.read_commit(&head_oid)?;
+        let mut tree = self.read_tree(&commit.tree)?;
+        let mut components = path
+            .split('/')
+            .filter(|component| !component.is_empty())
+            .peekable();
+        while let Some(component) = components.next() {
+            let Some(entry) = tree.entries.iter().find(|entry| entry.name == component) else {
+                return Ok(None);
+            };
+            if components.peek().is_none() {
+                if entry.is_tree() {
+                    return Ok(None);
+                }
+                return Ok(Some(entry.oid));
+            }
+            if !entry.is_tree() {
+                return Ok(None);
+            }
+            tree = self.read_tree(&entry.oid)?;
+        }
+        Ok(None)
+    }
+
     /// Stage a file (add to index).
     pub fn stage_file(&mut self, path: &str) -> Result<(), GitError> {
         let mut index = self.read_index()?;
@@ -927,6 +1008,16 @@ impl Repository {
         self.alternate_packs = Some(packs);
         Ok(())
     }
+}
+
+fn normalize_rel_path(path: &str) -> String {
+    let mut path = path.replace('\\', "/");
+    while let Some(stripped) = path.strip_prefix("./") {
+        path = stripped.to_string();
+    }
+    path.trim_start_matches('/')
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// Read a loose object directly from an objects/ directory (for alternates).

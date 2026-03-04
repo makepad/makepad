@@ -1178,7 +1178,6 @@ mod tests {
     /// On grow, scrollback is pulled to keep content anchored to the bottom
     /// (matching macOS Terminal).  The TUI app receives SIGWINCH and redraws.
     #[test]
-
     #[test]
     fn resize_shrink_bottom_anchors_when_text_below_cursor() {
         let mut terminal = Terminal::new(4, 5);
@@ -1366,9 +1365,8 @@ mod tests {
         terminal.process_bytes(format!("\x1b[{working_row};1H\x1b[K").as_bytes());
         terminal.process_bytes(format!("\x1b[{prompt_row};1H\x1b[K> ").as_bytes());
         terminal.process_bytes(format!("\x1b[{blank_row};1H\x1b[K").as_bytes());
-        terminal.process_bytes(
-            format!("\x1b[{status_row};1H\x1b[Kfake-model - 100% left").as_bytes(),
-        );
+        terminal
+            .process_bytes(format!("\x1b[{status_row};1H\x1b[Kfake-model - 100% left").as_bytes());
         terminal.process_bytes(format!("\x1b[1;{scroll_bottom}r").as_bytes());
         terminal.process_bytes(format!("\x1b[{prompt_row};3H").as_bytes());
     }
@@ -1416,7 +1414,12 @@ mod tests {
         let status_row = rows as usize - 1;
         let prompt = grid_row_text(terminal, prompt_row);
         let status = grid_row_text(terminal, status_row);
-        assert!(prompt.starts_with(">"), "prompt row corrupted at {}: '{}'", prompt_row, prompt);
+        assert!(
+            prompt.starts_with(">"),
+            "prompt row corrupted at {}: '{}'",
+            prompt_row,
+            prompt
+        );
         assert!(
             status.starts_with("status: ok"),
             "status row corrupted at {}: '{}'",
@@ -1448,14 +1451,26 @@ mod tests {
         t.resize(100, 24);
 
         // Grid content must stay at the SAME row positions.
-        assert!(grid_row_text(&t, 0).starts_with("=== Codex ==="),
-            "row 0 after resize: '{}'", grid_row_text(&t, 0));
-        assert!(grid_row_text(&t, 1).starts_with("---"),
-            "row 1 after resize: '{}'", grid_row_text(&t, 1));
-        assert!(grid_row_text(&t, 22).starts_with("> "),
-            "row 22 after resize: '{}'", grid_row_text(&t, 22));
-        assert!(grid_row_text(&t, 23).starts_with("status: ok"),
-            "row 23 after resize: '{}'", grid_row_text(&t, 23));
+        assert!(
+            grid_row_text(&t, 0).starts_with("=== Codex ==="),
+            "row 0 after resize: '{}'",
+            grid_row_text(&t, 0)
+        );
+        assert!(
+            grid_row_text(&t, 1).starts_with("---"),
+            "row 1 after resize: '{}'",
+            grid_row_text(&t, 1)
+        );
+        assert!(
+            grid_row_text(&t, 22).starts_with("> "),
+            "row 22 after resize: '{}'",
+            grid_row_text(&t, 22)
+        );
+        assert!(
+            grid_row_text(&t, 23).starts_with("status: ok"),
+            "row 23 after resize: '{}'",
+            grid_row_text(&t, 23)
+        );
 
         // Cursor y must not shift.
         assert_eq!(t.screen().cursor.y, 22);
@@ -1464,12 +1479,15 @@ mod tests {
         assert_eq!(t.screen().used_rows(), 24);
 
         // Scrollback may change size (reflow) but must not be pulled into grid.
-        assert!(t.primary.scrollback_len() <= sb_before,
-            "scrollback should not grow: was {}, now {}", sb_before, t.primary.scrollback_len());
+        assert!(
+            t.primary.scrollback_len() <= sb_before,
+            "scrollback should not grow: was {}, now {}",
+            sb_before,
+            t.primary.scrollback_len()
+        );
     }
 
     #[test]
-
     #[test]
     fn codex_tui_grid_positions_stable_after_narrower_resize() {
         let mut t = setup_codex_tui(80, 24);
@@ -1478,13 +1496,22 @@ mod tests {
         t.resize(60, 24);
 
         // Grid content must stay at same rows (truncated horizontally, not shifted).
-        assert!(grid_row_text(&t, 0).starts_with("=== Codex ==="),
-            "row 0: '{}'", grid_row_text(&t, 0));
-        assert!(grid_row_text(&t, 22).starts_with("> "),
-            "row 22: '{}'", grid_row_text(&t, 22));
+        assert!(
+            grid_row_text(&t, 0).starts_with("=== Codex ==="),
+            "row 0: '{}'",
+            grid_row_text(&t, 0)
+        );
+        assert!(
+            grid_row_text(&t, 22).starts_with("> "),
+            "row 22: '{}'",
+            grid_row_text(&t, 22)
+        );
         // Status bar text truncated to 60 cols but still on row 23.
-        assert!(grid_row_text(&t, 23).starts_with("status: ok"),
-            "row 23: '{}'", grid_row_text(&t, 23));
+        assert!(
+            grid_row_text(&t, 23).starts_with("status: ok"),
+            "row 23: '{}'",
+            grid_row_text(&t, 23)
+        );
 
         assert_eq!(t.screen().cursor.y, 22);
         assert_eq!(t.screen().used_rows(), 24);
@@ -1500,13 +1527,19 @@ mod tests {
 
         // After resize, used_rows must still cover all content, not snap to cursor.
         t.resize(100, 24);
-        assert!(t.screen().used_rows() >= 24,
-            "used_rows={} should be >= 24 after width resize", t.screen().used_rows());
+        assert!(
+            t.screen().used_rows() >= 24,
+            "used_rows={} should be >= 24 after width resize",
+            t.screen().used_rows()
+        );
 
         // The viewport total (scrollback + used_rows) should be enough to scroll to bottom.
         let total = t.primary.scrollback_len() + t.screen().used_rows();
-        assert!(total >= 24,
-            "total_lines={} should be >= viewport rows", total);
+        assert!(
+            total >= 24,
+            "total_lines={} should be >= viewport rows",
+            total
+        );
     }
 
     #[test]
@@ -1526,12 +1559,18 @@ mod tests {
 
         // Content cells should preserve their styles.
         let new_header_bg = t.screen().grid.cell(0, 0).style.bg;
-        assert_eq!(new_header_bg, header_bg,
-            "header bg should be preserved: {:?} vs {:?}", new_header_bg, header_bg);
+        assert_eq!(
+            new_header_bg, header_bg,
+            "header bg should be preserved: {:?} vs {:?}",
+            new_header_bg, header_bg
+        );
 
         let new_status_bg = t.screen().grid.cell(0, 23).style.bg;
-        assert_eq!(new_status_bg, status_bg,
-            "status bg should be preserved: {:?} vs {:?}", new_status_bg, status_bg);
+        assert_eq!(
+            new_status_bg, status_bg,
+            "status bg should be preserved: {:?} vs {:?}",
+            new_status_bg, status_bg
+        );
     }
 
     #[test]
@@ -1574,10 +1613,15 @@ mod tests {
         assert_eq!(sb.len(), t.primary.scrollback_len());
         // Find the row with 'A'.
         let a_row = sb.iter().position(|row| row[0].codepoint == 'A').unwrap();
-        assert_eq!(sb[a_row][35].codepoint, '9', "full line should be in one row");
+        assert_eq!(
+            sb[a_row][35].codepoint, '9',
+            "full line should be in one row"
+        );
         // Should NOT be wrapped anymore.
-        assert!(!t.primary.scrollback_wrapped[a_row],
-            "unwrapped line should not be marked wrapped");
+        assert!(
+            !t.primary.scrollback_wrapped[a_row],
+            "unwrapped line should not be marked wrapped"
+        );
     }
 
     /// Shrink pushes top rows into scrollback to keep cursor visible,
@@ -1586,9 +1630,7 @@ mod tests {
 
     /// Shrink + grow round-trip restores content from scrollback.
     #[test]
-
     #[test]
-
     #[test]
     fn makepad_tui_hi_up_down_resize_restores_framebuffer() {
         let mut t = setup_makepad_tui_like_with_hi(80, 20);
@@ -1624,7 +1666,10 @@ mod tests {
                 after_line.trim_end()
             );
         }
-        assert_eq!(after_cursor, before_cursor, "cursor should round-trip after up/down resize");
+        assert_eq!(
+            after_cursor, before_cursor,
+            "cursor should round-trip after up/down resize"
+        );
     }
 
     #[test]
@@ -1674,14 +1719,8 @@ mod tests {
         render_like_codex_resize(&mut t, 80, 20);
         assert_codex_frame_invariants(&t, 80, 20);
 
-        let sequence: &[(u16, u16)] = &[
-            (100, 34),
-            (72, 18),
-            (120, 40),
-            (64, 16),
-            (90, 28),
-            (80, 20),
-        ];
+        let sequence: &[(u16, u16)] =
+            &[(100, 34), (72, 18), (120, 40), (64, 16), (90, 28), (80, 20)];
 
         for _cycle in 0..3 {
             for (cols, rows) in sequence {
