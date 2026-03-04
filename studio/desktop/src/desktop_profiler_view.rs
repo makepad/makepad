@@ -191,12 +191,12 @@ struct DesktopProfilerEventChart {
 }
 
 impl DesktopProfilerEventChart {
-    fn profiler_tab_id_from_path(&self, cx: &Cx, data: &AppData) -> Option<LiveId> {
+    fn profiler_build_id_from_context(&self, cx: &Cx, data: &AppData) -> Option<QueryId> {
         let path = cx.widget_tree().path_to(self.uid);
         path.iter()
             .rev()
             .copied()
-            .find(|tab_id| data.profiler_tab_state.contains_key(tab_id))
+            .find_map(|tab_id| data.profiler_tab_state.get(&tab_id).map(|state| state.build_id))
     }
 
     fn set_follow_live(&mut self, cx: &mut Cx, follow_live: bool) {
@@ -916,15 +916,7 @@ impl Widget for DesktopProfilerEventChart {
             return DrawStep::done();
         };
 
-        let Some(tab_id) = self.profiler_tab_id_from_path(cx, data) else {
-            self.draw_bg.begin(cx, walk, Layout::default());
-            let rect = cx.turtle().rect();
-            self.draw_time
-                .draw_abs(cx, rect.pos + dvec2(8.0, 8.0), "No profiler tab");
-            self.draw_bg.end(cx);
-            return DrawStep::done();
-        };
-        let Some(tab_state) = data.profiler_tab_state.get(&tab_id) else {
+        let Some(build_id) = self.profiler_build_id_from_context(cx, data) else {
             self.draw_bg.begin(cx, walk, Layout::default());
             let rect = cx.turtle().rect();
             self.draw_time
@@ -936,11 +928,11 @@ impl Widget for DesktopProfilerEventChart {
         let empty_samples = UiProfilerSamples::default();
         let samples = data
             .profiler_samples_by_build
-            .get(&tab_state.build_id)
+            .get(&build_id)
             .unwrap_or(&empty_samples);
         let running = data
             .profiler_running_by_build
-            .get(&tab_state.build_id)
+            .get(&build_id)
             .copied()
             .unwrap_or(true);
 
@@ -1034,10 +1026,8 @@ impl Widget for DesktopProfilerEventChart {
     }
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct DesktopProfilerView {
-    #[uid]
-    uid: WidgetUid,
     #[deref]
     view: View,
     #[rust]
@@ -1046,13 +1036,16 @@ pub struct DesktopProfilerView {
     tmp_sample_count_label: String,
 }
 
+impl ScriptHook for DesktopProfilerView {}
+
 impl DesktopProfilerView {
-    fn profiler_tab_id_from_path(&self, cx: &Cx, data: &AppData) -> Option<LiveId> {
-        let path = cx.widget_tree().path_to(self.uid);
-        path.iter()
+    fn profiler_build_id_from_context(&self, cx: &Cx, data: &AppData) -> Option<QueryId> {
+        let view_path = cx.widget_tree().path_to(self.view.widget_uid());
+        view_path
+            .iter()
             .rev()
             .copied()
-            .find(|tab_id| data.profiler_tab_state.contains_key(tab_id))
+            .find_map(|tab_id| data.profiler_tab_state.get(&tab_id).map(|state| state.build_id))
     }
 }
 
@@ -1062,20 +1055,17 @@ impl WidgetMatchEvent for DesktopProfilerView {
             let Some(data) = scope.data.get::<AppData>() else {
                 return;
             };
-            let Some(tab_id) = self.profiler_tab_id_from_path(cx, data) else {
+            let Some(build_id) = self.profiler_build_id_from_context(cx, data) else {
                 return;
             };
-            let Some(tab_state) = data.profiler_tab_state.get(&tab_id) else {
-                return;
-            };
-            tab_state.build_id
+            build_id
         };
 
-        if self.button(cx, ids!(clear_button)).clicked(&actions) {
-            cx.widget_action(self.uid, DesktopProfilerViewAction::Clear { build_id });
+        if self.view.button(cx, ids!(clear_button)).clicked(&actions) {
+            cx.widget_action(self.widget_uid(), DesktopProfilerViewAction::Clear { build_id });
         }
 
-        if let Some(running) = self.check_box(cx, ids!(running_button)).changed(actions) {
+        if let Some(running) = self.view.check_box(cx, ids!(running_button)).changed(actions) {
             if let Some(mut chart) = self
                 .view
                 .widget(cx, ids!(chart))
@@ -1087,7 +1077,7 @@ impl WidgetMatchEvent for DesktopProfilerView {
                 }
             }
             cx.widget_action(
-                self.uid,
+                self.widget_uid(),
                 DesktopProfilerViewAction::SetRunning { build_id, running },
             );
         }
@@ -1101,15 +1091,13 @@ impl Widget for DesktopProfilerView {
             return DrawStep::done();
         };
 
-        let tab_state = self
-            .profiler_tab_id_from_path(cx, data)
-            .and_then(|tab_id| data.profiler_tab_state.get(&tab_id));
-        let build_id = tab_state.map(|s| s.build_id);
+        let build_id = self.profiler_build_id_from_context(cx, data);
         let running = build_id
             .and_then(|id| data.profiler_running_by_build.get(&id).copied())
             .unwrap_or(true);
 
-        self.check_box(cx, ids!(running_button))
+        self.view
+            .check_box(cx, ids!(running_button))
             .set_active(cx, running);
         if let Some(mut chart) = self
             .view
@@ -1122,16 +1110,21 @@ impl Widget for DesktopProfilerView {
         self.tmp_status_label.clear();
         self.tmp_sample_count_label.clear();
 
-        if let Some(tab_state) = tab_state {
+        if let Some(build_id) = build_id {
             let empty_samples = UiProfilerSamples::default();
             let samples = data
                 .profiler_samples_by_build
-                .get(&tab_state.build_id)
+                .get(&build_id)
                 .unwrap_or(&empty_samples);
+            let title = data
+                .build_package
+                .get(&build_id)
+                .cloned()
+                .unwrap_or_else(|| format!("build {}", build_id.0));
             let _ = write!(
                 &mut self.tmp_status_label,
                 "Build: {} ({})",
-                tab_state.title, tab_state.build_id.0
+                title, build_id.0
             );
             let _ = write!(
                 &mut self.tmp_sample_count_label,
@@ -1145,15 +1138,15 @@ impl Widget for DesktopProfilerView {
             self.tmp_sample_count_label.push_str("App E: 0 G: 0 C: 0");
         }
 
-        self.label(cx, ids!(status_label)).set_text_with(|v| {
+        self.view.label(cx, ids!(status_label)).set_text_with(|v| {
             v.clear();
             v.push_str(&self.tmp_status_label);
         });
-        self.label(cx, ids!(sample_count_label)).set_text_with(|v| {
+        self.view.label(cx, ids!(sample_count_label)).set_text_with(|v| {
             v.clear();
             v.push_str(&self.tmp_sample_count_label);
         });
-        self.label(cx, ids!(window_label)).set_text_with(|v| {
+        self.view.label(cx, ids!(window_label)).set_text_with(|v| {
             v.clear();
             v.push_str(if running { "Live" } else { "Paused" });
         });

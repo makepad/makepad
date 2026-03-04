@@ -312,7 +312,7 @@ impl WidgetTree {
             inner.dirty.insert(uid);
         }
 
-        if node_is_new || name_changed || skip_search_changed || parent_changed {
+        if node_is_new || widget_changed || name_changed || skip_search_changed || parent_changed {
             Self::invalidate_path_cache(&mut inner, uid);
         }
     }
@@ -470,6 +470,37 @@ impl WidgetTree {
 
         if child_is_new || name_changed || skip_search_changed || parent_changed {
             Self::invalidate_path_cache(&mut inner, parent_uid);
+        }
+    }
+
+    /// Insert a child and recursively register all its descendants.
+    /// Call this when the subtree is not borrowed (e.g. right after creation).
+    pub fn insert_child_deep(&self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef) {
+        self.insert_child(parent_uid, name, widget.clone());
+        // Now recursively walk the subtree — widget was just created so not borrowed.
+        let mut stack: Vec<(WidgetUid, WidgetRef)> = Vec::new();
+        if let Some(uid) = widget.try_widget_uid() {
+            if uid != WidgetUid(0) {
+                stack.push((uid, widget));
+            }
+        }
+        while let Some((current_uid, current_widget)) = stack.pop() {
+            let mut children: Vec<(LiveId, WidgetRef)> = Vec::new();
+            if !current_widget.try_children(&mut |child_name, child| {
+                if !child.is_empty() {
+                    children.push((child_name, child));
+                }
+            }) {
+                continue;
+            }
+            for (child_name, child_widget) in children {
+                self.insert_child(current_uid, child_name, child_widget.clone());
+                if let Some(child_uid) = child_widget.try_widget_uid() {
+                    if child_uid != WidgetUid(0) {
+                        stack.push((child_uid, child_widget));
+                    }
+                }
+            }
         }
     }
 
@@ -634,7 +665,13 @@ impl WidgetTree {
         }
 
         inner.dirty.insert(uid);
-        if node_is_new || name_changed || skip_search_changed || parent_changed || root_changed {
+        if node_is_new
+            || widget_changed
+            || name_changed
+            || skip_search_changed
+            || parent_changed
+            || root_changed
+        {
             Self::invalidate_path_cache(&mut inner, uid);
         }
     }
@@ -979,6 +1016,9 @@ impl WidgetTree {
         if path.is_empty() || root_uid == WidgetUid(0) || !inner.graph.contains_key(&root_uid) {
             return Vec::new();
         }
+        if !Self::ensure_node_cached(inner, root_uid) {
+            return Vec::new();
+        }
 
         if let Some(cached_matches) = Self::cached_path_matches(inner, root_uid, path) {
             if cached_matches.is_empty() {
@@ -1100,11 +1140,7 @@ impl WidgetTree {
             None => return true,
         };
 
-        let mut new_children: Vec<WidgetUid> = if mark_structure_dirty {
-            Vec::with_capacity(resolved_children.len())
-        } else {
-            old_children.clone()
-        };
+        let mut new_children: Vec<WidgetUid> = Vec::with_capacity(resolved_children.len());
         let mut invalidate_uid_cache = false;
 
         for (child_name, child_widget, child_uid) in resolved_children {
@@ -1185,18 +1221,16 @@ impl WidgetTree {
             }
 
             if old_parent != Some(uid) {
-                if mark_structure_dirty {
-                    if let Some(prev_parent_uid) = old_parent {
-                        if let Some(prev_parent) = inner.graph.get_mut(&prev_parent_uid) {
-                            if let Some(pos) = prev_parent
-                                .children
-                                .iter()
-                                .position(|entry| *entry == child_uid)
-                            {
-                                prev_parent.children.remove(pos);
-                                if mark_structure_dirty {
-                                    inner.structure_dirty = true;
-                                }
+                if let Some(prev_parent_uid) = old_parent {
+                    if let Some(prev_parent) = inner.graph.get_mut(&prev_parent_uid) {
+                        if let Some(pos) = prev_parent
+                            .children
+                            .iter()
+                            .position(|entry| *entry == child_uid)
+                        {
+                            prev_parent.children.remove(pos);
+                            if mark_structure_dirty {
+                                inner.structure_dirty = true;
                             }
                         }
                     }
@@ -2029,6 +2063,7 @@ pub trait CxWidgetExt {
     fn widget_tree(&self) -> &WidgetTree;
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid);
     fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
+    fn widget_tree_insert_child_deep(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
 }
 
 fn get_or_init_state(cx: &mut Cx) -> &mut WidgetTreeState {
@@ -2071,6 +2106,11 @@ impl CxWidgetExt for Cx {
         let state = get_or_init_state(self);
         state.tree.insert_child(parent_uid, name, widget);
     }
+
+    fn widget_tree_insert_child_deep(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef) {
+        let state = get_or_init_state(self);
+        state.tree.insert_child_deep(parent_uid, name, widget);
+    }
 }
 
 impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
@@ -2095,6 +2135,12 @@ impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
         let state = get_or_init_state(cx);
         state.tree.insert_child(parent_uid, name, widget);
     }
+
+    fn widget_tree_insert_child_deep(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef) {
+        let cx: &mut Cx = self;
+        let state = get_or_init_state(cx);
+        state.tree.insert_child_deep(parent_uid, name, widget);
+    }
 }
 
 impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
@@ -2118,6 +2164,12 @@ impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
         let cx: &mut Cx = self;
         let state = get_or_init_state(cx);
         state.tree.insert_child(parent_uid, name, widget);
+    }
+
+    fn widget_tree_insert_child_deep(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef) {
+        let cx: &mut Cx = self;
+        let state = get_or_init_state(cx);
+        state.tree.insert_child_deep(parent_uid, name, widget);
     }
 }
 
@@ -3184,5 +3236,34 @@ mod tests {
         let third = tree.find_within(root_uid, &path);
         assert!(!third.is_empty());
         assert_eq!(third.widget_uid(), leaf_uid);
+    }
+
+    #[test]
+    fn test_cached_path_refreshes_when_parent_widget_changes() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let old_uid = WidgetUid::new();
+        let new_uid = WidgetUid::new();
+
+        let old_child = make_widget(old_uid, vec![]);
+        let root_v1 = make_widget(root_uid, vec![(name("running_button"), old_child.clone())]);
+        let mut keep_alive = vec![old_child.clone(), root_v1.clone()];
+
+        tree.observe_node(root_uid, name("root"), root_v1.clone(), None);
+        let first = tree.find_within(root_uid, &[name("running_button")]);
+        assert_eq!(first.widget_uid(), old_uid);
+
+        let new_child = make_widget(new_uid, vec![]);
+        let root_v2 = make_widget(root_uid, vec![(name("running_button"), new_child.clone())]);
+        keep_alive.push(new_child.clone());
+        keep_alive.push(root_v2.clone());
+        tree.observe_node(root_uid, name("root"), root_v2.clone(), None);
+
+        let second = tree.find_within(root_uid, &[name("running_button")]);
+        assert_eq!(
+            second.widget_uid(),
+            new_uid,
+            "cached lookup must refresh after parent widget instance changes"
+        );
     }
 }
