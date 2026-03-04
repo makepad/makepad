@@ -107,6 +107,8 @@ fn run_terminal_loop(
     control_rx: Receiver<TerminalControl>,
     event_tx: Sender<HubEvent>,
 ) {
+    const MAX_READ_BYTES_PER_TICK: usize = 1 << 20;
+
     let mut should_close = false;
     let mut pending_input = VecDeque::<PendingInput>::new();
     let mut pending_resize: Option<(u16, u16)> = None;
@@ -169,13 +171,25 @@ fn run_terminal_loop(
             break;
         }
 
-        if let Some(data) = pty.try_read() {
-            if !data.is_empty() {
-                let _ = event_tx.send(HubEvent::TerminalOutput {
-                    path: path.clone(),
-                    data,
-                });
+        let mut output = Vec::new();
+        loop {
+            let Some(data) = pty.try_read() else {
+                break;
+            };
+            if data.is_empty() {
+                continue;
             }
+            output.extend_from_slice(&data);
+            if output.len() >= MAX_READ_BYTES_PER_TICK {
+                break;
+            }
+        }
+        let had_output = !output.is_empty();
+        if had_output {
+            let _ = event_tx.send(HubEvent::TerminalOutput {
+                path: path.clone(),
+                data: output,
+            });
         }
 
         // Apply one coalesced resize after I/O so buffered output is consumed
@@ -197,7 +211,7 @@ fn run_terminal_loop(
             }
         }
 
-        if pending_input.is_empty() {
+        if pending_input.is_empty() && pending_resize.is_none() && !had_output {
             thread::sleep(Duration::from_millis(16));
         } else {
             thread::sleep(Duration::from_millis(1));

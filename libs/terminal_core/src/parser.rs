@@ -190,6 +190,11 @@ impl Parser {
                 actions.push(Action::Execute(byte));
                 return;
             }
+            // ST (String Terminator, C1 form) ends string-like states.
+            0x9c if self.state == State::DcsPassthrough || self.state == State::SosPmApcString => {
+                self.state = State::Ground;
+                return;
+            }
             // CAN/SUB abort sequence
             0x18 | 0x1a => {
                 self.state = State::Ground;
