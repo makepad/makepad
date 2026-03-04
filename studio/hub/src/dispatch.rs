@@ -13,6 +13,7 @@ use backend_proto::{
     TerminalFramebuffer,
 };
 use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
+use makepad_git::{FileStatus as GitFileStatus, Repository as GitRepository};
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
 use makepad_network::ToUISender;
@@ -28,7 +29,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +145,7 @@ const FS_EVENT_HISTORY_RETENTION: Duration = Duration::from_secs(12);
 const FS_DELTA_FLUSH_DELAY: Duration = Duration::from_millis(32);
 const FS_DELTA_RELOAD_THRESHOLD: usize = 768;
 const FS_SELF_SAVE_SUPPRESS: Duration = Duration::from_millis(300);
+const GIT_STATUS_CACHE_TTL: Duration = Duration::from_millis(250);
 const IN_PROCESS_UI_WEB_SOCKET_ID: u64 = 0;
 const MAX_UI_CLIENT_IDS: usize = backend_proto::QUERY_ID_CLIENT_LANES as usize;
 
@@ -201,6 +203,16 @@ struct TerminalSession {
     subscribers: HashMap<ClientId, TerminalClientViewport>,
 }
 
+#[derive(Default)]
+struct GitStatusCache {
+    entries: HashMap<PathBuf, GitStatusCacheEntry>,
+}
+
+struct GitStatusCacheEntry {
+    refreshed_at: Instant,
+    status: backend_proto::GitStatus,
+}
+
 pub struct HubCore {
     rx: Receiver<HubEvent>,
     event_tx: Sender<HubEvent>,
@@ -227,6 +239,8 @@ pub struct HubCore {
     cancelled_queries: HashSet<QueryId>,
     worker_pool: WorkerPool,
     regex_search_pool: Arc<WorkerPool>,
+    io_worker_pool: WorkerPool,
+    git_status_cache: Arc<Mutex<GitStatusCache>>,
     fs_watcher: Option<FileSystemWatcher>,
     fs_event_last_by_path: HashMap<String, Instant>,
     fs_pending_diffs: HashMap<String, Vec<backend_proto::FileTreeChange>>,
@@ -277,6 +291,8 @@ impl HubCore {
             cancelled_queries: HashSet::new(),
             worker_pool: WorkerPool::new(worker_count),
             regex_search_pool: Arc::new(WorkerPool::new(regex_search_worker_count)),
+            io_worker_pool: WorkerPool::new(1),
+            git_status_cache: Arc::new(Mutex::new(GitStatusCache::default())),
             fs_watcher: None,
             fs_event_last_by_path: HashMap::new(),
             fs_pending_diffs: HashMap::new(),
@@ -638,28 +654,7 @@ impl HubCore {
                 }
             }
             ClientToHub::LoadFileTree { mount } => {
-                let waiters = self
-                    .file_tree_load_waiters
-                    .entry(mount.clone())
-                    .or_default();
-                let first_request = waiters.is_empty();
-                waiters.insert(client_id);
-                if !first_request {
-                    return;
-                }
-
-                let mount_name = mount.clone();
-                let vfs = self.vfs.clone_for_search();
-                let event_tx = self.event_tx.clone();
-                self.worker_pool.execute(move || {
-                    let result = vfs
-                        .load_file_tree(&mount_name)
-                        .map_err(|err| err.to_string());
-                    let _ = event_tx.send(HubEvent::WorkerLoadFileTreeDone {
-                        mount: mount_name,
-                        result,
-                    });
-                });
+                self.enqueue_file_tree_load_for_client(mount, client_id);
             }
             ClientToHub::OpenTextFile { path } => match self.vfs.open_text_file(&path) {
                 Ok(content) => self.send_ui_reply(
@@ -1432,6 +1427,45 @@ impl HubCore {
         }
     }
 
+    fn enqueue_file_tree_load_for_client(&mut self, mount: String, client_id: ClientId) {
+        let mut waiters = HashSet::new();
+        waiters.insert(client_id);
+        self.enqueue_file_tree_load(mount, waiters);
+    }
+
+    fn enqueue_file_tree_load_for_all_clients(&mut self, mount: &str) {
+        let waiters: HashSet<ClientId> = self.ui_clients.keys().copied().collect();
+        self.enqueue_file_tree_load(mount.to_string(), waiters);
+    }
+
+    fn enqueue_file_tree_load(&mut self, mount: String, new_waiters: HashSet<ClientId>) {
+        if new_waiters.is_empty() {
+            return;
+        }
+        let waiters = self
+            .file_tree_load_waiters
+            .entry(mount.clone())
+            .or_default();
+        let first_request = waiters.is_empty();
+        waiters.extend(new_waiters);
+        if !first_request {
+            return;
+        }
+
+        let mount_name = mount.clone();
+        let vfs = self.vfs.clone_for_search();
+        let event_tx = self.event_tx.clone();
+        self.worker_pool.execute(move || {
+            let result = vfs
+                .load_file_tree(&mount_name)
+                .map_err(|err| err.to_string());
+            let _ = event_tx.send(HubEvent::WorkerLoadFileTreeDone {
+                mount: mount_name,
+                result,
+            });
+        });
+    }
+
     fn on_mount_fs_changed(&mut self, mount: String, path: PathBuf) {
         let now = Instant::now();
         let path_is_file = path.is_file();
@@ -1595,11 +1629,17 @@ impl HubCore {
         self.fs_event_last_by_path
             .insert(virtual_path.to_string(), now);
 
+        if let Ok(mut cache_guard) = self.git_status_cache.lock() {
+            cache_guard.entries.remove(&disk_path);
+        }
+
         let mount = mount.to_string();
         let virtual_path = virtual_path.to_string();
         let event_tx = self.event_tx.clone();
+        let git_status_cache = Arc::clone(&self.git_status_cache);
         self.worker_pool.execute(move || {
-            let change = compute_filetree_change_for_path(&disk_path, virtual_path);
+            let change =
+                compute_filetree_change_for_path(&git_status_cache, &disk_path, virtual_path);
             let _ = event_tx.send(HubEvent::WorkerFileTreeDeltaDone { mount, change });
         });
     }
@@ -1645,15 +1685,7 @@ impl HubCore {
             }
         }
         self.fs_event_last_by_path.insert(reload_key, now);
-        match self.vfs.load_file_tree(mount) {
-            Ok(data) => self.broadcast_ui_message(HubToClient::FileTree {
-                mount: mount.to_string(),
-                data,
-            }),
-            Err(err) => self.broadcast_ui_message(HubToClient::Error {
-                message: format!("file tree reload failed for {}: {}", mount, err),
-            }),
-        }
+        self.enqueue_file_tree_load_for_all_clients(mount);
     }
 
     fn queue_file_tree_delta_change(
@@ -2365,9 +2397,14 @@ impl HubCore {
             force_bottom_for_sticky = new_total_rows > old_total_rows;
         }
         self.push_terminal_frame_updates(&path, force_bottom_for_sticky);
-        // Persist terminal history after pushing the frame so slow filesystem I/O
-        // cannot delay framebuffer delivery.
-        let _ = append_terminal_history_bytes(&self.vfs, &path, &data);
+        // Persist terminal history off the dispatch thread so fs I/O cannot
+        // block terminal framebuffer delivery.
+        let history_vfs = self.vfs.clone_for_search();
+        let history_path = path.clone();
+        let history_data = data;
+        self.io_worker_pool.execute(move || {
+            let _ = append_terminal_history_bytes(&history_vfs, &history_path, &history_data);
+        });
     }
 
     fn on_terminal_resized(&mut self, path: String, cols: u16, rows: u16) {
@@ -3178,6 +3215,7 @@ fn coalesce_file_tree_change(
 }
 
 fn compute_filetree_change_for_path(
+    git_status_cache: &Arc<Mutex<GitStatusCache>>,
     abs_path: &Path,
     virtual_path: String,
 ) -> backend_proto::FileTreeChange {
@@ -3188,88 +3226,70 @@ fn compute_filetree_change_for_path(
             } else {
                 backend_proto::FileNodeType::File
             };
-            let git_status = git_status_for_path(abs_path);
             backend_proto::FileTreeChange::Added {
                 path: virtual_path,
                 node_type,
-                git_status,
+                git_status: git_status_for_path_cached(git_status_cache, abs_path),
             }
         }
         Err(_) => backend_proto::FileTreeChange::Removed { path: virtual_path },
     }
 }
 
-fn git_status_for_path(path: &Path) -> backend_proto::GitStatus {
-    let repo_root = match find_repo_root(path) {
-        Some(root) => root,
-        None => return backend_proto::GitStatus::Unknown,
+fn git_status_for_path_cached(
+    cache: &Arc<Mutex<GitStatusCache>>,
+    path: &Path,
+) -> backend_proto::GitStatus {
+    let cache_key = path.to_path_buf();
+    let now = Instant::now();
+    if let Ok(cache_guard) = cache.lock() {
+        if let Some(entry) = cache_guard.entries.get(&cache_key) {
+            if now.saturating_duration_since(entry.refreshed_at) <= GIT_STATUS_CACHE_TTL {
+                return entry.status;
+            }
+        }
+    }
+
+    let status = compute_git_status_for_path(path);
+    if let Ok(mut cache_guard) = cache.lock() {
+        cache_guard.entries.insert(
+            cache_key,
+            GitStatusCacheEntry {
+                refreshed_at: now,
+                status,
+            },
+        );
+    }
+    status
+}
+
+fn compute_git_status_for_path(path: &Path) -> backend_proto::GitStatus {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let Ok(mut repo) = GitRepository::open(&canonical) else {
+        return backend_proto::GitStatus::Unknown;
     };
-    let rel = match path.strip_prefix(&repo_root) {
-        Ok(rel) => rel,
+    let rel = match canonical.strip_prefix(&repo.workdir) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
         Err(_) => return backend_proto::GitStatus::Unknown,
     };
-    let rel = rel.to_string_lossy().replace('\\', "/");
     if rel.is_empty() {
         return backend_proto::GitStatus::Clean;
     }
-
-    let output = match Command::new("git")
-        .arg("-C")
-        .arg(&repo_root)
-        .arg("status")
-        .arg("--porcelain")
-        .arg("--")
-        .arg(&rel)
-        .output()
-    {
-        Ok(output) => output,
-        Err(_) => return backend_proto::GitStatus::Unknown,
-    };
-    if !output.status.success() {
-        return backend_proto::GitStatus::Unknown;
+    match repo.status_for_path_for_file_tree(&rel) {
+        Ok(Some(status)) => git_status_from_file_status(status),
+        Ok(None) => backend_proto::GitStatus::Clean,
+        Err(_) => backend_proto::GitStatus::Unknown,
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.lines().next().unwrap_or("").trim_end();
-    if line.is_empty() {
-        return backend_proto::GitStatus::Clean;
-    }
-    if line.starts_with("??") {
-        return backend_proto::GitStatus::Untracked;
-    }
-    let mut chars = line.chars();
-    let x = chars.next().unwrap_or(' ');
-    let y = chars.next().unwrap_or(' ');
-    if x == 'U' || y == 'U' {
-        return backend_proto::GitStatus::Conflict;
-    }
-    if x == 'A' {
-        return backend_proto::GitStatus::Added;
-    }
-    if x == 'D' || y == 'D' {
-        return backend_proto::GitStatus::Deleted;
-    }
-    if x != ' ' && x != '?' {
-        return backend_proto::GitStatus::Staged;
-    }
-    if y != ' ' {
-        return backend_proto::GitStatus::Modified;
-    }
-    backend_proto::GitStatus::Clean
 }
 
-fn find_repo_root(path: &Path) -> Option<PathBuf> {
-    let mut dir = if path.is_dir() {
-        path.to_path_buf()
-    } else {
-        path.parent()?.to_path_buf()
-    };
-    loop {
-        if dir.join(".git").exists() {
-            return Some(dir);
-        }
-        if !dir.pop() {
-            return None;
-        }
+fn git_status_from_file_status(status: GitFileStatus) -> backend_proto::GitStatus {
+    match status {
+        GitFileStatus::Modified => backend_proto::GitStatus::Modified,
+        GitFileStatus::Deleted => backend_proto::GitStatus::Deleted,
+        GitFileStatus::Untracked => backend_proto::GitStatus::Untracked,
+        GitFileStatus::Staged => backend_proto::GitStatus::Staged,
+        GitFileStatus::StagedDeleted => backend_proto::GitStatus::Deleted,
+        GitFileStatus::StagedNew => backend_proto::GitStatus::Added,
     }
 }
 
@@ -4051,6 +4071,7 @@ mod tests {
             path: dir.path().join("src"),
         });
 
+        pump_core(&mut core, Duration::from_millis(400));
         let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
         assert!(
             messages.iter().any(|msg| {
@@ -4065,6 +4086,77 @@ mod tests {
                 )
             }),
             "expected full FileTree reload to include repo/src/from_dir_event.rs"
+        );
+    }
+
+    #[test]
+    fn full_file_tree_reload_payload_is_much_larger_than_single_file_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        for i in 0..1200usize {
+            let path = src_dir.join(format!("f{:04}.rs", i));
+            fs::write(path, format!("pub fn f{:04}() {{}}\n", i)).unwrap();
+        }
+
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+
+        // Trigger a full reload path (directory event).
+        core.handle_event(HubEvent::MountFsChanged {
+            mount: "repo".to_string(),
+            path: src_dir.clone(),
+        });
+        pump_core(&mut core, Duration::from_secs(2));
+
+        let mut full_reload_bytes = None;
+        let full_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < full_deadline {
+            let Ok(raw) = ui_rx.receiver.recv_timeout(Duration::from_millis(25)) else {
+                continue;
+            };
+            let Ok(msg) = HubToClient::deserialize_bin(&raw) else {
+                continue;
+            };
+            if matches!(msg, HubToClient::FileTree { ref mount, .. } if mount == "repo") {
+                full_reload_bytes = Some(raw.len());
+                break;
+            }
+        }
+        let full_reload_bytes = full_reload_bytes.expect("expected full FileTree payload");
+
+        let changed_path = src_dir.join("f0007.rs");
+        fs::write(&changed_path, "pub fn f0007() { let _x = 1; }\n").unwrap();
+        core.handle_event(HubEvent::MountFsChanged {
+            mount: "repo".to_string(),
+            path: changed_path,
+        });
+        pump_core(&mut core, Duration::from_secs(2));
+
+        let mut diff_bytes = None;
+        let diff_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < diff_deadline {
+            let Ok(raw) = ui_rx.receiver.recv_timeout(Duration::from_millis(25)) else {
+                continue;
+            };
+            let Ok(msg) = HubToClient::deserialize_bin(&raw) else {
+                continue;
+            };
+            if matches!(msg, HubToClient::FileTreeDiff { ref mount, .. } if mount == "repo") {
+                diff_bytes = Some(raw.len());
+                break;
+            }
+        }
+        let diff_bytes = diff_bytes.expect("expected FileTreeDiff payload");
+
+        eprintln!(
+            "full FileTree payload={} bytes, single FileTreeDiff payload={} bytes",
+            full_reload_bytes, diff_bytes
+        );
+        assert!(
+            full_reload_bytes > diff_bytes.saturating_mul(20),
+            "expected full reload payload to be far larger than single-file diff (full={} diff={})",
+            full_reload_bytes,
+            diff_bytes
         );
     }
 
