@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="460" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h980v460H0z"/>
+  <path stroke="#000" stroke-width="4" d="M2 2h976v456H2z"/>
+  <path fill="#003972" d="M4 295h972v45H4v-45Z"/>
+  <path fill="#003972" d="M4 295h972v45H4v-45ZM4 4h972v45H4V4Z"/>
+  <path fill="#003972" d="M4 4h972v45H4V4Z"/>
+  <path stroke="#000" stroke-width="4" d="M288 0v456M616 0v456M0 293h980M0 51h980M0 342h980"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="87.5781" y="32.3182">Main functions</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="320" y="32.3182">Motion estimation / compensation</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="370.711" y="323.318">Distortion estimation</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="719.539" y="323.318">Auxiliary operations</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="721.734" y="32.3182">Filtering operations</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="35.0781" y="323.318">Adjustment of filter strength</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="16.3838" y="165.68">svt_av1_init_temporal_filtering()
+</tspan><tspan x="16.3838" y="187.68">produce_temporally_filtered_pic()</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="299.999" y="165.68">create_ME_context_and_picture_control()
+</tspan><tspan x="370.153" y="187.68">tf_inter_prediction()</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="730.743" y="77.68">adjust_modifier()
+</tspan><tspan x="703.461" y="99.68">adjust_modifier_highbd()
+</tspan><tspan x="707.358" y="121.68">apply_filtering_block()
+</tspan><tspan x="699.563" y="143.68">apply_filtering_central()
+</tspan><tspan x="672.281" y="165.68">apply_filtering_central_highbd()
+</tspan><tspan x="691.769" y="187.68">get_final_filtered_pixels()
+</tspan><tspan x="691.769" y="209.68">svt_av1_apply_filtering_c()
+</tspan><tspan x="664.486" y="231.68">svt_av1_apply_filtering_highbd_c()
+</tspan><tspan x="641.102" y="253.68">get_subblock_filter_weight_16subblocks()
+</tspan><tspan x="644.999" y="275.68">get_subblock_filter_weight_4subblocks()</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="82.6406" y="382.68">estimate_noise()
+</tspan><tspan x="55.3584" y="404.68">estimate_noise_highbd()
+</tspan><tspan x="51.4609" y="426.68">adjust_filter_strength()</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="377.948" y="371.68">get_ME_distortion()
+</tspan><tspan x="350.666" y="393.68">get_ME_distortion_highbd()
+</tspan><tspan x="350.666" y="415.68">calculate_squared_errors()
+</tspan><tspan x="323.384" y="437.68">calculate_squared_errors_highbd()</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="734.641" y="382.68">estimate_noise()
+</tspan><tspan x="707.358" y="404.68">estimate_noise_highbd()
+</tspan><tspan x="703.461" y="426.68">adjust_filter_strength()</tspan></text>
+</svg>

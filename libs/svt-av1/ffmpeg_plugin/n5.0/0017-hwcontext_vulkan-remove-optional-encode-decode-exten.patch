@@ -1,0 +1,36 @@
+From 67c80720fc3da77bdf3ba66134a584ed1470a12e Mon Sep 17 00:00:00 2001
+From: Lynne <dev@lynne.ee>
+Date: Sun, 25 Dec 2022 01:03:30 +0100
+Subject: [PATCH 17/22] hwcontext_vulkan: remove optional encode/decode
+ extensions from the list
+
+They're not currently used, so they don't need to be there.
+Vulkan stabilized the decode extensions less than a week ago, and their
+name prefixes were changed from EXT to KHR. It's a bit too soon to be
+depending on it, so rather than bumping, just remove these for now.
+---
+ libavutil/hwcontext_vulkan.c | 8 --------
+ 1 file changed, 8 deletions(-)
+
+diff --git a/libavutil/hwcontext_vulkan.c b/libavutil/hwcontext_vulkan.c
+index 60a6cf6a91..82cae4c757 100644
+--- a/libavutil/hwcontext_vulkan.c
++++ b/libavutil/hwcontext_vulkan.c
+@@ -354,14 +354,6 @@ static const VulkanOptExtension optional_device_exts[] = {
+     { VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,            FF_VK_EXT_EXTERNAL_WIN32_MEMORY  },
+     { VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,         FF_VK_EXT_EXTERNAL_WIN32_SEM     },
+ #endif
+-
+-    /* Video encoding/decoding */
+-    { VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,                      FF_VK_EXT_NO_FLAG                },
+-    { VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,               FF_VK_EXT_NO_FLAG                },
+-    { VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME,               FF_VK_EXT_NO_FLAG                },
+-    { VK_EXT_VIDEO_ENCODE_H264_EXTENSION_NAME,                FF_VK_EXT_NO_FLAG                },
+-    { VK_EXT_VIDEO_DECODE_H264_EXTENSION_NAME,                FF_VK_EXT_NO_FLAG                },
+-    { VK_EXT_VIDEO_DECODE_H265_EXTENSION_NAME,                FF_VK_EXT_NO_FLAG                },
+ };
+ 
+ /* Converts return values to strings */
+-- 
+2.44.0
+

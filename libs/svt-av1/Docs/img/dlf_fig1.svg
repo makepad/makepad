@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="350" height="195" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h350v195H0z"/>
+  <path stroke="#000" d="M5.5 4.5h339v16H5.5z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="68.1836" y="16.1364">Determine the loopfilter level and sharpness</tspan></text>
+  <path stroke="#000" d="M5.5 39.5h339v16H5.5z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="121.611" y="51.1364">Identify edges to filter</tspan></text>
+  <path stroke="#000" d="M5.5 174.5h339v16H5.5z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="119.59" y="186.136">Select and apply filters</tspan></text>
+  <path stroke="#000" d="M5.5 74.5h339v31H5.5z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="60.3613" y="87.6364">Determine Adaptive Filter Strength Parameters: </tspan><tspan x="122.29" y="99.6364">lvl, </tspan><tspan x="159.067" y="99.6364">, </tspan><tspan x="191.167" y="99.6364">, </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="138.472" y="99.6364">limit</tspan><tspan x="164.272" y="99.6364">blimit</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="196.372" y="99.6364">thresh</tspan></text>
+  <path stroke="#000" d="M5.5 124.5h339v31H5.5z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="118.862" y="137.636">Determine filter masks: </tspan><tspan x="9.29688" y="149.636">High Edge Variance Mask (hevMask), </tspan><tspan x="240.039" y="149.636">, </tspan><tspan x="287.266" y="149.636">, </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="191.436" y="149.636">filterMask</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="245.244" y="149.636">flatMask</tspan><tspan x="292.471" y="149.636">flatMask2</tspan></text>
+  <path fill="#000" d="m175 39 2.887-5h-5.774L175 39Zm-.5-18v13.5h1V21h-1ZM175 74l2.887-5h-5.774L175 74Zm-.5-18v13.5h1V56h-1ZM175 124l2.887-5h-5.774l2.887 5Zm-.5-18v13.5h1V106h-1ZM175 174l2.887-5h-5.774l2.887 5Zm-.5-18v13.5h1V156h-1Z"/>
+</svg>

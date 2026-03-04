@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="55" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M1 1h298v53H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h298v53H1zM2 20h296"/>
+  <path fill="#003972" d="M2 2h296v17H2z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="86.7705" y="14.1364">Flag</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="225.771" y="14.1364">Settings</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M193 2v51"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="29.38"> </tspan><tspan x="51.9531" y="29.38"> (0-3) </tspan><tspan x="2" y="40.38"> (in </tspan><tspan x="183.969" y="40.38"> </tspan><tspan x="2" y="50.38"> in EbPictureDecisionProcess.c)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.98438" y="29.38">wedge_mode</tspan><tspan x="16.0781" y="40.38">signal_derivation_multi_processes_oq</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="194" y="28.9091"> Set to 0</tspan></text>
+</svg>

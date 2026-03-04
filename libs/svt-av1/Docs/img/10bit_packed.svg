@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="521" height="180" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h521v180H0z"/>
+  <path stroke="#000" stroke-width="4" d="M10 9.5h160v160H10zM170 89.5h80v80h-80zM250 89.5h80v80h-80z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.959" y="84.7727">Y
+</tspan><tspan x="76.2461" y="108.773">8b</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="282.764" y="124.773">V
+</tspan><tspan x="277.246" y="148.773">8b</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="202.666" y="124.773">U
+</tspan><tspan x="197.246" y="148.773">8b</tspan></text>
+  <path stroke="#000" stroke-width="4" d="M351 9.5h80v160h-80zM431 89.5h40v80h-40zM471 89.5h40v80h-40z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="382.959" y="84.7727">Y
+</tspan><tspan x="377.49" y="108.773">2b</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="482.764" y="124.773">V
+</tspan><tspan x="477.49" y="148.773">2b</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="442.666" y="124.773">U
+</tspan><tspan x="437.49" y="148.773">2b</tspan></text>
+</svg>

@@ -1,0 +1,171 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="325" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h600v325H0z"/>
+  <path stroke="#000" stroke-width="4" d="M300 313V13"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="339.209" y="317.273">Rectangular Codebook</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="63.3789" y="317.273">Square Codebook</tspan></text>
+  <path stroke="#000" d="M10.5 10.5h61v61h-61z"/>
+  <mask id="path-5-inside-1_202_2" fill="#fff">
+    <path d="M11 11h45L26 71H11V11Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M11 11h45L26 71H11V11Z" mask="url(#path-5-inside-1_202_2)"/>
+  <path stroke="#000" d="M82.5 10.5h61v61h-61z"/>
+  <mask id="path-7-inside-2_202_2" fill="#fff">
+    <path d="M83 11h60l-30 60H83V11Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M83 11h60l-30 60H83V11Z" mask="url(#path-7-inside-2_202_2)"/>
+  <path stroke="#000" d="M154.5 10.5h61v61h-61z"/>
+  <mask id="path-9-inside-3_202_2" fill="#fff">
+    <path d="M155 11h30l-30 60V11Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M155 11h30l-30 60V11Z" mask="url(#path-9-inside-3_202_2)"/>
+  <path stroke="#000" d="M226.5 10.5h61v61h-61z"/>
+  <mask id="path-11-inside-4_202_2" fill="#fff">
+    <path d="M227 71V11h45v60h-45Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M227 71V11h45v60h-45Z" mask="url(#path-11-inside-4_202_2)"/>
+  <path stroke="#000" d="M226.5 154.5h61v61h-61z"/>
+  <mask id="path-13-inside-5_202_2" fill="#fff">
+    <path d="M227 215v-60h15v60h-15Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M227 215v-60h15v60h-15Z" mask="url(#path-13-inside-5_202_2)"/>
+  <path stroke="#000" d="M226.5 82.5h61v61h-61z"/>
+  <mask id="path-15-inside-6_202_2" fill="#fff">
+    <path d="M227 83h60v45h-60V83Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M227 83h60v45h-60V83Z" mask="url(#path-15-inside-6_202_2)"/>
+  <path stroke="#000" d="M226.5 226.5h61v61h-61z"/>
+  <mask id="path-17-inside-7_202_2" fill="#fff">
+    <path d="M227 227h60v15h-60v-15Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M227 227h60v15h-60v-15Z" mask="url(#path-17-inside-7_202_2)"/>
+  <path stroke="#000" d="M154.5 82.5h61v61h-61z"/>
+  <mask id="path-19-inside-8_202_2" fill="#fff">
+    <path d="M155 143h30l-30-60v60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M155 143h30l-30-60v60Z" mask="url(#path-19-inside-8_202_2)"/>
+  <path stroke="#000" d="M82.5 82.5h61v61h-61z"/>
+  <mask id="path-21-inside-9_202_2" fill="#fff">
+    <path d="M83 143h60l-30-60H83v60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M83 143h60l-30-60H83v60Z" mask="url(#path-21-inside-9_202_2)"/>
+  <path stroke="#000" d="M10.5 82.5h61v61h-61z"/>
+  <mask id="path-23-inside-10_202_2" fill="#fff">
+    <path d="M11 143h45L26 83H11v60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M11 143h45L26 83H11v60Z" mask="url(#path-23-inside-10_202_2)"/>
+  <path stroke="#000" d="M10.5 154.5h61v61h-61z"/>
+  <mask id="path-25-inside-11_202_2" fill="#fff">
+    <path d="M11 155v45l60-30v-15H11Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M11 155v45l60-30v-15H11Z" mask="url(#path-25-inside-11_202_2)"/>
+  <path stroke="#000" d="M82.5 154.5h61v61h-61z"/>
+  <mask id="path-27-inside-12_202_2" fill="#fff">
+    <path d="M83 155v60l60-30v-30H83Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M83 155v60l60-30v-30H83Z" mask="url(#path-27-inside-12_202_2)"/>
+  <path stroke="#000" d="M154.5 154.5h61v61h-61z"/>
+  <mask id="path-29-inside-13_202_2" fill="#fff">
+    <path d="M155 155v30l60-30h-60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M155 155v30l60-30h-60Z" mask="url(#path-29-inside-13_202_2)"/>
+  <path stroke="#000" d="M154.5 226.5h61v61h-61z"/>
+  <mask id="path-31-inside-14_202_2" fill="#fff">
+    <path d="M215 227v30l-60-30h60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M215 227v30l-60-30h60Z" mask="url(#path-31-inside-14_202_2)"/>
+  <path stroke="#000" d="M82.5 226.5h61v61h-61z"/>
+  <mask id="path-33-inside-15_202_2" fill="#fff">
+    <path d="M143 227v60l-60-30v-30h60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M143 227v60l-60-30v-30h60Z" mask="url(#path-33-inside-15_202_2)"/>
+  <path stroke="#000" d="M10.5 226.5h61v61h-61z"/>
+  <mask id="path-35-inside-16_202_2" fill="#fff">
+    <path d="M71 227v45l-60-30v-15h60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M71 227v45l-60-30v-15h60Z" mask="url(#path-35-inside-16_202_2)"/>
+  <path stroke="#000" d="M312.5 25.5h61v31h-61z"/>
+  <mask id="path-37-inside-17_202_2" fill="#fff">
+    <path d="M313 26h37.5l-15 30H313V26Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M313 26h37.5l-15 30H313V26Z" mask="url(#path-37-inside-17_202_2)"/>
+  <path stroke="#000" d="M384.5 25.5h61v31h-61z"/>
+  <mask id="path-39-inside-18_202_2" fill="#fff">
+    <path d="M385 26h52.5l-15 30H385V26Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M385 26h52.5l-15 30H385V26Z" mask="url(#path-39-inside-18_202_2)"/>
+  <path stroke="#000" d="M456.5 25.5h61v31h-61z"/>
+  <mask id="path-41-inside-19_202_2" fill="#fff">
+    <path d="M457 26h22.5l-15 30H457V26Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M457 26h22.5l-15 30H457V26Z" mask="url(#path-41-inside-19_202_2)"/>
+  <path stroke="#000" d="M528.5 25.5h61v31h-61z"/>
+  <mask id="path-43-inside-20_202_2" fill="#fff">
+    <path d="M529 56V26h15v30h-15Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M529 56V26h15v30h-15Z" mask="url(#path-43-inside-20_202_2)"/>
+  <path stroke="#000" d="M528.5 169.5h61v31h-61z"/>
+  <mask id="path-45-inside-21_202_2" fill="#fff">
+    <path d="M529 200v-30h30v30h-30Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M529 200v-30h30v30h-30Z" mask="url(#path-45-inside-21_202_2)"/>
+  <path stroke="#000" d="M528.5 97.5h61v31h-61z"/>
+  <mask id="path-47-inside-22_202_2" fill="#fff">
+    <path d="M529 98h45v30h-45V98Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M529 98h45v30h-45V98Z" mask="url(#path-47-inside-22_202_2)"/>
+  <path stroke="#000" d="M528.5 241.5h61v31h-61z"/>
+  <mask id="path-49-inside-23_202_2" fill="#fff">
+    <path d="M529 242h60v15h-60v-15Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M529 242h60v15h-60v-15Z" mask="url(#path-49-inside-23_202_2)"/>
+  <path stroke="#000" d="M456.5 97.5h61v31h-61z"/>
+  <mask id="path-51-inside-24_202_2" fill="#fff">
+    <path d="M457 128h22.5l-15-30H457v30Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M457 128h22.5l-15-30H457v30Z" mask="url(#path-51-inside-24_202_2)"/>
+  <path stroke="#000" d="M384.5 97.5h61v31h-61z"/>
+  <mask id="path-53-inside-25_202_2" fill="#fff">
+    <path d="M385 128h52.5l-15-30H385v30Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M385 128h52.5l-15-30H385v30Z" mask="url(#path-53-inside-25_202_2)"/>
+  <path stroke="#000" d="M312.5 97.5h61v31h-61z"/>
+  <mask id="path-55-inside-26_202_2" fill="#fff">
+    <path d="M313 128h37.5l-15-30H313v30Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M313 128h37.5l-15-30H313v30Z" mask="url(#path-55-inside-26_202_2)"/>
+  <path stroke="#000" d="M312.5 169.5h61v31h-61z"/>
+  <mask id="path-57-inside-27_202_2" fill="#fff">
+    <path d="M313 170v30l60-30h-60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M313 170v30l60-30h-60Z" mask="url(#path-57-inside-27_202_2)"/>
+  <path stroke="#000" d="M384.5 169.5h61v31h-61z"/>
+  <mask id="path-59-inside-28_202_2" fill="#fff">
+    <path d="M385 170v30h30l30-15v-15h-60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M385 170v30h30l30-15v-15h-60Z" mask="url(#path-59-inside-28_202_2)"/>
+  <path stroke="#000" d="M456.5 169.5h61v31h-61z"/>
+  <mask id="path-61-inside-29_202_2" fill="#fff">
+    <path d="M457 170v15l30-15h-30Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M457 170v15l30-15h-30Z" mask="url(#path-61-inside-29_202_2)"/>
+  <path stroke="#000" d="M456.5 241.5h61v31h-61z"/>
+  <mask id="path-63-inside-30_202_2" fill="#fff">
+    <path d="M517 242v15l-30-15h30Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M517 242v15l-30-15h30Z" mask="url(#path-63-inside-30_202_2)"/>
+  <path stroke="#000" d="M384.5 241.5h61v31h-61z"/>
+  <mask id="path-65-inside-31_202_2" fill="#fff">
+    <path d="M445 242v30h-30l-30-15v-15h60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M445 242v30h-30l-30-15v-15h60Z" mask="url(#path-65-inside-31_202_2)"/>
+  <path stroke="#000" d="M312.5 241.5h61v31h-61z"/>
+  <mask id="path-67-inside-32_202_2" fill="#fff">
+    <path d="M373 242v30l-60-30h60Z"/>
+  </mask>
+  <path fill="#000" stroke="#000" stroke-width="2" d="M373 242v30l-60-30h60Z" mask="url(#path-67-inside-32_202_2)"/>
+</svg>

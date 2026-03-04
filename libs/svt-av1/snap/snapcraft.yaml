@@ -1,0 +1,27 @@
+name: svt-av1-enc
+base: core18
+version: 'git'
+summary: Scalable Video Technology implementation of AV1 encoder
+description: |
+  An AV1-compliant cpu-based encoder library and sample application
+  with performance levels suitable for video on demand and live
+  encoding.
+
+grade: devel
+confinement: strict
+
+apps:
+  svt-av1-enc:
+    command: bin/SvtAv1EncApp
+    plugs: [ 'home' ]
+
+parts:
+  svtav1:
+    plugin: cmake
+    build-packages: [ 'yasm', 'g++', ]
+    source: .
+    configflags:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_C_COMPILER=gcc
+      - -DCMAKE_ASM_NASM_COMPILER=yasm
+

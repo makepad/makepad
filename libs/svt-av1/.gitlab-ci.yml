@@ -1,0 +1,119 @@
+workflow:
+  rules:
+    # Use merge-request pipelines
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"
+      when: never
+    - when: always
+
+stages:
+  - check
+  - compile
+  - standalone
+  - ffmpeg
+  - test
+  - test-2 # Needed for weekend testing on aom-testing repo
+  - test-3 # Needed for weekend testing on aom-testing repo
+
+variables:
+  CMAKE_GENERATOR: Ninja
+  CCACHE_DIR: $CI_PROJECT_DIR/.ccache
+
+default:
+  interruptible: true
+  retry: 2
+  cache:
+    key: "$CI_JOB_NAME_SLUG"
+    paths:
+      - .ccache
+    policy: pull-push
+
+include:
+  - local: /.gitlab/workflows/common/.gitlab-ci.yml
+  - remote: 'https://gitlab.com/AOMediaCodec/aom-testing/-/raw/ci-build-testing/.gitlab/workflows/nightly/.gitlab-ci.yml'
+    rules:
+      - if: $NIGHTLY != null
+  - local: /.gitlab/workflows/common/.gitlab-ci.yml
+  - remote: 'https://gitlab.com/AOMediaCodec/aom-testing/-/raw/ci-build-testing/.gitlab/workflows/weekend-testing/.gitlab-ci.yml'
+    rules:
+      - if: $WEEKEND != null
+
+  - local: /.gitlab/workflows/standard/.gitlab-ci.yml
+    rules:
+      - if: $NIGHTLY == null && $WEEKEND == null
+
+Style check:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: never
+    - if: $NIGHTLY == null && $WEEKEND == null
+  stage: check
+  image: registry.gitlab.com/aomediacodec/aom-testing/alpine3
+  cache: []
+  script:
+    - ./test/stylecheck.sh
+
+Static analysis (cppcheck):
+  rules:
+    - if: $NIGHTLY != null && $WEEKEND != null
+      when: never
+    - !reference [.source_code_rules]
+  stage: check
+  image: registry.gitlab.com/aomediacodec/aom-testing/ubuntu1804
+  cache:
+    key: cppcheck
+    paths:
+      - .cppcheck
+    policy: pull-push
+  script:
+    - cmake -B Build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+    - mkdir -p .cppcheck
+    - jq '. | map(select(.file | test(".asm") | not))' Build/compile_commands.json > compile_commands.json
+    - |
+      cppcheck \
+        --project=compile_commands.json \
+        --error-exitcode=1 \
+        --enable=all \
+        -j 2 \
+        -rp=$PWD \
+        -ithird_party \
+        --cppcheck-build-dir=.cppcheck \
+        --suppress=unusedFunction > /dev/null
+
+# Checks to make sure the version defined in project() matches the version in the public header and the pkg-config file.
+Version consistency:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: never
+    - if: $NIGHTLY == null && $WEEKEND == null
+  stage: check
+  image: registry.gitlab.com/aomediacodec/aom-testing/ubuntu2404
+  cache:
+    key: cppcheck
+    paths:
+      - .cppcheck
+    policy: pull-push
+  script:
+    - cmake -B Build -DCMAKE_BUILD_TYPE=Release
+    - pkg_config_version=$(pkg-config --modversion Build/SvtAv1Enc.pc)
+    - cmake_version=$(grep 'PROJECT_VERSION:' Build/CMakeCache.txt | cut -d '=' -f2)
+    - |
+      header_version=$(
+      cc -E -P -x c -I Source/API/ - <<'eof' | tail -n 1
+      #include <EbSvtAv1.h>
+      #define concat(a, b, c) a ## . ## b ## . ## c
+      #define concat2(a, b, c) concat(a, b, c)
+      concat2(SVT_AV1_VERSION_MAJOR, SVT_AV1_VERSION_MINOR, SVT_AV1_VERSION_PATCHLEVEL)
+      eof
+      )
+    - |
+      if [ "$pkg_config_version" != "$cmake_version" ] || [ "$pkg_config_version" != "$header_version" ]; then
+        cat <<EOF
+      Version mismatch detected:
+      pkg-config version: $pkg_config_version
+      CMake version:      $cmake_version
+      Header version:     $header_version
+      EOF
+        exit 1
+      else
+        echo "Version consistency check passed: $pkg_config_version"
+      fi

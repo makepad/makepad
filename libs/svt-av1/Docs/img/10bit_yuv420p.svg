@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="340" height="180" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h340v180H0z"/>
+  <path stroke="#000" stroke-width="4" d="M10 10h160v160H10zM170 90h80v80h-80zM250 90h80v80h-80z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.959" y="85.2727">Y
+</tspan><tspan x="60.1621" y="109.273">10-bit</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="282.764" y="125.273">V
+</tspan><tspan x="261.162" y="149.273">10-bit</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="202.666" y="125.273">U
+</tspan><tspan x="181.162" y="149.273">10-bit</tspan></text>
+</svg>

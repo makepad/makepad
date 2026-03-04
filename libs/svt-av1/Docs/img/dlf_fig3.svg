@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="90" height="708" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h90v708H0z"/>
+  <path fill="#AEEAAE" stroke="#000" d="M20.5 304.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.0801" y="336.273">p0</tspan></text>
+  <path fill="#AEEAAE" stroke="#000" d="M20.5 255.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="33.9453" y="287.273">p1</tspan></text>
+  <path fill="#AEEAAE" stroke="#000" d="M20.5 206.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.5391" y="238.273">p2</tspan></text>
+  <path fill="#AEEAAE" stroke="#000" d="M20.5 157.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.2363" y="189.273">p3</tspan></text>
+  <path fill="#AEEAAE" stroke="#000" d="M20.5 108.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.0898" y="140.273">p4</tspan></text>
+  <path fill="#AEEAAE" stroke="#000" d="M20.5 59.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.4219" y="91.2727">p5</tspan></text>
+  <path fill="#AEEAAE" stroke="#000" d="M20.5 10.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.2656" y="42.2727">p6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M20.5 648.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.2656" y="680.273">q6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M20.5 599.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.4219" y="631.273">q5</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M20.5 550.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.0898" y="582.273">q4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M20.5 501.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.2363" y="533.273">q3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M20.5 452.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.5391" y="484.273">q2</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M20.5 403.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="33.9453" y="435.273">q1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M20.5 354.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.0801" y="386.273">q0</tspan></text>
+  <path stroke="#00F" stroke-width="2" d="M0 354h90"/>
+</svg>

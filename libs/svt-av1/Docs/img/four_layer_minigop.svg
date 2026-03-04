@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="105" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h600v105H0z"/>
+  <path fill="#5BD45B" stroke="#000" d="M40.5 5.5h29v19h-29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="51.6699" y="18.6364">4</tspan></text>
+  <path stroke="#000" d="M110.5 5.5h29v19h-29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="121.836" y="18.6364">5</tspan></text>
+  <path fill="#5BD45B" stroke="#000" d="M75.5 30.5h29v19h-29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="86.7432" y="43.6364">3</tspan></text>
+  <path fill="#5BD45B" stroke="#000" d="M145.5 55.5h29v19h-29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="156.895" y="68.6364">2</tspan></text>
+  <path fill="#5BD45B" stroke="#000" d="M5.5 80.5h29v19h-29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="16.665" y="93.6364">0</tspan></text>
+  <path stroke="#000" d="M279.5 5.5h-29v19h29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.772" y="18.6364">8</tspan></text>
+  <path stroke="#000" d="M209.5 5.5h-29v19h29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="192.065" y="18.6364">7</tspan></text>
+  <path stroke="#000" d="M244.5 30.5h-29v19h29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="226.758" y="43.6364">6</tspan></text>
+  <path fill="#5BD45B" stroke="#000" d="M314.5 80.5h-29v19h29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="297.598" y="93.6364">1</tspan></text>
+  <path stroke="#000" d="M320.5 5.5h29v19h-29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="329.492" y="18.6364">12</tspan></text>
+  <path stroke="#000" d="M390.5 5.5h29v19h-29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="399.341" y="18.6364">13</tspan></text>
+  <path stroke="#000" d="M355.5 30.5h29v19h-29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="365.195" y="43.6364">11</tspan></text>
+  <path fill="#5BD45B" stroke="#000" d="M425.5 55.5h29v19h-29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="434.263" y="68.6364">10</tspan></text>
+  <path stroke="#000" d="M559.5 5.5h-29v19h29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="539.355" y="18.6364">16</tspan></text>
+  <path stroke="#000" d="M489.5 5.5h-29v19h29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="469.434" y="18.6364">15</tspan></text>
+  <path stroke="#000" d="M524.5 30.5h-29v19h29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="504.268" y="43.6364">14</tspan></text>
+  <path fill="#5BD45B" stroke="#000" d="M594.5 80.5h-29v19h29z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="576.758" y="93.6364">9</tspan></text>
+  <path fill="#000" d="m75 30-1.4943-5.5768-4.0825 4.0825L75 30Zm-5.8536-5.1464 2.3181 2.318.7071-.7071-2.318-2.3181-.7072.7072ZM150 55l1.102-5.6674-5.459 1.8794L150 55Zm-10.973-30.3372 9.035 26.245.946-.3255-9.035-26.2451-.946.3256ZM145 55l-4.566-3.5333-.777 5.721L145 55Zm-40.567-5.0045 36.041 4.8944.134-.9909-36.041-4.8945-.134.991ZM170 55l-1.102-5.6674 5.459 1.8794L170 55Zm10.973-30.3372-9.035 26.245-.946-.3255 9.035-26.2451.946.3256ZM175 55l4.566-3.5333.777 5.721L175 55Zm40.567-5.0045-36.041 4.8944-.134-.9909 36.041-4.8945.134.991ZM30 80l3.7659-4.3762-5.6729-1.0733L30 80Zm10.0087-55.5929-9.6635 51.0784.9826.1859 9.6635-51.0785-.9826-.1858ZM35 80l5.7307-.7019-3.4732-4.612L35 80Zm40.1992-30.8994L38.2939 76.8935l.6015.7988 36.9054-27.7929-.6016-.7988ZM290 80l-3.766-4.3762 5.673-1.0733L290 80Zm-10.009-55.5929 9.664 51.0784-.983.1859-9.663-51.0785.982-.1858ZM285 80l-5.731-.7019 3.474-4.612L285 80Zm-40.199-30.8994 36.905 27.7929-.601.7988-36.906-27.7929.602-.7988ZM35 85l5.2507 2.4008-.5462-5.7476L35 85Zm110.453-10.9978L39.4325 84.0766l.0946.9955L145.547 74.9978l-.094-.9956ZM285 85l-5.251 2.4008.546-5.7476L285 85ZM174.547 74.0023l106.02 10.0743-.094.9955-106.02-10.0743.094-.9955ZM430 55l1.102-5.6674-5.459 1.8794L430 55Zm-10.973-30.3372 9.035 26.245.946-.3255-9.035-26.2451-.946.3256ZM425 55l-4.566-3.5333-.777 5.721L425 55Zm-40.567-5.0045 36.041 4.8944.134-.9909-36.041-4.8945-.134.991ZM450 55l-1.102-5.6674 5.459 1.8794L450 55Zm10.973-30.3372-9.035 26.245-.946-.3255 9.035-26.2451.946.3256ZM455 55l4.566-3.5333.777 5.721L455 55Zm40.567-5.0045-36.041 4.8944-.134-.9909 36.041-4.8944.134.9909ZM310 80l3.766-4.3762-5.673-1.0733L310 80Zm10.009-55.5929-9.664 51.0784.983.1859 9.663-51.0785-.982-.1858ZM315 80l5.731-.7019-3.474-4.612L315 80Zm40.199-30.8994-36.905 27.7929.601.7988 36.906-27.7929-.602-.7988ZM570 80l-3.766-4.3762 5.673-1.0733L570 80Zm-10.009-55.5929 9.664 51.0784-.983.1859-9.663-51.0785.982-.1858ZM565 80l-5.731-.7019 3.474-4.612L565 80Zm-40.199-30.8994 36.905 27.7929-.601.7988-36.906-27.7929.602-.7988ZM315 85l5.251 2.4008-.547-5.7476L315 85Zm110.453-10.9978-106.02 10.0744.094.9955 106.02-10.0743-.094-.9956ZM565 85l-5.251 2.4008.547-5.7476L565 85ZM454.547 74.0022l106.02 10.0744-.094.9955-106.02-10.0743.094-.9956ZM105 30l1.494-5.5768 4.083 4.0825L105 30Zm5.854-5.1464-2.318 2.318-.708-.7071 2.318-2.3181.708.7072ZM215 30l-1.494-5.5768-4.083 4.0825L215 30Zm-5.854-5.1464 2.318 2.318.708-.7071-2.318-2.3181-.708.7072ZM245 30l1.494-5.5768 4.083 4.0825L245 30Zm5.854-5.1464-2.318 2.318-.708-.7071 2.318-2.3181.708.7072ZM355 30l-1.494-5.5768-4.083 4.0825L355 30Zm-5.854-5.1464 2.318 2.318.708-.7071-2.318-2.3181-.708.7072ZM385 30l1.494-5.5768 4.083 4.0825L385 30Zm5.854-5.1464-2.318 2.318-.708-.7071 2.318-2.3181.708.7072ZM495 30l-1.494-5.5768-4.083 4.0825L495 30Zm-5.854-5.1464 2.318 2.318.708-.7071-2.318-2.3181-.708.7072ZM525 30l1.494-5.5768 4.083 4.0825L525 30Zm5.854-5.1464-2.318 2.318-.708-.7071 2.318-2.3181.708.7072Z"/>
+</svg>

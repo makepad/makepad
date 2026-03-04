@@ -1,0 +1,39 @@
+<svg width="570" height="400" viewBox="0 0 570 400" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+    <style>
+        @font-face {
+            font-family: 'Inter';
+            src: url('https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2') format('woff2');
+        }
+    </style>
+</defs>
+
+<rect width="570" height="400" fill="white"/>
+<rect x="6" y="56" width="558" height="303" stroke="black" stroke-width="2" stroke-linejoin="round"/>
+<rect x="146" y="6" width="98" height="38" rx="9" fill="#5BD45B" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em"><tspan x="166.897" y="30.0909">ME Data</tspan></text>
+<rect x="326" y="6" width="98" height="38" rx="9" fill="#5BD45B" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em"><tspan x="335.946" y="21.5909">All Possible&#x2028;</tspan><tspan x="342.229" y="38.5909">Partitions</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em"><tspan x="18.3203" y="77.2727">Mode Decision</tspan></text>
+<rect x="16" y="86" width="538" height="48" rx="9" fill="#ADE9CB" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em"><tspan x="220.77" y="118.727">PD Stage 0</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="360" y="106.864">Reduce the total number of&#x2028;</tspan><tspan x="360" y="121.864">partitions to be tested to N&#x2081;&#60;&#60;N&#x2080;</tspan></text>
+<rect x="16" y="166" width="538" height="48" rx="9" fill="#ADE9CB" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em"><tspan x="223.008" y="198.727">PD Stage 1</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="360" y="186.864">Reduce the total number of&#x2028;</tspan><tspan x="360" y="201.864">partitions to be tested to N&#x2082;&#60;&#60;N&#x2081;</tspan></text>
+<rect x="136" y="301" width="298" height="48" rx="9" fill="#ADE9CB" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em"><tspan x="221.461" y="333.727">PD Stage n</tspan></text>
+<path d="M245 25H325.003" stroke="black" stroke-width="2"/>
+<path d="M285 85L290.774 75H279.226L285 85ZM284 25V76H286V25H284Z" fill="black"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="293.244" y="74.3636">N&#x2080; Partitions</tspan></text>
+<path d="M285 395L290.774 385H279.226L285 395ZM284 350V386H286V350H284Z" fill="black"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="289.047" y="379.364">Final Partition and Coding Modes</tspan></text>
+<path d="M285 165L290.774 155H279.226L285 165ZM284 135V156H286V135H284Z" fill="black"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="294.064" y="154.364">N&#x2081; Partitions</tspan></text>
+<path d="M285 245L290.774 235H279.226L285 245ZM284 215V236H286V215H284Z" fill="black"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="293.438" y="234.364">N&#x2082; Partitions</tspan></text>
+<path d="M285 300L290.774 290H279.226L285 300ZM284 270V291H286V270H284Z" fill="black"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="292.033" y="289.364">N      Partitions</tspan></text>
+<text transform="matrix(0 -1 1 0 271 270)" fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="5.53906" y="15.3182">...</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="300.3" y="290.545">(n-1)</tspan></text>
+</svg>

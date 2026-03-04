@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="444" height="929" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h444v929H0z"/>
+  <rect width="142" height="27" x="59" y="11" fill="#003972" stroke="#000" stroke-width="2" rx="13.5"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="99.7231" y="28.5">Application</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 66h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="69.1724" y="83.5">Resource Coordination</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 121h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="87.1709" y="138.5">Picture Analysis</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 176h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="86.7305" y="193.5">Picture Decision</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 231h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.8857" y="248.5">Motion Estimation</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 286h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.0962" y="303.5">Initial Rate Control</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 341h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="62.5176" y="358.5">Source Based Operations</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 396h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="86.2041" y="413.5">Picture Manager</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 451h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="96.8711" y="468.5">Rate Control</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 506h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="94.1602" y="517.136">Mode Decision </tspan><tspan x="96.7432" y="529.136">Configuration</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 561h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="90.5762" y="578.5">Mode Decision</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 616h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="87.0098" y="633.5">Encode-Decode</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 671h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="99.981" y="688.5">Deblocking</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 726h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="115.364" y="743.5">CDEF</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 781h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="99.2773" y="798.5">Restoration</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 836h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="91.6074" y="853.5">Entropy Coder</tspan></text>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M59 891h142v27H59z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="93.9224" y="908.5">Packetization</tspan></text>
+  <path fill="#000" d="m130 65 5.774-10h-11.548L130 65Zm-1-26v17h2V39h-2ZM130 120l5.774-10h-11.548L130 120Zm-1-26v17h2V94h-2ZM130 175l5.774-10h-11.548L130 175Zm-1-26v17h2v-17h-2ZM130 230l5.774-10h-11.548L130 230Zm-1-26v17h2v-17h-2ZM130 285l5.774-10h-11.548L130 285Zm-1-26v17h2v-17h-2ZM130 340l5.774-10h-11.548L130 340Zm-1-26v17h2v-17h-2ZM130 395l5.774-10h-11.548L130 395Zm-1-26v17h2v-17h-2ZM259 349l-10-5.774v11.548L259 349Zm-57 1h48v-2h-48v2ZM202 360l10 5.774v-11.548L202 360Zm57-1h-48v2h48v-2ZM130 450l5.774-10h-11.548L130 450Zm-1-26v17h2v-17h-2ZM130 505l5.774-10h-11.548L130 505Zm-1-26v17h2v-17h-2ZM130 560l5.774-10h-11.548L130 560Zm-1-26v17h2v-17h-2ZM130 615l5.774-10h-11.548L130 615Zm-1-26v17h2v-17h-2ZM130 670l5.774-10h-11.548L130 670Zm-1-26v17h2v-17h-2ZM130 725l5.774-10h-11.548L130 725Zm-1-26v17h2v-17h-2ZM130 780l5.774-10h-11.548L130 780Zm-1-26v17h2v-17h-2ZM130 835l5.774-10h-11.548L130 835Zm-1-26v17h2v-17h-2ZM130 890l5.774-10h-11.548L130 890Zm-1-26v17h2v-17h-2Z"/>
+  <path fill="#003972" stroke="#000" stroke-width="2" d="M260 341h142v27H260z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="292.403" y="358.5">TPL Dispenser</tspan></text>
+  <path fill="#000" d="M34 904.5h-1v1h1v-1Zm0-440v-1h-1v1h1Zm24 0-10-5.773v11.546l10-5.773Zm0 439H34v2h24v-2Zm-23 1v-440h-2v440h2Zm-1-439h15v-2H34v2Z"/>
+  <path stroke="#003972" stroke-width="2" d="M58 849.5H35"/>
+  <path fill="#000" d="m38 794.5-.8944.447.2764.553H38v-1Zm-8 0v1h.618l.2764-.553L30 794.5Zm-20 0H9v1h1v-1Zm0-385v-1H9v1h1Zm48 0-10-5.773v11.546l10-5.773Zm0 384H38v2h20v-2Zm-28 0H10v2h20v-2Zm-19 1v-385H9v385h2Zm-1-384h39v-2H10v2Zm28.8944 383.553c-2.0166-4.033-7.7722-4.033-9.7888 0l1.7888.894c1.2796-2.559 4.9316-2.559 6.2112 0l1.7888-.894Z"/>
+  <path stroke="#000" stroke-width="2" d="M202 629.5h79"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="287" y="625.864">Inject GM as mode </tspan><tspan x="287" y="640.864">candidate to MD</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M202 574.5h79"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="287" y="570.864">Forward GM parameters </tspan><tspan x="287" y="585.864">to Mode Decision process</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M202 244.5h79"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="287" y="233.864">Detect whether a GM may </tspan><tspan x="287" y="248.864">occurs and if yes then </tspan><tspan x="287" y="263.864">perform the GM estimation</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M202 189.5h79"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="287" y="193.864">Set global motion controls</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M202 849.5h79"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="287" y="853.864">Code GM signals</tspan></text>
+</svg>

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="163" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M1 1h598v161H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h598v161H1z"/>
+  <path fill="#003972" d="M2 2h596v21H2z"/>
+  <path stroke="#000" stroke-width="2" d="M2 24h596M2 47h596M2 70h596M309 2v159M382 2v159"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="147.839" y="15.0455">Flag</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="470.956" y="15.0455">Description</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="336.559" y="10.0455">Level </tspan><tspan x="312.424" y="20.0455">(Sequence/Picture)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="38.02">  </tspan><tspan x="62.2344" y="38.02"> (0-2 OR -1)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="38.02">compound_level</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="61.02">  </tspan><tspan x="167.166" y="61.02"> (0-2)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="61.02">sequence_control_set_ptr-&gt;compound_mode</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381" y="33.0455">  Config level settings for the whole seqeuence. Takes the </tspan><tspan x="381" y="43.0455">  values 0-2 or -1 for auto i.e. DEFAULT</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381" y="56.0455">  Specifies the inter-inter compound modes to be considered </tspan><tspan x="381" y="66.0455">  from among AVG/DIST/DIFF/WEDGE</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381" y="79.0327">  Same as </tspan><tspan x="578.497" y="79.0327"> but </tspan><tspan x="381" y="89.0327">  at the picture level</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="414.804" y="79.0327">sequence_control_set_ptr-&gt;compound_mode</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="328.533" y="38.0455">Sequence</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="328.533" y="61.0455">Sequence</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 93h596M2 136h596M2 149h596"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="84.02">  </tspan><tspan x="162.969" y="84.02"> (0-2)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="84.02">picture_control_set_ptr-&gt;compound_mode</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="333.472" y="84.0455">Picture</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381" y="102.033">  Sets the compound modes to try as a function of the PD level. </tspan><tspan x="381" y="112.033">  Corresponds to the index of the elements in the following array </tspan><tspan x="381" y="122.033">  [</tspan><tspan x="433.397" y="122.033">, </tspan><tspan x="487.408" y="122.033">, </tspan><tspan x="545.616" y="122.033">, </tspan><tspan x="381" y="132.033">  </tspan><tspan x="439.037" y="132.033">]</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="387.228" y="122.033">MD_COMP_AVG</tspan><tspan x="437.041" y="122.033">MD_COMP_DIST</tspan><tspan x="491.052" y="122.033">MD_COMP_DIFF0</tspan><tspan x="384.473" y="132.033">MD_COMP_WEDGE</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="117.02">  </tspan><tspan x="91.6152" y="117.02"> (0-3)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="117.02">compound_types_to_try</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="333.472" y="117.045">Picture</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="145.02">  </tspan><tspan x="288.887" y="145.02"> (0/1)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="145.02">sequence_control_set_ptr-&gt;seq_header.order_hint_info.enable_jnt_comp</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381" y="145.045">  Enables distance-based weighting (DIST) when set to 1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="328.533" y="145.045">Sequence</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="158.02">  </tspan><tspan x="251.111" y="158.02"> (0/1)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="158.02">sequence_control_set_ptr-&gt;seq_header.enable_masked_compound</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381" y="158.045">  Enables masked compound (DIFF/WEDGE) when set to 1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="328.533" y="158.045">Sequence</tspan></text>
+</svg>

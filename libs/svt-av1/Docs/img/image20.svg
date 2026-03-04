@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="760" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h500v760H0z"/>
+  <path stroke="#000" d="M10.5 80.5h479v499h-479z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="16.4219" y="100.818">Segment loop</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="11.1328" y="70.8182">Enc-Dec Process</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M30.5 110.5h439v459h-439z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="36.5" y="130.818">SB-loop</tspan></text>
+  <path fill="#E9CBAD" stroke="#000" d="M50.5 140.5h399v294h-399z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="55.1562" y="160.818">Mode Decision</tspan></text>
+  <rect width="298" height="38" x="101" y="171" fill="#ADE9CB" stroke="#000" stroke-width="2" rx="9"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="196.475" y="197.273">PD Stage 0</tspan></text>
+  <rect width="248" height="38" x="126" y="241" fill="#ADE9CB" stroke="#000" stroke-width="2" rx="9"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="198.34" y="267.273">PD Stage 1</tspan></text>
+  <rect width="198" height="38" x="151" y="366" fill="#ADE9CB" stroke="#000" stroke-width="2" rx="9"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="197.051" y="392.273">PD Stage n</tspan></text>
+  <path fill="#000" d="m250 240 5.774-10h-11.548L250 240Zm-1-30v21h2v-21h-2ZM250 310l5.774-10h-11.548L250 310Zm-1-30v21h2v-21h-2ZM250 365l5.774-10h-11.548L250 365Zm-1-30v21h2v-21h-2Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 283.75 51.25)"><tspan x="3.79883" y="19.2727">...</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="259.064" y="226.864">N₁ Partitions</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="258.438" y="299.364">N₂ Partitions</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="257.033" y="354.364">N      Partitions</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="255.096" y="424.364">Final Partition and coding modes</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="258.244" y="159.364">N₀ Partitions</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="265.3" y="354.545">(n-1)</tspan></text>
+  <path fill="#E9E9AD" stroke="#000" d="M50.5 440.5h399v119h-399z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="54.9131" y="460.091">Encode pass - Block loop</tspan></text>
+  <path fill="#fff" stroke="#000" d="M197.5 470.5h104v79h-104z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="199" y="483.636">Residual </tspan><tspan x="199" y="495.636">Transform </tspan><tspan x="199" y="507.636">Quantization </tspan><tspan x="199" y="519.636">Inverse quantization </tspan><tspan x="199" y="531.636">Inverse Transform </tspan><tspan x="199" y="543.636">Reconstruction</tspan></text>
+  <path fill="#fff" stroke="#000" d="M142.5 470.5h24v79h-24z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 346 203)"><tspan x="2.23242" y="15.1364">Neighbor Array</tspan></text>
+  <path fill="#000" d="m167 500 10 5.774v-11.548L167 500Zm9 1h21v-2h-21v2ZM197 520l-10-5.774v11.548L197 520Zm-30 1h21v-2h-21v2ZM250 470l5.774-10h-11.548L250 470Zm-1-65v56h2v-56h-2Z"/>
+  <rect width="98" height="38" x="111" y="11" fill="#5BD45B" stroke="#000" stroke-width="2" rx="9"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="131.897" y="35.0909">ME Data</tspan></text>
+  <rect width="98" height="38" x="291" y="11" fill="#5BD45B" stroke="#000" stroke-width="2" rx="9"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="300.946" y="26.5909">All Possible </tspan><tspan x="307.229" y="43.5909">Partitions</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M210 30h80.003"/>
+  <path fill="#000" d="m250 170 5.774-10h-11.548L250 170Zm-1-140v131h2V30h-2ZM250 610l5.774-10h-11.548L250 610Zm-1-60v51h2v-51h-2Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="259.261" y="600.091">Reconstructed Samples</tspan></text>
+  <path fill="#000" d="m250 650 5.774-10h-11.548L250 650Zm-1-15v6h2v-6h-2ZM250 690l5.774-10h-11.548L250 690Zm-1-15v6h2v-6h-2ZM250 730l5.774-10h-11.548L250 730Zm-1-15v6h2v-6h-2Z"/>
+  <path stroke="#000" d="M160.5 610.5h179v24h-179z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="195.643" y="626.864">Loop filter Process</tspan></text>
+  <path stroke="#000" d="M160.5 650.5h179v24h-179z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="209.184" y="666.864">CDEF Process</tspan></text>
+  <path stroke="#000" d="M160.5 690.5h179v24h-179z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="175.322" y="706.864">Restoration Filter Process</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="158.281" y="744.364">Filtered Reconstructed Samples</tspan></text>
+</svg>

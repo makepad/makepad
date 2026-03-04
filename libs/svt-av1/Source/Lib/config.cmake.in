@@ -1,0 +1,21 @@
+@PACKAGE_INIT@
+
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/SVT-AV1-staticTargets.cmake)
+    if(UNIX AND NOT APPLE)
+        include(CMakeFindDependencyMacro)
+        find_dependency(Threads)
+    endif()
+    include(${CMAKE_CURRENT_LIST_DIR}/SVT-AV1-staticTargets.cmake)
+endif()
+
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/SVT-AV1-sharedTargets.cmake)
+    include(${CMAKE_CURRENT_LIST_DIR}/SVT-AV1-sharedTargets.cmake)
+    add_library(SVT-AV1::SVT-AV1 ALIAS SVT-AV1::SVT-AV1-shared)
+else()
+    add_library(SVT-AV1::SVT-AV1 ALIAS SVT-AV1::SVT-AV1-static)
+endif()
+
+set_and_check(SVT-AV1_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+set_and_check(SVT-AV1_LIB_DIR "@PACKAGE_CMAKE_INSTALL_LIBDIR@")
+
+check_required_components(SVT-AV1)

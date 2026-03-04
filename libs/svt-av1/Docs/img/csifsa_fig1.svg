@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="958" height="278" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M1 1h956v276H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h956v276H1z"/>
+  <path fill="#003972" d="M2 2h954v18H2z"/>
+  <path stroke="#000" stroke-width="2" d="M2 21h954"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="8.52734" y="15.3636">Position</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="114.299" y="15.3636">Regular</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="258.389" y="15.3636">Smooth</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="418.35" y="15.3636">Sharp</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="571.326" y="15.3636">Bilinear</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="702.078" y="15.3636">4-Tap Regular</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="846.168" y="15.3636">4-Tap Smooth</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M63 2v274M210 2v274M352 2v274M519 2v274M667 2v274M819 2v274"/>
+  <path fill="#EAEAAE" d="M2 22h60v14H2zM2 54h60v14H2zM2 118h60v14H2zM2 182h60v14H2zM2 246h60v14H2z"/>
+  <path fill="#EAC6AE" d="M2 150h60v14H2z"/>
+  <path fill="#AECCEA" d="M2 86h60v14H2zM2 214h60v14H2z"/>
+  <path stroke="#000" stroke-width="2" d="M2 37h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="32.6364"> 0/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="32.6">{0,0,0,128,0,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="32.6">{0,0,0,128,0,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="32.6">{0,0,0,128,0,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="32.6">{0,0,0,128,0,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="32.6">{0,0,0,128,0,0,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 53h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="48.6364"> 1/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="48.6">{0,2,-6,126,8,-2,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="48.6">{0,2,28,62,34,2,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="48.6">{-2,2,-6,126,8,-2,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="48.6">{0,0,0,120,8,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="48.6">{0,0,-4,126,8,-2,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 69h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="64.6364"> 2/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="64.6">{0,2,-10,122,18,-4,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="64.6">{0,0,26,62,36,4,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="64.6">{-2,6,-12,124,16,-6,4,-2}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="64.6">{0,0,0,112,16,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="64.6">{0,0,-8,122,18,-4,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 85h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="80.6364"> 3/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="80.6">{0,2,-12,116,28,-8,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="80.6">{0,0,22,62,40,4,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="80.6">{-2,8,-18,120,26,-10,6,-2}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="80.6">{0,0,0,104,24,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="80.6">{0,0,-10,116,28,-6,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 101h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="96.6364"> 4/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="96.6">{0,2,-14,110,38,-10,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="96.6">{0,0,20,60,42,6,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="96.6">{-4,10,-22,116,38,-14,6,-2}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="96.6">{0,0,0,96,32,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="96.6">{0,0,-10,110,38,-8,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 117h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="112.636"> 5/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="112.6">{0,2,-14,102,48,-12,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="112.6">{0,0,18,58,44,8,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="112.6">{-4,10,-22,108,48,-18,8,-2}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="112.6">{0,0,0,88,40,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="112.6">{0,0,-12,102,48,-10,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 133h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="128.636"> 6/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="128.6">{0,2,-16,94,58,-12,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="128.6">{0,0,16,56,46,10,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="128.6">{-4,10,-24,100,60,-20,8,-2}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="128.6">{0,0,0,80,48,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="128.6">{0,0,-14,94,58,-10,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 149h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="144.636"> 7/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="144.6">{0,2,-14,84,66,-12,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="144.6">{0,-2,16,54,48,12,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="144.6">{-4,10,-24,90,70,-22,10,-2}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="144.6">{0,0,0,72,56,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="144.6">{0,0,-12,84,66,-10,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 197h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="192.636"> 10/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="192.6">{0,2,-12,58,94,-16,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="192.6">{0,0,10,46,56,16,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="192.6">{-2,8,-20,60,100,-24,10,-4}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="192.6">{0,0,0,48,80,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="192.6">{0,0,-10,58,94,-14,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 213h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="208.636"> 11/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="208.6">{0,2,-12,48,102,-14,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="208.6">{0,0,8,44,58,18,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="208.6">{-2,8,-18,48,108,-22,10,-4}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="208.6">{0,0,0,40,88,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="208.6">{0,0,-10,48,102,-12,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 181h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="176.636"> 9/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="176.6">{0,2,-12,66,84,-14,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="176.6">{0,0,12,48,54,16,-2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="176.6">{-2,10,-22,70,90,-24,10,-4}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="176.6">{0,0,0,56,72,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="176.6">{0,0,-10,66,84,-12,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 165h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="160.636"> 8/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="160.6">{0,2,-14,76,76,-14,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="160.6">{0,-2,14,52,52,14,-2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="160.6">{-4,12,-24,80,80,-24,12,-4}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="160.6">{0,0,0,64,64,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="160.6">{0,0,-12,76,76,-12,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 261h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="256.636"> 14/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="256.6">{0,0,-4,18,122,-10,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="256.6">{0,0,4,36,62,26,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="256.6">{-2,4,-6,16,124,-12,6,-2}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="256.6">{0,0,0,16,112,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="256.6">{0,0,-4,18,122,-8,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="272.636"> 15/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="272.6">{0,0,-2,8,126,-6,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="272.6">{0,0,2,34,62,28,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="272.6">{0,2,-2,8,126,-6,2,-2}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="272.6">{0,0,0,8,120,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="272.6">{0,0,-2,8,126,-4,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 245h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="240.636"> 13/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="240.6">{0,2,-8,28,116,-12,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="240.6">{0,0,4,40,62,22,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="240.6">{-2,6,-10,26,120,-18,8,-2}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="240.6">{0,0,0,24,104,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="240.6">{0,0,-6,28,116,-10,0,0}</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 229h954"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="2" y="224.636"> 12/16</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="224.6">{0,2,-10,38,110,-14,2,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="211" y="224.6">{0,0,6,42,60,20,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="353" y="224.6">{-2,6,-14,38,116,-22,10,-4}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520" y="224.6">{0,0,0,32,96,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="668" y="224.6">{0,0,-8,38,110,-12,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="32.6">{0,0,0,128,0,0,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="48.6">{0,0,30,62,34,2,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="64.6">{0,0,26,62,36,4,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="80.6">{0,0,22,62,40,4,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="96.6">{0,0,20,60,42,6,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="112.6">{0,0,18,58,44,8,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="128.6">{0,0,16,56,46,10,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="144.6">{0,0,14,54,48,12,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="192.6">{0,0,10,46,56,16,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="208.6">{0,0,8,44,58,18,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="176.6">{0,0,12,48,54,14,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="160.6">{0,0,12,52,52,12,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="256.6">{0,0,4,36,62,26,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="272.6">{0,0,2,34,62,30,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="240.6">{0,0,4,40,62,22,0,0}</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821" y="224.6">{0,0,6,42,60,20,0,0}</tspan></text>
+</svg>

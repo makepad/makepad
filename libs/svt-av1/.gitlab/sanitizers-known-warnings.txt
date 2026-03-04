@@ -1,0 +1,22 @@
+#List of known warnings for CI task Sanitizer(thread-skip-known-warnings)
+#CI runs sanitizer with skip known warnings to detect regression of new potential issues.
+#Known warnings are tracked in issue: #1308
+
+#Race warnings (data races and use-after-free reports):
+#1]
+race:mode_decision_kernel
+#mode_decision_kernel() is run two times with that same pcs in separated tasks,
+#when: enc_dec_tasks->input_type is ENCDEC_TASKS_MDC_INPUT or ENCDEC_TASKS_ENCDEC_INPUT.
+#Some calculation are done double on that same memory.
+#Example for one of the warnings is to change in mode_decision_kernel:
+#((EbReferenceObject *)
+#     pcs->ppcs->ref_pic_wrapper->object_ptr)
+#    ->average_intensity = pcs->ppcs->average_intensity[0];
+#to:
+#if (ENCDEC_TASKS_MDC_INPUT == input_type) {
+#    ((EbReferenceObject *)
+#         pcs->ppcs->ref_pic_wrapper->object_ptr)
+#        ->average_intensity = pcs->ppcs->average_intensity[0];
+#}
+
+#End of file

@@ -1,0 +1,44 @@
+<svg width="800" height="420" viewBox="0 0 800 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+    <style>
+        @font-face {
+            font-family: 'Inter';
+            src: url('https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'GitLab Mono';
+            src: url('https://docs.gitlab.com/assets/vendor/GitLabMono.woff2') format('woff2');
+        }
+    </style>
+</defs>
+
+<rect width="800" height="420" fill="white"/>
+<rect x="250" width="550" height="30" fill="#003972"/>
+<rect width="250" height="420" fill="#003972"/>
+<rect x="1" y="1" width="798" height="418" stroke="black" stroke-width="2"/>
+<line x1="101" x2="101" y2="420" stroke="black" stroke-width="2"/>
+<line x1="251" x2="251" y2="420" stroke="black" stroke-width="2"/>
+<line y1="29" x2="800" y2="29" stroke="black" stroke-width="2"/>
+<line y1="59" x2="800" y2="59" stroke="black" stroke-width="2"/>
+<line y1="119" x2="800" y2="119" stroke="black" stroke-width="2"/>
+<line x1="100" y1="389" x2="800" y2="389" stroke="black" stroke-width="2"/>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="16.0469" y="20.8182">PD_PASS</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="104.992" y="20.8182">set_chroma_mode</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="172.273" y="49.8182">-</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="135.867" y="409.818">Otherwise</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="255" y="409.76">set_chroma_mode</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="275.469" y="81.26">temporal_layer_index == 0</tspan><tspan x="564.859" y="81.26">CHROMA_MODE_0</tspan><tspan x="290.891" y="106.26">CHROMA_MODE_1</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter Variable" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="679.984" y="81.26">&#x2028;</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="255" y="81.26">if (</tspan><tspan x="515.312" y="81.26">) then </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="255" y="106.26">else </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="255" y="49.76">CHROMA_MODE_2</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="474.109" y="20.8182">chroma_level</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="172.273" y="94.8182">-</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="140.656" y="259.818">DEFAULT</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter Variable" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="538.828" y="147.26">&#x2028;</tspan><tspan x="616.109" y="172.26">&#x2028;</tspan><tspan x="652" y="197.26">&#x2028;</tspan><tspan x="747.938" y="222.26">&#x2028;</tspan><tspan x="421.891" y="247.26">&#x2028;</tspan><tspan x="562.109" y="272.26">&#x2028;</tspan><tspan x="616.109" y="297.26">&#x2028;</tspan><tspan x="719.156" y="322.26">&#x2028;</tspan><tspan x="747.938" y="347.26">&#x2028;</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="269.172" y="147.26">sc_content_detected</tspan><tspan x="285.047" y="172.26">enc_mode == ENC_M0</tspan><tspan x="500.984" y="172.26">CHROMA_MODE_0</tspan><tspan x="320.938" y="197.26">enc_mode &#60;= ENC_M4</tspan><tspan x="536.875" y="197.26">CHROMA_MODE_1</tspan><tspan x="320.938" y="222.26">encoder_bit_depth == EB_8BIT</tspan><tspan x="632.812" y="222.26">CHROMA_MODE_2</tspan><tspan x="306.766" y="247.26">CHROMA_MODE_3</tspan><tspan x="305.062" y="272.26">sc_content_detected</tspan><tspan x="285.047" y="297.26">enc_mode &#60;= ENC_M6</tspan><tspan x="500.984" y="297.26">CHROMA_MODE_1</tspan><tspan x="320.938" y="322.26">temporal_layer_index == 0</tspan><tspan x="604.031" y="322.26">CHROMA_MODE_1</tspan><tspan x="320.938" y="347.26">encoder_bit_depth == EB_8BIT</tspan><tspan x="632.812" y="347.26">CHROMA_MODE_2</tspan><tspan x="306.766" y="372.26">CHROMA_MODE_3</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="255" y="147.26">if </tspan><tspan x="451.453" y="147.26"> not set then</tspan><tspan x="255" y="172.26">    if </tspan><tspan x="457.734" y="172.26"> then </tspan><tspan x="255" y="197.26">    else if </tspan><tspan x="493.625" y="197.26"> then </tspan><tspan x="255" y="222.26">    else if </tspan><tspan x="589.562" y="222.26"> then </tspan><tspan x="255" y="247.26">    else </tspan><tspan x="255" y="272.26">else if </tspan><tspan x="487.344" y="272.26"> is set then</tspan><tspan x="255" y="297.26">    if </tspan><tspan x="457.734" y="297.26"> then </tspan><tspan x="255" y="322.26">    else if </tspan><tspan x="560.781" y="322.26"> then </tspan><tspan x="255" y="347.26">    else if </tspan><tspan x="589.562" y="347.26"> then </tspan><tspan x="255" y="372.26">    else </tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="7.33594" y="49.8182">PD_PASS_0</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="9.32812" y="94.8182">PD_PASS_1</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="9.32812" y="274.818">PD_PASS_1</tspan></text>
+</svg>

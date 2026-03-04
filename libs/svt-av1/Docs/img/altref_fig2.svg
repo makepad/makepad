@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="661" height="696" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h661v696H0z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="10.0884" y="122.727">Predicted </tspan><tspan x="23.1265" y="138.727">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="24.9277" y="302.727">Filter </tspan><tspan x="15.2285" y="318.727">Weights</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="223.114" y="592.727">Filtered </tspan><tspan x="229.626" y="608.727">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="185.131" y="22.7273"> </tspan><tspan x="161.994" y="38.7273">t-1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="148.163" y="22.7273">Picture</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="167.344" y="225.727">x</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="367.344" y="225.727">x</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="567.344" y="225.727">x</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="584.131" y="22.7273"> </tspan><tspan x="559.648" y="38.7273">t+1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="547.163" y="22.7273">Picture</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="407.798" y="22.7273"> </tspan><tspan x="366.031" y="38.7273">t</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="321.496" y="22.7273">Central Picture</tspan></text>
+  <path fill="#ADCBE9" stroke="#306396" d="M90.5 45.5h160v160h-160z"/>
+  <path stroke="#306396" d="M210.5 45v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161M90 125.5h161m-161 0h161m-161 0h161m-161 40h161m-161 0h161m-161 0h161m-161-80h161m-161 0h161m-161 0h161"/>
+  <path stroke="#000" d="M90.5 235.5h160v160h-160zm120-.5v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161M90 315.5h161m-161 0h161m-161 0h161m-161 40h161m-161 0h161m-161 0h161m-161-80h161m-161 0h161m-161 0h161"/>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="103.501" y="259.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="143.501" y="259.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="184.275" y="259.5">31</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="224.275" y="259.5">31</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="103.501" y="299.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="143.249" y="299.5">30</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="183.249" y="299.5">30</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="223.249" y="299.5">30</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="103.249" y="339.5">30</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="144.275" y="339.5">31</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="183.856" y="339.5">27</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="223.534" y="339.5">28</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="103.534" y="379.5">28</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="143.856" y="379.5">27</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="183.518" y="379.5">26</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="223.604" y="379.5">25</tspan></text>
+  <path stroke="#000" d="M290.5 235.5h160v160h-160zm120-.5v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161M290 315.5h161m-161 0h161m-161 0h161m-161 40h161m-161 0h161m-161 0h161m-161-80h161m-161 0h161m-161 0h161"/>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="303.501" y="259.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="343.501" y="259.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="383.501" y="259.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="423.501" y="259.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="303.501" y="299.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="343.501" y="299.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="383.501" y="299.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="423.501" y="299.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="303.501" y="339.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="343.501" y="339.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="383.501" y="339.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="423.501" y="339.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="303.501" y="379.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="343.501" y="379.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="383.501" y="379.5">32</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="423.501" y="379.5">32</tspan></text>
+  <path stroke="#000" d="M490.5 235.5h160v160h-160zm120-.5v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161M490 315.5h161m-161 0h161m-161 0h161m-161 40h161m-161 0h161m-161 0h161m-161-80h161m-161 0h161m-161 0h161"/>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="503.416" y="259.5">20</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="544.441" y="259.5">21</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="583.416" y="259.5">20</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="623.416" y="259.5">20</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="504.307" y="299.5">18</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="544.291" y="299.5">19</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="583.668" y="299.5">22</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="623.668" y="299.5">22</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="503.501" y="339.5">23</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="543.668" y="339.5">22</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="584.441" y="339.5">21</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="623.507" y="339.5">24</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="503.507" y="379.5">24</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="543.856" y="379.5">27</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="583.518" y="379.5">29</tspan></text>
+  <text xml:space="preserve" fill="#CD6500" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="623.249" y="379.5">30</tspan></text>
+  <path fill="#ADCBE9" stroke="#306396" d="M490.5 45.5h160v160h-160z"/>
+  <path stroke="#306396" d="M610.5 45v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161M490 125.5h161m-161 0h161m-161 0h161m-161 40h161m-161 0h161m-161 0h161m-161-80h161m-161 0h161m-161 0h161"/>
+  <path fill="#AEEAAE" stroke="#309730" d="M290.5 45.5h160v160h-160z"/>
+  <path stroke="#309730" d="M410.5 45v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161M290 125.5h161m-161 0h161m-161 0h161m-161 40h161m-161 0h161m-161 0h161m-161-80h161m-161 0h161m-161 0h161"/>
+  <path fill="#EACDAE" stroke="#977A30" d="M290.5 525.5h160v160h-160z"/>
+  <path stroke="#977A30" d="M410.5 525v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161m-40-161v161m0-161v161m0-161v161M290 605.5h161m-161 0h161m-161 0h161m-161 40h161m-161 0h161m-161 0h161m-161-80h161m-161 0h161m-161 0h161"/>
+  <path stroke="#000" d="M298.5 435.5h144v60h-144z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="316.365" y="469.864">Add and normalize</tspan></text>
+  <path fill="#000" d="m370 525 2.887-5h-5.774l2.887 5Zm-.5-29v24.5h1V496h-1Zm-35-61 2.887-5h-5.774l2.887 5Zm-164-19.5h-.5v.5h.5v-.5Zm164 0h.5v-.5h-.5v.5ZM170 396v19.5h1V396h-1Zm.5 20h164v-1h-164v1Zm163.5-.5v15h1v-15h-1Zm72.5 19.5-2.887-5h5.774l-2.887 5Zm164-19.5h.5v.5h-.5v-.5Zm-164 0h-.5v-.5h.5v.5ZM571 396v19.5h-1V396h1Zm-.5 20h-164v-1h164v1Zm-163.5-.5v15h-1v-15h1ZM370.5 435l2.887-5h-5.774l2.887 5Zm-.5-39v34.5h1V396h-1Z"/>
+</svg>

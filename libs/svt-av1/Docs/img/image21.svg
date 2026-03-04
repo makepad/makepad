@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="530" height="480" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h530v480H0z"/>
+  <path stroke="#000" d="M10 280V10h270v40H50v230H10Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="25.998" y="274.364">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="105.998" y="224.364">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="165.998" y="114.364">0</tspan></text>
+  <path stroke="#000" d="M130 470H90V210h40v260ZM160 90v40h360V90H160ZM180 210v250h250V210H180Z"/>
+  <path fill="#AEEAAE" stroke="#000" stroke-dasharray="8 4" d="M220 280v40h40v-40h-40Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="231.141" y="304.364">CU</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="51.6875" y="34.3636">Top-Left Block Neighbor Array</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="97.5508" y="64.3636">Index = x-y</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="283.668" y="144.364">Index = x</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="265.979" y="114.364">Top Block Neighbor Array</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 260 160)"><tspan x="5.36914" y="14.3636">Left Block Neighbor Array</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 200 70)"><tspan x="3.58594" y="14.3636">Index = y</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="246.078" y="34.3636">MAX</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="486.078" y="114.364">MAX</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="96.0781" y="464.364">MAX</tspan></text>
+  <path fill="#000" d="m230 110-2.588 5.161 5.763-.339L230 110Zm10.499 169.971-9.736-165.508-.998.059 9.736 165.507.998-.058ZM30 30l.7271 5.7275 4.5966-3.4934L30 30Zm190.398 249.697L33.121 33.2802l-.7962.6051L219.602 280.303l.796-.606ZM120 300l5 2.887v-5.774L120 300Zm100-.5h-95.5v1H220v-1Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="24" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="222.055" y="363.227">Partitioned SB</tspan></text>
+</svg>

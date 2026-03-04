@@ -1,0 +1,39 @@
+From 46059c7636a8e16a61d41060fa13b15bbe283ad4 Mon Sep 17 00:00:00 2001
+From: Limin Wang <lance.lmwang@gmail.com>
+Date: Fri, 17 Sep 2021 10:02:02 +0800
+Subject: [PATCH 02/25] avcodec/libsvtav1: make coded GOP type configurable
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Reviewed-by: Jan Ekström <jeebjp@gmail.com>
+Signed-off-by: Limin Wang <lance.lmwang@gmail.com>
+---
+ libavcodec/libsvtav1.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 138241b736..f57cdba63a 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -210,7 +210,8 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+         param->min_qp_allowed       = avctx->qmin;
+     }
+ 
+-    param->intra_refresh_type       = 2; /* Real keyframes only */
++    /* 2 = IDR, closed GOP, 1 = CRA, open GOP */
++    param->intra_refresh_type = avctx->flags & AV_CODEC_FLAG_CLOSED_GOP ? 2 : 1;
+ 
+     if (svt_enc->la_depth >= 0)
+         param->look_ahead_distance  = svt_enc->la_depth;
+@@ -545,6 +546,7 @@ static const AVClass class = {
+ 
+ static const AVCodecDefault eb_enc_defaults[] = {
+     { "b",         "7M"    },
++    { "flags",     "+cgop" },
+     { "g",         "-1"    },
+     { "qmin",      "0"     },
+     { "qmax",      "63"    },
+-- 
+2.44.0
+

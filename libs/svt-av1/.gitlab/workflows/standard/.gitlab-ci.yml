@@ -1,0 +1,32 @@
+#
+# Standard jobs that run on MRs and normal schedules
+#
+
+include:
+  - local: /.gitlab/workflows/windows/.gitlab-ci.yml
+  - local: /.gitlab/workflows/macos/.gitlab-ci.yml
+  - local: /.gitlab/workflows/linux/.gitlab-ci.yml
+  - local: /.gitlab/workflows/bsd/.gitlab-ci.yml
+
+Enc OS Diff Test:
+  extends: .common-ci-base
+  stage: .post
+  image: registry.gitlab.com/aomediacodec/aom-testing/alpine3
+  script:
+    - |
+      success=true
+      for dist in *.ivf; do
+          case $dist in
+          test-pr-Linux_x86_64-Release-*bit-*.ivf) continue ;;
+          *-8bit-m2.ivf) diff -q test-pr-Linux_x86_64-Release-8bit-m2.ivf "$dist" || success=false ;;
+          *-8bit-m8.ivf) diff -q test-pr-Linux_x86_64-Release-8bit-m8.ivf "$dist" || success=false ;;
+          *-10bit-m2.ivf) diff -q test-pr-Linux_x86_64-Release-10bit-m2.ivf "$dist" || success=false ;;
+          *-10bit-m8.ivf) diff -q test-pr-Linux_x86_64-Release-10bit-m8.ivf "$dist" || success=false ;;
+          esac
+      done
+      $success
+  needs:
+    - Linux Enc Test
+    - macOS Enc Test (x86)
+    - macOS Enc Test (m1)
+    - Win64 Enc Test

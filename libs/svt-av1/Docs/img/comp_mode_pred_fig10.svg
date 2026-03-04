@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="75" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M1 1h398v73H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h398v73H1zM2 20h396M2 38h396M2 56h396"/>
+  <path fill="#003972" d="M2 2h396v17H2z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.84766" y="14.1364">compound_level / compound_mode</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.08" y="14.1364">Description</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M179 2v71"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="87.332" y="31.9091">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="88.0781" y="49.9091">1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="87.5156" y="67.9091">2</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="178" y="31.9091">  OFF: No compound mode search, only AVG</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="178" y="49.9091">  ON: compound mode search: AVG/DIST/DIFF</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="178" y="67.9091">  ON: AVG/DIST/DIFF/WEDGE</tspan></text>
+</svg>

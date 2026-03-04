@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="565" height="115" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#EAEAAE" d="M1 1h563v113H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h563v113H1z"/>
+  <path fill="#003972" d="M2 2h561v18H2z"/>
+  <path stroke="#000" stroke-width="2" d="M0 19h563M105 2v16M280 2v16M470 2v16"/>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="30.38"> av1_inter_prediction</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="105" y="30.38">... </tspan><tspan x="105" y="40.38">svt_av1_dist_wtd_comp_weight_assign </tspan><tspan x="105" y="50.38">av1_get_convolve_filter_params </tspan><tspan x="105" y="60.38">enc_make_inter_predictor</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="105" y="110.38">combine_interintra</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="280" y="75.38">... </tspan><tspan x="280" y="85.38">av1_make_masked_scaled_inter_predictor</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="470" y="85.38">... </tspan><tspan x="470" y="95.38">svt_inter_predictor</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="37.8711" y="12.9091">Depth 7</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="499.629" y="12.9091">Depth 10</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="177.137" y="12.9091">Depth 8</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="359.625" y="12.9091">Depth 9</tspan></text>
+</svg>

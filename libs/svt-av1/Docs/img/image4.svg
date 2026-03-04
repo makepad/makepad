@@ -1,0 +1,444 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="784" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h800v784H0z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="95.5547" y="22.2727">Open Loop Processing</tspan></text>
+  <path stroke="#000" d="M52.5 42.5h305v19h-305z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="239.59" y="55.6364"> Process</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="128.994" y="55.6364">Resource Coordination</tspan></text>
+  <path stroke="#000" d="M52.5 222.5h305v19h-305z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="229.17" y="235.636"> Process</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="139.414" y="235.636">Resource Decision</tspan></text>
+  <path stroke="#000" d="M52.5 502.5h305v19h-305z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="246.592" y="515.636"> Process</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="121.992" y="515.636">Source-based Operations</tspan></text>
+  <path stroke="#000" d="M52.5 682.5h305v19h-305z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="224.106" y="695.636"> Process</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="144.478" y="695.636">Picture Manager</tspan></text>
+  <path stroke="#000" d="M64.5 72.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="85.7637" y="86.8864">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="67.8516" y="96.8864">Picture Analysis </tspan><tspan x="87.6914" y="106.886">Tasks</tspan></text>
+  <path stroke="#000" d="M169.5 72.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="190.764" y="86.8864">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="172.852" y="96.8864">Picture Analysis </tspan><tspan x="192.691" y="106.886">Tasks</tspan></text>
+  <path stroke="#000" d="M275.5 72.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="296.764" y="86.8864">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="278.852" y="96.8864">Picture Analysis </tspan><tspan x="298.691" y="106.886">Tasks</tspan></text>
+  <path stroke="#000" d="M52.5 122.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="132.947" y="140.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="60.5645" y="140.773">Picture Analysis</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.0117" y="150.773">Process 1</tspan></text>
+  <path stroke="#000" d="M157.5 122.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="237.947" y="140.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="165.564" y="140.773">Picture Analysis</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="185.449" y="150.773">Process 2</tspan></text>
+  <path stroke="#000" d="M263.5 122.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="343.947" y="140.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="271.564" y="140.773">Picture Analysis</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="286.172" y="150.773">Process Npa</tspan></text>
+  <path stroke="#000" d="M64.5 172.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="85.7637" y="186.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="67.5312" y="196.886">Picture Decision </tspan><tspan x="87.6914" y="206.886">Tasks</tspan></text>
+  <path stroke="#000" d="M169.5 172.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="190.764" y="186.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="172.531" y="196.886">Picture Decision </tspan><tspan x="192.691" y="206.886">Tasks</tspan></text>
+  <path stroke="#000" d="M275.5 172.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="296.764" y="186.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="278.531" y="196.886">Picture Decision </tspan><tspan x="298.691" y="206.886">Tasks</tspan></text>
+  <path stroke="#000" d="M62.5 252.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="86.2637" y="266.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64.5078" y="276.886">Motion Estimation </tspan><tspan x="88.1914" y="286.886">Tasks</tspan></text>
+  <path stroke="#000" d="M167.5 252.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="191.264" y="266.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="169.508" y="276.886">Motion Estimation </tspan><tspan x="193.191" y="286.886">Tasks</tspan></text>
+  <path stroke="#000" d="M273.5 252.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="297.264" y="266.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="275.508" y="276.886">Motion Estimation </tspan><tspan x="299.191" y="286.886">Tasks</tspan></text>
+  <path stroke="#000" d="M52.5 302.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="137.146" y="320.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="55.7598" y="320.773">Motion Estimation</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.0117" y="330.773">Process 1</tspan></text>
+  <path stroke="#000" d="M157.5 302.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="242.146" y="320.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="185.449" y="330.773">Process 2</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="160.76" y="320.773">Motion Estimation</tspan></text>
+  <path stroke="#000" d="M263.5 302.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="348.146" y="320.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="286.172" y="330.773">Process Npa</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="266.76" y="320.773">Motion Estimation</tspan></text>
+  <path stroke="#000" d="M64.5 352.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="85.7637" y="366.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="79.8164" y="376.886">Initial rate </tspan><tspan x="87.6914" y="386.886">Tasks</tspan></text>
+  <path stroke="#000" d="M169.5 352.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="190.764" y="366.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="184.816" y="376.886">Initial rate </tspan><tspan x="192.691" y="386.886">Tasks</tspan></text>
+  <path stroke="#000" d="M275.5 352.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="296.764" y="366.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="290.816" y="376.886">Initial rate </tspan><tspan x="298.691" y="386.886">Tasks</tspan></text>
+  <path stroke="#000" d="M52.5 402.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="141.351" y="420.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="55.042" y="420.773">Initial Rate Control</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.0117" y="430.773">Process 1</tspan></text>
+  <path stroke="#000" d="M157.5 402.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="246.351" y="420.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="185.449" y="430.773">Process 2</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="160.042" y="420.773">Initial Rate Control</tspan></text>
+  <path stroke="#000" d="M263.5 402.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="352.351" y="420.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="286.121" y="430.773">Process Nirc</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="266.042" y="420.773">Initial Rate Control</tspan></text>
+  <path stroke="#000" d="M64.5 452.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="85.7637" y="466.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="79.8164" y="476.886">Initial rate </tspan><tspan x="87.6914" y="486.886">Tasks</tspan></text>
+  <path stroke="#000" d="M169.5 452.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="190.764" y="466.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="184.816" y="476.886">Initial rate </tspan><tspan x="192.691" y="486.886">Tasks</tspan></text>
+  <path stroke="#000" d="M275.5 452.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="296.764" y="466.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="290.816" y="476.886">Initial rate </tspan><tspan x="298.691" y="486.886">Tasks</tspan></text>
+  <path stroke="#000" d="M64.5 532.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="85.7637" y="546.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="79.8164" y="556.886">Initial rate </tspan><tspan x="87.6914" y="566.886">Tasks</tspan></text>
+  <path stroke="#000" d="M169.5 532.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="190.764" y="546.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="184.816" y="556.886">Initial rate </tspan><tspan x="192.691" y="566.886">Tasks</tspan></text>
+  <path stroke="#000" d="M275.5 532.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="296.764" y="546.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="290.816" y="556.886">Initial rate </tspan><tspan x="298.691" y="566.886">Tasks</tspan></text>
+  <path stroke="#000" d="M52.5 582.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="130.623" y="600.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64.4121" y="600.773">TPL Dispenser</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.0117" y="610.773">Process 1</tspan></text>
+  <path stroke="#000" d="M157.5 582.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="235.623" y="600.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="185.449" y="610.773">Process 2</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="169.412" y="600.773">TPL Dispenser</tspan></text>
+  <path stroke="#000" d="M263.5 582.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="341.623" y="600.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="285.906" y="610.773">Process Ntpl</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="275.412" y="600.773">TPL Dispenser</tspan></text>
+  <path stroke="#000" d="M170.5 632.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="191.764" y="646.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="181.57" y="656.886">Rate control </tspan><tspan x="193.691" y="666.886">Tasks</tspan></text>
+  <path stroke="#000" d="M170.5 712.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="191.764" y="726.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="181.57" y="736.886">Rate control </tspan><tspan x="193.691" y="746.886">Tasks</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M21 31h368v742H21z"/>
+  <path fill="#007200" d="m86 72 2.8868-5h-5.7736L86 72Zm-.5-10v5.5h1V62h-1Z"/>
+  <path fill="#FF8000" d="m111 62 2.887 5h-5.774L111 62Zm-.5 10v-5.5h1V72h-1Z"/>
+  <path fill="#007200" d="m192 72 2.887-5h-5.774L192 72Zm-.5-10v5.5h1V62h-1Z"/>
+  <path fill="#FF8000" d="m217 62 2.887 5h-5.774L217 62Zm-.5 10v-5.5h1V72h-1Z"/>
+  <path fill="#007200" d="m297 72 2.887-5h-5.774L297 72Zm-.5-10v5.5h1V62h-1Z"/>
+  <path fill="#FF8000" d="m322 62 2.887 5h-5.774L322 62Zm-.5 10v-5.5h1V72h-1Z"/>
+  <path fill="#00F" d="m86 122 2.8868-5h-5.7736L86 122Zm-.5-10v5.5h1V112h-1Z"/>
+  <path fill="red" d="m111 112 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m192 122 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V112h-1Z"/>
+  <path fill="red" d="m217 112 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m297 122 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V112h-1Z"/>
+  <path fill="red" d="m322 112 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m86 172 2.8868-5h-5.7736L86 172Zm-.5-10v5.5h1V162h-1Z"/>
+  <path fill="#FF8000" d="m111 162 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m192 172 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V162h-1Z"/>
+  <path fill="#FF8000" d="m217 162 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m297 172 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V162h-1Z"/>
+  <path fill="#FF8000" d="m322 162 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m86 222 2.8868-5h-5.7736L86 222Zm-.5-10v5.5h1V212h-1Z"/>
+  <path fill="red" d="m111 212 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m192 222 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V212h-1Z"/>
+  <path fill="red" d="m217 212 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m297 222 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V212h-1Z"/>
+  <path fill="red" d="m322 212 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m86 252 2.8868-5h-5.7736L86 252Zm-.5-10v5.5h1V242h-1Z"/>
+  <path fill="#FF8000" d="m111 242 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m192 252 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V242h-1Z"/>
+  <path fill="#FF8000" d="m217 242 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m297 252 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V242h-1Z"/>
+  <path fill="#FF8000" d="m322 242 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m86 302 2.8868-5h-5.7736L86 302Zm-.5-10v5.5h1V292h-1Z"/>
+  <path fill="red" d="m111 292 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m192 302 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V292h-1Z"/>
+  <path fill="red" d="m217 292 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m297 302 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V292h-1Z"/>
+  <path fill="red" d="m322 292 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m86 352 2.8868-5h-5.7736L86 352Zm-.5-10v5.5h1V342h-1Z"/>
+  <path fill="#FF8000" d="m111 342 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m192 352 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V342h-1Z"/>
+  <path fill="#FF8000" d="m217 342 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m297 352 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V342h-1Z"/>
+  <path fill="#FF8000" d="m322 342 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m86 402 2.8868-5h-5.7736L86 402Zm-.5-10v5.5h1V392h-1Z"/>
+  <path fill="red" d="m111 392 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m192 402 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V392h-1Z"/>
+  <path fill="red" d="m217 392 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m297 402 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V392h-1Z"/>
+  <path fill="red" d="m322 392 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m86 452 2.8868-5h-5.7736L86 452Zm-.5-10v5.5h1V442h-1Z"/>
+  <path fill="#FF8000" d="m111 442 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m192 452 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V442h-1Z"/>
+  <path fill="#FF8000" d="m217 442 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m297 452 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V442h-1Z"/>
+  <path fill="#FF8000" d="m322 442 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m86 502 2.8868-5h-5.7736L86 502Zm-.5-10v5.5h1V492h-1Z"/>
+  <path fill="red" d="m111 492 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m192 502 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V492h-1Z"/>
+  <path fill="red" d="m217 492 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m297 502 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V492h-1Z"/>
+  <path fill="red" d="m322 492 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m86 532 2.8868-5h-5.7736L86 532Zm-.5-10v5.5h1V522h-1Z"/>
+  <path fill="#FF8000" d="m111 522 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m192 532 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V522h-1Z"/>
+  <path fill="#FF8000" d="m217 522 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m297 532 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V522h-1Z"/>
+  <path fill="#FF8000" d="m322 522 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m86 582 2.8868-5h-5.7736L86 582Zm-.5-10v5.5h1V572h-1Z"/>
+  <path fill="red" d="m111 572 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m192 582 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V572h-1Z"/>
+  <path fill="red" d="m217 572 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m297 582 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V572h-1Z"/>
+  <path fill="red" d="m322 572 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m192 682 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V672h-1Z"/>
+  <path fill="red" d="m217 672 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m192 712 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V702h-1Z"/>
+  <path fill="#FF8000" d="m217 702 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#000" d="m51.9998 52-5-2.8868v5.7736l5-2.8868ZM5 52.5h42.4998v-1H5v1Z"/>
+  <path fill="#FF8000" d="M41.9999 647.5h-.5c0 .276.2239.5.5.5v-.5Zm0-130.5v-.5c-.2761 0-.5.224-.5.5h.5Zm10 0-5-2.887v5.774l5-2.887ZM170 647H41.9999v1H170v-1Zm-127.5001.5V517h-1v130.5h1Zm-.5-130h5.5v-1h-5.5v1Z"/>
+  <path fill="#007200" d="m170 656.5-5-2.887v5.774l5-2.887Zm-138 0h-.5c0 .276.2239.5.5.5v-.5ZM32 507v-.5c-.2761 0-.5.224-.5.5h.5Zm133.5 149H32v1h133.5v-1Zm-133 .5V507h-1v149.5h1Zm-.5-149h20v-1H32v1Z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="477.232" y="22.2727">Closed Loop Processing</tspan></text>
+  <path stroke="#000" d="M442.5 42.5h305v19h-305z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="631.572" y="55.6364"> Process</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="517.012" y="55.6364">Bitstream packetization</tspan></text>
+  <path stroke="#000" d="M442.5 737.5h305v19h-305z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="604.409" y="750.636"> Process</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="544.175" y="750.636">Rate Control</tspan></text>
+  <path stroke="#000" d="M454.5 72.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="475.764" y="86.8864">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="462.762" y="96.8864">Packetization </tspan><tspan x="477.691" y="106.886">Tasks</tspan></text>
+  <path stroke="#000" d="M559.5 72.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="580.764" y="86.8864">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="567.762" y="96.8864">Packetization </tspan><tspan x="582.691" y="106.886">Tasks</tspan></text>
+  <path stroke="#000" d="M665.5 72.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="686.764" y="86.8864">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="673.762" y="96.8864">Packetization </tspan><tspan x="688.691" y="106.886">Tasks</tspan></text>
+  <path stroke="#000" d="M442.5 132.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="520.682" y="150.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="452.068" y="150.773">Entropy Coding</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="471.012" y="160.773">Process 1</tspan></text>
+  <path stroke="#000" d="M547.5 132.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="625.682" y="150.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="557.068" y="150.773">Entropy Coding</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="575.449" y="160.773">Process 2</tspan></text>
+  <path stroke="#000" d="M653.5 132.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="731.682" y="150.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="663.068" y="150.773">Entropy Coding</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="676.289" y="160.773">Process Nec</tspan></text>
+  <path stroke="#000" d="M454.5 182.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="475.764" y="196.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="459.055" y="206.886">Entropy Coding </tspan><tspan x="477.691" y="216.886">Tasks</tspan></text>
+  <path stroke="#000" d="M559.5 182.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="580.764" y="196.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="564.055" y="206.886">Entropy Coding </tspan><tspan x="582.691" y="216.886">Tasks</tspan></text>
+  <path stroke="#000" d="M665.5 182.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="686.764" y="196.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="670.055" y="206.886">Entropy Coding </tspan><tspan x="688.691" y="216.886">Tasks</tspan></text>
+  <path stroke="#000" d="M442.5 242.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="527.059" y="260.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="447.977" y="260.773">Restoration Filter</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="471.012" y="270.773">Process 1</tspan></text>
+  <path stroke="#000" d="M547.5 242.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="632.059" y="260.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="575.449" y="270.773">Process 2</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="552.977" y="260.773">Restoration Filter</tspan></text>
+  <path stroke="#000" d="M653.5 242.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="738.059" y="260.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="677.758" y="270.773">Process Nrf</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="658.977" y="260.773">Restoration Filter</tspan></text>
+  <path stroke="#000" d="M452.5 292.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="476.264" y="306.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="456.281" y="316.886">Restoration Filter </tspan><tspan x="478.191" y="326.886">Tasks</tspan></text>
+  <path stroke="#000" d="M557.5 292.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="581.264" y="306.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="561.281" y="316.886">Restoration Filter </tspan><tspan x="583.191" y="326.886">Tasks</tspan></text>
+  <path stroke="#000" d="M663.5 292.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="687.264" y="306.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="667.281" y="316.886">Restoration Filter </tspan><tspan x="689.191" y="326.886">Tasks</tspan></text>
+  <path stroke="#000" d="M452.5 342.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="496.946" y="360.773"> </tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="476.194" y="360.773">CDEF</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="471.012" y="370.773">Process 1</tspan></text>
+  <path stroke="#000" d="M557.5 342.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="601.946" y="360.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="575.449" y="370.773">Process 2</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="581.194" y="360.773">CDEF</tspan></text>
+  <path stroke="#000" d="M663.5 342.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="707.946" y="360.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.262" y="370.773">Process Ncdef</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="687.194" y="360.773">CDEF</tspan></text>
+  <path stroke="#000" d="M459.5 392.5h59v34h-59z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="475.764" y="409.386">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="466.055" y="419.386">CDEF Tasks</tspan></text>
+  <path stroke="#000" d="M564.5 392.5h59v34h-59z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="580.764" y="409.386">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="571.055" y="419.386">CDEF Tasks</tspan></text>
+  <path stroke="#000" d="M670.5 392.5h59v34h-59z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="686.764" y="409.386">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="677.055" y="419.386">CDEF Tasks</tspan></text>
+  <path stroke="#000" d="M442.5 437.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="448.616" y="455.773">Deblocking Filter </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="471.012" y="465.773">Process 1</tspan></text>
+  <path stroke="#000" d="M547.5 437.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="553.616" y="455.773">Deblocking Filter </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="575.449" y="465.773">Process 2</tspan></text>
+  <path stroke="#000" d="M653.5 437.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="659.616" y="455.773">Deblocking Filter </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="676.941" y="465.773">Process Ndf</tspan></text>
+  <path stroke="#000" d="M452.5 487.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="476.264" y="501.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="456.793" y="511.886">Deblocking Filter </tspan><tspan x="478.191" y="521.886">Tasks</tspan></text>
+  <path stroke="#000" d="M557.5 487.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="581.264" y="501.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="561.793" y="511.886">Deblocking Filter </tspan><tspan x="583.191" y="521.886">Tasks</tspan></text>
+  <path stroke="#000" d="M663.5 487.5h74v39h-74z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="687.264" y="501.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="667.793" y="511.886">Deblocking Filter </tspan><tspan x="689.191" y="521.886">Tasks</tspan></text>
+  <path stroke="#000" d="M454.5 587.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="475.764" y="601.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="460.328" y="611.886">Mode Decision </tspan><tspan x="477.691" y="621.886">Tasks</tspan></text>
+  <path stroke="#000" d="M559.5 587.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="580.764" y="601.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="565.328" y="611.886">Mode Decision </tspan><tspan x="582.691" y="621.886">Tasks</tspan></text>
+  <path stroke="#000" d="M665.5 587.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="686.764" y="601.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="671.328" y="611.886">Mode Decision </tspan><tspan x="688.691" y="621.886">Tasks</tspan></text>
+  <path stroke="#000" d="M453.5 687.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="474.764" y="701.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="459.328" y="711.886">Mode Decision </tspan><tspan x="461.734" y="721.886">Config. Tasks</tspan></text>
+  <path stroke="#000" d="M558.5 687.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="579.764" y="701.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="564.328" y="711.886">Mode Decision </tspan><tspan x="566.734" y="721.886">Config. Tasks</tspan></text>
+  <path stroke="#000" d="M664.5 687.5h69v39h-69z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="685.764" y="701.886">SRM </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="670.328" y="711.886">Mode Decision </tspan><tspan x="672.734" y="721.886">Config. Tasks</tspan></text>
+  <path stroke="#000" d="M442.5 537.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="519.246" y="555.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="471.012" y="565.773">Process 1</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="453.66" y="555.773">Mode Decision</tspan></text>
+  <path stroke="#000" d="M547.5 537.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="624.246" y="555.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="575.449" y="565.773">Process 2</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="558.66" y="555.773">Mode Decision</tspan></text>
+  <path stroke="#000" d="M653.5 537.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="730.246" y="555.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="674.859" y="565.773">Process Nmd</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="664.66" y="555.773">Mode Decision</tspan></text>
+  <path stroke="#000" d="M442.5 637.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="516.663" y="661.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="471.012" y="671.773">Process 1</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="453.66" y="649.773">Mode Decision </tspan><tspan x="456.243" y="661.773">Configuration</tspan></text>
+  <path stroke="#000" d="M547.5 637.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="621.663" y="661.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="575.449" y="671.773">Process 2</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="558.66" y="649.773">Mode Decision </tspan><tspan x="561.243" y="661.773">Configuration</tspan></text>
+  <path stroke="#000" d="M653.5 637.5h94v39h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="727.663" y="661.773"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.551" y="671.773">Process Nmdc</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="664.66" y="649.773">Mode Decision </tspan><tspan x="667.243" y="661.773">Configuration</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M411 31h368v742H411z"/>
+  <path fill="red" d="m476 72 2.887-5h-5.774L476 72Zm-.5-10v5.5h1V62h-1Z"/>
+  <path fill="#00F" d="m501 62 2.887 5h-5.774L501 62Zm-.5 10v-5.5h1V72h-1Z"/>
+  <path fill="red" d="m582 72 2.887-5h-5.774L582 72Zm-.5-10v5.5h1V62h-1Z"/>
+  <path fill="#00F" d="m607 62 2.887 5h-5.774L607 62Zm-.5 10v-5.5h1V72h-1Z"/>
+  <path fill="red" d="m687 72 2.887-5h-5.774L687 72Zm-.5-10v5.5h1V62h-1Z"/>
+  <path fill="#00F" d="m712 62 2.887 5h-5.774L712 62Zm-.5 10v-5.5h1V72h-1Z"/>
+  <path fill="#FF8000" d="m476 132 2.887-5h-5.774l2.887 5Zm-.5-20v15.5h1V112h-1Z"/>
+  <path fill="#007200" d="m501 112 2.887 5h-5.774l2.887-5Zm-.5 20v-15.5h1V132h-1Z"/>
+  <path fill="#FF8000" d="m582 132 2.887-5h-5.774l2.887 5Zm-.5-20v15.5h1V112h-1Z"/>
+  <path fill="#007200" d="m607 112 2.887 5h-5.774l2.887-5Zm-.5 20v-15.5h1V132h-1Z"/>
+  <path fill="#FF8000" d="m687 132 2.887-5h-5.774l2.887 5Zm-.5-20v15.5h1V112h-1Z"/>
+  <path fill="#007200" d="m712 112 2.887 5h-5.774l2.887-5Zm-.5 20v-15.5h1V132h-1Z"/>
+  <path fill="red" d="m476 182 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V172h-1Z"/>
+  <path fill="#00F" d="m501 172 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m582 182 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V172h-1Z"/>
+  <path fill="#00F" d="m607 172 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m687 182 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V172h-1Z"/>
+  <path fill="#00F" d="m712 172 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#007200" d="m476 242 2.887-5h-5.774l2.887 5Zm-.5-20v15.5h1V222h-1Z"/>
+  <path fill="#FF8000" d="m501 222 2.887 5h-5.774l2.887-5Zm-.5 20v-15.5h1V242h-1Z"/>
+  <path fill="#007200" d="m582 242 2.887-5h-5.774l2.887 5Zm-.5-20v15.5h1V222h-1Z"/>
+  <path fill="#FF8000" d="m607 222 2.887 5h-5.774l2.887-5Zm-.5 20v-15.5h1V242h-1Z"/>
+  <path fill="#007200" d="m687 242 2.887-5h-5.774l2.887 5Zm-.5-20v15.5h1V222h-1Z"/>
+  <path fill="#FF8000" d="m712 222 2.887 5h-5.774l2.887-5Zm-.5 20v-15.5h1V242h-1Z"/>
+  <path fill="#00F" d="m476 292 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V282h-1Z"/>
+  <path fill="red" d="m501 282 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m582 292 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V282h-1Z"/>
+  <path fill="red" d="m607 282 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m687 292 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V282h-1Z"/>
+  <path fill="red" d="m712 282 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m476 342 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V332h-1Z"/>
+  <path fill="#007200" d="m501 332 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m582 342 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V332h-1Z"/>
+  <path fill="#007200" d="m607 332 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m687 342 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V332h-1Z"/>
+  <path fill="#007200" d="m712 332 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m476 392 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V382h-1Z"/>
+  <path fill="red" d="m501 382 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m582 392 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V382h-1Z"/>
+  <path fill="red" d="m607 382 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#00F" d="m687 392 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V382h-1Z"/>
+  <path fill="red" d="m712 382 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m476 437 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V427h-1Z"/>
+  <path fill="#007200" d="m501 427 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m582 437 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V427h-1Z"/>
+  <path fill="#007200" d="m607 427 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m687 437 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V427h-1Z"/>
+  <path fill="#007200" d="m712 427 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m476 487 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V477h-1Z"/>
+  <path fill="#00F" d="m501 477 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m582 487 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V477h-1Z"/>
+  <path fill="#00F" d="m607 477 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m687 487 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V477h-1Z"/>
+  <path fill="#00F" d="m712 477 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m476 587 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V577h-1Z"/>
+  <path fill="#00F" d="m501 577 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m582 587 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V577h-1Z"/>
+  <path fill="#00F" d="m607 577 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m687 587 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V577h-1Z"/>
+  <path fill="#00F" d="m712 577 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m476 687 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V677h-1Z"/>
+  <path fill="#00F" d="m501 677 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m582 687 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V677h-1Z"/>
+  <path fill="#00F" d="m607 677 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="red" d="m687 687 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V677h-1Z"/>
+  <path fill="#00F" d="m712 677 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m476 537 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V527h-1Z"/>
+  <path fill="#007200" d="m501 527 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m582 537 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V527h-1Z"/>
+  <path fill="#007200" d="m607 527 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m687 537 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V527h-1Z"/>
+  <path fill="#007200" d="m712 527 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m476 637 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V627h-1Z"/>
+  <path fill="#007200" d="m501 627 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m582 637 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V627h-1Z"/>
+  <path fill="#007200" d="m607 627 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m687 637 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V627h-1Z"/>
+  <path fill="#007200" d="m712 627 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m476 737 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V727h-1Z"/>
+  <path fill="#007200" d="m501 727 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m582 737 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V727h-1Z"/>
+  <path fill="#007200" d="m607 727 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path fill="#FF8000" d="m687 737 2.887-5h-5.774l2.887 5Zm-.5-10v5.5h1V727h-1Z"/>
+  <path fill="#007200" d="m712 727 2.887 5h-5.774l2.887-5Zm-.5 10v-5.5h1v5.5h-1Z"/>
+  <path stroke="#FF8000" stroke-linejoin="round" d="M526 132v-10h232"/>
+  <path stroke="#FF8000" d="M631 132v-10M737 132v-10"/>
+  <path stroke="#FF8000" stroke-linejoin="round" d="M663 242v-10H432"/>
+  <path stroke="#FF8000" d="M558 242v-10M452 242v-10"/>
+  <path fill="#FF8000" d="m748 747 5 2.887v-5.774L748 747Zm9.5-690.5h.5c0-.2761-.224-.5-.5-.5v.5Zm0 690.5v.5c.276 0 .5-.224.5-.5h-.5ZM748 57h9.5v-1H748v1Zm9-.5V747h1V56.5h-1Zm.5 690h-5v1h5v-1ZM358 692l5-2.887v5.774L358 692Zm74.5-640h-.5c0-.2761.224-.5.5-.5v.5Zm0 640h.5v.5h-.5v-.5ZM442 52.5h-9.5v-1h9.5v1Zm-9-.5v640h-1V52h1Zm-.5 640.5h-70v-1h70v1Z"/>
+  <path fill="red" d="m240 743 5 2.887v-5.774L240 743Zm202.002-.5H244.5v1h197.502v-1Z"/>
+  <path fill="red" d="m240 743 5 2.887v-5.774L240 743Zm202.002-.5H244.5v1h197.502v-1Z"/>
+  <path fill="#00F" d="m442.002 751-5-2.887v5.774l5-2.887Zm-4.5-.5H240v1h197.502v-1Z"/>
+  <path fill="#000" d="m795 52-5-2.8868v5.7736L795 52Zm-47 .5h42.5v-1H748v1Z"/>
+  <text xml:space="preserve" fill="#000" stroke="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1.27344" y="47.9091">Input Picture</tspan></text>
+  <text xml:space="preserve" fill="#000" stroke="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="749.371" y="47.9091">Bitstream</tspan></text>
+</svg>

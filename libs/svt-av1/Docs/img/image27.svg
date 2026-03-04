@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="465" height="240" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h465v240H0z"/>
+  <path stroke="#000" d="M10 15h20v20H10zM30 15h20v20H30zM50 15h20v20H50zM70 15h20v20H70zM90 15h20v20H90zM10 35h20v20H10zM30 35h20v20H30zM50 35h20v20H50zM70 35h20v20H70zM90 35h20v20H90zM10 55h20v20H10zM30 55h20v20H30z"/>
+  <path fill="#ADCBE9" stroke="#000" d="M50 55h20v20H50z"/>
+  <path stroke="#000" d="M70 55h20v20H70zM90 55h20v20H90zM10 75h20v20H10zM30 75h20v20H30zM50 75h20v20H50zM70 75h20v20H70zM90 75h20v20H90zM10 95h20v20H10zM30 95h20v20H30zM50 95h20v20H50zM70 95h20v20H70zM90 95h20v20H90z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="91.4492" y="27.9091">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="71.4492" y="47.9091">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="31.4492" y="87.9091">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="11.6719" y="107.909">a/16</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="12.1211" y="12.9091">d=0</tspan></text>
+  <path stroke="#000" d="M125 15h20v20h-20zM145 15h20v20h-20zM165 15h20v20h-20zM185 15h20v20h-20zM205 15h20v20h-20zM125 35h20v20h-20zM145 35h20v20h-20zM165 35h20v20h-20zM185 35h20v20h-20zM205 35h20v20h-20zM125 55h20v20h-20zM145 55h20v20h-20z"/>
+  <path fill="#ADCBE9" stroke="#000" d="M165 55h20v20h-20z"/>
+  <path stroke="#000" d="M185 55h20v20h-20zM205 55h20v20h-20zM125 75h20v20h-20zM145 75h20v20h-20zM165 75h20v20h-20zM185 75h20v20h-20zM205 75h20v20h-20zM125 95h20v20h-20zM145 95h20v20h-20zM165 95h20v20h-20zM185 95h20v20h-20zM205 95h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="206.672" y="47.9091">a/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="186.449" y="67.9091">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="146.449" y="67.9091">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="126.672" y="87.9091">a/16</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="127.867" y="12.9091">d=1</tspan></text>
+  <path stroke="#000" d="M240 15h20v20h-20zM260 15h20v20h-20zM280 15h20v20h-20zM300 15h20v20h-20zM320 15h20v20h-20zM240 35h20v20h-20zM260 35h20v20h-20zM280 35h20v20h-20zM300 35h20v20h-20zM320 35h20v20h-20zM240 55h20v20h-20zM260 55h20v20h-20z"/>
+  <path fill="#ADCBE9" stroke="#000" d="M280 55h20v20h-20z"/>
+  <path stroke="#000" d="M300 55h20v20h-20zM320 55h20v20h-20zM240 75h20v20h-20zM260 75h20v20h-20zM280 75h20v20h-20zM300 75h20v20h-20zM320 75h20v20h-20zM240 95h20v20h-20zM260 95h20v20h-20zM280 95h20v20h-20zM300 95h20v20h-20zM320 95h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="321.672" y="67.9091">a/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="301.449" y="67.9091">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.449" y="67.9091">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="241.672" y="67.9091">a/16</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="242.305" y="12.9091">d=2</tspan></text>
+  <path stroke="#000" d="M355 15h20v20h-20zM375 15h20v20h-20zM395 15h20v20h-20zM415 15h20v20h-20zM435 15h20v20h-20zM355 35h20v20h-20zM375 35h20v20h-20zM395 35h20v20h-20zM415 35h20v20h-20zM435 35h20v20h-20zM355 55h20v20h-20zM375 55h20v20h-20z"/>
+  <path fill="#ADCBE9" stroke="#000" d="M395 55h20v20h-20z"/>
+  <path stroke="#000" d="M415 55h20v20h-20zM435 55h20v20h-20zM355 75h20v20h-20zM375 75h20v20h-20zM395 75h20v20h-20zM415 75h20v20h-20zM435 75h20v20h-20zM355 95h20v20h-20zM375 95h20v20h-20zM395 95h20v20h-20zM415 95h20v20h-20zM435 95h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="436.672" y="87.9091">a/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="416.449" y="67.9091">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="376.449" y="67.9091">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="356.672" y="47.9091">a/16</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="357.184" y="12.9091">d=3</tspan></text>
+  <path stroke="#000" d="M10 130h20v20H10zM30 130h20v20H30zM50 130h20v20H50zM70 130h20v20H70zM90 130h20v20H90zM10 150h20v20H10zM30 150h20v20H30zM50 150h20v20H50zM70 150h20v20H70zM90 150h20v20H90zM10 170h20v20H10zM30 170h20v20H30z"/>
+  <path fill="#ADCBE9" stroke="#000" d="M50 170h20v20H50z"/>
+  <path stroke="#000" d="M70 170h20v20H70zM90 170h20v20H90zM10 190h20v20H10zM30 190h20v20H30zM50 190h20v20H50zM70 190h20v20H70zM90 190h20v20H90zM10 210h20v20H10zM30 210h20v20H30zM50 210h20v20H50zM70 210h20v20H70zM90 210h20v20H90z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="91.4492" y="222.909">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="71.4492" y="202.909">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="31.4492" y="162.909">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="11.6719" y="142.909">a/16</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="12.125" y="127.909">d=4</tspan></text>
+  <path stroke="#000" d="M125 130h20v20h-20zM145 130h20v20h-20zM165 130h20v20h-20zM185 130h20v20h-20zM205 130h20v20h-20zM125 150h20v20h-20zM145 150h20v20h-20zM165 150h20v20h-20zM185 150h20v20h-20zM205 150h20v20h-20zM125 170h20v20h-20zM145 170h20v20h-20z"/>
+  <path fill="#ADCBE9" stroke="#000" d="M165 170h20v20h-20z"/>
+  <path stroke="#000" d="M185 170h20v20h-20zM205 170h20v20h-20zM125 190h20v20h-20zM145 190h20v20h-20zM165 190h20v20h-20zM185 190h20v20h-20zM205 190h20v20h-20zM125 210h20v20h-20zM145 210h20v20h-20zM165 210h20v20h-20zM185 210h20v20h-20zM205 210h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="186.672" y="222.909">a/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="166.449" y="202.909">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="166.449" y="162.909">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="146.672" y="142.909">a/16</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="127.258" y="127.909">d=5</tspan></text>
+  <path stroke="#000" d="M240 130h20v20h-20zM260 130h20v20h-20zM280 130h20v20h-20zM300 130h20v20h-20zM320 130h20v20h-20zM240 150h20v20h-20zM260 150h20v20h-20zM280 150h20v20h-20zM300 150h20v20h-20zM320 150h20v20h-20zM240 170h20v20h-20zM260 170h20v20h-20z"/>
+  <path fill="#ADCBE9" stroke="#000" d="M280 170h20v20h-20z"/>
+  <path stroke="#000" d="M300 170h20v20h-20zM320 170h20v20h-20zM240 190h20v20h-20zM260 190h20v20h-20zM280 190h20v20h-20zM300 190h20v20h-20zM320 190h20v20h-20zM240 210h20v20h-20zM260 210h20v20h-20zM280 210h20v20h-20zM300 210h20v20h-20zM320 210h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="281.672" y="222.909">a/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="281.449" y="202.909">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="281.449" y="162.909">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="281.672" y="142.909">a/16</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="242.195" y="127.909">d=6</tspan></text>
+  <path stroke="#000" d="M355 130h20v20h-20zM375 130h20v20h-20zM395 130h20v20h-20zM415 130h20v20h-20zM435 130h20v20h-20zM355 150h20v20h-20zM375 150h20v20h-20zM395 150h20v20h-20zM415 150h20v20h-20zM435 150h20v20h-20zM355 170h20v20h-20zM375 170h20v20h-20z"/>
+  <path fill="#ADCBE9" stroke="#000" d="M395 170h20v20h-20z"/>
+  <path stroke="#000" d="M415 170h20v20h-20zM435 170h20v20h-20zM355 190h20v20h-20zM375 190h20v20h-20zM395 190h20v20h-20zM415 190h20v20h-20zM435 190h20v20h-20zM355 210h20v20h-20zM375 210h20v20h-20zM395 210h20v20h-20zM415 210h20v20h-20zM435 210h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="376.672" y="222.909">a/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="396.449" y="202.909">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="396.449" y="162.909">b/16</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="416.672" y="142.909">a/16</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="357.441" y="127.909">d=7</tspan></text>
+</svg>

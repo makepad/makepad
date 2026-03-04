@@ -1,0 +1,35 @@
+<svg width="520" height="210" viewBox="0 0 520 210" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+    <style>
+        @font-face {
+            font-family: 'Inter';
+            src: url('https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'GitLab Mono';
+            src: url('https://docs.gitlab.com/assets/vendor/GitLabMono.woff2') format('woff2');
+        }
+    </style>
+</defs>
+
+<rect x="1" y="1" width="518" height="208" fill="white"/>
+<rect x="1" y="1" width="518" height="208" stroke="black" stroke-width="2"/>
+<rect x="2" y="2" width="516" height="18" fill="#003972"/>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="26.8633" y="15.3636">PD PASS</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="235.25" y="15.3636">interpolation_search_level</tspan></text>
+<path d="M2 21H518" stroke="black" stroke-width="2"/>
+<path d="M2 38H518" stroke="black" stroke-width="2"/>
+<path d="M2 70H518" stroke="black" stroke-width="2"/>
+<path d="M103 2V208" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="104" y="84.6"> if (</tspan><tspan x="161.246" y="84.6">) then </tspan><tspan x="300.143" y="84.6">&#x2028;</tspan><tspan x="104" y="97.6">    else if (</tspan><tspan x="263.072" y="97.6">) then </tspan><tspan x="365.992" y="97.6">&#x2028;</tspan><tspan x="104" y="110.6">    else if (</tspan><tspan x="257.076" y="110.6">) then </tspan><tspan x="449.938" y="110.6">&#x2028;</tspan><tspan x="104" y="123.6">    else if (</tspan><tspan x="257.076" y="123.6">) then&#x2028;</tspan><tspan x="104" y="136.6">       </tspan><tspan x="104" y="149.6">       else </tspan><tspan x="104" y="162.6">    else if (</tspan><tspan x="257.076" y="162.6">)&#x2028;</tspan><tspan x="104" y="175.6">       if (</tspan><tspan x="284.059" y="175.6">) then </tspan><tspan x="476.92" y="175.6">&#x2028;</tspan><tspan x="104" y="188.6">       else </tspan><tspan x="104" y="201.6">    else </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="134.156" y="136.6">is_used_as_reference_flag</tspan><tspan x="315.025" y="136.6">IT_SEARCH_FAST_LOOP_UV_BLIND&#x2028;</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="121.363" y="136.6">if (</tspan><tspan x="284.059" y="136.6">) then </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="119.273" y="84.6">MR_MODE</tspan><tspan x="192.213" y="84.6">IT_SEARCH_FAST_LOOP</tspan><tspan x="149.146" y="97.6">sc_content_detected</tspan><tspan x="294.039" y="97.6">IT_SEARCH_OFF</tspan><tspan x="149.146" y="110.6">enc_mode &#60;= ENC_M1</tspan><tspan x="288.043" y="110.6">IT_SEARCH_FAST_LOOP_UV_BLIND</tspan><tspan x="149.146" y="123.6">enc_mode &#60;= ENC_M3</tspan><tspan x="143.795" y="149.6">IT_SEARCH_OFF&#x2028;</tspan><tspan x="149.146" y="162.6">enc_mode &#60;= ENC_M7</tspan><tspan x="134.156" y="175.6">temporal_layer_index == 0</tspan><tspan x="315.025" y="175.6">IT_SEARCH_FAST_LOOP_UV_BLIND</tspan><tspan x="143.795" y="188.6">IT_SEARCH_OFF&#x2028;</tspan><tspan x="136.354" y="201.6">IT_SEARCH_OFF</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="2" y="33.1364"> PD_PASS_0</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="104" y="33.1"> </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="106.48" y="33.1">IT_SEARCH_OFF</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="104" y="51.1"> if (</tspan><tspan x="269.176" y="51.1">) then </tspan><tspan x="462.037" y="51.1">&#x2028;</tspan><tspan x="104" y="64.1"> else </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="119.273" y="51.1">temporal_layer_index == 0</tspan><tspan x="300.143" y="51.1">IT_SEARCH_FAST_LOOP_UV_BLIND</tspan><tspan x="128.912" y="64.1">IT_SEARCH_OFF</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="2" y="57.6364"> PD_PASS_1</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="2" y="143.136"> PD_PASS_2</tspan></text>
+</svg>

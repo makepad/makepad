@@ -1,0 +1,66 @@
+<svg width="732" height="450" viewBox="0 0 732 450" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+    <style>
+        @font-face {
+            font-family: 'Inter';
+            src: url('https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2') format('woff2');
+        }
+    </style>
+</defs>
+
+<rect width="732" height="450" fill="white"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="298.993" y="258.136">Set filter to {Regular, Sharp}</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="293.812" y="280.136">Estimate switchable filter rate</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="313.437" y="302.136">Motion compensation</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="266" y="325.136"> Compute distortion and generate cost&#10;</tspan><tspan x="266" y="342.136">   if(cost &#60; best cost){&#x2028;</tspan><tspan x="266" y="354.136">      Set best vertical filter to Sharp&#x2028;</tspan><tspan x="266" y="366.136">      Set best cost to cost&#x2028;</tspan><tspan x="266" y="378.136">   }</tspan></text>
+<rect x="265.5" y="246.5" width="201" height="16" stroke="black"/>
+<rect x="265.5" y="268.5" width="201" height="16" stroke="black"/>
+<rect x="265.5" y="290.5" width="201" height="16" stroke="black"/>
+<rect x="265.5" y="312.5" width="201" height="71" stroke="black"/>
+<rect x="259.5" y="240.5" width="213" height="149" stroke="black"/>
+<path d="M366 240L371.774 230H360.226L366 240ZM365 210V231H367V210H365Z" fill="#5B97D4"/>
+<path d="M117 310H116C116 310.552 116.448 311 117 311V310ZM241.5 310V311C242.052 311 242.5 310.552 242.5 310H241.5ZM241.5 40V39C240.948 39 240.5 39.4477 240.5 40H241.5ZM366 40H367C367 39.4477 366.552 39 366 39V40ZM366 60L371.774 50H360.226L366 60ZM116 290V310H118V290H116ZM117 311H241.5V309H117V311ZM242.5 310V40H240.5V310H242.5ZM241.5 41L366 41V39L241.5 39V41ZM365 40V51H367V40H365Z" fill="#5B97D4"/>
+<path d="M366 410H365C365 410.552 365.448 411 366 411V410ZM490.5 410V411C491.052 411 491.5 410.552 491.5 410H490.5ZM490.5 40V39C489.948 39 489.5 39.4477 489.5 40H490.5ZM615 40H616C616 39.4477 615.552 39 615 39V40ZM615 60L620.774 50H609.226L615 60ZM365 390V410H367V390H365ZM366 411H490.5V409H366V411ZM491.5 410V40H489.5V410H491.5ZM490.5 41L615 41V39L490.5 39V41ZM614 40V51H616V40H614Z" fill="#5B97D4"/>
+<path d="M615 240L620.774 230H609.226L615 240ZM614 210V231H616V210H614Z" fill="#5B97D4"/>
+<path d="M615 420L620.774 410H609.226L615 420ZM614 390V411H616V390H614Z" fill="#5B97D4"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em"><tspan x="542.195" y="435.818">Selected dual filter</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="294.379" y="78.1364">Set filter to {Regular, Smooth}</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="293.812" y="100.136">Estimate switchable filter rate</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="313.437" y="122.136">Motion compensation</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="266" y="145.136"> Compute distortion and generate cost&#10;</tspan><tspan x="266" y="162.136">   if(cost &#60; best cost){&#x2028;</tspan><tspan x="266" y="174.136">      Set best vertical filter to Smooth&#x2028;</tspan><tspan x="266" y="186.136">      Set best cost to cost&#x2028;</tspan><tspan x="266" y="198.136">   }</tspan></text>
+<rect x="265.5" y="66.5" width="201" height="16" stroke="black"/>
+<rect x="265.5" y="88.5" width="201" height="16" stroke="black"/>
+<rect x="265.5" y="110.5" width="201" height="16" stroke="black"/>
+<rect x="265.5" y="132.5" width="201" height="71" stroke="black"/>
+<rect x="259.5" y="60.5" width="213" height="149" stroke="black"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="523.428" y="258.136">Set filter to {Sharp, best vertical filter}</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="542.812" y="280.136">Estimate switchable filter rate</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="562.437" y="302.136">Motion compensation</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="515" y="325.136"> Compute distortion and generate cost&#10;</tspan><tspan x="515" y="342.136">   if(cost &#60; best cost){&#x2028;</tspan><tspan x="515" y="354.136">      Set best horizontal filter to Sharp&#x2028;</tspan><tspan x="515" y="366.136">      Set best cost to cost&#x2028;</tspan><tspan x="515" y="378.136">   }</tspan></text>
+<rect x="514.5" y="246.5" width="201" height="16" stroke="black"/>
+<rect x="514.5" y="268.5" width="201" height="16" stroke="black"/>
+<rect x="514.5" y="290.5" width="201" height="16" stroke="black"/>
+<rect x="514.5" y="312.5" width="201" height="71" stroke="black"/>
+<rect x="508.5" y="240.5" width="213" height="149" stroke="black"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="518.877" y="78.1364">Set filter to {Smooth, best vertical filter}</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="542.812" y="100.136">Estimate switchable filter rate</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="562.437" y="122.136">Motion compensation</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="515" y="145.136"> Compute distortion and generate cost&#10;</tspan><tspan x="515" y="162.136">   if(cost &#60; best cost){&#x2028;</tspan><tspan x="515" y="174.136">      Set best horizontal filter to Smooth&#x2028;</tspan><tspan x="515" y="186.136">      Set best cost to cost&#x2028;</tspan><tspan x="515" y="198.136">   }</tspan></text>
+<rect x="514.5" y="66.5" width="201" height="16" stroke="black"/>
+<rect x="514.5" y="88.5" width="201" height="16" stroke="black"/>
+<rect x="514.5" y="110.5" width="201" height="16" stroke="black"/>
+<rect x="514.5" y="132.5" width="201" height="71" stroke="black"/>
+<rect x="508.5" y="60.5" width="213" height="149" stroke="black"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="45.7207" y="178.136">Set filter to {Regular, Regular}</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="44.8125" y="200.136">Estimate switchable filter rate</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="64.4365" y="222.136">Motion compensation</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="24.8857" y="249.636">Compute distortion and generate cost&#x2028;</tspan><tspan x="39.0654" y="261.636">Set best vertical filter to Regular&#x2028;</tspan><tspan x="67.1172" y="273.636">Set best cost to cost</tspan></text>
+<rect x="16.5" y="166.5" width="201" height="16" stroke="black"/>
+<rect x="16.5" y="188.5" width="201" height="16" stroke="black"/>
+<rect x="16.5" y="210.5" width="201" height="16" stroke="black"/>
+<rect x="16.5" y="232.5" width="201" height="51" stroke="black"/>
+<rect x="10.5" y="160.5" width="213" height="129" stroke="black"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em"><tspan x="81.3633" y="28.7273">Step 1</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em"><tspan x="328.676" y="28.7273">Step 2</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em"><tspan x="577.312" y="28.7273">Step 3</tspan></text>
+</svg>

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="305" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h500v305H0z"/>
+  <path stroke="#000" d="M5.5 233.5h99v16h-99z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="28.2275" y="245.136">No filtering</tspan></text>
+  <path stroke="#000" d="M110.5 233.5h99v51h-99z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="144.316" y="244.636">Filter4 </tspan><tspan x="115.229" y="256.636">Modifies </tspan><tspan x="204.771" y="256.636"> </tspan><tspan x="119.404" y="268.636">samples on each </tspan><tspan x="121.001" y="280.636">side of the edge</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="159.556" y="256.636">up to two</tspan></text>
+  <path stroke="#000" d="M215.5 233.5h124v66h-124z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.919" y="246.136">Filter8 </tspan><tspan x="251.792" y="258.136">7-tap filter </tspan><tspan x="241.431" y="270.136">[1, 1, 1, 2, 1, 1, 1] </tspan><tspan x="221.035" y="282.136">Modifies </tspan><tspan x="291.006" y="282.136"> samples </tspan><tspan x="218.145" y="294.136">on each side of the edge</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="265.361" y="282.136">three</tspan></text>
+  <path stroke="#000" d="M345.5 233.5h149v66h-149z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="401.914" y="246.136">Filter14 </tspan><tspan x="391.567" y="258.136">13-tap filter </tspan><tspan x="353.296" y="270.136">[1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1] </tspan><tspan x="349.141" y="282.136">Modifies </tspan><tspan x="407.188" y="282.136"> samples on each </tspan><tspan x="381.001" y="294.136">side of the edge</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="393.467" y="282.136">six</tspan></text>
+  <mask id="path-9-inside-1_3_23" fill="#fff">
+    <path d="m162 185 115.002-28L392 185l-115 28.001L162 185Z"/>
+  </mask>
+  <path stroke="#000" stroke-width="2" d="m162 185 115.002-28L392 185l-115 28.001L162 185Z" mask="url(#path-9-inside-1_3_23)"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="236.243" y="182.636">Filter_Length = 8 </tspan><tspan x="231.395" y="194.636">or Flat_Mask2 = 0?</tspan></text>
+  <mask id="path-11-inside-2_3_23" fill="#fff">
+    <path d="m162 109 115.002-28.0004L392 109l-115 28.001L162 109Z"/>
+  </mask>
+  <path stroke="#000" stroke-width="2" d="m162 109 115.002-28.0004L392 109l-115 28.001L162 109Z" mask="url(#path-11-inside-2_3_23)"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="229.876" y="106.636">Filter_Length = 4 or </tspan><tspan x="240.765" y="118.636">Flat_Mask = 0?</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="280" y="74.6364">No (i.e. Artifact)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64" y="29.6364">Yes (i.e. True edge)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="280" y="150.636">No</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="397" y="181.636">No</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="280" y="226.636">Yes</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="138" y="112.636">Yes</tspan></text>
+  <mask id="path-19-inside-3_3_23" fill="#fff">
+    <path d="M162 33 277.002 4.99962 392 33 277 61.0011 162 33Z"/>
+  </mask>
+  <path stroke="#000" stroke-width="2" d="M162 33 277.002 4.99962 392 33 277 61.0011 162 33Z" mask="url(#path-19-inside-3_3_23)"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="237.415" y="30.6364">Filter_Mask = 0? </tspan><tspan x="212.444" y="42.6364">(i.e. True edge or artifact?)</tspan></text>
+  <path stroke="#000" d="M277 60v22M277 136v22M277 212v22M166.2 33H55v200M166 109h-6v124M388 185h32v48"/>
+</svg>

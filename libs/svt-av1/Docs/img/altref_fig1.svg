@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="626" height="171" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h626v171H0z"/>
+  <path fill="#000" d="M17.5 30c-.2761 0-.5.2239-.5.5s.2239.5.5.5v-1Zm588.5.5-5-2.8867v5.7735l5-2.8868ZM17.5 31h584v-1h-584v1Z"/>
+  <path stroke="#000" d="M37.5 60.5h90v60h-90zM147.5 60.5h90v60h-90zM257.5 60.5h90v60h-90zM367.5 60.5h90v60h-90zM477.5 60.5h90v60h-90z"/>
+  <path fill="#000" d="M303 121c0-.276-.224-.5-.5-.5s-.5.224-.5.5h1Zm-110.5 0-2.78 5.06 5.772-.122L192.5 121Zm109.5 0c0 2.96-.122 10.158-6.908 16.638C288.29 144.134 274.695 150 247.5 150v1c27.305 0 41.21-5.884 48.283-12.638C302.872 131.592 303 124.04 303 121h-1Zm-54.5 29c-24.159 0-37.59-3.25-45.059-7.921-3.721-2.328-5.962-5.008-7.321-7.825-1.362-2.824-1.852-5.815-2.025-8.785l-.999.058c.178 3.035.682 6.172 2.124 9.161 1.445 2.997 3.819 5.817 7.691 8.239 7.717 4.827 21.388 8.073 45.589 8.073v-1Z"/>
+  <path fill="#000" d="M303 121c0-.276-.224-.5-.5-.5s-.5.224-.5.5h1Zm-220.5 0-2.7733 5.064 5.772-.13L82.5 121Zm219.5 0c0 2.482-.094 6.083-1.886 10.109-1.789 4.021-5.292 8.51-12.185 12.714-13.815 8.425-41.197 15.677-95.429 15.677v1c54.272 0 81.89-7.248 95.949-15.823 7.044-4.296 10.697-8.932 12.579-13.161C302.907 127.292 303 123.518 303 121h-1Zm-109.5 38.5c-49.558 0-76.702-4.594-91.564-11.156-7.4176-3.276-11.7444-7.029-14.2815-10.919-2.5372-3.89-3.3178-7.966-3.5539-11.955l-.9982.059c.2415 4.08 1.0455 8.35 3.7145 12.442 2.6691 4.092 7.1699 7.955 14.7161 11.288 15.066 6.653 42.393 11.241 91.967 11.241v-1Z"/>
+  <path fill="#000" d="M302 121c0-.276.224-.5.5-.5s.5.224.5.5h-1Zm220.5 0 2.785 5.057-5.772-.116L522.5 121ZM303 121c0 2.478.125 6.078 1.962 10.105 1.835 4.022 5.401 8.512 12.358 12.717 13.94 8.426 41.449 15.678 95.68 15.678v1c-54.273 0-82.014-7.248-96.198-15.822-7.105-4.295-10.82-8.93-12.75-13.158-1.927-4.223-2.052-7.998-2.052-10.52h1Zm110 38.5c49.558 0 76.597-4.594 91.345-11.156 7.36-3.275 11.627-7.027 14.116-10.915 2.488-3.889 3.23-7.966 3.449-11.957l.998.055c-.223 4.078-.986 8.348-3.605 12.441-2.62 4.093-7.062 7.957-14.552 11.29C489.798 155.912 462.574 160.5 413 160.5v-1Z"/>
+  <path fill="#000" d="M302 121c0-.276.224-.5.5-.5s.5.224.5.5h-1Zm110.5 0 2.8 5.049-5.773-.1L412.5 121ZM303 121c0 3.001.243 10.203 7.154 16.673C317.083 144.16 330.806 150 358 150v1c-27.306 0-41.333-5.859-48.529-12.597C302.257 131.649 302 124.1 302 121h1Zm55 29c24.16 0 37.49-3.25 44.848-7.919 3.665-2.326 5.849-5.005 7.159-7.821 1.314-2.824 1.764-5.815 1.916-8.788l.998.051c-.155 3.033-.616 6.169-2.007 9.159-1.395 2.998-3.711 5.82-7.53 8.243C395.774 147.754 382.2 151 358 151v-1Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="76" y="55.7273">-2</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="186" y="55.7273">-1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="298" y="55.7273">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="409" y="55.7273">1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="518" y="55.7273">2</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="581" y="25.7273">t</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="13" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="280" y="86.7273">central </tspan><tspan x="280" y="102.727">picture</tspan></text>
+</svg>

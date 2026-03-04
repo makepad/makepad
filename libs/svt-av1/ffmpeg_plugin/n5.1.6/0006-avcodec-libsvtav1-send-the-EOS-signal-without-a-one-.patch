@@ -1,0 +1,46 @@
+From 7046092ceaf11a888c4b61ab66d711308713797c Mon Sep 17 00:00:00 2001
+From: Cosmin Stejerean <cosmin@cosmin.at>
+Date: Fri, 23 Feb 2024 23:21:39 +0000
+Subject: [PATCH 6/6] avcodec/libsvtav1: send the EOS signal without a one
+ frame delay to allow for the library to operate in a low-delay mode
+
+Co-authored-by: Amir Naghdinezhad <amir.naghdinezhad@intel.com>
+Signed-off-by: Cosmin Stejerean <cosmin@cosmin.at>
+Signed-off-by: James Almer <jamrial@gmail.com>
+---
+ libavcodec/libsvtav1.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index ab95992ba6..3d3c251921 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -533,6 +533,14 @@ static int eb_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
+     if (svt_ret == EB_NoErrorEmptyQueue)
+         return AVERROR(EAGAIN);
+ 
++#if SVT_AV1_CHECK_VERSION(2, 0, 0)
++    if (headerPtr->flags & EB_BUFFERFLAG_EOS) {
++         svt_enc->eos_flag = EOS_RECEIVED;
++         svt_av1_enc_release_out_buffer(&headerPtr);
++         return AVERROR_EOF;
++    }
++#endif
++
+     ref = get_output_ref(avctx, svt_enc, headerPtr->n_filled_len);
+     if (!ref) {
+         av_log(avctx, AV_LOG_ERROR, "Failed to allocate output packet.\n");
+@@ -567,8 +575,10 @@ static int eb_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
+     if (headerPtr->pic_type == EB_AV1_NON_REF_PICTURE)
+         pkt->flags |= AV_PKT_FLAG_DISPOSABLE;
+ 
++#if !(SVT_AV1_CHECK_VERSION(2, 0, 0))
+     if (headerPtr->flags & EB_BUFFERFLAG_EOS)
+         svt_enc->eos_flag = EOS_RECEIVED;
++#endif
+ 
+     ff_side_data_set_encoder_stats(pkt, headerPtr->qp * FF_QP2LAMBDA, NULL, 0, pict_type);
+ 
+-- 
+2.46.0
+

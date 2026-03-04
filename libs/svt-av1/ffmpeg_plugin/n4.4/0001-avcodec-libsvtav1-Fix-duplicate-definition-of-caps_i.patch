@@ -1,0 +1,36 @@
+From 6b1121f90508fa02739fb8fa698e9e47d9949cf5 Mon Sep 17 00:00:00 2001
+From: Limin Wang <lance.lmwang@gmail.com>
+Date: Tue, 24 Aug 2021 18:27:07 +0800
+Subject: [PATCH 01/25] avcodec/libsvtav1: Fix duplicate definition of
+ caps_internal
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Reviewed-by: Jan Ekström <jeebjp@gmail.com>
+Signed-off-by: Limin Wang <lance.lmwang@gmail.com>
+---
+ libavcodec/libsvtav1.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index cfd93a2484..138241b736 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -561,12 +561,11 @@ AVCodec ff_libsvtav1_encoder = {
+     .receive_packet = eb_receive_packet,
+     .close          = eb_enc_close,
+     .capabilities   = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_OTHER_THREADS,
+-    .caps_internal  = FF_CODEC_CAP_AUTO_THREADS,
++    .caps_internal  = FF_CODEC_CAP_AUTO_THREADS | FF_CODEC_CAP_INIT_CLEANUP,
+     .pix_fmts       = (const enum AVPixelFormat[]){ AV_PIX_FMT_YUV420P,
+                                                     AV_PIX_FMT_YUV420P10,
+                                                     AV_PIX_FMT_NONE },
+     .priv_class     = &class,
+     .defaults       = eb_enc_defaults,
+-    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
+     .wrapper_name   = "libsvtav1",
+ };
+-- 
+2.44.0
+

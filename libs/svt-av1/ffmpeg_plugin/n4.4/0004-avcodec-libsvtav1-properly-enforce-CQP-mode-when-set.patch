@@ -1,0 +1,29 @@
+From 5162294f8af44787c387984749efec887b350335 Mon Sep 17 00:00:00 2001
+From: Limin Wang <lance.lmwang@gmail.com>
+Date: Sat, 25 Sep 2021 22:09:05 +0800
+Subject: [PATCH 04/25] avcodec/libsvtav1: properly enforce CQP mode when set
+ in wrapper
+
+SVT-AV1 seems to have switched their default from CQP to CRF in February,
+so enforce the controlling option accordingly.
+
+Signed-off-by: Limin Wang <lance.lmwang@gmail.com>
+---
+ libavcodec/libsvtav1.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 173979756d..24800d1eaf 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -205,6 +205,7 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+         param->frame_rate_denominator = avctx->time_base.num * avctx->ticks_per_frame;
+     }
+ 
++    param->enable_tpl_la = !!param->rate_control_mode;
+     if (param->rate_control_mode) {
+         param->max_qp_allowed       = avctx->qmax;
+         param->min_qp_allowed       = avctx->qmin;
+-- 
+2.44.0
+

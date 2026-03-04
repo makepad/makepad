@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="250" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h640v250H0z"/>
+  <path fill="#AEEAAE" stroke="#000" d="M100.5 190.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="118.33" y="222.273">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M160.5 10.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="180.195" y="42.2727">1</tspan></text>
+  <path fill="#AEEAAE" stroke="#000" d="M580.5 190.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="598.545" y="222.273">8</tspan></text>
+  <path fill="#E9E9AD" stroke="#000" d="M220.5 70.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="238.789" y="102.273">2</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M280.5 10.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="298.486" y="42.2727">3</tspan></text>
+  <path fill="#E9ADAD" stroke="#000" d="M340.5 130.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="358.34" y="162.273">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M400.5 10.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="418.672" y="42.2727">5</tspan></text>
+  <path fill="#E9E9AD" stroke="#000" d="M460.5 70.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="478.516" y="102.273">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M520.5 10.5h49v49h-49z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="539.131" y="42.2727">7</tspan></text>
+  <path fill="#000" d="m220 70-1.494-5.5768-4.083 4.0825L220 70Zm-10.854-10.1464 7.318 7.318.708-.7071-7.318-7.3181-.708.7072ZM270 70l1.494-5.5768 4.083 4.0825L270 70Zm10.854-10.1464-7.318 7.318-.708-.7071 7.318-7.3181.708.7072ZM460 70l-1.494-5.5768-4.083 4.0825L460 70Zm-10.854-10.1464 7.318 7.318.708-.7071-7.318-7.3181-.708.7072ZM510 70l1.494-5.5768 4.083 4.0825L510 70Zm10.854-10.1464-7.318 7.318-.708-.7071 7.318-7.3181.708.7072ZM140 190l3.628-4.491-5.704-.896L140 190Zm20.006-130.5776L140.204 185.477l.988.155 19.802-126.0544-.988-.1552ZM150 190l5.577-1.494-4.083-4.083L150 190Zm70.146-70.854-67.318 67.318.708.708 67.318-67.318-.708-.708ZM340 130l-4.52-3.592-.851 5.711L340 130Zm-70.574-10.005 66.049 9.837.148-.989-66.049-9.838-.148.99ZM350 130l1.376-5.607-5.544 1.612L350 130Zm-20.98-70.3604 19.243 66.1794.961-.28-19.244-66.1786-.96.2792ZM390 130l4.52-3.592.85 5.711L390 130Zm70.573-10.005-66.049 9.837-.147-.989 66.049-9.838.147.99ZM380 130l-1.376-5.607 5.544 1.612L380 130Zm20.98-70.3604-19.243 66.1794-.961-.28 19.244-66.1786.96.2792ZM150 200l5.28 2.335-.617-5.74L150 200Zm190.447-20.997-186.026 20.018.107.995 186.025-20.019-.106-.994ZM150 210l5 2.887v-5.774L150 210Zm430-.5H154.5v1H580v-1ZM580 200l-4.662-3.405-.618 5.74L580 200Zm-190.553-20.003 186.025 20.019.107-.995-186.026-20.018-.106.994ZM580 190l-1.494-5.577-4.083 4.083L580 190Zm-70.854-70.146 67.318 67.318.708-.708-67.318-67.318-.708.708ZM590 190l2.076-5.387-5.703.896L590 190ZM569.006 59.5776l19.802 126.0544.988-.155-19.802-126.0546-.988.1552Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 100 100)"><tspan x=".576172" y="32.2727">Temporal Layer</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="56.9961" y="221.727">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="59.2344" y="161.727">1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="57.5469" y="95.7273">2</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="57.1836" y="41.7273">3</tspan></text>
+</svg>

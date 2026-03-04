@@ -1,0 +1,107 @@
+<svg width="1088" height="600" viewBox="0 0 1088 600" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+    <style>
+        @font-face {
+            font-family: 'Inter';
+            src: url('https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2') format('woff2');
+        }
+    </style>
+</defs>
+
+<rect width="1088" height="600" fill="white"/>
+<rect x="100.5" y="50.5" width="977" height="499" stroke="black"/>
+<rect x="176" y="91" width="863" height="93" rx="14" fill="#E9E9AD" stroke="black" stroke-width="2"/>
+<rect x="576" y="141" width="458" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="673.914" y="164.364">Inter-class Decision (retire a class if need be)</tspan></text>
+<rect x="576" y="96" width="98" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="579.549" y="111.864">Class 0 Stage 0&#x2028;</tspan><tspan x="599.904" y="126.864">Decision</tspan></text>
+<rect x="686" y="96" width="98" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="690.668" y="111.864">Class 1 Stage 0&#x2028;</tspan><tspan x="709.904" y="126.864">Decision</tspan></text>
+<rect x="796" y="96" width="98" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="799.824" y="111.864">Class 2 Stage 0&#x2028;</tspan><tspan x="819.904" y="126.864">Decision</tspan></text>
+<rect x="936" y="96" width="98" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="939.408" y="111.864">Class X Stage 0&#x2028;</tspan><tspan x="959.904" y="126.864">Decision</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em"><tspan x="906.299" y="122.273">...</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-style="italic" font-weight="600" letter-spacing="0em"><tspan x="186.303" y="141.864">MD Stage 0</tspan></text>
+<text fill="#003972" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em"><tspan x="265" y="122">N_MD_0 input candidates&#x2028;</tspan><tspan x="265" y="135">Reduce the total number of candidates to&#x2028;</tspan><tspan x="265" y="148">N_MD_1 &#60;&#60; N_MD_0&#x2028;</tspan><tspan x="265" y="161">Using tools/metrics such as prediction, SAD</tspan></text>
+<rect x="176" y="211" width="863" height="93" rx="14" fill="#E9E9AD" stroke="black" stroke-width="2"/>
+<rect x="576" y="261" width="458" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="673.914" y="284.364">Inter-class Decision (retire a class if need be)</tspan></text>
+<rect x="576" y="216" width="98" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="580.668" y="231.864">Class 0 Stage 1&#x2028;</tspan><tspan x="599.904" y="246.864">Decision</tspan></text>
+<rect x="686" y="216" width="98" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="691.787" y="231.864">Class 1 Stage 1&#x2028;</tspan><tspan x="709.904" y="246.864">Decision</tspan></text>
+<rect x="796" y="216" width="98" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="800.943" y="231.864">Class 2 Stage 1&#x2028;</tspan><tspan x="819.904" y="246.864">Decision</tspan></text>
+<rect x="936" y="216" width="98" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="940.527" y="231.864">Class X Stage 1&#x2028;</tspan><tspan x="959.904" y="246.864">Decision</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em"><tspan x="906.299" y="242.273">...</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-style="italic" font-weight="600" letter-spacing="0em"><tspan x="187.422" y="261.864">MD Stage 1</tspan></text>
+<text fill="#003972" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em"><tspan x="265" y="235.5">N_MD_1 input candidates&#x2028;</tspan><tspan x="265" y="248.5">Reduce the total number of candidates to&#x2028;</tspan><tspan x="265" y="261.5">N_MD_2 &#60;&#60; N_MD_1&#x2028;</tspan><tspan x="265" y="274.5">Using tools/metrics such as prediction, SAD, interpolation </tspan><tspan x="265" y="287.5">search</tspan></text>
+<rect x="176" y="331" width="798" height="93" rx="14" fill="#E9E9AD" stroke="black" stroke-width="2"/>
+<rect x="576" y="381" width="393" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="641.414" y="404.364">Inter-class Decision (retire a class if need be)</tspan></text>
+<rect x="576" y="336" width="123" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="578.801" y="351.864">e.g. Class 2 Stage m&#x2028;</tspan><tspan x="612.404" y="366.864">Decision</tspan></text>
+<rect x="711" y="336" width="123" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="713.73" y="351.864">e.g. Class 5 Stage m&#x2028;</tspan><tspan x="747.404" y="366.864">Decision</tspan></text>
+<rect x="846" y="336" width="123" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="848.637" y="351.864">e.g. Class 6 Stage m&#x2028;</tspan><tspan x="882.404" y="366.864">Decision</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-style="italic" font-weight="600" letter-spacing="0em"><tspan x="184.92" y="381.864">MD Stage m</tspan></text>
+<text fill="#003972" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em"><tspan x="265" y="355.5">N_MD_(m-1) input candidates&#x2028;</tspan><tspan x="265" y="368.5">Reduce the total number of candidates to N_MD_m &#60;&#60; </tspan><tspan x="265" y="381.5">N_MD_(m-1)&#x2028;</tspan><tspan x="265" y="394.5">Using tools/metrics such as prediction, SSE, partial </tspan><tspan x="265" y="407.5">frequency transform, transform, quantization</tspan></text>
+<rect x="176" y="451" width="663" height="93" rx="14" fill="#E9E9AD" stroke="black" stroke-width="2"/>
+<rect x="576" y="501" width="258" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="647.227" y="524.364">Inter-class Decision</tspan></text>
+<rect x="576" y="456" width="123" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="580.459" y="471.864">e.g. Class 5 Stage n&#x2028;</tspan><tspan x="612.404" y="486.864">Decision</tspan></text>
+<rect x="711" y="456" width="123" height="38" rx="9" fill="#AEEAAE" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="716.373" y="471.864">e.g. Class 1 Stage n&#x2028;</tspan><tspan x="747.404" y="486.864">Decision</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-style="italic" font-weight="600" letter-spacing="0em"><tspan x="181.648" y="501.864">MD Stage n</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="8" font-style="italic" font-weight="600" letter-spacing="0em"><tspan x="248.477" y="504.909">MD</tspan></text>
+<text fill="#003972" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em"><tspan x="265" y="475.5">N_MD_(m-1) input candidates&#x2028;</tspan><tspan x="265" y="488.5">Reduce the total number of candidates to N_MD_n &#60;&#60; </tspan><tspan x="265" y="501.5">N_MD_(n-1)&#x2028;</tspan><tspan x="265" y="514.5">Using tools/metrics such as prediction, SSE, transform, </tspan><tspan x="265" y="527.5">quantization, adaptive transform block, TX Search</tspan></text>
+<rect x="105.5" y="90.5" width="39" height="454" fill="#ADCBE9" stroke="black"/>
+<text transform="matrix(0 -1 1 0 105 545)" fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em"><tspan x="176.025" y="25.0909">Neighbor Array</tspan></text>
+<path d="M175 138L165 132.226V143.774L175 138ZM145 139H166V137H145V139Z" fill="black"/>
+<path d="M175 258L165 252.226V263.774L175 258ZM145 259H166V257H145V259Z" fill="black"/>
+<path d="M175 375L165 369.226V380.774L175 375ZM145 376H166V374H145V376Z" fill="black"/>
+<path d="M145 497L155 502.774V491.226L145 497ZM154 498H175V496H154V498Z" fill="black"/>
+<text transform="matrix(0 -1 1 0 239 330)" fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em"><tspan x="3.79883" y="17.2727">...</tspan></text>
+<text transform="matrix(0 -1 1 0 239 450)" fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em"><tspan x="3.79883" y="17.2727">...</tspan></text>
+<text fill="#003972" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="603.455" y="66.8636">Class 0&#x2028;</tspan><tspan x="594.83" y="81.8636">(e.g. Intra)</tspan></text>
+<text fill="#003972" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="714.574" y="66.8636">Class 1&#x2028;</tspan><tspan x="704.695" y="81.8636">(e.g. Inter)</tspan></text>
+<text fill="#003972" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="823.73" y="66.8636">Class 2&#x2028;</tspan><tspan x="803.58" y="81.8636">(e.g. MV pred)</tspan></text>
+<text fill="#003972" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="963.314" y="66.8636">Class X&#x2028;</tspan><tspan x="949.691" y="81.8636">(e.g. OBMC)</tspan></text>
+<path d="M625 215L630.774 205H619.226L625 215ZM624 180V206H626V180H624Z" fill="black"/>
+<path d="M735 215L740.774 205H729.226L735 215ZM734 180V206H736V180H734Z" fill="black"/>
+<path d="M845 215L850.774 205H839.226L845 215ZM844 180V206H846V180H844Z" fill="black"/>
+<path d="M985 215L990.774 205H979.226L985 215ZM984 180V206H986V180H984Z" fill="black"/>
+<path d="M638 335L643.774 325H632.226L638 335ZM637 300V326H639V300H637Z" fill="black"/>
+<path d="M773 335L778.774 325H767.226L773 335ZM772 300V326H774V300H772Z" fill="black"/>
+<path d="M908 335L913.774 325H902.226L908 335ZM907 300V326H909V300H907Z" fill="black"/>
+<path d="M638 455L643.774 445H632.226L638 455ZM637 420V446H639V420H637Z" fill="black"/>
+<path d="M773 455L778.774 445H767.226L773 455ZM772 420V446H774V420H772Z" fill="black"/>
+<mask id="path-72-inside-1_28_2136" fill="white">
+<path d="M65 500H85V130H95L75 100L55 130H65V500Z"/>
+</mask>
+<path d="M65 500H85V130H95L75 100L55 130H65V500Z" fill="url(#paint0_linear_28_2136)" stroke="#808080" stroke-width="2" mask="url(#path-72-inside-1_28_2136)"/>
+<mask id="path-73-inside-2_28_2136" fill="white">
+<path d="M20 100H40V470H50L30 500L10 470H20V100Z"/>
+</mask>
+<path d="M20 100H40V470H50L30 500L10 470H20V100Z" fill="url(#paint1_linear_28_2136)" stroke="#808080" stroke-width="2" mask="url(#path-73-inside-2_28_2136)"/>
+<text transform="matrix(0 -1 1 0 65 500)" fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="102.928" y="14.3636">Increasing Number of Candidates </tspan></text>
+<text transform="matrix(0 -1 1 0 20 500)" fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em"><tspan x="85.9238" y="14.3636">Increasing Decision Making Complexity </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="14" font-style="italic" font-weight="600" letter-spacing="0em"><tspan x="449.575" y="20.0909">Candidates from PD stage n</tspan></text>
+<path d="M544 50L549.774 40H538.226L544 50ZM543 25V41H545V25H543Z" fill="black"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="14" font-style="italic" font-weight="600" letter-spacing="0em"><tspan x="449.63" y="590.091">Candidates to PD stage n+2</tspan></text>
+<path d="M544 575L549.774 565H538.226L544 575ZM543 550V566H545V550H543Z" fill="black"/>
+<defs>
+<linearGradient id="paint0_linear_28_2136" x1="75" y1="100" x2="75" y2="500" gradientUnits="userSpaceOnUse">
+<stop stop-color="#A6A6A6"/>
+<stop offset="0.5" stop-color="white"/>
+</linearGradient>
+<linearGradient id="paint1_linear_28_2136" x1="30" y1="100" x2="30" y2="500" gradientUnits="userSpaceOnUse">
+<stop offset="0.5" stop-color="white"/>
+<stop offset="1" stop-color="#A6A6A6"/>
+</linearGradient>
+</defs>
+</svg>

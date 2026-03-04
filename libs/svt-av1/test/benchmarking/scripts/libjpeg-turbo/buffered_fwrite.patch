@@ -1,0 +1,25 @@
+diff --git a/src/djpeg.c b/src/djpeg.c
+index fe559fae..fd220a79 100644
+--- a/src/djpeg.c
++++ b/src/djpeg.c
+@@ -855,6 +855,7 @@ main(int argc, char **argv)
+ 
+   /* Normal full-image decompress */
+   } else {
++    setvbuf(output_file, NULL, _IOFBF, 8*1024*1024);
+     /* Write output file header */
+     (*dest_mgr->start_output) (&cinfo, dest_mgr);
+ 
+diff --git a/src/wrppm.c b/src/wrppm.c
+index 749febf1..555ec64a 100644
+--- a/src/wrppm.c
++++ b/src/wrppm.c
+@@ -94,7 +94,7 @@ put_pixel_rows(j_decompress_ptr cinfo, djpeg_dest_ptr dinfo,
+ {
+   ppm_dest_ptr dest = (ppm_dest_ptr)dinfo;
+ 
+-  fwrite(dest->iobuffer, 1, dest->buffer_width, dest->pub.output_file);
++  fwrite(dest->iobuffer, dest->buffer_width, 1, dest->pub.output_file);
+ }
+ 
+ 

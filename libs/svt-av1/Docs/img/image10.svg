@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="590" height="420" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h590v420H0z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="64.1953" y="40.3182">Input Signal</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="191.555" y="21.3182"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-style="italic" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="18.8672" y="21.3182">Enhanced Input Picture</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-style="italic" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="187.508" y="391.318">Enhanced Input Picture </tspan><tspan x="234.336" y="410.318">Reference Lists</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="373.477" y="391.318">and </tspan></text>
+  <path fill="#FC6" stroke="#000" stroke-width="2" d="M11 101h234v98H11z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="16.6641" y="155.818">0</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M33 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="40.1562" y="155.818">1</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M55 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="61.0312" y="155.818">2</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M77 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 149 49)"><tspan x="35.5547" y="15.8182">n-1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 211 -13)"><tspan x="33.25" y="15.8182">m-1</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M121 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.0391" y="156.818">...</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M99 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="165.039" y="155.818">...</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M223 102v96M11 271h568v48H11z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="174.449" y="303.727">Picture Management</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="45.8672" y="231.591">Release </tspan><tspan x="48.4443" y="248.591">Picture</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="138.069" y="76.5909">Enhanced Input </tspan><tspan x="144.256" y="93.5909">Picture Buffer</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="167.924" y="231.591">Read </tspan><tspan x="160.944" y="248.591">Picture</tspan></text>
+  <path fill="#000" d="m110 100 5.774-10h-11.548L110 100Zm-1-50v41h2V50h-2Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="398.195" y="40.3182">Input Signal</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="504.328" y="21.3182"> </tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-style="italic" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="374.094" y="21.3182">Reference Picture</tspan></text>
+  <path fill="#CF6" stroke="#000" stroke-width="2" d="M345 101h234v98H345z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="350.664" y="155.818">0</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M367 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="374.156" y="155.818">1</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M389 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="395.031" y="155.818">2</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M411 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 316 -118)"><tspan x="35.5547" y="15.8182">n-1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 378 -180)"><tspan x="33.25" y="15.8182">m-1</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M455 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="415.039" y="156.818">...</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M433 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="499.039" y="155.818">...</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M557 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="490.417" y="76.5909">Reference </tspan><tspan x="478.256" y="93.5909">Picture Buffer</tspan></text>
+  <path fill="#000" d="m444 100 5.774-10h-11.548L444 100Zm-1-50v41h2V50h-2ZM295 370l5.774-10h-11.548L295 370Zm-1-50v41h2v-41h-2ZM105 200l-5.7735 10h11.5475L105 200Zm-1 9v61h2v-61h-2ZM155 270l-5.774-10h11.548L155 270Zm-1-9v-61h2v61h-2Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="340.867" y="231.591">Release </tspan><tspan x="343.444" y="248.591">Picture</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="432.924" y="231.591">Read </tspan><tspan x="425.944" y="248.591">Picture</tspan></text>
+  <path fill="#000" d="m400 200-5.774 10h11.548L400 200Zm-1 9v61h2v-61h-2ZM420 270l-5.774-10h11.548L420 270Zm-1-9v-61h2v61h-2Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="517.243" y="223.091">Create </tspan><tspan x="505.485" y="240.091">Reference </tspan><tspan x="521.898" y="257.091">Entry</tspan></text>
+  <path fill="#000" d="m500 200 5.774 10h-11.548L500 200Zm-1 70v-61h2v61h-2Z"/>
+</svg>

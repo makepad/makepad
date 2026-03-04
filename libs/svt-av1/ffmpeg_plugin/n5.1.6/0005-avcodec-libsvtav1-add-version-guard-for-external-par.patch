@@ -1,0 +1,34 @@
+From bd079ce3500f9558527852f432875f97f7f92dcb Mon Sep 17 00:00:00 2001
+From: Gyan Doshi <ffmpeg@gyani.pro>
+Date: Wed, 8 Nov 2023 10:15:19 +0530
+Subject: [PATCH 5/6] avcodec/libsvtav1: add version guard for external param
+
+Setting of external param 'force_key_frames' was added in 7bcc1b4eb8.
+It is available since v1.1.0 but ffmpeg allows linking against v0.9.0.
+---
+ libavcodec/libsvtav1.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 9b4cce7072..ab95992ba6 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -250,6 +250,7 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+     if (avctx->gop_size > 1)
+         param->intra_period_length  = avctx->gop_size - 1;
+ 
++#if SVT_AV1_CHECK_VERSION(1, 1, 0)
+     // In order for SVT-AV1 to force keyframes by setting pic_type to
+     // EB_AV1_KEY_PICTURE on any frame, force_key_frames has to be set. Note
+     // that this does not force all frames to be keyframes (it only forces a
+@@ -260,6 +261,7 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+     // to be updated to set force_key_frames accordingly.
+     if (avctx->gop_size == 1)
+         param->force_key_frames = 1;
++#endif
+ 
+     if (avctx->framerate.num > 0 && avctx->framerate.den > 0) {
+         param->frame_rate_numerator   = avctx->framerate.num;
+-- 
+2.46.0
+

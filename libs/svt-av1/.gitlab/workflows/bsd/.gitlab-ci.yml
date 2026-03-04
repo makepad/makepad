@@ -1,0 +1,50 @@
+#
+# BSD-like CI jobs
+#
+
+#
+# Anchors
+#
+
+.bsd-compiler-base:
+  extends: .common-ci-base
+  stage: standalone
+  dependencies: []
+  tags:
+    - gitlab-org
+  image: registry.gitlab.com/aomediacodec/aom-testing/ubuntu2404-bsd
+  before_script:
+    - |
+      case $CROSS_TARGET in
+      freebsd) EXTRA_CMAKE_FLAGS="--toolchain=/opt/cross-freebsd/toolchain.cmake${EXTRA_CMAKE_FLAGS:+ $EXTRA_CMAKE_FLAGS}" ;;
+      openbsd) EXTRA_CMAKE_FLAGS="--toolchain=/opt/cross-openbsd/toolchain.cmake${EXTRA_CMAKE_FLAGS:+ $EXTRA_CMAKE_FLAGS}" ;;
+      esac
+  script: !reference [.compiler-script]
+
+FreeBSD (Clang):
+  extends: .bsd-compiler-base
+  variables:
+    GIT_DEPTH: 0
+    CROSS_TARGET: freebsd
+  parallel:
+    matrix:
+      - CMAKE_BUILD_TYPE: [Release, Debug]
+  artifacts:
+    untracked: false
+    expire_in: 30 days
+    paths:
+      - Bin/*/SvtAv1EncApp
+
+OpenBSD (Clang):
+  extends: .bsd-compiler-base
+  variables:
+    GIT_DEPTH: 0
+    CROSS_TARGET: openbsd
+  parallel:
+    matrix:
+      - CMAKE_BUILD_TYPE: [Release, Debug]
+  artifacts:
+    untracked: false
+    expire_in: 30 days
+    paths:
+      - Bin/*/SvtAv1EncApp

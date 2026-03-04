@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="995" height="185" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#EAEAAE" d="M1 1h993v183H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h993v183H1z"/>
+  <path fill="#003972" d="M2 2h991v18H2z"/>
+  <path stroke="#000" stroke-width="2" d="M2 19h991M125 2v16M340 2v16M515 2v16M705 2v16M855 2v16"/>
+  <path fill="#5B98D4" d="M340 40h653v110H340z"/>
+  <path fill="#ADCBE9" d="M340 150h653v33H340z"/>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="30.38"> warped_motion_prediction</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="125" y="160.38">chroma_plane_warped_motion_prediction_sub8x8</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="125" y="30.38">... </tspan><tspan x="125" y="40.38">plane_warped_motion_prediction</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="340" y="40.38">... </tspan><tspan x="340" y="50.38">svt_av1_warp_plane </tspan><tspan x="340" y="60.38">svt_av1_dist_wtd_comp_weight_assign </tspan><tspan x="340" y="70.38">av1_make_masked_warp_inter_predictor</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="340" y="160.38">... </tspan><tspan x="340" y="170.38">svt_av1_dist_wtd_comp_weight_assign </tspan><tspan x="340" y="180.38">convolve...</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="515" y="50.38">svt_highbd_warp_plane / svt_warp_plane</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="705" y="50.38">svt_av1_warp_affine</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="860" y="115.38">av1_get_contiguos_soft_mask</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="515" y="85.38">... </tspan><tspan x="515" y="95.38">svt_av1_warp_plane </tspan><tspan x="515" y="105.38">av1_build_compound_diffwtd_mask_d16 </tspan><tspan x="515" y="115.38">build_masked_compound_no_round</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="705" y="105.38">diffwtd_mask_d16 </tspan><tspan x="705" y="115.38">av1_get_compound_type_mask </tspan><tspan x="705" y="125.38">aom_highbd_blend_a64_d16_mask / </tspan><tspan x="705" y="135.38">aom_lowbd_blend_a64_d16_mask </tspan><tspan x="705" y="145.38">svt_av1_warp_affine</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="47.625" y="12.9091">Depth 6</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="217.371" y="12.9091">Depth 7</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="412.137" y="12.9091">Depth 8</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="592.125" y="12.9091">Depth 9</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="762.629" y="12.9091">Depth 10</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="905.375" y="12.9091">Depth 11</tspan></text>
+</svg>

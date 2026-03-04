@@ -1,0 +1,39 @@
+From 14f4eb2b1d418d82b77878841eddbeeddfe56841 Mon Sep 17 00:00:00 2001
+From: Christopher Degawa <ccom@randomderp.com>
+Date: Wed, 10 May 2023 15:29:12 -0500
+Subject: [PATCH 2/6] libavcodec/libsvtav1: Allow -1 for preset option
+
+Currently, the -1 (MR) preset is disallowed as it's taken as the preset
+option not set, and the only way to access it was through svtav1-params.
+
+Signed-off-by: Christopher Degawa <ccom@randomderp.com>
+Signed-off-by: James Almer <jamrial@gmail.com>
+---
+ libavcodec/libsvtav1.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 164ba35137..198bb012c7 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -170,7 +170,7 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+         param->look_ahead_distance    = svt_enc->la_depth;
+ #endif
+ 
+-    if (svt_enc->enc_mode >= 0)
++    if (svt_enc->enc_mode >= -1)
+         param->enc_mode             = svt_enc->enc_mode;
+ 
+     if (avctx->bit_rate) {
+@@ -593,7 +593,7 @@ static const AVOption options[] = {
+         { "high", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, VE, "tier" },
+ #endif
+     { "preset", "Encoding preset",
+-      OFFSET(enc_mode), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, MAX_ENC_PRESET, VE },
++      OFFSET(enc_mode), AV_OPT_TYPE_INT, { .i64 = -2 }, -2, MAX_ENC_PRESET, VE },
+ 
+     FF_AV1_PROFILE_OPTS
+ 
+-- 
+2.46.0
+

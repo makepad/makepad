@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="685" height="155" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#EAEAAE" d="M1 1h683v153H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h683v153H1z"/>
+  <path fill="#003972" d="M2 2h681v16H2z"/>
+  <path stroke="#000" stroke-width="2" d="M2 19h681"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="45.6885" y="13.6364">Depth 0</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="186.621" y="13.6364">Depth 1</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="338.418" y="13.6364">Depth 2</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="478.267" y="13.6364">Depth 3</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="603.193" y="13.6364">Depth 4</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="28.38"> svt_av1_loop_filter_frame</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="130" y="27.88">svt_av1_loop_filter_frame_init </tspan><tspan x="130" y="37.88"> </tspan><tspan x="130" y="47.88"> </tspan><tspan x="130" y="57.88">loop_filter_sb</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="435" y="67.88">setup_pred_plane </tspan><tspan x="435" y="77.88">set_lpf_parameters </tspan><tspan x="435" y="87.88"> </tspan><tspan x="435" y="97.88"> </tspan><tspan x="435" y="107.88">aom_lpf_vertical_4/6/8/14 </tspan><tspan x="435" y="117.88">set_lpf_parameters </tspan><tspan x="435" y="127.88"> </tspan><tspan x="435" y="137.88"> </tspan><tspan x="435" y="147.88">aom_lpf_vertical_4/6/8/14</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="560" y="67.88">scaled_buffer_offset </tspan><tspan x="560" y="77.88">is_inter_block_no_intrabc </tspan><tspan x="560" y="87.88">get_transform_size </tspan><tspan x="560" y="97.88">get_filter_level_delta_if </tspan><tspan x="560" y="107.88"> </tspan><tspan x="560" y="117.88">is_inter_block_no_intrabc </tspan><tspan x="560" y="127.88">get_transform-size </tspan><tspan x="560" y="137.88">get_filter_level_delta_if</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="280" y="27.88">update_sharpness </tspan><tspan x="280" y="37.88">seg_feature_active </tspan><tspan x="280" y="47.88">get_segdata </tspan><tspan x="280" y="57.88">svt_av1_setup_dst_planes </tspan><tspan x="280" y="67.88">svt_av1_filter_block_plane_vert </tspan><tspan x="280" y="77.88"> </tspan><tspan x="280" y="87.88"> </tspan><tspan x="280" y="97.88"> </tspan><tspan x="280" y="107.88"> </tspan><tspan x="280" y="117.88">av1_filter_block_plane_horz</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M130 2v18M280 2v18M435 2v18M560 2v18"/>
+</svg>

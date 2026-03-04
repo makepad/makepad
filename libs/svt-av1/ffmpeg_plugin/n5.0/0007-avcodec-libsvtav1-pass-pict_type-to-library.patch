@@ -1,0 +1,41 @@
+From a025e3049aadfa09bb9b028a5cd8b7c4b3364ce6 Mon Sep 17 00:00:00 2001
+From: Christopher Degawa <ccom@randomderp.com>
+Date: Mon, 25 Apr 2022 17:54:38 -0500
+Subject: [PATCH 07/22] avcodec/libsvtav1: pass pict_type to library
+
+match the behavior of SvtAv1EncApp to ensure pic_type is always set
+before passing it to the library.
+
+The other options for pic_type aren't currently used inside the library,
+so they aren't introduced in this patch.
+
+Signed-off-by: Christopher Degawa <ccom@randomderp.com>
+Signed-off-by: James Almer <jamrial@gmail.com>
+---
+ libavcodec/libsvtav1.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 037ec3b287..0b8d8da5b2 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -403,6 +403,16 @@ static int eb_send_frame(AVCodecContext *avctx, const AVFrame *frame)
+     headerPtr->p_app_private = NULL;
+     headerPtr->pts           = frame->pts;
+ 
++    switch (frame->pict_type) {
++    case AV_PICTURE_TYPE_I:
++        headerPtr->pic_type = EB_AV1_KEY_PICTURE;
++        break;
++    default:
++        // Actually means auto, or default.
++        headerPtr->pic_type = EB_AV1_INVALID_PICTURE;
++        break;
++    }
++
+     svt_av1_enc_send_picture(svt_enc->svt_handle, headerPtr);
+ 
+     return 0;
+-- 
+2.44.0
+

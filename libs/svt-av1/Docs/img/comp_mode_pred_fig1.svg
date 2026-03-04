@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="490" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M1 1h598v488H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h598v488H1z"/>
+  <path fill="#ADCBE9" stroke="#306396" stroke-width="2" d="M405 25h180v180H405z"/>
+  <path stroke="#306396" stroke-width="2" d="M405 45h180M405 65h180M405 85h180M405 105h180M405 125h180M405 145h180M405 165h180M405 185h180M565 25v180M545 25.0579V205.058M525 25.1155V205.115M505 25.1733V205.173M485 25.2312V205.231M465 25.2888V205.289M445 25.3467V205.347M425 25.4043V205.404"/>
+  <path fill="#EACDAE" stroke="#977A30" stroke-width="2" d="M210 25h180v180H210z"/>
+  <path stroke="#977A30" stroke-width="2" d="M210 45h180M210 65h180M210 85h180M210 105h180M210 125h180M210 145h180M210 165h180M210 185h180M370 25v180M350 25.0579V205.058M330 25.1155V205.115M310 25.1733V205.173M290 25.2312V205.231M270 25.2888V205.289M250 25.3467V205.347M230 25.4043V205.404"/>
+  <path fill="#EAEAAE" stroke="#979730" stroke-width="2" d="M15 25h180v180H15z"/>
+  <path stroke="#979730" stroke-width="2" d="M15 45h180M15 65h180M15 85h180M15 105h180M15 125h180M15 145h180M15 165h180M15 185h180M175 25v180M155 25.0579V205.058M135 25.1155V205.115M115 25.1733V205.173M95.0001 25.2312V205.231M75.0001 25.2888V205.289M55.0002 25.3467V205.347M35.0004 25.4043V205.404"/>
+  <path fill="#707000" stroke="red" stroke-width="2" d="M55 65h20v20H55z"/>
+  <path fill="#AEEAAE" stroke="#309730" stroke-width="2" d="M210 300h180v180H210z"/>
+  <path stroke="#309730" stroke-width="2" d="M210 320h180M210 340h180M210 360h180M210 380h180M210 400h180M210 420h180M210 440h180M210 460h180M370 300v180M350 300.058v180M330 300.115v180M310 300.173v180M290 300.231v180M270 300.289v180M250 300.347v180M230 300.404v180"/>
+  <circle cx="300" cy="253" r="20" fill="#003972"/>
+  <path stroke="#fff" stroke-width="4" d="M290 253h20M300 243v20"/>
+  <path fill="#003972" stroke="#00F" stroke-width="2" d="M465 65h20v20h-20z"/>
+  <path fill="#306396" d="M66 75c0-.5523-.4477-1-1-1s-1 .4477-1 1h2Zm214 178-9.965-5.833-.07 11.546L280 253ZM64 75c0 68.654 17.9971 113.089 53.056 140.511 34.996 27.372 86.783 37.616 153.938 38.435l.025-2c-67.061-.818-118.277-11.062-152.731-38.01C83.8982 187.037 66 143.318 66 75h-2ZM474 75c0-.5523.448-1 1-1s1 .4477 1 1h-2ZM320 253l9.933-5.889.133 11.547L320 253ZM476 75c0 51.333-3.569 95.317-23.792 126.842-20.295 31.637-57.19 50.501-123.195 52.054l-.047-2c65.653-1.544 101.763-20.275 121.559-51.134C470.393 169.79 474 126.376 474 75h2Z"/>
+  <path fill="#007000" stroke="#0F0" stroke-width="2" d="M250 340h20v20h-20z"/>
+  <path fill="#306396" d="m260 350 11.477-1.273-6.841-9.303L260 350Zm39-78c0 25.395-8.29 52.357-32.383 71.894l1.26 1.554C292.556 325.436 301 297.828 301 272h-2Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="395.359" y="386.318">Compound </tspan><tspan x="398.508" y="405.318">Prediction</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="59.2891" y="21.3182">Prediction_1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="447.297" y="21.3182">Prediction_2</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="209.219" y="240.318">m(i,j)</tspan></text>
+  <text xml:space="preserve" fill="#FF8000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="342.789" y="240.318">m(i,j)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="321.352" y="240.318">(1-</tspan><tspan x="383.352" y="240.318">)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="279.211" y="21.3182">Mask</tspan></text>
+  <path fill="#306396" d="M260.979 75.2024c.112-.5409-.236-1.0699-.777-1.1817-.54-.1118-1.07.2361-1.181.7769l1.958.4048ZM229 225l7.678-8.625-11.308-2.337L229 225Zm30.021-150.2024L229.842 215.984l1.959.405 29.178-141.1866-1.958-.4048Z"/>
+  <path fill="#306396" d="M260.845 74.4649c-.296-.4665-.913-.6052-1.38-.3097-.467.2955-.605.9133-.31 1.3799l1.69-1.0702ZM355 225l-.473-11.537-9.755 6.178L355 225ZM259.155 75.5351 349.34 217.932l1.689-1.07-90.184-142.3971-1.69 1.0702Z"/>
+</svg>

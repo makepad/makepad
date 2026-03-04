@@ -1,0 +1,239 @@
+placeholders:
+  root_dir: "~/benchmark"
+  out_dir: "~/benchmark/out_images"
+  tag: "my_image_test"  # name used for output folders and log files
+
+# source files
+# for images - PNG, Y4M or YUV
+# for videos - Y4M or YUV
+# YUV files name format is <name>_{width}x{height}[_{fps}].yuv
+dataset:
+  source_dir: "{root_dir}/DataSet/f2_still_MidRes"
+  tmp_dir: "{out_dir}/tmp/{tag}"
+
+codecs:
+  allowed_codecs: ["jpegli", "jpegli_progressive", "libaom", "svtav1", "svtav1_rtc", "libavif_aom", "libavif_svt"]
+
+metrics:
+  allowed_metrics: ["vmaf", "ssimulacra2", "ms_ssim", "ssim", "psnr"]
+  allow_bdrate: true  # Set to true to enable BDRate metrics by default
+  anchor_encoder: "jpegli"  # Encoder used to generate the reference for BDRate
+  anchor_speed: 0
+  # VMAF settings
+  aom_ctc_model: "v6.0"  # AOM CTC model version
+
+settings:
+  dry_run: false
+  max_processes: 0  # 0 for auto scaling based on host configuration
+  remove_decoded_files: true
+
+
+###############################################################################
+#
+# STOP HERE.
+# Parameters below don't need to be changed unless you adding new codec/config
+#
+paths:
+  # preformatted output paths, no need to modify them
+  # encoded, decoded, and converted files and logs
+  encoded_dir: "{out_dir}/encoded/{tag}"
+  enc_log_path: "{out_dir}/encoded/{tag}.log"
+  enc_csv_path: "{out_dir}/encoded/{tag}.csv"
+
+  decoded_dir: "{out_dir}/decoded/{tag}"
+  dec_log_path: "{out_dir}/decoded/{tag}.log"
+  dec_csv_path: "{out_dir}/decoded/{tag}.csv"
+
+  conversion_dir: "{out_dir}/recon/{tag}"
+
+  qm_dir: "{out_dir}/quality/{tag}"
+  qm_log_path: "{out_dir}/quality/{tag}.log"
+
+  metrics_dir: "{out_dir}/summary/{tag}"
+
+binaries:
+  linux_x86_64:
+    # encoder binaries
+    jpegli_enc: "{root_dir}/bin/linux_x64/cjpegli"
+    jpegxl_enc: "{root_dir}/bin/linux_x64/cjxl"
+    libaom_enc: "{root_dir}/bin/linux_x64/aomenc"
+    svtav1_enc: "{root_dir}/bin/linux_x64/SvtAv1EncApp"
+    libavif_enc: "{root_dir}/bin/linux_x64/avifenc"
+    av2_enc: ""
+    # decoder binaries
+    djpeg: "{root_dir}/bin/linux_x64/djpeg-static"
+    jpegli_dec: "{root_dir}/bin/linux_x64/djpegli"
+    jpegxl_dec: "{root_dir}/bin/linux_x64/djxl"
+    libavif_dec: "{root_dir}/bin/linux_x64/avifdec"
+    dav1d: "{root_dir}/bin/linux_x64/dav1d"
+    av2_dec: ""
+    # format conversion
+    ffmpeg: "ffmpeg"
+    ffprobe: "ffprobe"
+    # quality metrics
+    ssimulacra2: "{root_dir}/bin/linux_x64/ssimulacra2"
+    vmaf: "{root_dir}/bin/linux_x64/vmaf"
+  mac_arm64:
+    # encoder binaries
+    jpegli_enc: "{root_dir}/bin/mac_arm64/cjpegli"
+    jpegxl_enc: "{root_dir}/bin/mac_arm64/cjxl"
+    libaom_enc: "{root_dir}/bin/mac_arm64/aomenc"
+    svtav1_enc: "{root_dir}/bin/mac_arm64/SvtAv1EncApp"
+    libavif_enc: "{root_dir}/bin/mac_arm64/avifenc"
+    av2_enc: ""
+    # decoder binaries
+    djpeg: "{root_dir}/bin/mac_arm64/djpeg-static"
+    jpegli_dec: "{root_dir}/bin/mac_arm64/djpegli"
+    jpegxl_dec: "{root_dir}/bin/mac_arm64/djxl"
+    libavif_dec: "{root_dir}/bin/mac_arm64/avifdec"
+    dav1d: "{root_dir}/bin/mac_arm64/dav1d"
+    av2_dec: ""
+    # format conversion
+    ffmpeg: "ffmpeg"
+    ffprobe: "ffprobe"
+    # quality metrics
+    ssimulacra2: "{root_dir}/bin/mac_arm64/ssimulacra2"
+    vmaf: "{root_dir}/bin/mac_arm64/vmaf"
+
+common_settings:
+  jpeg:
+    encode_extension: "jpg"
+    decode_extension: "ppm"
+    dir_format:
+      speed_suffix: ""
+      quality_param: "q"
+    jpegli:
+      q_values: [50, 60, 70, 80, 90]  # useful quality range
+      speed_values: [0]
+      input_extension: "png"
+      passes: 0
+    jpegli_progressive:
+      q_values: [50, 60, 70, 80, 90]  # useful quality range
+      speed_values: [0]
+      input_extension: "png"
+      passes: 0
+    jpegxl:
+      q_values: [50, 60, 70, 80, 90]
+      speed_values: [0]
+      input_extension: "png"
+      passes: 0
+  av1:
+    encode_extension: "avif"
+    decode_extension: "y4m"
+    dir_format:
+      speed_suffix: "_speed{speed}"
+      quality_param: "qp"
+    libaom:
+      qp_values: [5, 15, 23, 31, 39, 47]  # these are qps covering entire range of jpeg 50..90
+      speed_values: [5, 8]
+      input_extension: "y4m"
+      passes: 0
+    svtav1:
+      qp_values: [5, 15, 23, 31, 39, 47]  # these are qps covering entire range of jpeg 50..90
+      speed_values: [5, 8]
+      input_extension: "y4m"
+      passes: 0
+    svtav1_rtc:
+      qp_values: [5, 15, 23, 31, 39, 47]  # these are qps covering entire range of jpeg 50..90
+      speed_values: [5, 8]
+      input_extension: "y4m"
+      passes: 0
+    libavif_aom:
+      qp_values: [25, 38, 51, 63, 76, 92]  # match to av1 qp: quality = ((63 - qp) * 100 + 31) / 63
+      speed_values: [5, 8]
+      input_extension: "y4m"
+      passes: 0
+    libavif_svt:
+      qp_values: [25, 38, 51, 63, 76, 92]  # match to av1 qp: quality = ((63 - qp) * 100 + 31) / 63
+      speed_values: [5, 8]
+      input_extension: "y4m"
+      passes: 0
+  av2:
+    encode_extension: "ivf"
+    decode_extension: "y4m"
+    dir_format:
+      speed_suffix: ""
+      quality_param: "qp"
+    av2:
+      qp_values: [60, 85, 110, 135, 160, 185, 200, 215]
+      speed_values: [0]
+      input_extension: "y4m"
+
+encoder_settings:
+  jpeg:
+    jpegli:
+      encoder: "jpegli_enc"
+      command: "{binary_dir} -p 0 --chroma_subsampling=420 -q {q} {input_path} {output_path}"
+      nthreads: [1]
+    jpegli_progressive:
+      encoder: "jpegli_enc"
+      command: "{binary_dir} -p 2 --chroma_subsampling=420 -q {q} {input_path} {output_path}"
+      nthreads: [1]
+    jpegxl:
+      encoder: "jpegxl_enc"
+      command: "{binary_dir} {input_path} {output_path} -q {q} --num_threads {nthreads}"
+      nthreads: [0]
+  av1:
+    libaom:
+      encoder: "libaom_enc"
+      command: "{binary_dir} -v --ivf --cpu-used={speed} --end-usage=q --cq-level={q} --passes=1 --input-bit-depth=8 --bit-depth=8 --fps=30/1 --threads={nthreads} --usage=2 --tune=ssim --limit=1 --lag-in-frames=0 --disable-kf --kf-min-dist=0 --kf-max-dist=0 --enable-keyframe-filtering=0 --deltaq-mode=0 --enable-tpl-model=0 -o {output_path} {input_path}"
+      nthreads: [1]
+    svtav1:
+      encoder: "svtav1_enc"
+      command: "{binary_dir} --frames 1 --avif 1 --rc 0 --rtc 0 --qp {q} --preset {speed} -i {input_path} -b {output_path} --lp {nthreads}"
+      nthreads: [1]
+    svtav1_rtc:
+      encoder: "svtav1_enc"
+      command: "{binary_dir} --frames 1 --avif 1 --rc 0 --rtc 1 --qp {q} --preset {speed} -i {input_path} -b {output_path} --lp {nthreads}"
+      nthreads: [1]
+    libavif_aom:
+      encoder: "libavif_enc"
+      command: "{binary_dir} -q {q} -s {speed} -c aom -j {nthreads} --tilerowslog2 0 --tilecolslog2 0 {input_path} {output_path}"
+      nthreads: [1]
+    libavif_svt:
+      encoder: "libavif_enc"
+      command: "{binary_dir} -q {q} -s {speed} -c svt -j {nthreads} --tilerowslog2 0 --tilecolslog2 0 -a avif=1 {input_path} {output_path}"
+      nthreads: [1]
+  av2:
+    av2:
+      encoder: "av2_enc"
+      command: "{binary_dir}  --verbose --codec=av1 -v --psnr --obu --frame-parallel=0 --cpu-used=0 --limit=1 --skip=0 --passes=1 --end-usage=q --i420  --use-fixed-qp-offsets=1 --deltaq-mode=0  --enable-tpl-model=0 --fps=30/1 -w {width} -h {height} --input-bit-depth=8 --bit-depth=8 --qp={q} --tile-rows=0 --tile-columns=0 --threads={nthreads} --row-mt=0  --enable-fwd-kf=0  --enable-keyframe-filtering=0  --enable-intrabc-ext=2 --kf-min-dist=0 --kf-max-dist=0  -o {output_path} {input_path}"
+      nthreads: [1]
+
+decoder_settings:
+  jpeg:
+    jpegli:
+      decoder: "djpeg"
+      command: "{binary_dir} -outfile {output_path} {input_path}"
+    jpegli_progressive:
+      decoder: "djpeg"
+      command: "{binary_dir} -outfile {output_path} {input_path}"
+    jpegxl:
+      decoder: "jpegxl_dec"
+      command: "{binary_dir} {input_path} {output_path}"
+  av1:
+    libaom:
+      decoder: "dav1d"
+      command: "{binary_dir} -i {input_path} -o {output_path} --threads {nthreads}"
+      nthreads: [1]
+    svtav1:
+      decoder: "dav1d"
+      command: "{binary_dir} -i {input_path} -o {output_path} --threads {nthreads}"
+      nthreads: [1]
+    svtav1_rtc:
+      decoder: "dav1d"
+      command: "{binary_dir} -i {input_path} -o {output_path} --threads {nthreads}"
+      nthreads: [1]
+    libavif_aom:
+      decoder: "libavif_dec"
+      command: "{binary_dir} -c dav1d -j {nthreads} {input_path} {output_path}"
+      nthreads: [1]
+    libavif_svt:
+      decoder: "libavif_dec"
+      command: "{binary_dir} -c dav1d -j {nthreads} {input_path} {output_path}"
+      nthreads: [1]
+  av2:
+    av2:
+      decoder: "av2_dec"
+      command: "{binary_dir} --codec=av1 --summary -o {output_path} {input_path}"
+      nthreads: [1]

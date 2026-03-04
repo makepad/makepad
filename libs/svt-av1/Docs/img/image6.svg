@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="670" height="805" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h670v805H0z"/>
+  <path stroke="#000" d="M237.5 20.5h94v44h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="245.207" y="39.3636">Empty Object </tspan><tspan x="251.471" y="54.3636">FIFO size-</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="310.064" y="54.3636">n</tspan></text>
+  <path stroke="#000" d="M570.5 78.5h94v44h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="578.207" y="97.3636">Empty Object </tspan><tspan x="584.471" y="112.364">FIFO size-</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="643.064" y="112.364">n</tspan></text>
+  <mask id="path-5-inside-1_18_1420" fill="#fff">
+    <path d="M50 85h470l15 15 15 15H20l30-30Z"/>
+  </mask>
+  <path stroke="#000" stroke-width="2" d="M50 85h470l15 15 15 15H20l30-30Z" mask="url(#path-5-inside-1_18_1420)"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="222.246" y="104.364">Empty Object DEMUX</tspan></text>
+  <path stroke="#000" d="M20.5 135.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="49.0449" y="154.364">Producer 1 </tspan><tspan x="25.8945" y="169.364">Empty Object FIFO</tspan></text>
+  <path stroke="#000" d="M150.5 135.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="178.201" y="154.364">Producer 2 </tspan><tspan x="155.895" y="169.364">Empty Object FIFO</tspan></text>
+  <path stroke="#000" d="M280.5 135.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="308.02" y="154.364">Producer 3 </tspan><tspan x="285.895" y="169.364">Empty Object FIFO</tspan></text>
+  <path stroke="#000" d="M430.5 135.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="457.48" y="154.364">Producer N </tspan><tspan x="435.895" y="169.364">Empty Object FIFO</tspan></text>
+  <path stroke="#000" d="M20.5 200.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="49.0449" y="219.364">Producer 1 </tspan><tspan x="56.6387" y="234.364">Process</tspan></text>
+  <path stroke="#000" d="M150.5 200.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="178.201" y="219.364">Producer 2 </tspan><tspan x="186.639" y="234.364">Process</tspan></text>
+  <path stroke="#000" d="M280.5 200.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="308.02" y="219.364">Producer 3 </tspan><tspan x="316.639" y="234.364">Process</tspan></text>
+  <path stroke="#000" d="M430.5 200.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="457.48" y="219.364">Producer N </tspan><tspan x="466.639" y="234.364">Process</tspan></text>
+  <mask id="path-23-inside-2_18_1420" fill="#fff">
+    <path d="M50 395h470l30-30H20l30 30Z"/>
+  </mask>
+  <path stroke="#000" stroke-width="2" d="M50 395h470l30-30H20l30 30Z" mask="url(#path-23-inside-2_18_1420)"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="238.664" y="384.364">Full Object MUX</tspan></text>
+  <mask id="path-25-inside-3_18_1420" fill="#fff">
+    <path d="M600 345v-80l-30-20v120l30-20Z"/>
+  </mask>
+  <path stroke="#000" stroke-width="2" d="M600 345v-80l-30-20v120l30-20Z" mask="url(#path-25-inside-3_18_1420)"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(90 177.5 422.5)"><tspan x="21.1699" y="19.3636">Process MUX</tspan></text>
+  <path fill="#000" d="m285 85 5.774-10h-11.548L285 85Zm-1-20v11h2V65h-2ZM80 135l5.7735-10h-11.547L80 135Zm-1-20v11h2v-11h-2ZM210 135l5.774-10h-11.548L210 135Zm-1-20v11h2v-11h-2ZM340 135l5.774-10h-11.548L340 135Zm-1-20v11h2v-11h-2ZM490 135l5.774-10h-11.548L490 135Zm-1-20v11h2v-11h-2Z"/>
+  <path fill="#FF8000" d="m80 200 5.7735-10h-11.547L80 200Zm-1-20v11h2v-11h-2ZM210 200l5.774-10h-11.548L210 200Zm-1-20v11h2v-11h-2ZM340 200l5.774-10h-11.548L340 200Zm-1-20v11h2v-11h-2ZM490 200l5.774-10h-11.548L490 200Zm-1-20v11h2v-11h-2Z"/>
+  <path fill="#007200" d="m80 365 5.7735-10h-11.547L80 365Zm-1-120v111h2V245h-2ZM210 365l5.774-10h-11.548L210 365Zm-1-120v111h2V245h-2ZM340 365l5.774-10h-11.548L340 365Zm-1-120v111h2V245h-2ZM490 365l5.774-10h-11.548L490 365Zm-1-120v111h2V245h-2Z"/>
+  <path fill="#000" d="M520 269h-1c0 .552.448 1 1 1v-1Zm50 0-10-5.774v11.548L570 269Zm-51-24v24h2v-24h-2Zm1 25h41v-2h-41v2ZM370 293h-1c0 .552.448 1 1 1v-1Zm124 0-.905.426.27.574H494v-1Zm76 0-10-5.774v11.548L570 293Zm-84 0v1h.635l.27-.574L486 293Zm-117-48v48h2v-48h-2Zm125 49h67v-2h-67v2Zm-124 0h116v-2H370v2Zm116.905-.574c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852ZM240 317h-1c0 .552.448 1 1 1v-1Zm96 0v1h.635l.27-.574L336 317Zm158 0-.905.426.27.574H494v-1Zm76 0-10-5.774v11.548L570 317Zm-226 0-.905.426.27.574H344v-1Zm142 0v1h.635l.27-.574L486 317Zm-247-72v72h2v-72h-2Zm1 73h96v-2h-96v2Zm254 0h67v-2h-67v2Zm-150 0h142v-2H344v2Zm142.905-.574c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852Zm-150 0c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852ZM110 341h-1c0 .552.448 1 1 1v-1Zm96 0v1h.635l.27-.574L206 341Zm8 0-.905.426.27.574H214v-1Zm122 0v1h.634l.271-.574L336 341Zm158 0-.905.426.27.574H494v-1Zm76 0-10-5.774v11.548L570 341Zm-226 0-.905.426.27.574H344v-1Zm142 0v1h.634l.271-.574L486 341Zm-377-96v96h2v-96h-2Zm1 97h96v-2h-96v2Zm104 0h122v-2H214v2Zm280 0h67v-2h-67v2Zm-150 0h142v-2H344v2Zm142.905-.574c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852Zm-150 0c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852Zm-130 0c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852ZM617.5 305v1c.552 0 1-.448 1-1h-1Zm0-182-5.774 10h11.548l-5.774-10Zm-17.505 183H617.5v-2h-17.505v2Zm18.505-1V132h-2v173h2ZM535 100l10 5.774V94.2265L535 100Zm35-1h-26v2h26v-2Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="409.779" y="161.864">...</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="409.779" y="226.864">...</tspan></text>
+  <path stroke="#000" d="M237.5 415.5h94v44h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="253.633" y="434.364">Full Object </tspan><tspan x="251.471" y="449.364">FIFO size-</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="310.064" y="449.364">n</tspan></text>
+  <path stroke="#000" d="M570.5 473.5h94v44h-94z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="575.436" y="492.364">Idle Consumer </tspan><tspan x="579.326" y="507.364">Process FIFO</tspan></text>
+  <mask id="path-52-inside-4_18_1420" fill="#fff">
+    <path d="M50 480h470l15 15 15 15H20l30-30Z"/>
+  </mask>
+  <path stroke="#000" stroke-width="2" d="M50 480h470l15 15 15 15H20l30-30Z" mask="url(#path-52-inside-4_18_1420)"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="230.672" y="499.364">Full Object DEMUX</tspan></text>
+  <path stroke="#000" d="M20.5 530.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="49.0449" y="549.364">Producer 1 </tspan><tspan x="25.8945" y="564.364">Empty Object FIFO</tspan></text>
+  <path stroke="#000" d="M150.5 530.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="178.201" y="549.364">Producer 2 </tspan><tspan x="155.895" y="564.364">Empty Object FIFO</tspan></text>
+  <path stroke="#000" d="M280.5 530.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="308.02" y="549.364">Producer 3 </tspan><tspan x="285.895" y="564.364">Empty Object FIFO</tspan></text>
+  <path stroke="#000" d="M430.5 530.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="457.48" y="549.364">Producer N </tspan><tspan x="435.895" y="564.364">Empty Object FIFO</tspan></text>
+  <path stroke="#000" d="M20.5 595.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="45.5996" y="614.364">Consumer 1 </tspan><tspan x="56.6387" y="629.364">Process</tspan></text>
+  <path stroke="#000" d="M150.5 595.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="174.756" y="614.364">Consumer 2 </tspan><tspan x="186.639" y="629.364">Process</tspan></text>
+  <path stroke="#000" d="M280.5 595.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="304.574" y="614.364">Consumer 3 </tspan><tspan x="316.639" y="629.364">Process</tspan></text>
+  <path stroke="#000" d="M430.5 595.5h119v44h-119z"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="454.035" y="614.364">Consumer N </tspan><tspan x="466.639" y="629.364">Process</tspan></text>
+  <mask id="path-70-inside-5_18_1420" fill="#fff">
+    <path d="M50 790h470l30-30H20l30 30Z"/>
+  </mask>
+  <path stroke="#000" stroke-width="2" d="M50 790h470l30-30H20l30 30Z" mask="url(#path-70-inside-5_18_1420)"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="230.238" y="779.364">Empty Object MUX</tspan></text>
+  <mask id="path-72-inside-6_18_1420" fill="#fff">
+    <path d="M600 740v-80l-30-20v120l30-20Z"/>
+  </mask>
+  <path stroke="#000" stroke-width="2" d="M600 740v-80l-30-20v120l30-20Z" mask="url(#path-72-inside-6_18_1420)"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(90 -20 620)"><tspan x="21.1699" y="19.3636">Process MUX</tspan></text>
+  <path fill="#000" d="m285 480 5.774-10h-11.548L285 480Zm-1-20v11h2v-11h-2ZM285 415l5.774-10h-11.548L285 415Zm-1-20v11h2v-11h-2ZM80 530l5.7735-10h-11.547L80 530Zm-1-20v11h2v-11h-2ZM210 530l5.774-10h-11.548L210 530Zm-1-20v11h2v-11h-2ZM340 530l5.774-10h-11.548L340 530Zm-1-20v11h2v-11h-2ZM490 530l5.774-10h-11.548L490 530Zm-1-20v11h2v-11h-2Z"/>
+  <path fill="#00F" d="m80 595 5.7735-10h-11.547L80 595Zm-1-20v11h2v-11h-2ZM210 595l5.774-10h-11.548L210 595Zm-1-20v11h2v-11h-2ZM340 595l5.774-10h-11.548L340 595Zm-1-20v11h2v-11h-2ZM490 595l5.774-10h-11.548L490 595Zm-1-20v11h2v-11h-2Z"/>
+  <path fill="#FF8000" d="m80 760 5.7735-10h-11.547L80 760Zm-1-120v111h2V640h-2ZM210 760l5.774-10h-11.548L210 760Zm-1-120v111h2V640h-2ZM340 760l5.774-10h-11.548L340 760Zm-1-120v111h2V640h-2ZM490 760l5.774-10h-11.548L490 760Zm-1-120v111h2V640h-2Z"/>
+  <path fill="#000" d="M520 664h-1c0 .552.448 1 1 1v-1Zm50 0-10-5.774v11.548L570 664Zm-51-24v24h2v-24h-2Zm1 25h41v-2h-41v2ZM370 688h-1c0 .552.448 1 1 1v-1Zm124 0-.905.426.27.574H494v-1Zm76 0-10-5.774v11.548L570 688Zm-84 0v1h.635l.27-.574L486 688Zm-117-48v48h2v-48h-2Zm125 49h67v-2h-67v2Zm-124 0h116v-2H370v2Zm116.905-.574c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852ZM240 712h-1c0 .552.448 1 1 1v-1Zm96 0v1h.635l.27-.574L336 712Zm158 0-.905.426.27.574H494v-1Zm76 0-10-5.774v11.548L570 712Zm-226 0-.905.426.27.574H344v-1Zm142 0v1h.635l.27-.574L486 712Zm-247-72v72h2v-72h-2Zm1 73h96v-2h-96v2Zm254 0h67v-2h-67v2Zm-150 0h142v-2H344v2Zm142.905-.574c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852Zm-150 0c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852ZM110 736h-1c0 .552.448 1 1 1v-1Zm96 0v1h.635l.27-.574L206 736Zm8 0-.905.426.27.574H214v-1Zm122 0v1h.634l.271-.574L336 736Zm158 0-.905.426.27.574H494v-1Zm76 0-10-5.774v11.548L570 736Zm-226 0-.905.426.27.574H344v-1Zm142 0v1h.634l.271-.574L486 736Zm-377-96v96h2v-96h-2Zm1 97h96v-2h-96v2Zm104 0h122v-2H214v2Zm280 0h67v-2h-67v2Zm-150 0h142v-2H344v2Zm142.905-.574c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852Zm-150 0c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852Zm-130 0c1.232-2.619 4.958-2.619 6.19 0l1.81-.852c-1.953-4.15-7.857-4.15-9.81 0l1.81.852ZM617.5 700v1c.552 0 1-.448 1-1h-1Zm0-182-5.774 10h11.548l-5.774-10Zm-17.505 183H617.5v-2h-17.505v2Zm18.505-1V527h-2v173h2ZM535 495l10 5.774v-11.548L535 495Zm35-1h-26v2h26v-2Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="409.779" y="556.864">...</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="409.779" y="621.864">...</tspan></text>
+  <path fill="#000" d="M280 800v1c.552 0 1-.448 1-1h-1ZM5 800H4c0 .552.44772 1 1 1v-1ZM5 5V4c-.55228 0-1 .44772-1 1h1Zm280 0h1c0-.55228-.448-1-1-1v1Zm0 15 5.774-10h-11.548L285 20Zm-6 770v10h2v-10h-2Zm1 9H5v2h275v-2ZM6 800V5H4v795h2ZM5 6h280V4H5v2Zm279-1v6h2V5h-2Z"/>
+</svg>

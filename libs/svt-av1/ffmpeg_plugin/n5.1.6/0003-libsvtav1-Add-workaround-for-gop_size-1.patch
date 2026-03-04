@@ -1,0 +1,65 @@
+From 351838adad941eb3443683ab7a1c41d54fe5db0c Mon Sep 17 00:00:00 2001
+From: Vignesh Venkatasubramanian <vigneshv-at-google.com@ffmpeg.org>
+Date: Mon, 26 Jun 2023 10:47:09 -0700
+Subject: [PATCH 3/6] libsvtav1: Add workaround for gop_size == 1
+
+In some versions of libsvtav1, setting intra_period_length to 0
+does not produce the intended result (i.e.) all frames produced
+are not keyframes.
+
+Instead handle the gop_size == 1 as a special case by setting
+the pic_type to EB_AV1_KEY_PICTURE when encoding each frame so
+that all the output frames are keyframes.
+
+SVT-AV1 Bug: https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/2076
+
+Example command: ffmpeg -f lavfi -i testsrc=duration=1:size=64x64:rate=30 -c:v libsvtav1 -g 1 -y test.webm
+
+Before: Only first frame is keyframe, rest are intraonly.
+After: All frames are keyframes.
+
+Signed-off-by: Vignesh Venkatasubramanian <vigneshv@google.com>
+Signed-off-by: Ronald S. Bultje <rsbultje@gmail.com>
+---
+ libavcodec/libsvtav1.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 198bb012c7..260b7a4103 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -242,9 +242,20 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+     if (avctx->level != FF_LEVEL_UNKNOWN)
+         param->level = avctx->level;
+ 
+-    if (avctx->gop_size > 0)
++    // gop_size == 1 case is handled when encoding each frame by setting
++    // pic_type to EB_AV1_KEY_PICTURE. For gop_size > 1, set the
++    // intra_period_length. Even though setting intra_period_length to 0 should
++    // work in this case, it does not.
++    // See: https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/2076
++    if (avctx->gop_size > 1)
+         param->intra_period_length  = avctx->gop_size - 1;
+ 
++    // In order for SVT-AV1 to force keyframes by setting pic_type to
++    // EB_AV1_KEY_PICTURE on any frame, force_key_frames has to be set. Note
++    // that this does not force all frames to be keyframes (it only forces a
++    // keyframe with pic_type is set to EB_AV1_KEY_PICTURE).
++    param->force_key_frames = 1;
++
+     if (avctx->framerate.num > 0 && avctx->framerate.den > 0) {
+         param->frame_rate_numerator   = avctx->framerate.num;
+         param->frame_rate_denominator = avctx->framerate.den;
+@@ -456,6 +467,9 @@ static int eb_send_frame(AVCodecContext *avctx, const AVFrame *frame)
+         break;
+     }
+ 
++    if (avctx->gop_size == 1)
++        headerPtr->pic_type = EB_AV1_KEY_PICTURE;
++
+     svt_av1_enc_send_picture(svt_enc->svt_handle, headerPtr);
+ 
+     return 0;
+-- 
+2.46.0
+

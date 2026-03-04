@@ -1,0 +1,46 @@
+From 22539ad985914fcf0c07ebdd8ccb5e92306c3180 Mon Sep 17 00:00:00 2001
+From: Christopher Degawa <christopher.degawa@intel.com>
+Date: Thu, 20 Oct 2022 22:55:27 -0500
+Subject: [PATCH 12/22] avcodec/libsvtav1: remove compressed_ten_bit_format and
+ simplify alloc_buffer
+
+compressed_ten_bit_format has been deprecated upstream and has no effect
+and can be removed. Plus, technically it was never used in the first place
+since it would require the app (ffmpeg) to set it and do additional
+processing of the input frames.
+
+Also simplify alloc_buffer by removing calculations relating to the
+non-existant processing.
+
+Signed-off-by: Christopher Degawa <christopher.degawa@intel.com>
+---
+ libavcodec/libsvtav1.c | 10 +++-------
+ 1 file changed, 3 insertions(+), 7 deletions(-)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 1cb4e854d3..47e2aa9bcd 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -123,16 +123,12 @@ static int svt_print_error(void *log_ctx, EbErrorType err,
+ 
+ static int alloc_buffer(EbSvtAv1EncConfiguration *config, SvtContext *svt_enc)
+ {
+-    const int    pack_mode_10bit =
+-        (config->encoder_bit_depth > 8) && (config->compressed_ten_bit_format == 0) ? 1 : 0;
+-    const size_t luma_size_8bit  =
+-        config->source_width * config->source_height * (1 << pack_mode_10bit);
+-    const size_t luma_size_10bit =
+-        (config->encoder_bit_depth > 8 && pack_mode_10bit == 0) ? luma_size_8bit : 0;
++    const size_t luma_size = config->source_width * config->source_height *
++        (config->encoder_bit_depth > 8 ? 2 : 1);
+ 
+     EbSvtIOFormat *in_data;
+ 
+-    svt_enc->raw_size = (luma_size_8bit + luma_size_10bit) * 3 / 2;
++    svt_enc->raw_size = luma_size * 3 / 2;
+ 
+     // allocate buffer for in and out
+     svt_enc->in_buf           = av_mallocz(sizeof(*svt_enc->in_buf));
+-- 
+2.44.0
+

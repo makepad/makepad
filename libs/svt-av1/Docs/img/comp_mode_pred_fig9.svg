@@ -1,0 +1,57 @@
+<svg width="520" height="170" viewBox="0 0 520 170" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+    <style>
+        @font-face {
+            font-family: 'Inter';
+            src: url('https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'GitLab Mono';
+            src: url('https://docs.gitlab.com/assets/vendor/GitLabMono.woff2') format('woff2');
+        }
+    </style>
+</defs>
+
+<rect x="1" y="1" width="518" height="168" fill="white"/>
+<rect x="1" y="1" width="518" height="168" stroke="black" stroke-width="2"/>
+<rect x="2" y="2" width="516" height="21" fill="#003972"/>
+<path d="M2 24L519 24" stroke="black" stroke-width="2"/>
+<path d="M2 57L519 57" stroke="black" stroke-width="2"/>
+<path d="M2 103L519 103" stroke="black" stroke-width="2"/>
+<path d="M0 136L520 136" stroke="black" stroke-width="2"/>
+<path d="M168 2L168 168" stroke="black" stroke-width="2"/>
+<path d="M241 2L241 168" stroke="black" stroke-width="2"/>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="77.8394" y="15.0455">Flag</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="360.456" y="15.0455">Description</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="195.559" y="10.0455">Level&#x2028;</tspan><tspan x="171.424" y="20.0455">(Sequence/Picture)</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="87.1855" y="33.0327"> (0/1/-1)&#x2028;</tspan><tspan x="0" y="43.0327">  (in </tspan><tspan x="123.184" y="43.0327">&#x2028;</tspan><tspan x="0" y="53.0327">  in EbEncHandle.c)</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="14.0547" y="43.0327">eb_svt_enc_init_parameter()</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="bold" letter-spacing="0em"><tspan x="3.24023" y="33.0327">inter_intra_compound</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="bold" letter-spacing="0em"><tspan x="0" y="33.0327">  </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="240" y="38.0455">  Config level settings for the whole seqeuence. Takes the values 0/1 or -1 for&#x2028;</tspan><tspan x="240" y="48.0455">  auto i.e. DEFAULT</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="240" y="112.02">  if (</tspan><tspan x="382.543" y="112.02">)&#x2028;</tspan><tspan x="240" y="122.02">    if (</tspan><tspan x="344.043" y="122.02">) then </tspan><tspan x="474.849" y="122.02">, else 0&#x2028;</tspan><tspan x="240" y="132.02">  else </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="252.428" y="112.02">inter_intra_compound == DEFAULT</tspan><tspan x="255.9" y="122.02">slice_type != I_SLICE</tspan><tspan x="365.72" y="122.02">enable_interintra_compound</tspan><tspan x="259.175" y="132.02">inter_intra_compound</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="240" y="150.02">  if </tspan><tspan x="287.448" y="150.02"> OR </tspan><tspan x="338.67" y="150.02"> then 0&#x2028;</tspan><tspan x="240" y="160.02">  else </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="249.673" y="150.02">PD_PASS_0</tspan><tspan x="300.895" y="150.02">PD_PASS_1</tspan><tspan x="259.175" y="160.02">enable_inter_intra</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="240" y="67.52">  if (</tspan><tspan x="382.543" y="67.52">)&#x2028;</tspan><tspan x="240" y="77.52">    if </tspan><tspan x="282.526" y="77.52"> OR (</tspan><tspan x="491.802" y="77.52">) then 1&#x2028;</tspan><tspan x="240" y="87.52">    else 0&#x2028;</tspan><tspan x="240" y="97.52">  else </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="252.428" y="67.52">inter_intra_compound == DEFAULT</tspan><tspan x="253.146" y="77.52">MR_MODE</tspan><tspan x="298.728" y="77.52">enc_mode == ENC_M0 &#38;&#38; screen_content_mode != 1</tspan><tspan x="259.175" y="97.52">inter_intra_compound</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="187.533" y="43.0455">Sequence</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="187.533" y="82.5455">Sequence</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="187.533" y="155.045">Sequence</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="192.472" y="122.045">Picture</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="1.73633" y="82.5327"> </tspan><tspan x="1.73633" y="92.5327"> </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="14.0547" y="82.5327">resource_coordination_kernel()</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="112.369" y="72.5327"> (0/1)&#x2028;</tspan><tspan x="0" y="82.5327"> </tspan><tspan x="3.47266" y="82.5327">(in </tspan><tspan x="135.775" y="82.5327">&#x2028;</tspan><tspan x="0" y="92.5327"> </tspan><tspan x="3.47266" y="92.5327">in EbResourceCoordinationProcess.c)</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="bold" letter-spacing="0em"><tspan x="3.24023" y="72.5327">enable_interintra_compound</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="bold" letter-spacing="0em"><tspan x="0" y="72.5327">  </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="1.73633" y="122.033"> </tspan><tspan x="1.73633" y="132.033"> </tspan><tspan x="19.9609" y="132.033">PictureDecision</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="14.0547" y="122.033">signal_derivation_multi_processes_oq</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="78.791" y="112.033"> (0/1)&#x2028;</tspan><tspan x="0" y="122.033"> </tspan><tspan x="3.47266" y="122.033">(in </tspan><tspan x="160.959" y="122.033">&#x2028;</tspan><tspan x="0" y="132.033"> </tspan><tspan x="3.47266" y="132.033">in Eb</tspan><tspan x="73.2949" y="132.033">Process.c)</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="bold" letter-spacing="0em"><tspan x="3.24023" y="112.033">enable_inter_intra</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="bold" letter-spacing="0em"><tspan x="0" y="112.033">  </tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="1.73633" y="155.033"> </tspan><tspan x="1.73633" y="165.033"> </tspan><tspan x="19.9609" y="165.033">EncDec</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="14.0547" y="155.033">signal_derivation_enc_dec_kernel_oq</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em"><tspan x="91.3828" y="145.033"> (0/1)&#x2028;</tspan><tspan x="0" y="155.033"> </tspan><tspan x="3.47266" y="155.033">(in </tspan><tspan x="156.762" y="155.033">&#x2028;</tspan><tspan x="0" y="165.033"> </tspan><tspan x="3.47266" y="165.033">in Eb</tspan><tspan x="45.7803" y="165.033">Process.c)</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="7" font-weight="bold" letter-spacing="0em"><tspan x="3.24023" y="145.033">md_enable_inter_intra</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="7" font-weight="bold" letter-spacing="0em"><tspan x="0" y="145.033">  </tspan></text>
+</svg>

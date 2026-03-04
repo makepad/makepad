@@ -1,0 +1,46 @@
+From 94fc8f14ae20d2c00a41727435ef7f14d7c0cb1b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jan=20Ekstr=C3=B6m?= <jeebjp@gmail.com>
+Date: Thu, 9 Mar 2023 20:27:06 +0200
+Subject: [PATCH 20/25] avcodec/libsvtav1: use larger of bit rate and max rate
+ for buffer size
+
+Generally if maxrate is set, the calculation should be maxrate over
+bufsize. This additionally enables CRF + maxrate & bufsize usage.
+
+In order to keep negative values from enabling zero to be treated
+as larger and causing a division by zero, check that one of the
+variables is larger than zero.
+---
+ libavcodec/libsvtav1.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 939c80943a..32d10a3e1f 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -183,8 +183,10 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+         param->min_qp_allowed       = avctx->qmin;
+     }
+     param->max_bit_rate             = avctx->rc_max_rate;
+-    if (avctx->bit_rate && avctx->rc_buffer_size)
+-        param->maximum_buffer_size_ms = avctx->rc_buffer_size * 1000LL / avctx->bit_rate;
++    if ((avctx->bit_rate > 0 || avctx->rc_max_rate > 0) && avctx->rc_buffer_size)
++        param->maximum_buffer_size_ms =
++            avctx->rc_buffer_size * 1000LL /
++            FFMAX(avctx->bit_rate, avctx->rc_max_rate);
+ 
+     if (svt_enc->crf > 0) {
+         param->qp                   = svt_enc->crf;
+@@ -301,7 +303,8 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+     avctx->bit_rate       = param->rate_control_mode > 0 ?
+                             param->target_bit_rate : 0;
+     avctx->rc_max_rate    = param->max_bit_rate;
+-    avctx->rc_buffer_size = param->maximum_buffer_size_ms * avctx->bit_rate / 1000LL;
++    avctx->rc_buffer_size = param->maximum_buffer_size_ms *
++                            FFMAX(avctx->bit_rate, avctx->rc_max_rate) / 1000LL;
+ 
+     if (avctx->bit_rate || avctx->rc_max_rate || avctx->rc_buffer_size) {
+         AVCPBProperties *cpb_props = ff_add_cpb_side_data(avctx);
+-- 
+2.44.0
+

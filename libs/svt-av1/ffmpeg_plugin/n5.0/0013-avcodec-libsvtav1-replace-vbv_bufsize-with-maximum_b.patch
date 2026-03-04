@@ -1,0 +1,43 @@
+From 2ae3c92680fac7b0ffc7dbc36b7a76d860449291 Mon Sep 17 00:00:00 2001
+From: Christopher Degawa <christopher.degawa@intel.com>
+Date: Thu, 20 Oct 2022 22:55:28 -0500
+Subject: [PATCH 13/22] avcodec/libsvtav1: replace vbv_bufsize with
+ maximum_buffer_size_ms
+
+svt-av1 v1.2.0 has deprecated vbv_bufsize in favor of using
+- maximum_buffer_size_ms (--buf-sz)
+- starting_buffer_level_ms (--buf-initial-sz)
+- optimal_buffer_level_ms (--buf-optimal-sz)
+
+and vbv_bufsize has not been in use since svt-av1 v0.8.6
+
+Signed-off-by: Christopher Degawa <christopher.degawa@intel.com>
+---
+ libavcodec/libsvtav1.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 47e2aa9bcd..e8bbcb1ac3 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -178,7 +178,7 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+         param->min_qp_allowed       = avctx->qmin;
+     }
+     param->max_bit_rate             = avctx->rc_max_rate;
+-    param->vbv_bufsize              = avctx->rc_buffer_size;
++    param->maximum_buffer_size_ms   = avctx->rc_buffer_size * 1000LL / avctx->bit_rate;
+ 
+     if (svt_enc->crf > 0) {
+         param->qp                   = svt_enc->crf;
+@@ -295,7 +295,7 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+     avctx->bit_rate       = param->rate_control_mode > 0 ?
+                             param->target_bit_rate : 0;
+     avctx->rc_max_rate    = param->max_bit_rate;
+-    avctx->rc_buffer_size = param->vbv_bufsize;
++    avctx->rc_buffer_size = param->maximum_buffer_size_ms * avctx->bit_rate / 1000LL;
+ 
+     if (avctx->bit_rate || avctx->rc_max_rate || avctx->rc_buffer_size) {
+         AVCPBProperties *cpb_props = ff_add_cpb_side_data(avctx);
+-- 
+2.44.0
+

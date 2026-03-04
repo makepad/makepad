@@ -1,0 +1,277 @@
+#
+# MacOS CI jobs
+#
+
+#
+# Anchors
+#
+
+.macos-compiler-base:
+  extends: .common-ci-base
+  stage: compile
+  dependencies: []
+  tags:
+    - macos
+    - shell
+  variables:
+    !reference [.compiler-variables]
+  script: !reference [.compiler-script]
+
+.macos-test-base:
+  extends: .common-ci-base
+  stage: test
+  tags:
+    - macos
+    - shell
+    - x86
+  before_script:
+    - |
+      for file in $TEST_FILES; do
+        curl -fLs "https://gitlab.com/AOMediaCodec/aom-testing/-/raw/master/test-files/$file.zst" | zstd -d - -o "$file"
+      done
+
+.macos-unit-test-base:
+  extends: .macos-test-base
+  tags:
+    - macos
+    - shell
+    - x86
+  artifacts:
+    when: always
+    reports:
+      junit: reports/*.xml
+
+#
+# Compile jobs
+#
+
+# Xcode compilation test
+macOS (Xcode):
+  extends: .macos-compiler-base
+  stage: standalone
+  tags:
+    - macos
+    - shell
+    - x86 # limit to x86 only for now.
+  variables:
+    CMAKE_GENERATOR: Xcode
+
+# x86 compilation test
+macOS (Static, Tests):
+  extends: .macos-compiler-base
+  tags:
+    - macos
+    - shell
+    - x86
+  variables:
+    CMAKE_GENERATOR: Ninja
+    EXTRA_CMAKE_FLAGS: -DBUILD_TESTING=ON -DSVT_AV1_LTO=ON # -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" # universal binaries are currently broken
+    EXTRA_CFLAGS: -Wno-error -g
+    EXTRA_CXXFLAGS: -Wno-error -g
+    PREFIX_DIR: ${CI_PROJECT_DIR}/SVT-Install/
+    TARGET: install
+  parallel:
+    matrix:
+      - CMAKE_BUILD_TYPE: [Release, Debug]
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - Bin/Release/*
+      - SVT-Install/*
+
+# m1 compilation test
+macOS (Static, Tests, m1):
+  extends: .macos-compiler-base
+  tags:
+    - macos
+    - shell
+    - m1
+  variables:
+    CMAKE_GENERATOR: Ninja
+    EXTRA_CMAKE_FLAGS: -DBUILD_TESTING=ON # -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" # universal binaries are currently broken
+    EXTRA_CFLAGS: -Wno-error -g
+    EXTRA_CXXFLAGS: -Wno-error -g
+    PREFIX_DIR: ${CI_PROJECT_DIR}/SVT-Install/
+    TARGET: install
+  parallel:
+    matrix:
+      - CMAKE_BUILD_TYPE: [Release, Debug]
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - Bin/Release/* # We only care about getting the release binaries since debug mode is too slow to do anything with.
+      - SVT-Install/*
+
+#
+# Test jobs
+#
+
+macOS Unit Tests:
+  extends: .macos-unit-test-base
+  variables:
+    SVT_AV1_TEST_VECTOR_PATH: $CI_PROJECT_DIR/test/vectors
+    TOTAL_SHARDS: 4
+  parallel:
+    matrix:
+      - SHARD_INDEX: [0, 1, 2, 3]
+  cache:
+    key: testvectors
+    paths:
+      - test/vectors
+    policy: pull-push
+  before_script:
+    - curl -Ls "https://raw.githubusercontent.com/1480c1/gtest-parallel/unique_id/gtest_parallel.py" > gtest_parallel.py
+  script:
+    - cmake -B Build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+    - cmake --build Build --target TestVectors
+    - python3 gtest_parallel.py --print_test_times --shard_index=$SHARD_INDEX --shard_count=$TOTAL_SHARDS ./Bin/Release/SvtAv1UnitTests ./Bin/Release/SvtAv1E2ETests -- --gtest_output="xml:reports/{#}.xml"
+  needs:
+    - macOS (Static, Tests)
+
+macOS Unit Tests (m1):
+  extends: .macos-unit-test-base
+  variables:
+    SVT_AV1_TEST_VECTOR_PATH: $CI_PROJECT_DIR/test/vectors
+    TOTAL_SHARDS: 4
+  parallel:
+    matrix:
+      - SHARD_INDEX: [0, 1, 2, 3]
+  cache:
+    key: testvectors
+    paths:
+      - test/vectors
+    policy: pull-push
+  tags:
+    - macos
+    - shell
+    - m1
+  before_script:
+    - curl -Ls "https://raw.githubusercontent.com/1480c1/gtest-parallel/unique_id/gtest_parallel.py" > gtest_parallel.py
+  script:
+    - cmake -B Build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+    - cmake --build Build --target TestVectors
+    - python3 gtest_parallel.py --print_test_times --shard_index=$SHARD_INDEX --shard_count=$TOTAL_SHARDS ./Bin/Release/SvtAv1UnitTests ./Bin/Release/SvtAv1E2ETests -- --gtest_output="xml:reports/{#}.xml"
+  needs:
+    - macOS (Static, Tests, m1)
+
+macOS Enc Test (x86):
+  extends: .macos-test-base
+  variables:
+    TEST_FILES: akiyo_cif.y4m Chimera-Aerial_480x264_2997fps_10bit_420_150frames.y4m
+  script: !reference [.enc-test-script]
+  parallel: !reference [.enc-test-parallel]
+  artifacts: !reference [.enc-test-artifacts]
+  needs:
+    - macOS (Static, Tests)
+
+macOS Enc Test (m1):
+  extends: .macos-test-base
+  tags:
+    - macos
+    - shell
+    - m1
+  variables:
+    TEST_FILES: akiyo_cif.y4m Chimera-Aerial_480x264_2997fps_10bit_420_150frames.y4m
+  script: !reference [.enc-test-script]
+  parallel: !reference [.enc-test-parallel]
+  artifacts: !reference [.enc-test-artifacts]
+  needs:
+    - macOS (Static, Tests, m1)
+
+macOS FFmpeg (Static, x86):
+  extends: .macos-test-base
+  stage: ffmpeg
+  dependencies: []
+  variables:
+    CFLAGS: -pipe
+    CXXFLAGS: -pipe
+    LDFLAGS: -pipe
+    GIT_DEPTH: 0
+    PREFIX_DIR: ${CI_PROJECT_DIR}/SVT-Install/
+  allow_failure: true
+  before_script:
+    - !reference [.ffmpeg-before-script-clone]
+    - !reference [.ffmpeg-before-script-export]
+  script:
+    - !reference [.ffmpeg-svtav1-script]
+    - !reference [.ffmpeg-aom-script]
+    - !reference [.ffmpeg-libvpx-script]
+    - !reference [.ffmpeg-dav1d-script]
+    - !reference [.ffmpeg-vmaf-script]
+    # symbol conflict tests
+    - |
+      conflicts=$(
+        nm -Ag --defined-only ${PREFIX_DIR}/lib/lib{SvtAv1Enc,aom,dav1d,vpx,vmaf}.a 2>/dev/null |
+        # Ignore weak symbols
+        grep -v ' W ' |
+        cut -d' ' -f 4 |
+        sort |
+        uniq -d
+      )
+      if [ -n "$conflicts" ]; then
+        printf 'Conflicts Found!\n'
+        for conflict in $conflicts; do
+          nm -Ag --defined-only ${PREFIX_DIR}/lib/lib{SvtAv1Enc,aom,dav1d,vpx,vmaf}.a 2>/dev/null |
+          sort -k3 |
+          grep -- " $conflict$"
+        done
+        exit 1
+      fi
+    - !reference [.ffmpeg-ffmpeg-script]
+    - ccache -s
+  artifacts:
+    untracked: false
+    expire_in: 30 days
+    paths:
+      - ffmpeg
+
+macOS FFmpeg (Static, m1):
+  extends: .macos-test-base
+  tags:
+    - macos
+    - shell
+    - m1
+  stage: ffmpeg
+  dependencies: []
+  variables:
+    CFLAGS: -pipe
+    CXXFLAGS: -pipe
+    LDFLAGS: -pipe
+    GIT_DEPTH: 0
+    PREFIX_DIR: ${CI_PROJECT_DIR}/SVT-Install/
+  allow_failure: true
+  before_script:
+    - !reference [.ffmpeg-before-script-clone]
+    - !reference [.ffmpeg-before-script-export]
+  script:
+    - !reference [.ffmpeg-svtav1-script]
+    - !reference [.ffmpeg-aom-script]
+    - !reference [.ffmpeg-libvpx-script]
+    - !reference [.ffmpeg-dav1d-script]
+    - !reference [.ffmpeg-vmaf-script]
+    # symbol conflict tests
+    - |
+      conflicts=$(
+        nm -Ag --defined-only ${PREFIX_DIR}/lib/lib{SvtAv1Enc,aom,dav1d,vpx,vmaf}.a 2>/dev/null |
+        # Ignore weak symbols
+        grep -v ' W ' |
+        cut -d' ' -f 4 |
+        sort |
+        uniq -d
+      )
+      if [ -n "$conflicts" ]; then
+        printf 'Conflicts Found!\n'
+        for conflict in $conflicts; do
+          nm -Ag --defined-only ${PREFIX_DIR}/lib/lib{SvtAv1Enc,aom,dav1d,vpx,vmaf}.a 2>/dev/null |
+          sort -k3 |
+          grep -- " $conflict$"
+        done
+        exit 1
+      fi
+    - !reference [.ffmpeg-ffmpeg-script]
+    - ccache -s
+  artifacts:
+    untracked: false
+    expire_in: 30 days
+    paths:
+      - ffmpeg

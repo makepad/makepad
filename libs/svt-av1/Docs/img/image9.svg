@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="590" height="400" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h590v400H0z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="335.648" y="21.3182"> </tspan><tspan x="204.812" y="40.3182">(Random Access write)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-style="italic" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="244.773" y="21.3182">Input Picture</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-style="italic" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="240.281" y="390.818">Input Pictures</tspan></text>
+  <path fill="#FC6" stroke="#000" stroke-width="2" d="M11 101h568v98H11z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="16.6641" y="155.818">0</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M33 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="40.1562" y="155.818">1</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M55 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="61.0312" y="155.818">2</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M77 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="82.7891" y="155.818">3</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M99 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="104.672" y="155.818">4</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M121 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="126.938" y="155.818">5</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M143 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="148.812" y="155.818">6</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M165 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="171.305" y="155.818">7</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M187 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="192.836" y="155.818">8</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M209 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="214.812" y="155.818">9</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M231 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 266 -68)"><tspan x="35.5547" y="15.8182">n-1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 378 -180)"><tspan x="33.25" y="15.8182">m-1</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M355 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="275.039" y="155.818">...</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M333 102v96"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="449.039" y="155.818">...</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M557 102v96M11 271h568v48H11z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="96.2266" y="303.727">Picture-level Rate Control Process</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="121.427" y="231.591">Sequential </tspan><tspan x="120.142" y="248.591">Lookahead</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="410.717" y="90.0909">Circular Reorder Queue</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="331.953" y="231.591">Process Picture </tspan><tspan x="303.133" y="248.591">(Sequential-order Read)</tspan></text>
+  <path fill="#000" d="m295 100 5.774-10h-11.548L295 100Zm-1-50v41h2V50h-2ZM295 370l5.774-10h-11.548L295 370Zm-1-50v41h2v-41h-2ZM200 270l5.774-10h-11.548L200 270Zm-1-70v61h2v-61h-2ZM300 270l-5.774-10h11.548L300 270Zm-1-9v-61h2v61h-2Z"/>
+</svg>

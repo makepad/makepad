@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="577" height="305" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h577v305H0z"/>
+  <path stroke="#000" d="M10.5 35.5h399v224h-399zM11 62.5h398M11 91.5h398M11 119.5h398M11 147.5h398"/>
+  <path stroke="red" stroke-width="3" d="M11 175.5h398"/>
+  <path stroke="#000" d="M11 204.5h398M11 232.5h398M42.5 36v223M76.5 36v223M109.5 36v223"/>
+  <path stroke="red" stroke-width="3" d="M143.5 36v223"/>
+  <path stroke="#000" d="M176.5 36v223M210.5 36v223M243.5 36v223"/>
+  <path stroke="red" stroke-width="3" d="M310.5 36v223"/>
+  <path stroke="#000" d="M343.5 36v223M377.5 36v223M276.5 36v223"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="45.7339" y="81">Tile 1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="212.46" y="81">Tile 2</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="345.794" y="81">Tile 3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="44.7134" y="222.5">Tile 4</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="212.396" y="222.5">Tile 5</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="345.81" y="222.5">Tile 6</tspan></text>
+  <path fill="#000" d="M194.611 280.314c.173.215.488.249.703.075.215-.173.249-.488.075-.703l-.778.628ZM145 218l.891 5.704 4.495-3.624L145 218Zm50.389 61.686-47.175-58.497-.779.628 47.176 58.497.778-.628Z"/>
+  <path fill="#000" d="M194.527 280.161c.088.261.372.401.634.312.261-.088.401-.372.312-.634l-.946.322ZM160 177l-1.125 5.663 5.467-1.858L160 177Zm35.473 102.839L161.921 181.1l-.947.322 33.553 98.739.946-.322Z"/>
+  <path fill="#000" d="M194.761 279.561c-.242.132-.332.435-.2.678.132.243.435.332.678.2l-.478-.878ZM309 218l-5.772-.147 2.759 5.072L309 218Zm-113.761 62.439 110.047-59.85-.478-.878-110.047 59.85.478.878Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="11" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="153.202" y="291.5">Tile Boundaries</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="169.262" y="28.7273">Picture</tspan></text>
+  <path stroke="#000" d="M450.5 25.5h102v102h-102zM501.5 26v101M451 76.5h101M502 51h50M527 76V26"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="465.309" y="53.9091">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="465.309" y="104.909">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="516.309" y="104.909">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="503.309" y="40.9091">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="529.309" y="40.9091">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="503.309" y="66.9091">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="529.309" y="66.9091">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="462.248" y="21.8636">SB Partioning</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="437.486" y="188.864">Transform (Tx) Blocks</tspan></text>
+  <path stroke="#000" d="M450.5 192.5h102v102h-102zM501.5 193v101M451 243.5h101M502 218h50M527 243v-50M451 269h50M476 294v-50"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="459.586" y="220.909">Tx Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="510.586" y="271.909">Tx Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="509.27" y="202.909">Tx </tspan><tspan x="503.309" y="212.909">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="535.27" y="202.909">Tx </tspan><tspan x="529.309" y="212.909">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="509.27" y="228.909">Tx </tspan><tspan x="503.309" y="238.909">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="535.27" y="228.909">Tx </tspan><tspan x="529.309" y="238.909">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="458.27" y="253.909">Tx </tspan><tspan x="452.309" y="263.909">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="484.27" y="253.909">Tx </tspan><tspan x="478.309" y="263.909">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="458.27" y="279.909">Tx </tspan><tspan x="452.309" y="289.909">Block</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="484.27" y="279.909">Tx </tspan><tspan x="478.309" y="289.909">Block</tspan></text>
+  <path fill="#000" d="m450 76.5-5-2.8868v5.7736l5-2.8868Zm-55 .5h50.5v-1H395v1ZM501.5 178l2.887-5h-5.774l2.887 5Zm-.5-50v45.5h1V128h-1Z"/>
+</svg>

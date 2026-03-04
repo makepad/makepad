@@ -1,0 +1,30 @@
+From 6ba33d3d477486aef7dbcf4319aa88106e01964f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jan=20Ekstr=C3=B6m?= <jeebjp@gmail.com>
+Date: Mon, 9 May 2022 21:21:33 +0300
+Subject: [PATCH 09/22] avcodec/libsvtav1: update avctx bit rate according to
+ RC mode
+
+This way we can filter out the default value for this member, which
+is nonzero. Bases on the current affairs that bit rate based rate
+control is nonzero in SVT-AV1.
+---
+ libavcodec/libsvtav1.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index a259e42e8b..0298aa0f99 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -296,7 +296,8 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+         param->profile = FF_PROFILE_AV1_HIGH;
+     }
+ 
+-    avctx->bit_rate                 = param->target_bit_rate;
++    avctx->bit_rate = param->rate_control_mode > 0 ?
++                      param->target_bit_rate : 0;
+ 
+     return 0;
+ }
+-- 
+2.44.0
+

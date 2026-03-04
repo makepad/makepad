@@ -1,0 +1,221 @@
+#
+# Windows CI jobs
+#
+
+#
+# Anchors
+#
+
+.windows-compiler-base:
+  extends: .common-ci-base
+  stage: compile
+  dependencies: []
+  image: registry.gitlab.com/aomediacodec/aom-testing/ltsc2025
+  tags:
+    - svt-windows-docker
+  script:
+    - cmake `
+      -B Build `
+      -DREPRODUCIBLE_BUILDS=ON `
+      -DBUILD_SHARED_LIBS=ON `
+      -DBUILD_TESTING=ON `
+      -DSVT_AV1_LTO=ON `
+      $env:EXTRA_CMAKE_FLAGS
+    - cmake --build Build --config $(if ($env:CMAKE_BUILD_TYPE) {$env:CMAKE_BUILD_TYPE} else {"Release"})
+
+.windows-test-base:
+  extends: .common-ci-base
+  stage: test
+  image: registry.gitlab.com/aomediacodec/aom-testing/ltsc2025
+  tags:
+    - svt-windows-docker
+  before_script:
+    - Move-Item C:/*.zst .
+    - zstd -d $(Get-ChildItem *.zst)
+
+.windows-unit-test-base:
+  extends: .windows-test-base
+  artifacts:
+    when: always
+    reports:
+      junit: reports/*.xml
+
+#
+# Compile jobs
+#
+
+Win64 (MSVC, Tests):
+  extends: .windows-compiler-base
+  variables:
+    CFLAGS: /WX /D_CRT_SECURE_NO_WARNINGS=1
+    CXXFLAGS: /WX /D_CRT_SECURE_NO_WARNINGS=1
+    CMAKE_GENERATOR: Visual Studio 16 2019
+  parallel:
+    matrix:
+      - CMAKE_BUILD_TYPE: [Release, Debug]
+  artifacts:
+    untracked: false
+    expire_in: 1 day
+    paths:
+      - "Bin/*/*.exe"
+      - "Bin/*/*.dll"
+      - "Bin/*/*.pdb"
+
+#
+# Test jobs
+#
+
+Win64 Unit Tests:
+  extends: .windows-unit-test-base
+  variables:
+    SVT_AV1_TEST_VECTOR_PATH: $CI_PROJECT_DIR/test/vectors
+    TOTAL_SHARDS: 4
+  parallel:
+    matrix:
+      - SHARD_INDEX: [0, 1, 2, 3]
+  cache:
+    key: testvectors
+    paths:
+      - test/vectors
+    policy: pull-push
+  before_script:
+    - Invoke-WebRequest -OutFile gtest_parallel.py -Uri https://raw.githubusercontent.com/1480c1/gtest-parallel/unique_id/gtest_parallel.py
+  script:
+    - cmake -B Build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+    - cmake --build Build --target TestVectors
+    - python gtest_parallel.py --print_test_times --shard_index=$env:SHARD_INDEX --shard_count=$env:TOTAL_SHARDS ./Bin/Release/SvtAv1UnitTests ./Bin/Release/SvtAv1E2ETests -- --gtest_output="xml:reports/{#}.xml"
+  needs:
+    - Win64 (MSVC, Tests)
+
+Win64 Enc Test:
+  extends: .windows-test-base
+  script:
+    - ./Bin/Release/SvtAv1EncApp.exe --preset 2 -i "$env:SVT_ENCTEST_FILENAME" -n 17 -b "test-pr-Windows-Release-${env:SVT_ENCTEST_BITNESS}bit-m2.ivf"
+    - ./Bin/Release/SvtAv1EncApp.exe --preset 8 -i "$env:SVT_ENCTEST_FILENAME" -n 120 -b "test-pr-Windows-Release-${env:SVT_ENCTEST_BITNESS}bit-m8.ivf"
+    - ./Bin/Debug/SvtAv1EncApp.exe --preset 2 -i "$env:SVT_ENCTEST_FILENAME" -n 17 -b "test-pr-Windows-Debug-${env:SVT_ENCTEST_BITNESS}bit-m2.ivf"
+    - ./Bin/Debug/SvtAv1EncApp.exe --preset 8 -i "$env:SVT_ENCTEST_FILENAME" -n 120 -b "test-pr-Windows-Debug-${env:SVT_ENCTEST_BITNESS}bit-m8.ivf"
+  parallel: !reference [.enc-test-parallel]
+  artifacts: !reference [.enc-test-artifacts]
+  needs:
+    - Win64 (MSVC, Tests)
+
+Win64 FFmpeg (Static):
+  extends: .windows-test-base
+  dependencies: []
+  stage: ffmpeg
+  variables:
+    CC: ccache gcc
+    CXX: ccache g++
+    CFLAGS: -pipe
+    CXXFLAGS: -pipe
+    LDFLAGS: -pipe -static -static-libgcc -static-libstdc++
+    GIT_DEPTH: 0
+    PREFIX_DIR: C:/msys64/mingw64
+  allow_failure: true
+  before_script:
+    - !reference [.ffmpeg-before-script-git-setup]
+    - !reference [.ffmpeg-before-script-clone-windows]
+  script:
+    # SVT-AV1
+    - |
+      time cmake `
+        -S svtav1-src `
+        -B svtav1-build `
+        -DCMAKE_BUILD_TYPE=Release `
+        -DBUILD_SHARED_LIBS=OFF `
+        -DCMAKE_INSTALL_PREFIX="$env:PREFIX_DIR" `
+        -DBUILD_APPS=OFF `
+        -DREPRODUCIBLE_BUILDS=ON || $(
+          Get-Content svtav1-build/CMakeFiles/CMakeConfigureLog.yaml
+          exit 1
+        )
+      time cmake --build svtav1-build --config Release --target install
+    # aom
+    - |
+      time cmake `
+        -S aom-src `
+        -B aom-build `
+        -DCMAKE_BUILD_TYPE=Release `
+        -DBUILD_SHARED_LIBS=OFF `
+        -DCMAKE_INSTALL_PREFIX="$env:PREFIX_DIR" `
+        -DENABLE_TESTS=0 `
+        -DENABLE_EXAMPLES=0 `
+        -DENABLE_DOCS=0 `
+        -DENABLE_TESTDATA=0 `
+        -DENABLE_TOOLS=0
+      time cmake --build aom-build --config Release --target install
+    # libvpx
+    - |
+      mkdir vpx-build
+      cd vpx-build
+      time dash ../libvpx-src/configure `
+        --disable-dependency-tracking `
+        --disable-docs `
+        --disable-examples `
+        --disable-libyuv `
+        --disable-postproc `
+        --disable-shared `
+        --disable-tools `
+        --disable-unit-tests `
+        --disable-webm-io `
+        --enable-postproc `
+        --enable-runtime-cpu-detect `
+        --enable-vp8 --enable-vp9 `
+        --enable-vp9-highbitdepth `
+        --enable-vp9-postproc `
+        --prefix="$env:PREFIX_DIR"
+      time make -j $((Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors + 2) install
+      cd ..
+    # dav1d
+    - |
+      time meson setup `
+        --default-library static `
+        --buildtype release `
+        --libdir lib `
+        --prefix "$env:PREFIX_DIR" `
+        -Denable_tests=false `
+        -Denable_examples=false `
+        -Denable_tools=false `
+        dav1d-build dav1d-src
+      time meson install -C dav1d-build
+    # vmaf
+    - |
+      time meson setup `
+        --default-library static `
+        --buildtype release `
+        --libdir lib `
+        --prefix "$env:PREFIX_DIR" `
+        -Denable_tests=false `
+        -Denable_docs=false `
+        -Dbuilt_in_models=true `
+        -Denable_float=true `
+        vmaf-build vmaf-src/libvmaf
+      time meson install -C vmaf-build
+
+    # FFmpeg
+    # Uses ld=CXX for libvmaf to autolink the stdc++ library
+    - |
+      mkdir ffmpeg-build
+      cd ffmpeg-build
+      time bash ../ffmpeg-src/configure `
+        --arch=x86_64 `
+        --pkg-config-flags="--static" `
+        --cc="${env:CC}" `
+        --cxx="${env:CXX}" `
+        --ld="${env:CXX}" `
+        --enable-gpl --enable-static `
+        --prefix="$env:PREFIX_DIR" `
+        --enable-libaom `
+        --enable-libdav1d `
+        --enable-libsvtav1 `
+        --enable-libvmaf `
+        --enable-libvpx `
+        --disable-shared
+      time make -j $((Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors + 2) install
+      cp ./ffmpeg.exe $env:CI_PROJECT_DIR
+    - ccache -s
+  artifacts:
+    untracked: false
+    expire_in: 30 day
+    paths:
+      - ffmpeg.exe

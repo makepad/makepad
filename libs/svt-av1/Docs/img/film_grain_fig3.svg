@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="825" height="115" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#EAEAAE" d="M1 1h823v113H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h823v113H1z"/>
+  <path fill="#003972" d="M2 2h821v16H2z"/>
+  <path stroke="#000" stroke-width="2" d="M2 19h821"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="45.6885" y="13.6364">Depth 0</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="186.621" y="13.6364">Depth 1</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M130 2v18M280 2v18"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="328.418" y="13.6364">Depth 2</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M415 2v18"/>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="28.38"> picture_analysis_kernel</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="130" y="27.88">... </tspan><tspan x="130" y="37.88">PicturePreProcessingOperations</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="280" y="27.88"> </tspan><tspan x="280" y="37.88">denoise_estimate_film_grain</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="435.767" y="13.6364">Depth 3</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M495 2v18"/>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="415" y="27.88"> </tspan><tspan x="415" y="37.88">apply_denoise_2d</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="546.193" y="13.6364">Depth 4</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M635 2v18"/>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="495" y="27.88"> </tspan><tspan x="495" y="37.88">eb_aom_denoise_and_model_run</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="710.859" y="13.6364">Depth 5</tspan></text>
+  <text xml:space="preserve" fill="#00F" font-family="GitLab Mono" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="635" y="27.88"> </tspan><tspan x="635" y="37.88">denoise_and_model_realloc_if_necessary </tspan><tspan x="635" y="47.88">eb_aom_flat_block_finder_run </tspan><tspan x="635" y="57.88">eb_aom_wiener_denoise_2d </tspan><tspan x="635" y="67.88">eb_aom_noise_model_update </tspan><tspan x="635" y="77.88">eb_aom_noise_model_save_latest </tspan><tspan x="635" y="87.88">eb_aom_noise_model_get_grain_parameters </tspan><tspan x="635" y="97.88">eb_aom_flat_block_finder_free </tspan><tspan x="635" y="107.88">eb_aom_noise_model_free</tspan></text>
+</svg>

@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="750" height="240" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M1 1h748v238H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h748v238H1z"/>
+  <path fill="#003972" d="M150 2h598v16H150zM2 2h148v58H2z"/>
+  <text xml:space="preserve" fill="#fff" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="87.29" y="33.6">enc_mode</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="10.8057" y="33.6">Encoder Mode (</tspan><tspan x="135.259" y="33.6">)</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="254.136" y="13.6"> (Case of </tspan><tspan x="437.866" y="13.6">)</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="158.198" y="13.6">loop_filter_mode</tspan><tspan x="299.956" y="13.6">sc_content_detected = 0</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="554.136" y="13.6"> (Case of </tspan><tspan x="737.866" y="13.6">)</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="458.198" y="13.6">loop_filter_mode</tspan><tspan x="599.956" y="13.6">sc_content_detected = 1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="223.049" y="32.6">is_used_as_reference_flag</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="523.049" y="32.6">is_used_as_reference_flag</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M149 2v236M2 59h748"/>
+  <path stroke="#000" d="M2 79h748M2 99h748M2 119h748M2 139h748M2 159h748M2 179h748M2 199h748M2 219h748"/>
+  <path stroke="#000" stroke-width="2" d="M150 39h598M150 19h598M450 2v236M299 39v200"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="71.665" y="72.6364">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="72.5977" y="92.6364">1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="71.8945" y="112.636">2</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="71.7432" y="132.636">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="71.6699" y="152.636">4</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="71.8359" y="172.636">5</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="71.7578" y="192.636">6</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="72.0654" y="212.636">7</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="71.7725" y="232.636">8</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.743" y="72.6364">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.665" y="92.6364">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.665" y="112.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.665" y="132.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.665" y="152.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.665" y="172.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.665" y="192.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.665" y="212.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.665" y="232.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="371.243" y="72.6364">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="371.243" y="92.6364">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="371.243" y="112.636">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="371.243" y="132.636">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="371.243" y="152.636">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="371.243" y="172.636">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="372.098" y="192.636">1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="372.098" y="212.636">1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="372.098" y="232.636">1</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M600 39v200"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="72.6364">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="92.6364">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="112.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="132.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="152.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="172.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="192.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="212.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="232.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.243" y="72.6364">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.243" y="92.6364">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.165" y="112.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.165" y="132.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.165" y="152.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.165" y="172.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.165" y="192.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.165" y="212.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="672.165" y="232.636">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.665" y="52.6364">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="372.098" y="52.6364">1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="52.6364">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="673.098" y="52.6364">1</tspan></text>
+</svg>

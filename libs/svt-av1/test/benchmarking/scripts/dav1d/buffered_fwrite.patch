@@ -1,0 +1,12 @@
+diff --git a/tools/output/y4m2.c b/tools/output/y4m2.c
+index 40411d1..d2390ec 100644
+--- a/tools/output/y4m2.c
++++ b/tools/output/y4m2.c
+@@ -50,6 +50,7 @@ static int y4m2_open(Y4m2OutputContext *const c, const char *const file,
+         fprintf(stderr, "Failed to open %s: %s\n", file, strerror(errno));
+         return -1;
+     }
++    setvbuf(c->f, NULL, _IOFBF, 8*1024*1024);
+ 
+     c->first = 1;
+     c->fps[0] = fps[0];

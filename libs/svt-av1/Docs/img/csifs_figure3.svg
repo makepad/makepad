@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="380" height="618" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h380v618H0z"/>
+  <path stroke="#000" d="M10.5 10.5h359v39h-359zM10.5 120.5h359v487h-359z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="122.143" y="137.364">Mode Decision Process</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.643" y="26.8636"> </tspan><tspan x="119.002" y="41.8636">HME and Full-Pel Search</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="111.619" y="26.8636">Motion Estimation Process</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="129.863" y="80.4091">Full-pel MV per (list, reference) </tspan><tspan x="118.512" y="90.4091">for square blocks from 8x8 to 64x64</tspan></text>
+  <path stroke="#5B97D4" stroke-width="2" d="M190 50v20"/>
+  <path fill="#5B97D4" d="m190 120 5.774-10h-11.548L190 120Zm-1-25v16h2V95h-2Z"/>
+  <path stroke="#5B97D4" stroke-linejoin="round" stroke-width="2" d="M96 257v13h94v20"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="129.039" y="300.409">Sub-pel MV per (list, reference) </tspan><tspan x="165.41" y="310.409">for all blocks</tspan></text>
+  <path fill="#003972" stroke="#000" d="M20.5 145.5h151v111h-151z"/>
+  <path fill="#fff" stroke="#000" d="M25.5 165.5h141v41h-141z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.1816" y="183.636">Full-Pel Search around the </tspan><tspan x="61.5811" y="195.636">MV Predictors</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M25.5 210.5h141v41h-141z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="31.9912" y="228.636">Sub-pel search using non-</tspan><tspan x="56.7422" y="240.636">compliant filters</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="85.126" y="159.136">PME</tspan></text>
+  <path fill="#003972" stroke="#000" d="M208.5 145.5h151v111h-151z"/>
+  <path fill="#fff" stroke="#000" d="M213.5 165.5h141v41h-141z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="219.747" y="177.636">Perform full-pel Search for </tspan><tspan x="221.983" y="189.636">4x4 and 128x128, and for </tspan><tspan x="230.567" y="201.636">the non square blocks</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M213.5 210.5h141v41h-141v-41Z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="219.991" y="228.636">Sub-pel search using non-</tspan><tspan x="244.742" y="240.636">compliant filters</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="236.256" y="159.136">ME MVs refinement</tspan></text>
+  <path fill="#003972" stroke="#000" d="M114.5 340.5h151v21h-151zM114.5 365.5h151v67h-151z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="127.476" y="354.636">Construct MD candidates</tspan></text>
+  <path fill="#003972" stroke="#000" d="M114.5 436.5h151v21h-151z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="161.045" y="450.636">MD_Stage_1</tspan></text>
+  <path fill="#003972" stroke="#000" d="M114.5 461.5h151v21h-151z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="159.8" y="475.636">MD_Stage_2</tspan></text>
+  <path fill="#003972" stroke="#000" d="M114.5 486.5h151v111h-151z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="159.883" y="500.636">MD_Stage_3</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="bold" letter-spacing="0em" style="white-space:pre"><tspan x="159.736" y="379.636">MD_Stage_0</tspan></text>
+  <path stroke="#5B97D4" stroke-linejoin="round" stroke-width="2" d="M284 257v13h-94"/>
+  <path fill="#5B97D4" d="m190 340 5.774-10h-11.548L190 340Zm-1-25v16h2v-16h-2Z"/>
+  <path fill="#5B97D4" stroke="#000" d="M119.5 386.5h141v41h-141z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="144.805" y="398.636">Compliant Sub-pel </tspan><tspan x="122.178" y="410.636">interpolation for Luma using </tspan><tspan x="139.985" y="422.636">Regular as filter type</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M119.5 507.5h141v41h-141z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="128.94" y="525.636">Interpolation filter search </tspan><tspan x="170.249" y="537.636">for luma</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M119.5 552.5h141v41h-141z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="145.308" y="564.636">Compliant sub-pel </tspan><tspan x="130.859" y="576.636">interpolation for Chroma </tspan><tspan x="130.854" y="588.636">using the best filter type</tspan></text>
+</svg>

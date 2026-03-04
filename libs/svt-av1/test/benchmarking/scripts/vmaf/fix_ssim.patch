@@ -1,0 +1,12 @@
+diff --git a/libvmaf/src/feature/ssim.c b/libvmaf/src/feature/ssim.c
+index bec78659..ca4f5456 100644
+--- a/libvmaf/src/feature/ssim.c
++++ b/libvmaf/src/feature/ssim.c
+@@ -78,6 +78,7 @@ int compute_ssim(const float *ref, const float *cmp, int w, int h,
+ 
+     /* initialize algorithm parameters */
+     scale = _max( 1, _round( (float)_min(w,h) / 256.0f ) );
++    scale = 1; // compute on original resolution by default
+     if (args) {
+         if(args->f) {
+             scale = args->f;

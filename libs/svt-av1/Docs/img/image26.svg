@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="393" height="147" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h393v147H0z"/>
+  <path fill="#00F" d="m155 142 2.887-5h-5.774l2.887 5Zm0-130-2.887 5h5.774L155 12Zm.5 125.5v-121h-1v121h1Z"/>
+  <path fill="#00F" d="m90 77 5 2.8868v-5.7736L90 77Zm130 0-5-2.8868v5.7736L220 77Zm-125.5.5h121v-1h-121v1Z"/>
+  <path fill="#00724C" d="m95 137.208 5.577-1.494-4.0827-4.083L95 137.208ZM215.208 17l-5.577 1.4943 4.083 4.0825L215.208 17ZM98.5355 134.38 212.38 20.5355l-.707-.7071L97.8284 133.673l.7071.707Z"/>
+  <path fill="#5B97D4" d="m151.426 73.4264-1.494-5.5768-4.082 4.0825 5.576 1.4943Zm-42.78-42.0728 39.245 39.2444.707-.7071-39.244-39.2445-.708.7072Z"/>
+  <circle cx="155" cy="77" r="5" fill="red"/>
+  <circle cx="180" cy="52" r="5" fill="#5BD45B"/>
+  <circle cx="205" cy="27" r="5" fill="#5BD45B"/>
+  <circle cx="130" cy="102" r="5" fill="#5BD45B"/>
+  <circle cx="105" cy="127" r="5" fill="#5BD45B"/>
+  <circle cx="130" cy="77" r="5" fill="#0080FF"/>
+  <circle cx="105" cy="77" r="5" fill="#0080FF"/>
+  <circle cx="155" cy="52" r="5" fill="#0080FF"/>
+  <circle cx="155" cy="27" r="5" fill="#0080FF"/>
+  <circle cx="180" cy="77" r="5" fill="#0080FF"/>
+  <circle cx="205" cy="77" r="5" fill="#0080FF"/>
+  <circle cx="155" cy="102" r="5" fill="#0080FF"/>
+  <circle cx="155" cy="127" r="5" fill="#0080FF"/>
+  <text xml:space="preserve" fill="#00F" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="199.825" y="111.636">Secondary filter filtering directions </tspan><tspan x="180.367" y="123.636">(45° away from the primary filter direction)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.784" y="14.6364">Edge direction (d=0, 45°) </tspan></text>
+  <text xml:space="preserve" fill="#00724C" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="220.462" y="26.6364">Primary filtering direction</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="5.23438" y="28.8636">Pixel to be filtered</tspan></text>
+</svg>

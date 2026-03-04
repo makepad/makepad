@@ -1,0 +1,176 @@
+placeholders:
+  root_dir: "~/benchmark"
+  out_dir: "~/benchmark/out_videos"
+  tag: "my_video_test"  # name used for output folders and log files
+
+# source files
+# for images - PNG, Y4M or YUV
+# for videos - Y4M or YUV
+# YUV files name format is <name>_{width}x{height}[_{fps}].yuv
+dataset:
+  source_dir: "{root_dir}/Dataset/a4_360p"
+  tmp_dir: "{out_dir}/tmp/{tag}"
+
+codecs:
+  allowed_codecs: ["libaom", "libaom_rtc", "svtav1", "svtav1_rtc"]
+
+metrics:
+  allowed_metrics: ["psnr", "vbv"]
+  allow_bdrate: true  # Set to true to enable BDRate metrics by default
+  anchor_encoder: "libaom"  # Encoder used to generate the reference for BDRate
+  anchor_speed: 11
+  # VMAF settings
+  aom_ctc_model: "v6.0"  # AOM CTC model version
+
+settings:
+  dry_run: false
+  max_processes: 0  # 0 for auto scaling based on host configuration
+  remove_decoded_files: true
+
+
+###############################################################################
+#
+# STOP HERE.
+# Parameters below don't need to be changed unless you adding new codec/config
+#
+paths:
+  # preformatted output paths, no need to modify them
+  # encoded, decoded, and converted files and logs
+  encoded_dir: "{out_dir}/encoded/{tag}"
+  enc_log_path: "{out_dir}/encoded/{tag}.log"
+  enc_csv_path: "{out_dir}/encoded/{tag}.csv"
+
+  decoded_dir: "{out_dir}/decoded/{tag}"
+  dec_log_path: "{out_dir}/decoded/{tag}.log"
+  dec_csv_path: "{out_dir}/decoded/{tag}.csv"
+
+  conversion_dir: "{out_dir}/recon/{tag}"
+
+  qm_dir: "{out_dir}/quality/{tag}"
+  qm_log_path: "{out_dir}/quality/{tag}.log"
+
+  metrics_dir: "{out_dir}/summary/{tag}"
+
+binaries:
+  linux_x86_64:
+    # encoder binaries
+    jpegli_enc: "{root_dir}/bin/linux_x64/cjpegli"
+    jpegxl_enc: "{root_dir}/bin/linux_x64/cjxl"
+    libaom_enc: "{root_dir}/bin/linux_x64/aomenc"
+    libaom_rtc_enc: "{root_dir}/bin/linux_x64/aomenc_rtc"
+    svtav1_enc: "{root_dir}/bin/linux_x64/SvtAv1EncApp"
+    av2_enc: ""
+    # decoder binaries
+    djpeg: "{root_dir}/bin/linux_x64/djpeg-static"
+    jpegli_dec: "{root_dir}/bin/linux_x64/djpegli"
+    jpegxl_dec: "{root_dir}/bin/linux_x64/djxl"
+    dav1d: "{root_dir}/bin/linux_x64/dav1d"
+    av2_dec: ""
+    # format conversion
+    ffmpeg: "ffmpeg"
+    ffprobe: "ffprobe"
+    # quality metrics
+    ssimulacra2: "{root_dir}/bin/linux_x64/ssimulacra2"
+    vmaf: "{root_dir}/bin/linux_x64/vmaf"
+  mac_arm64:
+    # encoder binaries
+    jpegli_enc: "{root_dir}/bin/mac_arm64/cjpegli"
+    jpegxl_enc: "{root_dir}/bin/mac_arm64/cjxl"
+    libaom_enc: "{root_dir}/bin/mac_arm64/aomenc"
+    libaom_rtc_enc: "{root_dir}/bin/mac_arm64/aomenc_rtc"
+    svtav1_enc: "{root_dir}/bin/mac_arm64/SvtAv1EncApp"
+    av2_enc: ""
+    # decoder binaries
+    djpeg: "{root_dir}/bin/mac_arm64/djpeg-static"
+    jpegli_dec: "{root_dir}/bin/mac_arm64/djpegli"
+    jpegxl_dec: "{root_dir}/bin/mac_arm64/djxl"
+    dav1d: "{root_dir}/bin/mac_arm64/dav1d"
+    av2_dec: ""
+    # format conversion
+    ffmpeg: "ffmpeg"
+    ffprobe: "ffprobe"
+    # quality metrics
+    ssimulacra2: "{root_dir}/bin/mac_arm64/ssimulacra2"
+    vmaf: "{root_dir}/bin/mac_arm64/vmaf"
+
+common_settings:
+  av1:
+    encode_extension: "ivf"
+    decode_extension: "yuv"
+    dir_format:
+      speed_suffix: "_speed{speed}"
+      quality_param: "compression_factor"
+    libaom:
+      compression_factor_values: [500, 350, 250, 200, 150, 100, 50]
+      speed_values: [7, 9, 11]
+      input_extension: "yuv"
+    libaom_rtc:
+      compression_factor_values: [500, 350, 250, 200, 150, 100, 50]
+      speed_values: [7, 9, 11]
+      input_extension: "yuv"
+    svtav1:
+      compression_factor_values: [500, 350, 250, 200, 150, 100, 50]
+      speed_values: [9, 10]
+      input_extension: "yuv"
+    svtav1_rtc:
+      compression_factor_values: [500, 350, 250, 200, 150, 100, 50]
+      speed_values: [9, 10, 11, 12]
+      input_extension: "yuv"
+  av2:
+    encode_extension: "ivf"
+    decode_extension: "y4m"
+    dir_format:
+      speed_suffix: ""
+      quality_param: "compression_factor"
+    av2:
+      compression_factor_values: [500, 350, 250, 200, 150, 100, 50]
+      speed_values: [0]
+      input_extension: "y4m"
+
+encoder_settings:
+  av2:
+    av2:
+      encoder: "av2_enc"
+      command: "{binary_dir}"
+      nthreads: [1]
+  av1:
+    libaom:
+      encoder: "libaom_enc"
+      command: "{binary_dir} --verbose --codec=av1 --cpu-used={speed} --aq-mode=3 --min-q=2 --max-q=63 --buf-sz=1000 --buf-initial-sz=600 --buf-optimal-sz=600 --rt --ivf --width={width} --height={height} --fps={fps}/1 --target-bitrate={kbps} --profile=0 --threads={nthreads} --tile-columns=0 --kf-min-dist=3000 --kf-max-dist=3000 --max-intra-rate=300 --passes=1 --usage=1 --end-usage=cbr --lag-in-frames=0 --undershoot-pct=50 --overshoot-pct=10 --psnr --enable-cdef=1 --static-thresh=0 --coeff-cost-upd-freq=3 --mode-cost-upd-freq=3 --mv-cost-upd-freq=3 --enable-global-motion=0 --enable-obmc=0 --enable-warped-motion=0 --enable-ref-frame-mvs=0 --noise-sensitivity=0 --error-resilient=0 --enable-tpl-model=0 --deltaq-mode=0 --enable-order-hint=0 -o {output_path} {input_path}"
+      nthreads: [1]
+    libaom_rtc:
+      encoder: "libaom_rtc_enc"
+      command: "{binary_dir} --verbose --codec=av1 --cpu-used={speed} --aq-mode=3 --min-q=2 --max-q=63 --buf-sz=1000 --buf-initial-sz=600 --buf-optimal-sz=600 --rt --ivf --width={width} --height={height} --fps={fps}/1 --target-bitrate={kbps} --profile=0 --threads={nthreads} --tile-columns=0 --kf-min-dist=3000 --kf-max-dist=3000 --max-intra-rate=300 --passes=1 --usage=1 --end-usage=cbr --lag-in-frames=0 --undershoot-pct=50 --overshoot-pct=10 --psnr --enable-cdef=1 --static-thresh=0 --coeff-cost-upd-freq=3 --mode-cost-upd-freq=3 --mv-cost-upd-freq=3 --enable-global-motion=0 --enable-obmc=0 --enable-warped-motion=0 --enable-ref-frame-mvs=0 --noise-sensitivity=0 --error-resilient=0 --enable-tpl-model=0 --deltaq-mode=0 --enable-order-hint=0 -o {output_path} {input_path}"
+      nthreads: [1]
+    svtav1:
+      encoder: "svtav1_enc"
+      command: "{binary_dir} --allow-mmap-file 0 --preset {speed} --hierarchical-levels 0 --rtc 0 --width {width} --height {height} --fps-num {fps} --fps-denom 1 --tbr {kbps} --rc 2 --keyint 3000 --pred-struct 1 -i {input_path} -b {output_path} --lp {nthreads}"
+      nthreads: [1]
+    svtav1_rtc:
+      encoder: "svtav1_enc"
+      command: "{binary_dir} --allow-mmap-file 0 --preset {speed} --hierarchical-levels 0 --rtc 1 --width {width} --height {height} --fps-num {fps} --fps-denom 1 --tbr {kbps} --rc 2 --keyint 3000 --pred-struct 1 -i {input_path} -b {output_path} --lp {nthreads}"
+      nthreads: [1]
+
+decoder_settings:
+  av2:
+    av2:
+      decoder: "av2_dec"
+      command: "{binary_dir}"
+      nthreads: [1]
+  av1:
+    libaom:
+      decoder: "dav1d"
+      command: "{binary_dir} -i {input_path} -o {output_path} --threads {nthreads}"
+      nthreads: [1]
+    libaom_rtc:
+      decoder: "dav1d"
+      command: "{binary_dir} -i {input_path} -o {output_path} --threads {nthreads}"
+      nthreads: [1]
+    svtav1:
+      decoder: "dav1d"
+      command: "{binary_dir} -i {input_path} -o {output_path} --threads {nthreads}"
+      nthreads: [1]
+    svtav1_rtc:
+      decoder: "dav1d"
+      command: "{binary_dir} -i {input_path} -o {output_path} --threads {nthreads}"
+      nthreads: [1]

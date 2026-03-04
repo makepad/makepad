@@ -1,0 +1,29 @@
+<svg width="375" height="93" viewBox="0 0 375 93" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+    <style>
+        @font-face {
+            font-family: 'Inter';
+            src: url('https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2') format('woff2');
+        }
+    </style>
+</defs>
+
+<rect x="1" y="1" width="373" height="91" fill="white"/>
+<rect x="1" y="1" width="373" height="91" stroke="black" stroke-width="2"/>
+<path d="M2 20H373" stroke="black" stroke-width="2"/>
+<path d="M2 38H373" stroke="black" stroke-width="2"/>
+<path d="M2 56H373" stroke="black" stroke-width="2"/>
+<path d="M2 74H373" stroke="black" stroke-width="2"/>
+<rect x="2" y="2" width="371" height="17" fill="#003972"/>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="17.4805" y="14.1364">wedge_mode</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="208.58" y="14.1364">Description</tspan></text>
+<path d="M99 2C99 2 99 63.2728 99 91" stroke="black" stroke-width="2"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em"><tspan x="47.332" y="31.9091">0</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em"><tspan x="48.0781" y="49.9091">1</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em"><tspan x="47.5156" y="67.9091">2</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em"><tspan x="47.3945" y="85.9091">3</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em"><tspan x="98" y="31.9091">  Full search</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em"><tspan x="98" y="49.9091">  If two predictors are very similar, skip wedge compound mode search</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em"><tspan x="98" y="67.9091">  Estimate wedge sign</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="8" font-weight="600" letter-spacing="0em"><tspan x="98" y="85.9091">  Mode 1 &#38; Mode 2</tspan></text>
+</svg>

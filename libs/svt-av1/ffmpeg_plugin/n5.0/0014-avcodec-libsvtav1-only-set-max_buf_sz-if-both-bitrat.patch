@@ -1,0 +1,31 @@
+From 7cdb0f7860863bd3cd1eca73d7f1a49f536f0c6c Mon Sep 17 00:00:00 2001
+From: Christopher Degawa <ccom@randomderp.com>
+Date: Sun, 20 Nov 2022 13:07:36 -0600
+Subject: [PATCH 14/22] avcodec/libsvtav1: only set max_buf_sz if both bitrate
+ and rc_buf_sz is set
+
+maximum_buffer_size_ms should only be set if both are specified or if
+the user sets it through -svtav1-params buf-sz=val
+
+Signed-off-by: Christopher Degawa <ccom@randomderp.com>
+---
+ libavcodec/libsvtav1.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index e8bbcb1ac3..de6e6e813d 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -178,7 +178,8 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+         param->min_qp_allowed       = avctx->qmin;
+     }
+     param->max_bit_rate             = avctx->rc_max_rate;
+-    param->maximum_buffer_size_ms   = avctx->rc_buffer_size * 1000LL / avctx->bit_rate;
++    if (avctx->bit_rate && avctx->rc_buffer_size)
++        param->maximum_buffer_size_ms = avctx->rc_buffer_size * 1000LL / avctx->bit_rate;
+ 
+     if (svt_enc->crf > 0) {
+         param->qp                   = svt_enc->crf;
+-- 
+2.44.0
+

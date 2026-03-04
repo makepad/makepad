@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="180" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h700v180H0z"/>
+  <path stroke="#000" stroke-width="4" d="M10 10h160v160H10zM170 90h80v80h-80zM250 90h80v80h-80zM370 10h160v160H370zM530 90h80v80h-80zM610 90h80v80h-80z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="441.959" y="85.2727">Y
+</tspan><tspan x="425.426" y="109.273">2-bit</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.959" y="85.2727">Y
+</tspan><tspan x="65.1816" y="109.273">8-bit</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="282.764" y="125.273">V
+</tspan><tspan x="266.182" y="149.273">8-bit</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="203.666" y="125.273">U
+</tspan><tspan x="187.182" y="149.273">8-bit</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="641.764" y="125.273">V
+</tspan><tspan x="625.426" y="149.273">2-bit</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="562.666" y="125.273">U
+</tspan><tspan x="546.426" y="149.273">2-bit</tspan></text>
+</svg>

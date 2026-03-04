@@ -1,0 +1,1055 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1485" height="270" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h1485v270H0z"/>
+  <path stroke="#000" d="M55 80h160v160H55z"/>
+  <path fill="#fff" stroke="#000" d="M55 80h20v20H55z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="61.665" y="93.6364">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M75 80h20v20H75z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="82.5977" y="93.6364">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M95 80h20v20H95z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="101.895" y="93.6364">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M115 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="121.743" y="93.6364">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M135 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="141.67" y="93.6364">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M155 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="161.836" y="93.6364">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M175 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="181.758" y="93.6364">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M195 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="202.065" y="93.6364">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M55 100h20v20H55z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="62.5977" y="113.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M75 100h20v20H75z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.8945" y="113.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M95 100h20v20H95z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="101.743" y="113.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M115 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="121.67" y="113.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M135 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="141.836" y="113.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M155 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="161.758" y="113.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M175 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="182.065" y="113.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M195 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="201.772" y="113.636">8</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M55 120h20v20H55z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="61.8945" y="133.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M75 120h20v20H75z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.7432" y="133.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M95 120h20v20H95z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="101.67" y="133.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M115 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="121.836" y="133.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M135 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="141.758" y="133.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M155 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="162.065" y="133.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M175 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="181.772" y="133.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M195 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="201.758" y="133.636">9</tspan></text>
+  <path fill="#fff" stroke="#000" d="M55 140h20v20H55z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="61.7432" y="153.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M75 140h20v20H75z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.6699" y="153.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M95 140h20v20H95z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="101.836" y="153.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M115 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="121.758" y="153.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M135 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="142.065" y="153.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M155 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="161.772" y="153.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M175 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="181.758" y="153.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M195 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="199.263" y="153.636">10</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M55 160h20v20H55z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="61.6699" y="173.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M75 160h20v20H75z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.8359" y="173.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M95 160h20v20H95z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="101.758" y="173.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M115 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="122.065" y="173.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M135 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="141.772" y="173.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M155 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="161.758" y="173.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M175 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="179.263" y="173.636">10</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M195 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="200.195" y="173.636">11</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M55 180h20v20H55z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="61.8359" y="193.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M75 180h20v20H75z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.7578" y="193.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M95 180h20v20H95z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="102.065" y="193.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M115 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="121.772" y="193.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M135 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="141.758" y="193.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M155 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="159.263" y="193.636">10</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M175 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="180.195" y="193.636">11</tspan></text>
+  <path fill="#fff" stroke="#000" d="M195 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="199.492" y="193.636">12</tspan></text>
+  <path fill="#fff" stroke="#000" d="M55 200h20v20H55z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="61.7578" y="213.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M75 200h20v20H75z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="82.0654" y="213.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M95 200h20v20H95z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="101.772" y="213.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M115 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="121.758" y="213.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M135 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="139.263" y="213.636">10</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M155 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="160.195" y="213.636">11</tspan></text>
+  <path fill="#fff" stroke="#000" d="M175 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="179.492" y="213.636">12</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M195 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="199.341" y="213.636">13</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M55 220h20v20H55z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="62.0654" y="233.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M75 220h20v20H75z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="81.7725" y="233.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M95 220h20v20H95z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="101.758" y="233.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M115 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="119.263" y="233.636">10</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M135 220h20v20h-20v-20Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="140.195" y="233.636">11</tspan></text>
+  <path fill="#fff" stroke="#000" d="M155 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="159.492" y="233.636">12</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M175 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="179.341" y="233.636">13</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M195 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="199.268" y="233.636">14</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="8.54492" y="94.3636">k=0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="9.66406" y="114.364">k=1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="8.82031" y="134.364">k=2</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="8.63867" y="154.364">k=3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="14.7793" y="174.364">...</tspan></text>
+  <path fill="red" d="M55 100v.5h.2071l.1465-.146L55 100Zm30-30-5.5768 1.4943 4.0825 4.0825L85 70Zm-50 30.5h20v-1H35v1Zm20.3536-.146 26.818-26.8185-.7071-.7071-26.8181 26.818.7072.7076ZM55 120v.5h.2071l.1465-.146L55 120Zm50-50-5.5768 1.4943 4.0828 4.0825L105 70Zm-70 50.5h20v-1H35v1Zm20.3536-.146 46.8184-46.8185-.708-.7071-46.8176 46.8176.7072.708ZM55 140v.5h.2071l.1465-.146L55 140Zm70-70-5.577 1.4943 4.083 4.0825L125 70Zm-90 70.5h20v-1H35v1Zm20.3536-.146 66.8184-66.8185-.708-.7071-66.8176 66.8176.7072.708ZM55 160v.5h.2071l.1465-.146L55 160Zm90-90-5.577 1.4943 4.083 4.0825L145 70ZM35 160.5h20v-1H35v1Zm20.3536-.146 86.8184-86.8185-.708-.7071-86.8176 86.8176.7072.708Z"/>
+  <path stroke="#000" d="M235 80h160v160H235z"/>
+  <path fill="#fff" stroke="#000" d="M235 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="241.665" y="93.6364">0</tspan></text>
+  <path fill="#fff" stroke="#000" d="M255 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.665" y="93.6364">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M275 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="282.598" y="93.6364">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M295 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="302.598" y="93.6364">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M315 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="321.895" y="93.6364">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M335 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="341.895" y="93.6364">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M355 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="361.743" y="93.6364">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M375 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381.743" y="93.6364">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M235 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="242.598" y="113.636">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M255 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="262.598" y="113.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M275 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="281.895" y="113.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M295 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="301.895" y="113.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M315 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="321.743" y="113.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M335 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="341.743" y="113.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M355 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="361.67" y="113.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M375 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381.67" y="113.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M235 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="241.895" y="133.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M255 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.895" y="133.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M275 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="281.743" y="133.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M295 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="301.743" y="133.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M315 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="321.67" y="133.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M335 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="341.67" y="133.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M355 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="361.836" y="133.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M375 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381.836" y="133.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M235 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="241.743" y="153.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M255 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.743" y="153.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M275 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="281.67" y="153.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M295 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="301.67" y="153.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M315 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="321.836" y="153.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M335 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="341.836" y="153.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M355 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="361.758" y="153.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M375 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381.758" y="153.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M235 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="241.67" y="173.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M255 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.67" y="173.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M275 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="281.836" y="173.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M295 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="301.836" y="173.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M315 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="321.758" y="173.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M335 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="341.758" y="173.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M355 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="362.065" y="173.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M375 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="382.065" y="173.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M235 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="241.836" y="193.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M255 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.836" y="193.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M275 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="281.758" y="193.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M295 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="301.758" y="193.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M315 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="322.065" y="193.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M335 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="342.065" y="193.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M355 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="361.772" y="193.636">8</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M375 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381.772" y="193.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M235 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="241.758" y="213.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M255 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="261.758" y="213.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M275 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="282.065" y="213.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M295 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="302.065" y="213.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M315 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="321.772" y="213.636">8</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M335 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="341.772" y="213.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M355 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="361.758" y="213.636">9</tspan></text>
+  <path fill="#fff" stroke="#000" d="M375 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="381.758" y="213.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M235 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="242.065" y="233.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M255 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="262.065" y="233.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M275 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="281.772" y="233.636">8</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M295 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="301.772" y="233.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M315 220h20v20h-20v-20Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="321.758" y="233.636">9</tspan></text>
+  <path fill="#fff" stroke="#000" d="M335 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="341.758" y="233.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M355 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="359.263" y="233.636">10</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M375 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="379.263" y="233.636">10</tspan></text>
+  <path stroke="#000" d="M415 80h160v160H415z"/>
+  <path fill="#fff" stroke="#000" d="M415 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="421.665" y="93.6364">0</tspan></text>
+  <path fill="#fff" stroke="#000" d="M435 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="441.665" y="93.6364">0</tspan></text>
+  <path fill="#fff" stroke="#000" d="M455 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="461.665" y="93.6364">0</tspan></text>
+  <path fill="#fff" stroke="#000" d="M475 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="481.665" y="93.6364">0</tspan></text>
+  <path fill="#fff" stroke="#000" d="M495 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="501.665" y="93.6364">0</tspan></text>
+  <path fill="#fff" stroke="#000" d="M515 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.665" y="93.6364">0</tspan></text>
+  <path fill="#fff" stroke="#000" d="M535 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="541.665" y="93.6364">0</tspan></text>
+  <path fill="#fff" stroke="#000" d="M555 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="561.665" y="93.6364">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M415 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="422.598" y="113.636">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M435 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="442.598" y="113.636">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M455 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="462.598" y="113.636">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M475 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="482.598" y="113.636">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M495 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="502.598" y="113.636">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M515 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="522.598" y="113.636">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M535 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="542.598" y="113.636">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M555 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="562.598" y="113.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M415 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="421.895" y="133.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M435 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="441.895" y="133.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M455 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="461.895" y="133.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M475 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="481.895" y="133.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M495 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="501.895" y="133.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M515 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.895" y="133.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M535 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="541.895" y="133.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M555 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="561.895" y="133.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M415 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="421.743" y="153.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M435 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="441.743" y="153.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M455 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="461.743" y="153.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M475 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="481.743" y="153.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M495 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="501.743" y="153.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M515 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.743" y="153.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M535 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="541.743" y="153.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M555 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="561.743" y="153.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M415 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="421.67" y="173.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M435 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="441.67" y="173.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M455 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="461.67" y="173.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M475 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="481.67" y="173.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M495 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="501.67" y="173.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M515 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.67" y="173.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M535 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="541.67" y="173.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M555 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="561.67" y="173.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M415 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="421.836" y="193.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M435 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="441.836" y="193.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M455 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="461.836" y="193.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M475 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="481.836" y="193.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M495 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="501.836" y="193.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M515 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.836" y="193.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M535 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="541.836" y="193.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M555 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="561.836" y="193.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M415 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="421.758" y="213.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M435 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="441.758" y="213.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M455 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="461.758" y="213.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M475 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="481.758" y="213.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M495 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="501.758" y="213.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M515 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="521.758" y="213.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M535 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="541.758" y="213.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M555 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="561.758" y="213.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M415 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="422.065" y="233.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M435 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="442.065" y="233.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M455 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="462.065" y="233.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M475 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="482.065" y="233.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M495 220h20v20h-20v-20Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="502.065" y="233.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M515 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="522.065" y="233.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M535 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="542.065" y="233.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M555 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="562.065" y="233.636">7</tspan></text>
+  <path stroke="#000" d="M595 80h160v160H595z"/>
+  <path fill="#fff" stroke="#000" d="M755 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="741.665" y="93.6364">0</tspan></text>
+  <path fill="#fff" stroke="#000" d="M735 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="721.665" y="93.6364">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M715 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="702.598" y="93.6364">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M695 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="682.598" y="93.6364">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M675 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="661.895" y="93.6364">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M655 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="641.895" y="93.6364">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M635 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="621.743" y="93.6364">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M615 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="601.743" y="93.6364">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M755 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="742.598" y="113.636">1</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M735 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="722.598" y="113.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M715 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="701.895" y="113.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M695 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="681.895" y="113.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M675 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="661.743" y="113.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M655 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="641.743" y="113.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M635 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="621.67" y="113.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M615 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="601.67" y="113.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M755 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="741.895" y="133.636">2</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M735 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="721.895" y="133.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M715 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="701.743" y="133.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M695 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="681.743" y="133.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M675 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="661.67" y="133.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M655 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="641.67" y="133.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M635 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="621.836" y="133.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M615 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="601.836" y="133.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M755 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="741.743" y="153.636">3</tspan></text>
+  <path fill="#fff" stroke="#000" d="M735 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="721.743" y="153.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M715 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="701.67" y="153.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M695 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="681.67" y="153.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M675 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="661.836" y="153.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M655 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="641.836" y="153.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M635 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="621.758" y="153.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M615 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="601.758" y="153.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M755 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="741.67" y="173.636">4</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M735 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="721.67" y="173.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M715 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="701.836" y="173.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M695 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="681.836" y="173.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M675 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="661.758" y="173.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M655 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="641.758" y="173.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M635 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="622.065" y="173.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M615 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="602.065" y="173.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M755 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="741.836" y="193.636">5</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M735 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="721.836" y="193.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M715 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="701.758" y="193.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M695 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="681.758" y="193.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M675 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="662.065" y="193.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M655 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="642.065" y="193.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M635 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="621.772" y="193.636">8</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M615 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="601.772" y="193.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M755 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="741.758" y="213.636">6</tspan></text>
+  <path fill="#fff" stroke="#000" d="M735 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="721.758" y="213.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M715 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="702.065" y="213.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M695 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="682.065" y="213.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M675 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="661.772" y="213.636">8</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M655 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="641.772" y="213.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M635 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="621.758" y="213.636">9</tspan></text>
+  <path fill="#fff" stroke="#000" d="M615 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="601.758" y="213.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M755 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="742.065" y="233.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M735 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="722.065" y="233.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M715 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="701.772" y="233.636">8</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M695 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="681.772" y="233.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M675 220h-20v20h20v-20Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="661.758" y="233.636">9</tspan></text>
+  <path fill="#fff" stroke="#000" d="M655 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="641.758" y="233.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M635 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="619.263" y="233.636">10</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M615 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="599.263" y="233.636">10</tspan></text>
+  <path stroke="#000" d="M775 80h160v160H775z"/>
+  <path fill="#fff" stroke="#000" d="M935 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="921.665" y="93.6364">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M915 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="902.598" y="93.6364">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M895 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="881.895" y="93.6364">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M875 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="861.743" y="93.6364">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M855 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="841.67" y="93.6364">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M835 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821.836" y="93.6364">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M815 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="801.758" y="93.6364">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M795 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="782.065" y="93.6364">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M935 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="922.598" y="113.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M915 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="901.895" y="113.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M895 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="881.743" y="113.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M875 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="861.67" y="113.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M855 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="841.836" y="113.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M835 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821.758" y="113.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M815 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="802.065" y="113.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M795 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="781.772" y="113.636">8</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M935 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="921.895" y="133.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M915 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="901.743" y="133.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M895 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="881.67" y="133.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M875 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="861.836" y="133.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M855 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="841.758" y="133.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M835 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="822.065" y="133.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M815 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="801.772" y="133.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M795 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="781.758" y="133.636">9</tspan></text>
+  <path fill="#fff" stroke="#000" d="M935 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="921.743" y="153.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M915 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="901.67" y="153.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M895 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="881.836" y="153.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M875 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="861.758" y="153.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M855 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="842.065" y="153.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M835 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821.772" y="153.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M815 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="801.758" y="153.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M795 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="779.263" y="153.636">10</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M935 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="921.67" y="173.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M915 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="901.836" y="173.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M895 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="881.758" y="173.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M875 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="862.065" y="173.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M855 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="841.772" y="173.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M835 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="821.758" y="173.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M815 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="799.263" y="173.636">10</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M795 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="780.195" y="173.636">11</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M935 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="921.836" y="193.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M915 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="901.758" y="193.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M895 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="882.065" y="193.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M875 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="861.772" y="193.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M855 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="841.758" y="193.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M835 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="819.263" y="193.636">10</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M815 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="800.195" y="193.636">11</tspan></text>
+  <path fill="#fff" stroke="#000" d="M795 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="779.492" y="193.636">12</tspan></text>
+  <path fill="#fff" stroke="#000" d="M935 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="921.758" y="213.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M915 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="902.065" y="213.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M895 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="881.772" y="213.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M875 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="861.758" y="213.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M855 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="839.263" y="213.636">10</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M835 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="820.195" y="213.636">11</tspan></text>
+  <path fill="#fff" stroke="#000" d="M815 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="799.492" y="213.636">12</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M795 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="779.341" y="213.636">13</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M935 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="922.065" y="233.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M915 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="901.772" y="233.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M895 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="881.758" y="233.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M875 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="859.263" y="233.636">10</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M855 220h-20v20h20v-20Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="840.195" y="233.636">11</tspan></text>
+  <path fill="#fff" stroke="#000" d="M835 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="819.492" y="233.636">12</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M815 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="799.341" y="233.636">13</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M795 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="779.268" y="233.636">14</tspan></text>
+  <path stroke="#000" d="M955 80h160v160H955z"/>
+  <path fill="#fff" stroke="#000" d="M1115 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1101.67" y="93.6364">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1095 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1082.6" y="93.6364">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1075 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1061.89" y="93.6364">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1055 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1041.74" y="93.6364">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1035 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1021.67" y="93.6364">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1015 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1001.84" y="93.6364">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M995 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="981.758" y="93.6364">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M975 80h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="962.065" y="93.6364">7</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1115 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1101.67" y="113.636">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1095 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1082.6" y="113.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1075 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1061.89" y="113.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1055 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1041.74" y="113.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1035 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1021.67" y="113.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1015 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1001.84" y="113.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M995 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="981.758" y="113.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M975 100h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="962.065" y="113.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1115 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1102.6" y="133.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1095 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1081.89" y="133.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1075 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1061.74" y="133.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1055 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1041.67" y="133.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1035 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1021.84" y="133.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1015 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1001.76" y="133.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M995 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="982.065" y="133.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M975 120h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="961.772" y="133.636">8</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1115 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1102.6" y="153.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1095 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1081.89" y="153.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1075 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1061.74" y="153.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1055 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1041.67" y="153.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1035 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1021.84" y="153.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1015 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1001.76" y="153.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M995 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="982.065" y="153.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M975 140h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="961.772" y="153.636">8</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1115 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1101.89" y="173.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1095 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1081.74" y="173.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1075 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1061.67" y="173.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1055 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1041.84" y="173.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1035 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1021.76" y="173.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1015 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1002.07" y="173.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M995 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="981.772" y="173.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M975 160h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="961.758" y="173.636">9</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1115 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1101.89" y="193.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1095 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1081.74" y="193.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1075 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1061.67" y="193.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1055 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1041.84" y="193.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1035 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1021.76" y="193.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1015 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1002.07" y="193.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M995 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="981.772" y="193.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M975 180h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="961.758" y="193.636">9</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1115 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1101.74" y="213.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1095 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1081.67" y="213.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1075 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1061.84" y="213.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1055 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1041.76" y="213.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1035 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1022.07" y="213.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1015 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1001.77" y="213.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M995 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="981.758" y="213.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M975 200h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="959.263" y="213.636">10</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1115 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1101.74" y="233.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1095 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1081.67" y="233.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1075 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1061.84" y="233.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1055 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1041.76" y="233.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1035 220h-20v20h20v-20Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1022.07" y="233.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1015 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1001.77" y="233.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M995 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="981.758" y="233.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M975 220h-20v20h20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="959.263" y="233.636">10</tspan></text>
+  <path stroke="#000" d="M1135 80h160v160h-160z"/>
+  <path fill="#ADCBE9" stroke="#000" d="M1135 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1142.07" y="93.6364">7</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1155 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1161.76" y="93.6364">6</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1175 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1181.84" y="93.6364">5</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1195 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1201.67" y="93.6364">4</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1215 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1221.74" y="93.6364">3</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1235 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1241.89" y="93.6364">2</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1255 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1262.6" y="93.6364">1</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1275 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1281.67" y="93.6364">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1135 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1142.07" y="113.636">7</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1155 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1161.76" y="113.636">6</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1175 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1181.84" y="113.636">5</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1195 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1201.67" y="113.636">4</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1215 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1221.74" y="113.636">3</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1235 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1241.89" y="113.636">2</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1255 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1262.6" y="113.636">1</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1275 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1281.67" y="113.636">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1135 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1142.07" y="133.636">7</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1155 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1161.76" y="133.636">6</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1175 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1181.84" y="133.636">5</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1195 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1201.67" y="133.636">4</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1215 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1221.74" y="133.636">3</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1235 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1241.89" y="133.636">2</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1255 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1262.6" y="133.636">1</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1275 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1281.67" y="133.636">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1135 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1142.07" y="153.636">7</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1155 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1161.76" y="153.636">6</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1175 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1181.84" y="153.636">5</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1195 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1201.67" y="153.636">4</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1215 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1221.74" y="153.636">3</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1235 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1241.89" y="153.636">2</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1255 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1262.6" y="153.636">1</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1275 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1281.67" y="153.636">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1135 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1142.07" y="173.636">7</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1155 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1161.76" y="173.636">6</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1175 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1181.84" y="173.636">5</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1195 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1201.67" y="173.636">4</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1215 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1221.74" y="173.636">3</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1235 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1241.89" y="173.636">2</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1255 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1262.6" y="173.636">1</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1275 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1281.67" y="173.636">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1135 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1142.07" y="193.636">7</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1155 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1161.76" y="193.636">6</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1175 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1181.84" y="193.636">5</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1195 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1201.67" y="193.636">4</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1215 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1221.74" y="193.636">3</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1235 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1241.89" y="193.636">2</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1255 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1262.6" y="193.636">1</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1275 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1281.67" y="193.636">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1135 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1142.07" y="213.636">7</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1155 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1161.76" y="213.636">6</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1175 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1181.84" y="213.636">5</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1195 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1201.67" y="213.636">4</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1215 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1221.74" y="213.636">3</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1235 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1241.89" y="213.636">2</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1255 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1262.6" y="213.636">1</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1275 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1281.67" y="213.636">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1135 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1142.07" y="233.636">7</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1155 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1161.76" y="233.636">6</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1175 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1181.84" y="233.636">5</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1195 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1201.67" y="233.636">4</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1215 220h20v20h-20v-20Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1221.74" y="233.636">3</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1235 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1241.89" y="233.636">2</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1255 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1262.6" y="233.636">1</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1275 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1281.67" y="233.636">0</tspan></text>
+  <path stroke="#000" d="M1315 80h160v160h-160z"/>
+  <path fill="#fff" stroke="#000" d="M1315 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1321.67" y="93.6364">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1335 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1342.6" y="93.6364">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1355 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1361.89" y="93.6364">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1375 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1381.74" y="93.6364">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1395 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1401.67" y="93.6364">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1415 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1421.84" y="93.6364">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1435 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1441.76" y="93.6364">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1455 80h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1462.07" y="93.6364">7</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1315 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1321.67" y="113.636">0</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1335 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1342.6" y="113.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1355 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1361.89" y="113.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1375 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1381.74" y="113.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1395 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1401.67" y="113.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1415 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1421.84" y="113.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1435 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1441.76" y="113.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1455 100h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1462.07" y="113.636">7</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1315 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1322.6" y="133.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1335 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1341.89" y="133.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1355 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1361.74" y="133.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1375 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1381.67" y="133.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1395 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1401.84" y="133.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1415 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1421.76" y="133.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1435 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1442.07" y="133.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1455 120h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1461.77" y="133.636">8</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1315 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1322.6" y="153.636">1</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1335 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1341.89" y="153.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1355 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1361.74" y="153.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1375 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1381.67" y="153.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1395 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1401.84" y="153.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1415 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1421.76" y="153.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1435 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1442.07" y="153.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1455 140h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1461.77" y="153.636">8</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1315 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1321.89" y="173.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1335 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1341.74" y="173.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1355 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1361.67" y="173.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1375 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1381.84" y="173.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1395 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1401.76" y="173.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1415 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1422.07" y="173.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1435 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1441.77" y="173.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1455 160h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1461.76" y="173.636">9</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1315 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1321.89" y="193.636">2</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1335 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1341.74" y="193.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1355 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1361.67" y="193.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1375 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1381.84" y="193.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1395 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1401.76" y="193.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1415 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1422.07" y="193.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1435 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1441.77" y="193.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1455 180h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1461.76" y="193.636">9</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1315 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1321.74" y="213.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1335 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1341.67" y="213.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1355 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1361.84" y="213.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1375 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1381.76" y="213.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1395 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1402.07" y="213.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1415 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1421.77" y="213.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1435 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1441.76" y="213.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1455 200h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1459.26" y="213.636">10</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1315 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1321.74" y="233.636">3</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1335 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1341.67" y="233.636">4</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1355 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1361.84" y="233.636">5</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1375 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1381.76" y="233.636">6</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1395 220h20v20h-20v-20Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1402.07" y="233.636">7</tspan></text>
+  <path fill="#5B97D4" stroke="#000" d="M1415 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1421.77" y="233.636">8</tspan></text>
+  <path fill="#fff" stroke="#000" d="M1435 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1441.76" y="233.636">9</tspan></text>
+  <path fill="#ADCBE9" stroke="#000" d="M1455 220h20v20h-20z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1459.26" y="233.636">10</tspan></text>
+  <path fill="#FF8000" d="m110 65 11.154-2.9886-8.165-8.165L110 65Zm50-50-11.154 2.9886 8.165 8.165L160 15Zm-42.929 44.3431 37.272-37.272-1.414-1.4142-37.272 37.272 1.414 1.4142ZM283 54.88l11.503 1.0064-4.88-10.4651L283 54.88Zm64.086-29.8836L335.583 23.99l4.88 10.4651 6.623-9.4587Zm-55.507 26.9863 47.772-22.2764-.845-1.8127-47.772 22.2765.845 1.8126ZM460 40l10 5.7735v-11.547L460 40Zm70.711 0-10-5.7735v11.547l10-5.7735ZM469 41h52.711v-2H469v2ZM643 25l6.623 9.4588 4.88-10.4652L643 25Zm64.086 29.8836-6.623-9.4587-4.88 10.4651 11.503-1.0064Zm-56.352-25.1737 47.772 22.2765.845-1.8126-47.772-22.2765-.845 1.8126ZM830 15l2.989 11.1536 8.165-8.165L830 15Zm50 50-2.989-11.1536-8.165 8.165L880 65Zm-44.343-42.9289 37.272 37.272 1.414-1.4142-37.272-37.272-1.414 1.4142ZM1023 7l-2.01 11.3716 10.86-3.9493L1023 7Zm24.18 66.4463 2.01-11.3716-10.85 3.9493 8.84 7.4223Zm-22.04-57.647 18.03 49.5318 1.88-.6841-18.03-49.5318-1.88.6841ZM1215 5l-5.77 10h11.54L1215 5Zm0 70.7107 5.77-10h-11.54l5.77 10ZM1214 14v52.7107h2V14h-2ZM1407.18 7l-8.84 7.4223 10.85 3.9493L1407.18 7ZM1383 73.4463l8.85-7.4223-10.86-3.9493 2.01 11.3716Zm20.17-58.3311-18.03 49.5318 1.88.6841 18.03-49.5318-1.88-.6841Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="119.242" y="260.818">d=0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="300.734" y="260.818">d=1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="479.609" y="260.818">d=2</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="659.367" y="260.818">d=3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="839.25" y="260.818">d=4</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1019.52" y="260.818">d=5</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1199.39" y="260.818">d=6</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="16" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="1379.88" y="260.818">d=7</tspan></text>
+</svg>

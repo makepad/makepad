@@ -1,0 +1,56 @@
+<svg width="550" height="95" viewBox="0 0 550 95" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+    <style>
+        @font-face {
+            font-family: 'Inter';
+            src: url('https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'GitLab Mono';
+            src: url('https://docs.gitlab.com/assets/vendor/GitLabMono.woff2') format('woff2');
+        }
+    </style>
+</defs>
+
+<rect x="1" y="1" width="548" height="93" fill="white"/>
+<rect x="1" y="1" width="548" height="93" stroke="black" stroke-width="2"/>
+<rect x="141" y="14" width="407" height="17" fill="#003972"/>
+<rect x="2" y="21" width="546" height="36" fill="#003972"/>
+<rect x="68" y="2" width="240" height="17" fill="#AEEAAE"/>
+<path d="M308 2H548V19H308V2Z" fill="#EAEAAE"/>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="4.01953" y="70.6">fwd_offset</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="GitLab Mono" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="4.01953" y="88.6">bck_offset</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="99.5479" y="14.1364">Case of d0&#62;d1 and d1/d0&#62;Threshold</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="336.184" y="14.1364">Case of d0&#60;=d1 and d1/d0&#60;Threshold</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="14.1807" y="42.6364">Weights</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="162.993" y="33.1364">Threshold</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="98.7432" y="52.1364">2/3</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="178.836" y="52.1364">2/5</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="259.565" y="52.1364">2/7</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="339.743" y="52.1364">3/2</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="419.836" y="52.1364">5/2</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="500.565" y="52.1364">7/2</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="104.065" y="70.6364">7</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="183.836" y="70.6364">5</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="264.17" y="70.6364">4</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="344.758" y="70.6364">9</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="423.195" y="70.6364">11</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="502.992" y="70.6364">12</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="103.758" y="88.6364">9</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="182.195" y="88.6364">11</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="261.992" y="88.6364">12</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="345.065" y="88.6364">7</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="424.836" y="88.6364">5</tspan></text>
+<text fill="black" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="505.17" y="88.6364">4</tspan></text>
+<text fill="white" xml:space="preserve" style="white-space: pre" font-family="Inter" font-size="10" font-weight="600" letter-spacing="0em"><tspan x="403.993" y="33.1364">Threshold</tspan></text>
+<path d="M67 2C67 2 67 65.2728 67 93" stroke="black" stroke-width="2"/>
+<path d="M308 21C308 21 308 65.2728 308 93" stroke="black" stroke-width="2"/>
+<path d="M147 40C147 40 147 65.2728 147 93" stroke="black" stroke-width="2"/>
+<path d="M227 40C227 40 227 65.2728 227 93" stroke="black" stroke-width="2"/>
+<path d="M388 40C388 40 388 65.2728 388 93" stroke="black" stroke-width="2"/>
+<path d="M468 40C468 40 468 65.2728 468 93" stroke="black" stroke-width="2"/>
+<path d="M2 20C2 20 377.898 20 548 20" stroke="black" stroke-width="2"/>
+<path d="M68 39C68 39 377.898 39 548 39" stroke="black" stroke-width="2"/>
+<path d="M2 58C2 58 377.898 58 548 58" stroke="black" stroke-width="2"/>
+<path d="M2 76C2 76 377.898 76 548 76" stroke="black" stroke-width="2"/>
+</svg>

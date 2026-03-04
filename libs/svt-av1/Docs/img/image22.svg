@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="530" height="480" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h530v480H0z"/>
+  <path stroke="#F66" d="m430 328.5-6.5 6.5M430 288.5 383.5 335M430 318.5 413.5 335M430 278.5 373.5 335M430 308.5 403.5 335M430 268.5 363.5 335M430 298.5 393.5 335M430 258.5 353.5 335M430 248.5 343.5 335M428.5 210 305 333.5M430 238.5 333.5 335M418.5 210 305 323.5M430 228.5 323.5 335M408.5 210 305 313.5M430 218.5 313.5 335M398.5 210 305 303.5M388.5 210 305 293.5M378.5 210 305 283.5M368.5 210 305 273.5M358.5 210 305 263.5M348.5 210 305 253.5M338.5 210 305 243.5M328.5 210 305 233.5M318.5 210 305 223.5M309 210l-4 4.5M423.5 210l6.5 6.5M383.5 210l46.5 46.5M413.5 210l16.5 16.5M373.5 210l56.5 56.5M403.5 210l26.5 26.5M363.5 210l66.5 66.5M393.5 210l36.5 36.5M353.5 210l76.5 76.5M343.5 210l86.5 86.5M305 211.5 428.5 335M333.5 210l96.5 96.5M305 221.5 418.5 335M323.5 210 430 316.5M305 231.5 408.5 335M313.5 210 430 326.5M305 241.5l93.5 93.5M305 251.5l83.5 83.5M305 261.5l73.5 73.5M305 271.5l63.5 63.5M305 281.5l53.5 53.5M305 291.5l43.5 43.5M305 301.5l33.5 33.5M305 311.5l23.5 23.5M305 321.5l13.5 13.5M305 331l4.5 4M180 341.5l6.5-6.5M180 381.5l46.5-46.5M180 351.5l16.5-16.5M180 391.5l56.5-56.5M180 361.5l26.5-26.5M180 401.5l66.5-66.5M180 371.5l36.5-36.5M180 411.5l76.5-76.5M180 421.5l86.5-86.5M181.5 460 305 336.5M180 431.5l96.5-96.5M191.5 460 305 346.5M180 441.5 286.5 335M201.5 460 305 356.5M180 451.5 296.5 335M211.5 460l93.5-93.5M221.5 460l83.5-83.5M231.5 460l73.5-73.5M241.5 460l63.5-63.5M251.5 460l53.5-53.5M261.5 460l43.5-43.5M271.5 460l33.5-33.5M281.5 460l23.5-23.5M291.5 460l13.5-13.5M301 460l4-4.5M186.5 460l-6.5-6.5M226.5 460 180 413.5M196.5 460 180 443.5M236.5 460 180 403.5M206.5 460 180 433.5M246.5 460 180 393.5M216.5 460 180 423.5M256.5 460 180 383.5M266.5 460 180 373.5M305 458.5 181.5 335M276.5 460 180 363.5M305 448.5 191.5 335M286.5 460 180 353.5M305 438.5 201.5 335M296.5 460 180 343.5M305 428.5 211.5 335M305 418.5 221.5 335M305 408.5 231.5 335M305 398.5 241.5 335M305 388.5 251.5 335M305 378.5 261.5 335M305 368.5 271.5 335M305 358.5 281.5 335M305 348.5 291.5 335M305 339l-4.5-4M430 453.5l-6.5 6.5M430 413.5 383.5 460M430 443.5 413.5 460M430 403.5 373.5 460M430 433.5 403.5 460M430 393.5 363.5 460M430 423.5 393.5 460M430 383.5 353.5 460M430 373.5 343.5 460M428.5 335 305 458.5M430 363.5 333.5 460M418.5 335 305 448.5M430 353.5 323.5 460M408.5 335 305 438.5M430 343.5 313.5 460M398.5 335 305 428.5M388.5 335 305 418.5M378.5 335 305 408.5M368.5 335 305 398.5M358.5 335 305 388.5M348.5 335 305 378.5M338.5 335 305 368.5M328.5 335 305 358.5M318.5 335 305 348.5M309 335l-4 4.5M423.5 335l6.5 6.5M383.5 335l46.5 46.5M413.5 335l16.5 16.5M373.5 335l56.5 56.5M403.5 335l26.5 26.5M363.5 335l66.5 66.5M393.5 335l36.5 36.5M353.5 335l76.5 76.5M343.5 335l86.5 86.5M305 336.5 428.5 460M333.5 335l96.5 96.5M305 346.5 418.5 460M323.5 335 430 441.5M305 356.5 408.5 460M313.5 335 430 451.5M305 366.5l93.5 93.5M305 376.5l83.5 83.5M305 386.5l73.5 73.5M305 396.5l63.5 63.5M305 406.5l53.5 53.5M305 416.5l43.5 43.5M305 426.5l33.5 33.5M305 436.5l23.5 23.5M305 446.5l13.5 13.5M305 456l4.5 4"/>
+  <path fill="#D45B5B" d="M10 10h40v40H10z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="25.998" y="34.3636">0</tspan></text>
+  <path fill="#FC6" d="M10 50h40v40H10z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="24.3223" y="74.3636">-1</tspan></text>
+  <path fill="#FC6" d="M200 90h40v40h-40z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="217.117" y="114.364">1</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="256.273" y="114.364">2</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="336.004" y="114.364">4</tspan></text>
+  <path fill="#FC6" d="M10 90h40v40H10z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="23.6309" y="114.364">-2</tspan></text>
+  <path fill="#FC6" d="M90 290h40v40H90z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="106.273" y="314.364">2</tspan></text>
+  <path fill="#FC6" d="M90 330h40v40H90z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="106.092" y="354.364">3</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="106.004" y="394.364">4</tspan></text>
+  <path fill="#ADCBE9" d="M90 10h40v40H90z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="106.273" y="34.3636">2</tspan></text>
+  <path fill="#ADCBE9" d="M90 250h40v40H90z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="107.117" y="274.364">1</tspan></text>
+  <path fill="#ADCBE9" d="M280 90h40v40h-40z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="296.092" y="114.364">3</tspan></text>
+  <path fill="#AEEAAE" d="M130 10h40v40h-40z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="146.092" y="34.3636">3</tspan></text>
+  <path fill="#AEEAAE" d="M90 210h40v40H90z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="105.998" y="234.364">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="186.004" y="34.3636">4</tspan></text>
+  <path fill="#C1ADE9" d="M10 130h40v40H10z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="23.3379" y="154.364">-3</tspan></text>
+  <path fill="#C1ADE9" d="M160 90h40v40h-40z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="175.998" y="114.364">0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="23.209" y="194.364">-4</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="67.1172" y="34.3636">1</tspan></text>
+  <path stroke="#000" d="M10 280V10h270v40H50v230H10Z"/>
+  <path stroke="#000" d="M130 470H90V210h40v260ZM160 90v40h360V90H160Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="51.6875" y="64.3636">Top-Left Block Neighbor Array</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="305.979" y="84.3636">Top Block Neighbor Array</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre" transform="rotate(-90 255 185)"><tspan x="5.36914" y="14.3636">Left Block Neighbor Array</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="246.078" y="34.3636">MAX</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="486.078" y="114.364">MAX</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="96.0781" y="464.364">MAX</tspan></text>
+  <path fill="#C1ADE9" d="M180 273h31v62h-31z"/>
+  <path fill="#FC6" d="M212 273h31v62h-31z"/>
+  <path fill="#D45B5B" d="M180 210h63v63h-63z"/>
+  <path fill="#FC6" d="M243 210h31v31h-31z"/>
+  <path fill="#AEEAAE" d="M274 210h31v31h-31z"/>
+  <path fill="#ADCBE9" d="M274 242h31v31h-31z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="251.775" y="300.864">Current </tspan><tspan x="257.963" y="315.864">Block</tspan></text>
+  <path stroke="#000" d="M180 210v250h250V210H180ZM305 210.5v249M180.5 335h249M180 272.75h125M243 241.5h62M274 272.5v-62M211.5 335v-62M242.75 335V210"/>
+  <path fill="#000" d="m259 226-5.664-1.121 1.861 5.465L259 226Zm-46.839 16.473 42.74-14.549-.322-.947-42.74 14.55.322.946ZM290 226l-5-2.887v5.774l5-2.887Zm-31 .5h26.5v-1H259v1Z"/>
+  <path fill="#000" d="m259 258.3 5.545-1.608-4.166-3.998L259 258.3Zm30.639-32.646-27.884 29.054.722.692 27.884-29.054-.722-.692Z"/>
+  <path fill="#000" d="m290.239 258.3-5-2.886v5.773l5-2.887Zm-31.239.5h26.739v-1H259v1ZM228.239 304.364l-5.012-2.865.024 5.773 4.988-2.908Zm-32.237.636 27.739-.117-.004-1-27.739.117.004 1ZM274.239 303.507l-5.062-2.778.126 5.773 4.936-2.995ZM228.511 305l41.24-.895-.022-1-41.24.895.022 1Z"/>
+  <path fill="#000" d="m196.239 304.364 5.76.396-2.537-5.186-3.223 4.79Zm93.541-46.313-89.718 43.887.439.898 89.719-43.887-.44-.898Z"/>
+</svg>

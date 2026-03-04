@@ -1,0 +1,7 @@
+pyyaml
+pandas
+matplotlib
+meson
+tqdm
+numpy
+scipy

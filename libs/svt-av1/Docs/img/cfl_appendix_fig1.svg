@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="340" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h920v340H0z"/>
+  <path fill="#003972" d="M10 90h250v60H10zM10 190h250v60H10z"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="86.1328" y="227.273">Averaging</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="67.4512" y="127.273">Sub-sampling</tspan></text>
+  <path fill="#003972" d="m135 190 5.774-10h-11.548L135 190Zm-1-40v31h2v-31h-2ZM570 290l5.774-10h-11.548L570 290Zm-1-40v31h2v-31h-2ZM720 290l5.774-10h-11.548L720 290Zm-1-40v31h2v-31h-2ZM550 310l-10-5.774v11.548L550 310Zm-210 1h201v-2H340v2ZM700 310l-10-5.774v11.548L700 310Zm-110 1h101v-2H590v2ZM850 310l-10-5.774v11.548L850 310Zm-110 1h101v-2H740v2ZM135 90l5.774-10h-11.548L135 90Zm-1-40v31h2V50h-2Z"/>
+  <circle cx="320" cy="310" r="20" fill="#003972"/>
+  <circle cx="570" cy="310" r="20" fill="#003972"/>
+  <circle cx="720" cy="310" r="20" fill="#003972"/>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="18" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="22.4561" y="26.5455">Reconstructed Luma Intra</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="20" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="553.545" y="240.273">α</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="18" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="93.1816" y="46.5455">Luma</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="140.43" y="49.3636">recon</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="18" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="384.955" y="250.545">AC of Luma </tspan><tspan x="368.484" y="272.545">Intra prediction</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="18" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="382.182" y="296.545">Luma</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="431.027" y="299.364">recon_AC</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="18" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="805.705" y="250.545">Chroma </tspan><tspan x="773.484" y="272.545">Intra prediction</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="18" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="786.705" y="296.545">Chroma</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="856.67" y="299.364">pred</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="18" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="141.79" y="296.545">DC</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="169.469" y="299.364">Luma_recon</tspan></text>
+  <path fill="#003972" d="M135 310h-1v1h1v-1Zm165 0-10-5.774v11.548L300 310Zm-166-60v60h2v-60h-2Zm1 61h156v-2H135v2ZM320 120h1v-1h-1v1Zm0 170 5.774-10h-11.548L320 290Zm-60-169h60v-2h-60v2Zm59-1v161h2V120h-2Z"/>
+  <path fill="#fff" d="M310 307h20v6h-20z"/>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="14" font-style="italic" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="567.472" y="245.091">AC</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="678.322" y="240.273">DC</tspan></text>
+  <text xml:space="preserve" fill="#003972" font-family="Inter" font-size="14" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="707.488" y="245.091">chroma</tspan></text>
+  <path stroke="#fff" stroke-width="4" d="m562 318 16-16M562 302l16 16M710 310.001l20-.001M720 300v20"/>
+</svg>

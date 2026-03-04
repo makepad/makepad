@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="350" height="38" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M1 1h348v36H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h348v36H1z"/>
+  <path fill="#003972" d="M2 2h346v21H2z"/>
+  <path stroke="#000" stroke-width="2" d="M2 24h346"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="32.8394" y="15.0455">Flag</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="33.02">wedge_mode</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="33.02">  </tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="230.956" y="15.0455">Description</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="151" y="33.0455">  Specifies the complexity-quality tradeoffs of wedge</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="106.559" y="10.0455">Level </tspan><tspan x="82.4243" y="20.0455">(Sequence/Picture)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="103.472" y="33.0455">Picture</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M79 2v34M152 2v34"/>
+</svg>

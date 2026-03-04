@@ -1,0 +1,52 @@
+From 09a411de9f594ca8d8b7335c394375ffb4c4f401 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jan=20Ekstr=C3=B6m?= <jeebjp@gmail.com>
+Date: Mon, 25 Apr 2022 23:35:17 +0300
+Subject: [PATCH 08/22] avcodec/libsvtav1: add support for setting chroma
+ sample location
+
+Support for configuring this was added with version 1.0.0.
+---
+ libavcodec/libsvtav1.c | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 0b8d8da5b2..a259e42e8b 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -204,6 +204,33 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+     else
+         param->color_range = !!(desc->flags & AV_PIX_FMT_FLAG_RGB);
+ 
++#if SVT_AV1_CHECK_VERSION(1, 0, 0)
++    if (avctx->chroma_sample_location != AVCHROMA_LOC_UNSPECIFIED) {
++        const char *name =
++            av_chroma_location_name(avctx->chroma_sample_location);
++
++        switch (avctx->chroma_sample_location) {
++        case AVCHROMA_LOC_LEFT:
++            param->chroma_sample_position = EB_CSP_VERTICAL;
++            break;
++        case AVCHROMA_LOC_TOPLEFT:
++            param->chroma_sample_position = EB_CSP_COLOCATED;
++            break;
++        default:
++            if (!name)
++                break;
++
++            av_log(avctx, AV_LOG_WARNING,
++                   "Specified chroma sample location %s is unsupported "
++                   "on the AV1 bit stream level. Usage of a container that "
++                   "allows passing this information - such as Matroska - "
++                   "is recommended.\n",
++                   name);
++            break;
++        }
++    }
++#endif
++
+     if (avctx->profile != FF_PROFILE_UNKNOWN)
+         param->profile = avctx->profile;
+ 
+-- 
+2.44.0
+

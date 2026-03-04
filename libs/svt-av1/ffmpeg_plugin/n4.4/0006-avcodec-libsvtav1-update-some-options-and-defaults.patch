@@ -1,0 +1,189 @@
+From c366190368195cd20a36d8cc3b062352681c30ff Mon Sep 17 00:00:00 2001
+From: James Almer <jamrial@gmail.com>
+Date: Thu, 24 Feb 2022 20:36:46 -0300
+Subject: [PATCH 06/25] avcodec/libsvtav1: update some options and defaults
+
+And bump the minimum required version to 0.9.0
+
+Signed-off-by: James Almer <jamrial@gmail.com>
+---
+ configure              |  2 +-
+ doc/encoders.texi      | 23 ++++--------------
+ libavcodec/libsvtav1.c | 55 +++++++++++++++++++++++++++---------------
+ 3 files changed, 41 insertions(+), 39 deletions(-)
+
+diff --git a/configure b/configure
+index d7a3f507e8..467b529e46 100755
+--- a/configure
++++ b/configure
+@@ -6429,7 +6429,7 @@ enabled libsoxr           && require libsoxr soxr.h soxr_create -lsoxr
+ enabled libssh            && require_pkg_config libssh libssh libssh/sftp.h sftp_init
+ enabled libspeex          && require_pkg_config libspeex speex speex/speex.h speex_decoder_init
+ enabled libsrt            && require_pkg_config libsrt "srt >= 1.3.0" srt/srt.h srt_socket
+-enabled libsvtav1         && require_pkg_config libsvtav1 "SvtAv1Enc >= 0.8.4" EbSvtAv1Enc.h svt_av1_enc_init_handle
++enabled libsvtav1         && require_pkg_config libsvtav1 "SvtAv1Enc >= 0.9.0" EbSvtAv1Enc.h svt_av1_enc_init_handle
+ enabled libtensorflow     && require libtensorflow tensorflow/c/c_api.h TF_Version -ltensorflow
+ enabled libtesseract      && require_pkg_config libtesseract tesseract tesseract/capi.h TessBaseAPICreate
+ enabled libtheora         && require libtheora theora/theoraenc.h th_info_init -ltheoraenc -ltheoradec -logg
+diff --git a/doc/encoders.texi b/doc/encoders.texi
+index d6d0dc7080..8d11cb2d68 100644
+--- a/doc/encoders.texi
++++ b/doc/encoders.texi
+@@ -1754,28 +1754,15 @@ Set the operating point level.
+ @item tier
+ Set the operating point tier.
+ 
+-@item rc
+-Set the rate control mode to use.
+-
+-Possible modes:
+-@table @option
+-@item cqp
+-Constant quantizer: use fixed values of qindex (dependent on the frame type)
+-throughout the stream.  This mode is the default.
+-
+-@item vbr
+-Variable bitrate: use a target bitrate for the whole stream.
+-
+-@item cvbr
+-Constrained variable bitrate: use a target bitrate for each GOP.
+-@end table
+-
+ @item qmax
+ Set the maximum quantizer to use when using a bitrate mode.
+ 
+ @item qmin
+ Set the minimum quantizer to use when using a bitrate mode.
+ 
++@item crf
++Constant rate factor value used in crf rate control mode (0-63).
++
+ @item qp
+ Set the quantizer used in cqp rate control mode (0-63).
+ 
+@@ -1786,8 +1773,8 @@ Enable scene change detection.
+ Set number of frames to look ahead (0-120).
+ 
+ @item preset
+-Set the quality-speed tradeoff, in the range 0 to 8.  Higher values are
+-faster but lower quality.  Defaults to 8 (highest speed).
++Set the quality-speed tradeoff, in the range 0 to 13.  Higher values are
++faster but lower quality.
+ 
+ @item tile_rows
+ Set log2 of the number of rows of tiles to use (0-6).
+diff --git a/libavcodec/libsvtav1.c b/libavcodec/libsvtav1.c
+index 7c0b034d92..5b6fe90bb2 100644
+--- a/libavcodec/libsvtav1.c
++++ b/libavcodec/libsvtav1.c
+@@ -64,7 +64,7 @@ typedef struct SvtContext {
+     int hierarchical_level;
+     int la_depth;
+     int enc_mode;
+-    int rc_mode;
++    int crf;
+     int scd;
+     int qp;
+ 
+@@ -156,11 +156,32 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+ 
+     // Update param from options
+     param->hierarchical_levels      = svt_enc->hierarchical_level;
+-    param->enc_mode                 = svt_enc->enc_mode;
++
++    if (svt_enc->enc_mode >= 0)
++        param->enc_mode             = svt_enc->enc_mode;
++
+     param->tier                     = svt_enc->tier;
+-    param->rate_control_mode        = svt_enc->rc_mode;
++
++    if (avctx->bit_rate) {
++        param->target_bit_rate      = avctx->bit_rate;
++        if (avctx->rc_max_rate != avctx->bit_rate)
++            param->rate_control_mode = 1;
++        else
++            param->rate_control_mode = 2;
++    }
++    param->max_bit_rate             = avctx->rc_max_rate;
++    param->vbv_bufsize              = avctx->rc_buffer_size;
++
++    if (svt_enc->crf > 0) {
++        param->qp                   = svt_enc->crf;
++        param->rate_control_mode    = 0;
++        param->enable_tpl_la        = 1;
++    } else if (svt_enc->qp > 0) {
++        param->qp                   = svt_enc->qp;
++        param->rate_control_mode    = 0;
++        param->enable_tpl_la        = 0;
++    }
+     param->scene_change_detection   = svt_enc->scd;
+-    param->qp                       = svt_enc->qp;
+ 
+     if (svt_enc->la_depth >= 0)
+         param->look_ahead_distance  = svt_enc->la_depth;
+@@ -220,8 +241,6 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+         param->profile = FF_PROFILE_AV1_HIGH;
+     }
+ 
+-    param->target_bit_rate          = avctx->bit_rate;
+-
+     if (avctx->gop_size > 0)
+         param->intra_period_length  = avctx->gop_size - 1;
+ 
+@@ -233,8 +252,8 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
+         param->frame_rate_denominator = avctx->time_base.num * avctx->ticks_per_frame;
+     }
+ 
+-    param->enable_tpl_la = !!param->rate_control_mode;
+-    if (param->rate_control_mode) {
++    avctx->bit_rate                 = param->target_bit_rate;
++    if (avctx->bit_rate) {
+         param->max_qp_allowed       = avctx->qmax;
+         param->min_qp_allowed       = avctx->qmin;
+     }
+@@ -504,8 +523,8 @@ static const AVOption options[] = {
+     { "la_depth", "Look ahead distance [0, 120]", OFFSET(la_depth),
+       AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 120, VE },
+ 
+-    { "preset", "Encoding preset [0, 8]",
+-      OFFSET(enc_mode), AV_OPT_TYPE_INT, { .i64 = MAX_ENC_PRESET }, 0, MAX_ENC_PRESET, VE },
++    { "preset", "Encoding preset",
++      OFFSET(enc_mode), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, MAX_ENC_PRESET, VE },
+ 
+     { "tier", "Set operating point tier", OFFSET(tier),
+       AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, VE, "tier" },
+@@ -542,14 +561,10 @@ static const AVOption options[] = {
+         { LEVEL("7.3", 73) },
+ #undef LEVEL
+ 
+-    { "rc", "Bit rate control mode", OFFSET(rc_mode),
+-      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 2, VE , "rc"},
+-        { "cqp", "Constant quantizer", 0, AV_OPT_TYPE_CONST, { .i64 = 0 },  INT_MIN, INT_MAX, VE, "rc" },
+-        { "vbr", "Variable Bit Rate, use a target bitrate for the entire stream", 0, AV_OPT_TYPE_CONST, { .i64 = 1 },  INT_MIN, INT_MAX, VE, "rc" },
+-        { "cvbr", "Constrained Variable Bit Rate, use a target bitrate for each GOP", 0, AV_OPT_TYPE_CONST,{ .i64 = 2 },  INT_MIN, INT_MAX, VE, "rc" },
+-
+-    { "qp", "Quantizer to use with cqp rate control mode", OFFSET(qp),
+-      AV_OPT_TYPE_INT, { .i64 = 50 }, 0, 63, VE },
++    { "crf", "Constant Rate Factor value", OFFSET(crf),
++      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 63, VE },
++    { "qp", "Initial Quantizer level value", OFFSET(qp),
++      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 63, VE },
+ 
+     { "sc_detection", "Scene change detection", OFFSET(scd),
+       AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
+@@ -570,10 +585,10 @@ static const AVClass class = {
+ };
+ 
+ static const AVCodecDefault eb_enc_defaults[] = {
+-    { "b",         "7M"    },
++    { "b",         "0"    },
+     { "flags",     "+cgop" },
+     { "g",         "-1"    },
+-    { "qmin",      "0"     },
++    { "qmin",      "1"     },
+     { "qmax",      "63"    },
+     { NULL },
+ };
+-- 
+2.44.0
+

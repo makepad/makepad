@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="710" height="275" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M0 0h710v275H0z"/>
+  <rect width="198" height="198" x="256" y="6" fill="#ADE9CB" stroke="#000" stroke-width="2" rx="9"/>
+  <rect width="198" height="38" x="256" y="231" fill="#ADE9CB" stroke="#000" stroke-width="2" rx="9"/>
+  <rect width="188" height="108" x="261" y="46" fill="#EAEAAE" stroke="#000" stroke-width="2" rx="9"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="269.354" y="66.8636">Use more accurate prediction </tspan><tspan x="265.797" y="81.8636">tools and performance metrics </tspan><tspan x="283.059" y="96.8636">in mode decision stages. </tspan><tspan x="266.002" y="111.864">Fewer candidates are tested in </tspan><tspan x="268.855" y="126.864">this stage as compared to the </tspan><tspan x="310.375" y="141.864">previous stage.</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="299.17" y="33.2727">PD Stage m</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="287.637" y="257.273">PD Stage m+1</tspan></text>
+  <rect width="188" height="38" x="261" y="161" fill="#EAEAAE" stroke="#000" stroke-width="2" rx="9"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="295.738" y="184.364">Inter-depth decision</tspan></text>
+  <path fill="#000" d="m355 230 5.774-10h-11.548L355 230Zm-1-25v16h2v-16h-2Z"/>
+  <rect width="198" height="198" x="506" y="6" fill="#ADE9CB" stroke="#000" stroke-width="2" rx="9"/>
+  <rect width="198" height="38" x="506" y="231" fill="#ADE9CB" stroke="#000" stroke-width="2" rx="9"/>
+  <rect width="188" height="108" x="511" y="46" fill="#EAEAAE" stroke="#000" stroke-width="2" rx="9"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="534.84" y="59.3636">Use even more accurate </tspan><tspan x="547.232" y="74.3636">prediction tools and </tspan><tspan x="537.348" y="89.3636">performance metrics in </tspan><tspan x="539.768" y="104.364">mode decision stages. </tspan><tspan x="516.002" y="119.364">Fewer candidates are tested in </tspan><tspan x="518.855" y="134.364">this stage as compared to the </tspan><tspan x="560.375" y="149.364">previous stage.</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="549.17" y="33.2727">PD Stage m</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="563.457" y="257.273">Enc-Dec</tspan></text>
+  <rect width="188" height="38" x="511" y="161" fill="#EAEAAE" stroke="#000" stroke-width="2" rx="9"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="545.738" y="184.364">Inter-depth decision</tspan></text>
+  <path fill="#000" d="m605 230 5.774-10h-11.548L605 230Zm-1-25v16h2v-16h-2Z"/>
+  <rect width="198" height="198" x="6" y="6" fill="#ADE9CB" stroke="#000" stroke-width="2" rx="9"/>
+  <rect width="198" height="38" x="6" y="231" fill="#ADE9CB" stroke="#000" stroke-width="2" rx="9"/>
+  <rect width="188" height="108" x="11" y="46" fill="#EAEAAE" stroke="#000" stroke-width="2" rx="9"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="12" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="38.9707" y="96.8636">Use ME data to rank all </tspan><tspan x="51.0234" y="111.864">possible partitions</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="51.4746" y="33.2727">PD Stage 0</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="20" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="53.3398" y="257.273">PD Stage 1</tspan></text>
+  <path fill="#000" d="m105 230 5.774-10H99.2265L105 230Zm-1-25v16h2v-16h-2Z"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="219.559" y="113.727">...</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="24" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="469.559" y="113.727">...</tspan></text>
+</svg>

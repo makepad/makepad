@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="87" fill="none">
+  <defs>
+    <style>
+      @font-face{font-family:&quot;Inter&quot;;src:url(https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2)format(&quot;woff2&quot;)}@font-face{font-family:&quot;GitLab Mono&quot;;src:url(https://docs.gitlab.com/assets/vendor/GitLabMono.woff2)format(&quot;woff2&quot;)}
+    </style>
+  </defs>
+  <path fill="#fff" d="M1 1h418v85H1z"/>
+  <path stroke="#000" stroke-width="2" d="M1 1h418v85H1z"/>
+  <path fill="#003972" d="M2 2h416v21H2z"/>
+  <path stroke="#000" stroke-width="2" d="M2 24h416M2 47h416M2 60h416M134 2v83M207 2v83"/>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="60.3394" y="15.0455">Flag</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="293.456" y="15.0455">Description</tspan></text>
+  <text xml:space="preserve" fill="#fff" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="161.559" y="10.0455">Level </tspan><tspan x="137.424" y="20.0455">(Sequence/Picture)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="38.02">  </tspan><tspan x="87.418" y="38.02"> (0/1/-1)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="38.02">inter_intra_compound</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="56.02">  </tspan><tspan x="112.602" y="56.02"> (0/1)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="56.02">enable_interintra_compound</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="206" y="33.0455">  Config level settings for the whole seqeuence. Takes the </tspan><tspan x="206" y="43.0455">  values 0/1 or -1 for auto i.e. DEFAULT</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="206" y="56.0455">  Sequence-level ON/OFF flag for inter-intra prediction</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="153.533" y="38.0455">Sequence</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="153.533" y="56.0455">Sequence</tspan></text>
+  <path stroke="#000" stroke-width="2" d="M2 73h416"/>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="69.02">  </tspan><tspan x="79.0234" y="69.02"> (0/1)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="69.02">enable_inter_intra</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="206" y="69.0455">  Picture-level ON/OFF flag for inter-intra prediction</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="158.472" y="69.0455">Picture</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="0" y="82.02">  </tspan><tspan x="91.6152" y="82.02"> (0/1)</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="GitLab Mono" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="3.47266" y="82.02">md_enable_inter_intra</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="206" y="82.0455">  MD-level ON/OFF flag for inter-intra prediction</tspan></text>
+  <text xml:space="preserve" fill="#000" font-family="Inter" font-size="7" font-weight="600" letter-spacing="0em" style="white-space:pre"><tspan x="153.533" y="82.0455">Sequence</tspan></text>
+</svg>
