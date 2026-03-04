@@ -1169,7 +1169,7 @@ mod tests {
     #[test]
 
     #[test]
-    fn resize_shrink_keeps_cursor_row_when_already_visible() {
+    fn resize_shrink_bottom_anchors_when_text_below_cursor() {
         let mut terminal = Terminal::new(4, 5);
         write_line(&mut terminal.primary, 'A');
         write_line(&mut terminal.primary, 'B');
@@ -1177,17 +1177,18 @@ mod tests {
         write_line(&mut terminal.primary, 'D');
         terminal.primary.write_char('E');
 
-        // Cursor is already in the future 0..3 viewport, so shrinking should
-        // trim bottom rows instead of pushing top rows into scrollback.
+        // Text extends to row 4 but cursor is at row 1.
+        // Because there is text below the cursor, shrinking should
+        // bottom-anchor: push top rows to scrollback, keep bottom rows.
         terminal.primary.move_cursor_to(0, 1);
         terminal.resize(4, 3);
 
         let screen = terminal.screen();
-        assert_eq!(screen.grid.cell(0, 0).codepoint, 'A');
-        assert_eq!(screen.grid.cell(0, 1).codepoint, 'B');
-        assert_eq!(screen.grid.cell(0, 2).codepoint, 'C');
-        assert_eq!(screen.scrollback_len(), 0);
-        assert_eq!(screen.cursor.y, 1);
+        assert_eq!(screen.grid.cell(0, 0).codepoint, 'C');
+        assert_eq!(screen.grid.cell(0, 1).codepoint, 'D');
+        assert_eq!(screen.grid.cell(0, 2).codepoint, 'E');
+        assert_eq!(screen.scrollback_len(), 2);
+        assert_eq!(screen.cursor.y, 0);
     }
 
     #[test]
