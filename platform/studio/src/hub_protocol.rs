@@ -685,7 +685,7 @@ pub struct TerminalFramebuffer {
     pub cursor_keys_application_mode: bool,
     pub is_tui: bool,
     // Tight binary payload, row-major:
-    // [codepoint_u32_le, bg_r, bg_g, bg_b] repeated `cols * rows` times.
+    // [codepoint_u32_le, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b] repeated `cols * rows` times.
     pub cells: Vec<u8>,
 }
 

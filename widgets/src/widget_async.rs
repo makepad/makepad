@@ -571,6 +571,8 @@ fn register_ui_handle(vm: &mut ScriptVm) {
                 return script_err_not_found!(vm.trap(), "invalid ui handle");
             };
 
+            // Script UI handles intentionally use upward flood search semantics:
+            // look in current subtree first, then expand outward through ancestors.
             let child_ref = vm.with_cx(|cx| cx.widget_tree().find_flood(parent_uid, &[prop]));
             if child_ref.is_empty() {
                 return script_err_not_found!(vm.trap(), "widget '{:?}' not found in tree", prop);

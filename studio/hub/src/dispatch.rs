@@ -2771,7 +2771,7 @@ fn terminal_framebuffer_from_terminal(
     };
     let max_top = total_lines.saturating_sub(rows_usize);
     let top_row = requested_top_row.min(max_top);
-    let mut cells = Vec::with_capacity(cols_usize * rows_usize * 7);
+    let mut cells = Vec::with_capacity(cols_usize * rows_usize * 10);
     let palette = &terminal.palette.colors;
     let default_fg = terminal.default_fg;
     let default_bg = terminal.default_bg;
@@ -2779,23 +2779,27 @@ fn terminal_framebuffer_from_terminal(
         let virtual_row = top_row + row;
         let row_slice = screen.row_slice_virtual(virtual_row);
         for col in 0..cols_usize {
-            let (codepoint, bg) = if let Some(cell) = row_slice.and_then(|slice| slice.get(col)) {
+            let (codepoint, fg, bg) = if let Some(cell) = row_slice.and_then(|slice| slice.get(col)) {
                 let mut fg_src = cell.style.fg;
                 let mut bg_src = cell.style.bg;
                 if cell.style.flags.has(StyleFlags::INVERSE) {
                     std::mem::swap(&mut fg_src, &mut bg_src);
                 }
+                let fg = fg_src.resolve(palette, default_fg);
                 let bg = bg_src.resolve(palette, default_bg);
                 let codepoint = if cell.codepoint == '\0' {
                     ' ' as u32
                 } else {
                     cell.codepoint as u32
                 };
-                (codepoint, bg)
+                (codepoint, fg, bg)
             } else {
-                (' ' as u32, default_bg)
+                (' ' as u32, default_fg, default_bg)
             };
             cells.extend_from_slice(&codepoint.to_le_bytes());
+            cells.push(fg.r);
+            cells.push(fg.g);
+            cells.push(fg.b);
             cells.push(bg.r);
             cells.push(bg.g);
             cells.push(bg.b);
