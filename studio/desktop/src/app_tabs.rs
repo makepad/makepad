@@ -979,6 +979,88 @@ impl App {
         }
     }
 
+    fn drag_source_tab_id(items: &[DragItem]) -> Option<LiveId> {
+        if items.len() != 1 {
+            return None;
+        }
+        match &items[0] {
+            DragItem::FilePath { internal_id, .. } => *internal_id,
+            DragItem::String { .. } => None,
+        }
+    }
+
+    pub(super) fn start_workspace_tab_drag(&mut self, cx: &mut Cx, tab_id: LiveId) {
+        if self.data.tab_to_mount.contains_key(&tab_id) || tab_id == id!(terminal_add) {
+            return;
+        }
+        let Some(active_mount) = self.data.active_mount.clone() else {
+            return;
+        };
+        let Some(dock) = self.mount_workspace_dock(cx, &active_mount) else {
+            return;
+        };
+        if dock.find_tab_bar_of_tab(tab_id).is_none() {
+            return;
+        }
+
+        dock.tab_start_drag(
+            cx,
+            tab_id,
+            DragItem::FilePath {
+                path: String::new(),
+                internal_id: Some(tab_id),
+            },
+        );
+    }
+
+    pub(super) fn handle_workspace_tab_drag(&mut self, cx: &mut Cx, drag_event: DragHitEvent) {
+        let Some(source_tab_id) = Self::drag_source_tab_id(drag_event.items.as_ref()) else {
+            return;
+        };
+        if self.data.tab_to_mount.contains_key(&source_tab_id) || source_tab_id == id!(terminal_add)
+        {
+            return;
+        }
+        let Some(active_mount) = self.data.active_mount.clone() else {
+            return;
+        };
+        let Some(dock) = self.mount_workspace_dock(cx, &active_mount) else {
+            return;
+        };
+        if dock.find_tab_bar_of_tab(source_tab_id).is_none() {
+            return;
+        }
+
+        dock.accept_drag(cx, drag_event, DragResponse::Move);
+    }
+
+    pub(super) fn handle_workspace_tab_drop(&mut self, cx: &mut Cx, drop_event: DropHitEvent) {
+        let Some(source_tab_id) = Self::drag_source_tab_id(drop_event.items.as_ref()) else {
+            return;
+        };
+        if self.data.tab_to_mount.contains_key(&source_tab_id) || source_tab_id == id!(terminal_add)
+        {
+            return;
+        }
+        let Some(active_mount) = self.data.active_mount.clone() else {
+            return;
+        };
+        let Some(dock) = self.mount_workspace_dock(cx, &active_mount) else {
+            return;
+        };
+        if dock.find_tab_bar_of_tab(source_tab_id).is_none() {
+            return;
+        }
+
+        dock.drop_move(cx, drop_event.abs, source_tab_id);
+
+        if self.data.tab_to_path.contains_key(&source_tab_id) {
+            self.set_active_tab(cx, source_tab_id);
+        } else if let Some((_mount, path)) = self.terminal_tab_mount_path(source_tab_id) {
+            self.ensure_terminal_session_open(&path);
+        }
+    }
+
     pub(super) fn close_run_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
         let Some(state) = self.data.run_tab_state.remove(&tab_id) else {
             return;

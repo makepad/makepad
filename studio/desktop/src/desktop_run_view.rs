@@ -544,13 +544,9 @@ impl Widget for DesktopRunView {
                 let frames_left = self.ai_viz_frames_left as f32;
                 let t = 1.0f32 - (frames_left / total);
                 let (color, dot_radius, dot_alpha, ripple_radius, ripple_alpha) = match kind {
-                    RunViewInputVizKind::ClickDown => (
-                        [0.00, 0.83, 1.00, 1.0],
-                        5.0f32,
-                        0.95f32,
-                        5.0f32,
-                        0.45f32,
-                    ),
+                    RunViewInputVizKind::ClickDown => {
+                        ([0.00, 0.83, 1.00, 1.0], 5.0f32, 0.95f32, 5.0f32, 0.45f32)
+                    }
                     RunViewInputVizKind::ClickUp => (
                         [0.00, 0.83, 1.00, 1.0],
                         5.0f32,
@@ -576,15 +572,21 @@ impl Widget for DesktopRunView {
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(dot_radius), &[dot_radius]);
-                self.draw_ai_viz
-                    .draw_vars
-                    .set_dyn_instance(cx, id!(dot_alpha), &[dot_alpha.max(0.0)]);
-                self.draw_ai_viz
-                    .draw_vars
-                    .set_dyn_instance(cx, id!(ripple_radius), &[ripple_radius]);
-                self.draw_ai_viz
-                    .draw_vars
-                    .set_dyn_instance(cx, id!(ripple_alpha), &[ripple_alpha.max(0.0)]);
+                self.draw_ai_viz.draw_vars.set_dyn_instance(
+                    cx,
+                    id!(dot_alpha),
+                    &[dot_alpha.max(0.0)],
+                );
+                self.draw_ai_viz.draw_vars.set_dyn_instance(
+                    cx,
+                    id!(ripple_radius),
+                    &[ripple_radius],
+                );
+                self.draw_ai_viz.draw_vars.set_dyn_instance(
+                    cx,
+                    id!(ripple_alpha),
+                    &[ripple_alpha.max(0.0)],
+                );
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(color), &color);
