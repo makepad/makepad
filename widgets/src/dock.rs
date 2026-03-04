@@ -1510,11 +1510,15 @@ impl Widget for Dock {
                         if let Some(template_ref) = self.templates.get(kind) {
                             let template_value: ScriptValue = template_ref.as_object().into();
                             let kind_copy = *kind;
+                            let existed = self.items.contains_key(&id);
                             let (_, entry) = self.items.get_or_insert(cx, id, |cx| {
                                 cx.with_vm(|vm| {
                                     (kind_copy, WidgetRef::script_from_value(vm, template_value))
                                 })
                             });
+                            if !existed {
+                                cx.widget_tree_insert_child_deep(self.uid, id, entry.clone());
+                            }
                             entry.draw(cx, scope)?;
                         }
                     }

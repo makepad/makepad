@@ -51,15 +51,28 @@ impl WidgetNode for DesktopCodeEditor {
 
 impl Widget for DesktopCodeEditor {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let path = cx.widget_tree().path_to(self.widget_uid());
-        let tab_id = path
-            .get(path.len().wrapping_sub(2))
+        let widget_path = cx.widget_tree().path_to(self.widget_uid());
+        let tab_id = widget_path
+            .get(widget_path.len().wrapping_sub(2))
             .copied()
             .unwrap_or(id!(editor_first));
         if let Some(data) = scope.data.get_mut::<AppData>() {
             if let Some(session) = data.sessions.get_mut(&tab_id) {
                 self.editor.draw_walk_editor(cx, session, walk);
             } else {
+                let mapped_path = data.tab_to_path.get(&tab_id).cloned();
+                let is_pending = mapped_path
+                    .as_ref()
+                    .is_some_and(|path| data.pending_open_paths.contains(path));
+                if mapped_path.is_some() && !is_pending {
+                    println!(
+                        "studio editor session lookup failed in draw: tab_id={} widget_uid={} widget_path={:?} mapped_path={}",
+                        tab_id.0,
+                        self.uid.0,
+                        widget_path,
+                        mapped_path.unwrap_or_default()
+                    );
+                }
                 self.editor.draw_empty_editor(cx, walk);
             }
         } else {
@@ -69,9 +82,9 @@ impl Widget for DesktopCodeEditor {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let path = cx.widget_tree().path_to(self.widget_uid());
-        let tab_id = path
-            .get(path.len().wrapping_sub(2))
+        let widget_path = cx.widget_tree().path_to(self.widget_uid());
+        let tab_id = widget_path
+            .get(widget_path.len().wrapping_sub(2))
             .copied()
             .unwrap_or(id!(editor_first));
         if let Some(data) = scope.data.get_mut::<AppData>() {
@@ -81,6 +94,20 @@ impl Widget for DesktopCodeEditor {
                     .handle_event(cx, event, &mut Scope::empty(), session)
                 {
                     cx.widget_action(self.uid, action);
+                }
+            } else {
+                let mapped_path = data.tab_to_path.get(&tab_id).cloned();
+                let is_pending = mapped_path
+                    .as_ref()
+                    .is_some_and(|path| data.pending_open_paths.contains(path));
+                if mapped_path.is_some() && !is_pending {
+                    println!(
+                        "studio editor session lookup failed in handle_event: tab_id={} widget_uid={} widget_path={:?} mapped_path={}",
+                        tab_id.0,
+                        self.uid.0,
+                        widget_path,
+                        mapped_path.unwrap_or_default()
+                    );
                 }
             }
         }

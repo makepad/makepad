@@ -36,6 +36,12 @@ script_mod! {
         code_editor := DesktopCodeEditor {}
     }
 
+    let EditorFirstPane = RectView {
+        draw_bg +: {
+            color: theme.color_bg_container
+        }
+    }
+
     let RunListPane = View {
         width: Fill
         height: Fill
@@ -357,7 +363,7 @@ script_mod! {
                         editor_first := DockTab {
                             name: ""
                             template: @EditorFirstTab
-                            kind: @CodeEditorPane
+                            kind: @EditorFirstPane
                         }
 
                         run_first := DockTab {
@@ -387,6 +393,7 @@ script_mod! {
                         FileTreePane := FileTreePane {}
                         RunListPane := RunListPane {}
                         CodeEditorPane := CodeEditorPane {}
+                        EditorFirstPane := EditorFirstPane {}
                         RunningAppPane := RunningAppPane {}
                         RunFirstPane := RunFirstPane {}
                         LogFirstPane := LogFirstPane {}
