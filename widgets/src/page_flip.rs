@@ -98,8 +98,8 @@ impl PageFlip {
             let template_value: ScriptValue = template_ref.as_object().into();
             if !self.pages.contains_key(&page_id) {
                 let page = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
-                self.pages.insert(page_id, page);
-                cx.widget_tree_mark_dirty(self.uid);
+                self.pages.insert(page_id, page.clone());
+                cx.widget_tree_insert_child_deep(self.uid, page_id, page);
             }
             self.pages.get(&page_id).cloned()
         } else {
