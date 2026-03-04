@@ -2536,12 +2536,7 @@ impl HubCore {
 
     fn terminal_max_top_row(terminal: &Terminal, rows: u16) -> usize {
         let screen = terminal.screen();
-        let is_tui = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows() || terminal.modes.alt_screen;
-        let total_lines = if is_tui {
-            screen.scrollback_len() + screen.rows()
-        } else {
-            screen.scrollback_len() + screen.used_rows()
-        };
+        let total_lines = screen.scrollback_len() + screen.used_rows();
         total_lines.saturating_sub(rows.max(1) as usize)
     }
 
@@ -2776,11 +2771,7 @@ fn terminal_framebuffer_from_terminal(
     let screen = terminal.screen();
     let is_tui = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows() || terminal.modes.alt_screen;
     
-    let total_lines = if is_tui {
-        screen.scrollback_len() + screen.rows()
-    } else {
-        screen.scrollback_len() + screen.used_rows()
-    };
+    let total_lines = screen.scrollback_len() + screen.used_rows();
     
     let max_top = total_lines.saturating_sub(rows_usize);
     let top_row = requested_top_row.min(max_top);

@@ -456,16 +456,10 @@ impl Screen {
                         saved.y += pull_count;
                     }
                 } else if has_custom_scroll_region {
-                    // TUI with empty scrollback! We MUST anchor to bottom!
-                    let shift = rows - old_rows;
+                    // TUI with empty scrollback! We MUST anchor to top!
                     for (src_row, row) in old_grid_rows.iter().enumerate() {
-                        copy_row(row, src_row + shift, &mut new_grid);
-                        new_grid.line_wrapped[src_row + shift] = old_wrapped[src_row];
-                    }
-                    self.cursor.y += shift;
-                    self.high_water_row += shift;
-                    if let Some(saved) = &mut self.saved_cursor {
-                        saved.y += shift;
+                        copy_row(row, src_row, &mut new_grid);
+                        new_grid.line_wrapped[src_row] = old_wrapped[src_row];
                     }
                 } else {
                     for (src_row, row) in old_grid_rows.iter().enumerate() {
@@ -483,10 +477,9 @@ impl Screen {
                 let mut copy_start = required_scrolling.min(lines_removed);
                 
                 let has_custom_scroll_region = self.scroll_top != 0 || self.scroll_bottom != old_rows;
-                let has_text_below_cursor = self.last_non_empty_row() > self.cursor.y;
                 
-                if has_custom_scroll_region || has_text_below_cursor {
-                    copy_start = lines_removed; // TUI or text below cursor: Keep bottom rows anchored!
+                if has_custom_scroll_region {
+                    copy_start = lines_removed; // TUI: Keep bottom rows anchored!
                 } else if copy_start == 0 && self.bottom_trimmed_rows > 0 {
                     copy_start = self.bottom_trimmed_rows.min(lines_removed);
                 }
