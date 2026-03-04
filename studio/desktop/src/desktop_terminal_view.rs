@@ -452,7 +452,7 @@ impl DesktopTerminalView {
         let max_scroll = self.max_scroll_pixels_for_total_lines(frame.total_lines);
         let is_full_screen = max_scroll > 0.0;
         
-        let (origin_y, start_row) = if self.follow_output && is_full_screen {
+        let (origin_y, start_row) = if self.follow_output && is_full_screen && !frame.is_tui {
             let grid_height = render_rows as f64 * cell_height;
             let y = screen_bottom - grid_height;
             let sr = rows.saturating_sub(render_rows);
@@ -481,7 +481,7 @@ impl DesktopTerminalView {
             // down if the scroll is somehow non-zero (though it shouldn't be).
             // But more importantly, we want to align to the top.
             let max_scroll = self.max_scroll_pixels_for_total_lines(frame.total_lines);
-            let y = if max_scroll <= 0.0 {
+            let y = if max_scroll <= 0.0 || frame.is_tui {
                 screen_top
             } else {
                 screen_top - sub_pixel_y
@@ -854,13 +854,7 @@ impl Widget for DesktopTerminalView {
 
         let total_lines_for_scroll = frame
             .as_ref()
-            .map(|frame| {
-                if frame.is_tui {
-                    frame.total_lines.min(pty_rows as usize)
-                } else {
-                    frame.total_lines
-                }
-            })
+            .map(|frame| frame.total_lines)
             .unwrap_or(0);
         self.last_total_lines = total_lines_for_scroll;
         
@@ -978,6 +972,7 @@ impl Widget for DesktopTerminalView {
                 if path.is_empty() {
                     return;
                 }
+                
                 if Self::is_clipboard_paste_shortcut(e.key_code, &e.modifiers) {
                     return;
                 }
@@ -1011,10 +1006,17 @@ impl Widget for DesktopTerminalView {
                 if path.is_empty() {
                     return;
                 }
-                let is_newline_text = matches!(e.input.as_str(), "\n" | "\r" | "\r\n");
+                
+                if e.replace_last {
+                    // We don't support IME replace yet in terminal
+                    return;
+                }
+                
+                let is_newline_text = e.input.chars().all(|c| c == '\n' || c == '\r');
                 if !e.was_paste && is_newline_text {
                     return;
                 }
+                
                 if e.was_paste {
                     self.emit_paste_text(cx, &path, &e.input, bracketed_paste);
                 } else {
