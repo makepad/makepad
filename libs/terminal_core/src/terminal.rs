@@ -1139,6 +1139,17 @@ mod tests {
     }
 
     #[test]
+    fn dcs_with_c1_st_terminator_does_not_block_following_output() {
+        let mut terminal = Terminal::new(80, 24);
+        terminal.process_bytes(b"\x1bP=1s\x9c");
+        terminal.process_bytes(b"ok");
+
+        let screen = terminal.screen();
+        assert_eq!(screen.grid.cell(0, 0).codepoint, 'o');
+        assert_eq!(screen.grid.cell(1, 0).codepoint, 'k');
+    }
+
+    #[test]
     fn resize_grow_pulls_scrollback_if_at_bottom() {
         let mut terminal = Terminal::new(4, 3);
         write_line(&mut terminal.primary, 'A');

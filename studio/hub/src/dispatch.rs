@@ -1269,7 +1269,9 @@ impl HubCore {
                 pty_rows,
                 top_row,
             } => {
-                self.send_terminal_viewport_for_client(client_id, &path, cols, rows, pty_rows, top_row);
+                self.send_terminal_viewport_for_client(
+                    client_id, &path, cols, rows, pty_rows, top_row,
+                );
             }
             ClientToHub::TerminalClose { path } => {
                 self.terminal_manager.close_terminal(&path);
@@ -2342,7 +2344,6 @@ impl HubCore {
         // in terminal does not force repeated file-tree reloads.
         self.mount_suppress_fs_until
             .insert(mount, Instant::now() + Duration::from_millis(750));
-        let _ = append_terminal_history_bytes(&self.vfs, &path, &data);
         let mut force_bottom_for_sticky = true;
         if let Some(session) = self.terminal_sessions.get_mut(&path) {
             let old_total_rows = {
@@ -2364,6 +2365,9 @@ impl HubCore {
             force_bottom_for_sticky = new_total_rows > old_total_rows;
         }
         self.push_terminal_frame_updates(&path, force_bottom_for_sticky);
+        // Persist terminal history after pushing the frame so slow filesystem I/O
+        // cannot delay framebuffer delivery.
+        let _ = append_terminal_history_bytes(&self.vfs, &path, &data);
     }
 
     fn on_terminal_resized(&mut self, path: String, cols: u16, rows: u16) {
@@ -2375,9 +2379,7 @@ impl HubCore {
             }
             session.applied_cols = cols;
             session.applied_rows = rows;
-            session
-                .terminal
-                .resize(cols as usize, rows as usize);
+            session.terminal.resize(cols as usize, rows as usize);
             Self::adjust_terminal_subscribers_for_resize(session);
             if cols != session.cols || rows != session.rows {
                 if self
@@ -2762,8 +2764,10 @@ fn terminal_framebuffer_from_terminal(
     let cols_usize = cols as usize;
     let rows_usize = rows as usize;
     let screen = terminal.screen();
-    let is_tui = screen.scroll_top != 0 || screen.scroll_bottom != screen.rows() || terminal.modes.alt_screen;
-    
+    let is_tui = screen.scroll_top != 0
+        || screen.scroll_bottom != screen.rows()
+        || terminal.modes.alt_screen;
+
     let total_lines = if is_tui {
         screen.scrollback_len() + screen.rows()
     } else {
@@ -2779,7 +2783,8 @@ fn terminal_framebuffer_from_terminal(
         let virtual_row = top_row + row;
         let row_slice = screen.row_slice_virtual(virtual_row);
         for col in 0..cols_usize {
-            let (codepoint, fg, bg) = if let Some(cell) = row_slice.and_then(|slice| slice.get(col)) {
+            let (codepoint, fg, bg) = if let Some(cell) = row_slice.and_then(|slice| slice.get(col))
+            {
                 let mut fg_src = cell.style.fg;
                 let mut bg_src = cell.style.bg;
                 if cell.style.flags.has(StyleFlags::INVERSE) {
@@ -3536,6 +3541,121 @@ mod tests {
             }
         }
         out
+    }
+
+    fn render_like_sparse_codex(terminal: &mut Terminal, cols: u16, rows: u16) {
+        // Codex-style app keeps a custom scroll region but only redraws a small
+        // subset of rows while idle.
+        terminal.process_bytes(b"\x1b[r");
+        terminal.process_bytes(format!("\x1b[3;{}r", rows - 2).as_bytes());
+
+        terminal.process_bytes(b"\x1b[1;1H\x1b[K");
+        let header = format!("{:<width$}", "=== Codex ===", width = cols as usize);
+        terminal.process_bytes(header.as_bytes());
+
+        terminal.process_bytes(b"\x1b[2;1H\x1b[K");
+        let sep = "-".repeat(cols as usize);
+        terminal.process_bytes(sep.as_bytes());
+
+        for r in 3..=6.min(rows.saturating_sub(2)) {
+            terminal.process_bytes(format!("\x1b[{};1H\x1b[K", r).as_bytes());
+            let content = format!("idle {}", r);
+            terminal.process_bytes(content.as_bytes());
+        }
+
+        // Keep cursor in content area (not bottom), matching sparse idle state.
+        terminal.process_bytes(b"\x1b[6;6H");
+    }
+
+    fn seed_history(terminal: &mut Terminal, count: usize) {
+        for i in 0..count {
+            let line = format!("history line {:03}\r\n", i);
+            terminal.process_bytes(line.as_bytes());
+        }
+    }
+
+    fn decode_frame_row(frame: &TerminalFramebuffer, row: usize) -> String {
+        let cols = frame.cols as usize;
+        let mut out = String::with_capacity(cols);
+        for col in 0..cols {
+            let idx = (row * cols + col) * 10;
+            let codepoint = u32::from_le_bytes([
+                frame.cells[idx],
+                frame.cells[idx + 1],
+                frame.cells[idx + 2],
+                frame.cells[idx + 3],
+            ]);
+            out.push(char::from_u32(codepoint).unwrap_or(' '));
+        }
+        out.trim_end().to_string()
+    }
+
+    #[test]
+    fn terminal_framebuffer_sparse_codex_roundtrip_after_30_15_30_resize_without_history() {
+        let cols = 120u16;
+        let rows_large = 30u16;
+        let rows_small = 15u16;
+        let viewport_rows = rows_large + 1;
+
+        let mut term = Terminal::new(cols as usize, rows_large as usize);
+        render_like_sparse_codex(&mut term, cols, rows_large);
+        assert!(
+            term.screen().used_rows() < rows_large as usize,
+            "test precondition failed: expected sparse grid, used_rows={}, rows={}",
+            term.screen().used_rows(),
+            rows_large
+        );
+
+        // Crunch and redraw.
+        term.resize(cols as usize, rows_small as usize);
+        render_like_sparse_codex(&mut term, cols, rows_small);
+        // Expand and redraw.
+        term.resize(cols as usize, rows_large as usize);
+        render_like_sparse_codex(&mut term, cols, rows_large);
+
+        let after = terminal_framebuffer_from_terminal(&term, cols, viewport_rows, 0, 1);
+
+        let mut fresh = Terminal::new(cols as usize, rows_large as usize);
+        render_like_sparse_codex(&mut fresh, cols, rows_large);
+        let expected = terminal_framebuffer_from_terminal(&fresh, cols, viewport_rows, 0, 1);
+
+        assert_eq!(after.top_row, 0);
+        assert_eq!(after.total_lines, expected.total_lines);
+        assert_eq!(
+            after.cells,
+            expected.cells,
+            "row6='{}' row20='{}'",
+            decode_frame_row(&after, 5),
+            decode_frame_row(&after, 19)
+        );
+    }
+
+    #[test]
+    fn terminal_framebuffer_sparse_codex_roundtrip_after_30_15_30_resize_with_history() {
+        let cols = 120u16;
+        let rows_large = 30u16;
+        let rows_small = 15u16;
+        let viewport_rows = rows_large + 1;
+
+        let mut term = Terminal::new(cols as usize, rows_large as usize);
+        seed_history(&mut term, 200);
+        render_like_sparse_codex(&mut term, cols, rows_large);
+
+        term.resize(cols as usize, rows_small as usize);
+        render_like_sparse_codex(&mut term, cols, rows_small);
+        term.resize(cols as usize, rows_large as usize);
+        render_like_sparse_codex(&mut term, cols, rows_large);
+
+        let after = terminal_framebuffer_from_terminal(&term, cols, viewport_rows, 0, 1);
+
+        let mut fresh = Terminal::new(cols as usize, rows_large as usize);
+        seed_history(&mut fresh, 200);
+        render_like_sparse_codex(&mut fresh, cols, rows_large);
+        let expected = terminal_framebuffer_from_terminal(&fresh, cols, viewport_rows, 0, 1);
+
+        assert_eq!(after.top_row, 0);
+        assert_eq!(after.total_lines, expected.total_lines);
+        assert_eq!(after.cells, expected.cells);
     }
 
     #[test]
