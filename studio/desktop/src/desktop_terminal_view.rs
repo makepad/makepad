@@ -889,17 +889,20 @@ impl DesktopTerminalView {
             if from_col >= to_col_exclusive {
                 continue;
             }
+            let mut line = String::new();
             for col in from_col..to_col_exclusive {
                 if let Some(ch) = Self::frame_char(frame, frame_row, col) {
                     if ch != '\0' {
-                        out.push(ch);
+                        line.push(ch);
                     }
                 }
             }
-            let trimmed_len = out.trim_end().len();
+            let line = line.trim_end();
             if row < end_row {
-                out.truncate(trimmed_len);
+                out.push_str(line);
                 out.push('\n');
+            } else {
+                out.push_str(line);
             }
         }
         if out.is_empty() {
