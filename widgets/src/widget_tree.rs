@@ -1541,6 +1541,7 @@ impl WidgetTree {
 
     /// Build the path of LiveIds from root to the node with the given UID.
     pub fn path_to(&self, uid: WidgetUid) -> Vec<LiveId> {
+        self.sync_dirty();
         let mut inner = self.inner.borrow_mut();
         if !Self::ensure_node_cached(&mut inner, uid) {
             return Vec::new();
