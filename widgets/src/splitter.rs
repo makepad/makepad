@@ -267,7 +267,7 @@ impl Widget for Splitter {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
             }
-            Hit::FingerDown(_) => {
+            Hit::FingerDown(fe) if self.drag_start_align.is_none() && fe.is_primary_hit() => {
                 match self.axis {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                     SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
