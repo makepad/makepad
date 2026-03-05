@@ -96,7 +96,7 @@ fn cos_tables() -> &'static CosTables {
         let mut diff_small = [[0.0f64; 128]; 8];
 
         for i in 0..128 {
-            let mut d = 1.0 - (i as f64 - 2.0) / 60.0;
+            let d = 1.0 - (i as f64 - 2.0) / 60.0;
             diff_small[0][i] = if d > 0.15 {
                 (d - 0.08) * 1.086_956_5
             } else if d <= 0.0 {
@@ -198,28 +198,6 @@ fn apply_diff_mode_mb3d(mode: i32, ndotl: f64, rough: f64, calc_pix_col_sqr: boo
     }
 }
 
-pub fn dominant_shadow_light_dir(
-    lighting: &crate::m3p::M3PLighting,
-    camera: &crate::render::Camera,
-) -> Option<Vec3> {
-    let mut best_dir = None;
-    let mut best_luma = 0.0;
-    for (idx, l) in lighting.lights.iter().enumerate() {
-        if let Some(pl) = parse_light(idx, l, camera) {
-            let vis_mode = pl.i_light_pos & 14;
-            if pl.is_positional || vis_mode != 0 {
-                continue;
-            }
-            let luma = pl.color.x * 0.299 + pl.color.y * 0.587 + pl.color.z * 0.114;
-            if luma > best_luma {
-                best_luma = luma;
-                best_dir = Some(pl.dir);
-            }
-        }
-    }
-    best_dir
-}
-
 pub fn soft_hs_light_dir(
     lighting: &crate::m3p::M3PLighting,
     camera: &crate::render::Camera,
@@ -270,7 +248,6 @@ pub fn shade(
     ssao: &crate::m3p::M3PSSAO,
     formulas: &[crate::formulas::FormulaSlot],
     params: &crate::render::RenderParams,
-    debug: bool,
 ) -> [u8; 3] {
     let m_zz = depth / params.step_width;
 
@@ -306,7 +283,7 @@ pub fn shade(
         };
 
         let mut rot_m = Vec::new();
-        let (row_abr, d_step_mul, d_min_a_dif, correction_weight) = if ssao.quality == 0 {
+        let (_row_abr, d_step_mul, d_min_a_dif, correction_weight) = if ssao.quality == 0 {
             let row_abr = std::f64::consts::PI / 3.0;
             let polar = if ssao.ao_dithering > 0 {
                 (dither_y + 0.5) * 50.0_f64.to_radians()
@@ -344,10 +321,6 @@ pub fn shade(
         let ray_count = rot_m.len();
         let mut min_ra = vec![0.0; ray_count];
 
-        if debug {
-            println!("  num_rays: {}, quality: {}", ray_count, ssao.quality);
-        }
-
         let de_mul = ((ray_count as f64) * 0.5).sqrt();
         let overlap_abr = 1.2 / (1.0 / de_mul).asin();
 
@@ -364,7 +337,7 @@ pub fn shade(
         let step_ao_actual = ms_de_stop_steps / params.de_stop_header;
         let max_dist_steps = s_max_d * step_ao_actual.sqrt();
 
-        let mut ms_de_stop = if params.b_vary_de_stop {
+        let ms_de_stop = if params.b_vary_de_stop {
             ms_de_stop_steps / (d_step_mul * d_step_mul)
         } else {
             params.de_stop_header / (d_step_mul * d_step_mul)
@@ -400,12 +373,6 @@ pub fn shade(
                     s_tmp = val;
                 }
                 
-                if debug && i == 0 {
-                    println!("    AO ray 0 step: dt1={}, dt2={}, ms_de_stop={}, val={}, s_tmp={}", dt1, dt2, ms_de_stop, val, s_tmp);
-                    println!("      probe_pos offset from hit_pos: {:?}", probe_pos.sub(_p));
-                    println!("      de_world: {:e}, dt1 * step_width: {:e}, s_vec: {:?}", de_world, dt1 * params.step_width, s_vec);
-                }
-                
                 if s_tmp < 0.02 {
                     break;
                 }
@@ -425,7 +392,7 @@ pub fn shade(
         let mut s_add = vec![0.0; ray_count];
         
         for iy in 0..ray_count {
-            let mut max_add = 1.0 - min_ra[iy];
+            let max_add = 1.0 - min_ra[iy];
             if max_add > 0.0 {
                 for ix in 0..ray_count {
                     if ix != iy {
@@ -438,9 +405,6 @@ pub fn shade(
                         }
                     }
                 }
-            }
-            if debug && iy == 0 {
-                println!("    AO correction ray 0: min_ra={}, s_add={}, total_for_ray={}", min_ra[iy], s_add[iy], (s_add[iy] + min_ra[iy]).min(1.0));
             }
         }
         
@@ -541,11 +505,6 @@ pub fn shade(
     // bColCycling is true
     let ir_cycled = ir & 32767;
     
-    if debug {
-        println!("  s_c_start: {:.4}, s_c_mul: {:.4}, si_gradient: {}, i_dif_0: {:.4}, ir_f: {:.4}, ir_cycled: {}", 
-                 s_c_start, s_c_mul, si_gradient, i_dif_0, ir_f, ir_cycled);
-    }
-
     let c = surface_color(ir_cycled, lighting);
     let cs = surface_spec_color(ir_cycled, lighting);
 
@@ -598,13 +557,6 @@ pub fn shade(
         let diff_shadowed = diff_dot * light_gate;
         total_diffuse = total_diffuse.add(pl.color.scale(diff_shadowed));
         
-        if debug {
-            println!(
-                "    Light[{}]: diff_dot={}, hs_mul={}, no_hs={}, soft_hs={}, diff_shadowed={}",
-                li, diff_dot, light_gate, no_hs, soft_hs, diff_shadowed
-            );
-        }
-
         // MB3D DotOf2VecNormalize: reflect camera->object vector on normal, then dot with light.
         let reflect_view = v_from_cam.sub(n.scale(2.0 * n.dot(v_from_cam)));
         let spec_dot = pl.dir.dot(reflect_view);
@@ -659,17 +611,6 @@ pub fn shade(
             + spec_color.z * total_specular.z,
     );
 
-    if debug {
-        println!("  normal: {:?}", n);
-        println!("  amb_bottom: {:?}, amb_top: {:?}", amb_bottom, amb_top);
-        println!("  diffuse_color: {:?}", diffuse_color);
-        println!("  total_diffuse: {:?}", total_diffuse);
-        println!("  total_specular: {:?}", total_specular);
-        println!("  amb_light: {:?}", amb_light);
-        println!("  final_color: {:?}", final_color);
-        println!("  final_ao: {:.4}", final_ao);
-    }
-
     // Calculate Zpos
     let z_pos_f = 32767.0 - (params.z_cmul / 256.0) * ((m_zz * params.z_corr + 1.0).sqrt() - 1.0);
     let mut z_pos = z_pos_f.round().clamp(0.0, 32767.0) as i32;
@@ -681,7 +622,7 @@ pub fn shade(
         final_color = dep_c_interp;
     }
 
-    let mut d_tmp = if z_pos < 32768 {
+    let d_tmp = if z_pos < 32768 {
         (1.0 + (z_pos_f - 28000.0) * lighting.s_depth).max(0.0)
     } else {
         (1.0 - (60768.0 - z_pos_f) * lighting.s_depth).max(0.0)
@@ -722,17 +663,16 @@ pub fn shade(
     let b_dfog_options = if !lighting.lights.is_empty() { lighting.lights[0].free_byte & 3 } else { 0 };
     let b_dfog_options = if b_dfog_options == 3 { 1 } else { b_dfog_options };
 
-    let mut ir_for_fog = shadow_steps as f64;
     // MB3D uses PsiLight.Shadow (ray-march DE count), not fractal escape iterations.
-    if b_vol_light {
+    let ir_for_fog = if b_vol_light {
         let mut eax = shadow_steps & 0x3FF;
         let cl = eax >> 7;
         eax &= 0x7F;
         eax <<= cl;
-        ir_for_fog = eax as f64;
+        eax as f64
     } else {
-        ir_for_fog = (shadow_steps & 0x3FF) as f64;
-    }
+        (shadow_steps & 0x3FF) as f64
+    };
     
     let mut d_fog = (ir_for_fog - s_shad - s_shad_z_mul * plv_z_pos) * s_shad_gr;
     if (b_dfog_options & 2) != 0 {
@@ -763,11 +703,6 @@ pub fn shade(
         s_dyn_fog_col.y * (d_fog - d_tmp3) + s_dyn_fog_col2.y * d_tmp3,
         s_dyn_fog_col.z * (d_fog - d_tmp3) + s_dyn_fog_col2.z * d_tmp3,
     );
-
-    if debug {
-        println!("  depth: {:.4e}, m_zz: {:.4e}, z_pos_f: {:.2}, z_pos: {}, d_tmp: {:.4}", depth, m_zz, z_pos_f, z_pos, d_tmp);
-        println!("  s_shad: {:.4}, s_shad_z_mul: {:.4}, s_shad_gr: {:.4}, d_fog: {:.4}, d_tmp3: {:.4}", s_shad, s_shad_z_mul, s_shad_gr, d_fog, d_tmp3);
-    }
 
     // if d_tmp < 1.0 {
     //     d_tmp = 1.0 - (1.0 - d_tmp);
@@ -908,58 +843,4 @@ pub fn surface_spec_color(si_gradient: i32, lighting: &crate::m3p::M3PLighting) 
         }
     }
     c
-}
-
-pub fn iteration_color(t: f64, lighting: &crate::m3p::M3PLighting) -> (f64, f64, f64) {
-    let t = t.clamp(0.0, 1.0);
-    
-    // Convert pos to 0..1
-    let mut stops: Vec<(f64, (f64, f64, f64))> = lighting.i_cols.iter().map(|s| {
-        let pos = s.pos as f64 / 32768.0;
-        let c = (
-            s.color[0] as f64 / 255.0,
-            s.color[1] as f64 / 255.0,
-            s.color[2] as f64 / 255.0,
-        );
-        (pos, c)
-    }).collect();
-
-    if stops.is_empty() {
-        return (0.5, 0.5, 0.5);
-    }
-    
-    // Wrap around: add the first color at pos 1.0
-    if let Some(first) = stops.first().cloned() {
-        stops.push((1.0, first.1));
-    }
-
-    if stops.len() == 1 {
-        return stops[0].1;
-    }
-
-    if t <= stops[0].0 {
-        return stops[0].1;
-    }
-    if t >= stops.last().unwrap().0 {
-        return stops.last().unwrap().1;
-    }
-
-    for i in 0..stops.len() - 1 {
-        let (p0, c0) = stops[i];
-        let (p1, c1) = stops[i + 1];
-        if t >= p0 && t <= p1 {
-            let s = if p1 > p0 { (t - p0) / (p1 - p0) } else { 0.0 };
-            return lerp3(c0, c1, s);
-        }
-    }
-    
-    stops.last().unwrap().1
-}
-
-fn lerp3(a: (f64, f64, f64), b: (f64, f64, f64), t: f64) -> (f64, f64, f64) {
-    (
-        a.0 + (b.0 - a.0) * t,
-        a.1 + (b.1 - a.1) * t,
-        a.2 + (b.2 - a.2) * t,
-    )
 }
