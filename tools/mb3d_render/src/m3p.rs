@@ -136,6 +136,7 @@ pub struct M3PFile {
     pub rstop: f64,
     pub fov_y: f64,
     pub step_width: f64,
+    pub s_raystep_limiter: f32,
     pub de_stop: f32,
     pub b_vary_de_stop: bool,
     pub z_step_div: f32,
@@ -269,6 +270,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         u16::from_le_bytes(data[224..226].try_into().unwrap())
     );
     let hs_max_length_multiplier = f32::from_le_bytes(data[226..230].try_into().unwrap()) as f64;
+    let s_raystep_limiter = f32::from_le_bytes(data[242..246].try_into().unwrap());
 
     // skip to 246 for view matrix
     c.skip(22)?; // 224 + 22 = 246
@@ -464,6 +466,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
 
     let b_vary_de_stop = data[162] != 0;
     println!("  bVaryDEstop: {}", b_vary_de_stop);
+    println!("  sRaystepLimiter: {:.6}", s_raystep_limiter);
     println!(
         "  hard shadow flags: bCalculateHardShadow=0x{b_calculate_hard_shadow:02x}, bCalc1HSsoft=0x{b_calc1_hs_soft:02x}, bHScalculated=0x{b_hs_calculated:02x}"
     );
@@ -511,6 +514,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         x_mid, y_mid, z_mid,
         xw_rot, yw_rot, zw_rot,
         zoom, rstop, fov_y, step_width,
+        s_raystep_limiter,
         b_vary_de_stop,
         de_stop, z_step_div,
         soft_shadow_radius, hs_max_length_multiplier,
