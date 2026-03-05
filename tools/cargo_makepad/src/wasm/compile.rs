@@ -19,6 +19,7 @@ pub struct WasmConfig {
     pub small_fonts: bool,
     pub brotli: bool,
     pub bindgen: bool,
+    pub threads: bool,
 }
 
 pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
@@ -171,8 +172,11 @@ pub fn cp_brotli(
 
 const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
+const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
+const WASM_RUSTFLAGS_SINGLE_THREADED: &str =
+    "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C opt-level=z";
 
-fn build_wasm_target_spec(cwd: &PathBuf) -> Result<PathBuf, String> {
+fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, String> {
     let target_spec_dir = cwd.join("target/makepad-wasm-target");
     mkdir(&target_spec_dir)?;
     let target_spec_path = target_spec_dir.join(format!("{WASM_TARGET_TRIPLE}.json"));
@@ -201,13 +205,15 @@ fn build_wasm_target_spec(cwd: &PathBuf) -> Result<PathBuf, String> {
         );
     }
 
-    let insert_at = target_spec
-        .rfind('}')
-        .ok_or_else(|| "Unable to parse wasm target spec JSON from rustc".to_string())?;
-    target_spec.insert_str(
-        insert_at,
-        &format!(",\n  \"features\": \"{WASM_TARGET_SPEC_FEATURES}\"\n"),
-    );
+    if threaded {
+        let insert_at = target_spec
+            .rfind('}')
+            .ok_or_else(|| "Unable to parse wasm target spec JSON from rustc".to_string())?;
+        target_spec.insert_str(
+            insert_at,
+            &format!(",\n  \"features\": \"{WASM_TARGET_SPEC_FEATURES}\"\n"),
+        );
+    }
 
     fs::write(&target_spec_path, target_spec)
         .map_err(|e| format!("Can't write wasm target spec {:?}: {:?}", target_spec_path, e))?;
@@ -217,7 +223,7 @@ fn build_wasm_target_spec(cwd: &PathBuf) -> Result<PathBuf, String> {
 pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
     let cwd = std::env::current_dir().unwrap();
-    let wasm_target_spec = build_wasm_target_spec(&cwd)?;
+    let wasm_target_spec = build_wasm_target_spec(&cwd, config.threads)?;
     let target_arg = format!("--target={}", wasm_target_spec.display());
 
     let base_args = vec![
@@ -241,10 +247,17 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     }
     let args_out_refs: Vec<&str> = args_out.iter().map(|arg| arg.as_str()).collect();
 
-    shell_env(&[
-        ("RUSTFLAGS", "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z"),
-        ("MAKEPAD", "lines"),
-    ], &cwd, "rustup", &args_out_refs) ?;
+    let rustflags = if config.threads {
+        WASM_RUSTFLAGS_THREADED
+    } else {
+        WASM_RUSTFLAGS_SINGLE_THREADED
+    };
+    shell_env(
+        &[("RUSTFLAGS", rustflags), ("MAKEPAD", "lines")],
+        &cwd,
+        "rustup",
+        &args_out_refs,
+    )?;
 
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
     let build_dir = cwd.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
@@ -472,9 +485,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         brotli_compress(&index_path);
     }
     println!("Created wasm package: {:?}", app_dir);
-    println!("Copy this directory to any webserver, and serve with atleast these headers:");
-    println!("Cross-Origin-Embedder-Policy: require-corp");
-    println!("Cross-Origin-Opener-Policy: same-origin");
+    if config.threads {
+        println!("Copy this directory to any webserver, and serve with atleast these headers:");
+        println!("Cross-Origin-Embedder-Policy: require-corp");
+        println!("Cross-Origin-Opener-Policy: same-origin");
+    } else {
+        println!("Copy this directory to any webserver.");
+        println!("This single-threaded wasm build does not require COOP/COEP headers.");
+    }
     println!("Files need to be served with these mime types: ");
     println!("*.html => text/html");
     println!("*.wasm => application/wasm");
@@ -492,7 +510,12 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 pub fn run(config: WasmConfig, args: &[String]) -> Result<(), String> {
     // we should run the compiled folder root as webserver
     let result = build(config, args)?;
-    start_wasm_server(result.app_dir, config.lan, config.port.unwrap_or(8010));
+    start_wasm_server(
+        result.app_dir,
+        config.lan,
+        config.port.unwrap_or(8010),
+        config.threads,
+    );
     Ok(())
 }
 
@@ -535,7 +558,7 @@ fn decode_query_component(input: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
+pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
     let net = NetworkRuntime::new(NetworkConfig::default());
     let addr = if lan {
         SocketAddr::new("0.0.0.0".parse().unwrap(), port)
@@ -659,16 +682,22 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16) {
                     if let Ok(mut file_handle) = File::open(&path) {
                         let mut body = Vec::<u8>::new();
                         if file_handle.read_to_end(&mut body).is_ok() {
+                            let coop_coep_headers = if threaded {
+                                "Cross-Origin-Embedder-Policy: require-corp\r\n\
+                                Cross-Origin-Opener-Policy: same-origin\r\n"
+                            } else {
+                                ""
+                            };
                             let header = format!(
                                 "HTTP/1.1 200 OK\r\n\
                                 Content-Type: {}\r\n\
-                                Cross-Origin-Embedder-Policy: require-corp\r\n\
-                                Cross-Origin-Opener-Policy: same-origin\r\n\
+                                {}\
                                 Content-encoding: none\r\n\
                                 Cache-Control: max-age:0\r\n\
                                 Content-Length: {}\r\n\
                                 Connection: close\r\n\r\n",
                                 mime_type,
+                                coop_coep_headers,
                                 body.len()
                             );
                             let _ = response_sender.send(HttpServerResponse { header, body });
