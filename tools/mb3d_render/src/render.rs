@@ -1,5 +1,7 @@
 use crate::formulas::{self, FormulaSlot, IterParams};
 
+const MB3D_MIN_STEP_UNITS: f64 = 0.11;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Vec3 {
     pub x: f64,
@@ -276,7 +278,7 @@ impl RenderParams {
         let de_floor = de_stop * 0.25;
 
         // Binary search steps
-        let bin_search_steps = 6;
+        let bin_search_steps = m3p.b_steps_after_de_stop as i32;
 
         eprintln!("  max_ray_length: {:.6e}", max_ray_length);
         eprintln!("  de_stop_world: {:.6e} ({:.4} step units)", de_stop_world, de_stop_header);
@@ -356,9 +358,17 @@ fn calc_de(pos: Vec3, formulas: &[FormulaSlot], params: &IterParams, de_floor: f
 }
 
 /// Estimate raw normal gradient via 6-point central differences along view vectors.
-/// Matches MB3D's RMCalculateNormals sampling pattern.
-fn estimate_normal_grad(pos: Vec3, eps: f64, forward: Vec3, right: Vec3, up: Vec3,
-                        formulas: &[FormulaSlot], params: &IterParams, de_floor: f64) -> Vec3 {
+/// Returns both camera-basis components (x/right, y/up, z/forward) and world-space gradient.
+fn estimate_normal_grad(
+    pos: Vec3,
+    eps: f64,
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+    formulas: &[FormulaSlot],
+    params: &IterParams,
+    de_floor: f64,
+) -> (Vec3, Vec3) {
     let fwd = forward.normalize().scale(eps);
     let rt = right.normalize().scale(eps);
     let upv = up.normalize().scale(eps);
@@ -371,11 +381,13 @@ fn estimate_normal_grad(pos: Vec3, eps: f64, forward: Vec3, right: Vec3, up: Vec
     let dy = calc_de(pos.add(upv), formulas, params, de_floor).1
            - calc_de(pos.sub(upv), formulas, params, de_floor).1;
 
-    // Recompose back to world-space gradient.
-    rt.normalize()
+    let basis_grad = Vec3::new(dx, dy, dz);
+    let world_grad = rt.normalize()
         .scale(dx)
         .add(upv.normalize().scale(dy))
-        .add(fwd.normalize().scale(dz))
+        .add(fwd.normalize().scale(dz));
+
+    (basis_grad, world_grad)
 }
 
 /// MB3D RMCalculateNormals probe offset:
@@ -387,33 +399,57 @@ fn mb3d_normal_offset(params: &RenderParams, m_zz: f64) -> f64 {
         * params.step_width
 }
 
-fn tangent_basis(normal: Vec3) -> (Vec3, Vec3) {
-    let n = normal.normalize();
-    let seed = if n.z.abs() < 0.9 {
-        Vec3::new(0.0, 0.0, 1.0)
-    } else {
-        Vec3::new(0.0, 1.0, 0.0)
-    };
-    let mut vx = seed.cross(n).normalize();
-    if vx.len() < 1e-10 {
-        vx = Vec3::new(1.0, 0.0, 0.0).cross(n).normalize();
+fn destop_at_steps(params: &RenderParams, depth_steps: f64) -> f64 {
+    params.de_stop * (1.0 + depth_steps.abs() * params.de_stop_factor)
+}
+
+fn rotate_vector_reverse_basis(v: Vec3, right: Vec3, up: Vec3, forward: Vec3) -> Vec3 {
+    right.normalize()
+        .scale(v.x)
+        .add(up.normalize().scale(v.y))
+        .add(forward.normalize().scale(v.z))
+}
+
+fn create_xy_vecs_from_normals_mb3d(n: Vec3) -> (Vec3, Vec3) {
+    let d = n.y * n.y + n.x * n.x;
+    if d < 1.0e-50 {
+        return (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
     }
-    let vy = n.cross(vx).normalize();
+
+    let denom = (d + n.z * n.z + 1.0e-100).sqrt();
+    let half_angle = (-n.z / denom).clamp(-1.0, 1.0).acos() * 0.5;
+    let (mut sin_a, cos_a) = half_angle.sin_cos();
+    sin_a /= d.sqrt();
+    let d0 = -n.y * sin_a;
+    let d1 = n.x * sin_a;
+
+    let vx = Vec3::new(
+        1.0 - 2.0 * d1 * d1,
+        2.0 * d0 * d1,
+        2.0 * d1 * cos_a,
+    );
+    let vy = Vec3::new(
+        vx.y,
+        1.0 - 2.0 * d0 * d0,
+        -2.0 * d0 * cos_a,
+    );
     (vx, vy)
 }
 
 fn smooth_normal_mb3d(
     pos: Vec3,
-    normal_grad: Vec3,
+    normal_grad_basis: Vec3,
+    normal_grad_world: Vec3,
     n_offset: f64,
     smooth_n: i32,
+    forward: Vec3,
     right: Vec3,
     up: Vec3,
     formulas: &[FormulaSlot],
     params: &IterParams,
     de_floor: f64,
 ) -> (Vec3, f64) {
-    let normal = normal_grad.normalize();
+    let normal = normal_grad_world.normalize();
     if smooth_n <= 0 {
         return (normal, 0.0);
     }
@@ -436,7 +472,9 @@ fn smooth_normal_mb3d(
         ) * 0.2;
     }
 
-    let (vx, vy) = tangent_basis(normal);
+    let (vx_basis, vy_basis) = create_xy_vecs_from_normals_mb3d(normal_grad_basis);
+    let vx = rotate_vector_reverse_basis(vx_basis, right, up, forward).normalize();
+    let vy = rotate_vector_reverse_basis(vy_basis, right, up, forward).normalize();
     let mut nn1 = 0.0;
     let mut nn2 = 0.0;
     let mut ds1 = 0.0;
@@ -472,15 +510,22 @@ fn smooth_normal_mb3d(
     d_sg += ds2 * d_m - nn2 * nn2;
 
     // RMCalcRoughness: rough = clamp(sqrt(max(0, dSG * 7 * dT2^2 / |N|^2)) - 0.05, 0, 1)
-    let denom = 1.0e-40 + normal_grad.dot(normal_grad);
+    let denom = 1.0e-40 + normal_grad_basis.dot(normal_grad_basis);
     let mut rough = ((d_sg * 7.0 * d_t2 * d_t2) / denom).max(0.0).sqrt() - 0.05;
     rough = rough.clamp(0.0, 1.0);
 
     let out_n = if smooth_n < 8 {
-        normal_grad
-            .add(vx.scale(nn1 * d_t2))
-            .add(vy.scale(nn2 * d_t2))
-            .normalize()
+        rotate_vector_reverse_basis(
+            Vec3::new(
+                normal_grad_basis.x + nn1 * d_t2,
+                normal_grad_basis.y + nn2 * d_t2,
+                normal_grad_basis.z,
+            ),
+            right,
+            up,
+            forward,
+        )
+        .normalize()
     } else {
         normal
     };
@@ -539,7 +584,7 @@ fn calc_hs_soft_bits_mb3d(
     let mut refine_step = params.step_width;
     for _ in 0..8 {
         let (_, de_ref) = calc_de(refined_pos, formulas, &params.iter_params, params.de_floor);
-        let de_stop_ref = params.de_stop * (1.0 + refined_depth.abs() * params.de_stop_factor);
+        let de_stop_ref = destop_at_steps(params, refined_depth / params.step_width);
         if de_ref <= de_stop_ref {
             refined_pos = refined_pos.add(view_dir.scale(-refine_step));
             refined_depth = (refined_depth - refine_step).max(0.0);
@@ -603,8 +648,8 @@ fn calc_hs_soft_bits_mb3d(
     }
 
     let mut d_t1 = max_l_hs;
-    let mut zz2_world = depth_steps * params.step_width;
-    let mut ms_de_stop_world = params.de_stop * (1.0 + zz2_world.abs() * params.de_stop_factor);
+    let mut zz2_steps = depth_steps;
+    let mut ms_de_stop_world = destop_at_steps(params, zz2_steps);
     let mut step_factor_diff = 1.0f64;
     let (mut iters, mut de_world) = calc_de(pos, formulas, &params.iter_params, params.de_floor);
 
@@ -614,7 +659,7 @@ fn calc_hs_soft_bits_mb3d(
         let r_last_step_world = ((de_world - params.ms_de_sub * ms_de_stop_world)
             * params.s_z_step_div_raw
             * step_factor_diff)
-            .max(0.011 * params.step_width)
+            .max(MB3D_MIN_STEP_UNITS * params.step_width)
             .min(max_step_world);
         if r_last_step_world <= 0.0 {
             break;
@@ -623,13 +668,13 @@ fn calc_hs_soft_bits_mb3d(
         d_t1 -= r_last_step_width;
 
         pos = pos.add(l.scale(r_last_step_world));
-        zz2_world += r_last_step_world * zz2mul;
-        ms_de_stop_world = params.de_stop * (1.0 + zz2_world.abs() * params.de_stop_factor);
+        zz2_steps += r_last_step_width * zz2mul;
+        ms_de_stop_world = destop_at_steps(params, zz2_steps);
 
         (iters, de_world) = calc_de(pos, formulas, &params.iter_params, params.de_floor);
 
         let traveled = (max_l_hs - d_t1).max(0.0);
-        let soft_term = ((de_world - ms_de_stop_world) / params.step_width) * zr_s_mul / (traveled + 0.011)
+        let soft_term = ((de_world - ms_de_stop_world) / params.step_width) * zr_s_mul / (traveled + MB3D_MIN_STEP_UNITS)
             + (traveled / max_l_hs.max(1.0e-30)).powi(8);
         zr_soft = zr_soft.min(soft_term);
 
@@ -674,7 +719,6 @@ pub fn ray_march(
     let mut step_count = 0.0f64;
     let mut seed = seed0;
     let mut first_step = params.first_step_random;
-    let de_stop = params.de_stop;
     let de_floor = params.de_floor;
     let dfog_on_it = params.d_fog_on_it;
 
@@ -683,7 +727,7 @@ pub fn ray_march(
     let (iters, de) = calc_de(pos, formulas, &params.iter_params, de_floor);
 
     // Check if already inside the set
-    let current_destop = de_stop * (1.0 + t * params.de_stop_factor);
+    let current_destop = destop_at_steps(params, t / params.step_width);
     if iters >= params.iter_params.max_iters || de < current_destop {
         return PixelResult::Hit {
             depth: t,
@@ -693,12 +737,12 @@ pub fn ray_march(
     }
 
     // Initialize last step from first DE
-    last_step = (de * params.s_z_step_div).max(0.011 * params.step_width);
+    last_step = (de * params.s_z_step_div).max(MB3D_MIN_STEP_UNITS * params.step_width);
     last_de = de;
 
     let max_steps = 2000000;
     for _ in 0..max_steps {
-        let current_destop = de_stop * (1.0 + t * params.de_stop_factor);
+        let current_destop = destop_at_steps(params, t / params.step_width);
 
         // Evaluate DE
         let pos = origin.add(dir.scale(t));
@@ -713,7 +757,7 @@ pub fn ray_march(
         if iters < params.iter_params.max_iters && de >= current_destop {
             // Source path: step from (DE - msDEsub*msDEstop), min floor, then clamp by dynamic max-step.
             let mut step = ((de - params.ms_de_sub * current_destop) * params.s_z_step_div * rsfmul)
-                .max(0.011 * params.step_width);
+                .max(MB3D_MIN_STEP_UNITS * params.step_width);
             let max_step_here = (current_destop.max(0.4 * params.step_width)) * params.mct_mh04_zsd;
 
             if max_step_here < step {
@@ -758,7 +802,7 @@ pub fn ray_march(
             for _ in 0..params.bin_search_steps {
                 t += refine_step;
                 let rpos = origin.add(dir.scale(t));
-                let destop_here = de_stop * (1.0 + t * params.de_stop_factor);
+                let destop_here = destop_at_steps(params, t / params.step_width);
                 let (ri, rd) = calc_de(rpos, formulas, &params.iter_params, de_floor);
                 if rd < destop_here || ri >= params.iter_params.max_iters {
                     refine_step = -(refine_step.abs() * 0.55); // back up
@@ -962,7 +1006,7 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                 let hit_pos = origin.add(dir.scale(d));
                                 let m_zz = d / params.step_width;
                                 let n_offset = mb3d_normal_offset(params, m_zz);
-                                let normal_coarse = estimate_normal_grad(
+                                let (normal_basis, normal_coarse) = estimate_normal_grad(
                                     hit_pos,
                                     n_offset,
                                     params.camera.forward, params.camera.right, params.camera.up,
@@ -970,9 +1014,11 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                 );
                                 let (normal, _roughness) = smooth_normal_mb3d(
                                     hit_pos,
+                                    normal_basis,
                                     normal_coarse,
                                     n_offset,
                                     params.sm_normals,
+                                    params.camera.forward,
                                     params.camera.right,
                                     params.camera.up,
                                     formulas,
@@ -1021,16 +1067,18 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                 let m_zz = d / params.step_width;
                                 let n_offset = mb3d_normal_offset(params, m_zz);
                                 
-                                let normal_coarse = estimate_normal_grad(
+                                let (normal_basis, normal_coarse) = estimate_normal_grad(
                                     hit_pos, n_offset,
                                     params.camera.forward, params.camera.right, params.camera.up,
                                     formulas, &params.iter_params, params.de_floor,
                                 );
                                 let (normal_mb3d, roughness_mb3d) = smooth_normal_mb3d(
                                     hit_pos,
+                                    normal_basis,
                                     normal_coarse,
                                     n_offset,
                                     params.sm_normals,
+                                    params.camera.forward,
                                     params.camera.right,
                                     params.camera.up,
                                     formulas,
