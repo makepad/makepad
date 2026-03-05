@@ -34,6 +34,7 @@ trait ReadExt: Read {
 }
 impl<R: Read> ReadExt for R {}
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct HAFormula {
     pub iteration_count: i32,
@@ -44,6 +45,7 @@ pub struct HAFormula {
     pub option_values: [f64; 16],
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct HeaderCustomAddon {
     pub version: u8,
@@ -56,6 +58,7 @@ pub struct HeaderCustomAddon {
     pub formulas: [HAFormula; 6],
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct M3PLight {
     pub color: [u8; 3],
@@ -69,6 +72,7 @@ pub struct M3PLight {
     pub free_byte: u8,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct M3PLCol {
     pub pos: u16,
@@ -76,12 +80,14 @@ pub struct M3PLCol {
     pub color_spe: [u8; 4],
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct M3PICol {
     pub pos: u16,
     pub color: [u8; 4],
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct M3PLighting {
     pub roughness_factor: u8,
@@ -109,6 +115,7 @@ pub struct M3PLighting {
     pub i_cols: Vec<M3PICol>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct M3PFile {
     pub mand_id: i32,
@@ -302,7 +309,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let julia_z = f64::from_le_bytes(data[207..215].try_into().unwrap());
     let julia_w = f64::from_le_bytes(data[215..223].try_into().unwrap());
 
-    let var_col_zpos = i16::from_le_bytes(data[432..434].try_into().unwrap());
+    let _var_col_zpos = i16::from_le_bytes(data[432..434].try_into().unwrap());
     let roughness_factor = data[434];
     let _b_color_map = data[435];
     let additional_options = data[439];
@@ -320,11 +327,6 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let fine_col_adj_2 = data[481];
     let _l_version = (tboptions >> 21) & 7;
     let s_depth = tbpos_4 as f64 * 0.8e-6;
-    println!("  s_depth: {} (tbpos_4: {}), var_col_zpos: {}, roughness_factor: {}, tbpos_3: {}, tbpos_5: {}, tbpos_6: {}, tbpos_7: {}, bColCycling: {}",
-        s_depth, tbpos_4, var_col_zpos, roughness_factor, tbpos_3, tbpos_5, tbpos_6, tbpos_7, (tboptions & 0x4000) != 0);
-    println!("  tbpos_9: {}, tbpos_10: {}, tboptions: {:08x}, fine_col_adj_1: {}, fine_col_adj_2: {}", tbpos_9, tbpos_10, tboptions, fine_col_adj_1, fine_col_adj_2);
-    println!("  depth_col: {:?}, depth_col2: {:?}", [data[492], data[493], data[494]], [data[496], data[497], data[498]]);
-
     // Parse lighting at fixed offsets
     let mut lighting = M3PLighting {
         roughness_factor,
@@ -390,11 +392,6 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         // Keep a minimum amplitude for robust rendering if the file has zeroed legacy values.
         let l_amp = if lamp.abs() < 1.0e-20 { 1.0 } else { lamp };
 
-        println!(
-            "  Light {}: color=[{}, {}, {}], option={}, function={}, lamp={:.6e}, angle_xy={}, angle_z={}, add_ex={}, free={}",
-            i, r, g, b, l_option, l_function, l_amp, angle_xy, angle_z, additional_byte_ex, free_byte
-        );
-
         lighting.lights.push(M3PLight {
             color: [r, g, b],
             lamp: l_amp,
@@ -437,7 +434,6 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let version = ac.read_u8_val()?;
     let b_options1 = ac.read_u8_val()?;
     let b_options2 = ac.read_u8_val()?;
-    println!("  b_options2: {}", b_options2);
     let b_options3 = ac.read_u8_val()?;
     let formula_count = ac.read_u8_val()?;
     let b_hyb_opt1 = ac.read_u8_val()?;
@@ -467,13 +463,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     };
 
     let b_vary_de_stop = data[162] != 0;
-    println!("  bVaryDEstop: {}", b_vary_de_stop);
-    println!("  sRaystepLimiter: {:.6}", s_raystep_limiter);
-    println!(
-        "  hard shadow flags: bCalculateHardShadow=0x{b_calculate_hard_shadow:02x}, bCalc1HSsoft=0x{b_calc1_hs_soft:02x}, bHScalculated=0x{b_hs_calculated:02x}"
-    );
     let b_calc_amb_shadow_automatic = data[149];
-    println!("  b_calc_amb_shadow_automatic: {}", b_calc_amb_shadow_automatic);
     let calc_amb_shadow = (b_calc_amb_shadow_automatic & 1) != 0;
     let mode = ((b_calc_amb_shadow_automatic >> 2) & 3) as i32;
     let quality = ((b_calc_amb_shadow_automatic >> 4) & 3) as i32;
@@ -500,15 +490,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         amb_shad,
     };
 
-        println!("  SSAO: enabled={}, mode={}, quality={}, rays={}, maxL={}, amb_shad={}, diff_shad={}", 
-            ssao.calc_amb_shadow, ssao.mode, ssao.quality, ssao.ssao_r_count, ssao.deao_max_l, ssao.amb_shad, ssao.diffuse_shadowing);
-        
-        println!("LCols:");
-        for (i, c) in lighting.l_cols.iter().enumerate() {
-            println!("  {}: pos={}, dif={:?}, spe={:?}", i, c.pos, c.color_dif, c.color_spe);
-        }
-        
-        let min_iterations = i32::from_le_bytes(data[135..139].try_into().unwrap());
+    let min_iterations = i32::from_le_bytes(data[135..139].try_into().unwrap());
 
     Ok(M3PFile {
         mand_id, width, height, iterations, min_iterations, b_steps_after_de_stop,
@@ -531,6 +513,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     })
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct M3PSSAO {
     pub mode: i32,

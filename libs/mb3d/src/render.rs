@@ -20,7 +20,6 @@ impl Vec3 {
     pub fn scale(self, s: f64) -> Self { Vec3::new(self.x*s, self.y*s, self.z*s) }
     pub fn add(self, o: Self) -> Self { Vec3::new(self.x+o.x, self.y+o.y, self.z+o.z) }
     pub fn sub(self, o: Self) -> Self { Vec3::new(self.x-o.x, self.y-o.y, self.z-o.z) }
-    pub fn mul(self, o: Self) -> Self { Vec3::new(self.x*o.x, self.y*o.y, self.z*o.z) }
     pub fn cross(self, o: Self) -> Self {
         Vec3::new(
             self.y * o.z - self.z * o.y,
@@ -46,7 +45,6 @@ pub struct Camera {
     pub step_width: f64,  // StepWidth from header (world units per step)
     pub z_start: f64,
     pub z_end: f64,
-    pub z1: f64,          // dZstart - dZmid
     pub width: i32,
     pub height: i32,
     pub fov_y: f64,
@@ -69,15 +67,6 @@ impl Camera {
 
         let mid = Vec3::new(m3p.x_mid, m3p.y_mid, m3p.z_mid);
         let z_start = m3p.z_start; // Already in world units in the file
-        let z1 = m3p.z_start - m3p.z_mid;
-
-        eprintln!("  StepWidth: {:.6e}", step_width);
-        eprintln!("  z_start (world): {:.10e}", z_start);
-        eprintln!("  z1: {:.10e}", z1);
-        eprintln!("  right:   ({:.6e}, {:.6e}, {:.6e})", right.x, right.y, right.z);
-        eprintln!("  up:      ({:.6e}, {:.6e}, {:.6e})", up.x, up.y, up.z);
-        eprintln!("  forward: ({:.6e}, {:.6e}, {:.6e})", forward.x, forward.y, forward.z);
-        eprintln!("  mid:     ({:.10e}, {:.10e}, {:.10e})", mid.x, mid.y, mid.z);
 
         Camera {
             mid,
@@ -87,7 +76,6 @@ impl Camera {
             step_width,
             z_start,
             z_end: m3p.z_end,
-            z1,
             width: m3p.width,
             height: m3p.height,
             fov_y: m3p.fov_y,
@@ -162,7 +150,6 @@ pub struct RenderParams {
     pub step_width: f64,       // StepWidth from header
     pub de_stop_factor: f64,   // mctDEstopFactor: how DEstop scales with distance
     pub mct_mh04_zsd: f64,     // Max(iMandWidth, iMandHeight) ray-step limiter
-    pub max_step: f64,         // maximum step size (world units)
     pub de_floor: f64,         // minimum DE value (0.25 * de_stop)
     pub de_scale: f64,         // dDEscale_computed: formula-specific DE scaling factor
     pub bin_search_steps: i32, // iDEAddSteps for binary search refinement
@@ -272,24 +259,11 @@ impl RenderParams {
             * s_raystep_limiter;
 
         // Maximum step size (in world units) near camera; marcher uses dynamic value with current DEstop.
-        let max_step = de_stop_header.max(0.4) * mct_mh04_zsd * step_width;
-
         // DE floor: min 0.25 * effective DEstop (in world units)
         let de_floor = de_stop * 0.25;
 
         // Binary search steps
         let bin_search_steps = m3p.b_steps_after_de_stop as i32;
-
-        eprintln!("  max_ray_length: {:.6e}", max_ray_length);
-        eprintln!("  de_stop_world: {:.6e} ({:.4} step units)", de_stop_world, de_stop_header);
-        eprintln!("  de_scale: {:.4} (dDEscale_computed)", de_scale);
-        eprintln!("  effective de_stop: {:.6e}", de_stop);
-        eprintln!("  effective sZstepDiv: {:.4} (raw {:.4} * de_scale {:.4})", s_z_step_div, s_z_step_div_raw, de_scale);
-        eprintln!("  msDEsub: {:.4}", ms_de_sub);
-        eprintln!("  max_step: {:.6e}", max_step);
-        eprintln!("  de_floor: {:.6e}", de_floor);
-        eprintln!("  iSmNormals: {}", ((m3p.i_options >> 6) & 0x0F));
-        eprintln!("  mctMH04ZSD: {:.6}", mct_mh04_zsd);
 
         let d_fog_on_it = if (m3p.b_vol_light_nr & 7) > 0 {
             65535
@@ -326,7 +300,6 @@ impl RenderParams {
             soft_shadow_radius: m3p.soft_shadow_radius.max(0.001),
             hs_max_length_multiplier: m3p.hs_max_length_multiplier.max(0.001),
             ms_de_sub,
-            max_step,
             mct_mh04_zsd,
             de_floor,
             de_scale,
@@ -532,37 +505,6 @@ fn smooth_normal_mb3d(
     (out_n, rough)
 }
 
-/// Lightweight DE-based soft shadow toward a directional light.
-fn soft_shadow(
-    pos: Vec3,
-    light_dir: Vec3,
-    formulas: &[FormulaSlot],
-    params: &RenderParams,
-    steps: i32,
-    max_dist: f64,
-) -> f64 {
-    if steps <= 0 {
-        return 1.0;
-    }
-    let mut t = params.de_stop * 8.0;
-    let mut res = 1.0f64;
-    for _ in 0..steps {
-        if t >= max_dist {
-            break;
-        }
-        let p = pos.add(light_dir.scale(t));
-        let (_, de) = calc_de(p, formulas, &params.iter_params, params.de_floor);
-        let h = de.max(params.de_floor);
-        let penumbra = (8.0 * h / t.max(1e-20)).clamp(0.0, 1.0);
-        res = res.min(penumbra);
-        t += h.max(params.de_stop * 3.0);
-        if res < 0.05 {
-            break;
-        }
-    }
-    res.clamp(0.0, 1.0)
-}
-
 /// CalcHSsoft port for directional lights, matching MB3D's packed soft-HS high bits.
 fn calc_hs_soft_bits_mb3d(
     hit_pos: Vec3,
@@ -651,7 +593,7 @@ fn calc_hs_soft_bits_mb3d(
     let mut zz2_steps = depth_steps;
     let mut ms_de_stop_world = destop_at_steps(params, zz2_steps);
     let mut step_factor_diff = 1.0f64;
-    let (mut iters, mut de_world) = calc_de(pos, formulas, &params.iter_params, params.de_floor);
+    let mut de_world = calc_de(pos, formulas, &params.iter_params, params.de_floor).1;
 
     loop {
         let r_last_de_world = de_world;
@@ -671,7 +613,8 @@ fn calc_hs_soft_bits_mb3d(
         zz2_steps += r_last_step_width * zz2mul;
         ms_de_stop_world = destop_at_steps(params, zz2_steps);
 
-        (iters, de_world) = calc_de(pos, formulas, &params.iter_params, params.de_floor);
+        let (iters, next_de_world) = calc_de(pos, formulas, &params.iter_params, params.de_floor);
+        de_world = next_de_world;
 
         let traveled = (max_l_hs - d_t1).max(0.0);
         let soft_term = ((de_world - ms_de_stop_world) / params.step_width) * zr_s_mul / (traveled + MB3D_MIN_STEP_UNITS)
@@ -825,7 +768,6 @@ pub fn ray_march(
     PixelResult::Miss
 }
 
-use std::sync::{Arc, Mutex};
 use std::thread;
 
 /// Render the full image using two passes:
@@ -834,6 +776,9 @@ use std::thread;
 pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate::m3p::M3PLighting, ssao: &crate::m3p::M3PSSAO) -> Vec<u8> {
     let w = params.camera.width as usize;
     let h = params.camera.height as usize;
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
 
     // Pass 1: build depth and iteration buffers
     let mut depth_buf = vec![f64::MAX; w * h];
@@ -843,375 +788,186 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
     eprintln!("Rendering {}x{} ...", w, h);
     let start = std::time::Instant::now();
     
-    let num_threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let num_threads = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(h.max(1));
+    let rows_per_thread = h.div_ceil(num_threads);
+    let band_len = rows_per_thread * w;
     eprintln!("Using {} threads", num_threads);
     
-    let next_y = Arc::new(Mutex::new(0usize));
-    let hit_count = Arc::new(Mutex::new(0u64));
-    
-    // We need to share formulas and params across threads.
-    // Since they are not easily Send+Sync without Arc, and we don't want to change their signatures,
-    // we'll use scoped threads if possible, or just Arc.
-    // Actually, std::thread::scope is available in Rust 1.63+
-    
-    thread::scope(|s| {
-        let mut threads = Vec::new();
-        
-        // We need to write to depth_buf and iter_buf. We can divide the buffers into chunks,
-        // or use a mutex. Mutex per pixel is slow.
-        // Let's divide rows among threads.
-        // We can create a channel or just divide the rows upfront.
-        
-        for thread_idx in 0..num_threads {
+    let total_hits = thread::scope(|s| {
+        let mut workers = Vec::new();
+        for (thread_idx, ((depth_chunk, iter_chunk), shadow_chunk)) in depth_buf
+            .chunks_mut(band_len)
+            .zip(iter_buf.chunks_mut(band_len))
+            .zip(shadow_buf.chunks_mut(band_len))
+            .enumerate()
+        {
             let formulas = &formulas;
             let params = &params;
-            let next_y = Arc::clone(&next_y);
-            let hit_count = Arc::clone(&hit_count);
-            
-            // To avoid unsafe, we can return the results from the thread and merge them.
-            threads.push(s.spawn(move || {
-                let mut local_results = Vec::new();
+            let y_start = thread_idx * rows_per_thread;
+            workers.push(s.spawn(move || {
+                let row_count = depth_chunk.len() / w;
                 let mut local_hits = 0u64;
-                
-                loop {
-                    let y = {
-                        let mut ny = next_y.lock().unwrap();
-                        let current = *ny;
-                        if current >= h {
-                            break;
-                        }
-                        *ny += 1;
-                        current
-                    };
-                    
-                    if thread_idx == 0 && y % (h.max(100) / 20).max(1) == 0 {
-                        let pct = y * 100 / h;
-                        eprintln!("  {}% ({:.1}s)", pct, start.elapsed().as_secs_f64());
-                    }
-                    
-                    let mut row_depth = vec![f64::MAX; w];
-                    let mut row_iter = vec![0i32; w];
-                    let mut row_shadow = vec![0i32; w];
-                    
+
+                for local_y in 0..row_count {
+                    let y = y_start + local_y;
+                    let row_offset = local_y * w;
                     for x in 0..w {
+                        let idx = row_offset + x;
                         let (origin, dir) = params.camera.ray_for_pixel(x as i32, y as i32);
                         let seed = (x as u32)
                             .wrapping_mul(0x45d9f3b)
                             .wrapping_add((y as u32).wrapping_mul(0x2710_0001))
                             .wrapping_add((thread_idx as u32).wrapping_mul(0x9e37_79b9))
                             .wrapping_add(0x2456_3487);
-                        let result = ray_march(origin, dir, formulas, params, seed);
-                        
-                        match result {
-                            PixelResult::Hit { depth, iters, shadow_steps } => {
-                                local_hits += 1;
-                                row_depth[x] = depth;
-                                row_iter[x] = iters;
-                                row_shadow[x] = shadow_steps;
-                            }
-                            PixelResult::Miss => {}
+
+                        if let PixelResult::Hit { depth, iters, shadow_steps } =
+                            ray_march(origin, dir, formulas, params, seed)
+                        {
+                            local_hits += 1;
+                            depth_chunk[idx] = depth;
+                            iter_chunk[idx] = iters;
+                            shadow_chunk[idx] = shadow_steps;
                         }
                     }
-                    
-                    local_results.push((y, row_depth, row_iter, row_shadow));
                 }
-                
-                let mut hc = hit_count.lock().unwrap();
-                *hc += local_hits;
-                
-                local_results
+
+                local_hits
             }));
         }
-        
-        for t in threads {
-            let results = t.join().unwrap();
-            for (y, row_depth, row_iter, row_shadow) in results {
-                let offset = y * w;
-                depth_buf[offset..offset + w].copy_from_slice(&row_depth);
-                iter_buf[offset..offset + w].copy_from_slice(&row_iter);
-                shadow_buf[offset..offset + w].copy_from_slice(&row_shadow);
-            }
+
+        let mut total_hits = 0u64;
+        for worker in workers {
+            total_hits += worker.join().unwrap();
         }
+        total_hits
     });
 
-    let total_hits = *hit_count.lock().unwrap();
     eprintln!("Ray march complete in {:.1}s ({} hits / {} pixels)",
         start.elapsed().as_secs_f64(), total_hits, w * h);
 
-    let smooth_iter = iter_buf.clone();
-
-    // Pass 3: compute normals and shade
+    // Pass 2: compute normals and shade
     let mut pixels = vec![0u8; w * h * 4];
-    let debug_mode = std::env::var("DEBUG_MODE").unwrap_or_default();
-
     let soft_hs_light = crate::lighting::soft_hs_light_dir(lighting, &params.camera, params);
 
     thread::scope(|s| {
-        let mut threads = Vec::new();
-        let next_y = Arc::new(Mutex::new(0usize));
-        
-        for _ in 0..num_threads {
+        let mut workers = Vec::new();
+
+        for (band_idx, pixel_chunk) in pixels.chunks_mut(rows_per_thread * w * 4).enumerate() {
             let formulas = &formulas;
             let params = &params;
             let depth_buf = &depth_buf;
-            let smooth_iter = &smooth_iter;
+            let iter_buf = &iter_buf;
             let shadow_buf = &shadow_buf;
-            let debug_mode = &debug_mode;
-            let next_y = Arc::clone(&next_y);
             let soft_hs_light = soft_hs_light;
-            
-            threads.push(s.spawn(move || {
-                let mut local_pixels = Vec::new();
-                
-                loop {
-                    let y = {
-                        let mut ny = next_y.lock().unwrap();
-                        let current = *ny;
-                        if current >= h {
-                            break;
-                        }
-                        *ny += 1;
-                        current
-                    };
-                    
-                    let mut row_pixels = vec![0u8; w * 4];
-                    
+            let y_start = band_idx * rows_per_thread;
+
+            workers.push(s.spawn(move || {
+                let row_count = pixel_chunk.len() / (w * 4);
+                for local_y in 0..row_count {
+                    let y = y_start + local_y;
+                    let row_offset = local_y * w * 4;
+
                     for x in 0..w {
                         let idx = y * w + x;
-                        let offset = x * 4;
-                        let d = depth_buf[idx];
+                        let offset = row_offset + x * 4;
+                        let depth = depth_buf[idx];
 
-                        if d == f64::MAX {
-                            row_pixels[offset] = 10;
-                            row_pixels[offset + 1] = 10;
-                            row_pixels[offset + 2] = 15;
-                            row_pixels[offset + 3] = 255;
+                        if depth == f64::MAX {
+                            pixel_chunk[offset] = 10;
+                            pixel_chunk[offset + 1] = 10;
+                            pixel_chunk[offset + 2] = 15;
+                            pixel_chunk[offset + 3] = 255;
                             continue;
                         }
 
-                        let color = match debug_mode.as_str() {
-                            "depth" => {
-                                let t = (d / params.max_ray_length).clamp(0.0, 1.0);
-                                let v = ((1.0 - t) * 255.0) as u8;
-                                [v, v, v]
-                            }
-                            "iters" => {
-                                let t = (smooth_iter[idx] as f64) / (params.iter_params.max_iters as f64);
-                                let (r, g, b) = crate::lighting::iteration_color(t, lighting);
-                                [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
-                            }
-                            "normals" => {
-                                // Visualize the same MB3D-inspired normal path used for shading.
-                                let (origin, dir) = params.camera.ray_for_pixel(x as i32, y as i32);
-                                let hit_pos = origin.add(dir.scale(d));
-                                let m_zz = d / params.step_width;
-                                let n_offset = mb3d_normal_offset(params, m_zz);
-                                let (normal_basis, normal_coarse) = estimate_normal_grad(
-                                    hit_pos,
-                                    n_offset,
-                                    params.camera.forward, params.camera.right, params.camera.up,
-                                    formulas, &params.iter_params, params.de_floor,
-                                );
-                                let (normal, _roughness) = smooth_normal_mb3d(
-                                    hit_pos,
-                                    normal_basis,
-                                    normal_coarse,
-                                    n_offset,
-                                    params.sm_normals,
-                                    params.camera.forward,
-                                    params.camera.right,
-                                    params.camera.up,
-                                    formulas,
-                                    &params.iter_params,
-                                    params.de_floor,
-                                );
-                                [
-                                    ((normal.x * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0) as u8,
-                                    ((normal.y * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0) as u8,
-                                    ((normal.z * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0) as u8,
-                                ]
-                            }
-                            "ssn" => {
-                                let normal = screen_space_normal(&depth_buf, x, y, w, h, params.step_width);
-                                let (origin, dir) = params.camera.ray_for_pixel(x as i32, y as i32);
-                                let hit_pos = origin.add(dir.scale(d));
-                                crate::lighting::shade(
-                                    normal,
-                                    0.0,
-                                    dir.scale(-1.0),
-                                    smooth_iter[idx],
-                                    shadow_buf[idx],
-                                    params.iter_params.max_iters,
-                                    params.iter_params.min_iters,
-                                    hit_pos,
-                                    &params.camera,
-                                    1.0,
-                                    1.0,
-                                    d,
-                                    x as i32,
-                                    y as i32,
-                                    (y as f64 + 0.5) / h as f64,
-                                    params.max_ray_length,
-                                    lighting,
-                                    ssao,
-                                    formulas,
-                                    params,
-                                    x == w / 2 && y == h / 2,
-                                )
-                            }
-                            _ => {
-                                // DE-based normals along view vectors
-                                let (origin, dir) = params.camera.ray_for_pixel(x as i32, y as i32);
-                                let hit_pos = origin.add(dir.scale(d));
-                                
-                                let m_zz = d / params.step_width;
-                                let n_offset = mb3d_normal_offset(params, m_zz);
-                                
-                                let (normal_basis, normal_coarse) = estimate_normal_grad(
-                                    hit_pos, n_offset,
-                                    params.camera.forward, params.camera.right, params.camera.up,
-                                    formulas, &params.iter_params, params.de_floor,
-                                );
-                                let (normal_mb3d, roughness_mb3d) = smooth_normal_mb3d(
-                                    hit_pos,
-                                    normal_basis,
-                                    normal_coarse,
-                                    n_offset,
-                                    params.sm_normals,
-                                    params.camera.forward,
-                                    params.camera.right,
-                                    params.camera.up,
-                                    formulas,
-                                    &params.iter_params,
-                                    params.de_floor,
-                                );
-                                let normal_shade = normal_mb3d;
-                                let ao_factor = 1.0;
-                                let direct_light_factor = 1.0;
+                        let (origin, dir) = params.camera.ray_for_pixel(x as i32, y as i32);
+                        let hit_pos = origin.add(dir.scale(depth));
+                        let m_zz = depth / params.step_width;
+                        let n_offset = mb3d_normal_offset(params, m_zz);
 
-                                let is_center = x == w / 2 && y == h / 2;
+                        let (normal_basis, normal_coarse) = estimate_normal_grad(
+                            hit_pos,
+                            n_offset,
+                            params.camera.forward,
+                            params.camera.right,
+                            params.camera.up,
+                            formulas,
+                            &params.iter_params,
+                            params.de_floor,
+                        );
+                        let (normal_mb3d, roughness_mb3d) = smooth_normal_mb3d(
+                            hit_pos,
+                            normal_basis,
+                            normal_coarse,
+                            n_offset,
+                            params.sm_normals,
+                            params.camera.forward,
+                            params.camera.right,
+                            params.camera.up,
+                            formulas,
+                            &params.iter_params,
+                            params.de_floor,
+                        );
 
-                                // Packed PsiLight.Shadow equivalent:
-                                // low 10 bits = march/fog counter, high 6 bits = softHS factor.
-                                let mut shadow_word = shadow_buf[idx] & 0x3ff;
-                                if let Some((_li, light_dir, i_light_pos)) = soft_hs_light {
-                                    shadow_word |= 0xFC00;
-                                    let soft_bits = calc_hs_soft_bits_mb3d(
-                                        hit_pos,
-                                        d,
-                                        dir,
-                                        normal_shade,
-                                        light_dir,
-                                        i_light_pos,
-                                        y,
-                                        formulas,
-                                        params,
-                                    );
-                                    shadow_word = (shadow_word & 0x03FF) | (soft_bits << 10);
-                                }
+                        // Packed PsiLight.Shadow equivalent:
+                        // low 10 bits = march/fog counter, high 6 bits = softHS factor.
+                        let mut shadow_word = shadow_buf[idx] & 0x3ff;
+                        if let Some((_li, light_dir, i_light_pos)) = soft_hs_light {
+                            shadow_word |= 0xFC00;
+                            let soft_bits = calc_hs_soft_bits_mb3d(
+                                hit_pos,
+                                depth,
+                                dir,
+                                normal_mb3d,
+                                light_dir,
+                                i_light_pos,
+                                y,
+                                formulas,
+                                params,
+                            );
+                            shadow_word = (shadow_word & 0x03FF) | (soft_bits << 10);
+                        }
 
-                                crate::lighting::shade(
-                                    normal_shade,
-                                    roughness_mb3d,
-                                    dir.scale(-1.0),
-                                    smooth_iter[idx],
-                                    shadow_word,
-                                    params.iter_params.max_iters,
-                                    params.iter_params.min_iters,
-                                    hit_pos,
-                                    &params.camera,
-                                    ao_factor,
-                                    direct_light_factor,
-                                    d,
-                                    x as i32,
-                                    y as i32,
-                                    (y as f64 + 0.5) / h as f64,
-                                    params.max_ray_length,
-                                    lighting,
-                                    ssao,
-                                    formulas,
-                                    params,
-                                    is_center,
-                                )
-                            }
-                        };
-                        row_pixels[offset] = color[0];
-                        row_pixels[offset + 1] = color[1];
-                        row_pixels[offset + 2] = color[2];
-                        row_pixels[offset + 3] = 255;
+                        let color = crate::lighting::shade(
+                            normal_mb3d,
+                            roughness_mb3d,
+                            dir.scale(-1.0),
+                            iter_buf[idx],
+                            shadow_word,
+                            params.iter_params.max_iters,
+                            params.iter_params.min_iters,
+                            hit_pos,
+                            &params.camera,
+                            1.0,
+                            1.0,
+                            depth,
+                            x as i32,
+                            y as i32,
+                            (y as f64 + 0.5) / h as f64,
+                            params.max_ray_length,
+                            lighting,
+                            ssao,
+                            formulas,
+                            params,
+                        );
+
+                        pixel_chunk[offset] = color[0];
+                        pixel_chunk[offset + 1] = color[1];
+                        pixel_chunk[offset + 2] = color[2];
+                        pixel_chunk[offset + 3] = 255;
                     }
-                    local_pixels.push((y, row_pixels));
                 }
-                local_pixels
             }));
         }
-        
-        for t in threads {
-            let results = t.join().unwrap();
-            for (y, row_pixels) in results {
-                let offset = y * w * 4;
-                pixels[offset..offset + w * 4].copy_from_slice(&row_pixels);
-            }
+
+        for worker in workers {
+            worker.join().unwrap();
         }
     });
 
     eprintln!("Render complete in {:.1}s", start.elapsed().as_secs_f64());
     pixels
-}
-
-/// Smooth iteration buffer using 5x5 median filter to reduce speckle noise.
-fn smooth_iter_buf(iter_buf: &[i32], w: usize, h: usize) -> Vec<i32> {
-    let mut out = vec![0i32; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let mut samples = Vec::with_capacity(25);
-            for dy in 0..5i32 {
-                for dx in 0..5i32 {
-                    let nx = x as i32 + dx - 2;
-                    let ny = y as i32 + dy - 2;
-                    if nx >= 0 && nx < w as i32 && ny >= 0 && ny < h as i32 {
-                        samples.push(iter_buf[ny as usize * w + nx as usize]);
-                    }
-                }
-            }
-            samples.sort_unstable();
-            out[y * w + x] = samples[samples.len() / 2]; // median
-        }
-    }
-    out
-}
-
-/// Compute screen-space normal from depth buffer gradients.
-fn screen_space_normal(depth_buf: &[f64], x: usize, y: usize, w: usize, h: usize, step_width: f64) -> Vec3 {
-    let d = depth_buf[y * w + x];
-    let miss = f64::MAX;
-
-    let dl = if x > 0 { depth_buf[y * w + (x - 1)] } else { miss };
-    let dr = if x + 1 < w { depth_buf[y * w + (x + 1)] } else { miss };
-    let du = if y > 0 { depth_buf[(y - 1) * w + x] } else { miss };
-    let dd = if y + 1 < h { depth_buf[(y + 1) * w + x] } else { miss };
-
-    let dx = if dl != miss && dr != miss {
-        (dr - dl) * 0.5
-    } else if dr != miss {
-        dr - d
-    } else if dl != miss {
-        d - dl
-    } else {
-        0.0
-    };
-
-    let dy = if du != miss && dd != miss {
-        (dd - du) * 0.5
-    } else if dd != miss {
-        dd - d
-    } else if du != miss {
-        d - du
-    } else {
-        0.0
-    };
-
-    // Normal from depth gradient: depth differences are in world units,
-    // pixel spacing is StepWidth, so z-component = StepWidth for proper scale
-    Vec3::new(-dx, -dy, step_width).normalize()
 }
