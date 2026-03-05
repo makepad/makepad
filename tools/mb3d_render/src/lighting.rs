@@ -48,6 +48,111 @@ fn config() -> &'static LightingConfig {
     })
 }
 
+#[derive(Clone, Copy)]
+struct ParsedLight {
+    dir: Vec3,
+    color: Vec3,
+    spec_power: f64,
+    diff_mode: i32,
+    i_light_pos: u8,
+    is_positional: bool,
+}
+
+fn mb3d_light_local_dir(angle_xy: f64, angle_z: f64) -> Vec3 {
+    // HeaderTrafos:
+    // dTmp := -LXpos; dTmp2 := LYpos;
+    // BuildViewVectorFOV(dTmp2, dTmp); SVectorChangeSign.
+    Vec3::new(-angle_xy.sin(), -angle_z.sin(), -(angle_xy.cos() * angle_z.cos())).normalize()
+}
+
+fn light_is_active_non_lightmap(l: &crate::m3p::M3PLight) -> bool {
+    // MB3D: iLightOption := Loption and 3; 0=on, 1=off, 2=lightmap, 3->off.
+    let mut opt = (l.l_option & 3) as i32;
+    if opt == 3 {
+        opt = 1;
+    }
+    opt == 0
+}
+
+fn parse_light(l: &crate::m3p::M3PLight, camera: &crate::render::Camera) -> Option<ParsedLight> {
+    if !light_is_active_non_lightmap(l) {
+        return None;
+    }
+
+    let lamp = l.l_amp.max(0.0);
+    if lamp <= 0.0 {
+        return None;
+    }
+
+    let i_light_pos = ((l.l_option >> 2) & 7) | ((l.l_function & 0x80) >> 4);
+    let is_positional = (i_light_pos & 1) != 0;
+    let diff_mode = ((l.l_function >> 4) & 3) as i32;
+    let spec_power = (2u32 << (l.l_function & 0x07)) as f64;
+
+    let local_dir = mb3d_light_local_dir(l.angle_xy, l.angle_z);
+    let r = camera.right.normalize();
+    let u = camera.up.normalize();
+    let f = camera.forward.normalize();
+    let dir = r
+        .scale(local_dir.x)
+        .add(u.scale(local_dir.y))
+        .add(f.scale(local_dir.z))
+        .normalize();
+
+    let mut color = Vec3::new(
+        l.color[0] as f64 / 255.0,
+        l.color[1] as f64 / 255.0,
+        l.color[2] as f64 / 255.0,
+    );
+    let lamp_mul = if is_positional { lamp * 1.3 } else { lamp };
+    color = color.scale(lamp_mul);
+
+    if color.x <= 0.0 && color.y <= 0.0 && color.z <= 0.0 {
+        return None;
+    }
+
+    Some(ParsedLight {
+        dir,
+        color,
+        spec_power,
+        diff_mode,
+        i_light_pos,
+        is_positional,
+    })
+}
+
+fn apply_diff_mode(mode: i32, ndotl: f64) -> f64 {
+    let d = ndotl.max(0.0);
+    match mode {
+        0 => d,
+        1 => d * d,
+        2 => d.sqrt(),
+        _ => d.powf(0.25),
+    }
+}
+
+pub fn dominant_shadow_light_dir(
+    lighting: &crate::m3p::M3PLighting,
+    camera: &crate::render::Camera,
+) -> Option<Vec3> {
+    let mut best_dir = None;
+    let mut best_luma = 0.0;
+    for l in &lighting.lights {
+        if let Some(pl) = parse_light(l, camera) {
+            let vis_mode = pl.i_light_pos & 14;
+            if pl.is_positional || vis_mode != 0 {
+                continue;
+            }
+            let luma = pl.color.x * 0.299 + pl.color.y * 0.587 + pl.color.z * 0.114;
+            if luma > best_luma {
+                best_luma = luma;
+                best_dir = Some(pl.dir);
+            }
+        }
+    }
+    best_dir
+}
+
 /// Shade a hit pixel using a stable two-light material model.
 pub fn shade(
     normal: Vec3,
@@ -60,6 +165,7 @@ pub fn shade(
     ao_factor: f64,
     direct_light_factor: f64,
     depth: f64,
+    y_pos: f64,
     max_depth: f64,
     lighting: &crate::m3p::M3PLighting,
     ssao: &crate::m3p::M3PSSAO,
@@ -71,8 +177,9 @@ pub fn shade(
 
     let m_zz = depth / params.step_width;
 
-    let mut final_ao = 1.0;
-    if ssao.calc_amb_shadow {
+    // AO is estimated in render pass; keep the expensive per-shade AO path optional.
+    let mut final_ao = ao_factor.clamp(0.0, 1.0);
+    if ssao.calc_amb_shadow && env_f64("SHADE_AO_RAYS", 0.0) != 0.0 {
         let mut final_ao_val = 0.0;
         
         let num_rays = if ssao.quality == 0 { 3 } else { 
@@ -237,62 +344,17 @@ pub fn shade(
         }
         
         d_amb_s = d_amb_s.clamp(0.0, 1.0);
-        d_amb_s = d_amb_s * d_amb_s;
         final_ao = d_amb_s;
     }
-    
-    // Mix with diffuse shadowing
-    let diff_shadow = 1.0 - ssao.diffuse_shadowing;
-    let diff_ao = final_ao * diff_shadow + (1.0 - diff_shadow);
-    let mut parsed_lights = Vec::new();
-    for l in &lighting.lights {
-        // Light color
-        let l_color = Vec3::new(
-            l.color[0] as f64 / 255.0,
-            l.color[1] as f64 / 255.0,
-            l.color[2] as f64 / 255.0,
-        ).scale(l.l_amp);
-        
-        // Only use lights that are not completely black and are turned on
-        // Loption bit 1 (val 2) is "Off", bit 0 (val 1) is "On"?
-        // Wait, "bit1: 0: On  1: Off" -> actually Loption & 1 == 0 means On?
-        // Let's just check if l_amp > 0 and color is not black
-        if l.l_amp > 0.0 && (l_color.x > 0.0 || l_color.y > 0.0 || l_color.z > 0.0) {
-            // Convert spherical angles to vector
-            let mut l_local = Vec3::new(
-                l.angle_xy.sin(),
-                l.angle_z.sin(),
-                l.angle_xy.cos() * l.angle_z.cos(),
-            ).normalize();
-            
-            // In MB3D: SVectorChangeSign(@PLValigned.LN[i]);
-            l_local = l_local.scale(-1.0);
-            
-            // Transform to world space
-            // Wait, in MB3D global lights are NOT transformed by camera if iLightAbs[i] == 0.
-            // "if iLightAbs[i] > 0 then RotateSVectorReverse(@PLValigned.LN[i], @M);"
-            // Let's assume they are relative to camera for now, or relative to world?
-            // "rel to viewer = Zvec = -sinY, sinX, cosX*cosY"
-            // If it's relative to viewer, we need to transform it by the camera matrix.
-            // Actually, if it's relative to viewer, it's already in view space?
-            // "if iLightAbs[i] > 0 then RotateSVectorReverse(@PLValigned.LN[i], @M);"
-            // So if iLightAbs == 0, it stays in view space.
-            // We need it in world space for our shading, so we SHOULD transform it by the camera matrix!
-            // Wait, RotateSVectorReverse rotates from View to World!
-            // So if iLightAbs > 0, it's rotated to World.
-            // If iLightAbs == 0, it's already in World? No, M is the camera matrix.
-            // Let's just use the camera matrix to transform it to world space.
-            let l_dir = _camera.right.scale(l_local.x)
-                .add(_camera.up.scale(l_local.y))
-                .add(_camera.forward.scale(l_local.z))
-                .normalize();
-                
-            let spec_power = (8 << (l.l_function & 0x07)) as f64;
-            let diff_factor = ((l.l_function >> 4) & 3) as f64; // Might be used later
-                
-            parsed_lights.push((l_dir, l_color, spec_power));
-        }
-    }
+    // MB3D: dFog := sDiffuseShadowing * (dAmbSh - 1) + 1
+    //      = (1 - sDiffuseShadowing) + sDiffuseShadowing * dAmbSh.
+    let diffuse_shadowing = ssao.diffuse_shadowing.clamp(0.0, 1.0);
+    let diff_ao = (1.0 - diffuse_shadowing) + diffuse_shadowing * final_ao;
+    let parsed_lights: Vec<ParsedLight> = lighting
+        .lights
+        .iter()
+        .filter_map(|l| parse_light(l, _camera))
+        .collect();
 
     // Ambient colors from M3P
     let amb_bottom = Vec3::new(
@@ -306,12 +368,6 @@ pub fn shade(
         lighting.ambient_top[2] as f64 / 255.0,
     );
 
-    // Use a neutral base material and a subtle iteration tint.
-    let mut it = 0.0;
-    if max_iters > 0 {
-        it = 1.0 - (iters as f64 / max_iters as f64).clamp(0.0, 1.0);
-    }
-    
     // Calculate SIgradient
     let d_tmp = iters as f64;
     let max_it = max_iters as f64;
@@ -331,8 +387,12 @@ pub fn shade(
         s_c_start = s_c_start + s_c_mul * (lighting.fine_col_adj_1 as i32 - 30) as f64 * 0.0166666666666666;
         s_c_mul = d_tmp - s_c_start;
     }
-    if s_c_mul.abs() > 1e-10 {
-        s_c_mul = 1.0 / s_c_mul;
+    if s_c_mul.abs() > 1e-4 {
+        s_c_mul = 2.0 / s_c_mul;
+    } else if s_c_mul < 0.0 {
+        s_c_mul = -2000.0;
+    } else {
+        s_c_mul = 2000.0;
     }
     
     // iDif[0] is sColZmul * PLV.zPos
@@ -358,18 +418,24 @@ pub fn shade(
     }
 
     let c = surface_color(ir_cycled, lighting);
-    
+    let cs = surface_spec_color(ir_cycled, lighting);
+
     let diffuse_color = Vec3::new(c.0, c.1, c.2);
-    let spec_color = Vec3::new(1.0, 1.0, 1.0);
+    let spec_color = Vec3::new(cs.0, cs.1, cs.2);
 
-    let s_diff = cfg.diffuse_strength;
-    let s_spec = cfg.specular_strength;
+    let s_diff = (lighting.tbpos_5 as f64 * 0.02).max(0.0) * cfg.diffuse_strength;
+    let s_spec = (((lighting.tbpos_7 & 0x0FFF) as f64) * 0.02).max(0.004) * cfg.specular_strength;
 
-    let v = view_dir.normalize();
+    // view_dir is passed as object->camera.
+    let v_to_cam = view_dir.normalize();
+    let v_from_cam = v_to_cam.scale(-1.0);
     let n = normal.normalize();
+    let cam_up = _camera.up.normalize();
+
+    let b_amb_rel_obj = (lighting.tboptions & 0x20000000) != 0;
 
     // Ambient light
-    let ny = n.y;
+    let ny = if b_amb_rel_obj { n.y } else { n.dot(cam_up) };
     let w_top = (ny * 0.5 + 0.5).clamp(0.0, 1.0);
     let w_bot = 1.0 - w_top;
     let amb_light = amb_top.scale(w_top).add(amb_bottom.scale(w_bot)).scale(final_ao);
@@ -380,26 +446,27 @@ pub fn shade(
     let mut total_specular2 = Vec3::new(0.0, 0.0, 0.0);
 
     // For each light:
-    for (l_dir, l_color, spec_power) in parsed_lights {
-        let diff_dot = n.dot(l_dir).max(0.0);
+    for pl in &parsed_lights {
+        let diff_dot = apply_diff_mode(pl.diff_mode, n.dot(pl.dir));
         let diff_shadowed = diff_dot * diff_ao * direct_light_factor;
-        total_diffuse = total_diffuse.add(l_color.scale(diff_shadowed));
+        total_diffuse = total_diffuse.add(pl.color.scale(diff_shadowed));
         
         if debug {
             println!("    Light: diff_dot={}, diff_ao={}, direct_light_factor={}, diff_shadowed={}", diff_dot, diff_ao, direct_light_factor, diff_shadowed);
         }
 
-        // Blinn-Phong specular (Half-vector)
-        let half_vector = l_dir.add(v).normalize();
-        let spec_dot = n.dot(half_vector).max(0.0);
-        
-        let spec_pow = spec_dot.powf(spec_power);
-        total_specular = total_specular.add(l_color.scale(spec_pow * s_spec * diff_ao * direct_light_factor));
+        // MB3D DotOf2VecNormalize: reflect camera->object vector on normal, then dot with light.
+        let reflect_view = v_from_cam.sub(n.scale(2.0 * n.dot(v_from_cam)));
+        let spec_dot = pl.dir.dot(reflect_view);
+        if spec_dot > 0.0 {
+            let spec_pow = spec_dot.powf(pl.spec_power);
+            total_specular = total_specular.add(pl.color.scale(spec_pow * s_spec * diff_ao * direct_light_factor));
 
-        let spec_pow2 = spec_dot.powf(cfg.specular2_power);
-        total_specular2 = total_specular2.add(
-            l_color.scale(spec_pow2 * cfg.specular2_strength * diff_ao * direct_light_factor)
-        );
+            let spec_pow2 = spec_dot.powf(cfg.specular2_power);
+            total_specular2 = total_specular2.add(
+                pl.color.scale(spec_pow2 * cfg.specular2_strength * diff_ao * direct_light_factor)
+            );
+        }
     }
 
     // Final color
@@ -424,7 +491,7 @@ pub fn shade(
     }
 
     // Subtle rim light helps recover highlight structure on silhouette-like ridges.
-    let rim = (1.0 - n.dot(v).max(0.0)).powf(cfg.rim_power) * cfg.rim_strength;
+    let rim = (1.0 - n.dot(v_to_cam).max(0.0)).powf(cfg.rim_power) * cfg.rim_strength;
     final_color = final_color.add(Vec3::new(rim, rim, rim));
 
     // Atmospheric lift toward top-ambient color for distant samples.
@@ -493,14 +560,6 @@ pub fn shade(
         ir_for_fog = (iters as i32 & 0x3FF) as f64;
     }
     
-    // In PaintThread:
-    // dFog := (ir - sShad - sShadZmul * PLV.zPos) * sShadGr;
-    // Note: plv_z_pos is calculated in render.rs as `d_tmp`? No, it's `z_pos_f`.
-    // Wait, in PaintThread: `PLV.zPos` is `z_pos_f` from render.rs.
-    // In PaintThread:
-    // dFog := (ir - sShad - sShadZmul * PLV.zPos) * sShadGr;
-    // Note: plv_z_pos is calculated in render.rs as `d_tmp`? No, it's `z_pos_f`.
-    // Wait, in PaintThread: `PLV.zPos` is `z_pos_f` from render.rs.
     let mut d_fog = (ir_for_fog - s_shad - s_shad_z_mul * plv_z_pos) * s_shad_gr;
     if (b_dfog_options & 2) != 0 {
         d_fog = d_fog.max(0.0);
@@ -515,14 +574,14 @@ pub fn shade(
     
     // AddSVectors(@LiLSDAI[4], Add2SVecsWeight(PLValigned.sDynFogCol, PLValigned.sDynFogCol2, dFog - dTmp3, dTmp3));
     let s_dyn_fog_col = Vec3::new(
-        lighting.depth_col[0] as f64 / 255.0,
-        lighting.depth_col[1] as f64 / 255.0,
-        lighting.depth_col[2] as f64 / 255.0,
+        lighting.dyn_fog_col[0] as f64 / 255.0,
+        lighting.dyn_fog_col[1] as f64 / 255.0,
+        lighting.dyn_fog_col[2] as f64 / 255.0,
     );
     let s_dyn_fog_col2 = Vec3::new(
-        lighting.depth_col2[0] as f64 / 255.0,
-        lighting.depth_col2[1] as f64 / 255.0,
-        lighting.depth_col2[2] as f64 / 255.0,
+        lighting.dyn_fog_col2[0] as f64 / 255.0,
+        lighting.dyn_fog_col2[1] as f64 / 255.0,
+        lighting.dyn_fog_col2[2] as f64 / 255.0,
     );
     
     let fog_add = Vec3::new(
@@ -540,8 +599,17 @@ pub fn shade(
         d_tmp = 1.0 - f64::powi(1.0 - d_tmp, 2);
     }
 
-    let view_y = -view_dir.y;
-    let s = (view_y.asin() / std::f64::consts::PI + 0.5).clamp(0.0, 1.0);
+    let i_dfunc = ((lighting.tboptions >> 30) & 0x3) as i32;
+    let s = if b_amb_rel_obj {
+        (v_from_cam.y.asin() / std::f64::consts::PI + 0.5).clamp(0.0, 1.0)
+    } else {
+        let yy = y_pos.clamp(0.0, 1.0);
+        match i_dfunc {
+            1 => yy * yy,
+            0 => yy,
+            _ => yy.sqrt(),
+        }
+    };
     let dep_c = Vec3::new(
         lighting.depth_col[0] as f64 / 255.0,
         lighting.depth_col[1] as f64 / 255.0,
@@ -553,9 +621,9 @@ pub fn shade(
         lighting.depth_col2[2] as f64 / 255.0,
     );
     let dep_c_interp = Vec3::new(
-        dep_c2.x * (1.0 - s) + dep_c.x * s,
-        dep_c2.y * (1.0 - s) + dep_c.y * s,
-        dep_c2.z * (1.0 - s) + dep_c.z * s,
+        dep_c2.x * s + dep_c.x * (1.0 - s),
+        dep_c2.y * s + dep_c.y * (1.0 - s),
+        dep_c2.z * s + dep_c.z * (1.0 - s),
     );
 
     if z_pos < 32768 {
@@ -590,8 +658,11 @@ pub fn shade(
     
     // No depth fog for now
     
-    // Scene-calibrated tone mapping: compress highlights and deepen midtones.
-    let tone = |c: f64| ((c.clamp(0.0, 1.0).powf(cfg.tone_gamma) * cfg.tone_gain) + cfg.tone_bias).clamp(0.0, 1.0);
+    // Scene-calibrated tone mapping: roll off highlights before gamma/contrast shaping.
+    let tone = |c: f64| {
+        let mapped = c.max(0.0) / (1.0 + c.max(0.0)); // Reinhard-like compression
+        ((mapped.powf(cfg.tone_gamma) * cfg.tone_gain) + cfg.tone_bias).clamp(0.0, 1.0)
+    };
 
     let final_color_toned = Vec3::new(
         tone(final_color.x),
@@ -646,6 +717,52 @@ pub fn surface_color(si_gradient: i32, lighting: &crate::m3p::M3PLighting) -> (f
             t_check += 1.0;
         }
 
+        if t_check >= p1 && t_check <= p2 {
+            let f = if p2 > p1 { (t_check - p1) / (p2 - p1) } else { 0.0 };
+            c = (
+                c1.0 * (1.0 - f) + c2.0 * f,
+                c1.1 * (1.0 - f) + c2.1 * f,
+                c1.2 * (1.0 - f) + c2.2 * f,
+            );
+            break;
+        }
+    }
+    c
+}
+
+pub fn surface_spec_color(si_gradient: i32, lighting: &crate::m3p::M3PLighting) -> (f64, f64, f64) {
+    let mut t = si_gradient as f64 / 32768.0;
+
+    t = t - t.floor();
+    if t < 0.0 { t += 1.0; }
+
+    let mut stops: Vec<(f64, (f64, f64, f64))> = lighting.l_cols.iter().map(|s| {
+        let pos = s.pos as f64 / 32768.0;
+        let c = (
+            s.color_spe[0] as f64 / 255.0,
+            s.color_spe[1] as f64 / 255.0,
+            s.color_spe[2] as f64 / 255.0,
+        );
+        (pos, c)
+    }).collect();
+
+    if stops.is_empty() {
+        return (1.0, 1.0, 1.0);
+    }
+
+    stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    if let Some(first) = stops.first().cloned() {
+        stops.push((1.0 + first.0, first.1));
+    }
+
+    let mut c = stops.last().unwrap().1;
+    for i in 0..stops.len() - 1 {
+        let (p1, c1) = stops[i];
+        let (p2, c2) = stops[i + 1];
+        let mut t_check = t;
+        if i == stops.len() - 2 && t < p1 {
+            t_check += 1.0;
+        }
         if t_check >= p1 && t_check <= p2 {
             let f = if p2 > p1 { (t_check - p1) / (p2 - p1) } else { 0.0 };
             c = (

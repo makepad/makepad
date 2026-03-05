@@ -604,8 +604,9 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
         .unwrap_or(16);
     let shadow_strength = std::env::var("SHADOW_STRENGTH").ok()
         .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.8)
+        .unwrap_or(0.35)
         .clamp(0.0, 1.0);
+    let shadow_light_dir = crate::lighting::dominant_shadow_light_dir(lighting, &params.camera);
 
     thread::scope(|s| {
         let mut threads = Vec::new();
@@ -618,6 +619,8 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
             let smooth_iter = &smooth_iter;
             let debug_mode = &debug_mode;
             let next_y = Arc::clone(&next_y);
+            let shadow_light_dir = shadow_light_dir;
+            let detail_normal_mix = detail_normal_mix;
             
             threads.push(s.spawn(move || {
                 let mut local_pixels = Vec::new();
@@ -689,6 +692,7 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                     1.0,
                                     1.0,
                                     d,
+                                    (y as f64 + 0.5) / h as f64,
                                     params.max_ray_length,
                                     lighting,
                                     ssao,
@@ -713,17 +717,53 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                     params.camera.forward, params.camera.right, params.camera.up,
                                     formulas, &params.iter_params, params.de_floor,
                                 );
+                                let normal_screen = screen_space_normal(&depth_buf, x, y, w, h, params.step_width);
+                                let normal_shade = normal_coarse
+                                    .scale(1.0 - detail_normal_mix)
+                                    .add(normal_screen.scale(detail_normal_mix))
+                                    .normalize();
                                 
-                                // Simple DEAO: probe along normal at increasing distances
+                                // DEAO: probe farther than DEstop to avoid salt-and-pepper self-occlusion.
                                 let mut deao = 0.0;
-                                let ao_base = params.de_stop * 2.0;
-                                for i in 1..=5 {
+                                let ao_steps = 6;
+                                let ao_base = (params.step_width * ao_base_mul).max(params.de_stop * 2.0);
+                                for i in 1..=ao_steps {
                                     let step_dist = ao_base * (i as f64);
-                                    let ao_pos = hit_pos.add(normal_coarse.scale(step_dist));
+                                    let ao_pos = hit_pos.add(normal_shade.scale(step_dist));
                                     let (_, de) = calc_de(ao_pos, formulas, &params.iter_params, params.de_floor);
                                     deao += (step_dist - de).max(0.0) / step_dist;
                                 }
-                                let mut d_amb_s = (1.0 - deao / 5.0 * 2.0).clamp(0.0, 1.0);
+                                let deao_norm = (deao / ao_steps as f64).clamp(0.0, 1.0);
+                                let mut d_amb_s = (1.0 - deao_norm * ao_strength).clamp(ao_min, 1.0);
+
+                                // Add medium-scale screen-space occlusion from local depth gradients.
+                                let ao_depth_scale = (ao_base * 12.0).max(params.step_width * 2.0);
+                                let mut ssao_occ = 0.0;
+                                let mut ssao_w = 0.0;
+                                let taps = [
+                                    (1isize, 0isize, 1.0f64), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+                                    (2, 0, 0.8), (-2, 0, 0.8), (0, 2, 0.8), (0, -2, 0.8),
+                                    (1, 1, 0.7), (-1, 1, 0.7), (1, -1, 0.7), (-1, -1, 0.7),
+                                ];
+                                for (dx, dy, wtap) in taps {
+                                    let nx = x as isize + dx;
+                                    let ny = y as isize + dy;
+                                    if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize {
+                                        continue;
+                                    }
+                                    let nd = depth_buf[ny as usize * w + nx as usize];
+                                    if nd == f64::MAX {
+                                        continue;
+                                    }
+                                    // If neighbor is closer to camera than the current pixel, treat as occluder.
+                                    let occ = ((d - nd) / ao_depth_scale).clamp(0.0, 1.0);
+                                    ssao_occ += occ * wtap;
+                                    ssao_w += wtap;
+                                }
+                                if ssao_w > 0.0 {
+                                    let ssao = 1.0 - 0.6 * (ssao_occ / ssao_w).clamp(0.0, 1.0);
+                                    d_amb_s = (d_amb_s * ssao).clamp(ao_min, 1.0);
+                                }
                                 
                                 // Apply sAmplitude (amb_shad)
                                 let s_amplitude = ssao.amb_shad;
@@ -734,19 +774,22 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                 }
                                 
                                 let ao_factor = d_amb_s;
-                                let light0_dir = Vec3::new(0.343791, -0.264714, 0.900963).normalize();
-                                let shadow_raw = soft_shadow(
-                                    hit_pos.add(normal_coarse.scale(params.de_stop * 4.0)),
-                                    light0_dir,
-                                    formulas,
-                                    params,
-                                    shadow_steps,
-                                    params.max_ray_length * 0.25,
-                                );
-                                let direct_light_factor = 1.0 - shadow_strength * (1.0 - shadow_raw);
+                                let direct_light_factor = if let Some(light_dir) = shadow_light_dir {
+                                    let shadow_raw = soft_shadow(
+                                        hit_pos.add(normal_shade.scale(params.de_stop * 4.0)),
+                                        light_dir,
+                                        formulas,
+                                        params,
+                                        shadow_steps,
+                                        params.max_ray_length * 0.25,
+                                    );
+                                    1.0 - shadow_strength * (1.0 - shadow_raw)
+                                } else {
+                                    1.0
+                                };
 
                                 crate::lighting::shade(
-                                    normal_coarse,
+                                    normal_shade,
                                     dir.scale(-1.0),
                                     smooth_iter[idx],
                                     params.iter_params.max_iters,
@@ -756,6 +799,7 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                     ao_factor,
                                     direct_light_factor,
                                     d,
+                                    (y as f64 + 0.5) / h as f64,
                                     params.max_ray_length,
                                     lighting,
                                     ssao,
@@ -784,6 +828,25 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
             }
         }
     });
+
+    let denoise_strength = std::env::var("DENOISE_STRENGTH").ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.55)
+        .clamp(0.0, 1.0);
+    if denoise_strength > 0.0 {
+        let denoise_depth_sigma = std::env::var("DENOISE_DEPTH_SIGMA").ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(params.step_width * 3000.0)
+            .max(params.step_width * 10.0);
+        depth_bilateral_denoise_rgba(
+            &mut pixels,
+            &depth_buf,
+            w,
+            h,
+            denoise_strength,
+            denoise_depth_sigma,
+        );
+    }
 
     eprintln!("Render complete in {:.1}s", start.elapsed().as_secs_f64());
     pixels
@@ -844,4 +907,69 @@ fn screen_space_normal(depth_buf: &[f64], x: usize, y: usize, w: usize, h: usize
     // Normal from depth gradient: depth differences are in world units,
     // pixel spacing is StepWidth, so z-component = StepWidth for proper scale
     Vec3::new(-dx, -dy, step_width).normalize()
+}
+
+fn depth_bilateral_denoise_rgba(
+    pixels: &mut [u8],
+    depth_buf: &[f64],
+    w: usize,
+    h: usize,
+    strength: f64,
+    depth_sigma: f64,
+) {
+    let miss = f64::MAX;
+    let src = pixels.to_vec();
+    let spatial = [
+        [0.0751136, 0.123841, 0.0751136],
+        [0.123841, 0.20418, 0.123841],
+        [0.0751136, 0.123841, 0.0751136],
+    ];
+    let inv_depth_sigma = if depth_sigma > 1e-30 { 1.0 / depth_sigma } else { 0.0 };
+
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            let d0 = depth_buf[idx];
+            if d0 == miss {
+                continue;
+            }
+
+            let mut wr = 0.0;
+            let mut acc_r = 0.0;
+            let mut acc_g = 0.0;
+            let mut acc_b = 0.0;
+
+            for ky in 0..3usize {
+                for kx in 0..3usize {
+                    let nx = x as isize + kx as isize - 1;
+                    let ny = y as isize + ky as isize - 1;
+                    if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize {
+                        continue;
+                    }
+                    let nidx = ny as usize * w + nx as usize;
+                    let dn = depth_buf[nidx];
+                    if dn == miss {
+                        continue;
+                    }
+                    let depth_w = (-(d0 - dn).abs() * inv_depth_sigma).exp();
+                    let wtap = spatial[ky][kx] * depth_w;
+                    let po = nidx * 4;
+                    acc_r += src[po] as f64 * wtap;
+                    acc_g += src[po + 1] as f64 * wtap;
+                    acc_b += src[po + 2] as f64 * wtap;
+                    wr += wtap;
+                }
+            }
+
+            if wr > 1e-12 {
+                let po = idx * 4;
+                let nr = acc_r / wr;
+                let ng = acc_g / wr;
+                let nb = acc_b / wr;
+                pixels[po] = ((src[po] as f64) * (1.0 - strength) + nr * strength).clamp(0.0, 255.0) as u8;
+                pixels[po + 1] = ((src[po + 1] as f64) * (1.0 - strength) + ng * strength).clamp(0.0, 255.0) as u8;
+                pixels[po + 2] = ((src[po + 2] as f64) * (1.0 - strength) + nb * strength).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
 }

@@ -59,11 +59,13 @@ pub struct HeaderCustomAddon {
 #[derive(Debug, Clone)]
 pub struct M3PLight {
     pub color: [u8; 3],
+    pub lamp: f64,
     pub angle_xy: f64,
     pub angle_z: f64,
     pub l_option: u8,
     pub l_function: u8,
     pub l_amp: f64,
+    pub additional_byte_ex: u8,
     pub free_byte: u8,
 }
 
@@ -82,13 +84,17 @@ pub struct M3PICol {
 
 #[derive(Debug, Clone)]
 pub struct M3PLighting {
+    pub dyn_fog_col: [u8; 3],
+    pub dyn_fog_col2: [u8; 3],
     pub ambient_bottom: [u8; 3],
     pub ambient_top: [u8; 3],
     pub depth_col: [u8; 3],
     pub depth_col2: [u8; 3],
     pub s_depth: f64,
     pub tbpos_3: i32,
+    pub tbpos_5: i32,
     pub tbpos_6: i32,
+    pub tbpos_7: i32,
     pub tbpos_9: i32,
     pub tbpos_10: i32,
     pub tbpos_11: i32,
@@ -171,6 +177,16 @@ impl HAFormula {
             option_values,
         })
     }
+}
+
+fn short_float_to_f64(v: u16) -> f64 {
+    // MB3D ShortFloat: mantissa/exponent packed as signed bytes.
+    // value = mantissa * 10^(exp-1), exponent clamped to [-25, 25].
+    let bytes = v.to_le_bytes();
+    let mant = i8::from_le_bytes([bytes[0]]) as f64;
+    let exp = i8::from_le_bytes([bytes[1]]) as i32;
+    let exp_clamped = exp.clamp(-25, 25) - 1;
+    mant * 10f64.powi(exp_clamped)
 }
 
 pub fn parse(path: &str) -> io::Result<M3PFile> {
@@ -269,10 +285,12 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let julia_w = 0.0;
 
     let var_col_zpos = i16::from_le_bytes(data[432..434].try_into().unwrap());
-    let tbpos_3 = i32::from_le_bytes(data[440..444].try_into().unwrap());
-    let tbpos_4 = i32::from_le_bytes(data[444..448].try_into().unwrap());
-    // TBpos is 1-indexed in Delphi, so TBpos[6] is at offset 440 + (6-1)*4 = 440 + 20 = 460
-    let tbpos_6 = i32::from_le_bytes(data[460..464].try_into().unwrap());
+    // TLightingParas9 stores TBpos[3..11] starting at offset 440.
+    let tbpos_3 = i32::from_le_bytes(data[440..444].try_into().unwrap());  // TBpos[3]
+    let tbpos_4 = i32::from_le_bytes(data[444..448].try_into().unwrap());  // TBpos[4]
+    let tbpos_5 = i32::from_le_bytes(data[448..452].try_into().unwrap());  // TBpos[5]
+    let tbpos_6 = i32::from_le_bytes(data[452..456].try_into().unwrap());  // TBpos[6]
+    let tbpos_7 = i32::from_le_bytes(data[456..460].try_into().unwrap());  // TBpos[7]
     let tboptions = u32::from_le_bytes(data[476..480].try_into().unwrap());
     let tbpos_9 = i32::from_le_bytes(data[464..468].try_into().unwrap());
     let tbpos_10 = i32::from_le_bytes(data[468..472].try_into().unwrap());
@@ -281,19 +299,23 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let fine_col_adj_2 = data[481];
     let l_version = (tboptions >> 21) & 7;
     let s_depth = tbpos_4 as f64 * 0.8e-6;
-    println!("  s_depth: {} (tbpos_4: {}), var_col_zpos: {}, tbpos_3: {}, tbpos_6: {}, bColCycling: {}", s_depth, tbpos_4, var_col_zpos, tbpos_3, tbpos_6, (tboptions & 0x4000) != 0);
+    println!("  s_depth: {} (tbpos_4: {}), var_col_zpos: {}, tbpos_3: {}, tbpos_5: {}, tbpos_6: {}, tbpos_7: {}, bColCycling: {}", s_depth, tbpos_4, var_col_zpos, tbpos_3, tbpos_5, tbpos_6, tbpos_7, (tboptions & 0x4000) != 0);
     println!("  tbpos_9: {}, tbpos_10: {}, tboptions: {:08x}, fine_col_adj_1: {}, fine_col_adj_2: {}", tbpos_9, tbpos_10, tboptions, fine_col_adj_1, fine_col_adj_2);
     println!("  depth_col: {:?}, depth_col2: {:?}", [data[492], data[493], data[494]], [data[496], data[497], data[498]]);
 
     // Parse lighting at fixed offsets
     let mut lighting = M3PLighting {
+        dyn_fog_col: [data[487], data[491], data[495]],
+        dyn_fog_col2: [data[436], data[437], data[438]],
         ambient_bottom: [data[484], data[485], data[486]],
         ambient_top: [data[488], data[489], data[490]],
         depth_col: [data[492], data[493], data[494]],
         depth_col2: [data[496], data[497], data[498]],
         s_depth,
         tbpos_3,
+        tbpos_5,
         tbpos_6,
+        tbpos_7,
         tbpos_9,
         tbpos_10,
         tbpos_11,
@@ -305,47 +327,58 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         i_cols: Vec::new(),
     };
 
-    // 3 lights starting at 500
-    for i in 0..3 {
+    // 6 lights (6 * 32 bytes) starting at 500
+    for i in 0..6 {
         let offset = 500 + i * 32;
         let mut lc = Cursor::new(&data[offset..offset + 32]);
         let l_option = lc.read_u8_val()?;
         let l_function = lc.read_u8_val()?;
-        
-        let _lamp = lc.read_u16()?;
-        
+
+        let lamp_word = lc.read_u16()?;
+        let lamp = short_float_to_f64(lamp_word);
+
         let r = lc.read_u8_val()?;
         let g = lc.read_u8_val()?;
         let b = lc.read_u8_val()?;
-        lc.read_u16()?; // LightMapNr
+        let _light_map_nr = lc.read_u16()?;
         
         // Double7B for LXpos
         let mut x_bytes = [0u8; 8];
         lc.read_exact(&mut x_bytes[1..8])?;
         let angle_xy = f64::from_le_bytes(x_bytes);
-        
-        let free_byte = lc.read_u8_val()?; // FreeByte
-        let mut z_bytes = [0u8; 8];
-        lc.read_exact(&mut z_bytes[1..8])?; // LZpos
-        
-        lc.read_u8_val()?; // AdditionalByteEx
-        
+
+        // TLight8 layout (after LXpos):
+        // AdditionalByteEx, LYpos(Double7B), FreeByte, LZpos(Double7B)
+        let additional_byte_ex = lc.read_u8_val()?; // AdditionalByteEx
+
         // Double7B for LYpos
         let mut y_bytes = [0u8; 8];
         lc.read_exact(&mut y_bytes[1..8])?;
         let angle_z = f64::from_le_bytes(y_bytes);
-        
-        let l_amp = 1.0; // Wait, we need to extract amplitude?
-        
-        println!("  Light {}: color=[{}, {}, {}], option={}, function={}, angle_xy={}, angle_z={}", i, r, g, b, l_option, l_function, angle_xy, angle_z);
+
+        let free_byte = lc.read_u8_val()?; // FreeByte
+
+        // Double7B for LZpos (currently unused in the renderer)
+        let mut _z_bytes = [0u8; 8];
+        lc.read_exact(&mut _z_bytes[1..8])?;
+
+        // Keep a minimum amplitude for robust rendering if the file has zeroed legacy values.
+        let l_amp = if lamp.abs() < 1.0e-20 { 1.0 } else { lamp };
+
+        println!(
+            "  Light {}: color=[{}, {}, {}], option={}, function={}, lamp={:.6e}, angle_xy={}, angle_z={}, add_ex={}, free={}",
+            i, r, g, b, l_option, l_function, l_amp, angle_xy, angle_z, additional_byte_ex, free_byte
+        );
 
         lighting.lights.push(M3PLight {
             color: [r, g, b],
+            lamp: l_amp,
             angle_xy,
             angle_z,
             l_option,
             l_function,
             l_amp,
+            additional_byte_ex,
             free_byte,
         });
     }
@@ -420,7 +453,11 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     
     let amb_shad = (lighting.tbpos_11 & 0xFF) as f64 / 53.0;
     
-    let diffuse_shadowing = data[600 + 16] as f64 / 256.0;
+    let diffuse_shadowing = lighting
+        .lights
+        .get(3)
+        .map(|l| l.additional_byte_ex as f64 / 256.0)
+        .unwrap_or(data[600 + 16] as f64 / 256.0);
 
     let ssao = M3PSSAO {
         quality,
