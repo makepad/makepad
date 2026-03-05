@@ -285,7 +285,8 @@ pub fn shade(
 
     // AO is estimated in render pass; keep the expensive per-shade AO path optional.
     let mut final_ao = ao_factor.clamp(0.0, 1.0);
-    if ssao.calc_amb_shadow && env_f64("SHADE_AO_RAYS", 1.0) != 0.0 {
+    // Base-first workflow: keep AO ray pass opt-in while core lighting is tuned.
+    if ssao.calc_amb_shadow && env_f64("SHADE_AO_RAYS", 0.0) != 0.0 {
         let mut final_ao_val = 0.0;
         
         let num_rays = if ssao.quality == 0 { 3 } else { 
@@ -435,18 +436,26 @@ pub fn shade(
         for iy in 0..num_rays {
             final_ao_val += (s_add[iy] + min_ra[iy]).min(1.0);
         }
-        
-        final_ao_val = 1.0 - final_ao_val / num_rays as f64;
-        
-        let mut d_amb_s = final_ao_val.clamp(0.0, 1.0);
-        
+
+        // Matches CalcAmbShadowDEfor1pos:
+        // AmbShadowNorm = 1 - dAmount/RayCount.
+        let amb_shadow_norm = (1.0 - final_ao_val / num_rays as f64).clamp(0.0, 1.0);
         let s_amplitude = ssao.amb_shad;
-        if s_amplitude > 1.0 {
-            d_amb_s = d_amb_s + (s_amplitude - 1.0) * (d_amb_s * d_amb_s - d_amb_s);
+
+        // Matches PaintThread.calcAmbshadow:
+        // if amp>1:
+        //   dAmbS = 1 - AmbShadowNorm;
+        //   dAmbS += (amp-1) * (dAmbS^2 - dAmbS)
+        // else:
+        //   dAmbS = 1 - amp * AmbShadowNorm
+        let mut d_amb_s = if s_amplitude > 1.0 {
+            let mut d = 1.0 - amb_shadow_norm;
+            d = d + (s_amplitude - 1.0) * (d * d - d);
+            d
         } else {
-            d_amb_s = 1.0 - s_amplitude * (1.0 - d_amb_s);
-        }
-        
+            1.0 - s_amplitude * amb_shadow_norm
+        };
+
         d_amb_s = d_amb_s.clamp(0.0, 1.0);
         final_ao = d_amb_s;
     }
