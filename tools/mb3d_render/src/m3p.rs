@@ -473,6 +473,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let b_calc_amb_shadow_automatic = data[149];
     println!("  b_calc_amb_shadow_automatic: {}", b_calc_amb_shadow_automatic);
     let calc_amb_shadow = (b_calc_amb_shadow_automatic & 1) != 0;
+    let mode = ((b_calc_amb_shadow_automatic >> 2) & 3) as i32;
     let quality = ((b_calc_amb_shadow_automatic >> 4) & 3) as i32;
     let ssao_r_count = data[187] as i32;
     let ao_dithering = data[188] as i32;
@@ -487,6 +488,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         .unwrap_or(data[600 + 16] as f64 / 256.0);
 
     let ssao = M3PSSAO {
+        mode,
         quality,
         deao_max_l,
         ssao_r_count,
@@ -496,8 +498,8 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         amb_shad,
     };
 
-        println!("  SSAO: enabled={}, quality={}, rays={}, maxL={}, amb_shad={}, diff_shad={}", 
-            ssao.calc_amb_shadow, ssao.quality, ssao.ssao_r_count, ssao.deao_max_l, ssao.amb_shad, ssao.diffuse_shadowing);
+        println!("  SSAO: enabled={}, mode={}, quality={}, rays={}, maxL={}, amb_shad={}, diff_shad={}", 
+            ssao.calc_amb_shadow, ssao.mode, ssao.quality, ssao.ssao_r_count, ssao.deao_max_l, ssao.amb_shad, ssao.diffuse_shadowing);
         
         println!("LCols:");
         for (i, c) in lighting.l_cols.iter().enumerate() {
@@ -529,6 +531,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
 
 #[derive(Debug, Clone)]
 pub struct M3PSSAO {
+    pub mode: i32,
     pub quality: i32,
     pub deao_max_l: f64,
     pub ssao_r_count: i32,
