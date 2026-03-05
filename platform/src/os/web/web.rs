@@ -184,9 +184,6 @@ impl Cx {
 
                 live_id!(ToWasmRedrawAll) => {
                     self.redraw_all();
-                    self.os.from_wasm(FromWasmSetDocumentTitle {
-                        title: "debug got ToWasmRedrawAll".to_string(),
-                    });
                 }
 
                 live_id!(ToWasmPaintDirty) => {
