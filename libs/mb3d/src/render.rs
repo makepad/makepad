@@ -107,6 +107,7 @@ pub struct RenderParams {
     pub mct_mh04_zsd: f64,     // Max(iMandWidth, iMandHeight) ray-step limiter
     pub de_floor: f64,         // minimum DE value (0.25 * de_stop)
     pub de_scale: f64,         // dDEscale_computed: formula-specific DE scaling factor
+    pub s_raystep_limiter: f64,
     pub bin_search_steps: i32, // iDEAddSteps for binary search refinement
     pub z_corr: f64,
     pub b_vary_de_stop: bool,
@@ -258,6 +259,7 @@ impl RenderParams {
             mct_mh04_zsd,
             de_floor,
             de_scale,
+            s_raystep_limiter,
             bin_search_steps,
             z_corr,
             b_vary_de_stop: m3p.b_vary_de_stop,
@@ -265,6 +267,41 @@ impl RenderParams {
             de_stop_header,
             sm_normals: ((m3p.i_options >> 6) & 0x0F) as i32,
         }
+    }
+
+    pub fn apply_image_scale(&mut self, scale: f64) {
+        if !scale.is_finite() || scale <= 0.0 || (scale - 1.0).abs() <= f64::EPSILON {
+            return;
+        }
+
+        let old_width = self.camera.width.max(1) as f64;
+        let new_width = (old_width * scale).round().max(1.0) as i32;
+        let new_height = ((self.camera.height.max(1) as f64) * scale).round().max(1.0) as i32;
+        let width_scale = new_width as f64 / old_width;
+
+        self.camera.width = new_width;
+        self.camera.height = new_height;
+
+        // MB3D scales sDEstop with image width when increasing render resolution.
+        self.de_stop_header *= width_scale;
+        self.de_stop *= width_scale;
+        self.de_floor = self.de_stop * 0.25;
+
+        let fov_y_rad = self.camera.fov_y * std::f64::consts::PI / 180.0;
+        let height = self.camera.height.max(1) as f64;
+        let x1 = 0.001 * height / (0.001f64.sin() * fov_y_rad.max(1.0 / 65535.0));
+        self.de_stop_factor = if self.b_vary_de_stop { 1.0 / x1 } else { 0.0 };
+
+        let fov_y_rad_for_z = self.camera.fov_y.max(1.0) * std::f64::consts::PI / 180.0;
+        self.z_corr = (fov_y_rad_for_z / height).sin();
+        self.z_cmul = 32767.0 * 256.0
+            / ((((self.camera.z_end - self.camera.z_start) / self.step_width) * self.z_corr + 1.0).sqrt()
+                - 0.999999999);
+
+        self.mct_mh04_zsd = self.camera.width.max(self.camera.height) as f64
+            * 0.5
+            * (self.s_z_step_div_raw + 0.0001).sqrt()
+            * self.s_raystep_limiter;
     }
 }
 
