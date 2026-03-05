@@ -45,6 +45,7 @@ fn show_help() {
         "       --brotli                                  Use brotli to compress the wasm file"
     );
     println!("       --bindgen                                 Enable wasm-bindgen compatibility");
+    println!("       --no-threads                              Build single-threaded wasm (no COOP/COEP needed)");
     println!();
     println!("Apple iOS/TVOs Commands:");
     println!();
