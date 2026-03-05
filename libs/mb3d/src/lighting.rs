@@ -8,8 +8,50 @@ struct ParsedLight {
     color: Vec3,
     spec_power: f64,
     diff_mode: i32,
+    l_option: u8,
     i_light_pos: u8,
     is_positional: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ColorStop {
+    pos: f64,
+    color: Vec3,
+}
+
+pub struct LightingCache {
+    parsed_lights: Vec<ParsedLight>,
+    surface_diff_stops: Vec<ColorStop>,
+    surface_spec_stops: Vec<ColorStop>,
+    amb_bottom: Vec3,
+    amb_top: Vec3,
+    depth_col: Vec3,
+    depth_col2: Vec3,
+    dyn_fog_col: Vec3,
+    dyn_fog_col2: Vec3,
+    cam_up: Vec3,
+    s_depth: f64,
+    tbpos_3: i32,
+    tbpos_6: i32,
+    calc_pix_col_sqr: bool,
+    rough_scale: f64,
+    s_c_start: f64,
+    s_c_mul: f64,
+    s_col_z_mul: f64,
+    s_diff: f64,
+    s_spec: f64,
+    z1: f64,
+    depth_range: f64,
+    b_amb_rel_obj: bool,
+    i_dfunc: i32,
+    b_dfog_options: u8,
+}
+
+#[derive(Default)]
+pub struct ShadeScratch {
+    rot_m: Vec<Vec3>,
+    min_ra: Vec<f64>,
+    s_add: Vec<f64>,
 }
 
 struct CosTables {
@@ -76,9 +118,179 @@ fn parse_light(idx: usize, l: &crate::m3p::M3PLight, camera: &crate::render::Cam
         color,
         spec_power,
         diff_mode,
+        l_option: l.l_option,
         i_light_pos,
         is_positional,
     })
+}
+
+fn build_color_stops(lighting: &crate::m3p::M3PLighting, specular: bool) -> Vec<ColorStop> {
+    let mut stops = Vec::with_capacity(lighting.l_cols.len() + 1);
+    for stop in &lighting.l_cols {
+        let color = if specular {
+            Vec3::new(
+                stop.color_spe[0] as f64 / 255.0,
+                stop.color_spe[1] as f64 / 255.0,
+                stop.color_spe[2] as f64 / 255.0,
+            )
+        } else {
+            Vec3::new(
+                stop.color_dif[0] as f64 / 255.0,
+                stop.color_dif[1] as f64 / 255.0,
+                stop.color_dif[2] as f64 / 255.0,
+            )
+        };
+        stops.push(ColorStop {
+            pos: stop.pos as f64 / 32768.0,
+            color,
+        });
+    }
+    stops.sort_by(|a, b| a.pos.partial_cmp(&b.pos).unwrap());
+    if let Some(first) = stops.first().copied() {
+        stops.push(ColorStop {
+            pos: 1.0 + first.pos,
+            color: first.color,
+        });
+    }
+    stops
+}
+
+fn sample_color_cycle(si_gradient: i32, stops: &[ColorStop], default: Vec3) -> Vec3 {
+    if stops.is_empty() {
+        return default;
+    }
+
+    let mut t = si_gradient as f64 / 32768.0;
+    t -= t.floor();
+    if t < 0.0 {
+        t += 1.0;
+    }
+
+    let mut color = stops.last().unwrap().color;
+    for i in 0..stops.len() - 1 {
+        let first = stops[i];
+        let second = stops[i + 1];
+        let mut t_check = t;
+        if i == stops.len() - 2 && t < first.pos {
+            t_check += 1.0;
+        }
+
+        if t_check >= first.pos && t_check <= second.pos {
+            let f = if second.pos > first.pos {
+                (t_check - first.pos) / (second.pos - first.pos)
+            } else {
+                0.0
+            };
+            color = Vec3::new(
+                first.color.x * (1.0 - f) + second.color.x * f,
+                first.color.y * (1.0 - f) + second.color.y * f,
+                first.color.z * (1.0 - f) + second.color.z * f,
+            );
+            break;
+        }
+    }
+    color
+}
+
+impl LightingCache {
+    pub fn new(
+        lighting: &crate::m3p::M3PLighting,
+        camera: &crate::render::Camera,
+        params: &crate::render::RenderParams,
+    ) -> Self {
+        let mut parsed_lights = Vec::with_capacity(lighting.lights.len());
+        for (idx, light) in lighting.lights.iter().enumerate() {
+            if let Some(parsed) = parse_light(idx, light, camera) {
+                parsed_lights.push(parsed);
+            }
+        }
+
+        let mut s_c_start =
+            ((lighting.tbpos_9 + 30) as f64 * 0.01111111111111111).powi(2) * 32767.0 - 10900.0;
+        let mut s_c_mul =
+            ((lighting.tbpos_10 + 30) as f64 * 0.01111111111111111).powi(2) * 32767.0 - 10900.0
+                - s_c_start;
+        if (lighting.tboptions & 0x10000) != 0 {
+            let adjusted =
+                s_c_start + s_c_mul * (lighting.fine_col_adj_2 as i32 - 30) as f64 * 0.0166666666666666;
+            s_c_start += s_c_mul * (lighting.fine_col_adj_1 as i32 - 30) as f64 * 0.0166666666666666;
+            s_c_mul = adjusted - s_c_start;
+        }
+        if s_c_mul.abs() > 1e-4 {
+            s_c_mul = 2.0 / s_c_mul;
+        } else if s_c_mul < 0.0 {
+            s_c_mul = -2000.0;
+        } else {
+            s_c_mul = 2000.0;
+        }
+
+        let s_col_z_mul = if (lighting.tboptions & 0x20000) != 0 {
+            (lighting.tbpos_11 as f64 * -0.005) / (params.step_width * 1920.0)
+        } else {
+            0.0
+        };
+
+        let mut b_dfog_options = lighting
+            .lights
+            .first()
+            .map(|light| light.free_byte & 3)
+            .unwrap_or(0);
+        if b_dfog_options == 3 {
+            b_dfog_options = 1;
+        }
+
+        Self {
+            parsed_lights,
+            surface_diff_stops: build_color_stops(lighting, false),
+            surface_spec_stops: build_color_stops(lighting, true),
+            amb_bottom: Vec3::new(
+                lighting.ambient_bottom[0] as f64 / 255.0,
+                lighting.ambient_bottom[1] as f64 / 255.0,
+                lighting.ambient_bottom[2] as f64 / 255.0,
+            ),
+            amb_top: Vec3::new(
+                lighting.ambient_top[0] as f64 / 255.0,
+                lighting.ambient_top[1] as f64 / 255.0,
+                lighting.ambient_top[2] as f64 / 255.0,
+            ),
+            depth_col: Vec3::new(
+                lighting.depth_col[0] as f64 / 255.0,
+                lighting.depth_col[1] as f64 / 255.0,
+                lighting.depth_col[2] as f64 / 255.0,
+            ),
+            depth_col2: Vec3::new(
+                lighting.depth_col2[0] as f64 / 255.0,
+                lighting.depth_col2[1] as f64 / 255.0,
+                lighting.depth_col2[2] as f64 / 255.0,
+            ),
+            dyn_fog_col: Vec3::new(
+                lighting.dyn_fog_col[0] as f64 / 255.0,
+                lighting.dyn_fog_col[1] as f64 / 255.0,
+                lighting.dyn_fog_col[2] as f64 / 255.0,
+            ),
+            dyn_fog_col2: Vec3::new(
+                lighting.dyn_fog_col2[0] as f64 / 255.0,
+                lighting.dyn_fog_col2[1] as f64 / 255.0,
+                lighting.dyn_fog_col2[2] as f64 / 255.0,
+            ),
+            cam_up: camera.up.normalize(),
+            s_depth: lighting.s_depth,
+            tbpos_3: lighting.tbpos_3,
+            tbpos_6: lighting.tbpos_6,
+            calc_pix_col_sqr: lighting.calc_pix_col_sqr,
+            rough_scale: lighting.roughness_factor as f64 / (255.0 * 255.0),
+            s_c_start,
+            s_c_mul,
+            s_col_z_mul,
+            s_diff: (lighting.tbpos_5 as f64 * 0.02).max(0.0),
+            s_spec: (((lighting.tbpos_7 & 0x0FFF) as f64) * 0.02).max(0.004),
+            z1: camera.z_start - camera.mid.z,
+            depth_range: camera.z_end - camera.z_start,
+            b_amb_rel_obj: (lighting.tboptions & 0x20000000) != 0,
+            i_dfunc: ((lighting.tboptions >> 30) & 0x3) as i32,
+            b_dfog_options,
+        }
+    }
 }
 
 fn ao_step_jitter(pixel_x: i32, pixel_y: i32, ray_idx: usize) -> f64 {
@@ -235,19 +447,18 @@ pub fn shade(
     shadow_steps: i32,
     max_iters: i32,
     min_iters: i32,
-    _p: Vec3,
-    _camera: &crate::render::Camera,
+    hit_pos: Vec3,
     ao_factor: f64,
-    _direct_light_factor: f64,
     depth: f64,
     pixel_x: i32,
     pixel_y: i32,
     y_pos: f64,
     max_depth: f64,
-    lighting: &crate::m3p::M3PLighting,
+    cache: &LightingCache,
     ssao: &crate::m3p::M3PSSAO,
-    formulas: &[crate::formulas::FormulaSlot],
+    formulas: &crate::formulas::HybridProgram,
     params: &crate::render::RenderParams,
+    scratch: &mut ShadeScratch,
 ) -> [u8; 3] {
     let m_zz = depth / params.step_width;
 
@@ -282,7 +493,7 @@ pub fn shade(
             (0.25, 0.0)
         };
 
-        let mut rot_m = Vec::new();
+        scratch.rot_m.clear();
         let (_row_abr, d_step_mul, d_min_a_dif, correction_weight) = if ssao.quality == 0 {
             let row_abr = std::f64::consts::PI / 3.0;
             let polar = if ssao.ao_dithering > 0 {
@@ -292,13 +503,13 @@ pub fn shade(
             };
             for itmp in 0..3 {
                 let azimuth = (itmp as f64 + dither_x) * std::f64::consts::PI * 2.0 / 3.0;
-                rot_m.push(make_world_dir(polar, azimuth));
+                scratch.rot_m.push(make_world_dir(polar, azimuth));
             }
             (row_abr, 1.8, -1.0, 0.3)
         } else {
             let row_abr = std::f64::consts::PI * 0.5 / (ssao.quality as f64 + 0.9);
             if dither_y >= 0.1 {
-                rot_m.push(normal_basis_w);
+                scratch.rot_m.push(normal_basis_w);
             }
             for iy in 1..=ssao.quality {
                 let row_count = ((iy as f64 * row_abr).sin() * std::f64::consts::PI * 2.0 / row_abr)
@@ -307,7 +518,7 @@ pub fn shade(
                 let polar = row_abr * (iy as f64 + dither_y - 0.25);
                 for ix in 0..row_count {
                     let azimuth = (ix as f64 + dither_x) * std::f64::consts::PI * 2.0 / row_count as f64;
-                    rot_m.push(make_world_dir(polar, azimuth));
+                    scratch.rot_m.push(make_world_dir(polar, azimuth));
                 }
             }
             let correction_weight = if ssao.quality == 1 { 0.2 } else { 0.1666 };
@@ -318,8 +529,11 @@ pub fn shade(
                 correction_weight,
             )
         };
-        let ray_count = rot_m.len();
-        let mut min_ra = vec![0.0; ray_count];
+        let ray_count = scratch.rot_m.len();
+        scratch.min_ra.clear();
+        scratch.min_ra.resize(ray_count, 0.0);
+        scratch.s_add.clear();
+        scratch.s_add.resize(ray_count, 0.0);
 
         let de_mul = ((ray_count as f64) * 0.5).sqrt();
         let overlap_abr = 1.2 / (1.0 / de_mul).asin();
@@ -344,7 +558,7 @@ pub fn shade(
         };
         
         for i in 0..ray_count {
-            let s_vec = rot_m[i];
+            let s_vec = scratch.rot_m[i];
             
             let mut dt1 = step_ao_actual * d_step_mul;
             let mut s_tmp = 1.0;
@@ -362,7 +576,7 @@ pub fn shade(
                     b_end = true;
                 }
                 
-                let probe_pos = _p.add(s_vec.scale(dt1 * params.step_width));
+                let probe_pos = hit_pos.add(s_vec.scale(dt1 * params.step_width));
                 
                 let (_, de_world) = crate::formulas::hybrid_de((probe_pos.x, probe_pos.y, probe_pos.z), formulas, &params.iter_params);
                 let dt2 = de_world * params.de_scale / params.step_width;
@@ -385,22 +599,19 @@ pub fn shade(
                 }
             }
             
-            min_ra[i] = s_tmp.max(0.0) * de_mul;
+            scratch.min_ra[i] = s_tmp.max(0.0) * de_mul;
         }
-        
-        // Correction step
-        let mut s_add = vec![0.0; ray_count];
-        
+
         for iy in 0..ray_count {
-            let max_add = 1.0 - min_ra[iy];
+            let max_add = 1.0 - scratch.min_ra[iy];
             if max_add > 0.0 {
                 for ix in 0..ray_count {
                     if ix != iy {
-                        let d_tmp = rot_m[iy].dot(rot_m[ix]);
+                        let d_tmp = scratch.rot_m[iy].dot(scratch.rot_m[ix]);
                         if d_tmp > d_min_a_dif {
-                            let overlap = min_ra[ix] - d_tmp.acos() * overlap_abr + 1.0;
+                            let overlap = scratch.min_ra[ix] - d_tmp.acos() * overlap_abr + 1.0;
                             if overlap > 0.0 {
-                                s_add[iy] += max_add.min(overlap) * correction_weight;
+                                scratch.s_add[iy] += max_add.min(overlap) * correction_weight;
                             }
                         }
                     }
@@ -409,7 +620,7 @@ pub fn shade(
         }
         
         for iy in 0..ray_count {
-            final_ao_val += (s_add[iy] + min_ra[iy]).min(1.0);
+            final_ao_val += (scratch.s_add[iy] + scratch.min_ra[iy]).min(1.0);
         }
 
         // Matches CalcAmbShadowDEfor1pos:
@@ -439,27 +650,8 @@ pub fn shade(
     let diffuse_shadowing = ssao.diffuse_shadowing.clamp(0.0, 1.0);
     let diff_ao = (1.0 - diffuse_shadowing) + diffuse_shadowing * final_ao;
     // MB3D: dRough = roughByte * sRoughnessFactor, with sRoughnessFactor = RoughnessFactor * (1/255)^2.
-    let rough_scale = lighting.roughness_factor as f64 / (255.0 * 255.0);
     let rough_byte = (roughness.clamp(0.0, 1.0) * 255.0).round();
-    let d_rough = rough_byte * rough_scale;
-    let parsed_lights: Vec<ParsedLight> = lighting
-        .lights
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, l)| parse_light(idx, l, _camera))
-        .collect();
-
-    // Ambient colors from M3P
-    let amb_bottom = Vec3::new(
-        lighting.ambient_bottom[0] as f64 / 255.0,
-        lighting.ambient_bottom[1] as f64 / 255.0,
-        lighting.ambient_bottom[2] as f64 / 255.0,
-    );
-    let amb_top = Vec3::new(
-        lighting.ambient_top[0] as f64 / 255.0,
-        lighting.ambient_top[1] as f64 / 255.0,
-        lighting.ambient_top[2] as f64 / 255.0,
-    );
+    let d_rough = rough_byte * cache.rough_scale;
 
     // Calculate SIgradient
     let d_tmp = iters as f64;
@@ -472,72 +664,45 @@ pub fn shade(
     let si_gradient = si_gradient_f.round() as i32;
 
     // Calculate ir
-    let mut s_c_start = ((lighting.tbpos_9 + 30) as f64 * 0.01111111111111111).powi(2) * 32767.0 - 10900.0;
-    let mut s_c_mul = ((lighting.tbpos_10 + 30) as f64 * 0.01111111111111111).powi(2) * 32767.0 - 10900.0 - s_c_start;
-    
-    if (lighting.tboptions & 0x10000) != 0 {
-        let d_tmp = s_c_start + s_c_mul * (lighting.fine_col_adj_2 as i32 - 30) as f64 * 0.0166666666666666;
-        s_c_start = s_c_start + s_c_mul * (lighting.fine_col_adj_1 as i32 - 30) as f64 * 0.0166666666666666;
-        s_c_mul = d_tmp - s_c_start;
-    }
-    if s_c_mul.abs() > 1e-4 {
-        s_c_mul = 2.0 / s_c_mul;
-    } else if s_c_mul < 0.0 {
-        s_c_mul = -2000.0;
-    } else {
-        s_c_mul = 2000.0;
-    }
-    
     // iDif[0] is sColZmul * PLV.zPos
     // sColZmul = 11 * -0.005 / (1.689668e-12 * 1920) = -16954034875.5
     // PLV.zPos = depth + z1
-    let z1 = params.camera.z_start - params.camera.mid.z;
-    let plv_z_pos = depth + z1;
-    let mut s_col_z_mul = 0.0;
-    if (lighting.tboptions & 0x20000) != 0 {
-        s_col_z_mul = (lighting.tbpos_11 as f64 * -0.005) / (params.step_width * 1920.0);
-    }
-    let i_dif_0 = s_col_z_mul * plv_z_pos;
+    let plv_z_pos = depth + cache.z1;
+    let i_dif_0 = cache.s_col_z_mul * plv_z_pos;
     
-    let ir_f = ((si_gradient as f64 - s_c_start) * s_c_mul + i_dif_0) * 16384.0;
+    let ir_f = ((si_gradient as f64 - cache.s_c_start) * cache.s_c_mul + i_dif_0) * 16384.0;
     let ir = ir_f.round() as i32;
     
     // bColCycling is true
     let ir_cycled = ir & 32767;
     
-    let c = surface_color(ir_cycled, lighting);
-    let cs = surface_spec_color(ir_cycled, lighting);
-
-    let diffuse_color = Vec3::new(c.0, c.1, c.2);
-    let spec_color = Vec3::new(cs.0, cs.1, cs.2);
-
-    let s_diff_base = (lighting.tbpos_5 as f64 * 0.02).max(0.0);
-    let s_spec_base = (((lighting.tbpos_7 & 0x0FFF) as f64) * 0.02).max(0.004);
-    let s_diff = s_diff_base;
-    let s_spec = s_spec_base;
+    let diffuse_color =
+        sample_color_cycle(ir_cycled, &cache.surface_diff_stops, Vec3::new(0.5, 0.5, 0.5));
+    let spec_color =
+        sample_color_cycle(ir_cycled, &cache.surface_spec_stops, Vec3::new(1.0, 1.0, 1.0));
 
     // view_dir is passed as object->camera.
     let v_from_cam = view_dir.normalize().scale(-1.0);
     let n = normal.normalize();
-    let cam_up = _camera.up.normalize();
-
-    let b_amb_rel_obj = (lighting.tboptions & 0x20000000) != 0;
 
     // Ambient light
-    let ny = if b_amb_rel_obj { n.y } else { n.dot(cam_up) };
+    let ny = if cache.b_amb_rel_obj { n.y } else { n.dot(cache.cam_up) };
     let w_top = (ny * 0.5 + 0.5).clamp(0.0, 1.0);
     let w_bot = 1.0 - w_top;
-    let amb_light = amb_top.scale(w_top).add(amb_bottom.scale(w_bot)).scale(final_ao);
+    let amb_light = cache
+        .amb_top
+        .scale(w_top)
+        .add(cache.amb_bottom.scale(w_bot))
+        .scale(final_ao);
 
     // Diffuse light accumulation
     let mut total_diffuse = Vec3::new(0.0, 0.0, 0.0);
     let mut total_specular = Vec3::new(0.0, 0.0, 0.0);
 
     // For each light:
-    for pl in &parsed_lights {
+    for pl in &cache.parsed_lights {
         let li = pl.idx;
-        let hsl = &lighting.lights[li];
-        let i_hs_enabled = 1 - (((hsl.l_option >> 6) & 1) as i32);
+        let i_hs_enabled = 1 - (((pl.l_option >> 6) & 1) as i32);
         let i_hs_calced = i_hs_enabled & (((params.b_hs_calculated as i32) >> (li + 2)) & 1);
         let mut i_hs_mask = 0x400i32 << li;
         if ((params.b_calc1_hs_soft & 1) != 0) && (i_hs_calced != 0) {
@@ -553,7 +718,8 @@ pub fn shade(
         }
         let light_gate = if no_hs { hs_mul } else { 0.0 };
 
-        let diff_dot = apply_diff_mode_mb3d(pl.diff_mode, n.dot(pl.dir), d_rough, lighting.calc_pix_col_sqr);
+        let diff_dot =
+            apply_diff_mode_mb3d(pl.diff_mode, n.dot(pl.dir), d_rough, cache.calc_pix_col_sqr);
         let diff_shadowed = diff_dot * light_gate;
         total_diffuse = total_diffuse.add(pl.color.scale(diff_shadowed));
         
@@ -562,7 +728,8 @@ pub fn shade(
         let spec_dot = pl.dir.dot(reflect_view);
         if spec_dot > 0.0 {
             let att = 1.0;
-            let mut spec_mul = (att + (d_rough * 2.0).min(1.0) * (1.0 / pl.spec_power - att)) * s_spec;
+            let mut spec_mul = (att + (d_rough * 2.0).min(1.0) * (1.0 / pl.spec_power - att))
+                * cache.s_spec;
             if spec_mul < 0.0 {
                 spec_mul = 0.0;
             }
@@ -575,39 +742,28 @@ pub fn shade(
     }
 
 
-    let i_dfunc = ((lighting.tboptions >> 30) & 0x3) as i32;
-    let s = if b_amb_rel_obj {
+    let s = if cache.b_amb_rel_obj {
         (v_from_cam.y.asin() / std::f64::consts::PI + 0.5).clamp(0.0, 1.0)
     } else {
         let yy = y_pos.clamp(0.0, 1.0);
-        match i_dfunc {
+        match cache.i_dfunc {
             1 => yy * yy,
             0 => yy,
             _ => yy.sqrt(),
         }
     };
-    let dep_c = Vec3::new(
-        lighting.depth_col[0] as f64 / 255.0,
-        lighting.depth_col[1] as f64 / 255.0,
-        lighting.depth_col[2] as f64 / 255.0,
-    );
-    let dep_c2 = Vec3::new(
-        lighting.depth_col2[0] as f64 / 255.0,
-        lighting.depth_col2[1] as f64 / 255.0,
-        lighting.depth_col2[2] as f64 / 255.0,
-    );
     let dep_c_interp = Vec3::new(
-        dep_c2.x * s + dep_c.x * (1.0 - s),
-        dep_c2.y * s + dep_c.y * (1.0 - s),
-        dep_c2.z * s + dep_c.z * (1.0 - s),
+        cache.depth_col2.x * s + cache.depth_col.x * (1.0 - s),
+        cache.depth_col2.y * s + cache.depth_col.y * (1.0 - s),
+        cache.depth_col2.z * s + cache.depth_col.z * (1.0 - s),
     );
 
     let mut final_color = Vec3::new(
-        amb_light.x * diffuse_color.x + diffuse_color.x * s_diff * total_diffuse.x
+        amb_light.x * diffuse_color.x + diffuse_color.x * cache.s_diff * total_diffuse.x
             + spec_color.x * total_specular.x,
-        amb_light.y * diffuse_color.y + diffuse_color.y * s_diff * total_diffuse.y
+        amb_light.y * diffuse_color.y + diffuse_color.y * cache.s_diff * total_diffuse.y
             + spec_color.y * total_specular.y,
-        amb_light.z * diffuse_color.z + diffuse_color.z * s_diff * total_diffuse.z
+        amb_light.z * diffuse_color.z + diffuse_color.z * cache.s_diff * total_diffuse.z
             + spec_color.z * total_specular.z,
     );
 
@@ -623,14 +779,14 @@ pub fn shade(
     }
 
     let d_tmp = if z_pos < 32768 {
-        (1.0 + (z_pos_f - 28000.0) * lighting.s_depth).max(0.0)
+        (1.0 + (z_pos_f - 28000.0) * cache.s_depth).max(0.0)
     } else {
-        (1.0 - (60768.0 - z_pos_f) * lighting.s_depth).max(0.0)
+        (1.0 - (60768.0 - z_pos_f) * cache.s_depth).max(0.0)
     };
     
     // Calculate sShad, sShadZmul, sShadGr
-    let tbpos_3 = lighting.tbpos_3;
-    let tbpos_6 = lighting.tbpos_6;
+    let tbpos_3 = cache.tbpos_3;
+    let tbpos_6 = cache.tbpos_6;
     let mut s_tmp_shad = 128.0;
     
     let b_vol_light = (params.b_vol_light_nr & 7) != 0;
@@ -658,10 +814,7 @@ pub fn shade(
     let s_shad = (s_tmp_shad - sqrt_tbpos3_and_ffff * 11.313708) * d_tmp_shad * 0.28;
     
     let sqrt_tbpos3_shr_16 = ((tbpos_3 >> 16) as f64).sqrt();
-    let s_shad_z_mul = d_tmp_shad * 0.7 / (params.camera.z_end - params.camera.z_start) * (128.0 - sqrt_tbpos3_shr_16 * 11.313708);
-    
-    let b_dfog_options = if !lighting.lights.is_empty() { lighting.lights[0].free_byte & 3 } else { 0 };
-    let b_dfog_options = if b_dfog_options == 3 { 1 } else { b_dfog_options };
+    let s_shad_z_mul = d_tmp_shad * 0.7 / cache.depth_range * (128.0 - sqrt_tbpos3_shr_16 * 11.313708);
 
     // MB3D uses PsiLight.Shadow (ray-march DE count), not fractal escape iterations.
     let ir_for_fog = if b_vol_light {
@@ -675,33 +828,21 @@ pub fn shade(
     };
     
     let mut d_fog = (ir_for_fog - s_shad - s_shad_z_mul * plv_z_pos) * s_shad_gr;
-    if (b_dfog_options & 2) != 0 {
+    if (cache.b_dfog_options & 2) != 0 {
         d_fog = d_fog.max(0.0);
     }
     
     let mut d_tmp3 = (1.0f64).min(ir_for_fog * s_dyn_fog_mul) * d_fog;
     
-    if (b_dfog_options & 1) != 0 {
+    if (cache.b_dfog_options & 1) != 0 {
         d_fog = d_fog.clamp(0.0, 1.0);
         d_tmp3 = d_tmp3.clamp(0.0, 1.0);
     }
     
-    // AddSVectors(@LiLSDAI[4], Add2SVecsWeight(PLValigned.sDynFogCol, PLValigned.sDynFogCol2, dFog - dTmp3, dTmp3));
-    let s_dyn_fog_col = Vec3::new(
-        lighting.dyn_fog_col[0] as f64 / 255.0,
-        lighting.dyn_fog_col[1] as f64 / 255.0,
-        lighting.dyn_fog_col[2] as f64 / 255.0,
-    );
-    let s_dyn_fog_col2 = Vec3::new(
-        lighting.dyn_fog_col2[0] as f64 / 255.0,
-        lighting.dyn_fog_col2[1] as f64 / 255.0,
-        lighting.dyn_fog_col2[2] as f64 / 255.0,
-    );
-    
     let fog_add = Vec3::new(
-        s_dyn_fog_col.x * (d_fog - d_tmp3) + s_dyn_fog_col2.x * d_tmp3,
-        s_dyn_fog_col.y * (d_fog - d_tmp3) + s_dyn_fog_col2.y * d_tmp3,
-        s_dyn_fog_col.z * (d_fog - d_tmp3) + s_dyn_fog_col2.z * d_tmp3,
+        cache.dyn_fog_col.x * (d_fog - d_tmp3) + cache.dyn_fog_col2.x * d_tmp3,
+        cache.dyn_fog_col.y * (d_fog - d_tmp3) + cache.dyn_fog_col2.y * d_tmp3,
+        cache.dyn_fog_col.z * (d_fog - d_tmp3) + cache.dyn_fog_col2.z * d_tmp3,
     );
 
     // if d_tmp < 1.0 {
@@ -717,7 +858,7 @@ pub fn shade(
         final_color.z * d_tmp + dep_c_interp.z * t_dep,
     );
 
-    if (b_dfog_options & 1) != 0 {
+    if (cache.b_dfog_options & 1) != 0 {
         final_color = Vec3::new(
             final_color.x * (1.0 - d_fog),
             final_color.y * (1.0 - d_fog),
@@ -744,103 +885,4 @@ pub fn shade(
         (final_color_toned.y * 255.0) as u8,
         (final_color_toned.z * 255.0) as u8,
     ]
-}
-
-/// Map normalized iteration count to a color (0..1 each channel)
-pub fn surface_color(si_gradient: i32, lighting: &crate::m3p::M3PLighting) -> (f64, f64, f64) {
-    let mut t = si_gradient as f64 / 32768.0;
-    
-    // Wrap around
-    t = t - t.floor();
-    if t < 0.0 { t += 1.0; }
-    
-    let mut stops: Vec<(f64, (f64, f64, f64))> = lighting.l_cols.iter().map(|s| {
-        let pos = s.pos as f64 / 32768.0;
-        let c = (
-            s.color_dif[0] as f64 / 255.0,
-            s.color_dif[1] as f64 / 255.0,
-            s.color_dif[2] as f64 / 255.0,
-        );
-        (pos, c)
-    }).collect();
-
-    if stops.is_empty() {
-        return (0.5, 0.5, 0.5);
-    }
-    
-    stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    
-    // Wrap around: add the first color at pos 1.0 + first.pos
-    if let Some(first) = stops.first().cloned() {
-        stops.push((1.0 + first.0, first.1));
-    }
-
-    let mut c = stops.last().unwrap().1;
-    for i in 0..stops.len() - 1 {
-        let (p1, c1) = stops[i];
-        let (p2, c2) = stops[i+1];
-        
-        // Handle wrap around case where t might be between last element and 1.0 + first
-        let mut t_check = t;
-        if i == stops.len() - 2 && t < p1 {
-            t_check += 1.0;
-        }
-
-        if t_check >= p1 && t_check <= p2 {
-            let f = if p2 > p1 { (t_check - p1) / (p2 - p1) } else { 0.0 };
-            c = (
-                c1.0 * (1.0 - f) + c2.0 * f,
-                c1.1 * (1.0 - f) + c2.1 * f,
-                c1.2 * (1.0 - f) + c2.2 * f,
-            );
-            break;
-        }
-    }
-    c
-}
-
-pub fn surface_spec_color(si_gradient: i32, lighting: &crate::m3p::M3PLighting) -> (f64, f64, f64) {
-    let mut t = si_gradient as f64 / 32768.0;
-
-    t = t - t.floor();
-    if t < 0.0 { t += 1.0; }
-
-    let mut stops: Vec<(f64, (f64, f64, f64))> = lighting.l_cols.iter().map(|s| {
-        let pos = s.pos as f64 / 32768.0;
-        let c = (
-            s.color_spe[0] as f64 / 255.0,
-            s.color_spe[1] as f64 / 255.0,
-            s.color_spe[2] as f64 / 255.0,
-        );
-        (pos, c)
-    }).collect();
-
-    if stops.is_empty() {
-        return (1.0, 1.0, 1.0);
-    }
-
-    stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    if let Some(first) = stops.first().cloned() {
-        stops.push((1.0 + first.0, first.1));
-    }
-
-    let mut c = stops.last().unwrap().1;
-    for i in 0..stops.len() - 1 {
-        let (p1, c1) = stops[i];
-        let (p2, c2) = stops[i + 1];
-        let mut t_check = t;
-        if i == stops.len() - 2 && t < p1 {
-            t_check += 1.0;
-        }
-        if t_check >= p1 && t_check <= p2 {
-            let f = if p2 > p1 { (t_check - p1) / (p2 - p1) } else { 0.0 };
-            c = (
-                c1.0 * (1.0 - f) + c2.0 * f,
-                c1.1 * (1.0 - f) + c2.1 * f,
-                c1.2 * (1.0 - f) + c2.2 * f,
-            );
-            break;
-        }
-    }
-    c
 }
