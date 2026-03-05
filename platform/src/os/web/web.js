@@ -59,7 +59,7 @@ export class WasmWebBrowser extends WasmBridge {
                 pathname: location.pathname + "",
                 search: location.search + "",
                 hash: location.hash + "",
-                has_thread_support: this.wasm._has_threading_support
+                has_thread_support: this.wasm._has_thread_support
             },
             window_info: this.window_info,
         });
@@ -278,6 +278,15 @@ export class WasmWebBrowser extends WasmBridge {
         if (this.audio_context) {
             return
         }
+        if (!this.wasm._has_thread_support) {
+            console.warn("FromWasmStartAudioOutput skipped: wasm threading support is unavailable");
+            return
+        }
+        const thread_info = this.alloc_thread_stack(args.context_ptr);
+        if (!thread_info) {
+            console.warn("FromWasmStartAudioOutput skipped: thread stack allocation prerequisites are unavailable");
+            return
+        }
         const start_worklet = async () => {
 
             await this.audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", {credentials: 'omit'});
@@ -286,7 +295,7 @@ export class WasmWebBrowser extends WasmBridge {
                 numberOfInputs: 0,
                 numberOfOutputs: 1,
                 outputChannelCount: [2],
-                processorOptions: {thread_info: this.alloc_thread_stack(args.context_ptr)}
+                processorOptions: {thread_info}
             });
             
             audio_worklet.port.onmessage = (e) => {
@@ -425,7 +434,15 @@ export class WasmWebBrowser extends WasmBridge {
         
     }
     
-    alloc_thread_stack(context_ptr, timer) {
+    alloc_thread_stack(context_ptr, timer = 0) {
+        if (!this.wasm._has_thread_support) {
+            console.warn("alloc_thread_stack unavailable: wasm threading support is disabled");
+            return null;
+        }
+        if (this.exports.__stack_pointer === undefined) {
+            console.warn("alloc_thread_stack unavailable: missing __stack_pointer export");
+            return null;
+        }
         var ret = {
             timer,
             module: this.wasm._module,
@@ -435,10 +452,21 @@ export class WasmWebBrowser extends WasmBridge {
         if (typeof this.exports.__wbindgen_start !== 'undefined') {
             ret.wasm_bindgen = true;
         } else {
+            if (this.exports.__tls_size === undefined) {
+                console.warn("alloc_thread_stack unavailable: missing __tls_size export");
+                return null;
+            }
+            if (typeof this.exports.wasm_thread_alloc_tls_and_stack !== "function") {
+                console.warn("alloc_thread_stack unavailable: missing wasm_thread_alloc_tls_and_stack export");
+                return null;
+            }
             let tls_size = this.exports.__tls_size.value;
             tls_size += 8 - (tls_size & 7); // align it to 8 bytes
             let stack_size = this.thread_stack_size; // 8mb
-            if ((tls_size + stack_size) & 7 != 0) throw new Error("stack size not 8 byte aligned");
+            if ((tls_size + stack_size) & 7 != 0) {
+                console.warn("alloc_thread_stack unavailable: stack size is not 8-byte aligned");
+                return null;
+            }
             ret.tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack((tls_size + stack_size) >> 3);
             this.update_array_buffer_refs();
             ret.stack_ptr = ret.tls_ptr + tls_size + stack_size - 8;
@@ -454,21 +482,20 @@ export class WasmWebBrowser extends WasmBridge {
     // example build command:
     // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
     FromWasmCreateThread(args) {
-        
-        let worker = new Worker(
-            './makepad_platform/web_worker.js',
-            {type: 'module'}
-        );
-        
         if (!this.wasm._has_thread_support) {
             console.error("FromWasmCreateThread not available, wasm file not compiled with threading support");
             return
         }
-        if (this.exports.__stack_pointer === undefined) {
-            console.error("FromWasmCreateThread not available, wasm file not compiled with -C link-arg=--export=__stack_pointer");
+        let thread_info = this.alloc_thread_stack(args.context_ptr, args.timer);
+        if (!thread_info) {
+            console.error("FromWasmCreateThread not available, thread stack allocation prerequisites are missing");
             return
         }
-        worker.postMessage(this.alloc_thread_stack(args.context_ptr, args.timer));
+        let worker = new Worker(
+            './makepad_platform/web_worker.js',
+            {type: 'module'}
+        );
+        worker.postMessage(thread_info);
         
         this.workers.push(worker);
     }
