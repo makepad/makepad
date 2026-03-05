@@ -50,6 +50,7 @@ fn config() -> &'static LightingConfig {
 
 #[derive(Clone, Copy)]
 struct ParsedLight {
+    idx: usize,
     dir: Vec3,
     color: Vec3,
     spec_power: f64,
@@ -79,7 +80,7 @@ fn light_is_active_non_lightmap(l: &crate::m3p::M3PLight) -> bool {
     opt == 0
 }
 
-fn parse_light(l: &crate::m3p::M3PLight, camera: &crate::render::Camera) -> Option<ParsedLight> {
+fn parse_light(idx: usize, l: &crate::m3p::M3PLight, camera: &crate::render::Camera) -> Option<ParsedLight> {
     if !light_is_active_non_lightmap(l) {
         return None;
     }
@@ -117,6 +118,7 @@ fn parse_light(l: &crate::m3p::M3PLight, camera: &crate::render::Camera) -> Opti
     }
 
     Some(ParsedLight {
+        idx,
         dir,
         color,
         spec_power,
@@ -240,8 +242,8 @@ pub fn dominant_shadow_light_dir(
 ) -> Option<Vec3> {
     let mut best_dir = None;
     let mut best_luma = 0.0;
-    for l in &lighting.lights {
-        if let Some(pl) = parse_light(l, camera) {
+    for (idx, l) in lighting.lights.iter().enumerate() {
+        if let Some(pl) = parse_light(idx, l, camera) {
             let vis_mode = pl.i_light_pos & 14;
             if pl.is_positional || vis_mode != 0 {
                 continue;
@@ -254,6 +256,34 @@ pub fn dominant_shadow_light_dir(
         }
     }
     best_dir
+}
+
+pub fn soft_hs_light_dir(
+    lighting: &crate::m3p::M3PLighting,
+    camera: &crate::render::Camera,
+    params: &crate::render::RenderParams,
+) -> Option<(usize, Vec3, u8)> {
+    // MB3D softHS: CalcHSsoft selects the last enabled HS light from calcHardShadow bits.
+    if (params.b_calc1_hs_soft & 1) == 0 {
+        return None;
+    }
+
+    let mut selected = None;
+    let hs_bits = params.b_calculate_hard_shadow as u16;
+    for itmp in 0..6usize {
+        let mask = 4u16 << itmp;
+        if (hs_bits & mask) != 0 {
+            selected = Some(itmp);
+        }
+    }
+    let idx = selected?;
+    let l = lighting.lights.get(idx)?;
+    let pl = parse_light(idx, l, camera)?;
+    if pl.is_positional {
+        // Positional softHS requires CalcHSsoft positional branch; not yet implemented.
+        return None;
+    }
+    Some((idx, pl.dir, pl.i_light_pos))
 }
 
 /// Shade a hit pixel using a stable two-light material model.
@@ -279,7 +309,7 @@ pub fn shade(
     debug: bool,
 ) -> [u8; 3] {
     let cfg = config();
-    let strict_mb3d = env_f64("STRICT_MB3D", 1.0) != 0.0;
+    let strict_mb3d = true;
 
     let m_zz = depth / params.step_width;
 
@@ -470,7 +500,8 @@ pub fn shade(
     let parsed_lights: Vec<ParsedLight> = lighting
         .lights
         .iter()
-        .filter_map(|l| parse_light(l, _camera))
+        .enumerate()
+        .filter_map(|(idx, l)| parse_light(idx, l, _camera))
         .collect();
 
     // Ambient colors from M3P
@@ -574,12 +605,36 @@ pub fn shade(
 
     // For each light:
     for pl in &parsed_lights {
+        let li = pl.idx;
+        let hsl = &lighting.lights[li];
+        let i_hs_enabled = 1 - (((hsl.l_option >> 6) & 1) as i32);
+        let i_hs_calced = i_hs_enabled & (((params.b_hs_calculated as i32) >> (li + 2)) & 1);
+        let mut i_hs_mask = 0x400i32 << li;
+        if ((params.b_calc1_hs_soft & 1) != 0) && (i_hs_calced != 0) {
+            i_hs_mask = -1;
+        }
+        let soft_hs = i_hs_mask == -1;
+        let no_hs = soft_hs || ((shadow_steps & i_hs_mask) == 0) || (i_hs_calced == 0);
+        let b_sub_amb_sh = (i_hs_calced ^ i_hs_enabled) != 0;
+        let mut hs_mul = if b_sub_amb_sh { final_ao } else { diff_ao };
+        if soft_hs {
+            let soft = ((shadow_steps >> 10) as f64 * (1.0 / 63.0)).clamp(0.0, 1.0);
+            hs_mul *= soft;
+        }
+        let light_gate = if no_hs { hs_mul } else { 0.0 };
+
         let diff_dot = apply_diff_mode_mb3d(pl.diff_mode, n.dot(pl.dir), d_rough, lighting.calc_pix_col_sqr);
-        let diff_shadowed = diff_dot * diff_ao * direct_light_factor;
+        let mut diff_shadowed = diff_dot * light_gate;
+        if !strict_mb3d {
+            diff_shadowed *= direct_light_factor;
+        }
         total_diffuse = total_diffuse.add(pl.color.scale(diff_shadowed));
         
         if debug {
-            println!("    Light: diff_dot={}, diff_ao={}, direct_light_factor={}, diff_shadowed={}", diff_dot, diff_ao, direct_light_factor, diff_shadowed);
+            println!(
+                "    Light[{}]: diff_dot={}, hs_mul={}, no_hs={}, soft_hs={}, diff_shadowed={}",
+                li, diff_dot, light_gate, no_hs, soft_hs, diff_shadowed
+            );
         }
 
         // MB3D DotOf2VecNormalize: reflect camera->object vector on normal, then dot with light.
@@ -593,7 +648,11 @@ pub fn shade(
             }
             if spec_mul > 0.0 {
                 let spec_pow = spec_dot.powf(pl.spec_power);
-                total_specular = total_specular.add(pl.color.scale(spec_pow * spec_mul * diff_ao * direct_light_factor));
+                let mut spec_shadowed = spec_pow * spec_mul * light_gate;
+                if !strict_mb3d {
+                    spec_shadowed *= direct_light_factor;
+                }
+                total_specular = total_specular.add(pl.color.scale(spec_shadowed));
             }
 
             if !strict_mb3d {
@@ -658,7 +717,7 @@ pub fn shade(
     let mut d_tmp = if z_pos < 32768 {
         ((z_pos as f64 - 28000.0) * lighting.s_depth + 1.0).max(0.0)
     } else {
-        (1.0 - (1.0 - 28000.0 * lighting.s_depth).max(0.0)).max(0.0)
+        (1.0f64 - (1.0f64 - 28000.0f64 * lighting.s_depth).max(0.0f64)).max(0.0f64)
     };
     
     // Calculate sShad, sShadZmul, sShadGr
@@ -783,7 +842,7 @@ pub fn shade(
     }
     
     // LiLSDAI[4] := Add2SVecsWeight2(LiLSDAI[4], DepC, Max0S(1 - dTmp));
-    let t_dep = (1.0 - d_tmp).max(0.0);
+    let t_dep = (1.0f64 - d_tmp).max(0.0f64);
     final_color = Vec3::new(
         final_color.x + dep_c_interp.x * t_dep,
         final_color.y + dep_c_interp.y * t_dep,
