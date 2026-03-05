@@ -94,10 +94,7 @@ fn main() {
 
     let mut params = render::RenderParams::from_m3p(&m3p_file);
     params.adaptive_ao_subsampling = options.adaptive_ao;
-    if (options.scale - 1.0).abs() > f64::EPSILON {
-        params.camera.width = (m3p_file.width as f64 * options.scale).round().max(1.0) as i32;
-        params.camera.height = (m3p_file.height as f64 * options.scale).round().max(1.0) as i32;
-    }
+    params.apply_image_scale(options.scale);
 
     let pixels = render::render(&formula_slots, &params, &m3p_file.lighting, &m3p_file.ssao);
 
