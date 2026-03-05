@@ -116,6 +116,7 @@ pub struct M3PFile {
     pub height: i32,
     pub iterations: i32,
     pub min_iterations: i32,
+    pub b_steps_after_de_stop: u8,
     pub i_options: u16,
     pub b_new_options: u8,
     pub b_dfog_it: u8,
@@ -278,6 +279,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     // bVolLightNr is at 343
     let b_vol_light_nr = data[343];
     let b_calculate_hard_shadow = data[133];
+    let b_steps_after_de_stop = data[134];
     let b_calc1_hs_soft = data[139];
     let b_hs_calculated = data[163];
 
@@ -509,7 +511,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         let min_iterations = i32::from_le_bytes(data[135..139].try_into().unwrap());
 
     Ok(M3PFile {
-        mand_id, width, height, iterations, min_iterations,
+        mand_id, width, height, iterations, min_iterations, b_steps_after_de_stop,
         i_options, b_new_options, b_color_on_it, b_dfog_it, b_vol_light_nr,
         b_calculate_hard_shadow, b_hs_calculated, b_calc1_hs_soft,
         z_start, z_end,
