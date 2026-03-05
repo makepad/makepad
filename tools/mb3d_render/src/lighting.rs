@@ -58,6 +58,11 @@ struct ParsedLight {
     is_positional: bool,
 }
 
+struct CosTables {
+    // DiffCosTabNsmall[0..7][0..127] from MB3D.
+    diff_small: [[f64; 128]; 8],
+}
+
 fn mb3d_light_local_dir(angle_xy: f64, angle_z: f64) -> Vec3 {
     // HeaderTrafos:
     // dTmp := -LXpos; dTmp2 := LYpos;
@@ -121,13 +126,111 @@ fn parse_light(l: &crate::m3p::M3PLight, camera: &crate::render::Camera) -> Opti
     })
 }
 
-fn apply_diff_mode(mode: i32, ndotl: f64) -> f64 {
-    let d = ndotl.max(0.0);
-    match mode {
-        0 => d,
-        1 => d * d,
-        2 => d.sqrt(),
-        _ => d.powf(0.25),
+fn cos_tables() -> &'static CosTables {
+    static TABLES: OnceLock<CosTables> = OnceLock::new();
+    TABLES.get_or_init(|| {
+        let mut diff_small = [[0.0f64; 128]; 8];
+
+        for i in 0..128 {
+            let mut d = 1.0 - (i as f64 - 2.0) / 60.0;
+            diff_small[0][i] = if d > 0.15 {
+                (d - 0.08) * 1.086_956_5
+            } else if d <= 0.0 {
+                0.0
+            } else {
+                d.powf(((0.505 - d) * 3.8).max(1.0))
+            };
+            diff_small[1][i] = d.max(0.0) * d.max(0.0);
+            diff_small[2][i] = d * 0.5 + 0.5;
+            diff_small[3][i] = diff_small[2][i] * diff_small[2][i];
+        }
+
+        for k in 0..4 {
+            let mut tmp = [0.0f64; 128];
+            for j in 0..128 {
+                tmp[j] = diff_small[k][j].max(0.0).sqrt();
+            }
+            for j in 0..128 {
+                let mut e = 0.0;
+                for i in 0..=60 {
+                    let l = (j as i32 + i - 30).abs() as usize;
+                    if l < 128 {
+                        e += tmp[l];
+                    }
+                }
+                let t = e * 0.011 + (e * 0.007) * (e * 0.007);
+                diff_small[k + 4][j] = t * t;
+            }
+        }
+
+        CosTables { diff_small }
+    })
+}
+
+fn make_spline_coeff(xs: f64) -> [f64; 4] {
+    // Math3D.MakeSplineCoeff
+    let w3 = (1.0 / 6.0) * xs * xs * xs;
+    let w0 = (1.0 / 6.0) + 0.5 * xs * (xs - 1.0) - w3;
+    let w2 = xs + w0 - 2.0 * w3;
+    let w1 = 1.0 - w0 - w2 - w3;
+    [w0, w1, w2, w3]
+}
+
+fn interp_tab4(tab: &[f64; 128], ip: usize, w: [f64; 4]) -> f64 {
+    tab[ip] * w[0] + tab[ip + 1] * w[1] + tab[ip + 2] * w[2] + tab[ip + 3] * w[3]
+}
+
+fn get_cos_tab_val(tnr: i32, dotp: f64, rough: f64) -> f64 {
+    let tnr = tnr.clamp(0, 3) as usize;
+    let rough = rough.clamp(0.0, 1.0);
+    let mut t = 62.0 - 60.0 * dotp;
+    let mut ip = t.trunc() as i32 - 1;
+    if ip < 0 {
+        ip = 0;
+        t = 0.0;
+    } else if ip > 124 {
+        ip = 124;
+        t = 1.0;
+    } else {
+        t = t.fract();
+    }
+    let ipu = ip as usize;
+    let w = make_spline_coeff(t);
+    let tables = cos_tables();
+    let a = interp_tab4(&tables.diff_small[tnr], ipu, w);
+    let b = interp_tab4(&tables.diff_small[tnr + 4], ipu, w);
+    a + rough * (b - a)
+}
+
+fn get_cos_tab_val_sqr(tnr: i32, dotp: f64, rough: f64) -> f64 {
+    let tnr = tnr.clamp(0, 3) as usize;
+    let rough = rough.clamp(0.0, 1.0);
+    let mut t = 62.0 - 60.0 * dotp;
+    let mut ip = t.trunc() as i32 - 1;
+    if ip < 0 {
+        ip = 0;
+        t = 0.0;
+    } else if ip > 124 {
+        ip = 124;
+        t = 1.0;
+    } else {
+        t = t.fract();
+    }
+    let ipu = ip as usize;
+    let w = make_spline_coeff(t);
+    let tables = cos_tables();
+    let a = interp_tab4(&tables.diff_small[tnr], ipu, w);
+    let b = interp_tab4(&tables.diff_small[tnr + 4], ipu, w);
+    let a2 = a * a;
+    let b2 = b * b;
+    a2 + rough * (b2 - a2)
+}
+
+fn apply_diff_mode_mb3d(mode: i32, ndotl: f64, rough: f64, calc_pix_col_sqr: bool) -> f64 {
+    if calc_pix_col_sqr {
+        get_cos_tab_val_sqr(mode, ndotl, rough)
+    } else {
+        get_cos_tab_val(mode, ndotl, rough)
     }
 }
 
@@ -156,8 +259,10 @@ pub fn dominant_shadow_light_dir(
 /// Shade a hit pixel using a stable two-light material model.
 pub fn shade(
     normal: Vec3,
+    roughness: f64,
     view_dir: Vec3,
     iters: i32,
+    shadow_steps: i32,
     max_iters: i32,
     min_iters: i32,
     _p: Vec3,
@@ -174,12 +279,13 @@ pub fn shade(
     debug: bool,
 ) -> [u8; 3] {
     let cfg = config();
+    let strict_mb3d = env_f64("STRICT_MB3D", 1.0) != 0.0;
 
     let m_zz = depth / params.step_width;
 
     // AO is estimated in render pass; keep the expensive per-shade AO path optional.
     let mut final_ao = ao_factor.clamp(0.0, 1.0);
-    if ssao.calc_amb_shadow && env_f64("SHADE_AO_RAYS", 0.0) != 0.0 {
+    if ssao.calc_amb_shadow && env_f64("SHADE_AO_RAYS", 1.0) != 0.0 {
         let mut final_ao_val = 0.0;
         
         let num_rays = if ssao.quality == 0 { 3 } else { 
@@ -236,31 +342,30 @@ pub fn shade(
         let d_step_mul = 1.0 + abr.sin();
         let de_mul = ((num_rays as f64) * 0.5).sqrt();
         
+        // MB3D AO math operates in step units.
         let step_ao = 1.0 + m_zz.abs() * params.de_stop_factor;
-        
-        let s_max_d = ssao.deao_max_l as f64 * 0.5 * ((params.camera.width * params.camera.width + params.camera.height * params.camera.height) as f64).sqrt();
-        
+
+        let s_max_d = ssao.deao_max_l as f64 * 0.5
+            * ((params.camera.width * params.camera.width + params.camera.height * params.camera.height) as f64).sqrt();
+
         let mut ms_de_stop_steps = params.de_stop_header * step_ao;
         if ms_de_stop_steps > 10000.0 { ms_de_stop_steps = 10000.0; }
         if ms_de_stop_steps < params.de_stop_header { ms_de_stop_steps = params.de_stop_header; }
-        
+
         let step_ao_actual = ms_de_stop_steps / params.de_stop_header;
         let max_dist_steps = s_max_d * step_ao_actual.sqrt();
-        let max_dist = max_dist_steps * params.step_width; // Max distance in world space
-        
-        let mut ms_de_stop = ms_de_stop_steps * params.step_width;
-        if params.b_vary_de_stop {
-            ms_de_stop = ms_de_stop / (d_step_mul * d_step_mul);
+
+        let mut ms_de_stop = if params.b_vary_de_stop {
+            ms_de_stop_steps / (d_step_mul * d_step_mul)
         } else {
-            ms_de_stop = params.de_stop_header * params.step_width / (d_step_mul * d_step_mul);
-        }
+            params.de_stop_header / (d_step_mul * d_step_mul)
+        };
         
         for i in 0..num_rays {
             let s_vec = rot_m[i];
             
-            let mut dt1 = step_ao_actual * d_step_mul * params.step_width;
+            let mut dt1 = step_ao_actual * d_step_mul;
             let mut s_tmp = 1.0;
-            let mut zz = m_zz.abs();
             
             let mut b_first_step = false; // bMCTFirstStepRandom is false for this file
             
@@ -270,17 +375,16 @@ pub fn shade(
                 if b_first_step {
                     b_first_step = false;
                     dt1 = dt1 * 1.25; // Average of (rand * 1.5 + 0.5)
-                } else if dt1 > max_dist {
-                    dt1 = max_dist;
+                } else if dt1 > max_dist_steps {
+                    dt1 = max_dist_steps;
                     b_end = true;
                 }
                 
-                let probe_pos = _p.add(s_vec.scale(dt1));
+                let probe_pos = _p.add(s_vec.scale(dt1 * params.step_width));
                 
-                let (_, de) = crate::formulas::hybrid_de((probe_pos.x, probe_pos.y, probe_pos.z), formulas, &params.iter_params);
-                let dt2 = de * params.de_scale;
+                let (_, de_world) = crate::formulas::hybrid_de((probe_pos.x, probe_pos.y, probe_pos.z), formulas, &params.iter_params);
+                let dt2 = de_world / params.step_width;
                 
-                let max_dist_steps = max_dist / params.step_width;
                 let md_d10 = 0.1 / (max_dist_steps * de_mul);
                 let val = ((dt2 - ms_de_stop) / dt1 + md_d10).min(s_tmp);
                 if val < s_tmp {
@@ -288,7 +392,7 @@ pub fn shade(
                 }
                 
                 if debug && i == 0 {
-                    println!("    AO ray 0 step: dt1={:.4e}, dt2={:.4e}, ms_de_stop={:.4e}, val={:.4}, s_tmp={:.4}", dt1, dt2, ms_de_stop, val, s_tmp);
+                    println!("    AO ray 0 step(steps): dt1={:.4e}, dt2={:.4e}, ms_de_stop={:.4e}, val={:.4}, s_tmp={:.4}", dt1, dt2, ms_de_stop, val, s_tmp);
                 }
                 
                 if s_tmp < 0.02 {
@@ -350,6 +454,10 @@ pub fn shade(
     //      = (1 - sDiffuseShadowing) + sDiffuseShadowing * dAmbSh.
     let diffuse_shadowing = ssao.diffuse_shadowing.clamp(0.0, 1.0);
     let diff_ao = (1.0 - diffuse_shadowing) + diffuse_shadowing * final_ao;
+    // MB3D: dRough = roughByte * sRoughnessFactor, with sRoughnessFactor = RoughnessFactor * (1/255)^2.
+    let rough_scale = lighting.roughness_factor as f64 / (255.0 * 255.0);
+    let rough_byte = (roughness.clamp(0.0, 1.0) * 255.0).round();
+    let d_rough = rough_byte * rough_scale;
     let parsed_lights: Vec<ParsedLight> = lighting
         .lights
         .iter()
@@ -423,8 +531,18 @@ pub fn shade(
     let diffuse_color = Vec3::new(c.0, c.1, c.2);
     let spec_color = Vec3::new(cs.0, cs.1, cs.2);
 
-    let s_diff = (lighting.tbpos_5 as f64 * 0.02).max(0.0) * cfg.diffuse_strength;
-    let s_spec = (((lighting.tbpos_7 & 0x0FFF) as f64) * 0.02).max(0.004) * cfg.specular_strength;
+    let s_diff_base = (lighting.tbpos_5 as f64 * 0.02).max(0.0);
+    let s_spec_base = (((lighting.tbpos_7 & 0x0FFF) as f64) * 0.02).max(0.004);
+    let s_diff = if strict_mb3d {
+        s_diff_base
+    } else {
+        s_diff_base * cfg.diffuse_strength
+    };
+    let s_spec = if strict_mb3d {
+        s_spec_base
+    } else {
+        s_spec_base * cfg.specular_strength
+    };
 
     // view_dir is passed as object->camera.
     let v_to_cam = view_dir.normalize();
@@ -447,7 +565,7 @@ pub fn shade(
 
     // For each light:
     for pl in &parsed_lights {
-        let diff_dot = apply_diff_mode(pl.diff_mode, n.dot(pl.dir));
+        let diff_dot = apply_diff_mode_mb3d(pl.diff_mode, n.dot(pl.dir), d_rough, lighting.calc_pix_col_sqr);
         let diff_shadowed = diff_dot * diff_ao * direct_light_factor;
         total_diffuse = total_diffuse.add(pl.color.scale(diff_shadowed));
         
@@ -459,25 +577,45 @@ pub fn shade(
         let reflect_view = v_from_cam.sub(n.scale(2.0 * n.dot(v_from_cam)));
         let spec_dot = pl.dir.dot(reflect_view);
         if spec_dot > 0.0 {
-            let spec_pow = spec_dot.powf(pl.spec_power);
-            total_specular = total_specular.add(pl.color.scale(spec_pow * s_spec * diff_ao * direct_light_factor));
+            let att = 1.0;
+            let mut spec_mul = (att + (d_rough * 2.0).min(1.0) * (1.0 / pl.spec_power - att)) * s_spec;
+            if spec_mul < 0.0 {
+                spec_mul = 0.0;
+            }
+            if spec_mul > 0.0 {
+                let spec_pow = spec_dot.powf(pl.spec_power);
+                total_specular = total_specular.add(pl.color.scale(spec_pow * spec_mul * diff_ao * direct_light_factor));
+            }
 
-            let spec_pow2 = spec_dot.powf(cfg.specular2_power);
-            total_specular2 = total_specular2.add(
-                pl.color.scale(spec_pow2 * cfg.specular2_strength * diff_ao * direct_light_factor)
-            );
+            if !strict_mb3d {
+                let spec_pow2 = spec_dot.powf(cfg.specular2_power);
+                total_specular2 = total_specular2.add(
+                    pl.color.scale(spec_pow2 * cfg.specular2_strength * diff_ao * direct_light_factor)
+                );
+            }
         }
     }
 
     // Final color
-    let mut final_color = Vec3::new(
-        amb_light.x * diffuse_color.x + diffuse_color.x * s_diff * total_diffuse.x
-            + spec_color.x * (total_specular.x + total_specular2.x),
-        amb_light.y * diffuse_color.y + diffuse_color.y * s_diff * total_diffuse.y
-            + spec_color.y * (total_specular.y + total_specular2.y),
-        amb_light.z * diffuse_color.z + diffuse_color.z * s_diff * total_diffuse.z
-            + spec_color.z * (total_specular.z + total_specular2.z),
-    );
+    let mut final_color = if strict_mb3d {
+        Vec3::new(
+            amb_light.x * diffuse_color.x + diffuse_color.x * s_diff * total_diffuse.x
+                + spec_color.x * total_specular.x,
+            amb_light.y * diffuse_color.y + diffuse_color.y * s_diff * total_diffuse.y
+                + spec_color.y * total_specular.y,
+            amb_light.z * diffuse_color.z + diffuse_color.z * s_diff * total_diffuse.z
+                + spec_color.z * total_specular.z,
+        )
+    } else {
+        Vec3::new(
+            amb_light.x * diffuse_color.x + diffuse_color.x * s_diff * total_diffuse.x
+                + spec_color.x * (total_specular.x + total_specular2.x),
+            amb_light.y * diffuse_color.y + diffuse_color.y * s_diff * total_diffuse.y
+                + spec_color.y * (total_specular.y + total_specular2.y),
+            amb_light.z * diffuse_color.z + diffuse_color.z * s_diff * total_diffuse.z
+                + spec_color.z * (total_specular.z + total_specular2.z),
+        )
+    };
 
     if debug {
         println!("  normal: {:?}", n);
@@ -490,18 +628,19 @@ pub fn shade(
         println!("  final_ao: {:.4}", final_ao);
     }
 
-    // Subtle rim light helps recover highlight structure on silhouette-like ridges.
-    let rim = (1.0 - n.dot(v_to_cam).max(0.0)).powf(cfg.rim_power) * cfg.rim_strength;
-    final_color = final_color.add(Vec3::new(rim, rim, rim));
+    if !strict_mb3d {
+        // Non-source experimental boosts (disabled in strict mode).
+        let rim = (1.0 - n.dot(v_to_cam).max(0.0)).powf(cfg.rim_power) * cfg.rim_strength;
+        final_color = final_color.add(Vec3::new(rim, rim, rim));
 
-    // Atmospheric lift toward top-ambient color for distant samples.
-    let fog_t = if max_depth > 1e-20 {
-        (depth / max_depth).clamp(0.0, 1.0).powf(cfg.fog_gamma) * cfg.fog_strength
-    } else {
-        0.0
-    };
-    let fog_color = amb_top;
-    final_color = final_color.scale(1.0 - fog_t).add(fog_color.scale(fog_t));
+        let fog_t = if max_depth > 1e-20 {
+            (depth / max_depth).clamp(0.0, 1.0).powf(cfg.fog_gamma) * cfg.fog_strength
+        } else {
+            0.0
+        };
+        let fog_color = amb_top;
+        final_color = final_color.scale(1.0 - fog_t).add(fog_color.scale(fog_t));
+    }
 
     // Calculate Zpos
     let z_pos_f = 32767.0 - (params.z_cmul / 256.0) * ((m_zz * params.z_corr + 1.0).sqrt() - 1.0);
@@ -548,16 +687,16 @@ pub fn shade(
     let b_dfog_options = if !lighting.lights.is_empty() { lighting.lights[0].free_byte & 3 } else { 0 };
     let b_dfog_options = if b_dfog_options == 3 { 1 } else { b_dfog_options };
 
-    let mut ir_for_fog = iters as f64;
-    // Shadow is DEcount (number of steps)
+    let mut ir_for_fog = shadow_steps as f64;
+    // MB3D uses PsiLight.Shadow (ray-march DE count), not fractal escape iterations.
     if b_vol_light {
-        let mut eax = iters as i32 & 0x3FF;
+        let mut eax = shadow_steps & 0x3FF;
         let cl = eax >> 7;
         eax &= 0x7F;
         eax <<= cl;
         ir_for_fog = eax as f64;
     } else {
-        ir_for_fog = (iters as i32 & 0x3FF) as f64;
+        ir_for_fog = (shadow_steps & 0x3FF) as f64;
     }
     
     let mut d_fog = (ir_for_fog - s_shad - s_shad_z_mul * plv_z_pos) * s_shad_gr;
@@ -658,17 +797,21 @@ pub fn shade(
     
     // No depth fog for now
     
-    // Scene-calibrated tone mapping: roll off highlights before gamma/contrast shaping.
-    let tone = |c: f64| {
-        let mapped = c.max(0.0) / (1.0 + c.max(0.0)); // Reinhard-like compression
-        ((mapped.powf(cfg.tone_gamma) * cfg.tone_gain) + cfg.tone_bias).clamp(0.0, 1.0)
+    let final_color_toned = if strict_mb3d {
+        Vec3::new(
+            final_color.x.clamp(0.0, 1.0),
+            final_color.y.clamp(0.0, 1.0),
+            final_color.z.clamp(0.0, 1.0),
+        )
+    } else {
+        // Non-source experimental tone mapping (disabled in strict mode).
+        let tone = |c: f64| ((c.clamp(0.0, 1.0).powf(cfg.tone_gamma) * cfg.tone_gain) + cfg.tone_bias).clamp(0.0, 1.0);
+        Vec3::new(
+            tone(final_color.x),
+            tone(final_color.y),
+            tone(final_color.z),
+        )
     };
-
-    let final_color_toned = Vec3::new(
-        tone(final_color.x),
-        tone(final_color.y),
-        tone(final_color.z),
-    );
 
     [
         (final_color_toned.x * 255.0) as u8,

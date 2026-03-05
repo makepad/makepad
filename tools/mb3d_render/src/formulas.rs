@@ -249,8 +249,15 @@ pub fn hybrid_de(pos: (f64, f64, f64), formulas: &[FormulaSlot], params: &IterPa
         let slot = &formulas[current_formula];
         let scale_factor = slot.iterate(&mut state);
 
-        // Update DE derivative: cumulative scale factor product
-        state.dr = state.dr * scale_factor.abs();
+        // Update DE derivative.
+        // Mandelbox-like formulas include a constant add term, which contributes +1
+        // to the derivative recurrence (dr = dr * |m| + 1).
+        // IFS-like formulas are pure scale transforms (dr = dr * scale).
+        if slot.has_c_add() {
+            state.dr = state.dr * scale_factor.abs() + 1.0;
+        } else {
+            state.dr = state.dr * scale_factor.abs();
+        }
 
         total_iters += 1;
         current_iters_left -= 1;

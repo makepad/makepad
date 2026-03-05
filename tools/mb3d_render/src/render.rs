@@ -159,6 +159,7 @@ pub struct RenderParams {
     pub b_vary_de_stop: bool,
     pub z_cmul: f64,
     pub de_stop_header: f64,
+    pub sm_normals: i32,
 }
 
 /// Compute dDEscale factor for hybrid formulas.
@@ -250,7 +251,7 @@ impl RenderParams {
         // Maximum step size (in world units)
         // MB3D: max_step = max(DEstop, 0.4) * mctMH04ZSD * StepWidth
         let mct_mh04_zsd = m3p.width.max(m3p.height) as f64;
-        let max_step = de_stop_header.max(0.4) * mct_mh04_zsd * step_width * 1000.0;
+        let max_step = de_stop_header.max(0.4) * mct_mh04_zsd * step_width;
 
         // DE floor: min 0.25 * effective DEstop (in world units)
         let de_floor = de_stop * 0.25;
@@ -265,6 +266,7 @@ impl RenderParams {
         eprintln!("  effective sZstepDiv: {:.4} (raw {:.4} * de_scale {:.4})", s_z_step_div, s_z_step_div_raw, de_scale);
         eprintln!("  max_step: {:.6e}", max_step);
         eprintln!("  de_floor: {:.6e}", de_floor);
+        eprintln!("  iSmNormals: {}", ((m3p.i_options >> 6) & 0x0F));
 
         RenderParams {
             camera,
@@ -294,6 +296,7 @@ impl RenderParams {
             b_vary_de_stop: m3p.b_vary_de_stop,
             z_cmul,
             de_stop_header,
+            sm_normals: ((m3p.i_options >> 6) & 0x0F) as i32,
         }
     }
 }
@@ -303,6 +306,7 @@ pub enum PixelResult {
     Hit {
         depth: f64,
         iters: i32,
+        shadow_steps: i32,
     },
     Miss,
 }
@@ -314,10 +318,10 @@ fn calc_de(pos: Vec3, formulas: &[FormulaSlot], params: &IterParams, de_floor: f
     (iters, de.max(de_floor))
 }
 
-/// Estimate surface normal via 6-point central differences along view vectors.
-/// Matches MB3D's RMCalculateNormals with Noffset = min(1, DEstop) * 0.15 * StepWidth.
-fn estimate_normal(pos: Vec3, eps: f64, forward: Vec3, right: Vec3, up: Vec3,
-                   formulas: &[FormulaSlot], params: &IterParams, de_floor: f64) -> Vec3 {
+/// Estimate raw normal gradient via 6-point central differences along view vectors.
+/// Matches MB3D's RMCalculateNormals sampling pattern.
+fn estimate_normal_grad(pos: Vec3, eps: f64, forward: Vec3, right: Vec3, up: Vec3,
+                        formulas: &[FormulaSlot], params: &IterParams, de_floor: f64) -> Vec3 {
     let fwd = forward.normalize().scale(eps);
     let rt = right.normalize().scale(eps);
     let upv = up.normalize().scale(eps);
@@ -330,12 +334,120 @@ fn estimate_normal(pos: Vec3, eps: f64, forward: Vec3, right: Vec3, up: Vec3,
     let dy = calc_de(pos.add(upv), formulas, params, de_floor).1
            - calc_de(pos.sub(upv), formulas, params, de_floor).1;
 
-    // Recompose back to world-space normal.
+    // Recompose back to world-space gradient.
     rt.normalize()
         .scale(dx)
         .add(upv.normalize().scale(dy))
         .add(fwd.normalize().scale(dz))
-        .normalize()
+}
+
+/// MB3D RMCalculateNormals probe offset:
+/// Noffset = min(1, DEstop) * (1 + abs(mZZ) * mctDEstopFactor) * 0.15 * StepWidth.
+fn mb3d_normal_offset(params: &RenderParams, m_zz: f64) -> f64 {
+    params.de_stop_header.min(1.0)
+        * (1.0 + m_zz.abs() * params.de_stop_factor)
+        * 0.15
+        * params.step_width
+}
+
+fn tangent_basis(normal: Vec3) -> (Vec3, Vec3) {
+    let n = normal.normalize();
+    let seed = if n.z.abs() < 0.9 {
+        Vec3::new(0.0, 0.0, 1.0)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    let mut vx = seed.cross(n).normalize();
+    if vx.len() < 1e-10 {
+        vx = Vec3::new(1.0, 0.0, 0.0).cross(n).normalize();
+    }
+    let vy = n.cross(vx).normalize();
+    (vx, vy)
+}
+
+fn smooth_normal_mb3d(
+    pos: Vec3,
+    normal_grad: Vec3,
+    n_offset: f64,
+    smooth_n: i32,
+    right: Vec3,
+    up: Vec3,
+    formulas: &[FormulaSlot],
+    params: &IterParams,
+    de_floor: f64,
+) -> (Vec3, f64) {
+    let normal = normal_grad.normalize();
+    if smooth_n <= 0 {
+        return (normal, 0.0);
+    }
+    let smooth_n = smooth_n.min(8);
+    let noffset2 = n_offset * 2.0;
+    let step_snorm = noffset2 * 3.0 / (smooth_n as f64 + 0.5);
+    if step_snorm <= 1e-30 {
+        return (normal, 0.0);
+    }
+
+    let mut dnn = calc_de(pos, formulas, params, de_floor).1;
+    if smooth_n < 8 {
+        // RMCalculateNormals: after doubling Noffset, smooth midpoint uses +/-X and +/-Y probes.
+        dnn = (
+            dnn
+            + calc_de(pos.add(right.normalize().scale(-noffset2)), formulas, params, de_floor).1
+            + calc_de(pos.add(right.normalize().scale(noffset2)), formulas, params, de_floor).1
+            + calc_de(pos.add(up.normalize().scale(-noffset2)), formulas, params, de_floor).1
+            + calc_de(pos.add(up.normalize().scale(noffset2)), formulas, params, de_floor).1
+        ) * 0.2;
+    }
+
+    let (vx, vy) = tangent_basis(normal);
+    let mut nn1 = 0.0;
+    let mut nn2 = 0.0;
+    let mut ds1 = 0.0;
+    let mut ds2 = 0.0;
+
+    for it in -smooth_n..=smooth_n {
+        if it == 0 {
+            continue;
+        }
+        let t = it as f64 * step_snorm;
+        let de_x = calc_de(pos.add(vx.scale(t)), formulas, params, de_floor).1;
+        let dt = (de_x - dnn) / it as f64;
+        nn1 += dt;
+        ds1 += dt * dt;
+    }
+    for it in -smooth_n..=smooth_n {
+        if it == 0 {
+            continue;
+        }
+        let t = it as f64 * step_snorm;
+        let de_y = calc_de(pos.add(vy.scale(t)), formulas, params, de_floor).1;
+        let dt = (de_y - dnn) / it as f64;
+        nn2 += dt;
+        ds2 += dt * dt;
+    }
+
+    let d_m = (smooth_n * 2) as f64;
+    if d_m <= 1e-30 {
+        return (normal, 0.0);
+    }
+    let d_t2 = noffset2 * 0.5 / (d_m * step_snorm).max(1e-30);
+    let mut d_sg = ds1 * d_m - nn1 * nn1;
+    d_sg += ds2 * d_m - nn2 * nn2;
+
+    // RMCalcRoughness: rough = clamp(sqrt(max(0, dSG * 7 * dT2^2 / |N|^2)) - 0.05, 0, 1)
+    let denom = 1.0e-40 + normal_grad.dot(normal_grad);
+    let mut rough = ((d_sg * 7.0 * d_t2 * d_t2) / denom).max(0.0).sqrt() - 0.05;
+    rough = rough.clamp(0.0, 1.0);
+
+    let out_n = if smooth_n < 8 {
+        normal_grad
+            .add(vx.scale(nn1 * d_t2))
+            .add(vy.scale(nn2 * d_t2))
+            .normalize()
+    } else {
+        normal
+    };
+    (out_n, rough)
 }
 
 /// Lightweight DE-based soft shadow toward a directional light.
@@ -375,6 +487,7 @@ pub fn ray_march(origin: Vec3, dir: Vec3, formulas: &[FormulaSlot], params: &Ren
     let mut last_de = f64::MAX;
     let mut last_step = 0.0f64;
     let mut rsfmul: f64 = 1.0;
+    let mut steps_taken = 0i32;
     let de_stop = params.de_stop;
     let de_floor = params.de_floor;
 
@@ -385,7 +498,7 @@ pub fn ray_march(origin: Vec3, dir: Vec3, formulas: &[FormulaSlot], params: &Ren
     // Check if already inside the set
     let current_destop = de_stop * (1.0 + t * params.de_stop_factor);
     if iters >= params.iter_params.max_iters || de < current_destop {
-        return PixelResult::Hit { depth: t, iters };
+        return PixelResult::Hit { depth: t, iters, shadow_steps: steps_taken };
     }
 
     // Initialize last step from first DE
@@ -431,6 +544,7 @@ pub fn ray_march(origin: Vec3, dir: Vec3, formulas: &[FormulaSlot], params: &Ren
             last_de = de;
             last_step = step;
             t += step;
+            steps_taken += 1;
 
             if t > params.max_ray_length {
                 return PixelResult::Miss;
@@ -457,6 +571,7 @@ pub fn ray_march(origin: Vec3, dir: Vec3, formulas: &[FormulaSlot], params: &Ren
             return PixelResult::Hit {
                 depth: t,
                 iters: final_iters,
+                shadow_steps: steps_taken,
             };
         }
     }
@@ -477,6 +592,7 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
     // Pass 1: build depth and iteration buffers
     let mut depth_buf = vec![f64::MAX; w * h];
     let mut iter_buf = vec![0i32; w * h];
+    let mut shadow_buf = vec![0i32; w * h];
 
     eprintln!("Rendering {}x{} ...", w, h);
     let start = std::time::Instant::now();
@@ -529,22 +645,24 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                     
                     let mut row_depth = vec![f64::MAX; w];
                     let mut row_iter = vec![0i32; w];
+                    let mut row_shadow = vec![0i32; w];
                     
                     for x in 0..w {
                         let (origin, dir) = params.camera.ray_for_pixel(x as i32, y as i32);
                         let result = ray_march(origin, dir, formulas, params);
                         
                         match result {
-                            PixelResult::Hit { depth, iters } => {
+                            PixelResult::Hit { depth, iters, shadow_steps } => {
                                 local_hits += 1;
                                 row_depth[x] = depth;
                                 row_iter[x] = iters;
+                                row_shadow[x] = shadow_steps;
                             }
                             PixelResult::Miss => {}
                         }
                     }
                     
-                    local_results.push((y, row_depth, row_iter));
+                    local_results.push((y, row_depth, row_iter, row_shadow));
                 }
                 
                 let mut hc = hit_count.lock().unwrap();
@@ -556,10 +674,11 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
         
         for t in threads {
             let results = t.join().unwrap();
-            for (y, row_depth, row_iter) in results {
+            for (y, row_depth, row_iter, row_shadow) in results {
                 let offset = y * w;
                 depth_buf[offset..offset + w].copy_from_slice(&row_depth);
                 iter_buf[offset..offset + w].copy_from_slice(&row_iter);
+                shadow_buf[offset..offset + w].copy_from_slice(&row_shadow);
             }
         }
     });
@@ -568,44 +687,38 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
     eprintln!("Ray march complete in {:.1}s ({} hits / {} pixels)",
         start.elapsed().as_secs_f64(), total_hits, w * h);
 
-    // Pass 2: smooth iteration buffer (3x3 median filter to reduce speckle noise)
-    let smooth_iter = smooth_iter_buf(&iter_buf, w, h);
+    // Optional iteration post-smoothing for experiments.
+    // Keep disabled by default for source-faithful behavior.
+    let use_iter_median = std::env::var("ITER_MEDIAN")
+        .ok()
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let smooth_iter = if use_iter_median {
+        smooth_iter_buf(&iter_buf, w, h)
+    } else {
+        iter_buf.clone()
+    };
 
     // Pass 3: compute normals and shade
     let mut pixels = vec![0u8; w * h * 4];
     let debug_mode = std::env::var("DEBUG_MODE").unwrap_or_default();
 
-    // Normal epsilon: default 50 StepWidths for smooth normals.
-    // MB3D uses 0.15 StepWidths + multi-point smoothing (iSmNormals).
-    let normal_eps_mul = std::env::var("NORMAL_EPS").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(100.0);
-    let n_offset = normal_eps_mul * params.step_width;
-    eprintln!("  Normal epsilon: {:.6e} ({:.3} StepWidths)", n_offset, normal_eps_mul);
+    eprintln!("  Iter median filter: {}", if use_iter_median { "on" } else { "off" });
     let detail_normal_mix = std::env::var("DETAIL_NORMAL_MIX").ok()
         .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.35)
+        .unwrap_or(0.0)
         .clamp(0.0, 1.0);
-    let detail_normal_scale = std::env::var("DETAIL_NORMAL_SCALE").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.2)
-        .clamp(0.01, 1.0);
-    let ao_base_mul = std::env::var("AO_BASE_MUL").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(500.0);
-    let ao_strength = std::env::var("AO_STRENGTH").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(1.0);
-    let ao_min = std::env::var("AO_MIN").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.2);
     let shadow_steps = std::env::var("SHADOW_STEPS").ok()
         .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(16);
+        .unwrap_or(48);
     let shadow_strength = std::env::var("SHADOW_STRENGTH").ok()
         .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.35)
+        .unwrap_or(1.0)
         .clamp(0.0, 1.0);
+    let simple_deao = std::env::var("SIMPLE_DEAO")
+        .ok()
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let shadow_light_dir = crate::lighting::dominant_shadow_light_dir(lighting, &params.camera);
 
     thread::scope(|s| {
@@ -617,10 +730,12 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
             let params = &params;
             let depth_buf = &depth_buf;
             let smooth_iter = &smooth_iter;
+            let shadow_buf = &shadow_buf;
             let debug_mode = &debug_mode;
             let next_y = Arc::clone(&next_y);
             let shadow_light_dir = shadow_light_dir;
             let detail_normal_mix = detail_normal_mix;
+            let simple_deao = simple_deao;
             
             threads.push(s.spawn(move || {
                 let mut local_pixels = Vec::new();
@@ -663,13 +778,27 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                 [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
                             }
                             "normals" => {
-                                // Visualize DE-based normals as RGB
+                                // Visualize the same MB3D-inspired normal path used for shading.
                                 let (origin, dir) = params.camera.ray_for_pixel(x as i32, y as i32);
                                 let hit_pos = origin.add(dir.scale(d));
-                                let normal = estimate_normal(
-                                    hit_pos, n_offset,
+                                let m_zz = d / params.step_width;
+                                let n_offset = mb3d_normal_offset(params, m_zz);
+                                let normal_coarse = estimate_normal_grad(
+                                    hit_pos,
+                                    n_offset,
                                     params.camera.forward, params.camera.right, params.camera.up,
                                     formulas, &params.iter_params, params.de_floor,
+                                );
+                                let (normal, _roughness) = smooth_normal_mb3d(
+                                    hit_pos,
+                                    normal_coarse,
+                                    n_offset,
+                                    params.sm_normals,
+                                    params.camera.right,
+                                    params.camera.up,
+                                    formulas,
+                                    &params.iter_params,
+                                    params.de_floor,
                                 );
                                 [
                                     ((normal.x * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0) as u8,
@@ -683,8 +812,10 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                 let hit_pos = origin.add(dir.scale(d));
                                 crate::lighting::shade(
                                     normal,
+                                    0.0,
                                     dir.scale(-1.0),
                                     smooth_iter[idx],
+                                    shadow_buf[idx],
                                     params.iter_params.max_iters,
                                     params.iter_params.min_iters,
                                     hit_pos,
@@ -707,73 +838,52 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                 let hit_pos = origin.add(dir.scale(d));
                                 
                                 let m_zz = d / params.step_width;
-                                let mut n_offset = params.de_stop_header.min(1.0) * (1.0 + m_zz.abs() * params.de_stop_factor) * 0.15 * params.step_width;
-                                // MB3D multiplies Noffset by 2 if iSmNormals > 0, and then StepSNorm = Noffset * 3 / (SmoothN + 0.5)
-                                // For iSmNormals = 2, StepSNorm = 2 * Noffset * 3 / 2.5 = 2.4 * Noffset
-                                n_offset *= 2.4;
+                                let n_offset = mb3d_normal_offset(params, m_zz);
                                 
-                                let normal_coarse = estimate_normal(
+                                let normal_coarse = estimate_normal_grad(
                                     hit_pos, n_offset,
                                     params.camera.forward, params.camera.right, params.camera.up,
                                     formulas, &params.iter_params, params.de_floor,
                                 );
+                                let (normal_mb3d, roughness_mb3d) = smooth_normal_mb3d(
+                                    hit_pos,
+                                    normal_coarse,
+                                    n_offset,
+                                    params.sm_normals,
+                                    params.camera.right,
+                                    params.camera.up,
+                                    formulas,
+                                    &params.iter_params,
+                                    params.de_floor,
+                                );
                                 let normal_screen = screen_space_normal(&depth_buf, x, y, w, h, params.step_width);
-                                let normal_shade = normal_coarse
+                                let normal_shade = normal_mb3d
                                     .scale(1.0 - detail_normal_mix)
                                     .add(normal_screen.scale(detail_normal_mix))
                                     .normalize();
                                 
-                                // DEAO: probe farther than DEstop to avoid salt-and-pepper self-occlusion.
-                                let mut deao = 0.0;
-                                let ao_steps = 6;
-                                let ao_base = (params.step_width * ao_base_mul).max(params.de_stop * 2.0);
-                                for i in 1..=ao_steps {
-                                    let step_dist = ao_base * (i as f64);
-                                    let ao_pos = hit_pos.add(normal_shade.scale(step_dist));
-                                    let (_, de) = calc_de(ao_pos, formulas, &params.iter_params, params.de_floor);
-                                    deao += (step_dist - de).max(0.0) / step_dist;
-                                }
-                                let deao_norm = (deao / ao_steps as f64).clamp(0.0, 1.0);
-                                let mut d_amb_s = (1.0 - deao_norm * ao_strength).clamp(ao_min, 1.0);
-
-                                // Add medium-scale screen-space occlusion from local depth gradients.
-                                let ao_depth_scale = (ao_base * 12.0).max(params.step_width * 2.0);
-                                let mut ssao_occ = 0.0;
-                                let mut ssao_w = 0.0;
-                                let taps = [
-                                    (1isize, 0isize, 1.0f64), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
-                                    (2, 0, 0.8), (-2, 0, 0.8), (0, 2, 0.8), (0, -2, 0.8),
-                                    (1, 1, 0.7), (-1, 1, 0.7), (1, -1, 0.7), (-1, -1, 0.7),
-                                ];
-                                for (dx, dy, wtap) in taps {
-                                    let nx = x as isize + dx;
-                                    let ny = y as isize + dy;
-                                    if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize {
-                                        continue;
+                                // Source-faithful default: AO is handled in lighting::shade (ray-based path).
+                                // Keep old simple DEAO as opt-in experiment.
+                                let ao_factor = if simple_deao {
+                                    let mut deao = 0.0;
+                                    let ao_base = params.de_stop * 2.0;
+                                    for i in 1..=5 {
+                                        let step_dist = ao_base * (i as f64);
+                                        let ao_pos = hit_pos.add(normal_shade.scale(step_dist));
+                                        let (_, de) = calc_de(ao_pos, formulas, &params.iter_params, params.de_floor);
+                                        deao += (step_dist - de).max(0.0) / step_dist;
                                     }
-                                    let nd = depth_buf[ny as usize * w + nx as usize];
-                                    if nd == f64::MAX {
-                                        continue;
+                                    let mut d_amb_s = (1.0 - deao / 5.0 * 2.0).clamp(0.0, 1.0);
+                                    let s_amplitude = ssao.amb_shad;
+                                    if s_amplitude > 1.0 {
+                                        d_amb_s = d_amb_s + (s_amplitude - 1.0) * (d_amb_s * d_amb_s - d_amb_s);
+                                    } else {
+                                        d_amb_s = 1.0 - s_amplitude * (1.0 - d_amb_s);
                                     }
-                                    // If neighbor is closer to camera than the current pixel, treat as occluder.
-                                    let occ = ((d - nd) / ao_depth_scale).clamp(0.0, 1.0);
-                                    ssao_occ += occ * wtap;
-                                    ssao_w += wtap;
-                                }
-                                if ssao_w > 0.0 {
-                                    let ssao = 1.0 - 0.6 * (ssao_occ / ssao_w).clamp(0.0, 1.0);
-                                    d_amb_s = (d_amb_s * ssao).clamp(ao_min, 1.0);
-                                }
-                                
-                                // Apply sAmplitude (amb_shad)
-                                let s_amplitude = ssao.amb_shad;
-                                if s_amplitude > 1.0 {
-                                    d_amb_s = d_amb_s + (s_amplitude - 1.0) * (d_amb_s * d_amb_s - d_amb_s);
+                                    d_amb_s
                                 } else {
-                                    d_amb_s = 1.0 - s_amplitude * (1.0 - d_amb_s);
-                                }
-                                
-                                let ao_factor = d_amb_s;
+                                    1.0
+                                };
                                 let direct_light_factor = if let Some(light_dir) = shadow_light_dir {
                                     let shadow_raw = soft_shadow(
                                         hit_pos.add(normal_shade.scale(params.de_stop * 4.0)),
@@ -790,8 +900,10 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
 
                                 crate::lighting::shade(
                                     normal_shade,
+                                    roughness_mb3d,
                                     dir.scale(-1.0),
                                     smooth_iter[idx],
+                                    shadow_buf[idx],
                                     params.iter_params.max_iters,
                                     params.iter_params.min_iters,
                                     hit_pos,
@@ -828,25 +940,6 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
             }
         }
     });
-
-    let denoise_strength = std::env::var("DENOISE_STRENGTH").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.55)
-        .clamp(0.0, 1.0);
-    if denoise_strength > 0.0 {
-        let denoise_depth_sigma = std::env::var("DENOISE_DEPTH_SIGMA").ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(params.step_width * 3000.0)
-            .max(params.step_width * 10.0);
-        depth_bilateral_denoise_rgba(
-            &mut pixels,
-            &depth_buf,
-            w,
-            h,
-            denoise_strength,
-            denoise_depth_sigma,
-        );
-    }
 
     eprintln!("Render complete in {:.1}s", start.elapsed().as_secs_f64());
     pixels
@@ -907,69 +1000,4 @@ fn screen_space_normal(depth_buf: &[f64], x: usize, y: usize, w: usize, h: usize
     // Normal from depth gradient: depth differences are in world units,
     // pixel spacing is StepWidth, so z-component = StepWidth for proper scale
     Vec3::new(-dx, -dy, step_width).normalize()
-}
-
-fn depth_bilateral_denoise_rgba(
-    pixels: &mut [u8],
-    depth_buf: &[f64],
-    w: usize,
-    h: usize,
-    strength: f64,
-    depth_sigma: f64,
-) {
-    let miss = f64::MAX;
-    let src = pixels.to_vec();
-    let spatial = [
-        [0.0751136, 0.123841, 0.0751136],
-        [0.123841, 0.20418, 0.123841],
-        [0.0751136, 0.123841, 0.0751136],
-    ];
-    let inv_depth_sigma = if depth_sigma > 1e-30 { 1.0 / depth_sigma } else { 0.0 };
-
-    for y in 0..h {
-        for x in 0..w {
-            let idx = y * w + x;
-            let d0 = depth_buf[idx];
-            if d0 == miss {
-                continue;
-            }
-
-            let mut wr = 0.0;
-            let mut acc_r = 0.0;
-            let mut acc_g = 0.0;
-            let mut acc_b = 0.0;
-
-            for ky in 0..3usize {
-                for kx in 0..3usize {
-                    let nx = x as isize + kx as isize - 1;
-                    let ny = y as isize + ky as isize - 1;
-                    if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize {
-                        continue;
-                    }
-                    let nidx = ny as usize * w + nx as usize;
-                    let dn = depth_buf[nidx];
-                    if dn == miss {
-                        continue;
-                    }
-                    let depth_w = (-(d0 - dn).abs() * inv_depth_sigma).exp();
-                    let wtap = spatial[ky][kx] * depth_w;
-                    let po = nidx * 4;
-                    acc_r += src[po] as f64 * wtap;
-                    acc_g += src[po + 1] as f64 * wtap;
-                    acc_b += src[po + 2] as f64 * wtap;
-                    wr += wtap;
-                }
-            }
-
-            if wr > 1e-12 {
-                let po = idx * 4;
-                let nr = acc_r / wr;
-                let ng = acc_g / wr;
-                let nb = acc_b / wr;
-                pixels[po] = ((src[po] as f64) * (1.0 - strength) + nr * strength).clamp(0.0, 255.0) as u8;
-                pixels[po + 1] = ((src[po + 1] as f64) * (1.0 - strength) + ng * strength).clamp(0.0, 255.0) as u8;
-                pixels[po + 2] = ((src[po + 2] as f64) * (1.0 - strength) + nb * strength).clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
 }
