@@ -1,4 +1,4 @@
-use crate::formulas::{self, FormulaSlot, IterParams};
+use crate::formulas::{self, HybridProgram, IterParams};
 
 const MB3D_MIN_STEP_UNITS: f64 = 0.11;
 
@@ -82,52 +82,6 @@ impl Camera {
         }
     }
 
-    /// Compute ray start position and direction for pixel (px, py).
-    pub fn v_local_for_pixel(&self, px: i32, py: i32) -> Vec3 {
-        let px_f = self.width as f64 * 0.5 - px as f64; // MB3D: FOVXoff - ix
-        let py_f = py as f64 - self.height as f64 * 0.5; // MB3D: (y / iMandHeight - s05) * iMandHeight
-        
-        let fov_rad = self.fov_y * std::f64::consts::PI / 180.0;
-        let fov_mul = fov_rad / self.height as f64;
-        
-        let cafx = px_f * fov_mul;
-        let cafy = py_f * fov_mul;
-        
-        let (sin_x, cos_x) = cafx.sin_cos();
-        let (sin_y, cos_y) = cafy.sin_cos();
-        
-        // BuildViewVectorDFOV: (-sinX, sinY, cosX*cosY)
-        Vec3::new(-sin_x, sin_y, cos_x * cos_y).normalize()
-    }
-
-    pub fn ray_for_pixel(&self, px: i32, py: i32) -> (Vec3, Vec3) {
-        let v_local = self.v_local_for_pixel(px, py);
-
-        // In MB3D, the view vectors are scaled by StepWidth.
-        // But we want a normalized direction.
-        // Let's reconstruct the unscaled right/up/forward by dividing by StepWidth.
-        let r = self.right.scale(1.0 / self.step_width);
-        let u = self.up.scale(1.0 / self.step_width);
-        let f = self.forward.scale(1.0 / self.step_width);
-
-        // RotateVectorReverse
-        let dir = r.scale(v_local.x).add(u.scale(v_local.y)).add(f.scale(v_local.z)).normalize();
-
-        // In MB3D, for MCTCameraOptic = 0, the ray origin is calculated as:
-        // C1 = Ystart + Vgrads[0]*ix + Vgrads[1]*iy
-        // where Ystart = Mid + z1*Vgrads[2] - y1*Vgrads[1] - x1*Vgrads[0]
-        // and z1 = (dZstart - dZmid) / StepWidth
-        // Since Vgrads has length StepWidth:
-        // origin = Mid + (dZstart - dZmid) * forward + (ix - width/2) * StepWidth * right + (iy - height/2) * StepWidth * up
-        let cx = px as f64 - self.width as f64 * 0.5;
-        let cy = py as f64 - self.height as f64 * 0.5;
-        let start = self.mid
-            .add(f.scale(self.z_start - self.mid.z))
-            .add(r.scale(cx * self.step_width))
-            .add(u.scale(cy * self.step_width));
-
-        (start, dir)
-    }
 }
 
 pub struct RenderParams {
@@ -282,7 +236,6 @@ impl RenderParams {
                 julia_x: m3p.julia_x,
                 julia_y: m3p.julia_y,
                 julia_z: m3p.julia_z,
-                repeat_from: (m3p.addon.b_hyb_opt1 >> 4) as usize,
             },
             max_ray_length,
             de_stop,
@@ -323,9 +276,99 @@ pub enum PixelResult {
     Miss,
 }
 
+struct RayGrid {
+    dirs: Vec<Vec3>,
+    row_origins: Vec<Vec3>,
+    x_offsets: Vec<Vec3>,
+}
+
+fn build_ray_grid(camera: &Camera, num_threads: usize, rows_per_thread: usize) -> RayGrid {
+    let w = camera.width as usize;
+    let h = camera.height as usize;
+    let half_w = camera.width as f64 * 0.5;
+    let half_h = camera.height as f64 * 0.5;
+    let inv_step_width = 1.0 / camera.step_width;
+    let r = camera.right.scale(inv_step_width);
+    let u = camera.up.scale(inv_step_width);
+    let f = camera.forward.scale(inv_step_width);
+    let fov_rad = camera.fov_y * std::f64::consts::PI / 180.0;
+    let fov_mul = fov_rad / camera.height as f64;
+
+    let mut sin_x = vec![0.0; w];
+    let mut cos_x = vec![0.0; w];
+    for x in 0..w {
+        let cafx = (half_w - x as f64) * fov_mul;
+        let (sx, cx) = cafx.sin_cos();
+        sin_x[x] = sx;
+        cos_x[x] = cx;
+    }
+
+    let mut sin_y = vec![0.0; h];
+    let mut cos_y = vec![0.0; h];
+    for y in 0..h {
+        let cafy = (y as f64 - half_h) * fov_mul;
+        let (sy, cy) = cafy.sin_cos();
+        sin_y[y] = sy;
+        cos_y[y] = cy;
+    }
+
+    let base_start = camera
+        .mid
+        .add(f.scale(camera.z_start - camera.mid.z))
+        .add(r.scale(-half_w * camera.step_width));
+    let mut row_origins = Vec::with_capacity(h);
+    for y in 0..h {
+        row_origins.push(base_start.add(u.scale((y as f64 - half_h) * camera.step_width)));
+    }
+
+    let mut x_offsets = Vec::with_capacity(w);
+    for x in 0..w {
+        x_offsets.push(camera.right.scale(x as f64));
+    }
+
+    let mut dirs = vec![Vec3::new(0.0, 0.0, 0.0); w * h];
+    let band_len = rows_per_thread * w;
+    thread::scope(|s| {
+        let mut workers = Vec::new();
+        for (band_idx, dir_chunk) in dirs.chunks_mut(band_len).enumerate().take(num_threads) {
+            let y_start = band_idx * rows_per_thread;
+            let sin_x = &sin_x;
+            let cos_x = &cos_x;
+            let sin_y = &sin_y;
+            let cos_y = &cos_y;
+            let r = r;
+            let u = u;
+            let f = f;
+
+            workers.push(s.spawn(move || {
+                let row_count = dir_chunk.len() / w;
+                for local_y in 0..row_count {
+                    let y = y_start + local_y;
+                    let row_offset = local_y * w;
+                    for x in 0..w {
+                        let v_local = Vec3::new(-sin_x[x], sin_y[y], cos_x[x] * cos_y[y]).normalize();
+                        dir_chunk[row_offset + x] =
+                            r.scale(v_local.x).add(u.scale(v_local.y)).add(f.scale(v_local.z)).normalize();
+                    }
+                }
+            }));
+        }
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+
+    RayGrid {
+        dirs,
+        row_origins,
+        x_offsets,
+    }
+}
+
 /// Compute distance estimation at a point, with DE floor clamping.
 /// MB3D's CalcDEanalytic: if DE < DEstop * 0.25 then DE = DEstop * 0.25
-fn calc_de(pos: Vec3, formulas: &[FormulaSlot], params: &IterParams, de_floor: f64) -> (i32, f64) {
+fn calc_de(pos: Vec3, formulas: &HybridProgram, params: &IterParams, de_floor: f64) -> (i32, f64) {
     let (iters, de) = formulas::hybrid_de((pos.x, pos.y, pos.z), formulas, params);
     (iters, de.max(de_floor))
 }
@@ -338,7 +381,7 @@ fn estimate_normal_grad(
     forward: Vec3,
     right: Vec3,
     up: Vec3,
-    formulas: &[FormulaSlot],
+    formulas: &HybridProgram,
     params: &IterParams,
     de_floor: f64,
 ) -> (Vec3, Vec3) {
@@ -418,7 +461,7 @@ fn smooth_normal_mb3d(
     forward: Vec3,
     right: Vec3,
     up: Vec3,
-    formulas: &[FormulaSlot],
+    formulas: &HybridProgram,
     params: &IterParams,
     de_floor: f64,
 ) -> (Vec3, f64) {
@@ -514,9 +557,16 @@ fn calc_hs_soft_bits_mb3d(
     light_dir: Vec3,    // object -> light direction
     i_light_pos: u8,
     y: usize,
-    formulas: &[FormulaSlot],
+    formulas: &HybridProgram,
     params: &RenderParams,
 ) -> i32 {
+    let n = normal.normalize();
+    let l = light_dir.normalize();
+    let hs_vec = l.scale(-1.0);
+    if n.dot(hs_vec) > 0.0 {
+        return 0;
+    }
+
     let view_dir = ray_dir.normalize();
 
     // Pre-refine HS start along the view direction so CalcHSsoft starts close to the same
@@ -579,15 +629,8 @@ fn calc_hs_soft_bits_mb3d(
         return 63;
     }
 
-    let n = normal.normalize();
-    let l = light_dir.normalize();
     let v = view_dir;
-    let hs_vec = l.scale(-1.0);
     let zz2mul = -hs_vec.dot(v); // == dot(light_dir, ray_dir)
-
-    if n.dot(hs_vec) > 0.0 {
-        return 0;
-    }
 
     let mut d_t1 = max_l_hs;
     let mut zz2_steps = depth_steps;
@@ -651,7 +694,7 @@ fn calc_hs_soft_bits_mb3d(
 pub fn ray_march(
     origin: Vec3,
     dir: Vec3,
-    formulas: &[FormulaSlot],
+    formulas: &HybridProgram,
     params: &RenderParams,
     seed0: u32,
 ) -> PixelResult {
@@ -773,7 +816,7 @@ use std::thread;
 /// Render the full image using two passes:
 /// 1. Ray march to build depth + iteration buffers
 /// 2. Compute normals and shade
-pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate::m3p::M3PLighting, ssao: &crate::m3p::M3PSSAO) -> Vec<u8> {
+pub fn render(formulas: &HybridProgram, params: &RenderParams, lighting: &crate::m3p::M3PLighting, ssao: &crate::m3p::M3PSSAO) -> Vec<u8> {
     let w = params.camera.width as usize;
     let h = params.camera.height as usize;
     if w == 0 || h == 0 {
@@ -794,10 +837,12 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
         .min(h.max(1));
     let rows_per_thread = h.div_ceil(num_threads);
     let band_len = rows_per_thread * w;
+    let ray_grid = build_ray_grid(&params.camera, num_threads, rows_per_thread);
     eprintln!("Using {} threads", num_threads);
     
     let total_hits = thread::scope(|s| {
         let mut workers = Vec::new();
+        let ray_grid = &ray_grid;
         for (thread_idx, ((depth_chunk, iter_chunk), shadow_chunk)) in depth_buf
             .chunks_mut(band_len)
             .zip(iter_buf.chunks_mut(band_len))
@@ -816,7 +861,8 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                     let row_offset = local_y * w;
                     for x in 0..w {
                         let idx = row_offset + x;
-                        let (origin, dir) = params.camera.ray_for_pixel(x as i32, y as i32);
+                        let origin = ray_grid.row_origins[y].add(ray_grid.x_offsets[x]);
+                        let dir = ray_grid.dirs[y * w + x];
                         let seed = (x as u32)
                             .wrapping_mul(0x45d9f3b)
                             .wrapping_add((y as u32).wrapping_mul(0x2710_0001))
@@ -851,6 +897,7 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
     // Pass 2: compute normals and shade
     let mut pixels = vec![0u8; w * h * 4];
     let soft_hs_light = crate::lighting::soft_hs_light_dir(lighting, &params.camera, params);
+    let lighting_cache = crate::lighting::LightingCache::new(lighting, &params.camera, params);
 
     thread::scope(|s| {
         let mut workers = Vec::new();
@@ -861,10 +908,13 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
             let depth_buf = &depth_buf;
             let iter_buf = &iter_buf;
             let shadow_buf = &shadow_buf;
+            let ray_grid = &ray_grid;
             let soft_hs_light = soft_hs_light;
+            let lighting_cache = &lighting_cache;
             let y_start = band_idx * rows_per_thread;
 
             workers.push(s.spawn(move || {
+                let mut shade_scratch = crate::lighting::ShadeScratch::default();
                 let row_count = pixel_chunk.len() / (w * 4);
                 for local_y in 0..row_count {
                     let y = y_start + local_y;
@@ -874,6 +924,7 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                         let idx = y * w + x;
                         let offset = row_offset + x * 4;
                         let depth = depth_buf[idx];
+                        let origin = ray_grid.row_origins[y].add(ray_grid.x_offsets[x]);
 
                         if depth == f64::MAX {
                             pixel_chunk[offset] = 10;
@@ -883,7 +934,7 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                             continue;
                         }
 
-                        let (origin, dir) = params.camera.ray_for_pixel(x as i32, y as i32);
+                        let dir = ray_grid.dirs[idx];
                         let hit_pos = origin.add(dir.scale(depth));
                         let m_zz = depth / params.step_width;
                         let n_offset = mb3d_normal_offset(params, m_zz);
@@ -940,18 +991,17 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                             params.iter_params.max_iters,
                             params.iter_params.min_iters,
                             hit_pos,
-                            &params.camera,
-                            1.0,
                             1.0,
                             depth,
                             x as i32,
                             y as i32,
                             (y as f64 + 0.5) / h as f64,
                             params.max_ray_length,
-                            lighting,
+                            lighting_cache,
                             ssao,
                             formulas,
                             params,
+                            &mut shade_scratch,
                         );
 
                         pixel_chunk[offset] = color[0];
