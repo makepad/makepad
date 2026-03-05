@@ -139,6 +139,8 @@ pub struct M3PFile {
     pub de_stop: f32,
     pub b_vary_de_stop: bool,
     pub z_step_div: f32,
+    pub soft_shadow_radius: f64,
+    pub hs_max_length_multiplier: f64,
     pub is_julia: bool,
     pub julia_x: f64,
     pub julia_y: f64,
@@ -259,7 +261,15 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     // offset 186: skip to 223 for bDFogIt
     c.skip(37)?; // 186 + 37 = 223
     let b_dfog_it = c.read_u8_val()?; // 223
-    
+
+    // TMandHeader10:
+    //   MCSoftShadowRadius (ShortFloat) @224
+    //   HSmaxLengthMultiplier (Single) @226
+    let soft_shadow_radius = short_float_to_f64(
+        u16::from_le_bytes(data[224..226].try_into().unwrap())
+    );
+    let hs_max_length_multiplier = f32::from_le_bytes(data[226..230].try_into().unwrap()) as f64;
+
     // skip to 246 for view matrix
     c.skip(22)?; // 224 + 22 = 246
     
@@ -304,7 +314,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let tbpos_11 = i32::from_le_bytes(data[472..476].try_into().unwrap());
     let fine_col_adj_1 = data[480];
     let fine_col_adj_2 = data[481];
-    let l_version = (tboptions >> 21) & 7;
+    let _l_version = (tboptions >> 21) & 7;
     let s_depth = tbpos_4 as f64 * 0.8e-6;
     println!("  s_depth: {} (tbpos_4: {}), var_col_zpos: {}, roughness_factor: {}, tbpos_3: {}, tbpos_5: {}, tbpos_6: {}, tbpos_7: {}, bColCycling: {}",
         s_depth, tbpos_4, var_col_zpos, roughness_factor, tbpos_3, tbpos_5, tbpos_6, tbpos_7, (tboptions & 0x4000) != 0);
@@ -503,6 +513,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         zoom, rstop, fov_y, step_width,
         b_vary_de_stop,
         de_stop, z_step_div,
+        soft_shadow_radius, hs_max_length_multiplier,
         is_julia, julia_x, julia_y, julia_z, julia_w,
         view_matrix,
         lighting,
