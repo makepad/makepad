@@ -1,3 +1,8 @@
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 /// Iteration state for fractal computation
 #[derive(Debug, Clone)]
 pub struct IterState {
@@ -29,6 +34,136 @@ impl IterState {
     }
 }
 
+#[inline(always)]
+fn simd_abs_xy(x: f64, y: f64) -> (f64, f64) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let xy = vld1q_f64([x, y].as_ptr());
+            let abs_xy = vabsq_f64(xy);
+            let mut out = [0.0; 2];
+            vst1q_f64(out.as_mut_ptr(), abs_xy);
+            (out[0], out[1])
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe {
+            let xy = _mm_set_pd(y, x);
+            let mask = _mm_castsi128_pd(_mm_set1_epi64x(i64::MAX));
+            let abs_xy = _mm_and_pd(xy, mask);
+            let mut out = [0.0; 2];
+            _mm_storeu_pd(out.as_mut_ptr(), abs_xy);
+            (out[0], out[1])
+        }
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        (x.abs(), y.abs())
+    }
+}
+
+#[inline(always)]
+fn simd_box_fold_xy(x: f64, y: f64, fold: f64) -> (f64, f64) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let xy = vld1q_f64([x, y].as_ptr());
+            let ff = vdupq_n_f64(fold);
+            let folded =
+                vsubq_f64(vsubq_f64(vabsq_f64(vaddq_f64(xy, ff)), vabsq_f64(vsubq_f64(xy, ff))), xy);
+            let mut out = [0.0; 2];
+            vst1q_f64(out.as_mut_ptr(), folded);
+            (out[0], out[1])
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe {
+            let xy = _mm_set_pd(y, x);
+            let ff = _mm_set1_pd(fold);
+            let mask = _mm_castsi128_pd(_mm_set1_epi64x(i64::MAX));
+            let plus_abs = _mm_and_pd(_mm_add_pd(xy, ff), mask);
+            let minus_abs = _mm_and_pd(_mm_sub_pd(xy, ff), mask);
+            let folded = _mm_sub_pd(_mm_sub_pd(plus_abs, minus_abs), xy);
+            let mut out = [0.0; 2];
+            _mm_storeu_pd(out.as_mut_ptr(), folded);
+            (out[0], out[1])
+        }
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        (
+            (x + fold).abs() - (x - fold).abs() - x,
+            (y + fold).abs() - (y - fold).abs() - y,
+        )
+    }
+}
+
+#[inline(always)]
+fn simd_dot2(x: f64, y: f64) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let xy = vld1q_f64([x, y].as_ptr());
+            vaddvq_f64(vmulq_f64(xy, xy))
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe {
+            let xy = _mm_set_pd(y, x);
+            let sq = _mm_mul_pd(xy, xy);
+            let hi = _mm_unpackhi_pd(sq, sq);
+            _mm_cvtsd_f64(_mm_add_sd(sq, hi))
+        }
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        x * x + y * y
+    }
+}
+
+#[inline(always)]
+fn simd_mul_add_xy(x: f64, y: f64, mul: f64, add_x: f64, add_y: f64) -> (f64, f64) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe {
+            let xy = vld1q_f64([x, y].as_ptr());
+            let mul_xy = vmulq_n_f64(xy, mul);
+            let add_xy = vld1q_f64([add_x, add_y].as_ptr());
+            let out_xy = vaddq_f64(mul_xy, add_xy);
+            let mut out = [0.0; 2];
+            vst1q_f64(out.as_mut_ptr(), out_xy);
+            (out[0], out[1])
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        unsafe {
+            let xy = _mm_set_pd(y, x);
+            let mm = _mm_set1_pd(mul);
+            let add_xy = _mm_set_pd(add_y, add_x);
+            let out_xy = _mm_add_pd(_mm_mul_pd(xy, mm), add_xy);
+            let mut out = [0.0; 2];
+            _mm_storeu_pd(out.as_mut_ptr(), out_xy);
+            (out[0], out[1])
+        }
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        (x * mul + add_x, y * mul + add_y)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IterParams {
     pub max_iters: i32,
@@ -38,11 +173,11 @@ pub struct IterParams {
     pub julia_x: f64,
     pub julia_y: f64,
     pub julia_z: f64,
-    pub repeat_from: usize,
 }
 
 /// Amazing Box (Mandelbox) formula
 /// Box-fold + sphere-fold + scale
+#[derive(Clone)]
 pub struct AmazingBox {
     pub scale: f64,
     pub scale_div_min_r2: f64,
@@ -68,13 +203,14 @@ impl AmazingBox {
         // Box fold: clamp each axis to [-fold, fold], then reflect
         // equivalent to: x = clamp(x, -fold, fold) * 2 - x
         let f = self.fold;
-        state.x = (state.x + f).abs() - (state.x - f).abs() - state.x;
-        state.y = (state.y + f).abs() - (state.y - f).abs() - state.y;
+        let (folded_x, folded_y) = simd_box_fold_xy(state.x, state.y, f);
+        state.x = folded_x;
+        state.y = folded_y;
         state.z = (state.z + f).abs() - (state.z - f).abs() - state.z;
 
         // Sphere fold using the packed constants from FillCustomVBufWithVars:
         // [PVar-24] = scale / min_r^2, [PVar-32] = min_r^2
-        let rr = state.x * state.x + state.y * state.y + state.z * state.z;
+        let rr = simd_dot2(state.x, state.y) + state.z * state.z;
         let m = if rr < self.min_r2 {
             self.scale_div_min_r2
         } else if rr < 1.0 {
@@ -87,8 +223,9 @@ impl AmazingBox {
         state.w *= m;
 
         // Scale and add constant
-        state.x = state.x * m + state.cx;
-        state.y = state.y * m + state.cy;
+        let (next_x, next_y) = simd_mul_add_xy(state.x, state.y, m, state.cx, state.cy);
+        state.x = next_x;
+        state.y = next_y;
         state.z = state.z * m + state.cz;
     }
 }
@@ -135,6 +272,7 @@ impl Mat3 {
 }
 
 /// MengerIFS formula - Menger sponge via Iterated Function System
+#[derive(Clone)]
 pub struct MengerIFS {
     pub scale: f64,
     pub cx: f64,
@@ -151,8 +289,9 @@ impl MengerIFS {
     /// One iteration for MB3D's hybrid IFS path.
     pub fn iterate(&self, state: &mut IterState) {
         // Fold: absolute value
-        state.x = state.x.abs();
-        state.y = state.y.abs();
+        let (abs_x, abs_y) = simd_abs_xy(state.x, state.y);
+        state.x = abs_x;
+        state.y = abs_y;
         state.z = state.z.abs();
 
         // Sort axes (largest first) - creates octahedral symmetry
@@ -185,6 +324,7 @@ impl MengerIFS {
 }
 
 /// Formula slot in a hybrid setup
+#[derive(Clone)]
 pub enum FormulaKind {
     AmazingBox(AmazingBox),
     MengerIFS(MengerIFS),
@@ -196,6 +336,7 @@ pub struct FormulaSlot {
 }
 
 impl FormulaSlot {
+    #[inline(always)]
     pub fn iterate(&self, state: &mut IterState) {
         match &self.kind {
             FormulaKind::AmazingBox(f) => f.iterate(state),
@@ -204,42 +345,44 @@ impl FormulaSlot {
     }
 }
 
+pub struct HybridProgram {
+    cycle_ops: Box<[FormulaKind]>,
+    repeat_from_op: usize,
+}
+
+impl HybridProgram {
+    pub fn is_empty(&self) -> bool {
+        self.cycle_ops.is_empty()
+    }
+}
+
 /// Run hybrid iteration (alternating mode) and compute distance estimation
-pub fn hybrid_de(pos: (f64, f64, f64), formulas: &[FormulaSlot], params: &IterParams) -> (i32, f64) {
+pub fn hybrid_de(pos: (f64, f64, f64), program: &HybridProgram, params: &IterParams) -> (i32, f64) {
     let mut state = IterState::new(pos.0, pos.1, pos.2, params);
     // MB3D doHybridPasDE initializes w := 1 for the common AmBox + IFS path.
     state.w = 1.0;
+    if program.cycle_ops.is_empty() {
+        return (0, 0.0);
+    }
 
     let mut total_iters = 0i32;
-    let mut current_formula = 0;
-    let mut current_iters_left = if formulas.is_empty() { 0 } else { formulas[0].iteration_count };
+    let mut op_idx = 0usize;
 
     'outer: loop {
-        if current_iters_left <= 0 {
-            current_formula += 1;
-            if current_formula >= formulas.len() {
-                // In MB3D, it repeats from `RepeatFrom`
-                // But we didn't pass `RepeatFrom` to `hybrid_de`.
-                // Let's pass it or store it in `formulas`.
-                // Actually, we can just use the last formula if `formulas` only contains the ones up to `EndTo`.
-                // Wait, `formulas` contains all formulas up to `EndTo`.
-                // But we need `RepeatFrom`.
-                // For now, let's just repeat the last formula if `RepeatFrom` is not available,
-                // or let's add `repeat_from` to `IterParams`!
-                current_formula = params.repeat_from;
-            }
-            current_iters_left = formulas[current_formula].iteration_count;
+        match &program.cycle_ops[op_idx] {
+            FormulaKind::AmazingBox(f) => f.iterate(&mut state),
+            FormulaKind::MengerIFS(f) => f.iterate(&mut state),
         }
-
-        let slot = &formulas[current_formula];
-        slot.iterate(&mut state);
-
         total_iters += 1;
-        current_iters_left -= 1;
-        state.r2 = state.x * state.x + state.y * state.y + state.z * state.z;
+        state.r2 = simd_dot2(state.x, state.y) + state.z * state.z;
 
         if state.r2 > state.rstop || total_iters >= state.max_iters {
             break 'outer;
+        }
+
+        op_idx += 1;
+        if op_idx >= program.cycle_ops.len() {
+            op_idx = program.repeat_from_op;
         }
     }
 
@@ -256,7 +399,7 @@ pub fn hybrid_de(pos: (f64, f64, f64), formulas: &[FormulaSlot], params: &IterPa
 }
 
 /// Build formula slots from M3P file data
-pub fn build_formulas(m3p: &crate::m3p::M3PFile) -> Vec<FormulaSlot> {
+pub fn build_formulas(m3p: &crate::m3p::M3PFile) -> HybridProgram {
     let addon = &m3p.addon;
     let mut slots = Vec::new();
 
@@ -264,12 +407,16 @@ pub fn build_formulas(m3p: &crate::m3p::M3PFile) -> Vec<FormulaSlot> {
     // bHybOpt1 & 7 is the end index (inclusive)
     // bHybOpt1 >> 4 is the repeat index
     let end_to = (addon.b_hyb_opt1 & 7) as usize;
-    let _repeat_from = (addon.b_hyb_opt1 >> 4) as usize;
+    let repeat_from = (addon.b_hyb_opt1 >> 4) as usize;
+    let mut repeat_from_slot = None;
 
     for i in 0..=end_to.min(5) {
         let f = &addon.formulas[i];
         if f.iteration_count <= 0 {
             continue;
+        }
+        if repeat_from_slot.is_none() && i >= repeat_from {
+            repeat_from_slot = Some(slots.len());
         }
 
         let kind = match f.formula_nr {
@@ -316,5 +463,24 @@ pub fn build_formulas(m3p: &crate::m3p::M3PFile) -> Vec<FormulaSlot> {
         });
     }
 
-    slots
+    let repeat_from_slot = repeat_from_slot.unwrap_or(0);
+    let mut cycle_ops = Vec::new();
+    let mut repeat_from_op = 0usize;
+    for (slot_idx, slot) in slots.iter().enumerate() {
+        if slot_idx == repeat_from_slot {
+            repeat_from_op = cycle_ops.len();
+        }
+        cycle_ops.extend(std::iter::repeat_n(slot.kind.clone(), slot.iteration_count as usize));
+    }
+
+    let repeat_from_op = if cycle_ops.is_empty() {
+        0
+    } else {
+        repeat_from_op.min(cycle_ops.len() - 1)
+    };
+
+    HybridProgram {
+        cycle_ops: cycle_ops.into_boxed_slice(),
+        repeat_from_op,
+    }
 }
