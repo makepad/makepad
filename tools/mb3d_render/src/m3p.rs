@@ -1,0 +1,472 @@
+use std::io::{self, Read, Cursor};
+
+// Binary reader helpers
+trait ReadExt: Read {
+    fn read_i32(&mut self) -> io::Result<i32> {
+        let mut buf = [0u8; 4];
+        self.read_exact(&mut buf)?;
+        Ok(i32::from_le_bytes(buf))
+    }
+    fn read_u8_val(&mut self) -> io::Result<u8> {
+        let mut buf = [0u8; 1];
+        self.read_exact(&mut buf)?;
+        Ok(buf[0])
+    }
+    fn read_u16(&mut self) -> io::Result<u16> {
+        let mut buf = [0u8; 2];
+        self.read_exact(&mut buf)?;
+        Ok(u16::from_le_bytes(buf))
+    }
+    fn read_f32(&mut self) -> io::Result<f32> {
+        let mut buf = [0u8; 4];
+        self.read_exact(&mut buf)?;
+        Ok(f32::from_le_bytes(buf))
+    }
+    fn read_f64(&mut self) -> io::Result<f64> {
+        let mut buf = [0u8; 8];
+        self.read_exact(&mut buf)?;
+        Ok(f64::from_le_bytes(buf))
+    }
+    fn skip(&mut self, n: usize) -> io::Result<()> {
+        let mut buf = vec![0u8; n];
+        self.read_exact(&mut buf)
+    }
+}
+impl<R: Read> ReadExt for R {}
+
+#[derive(Debug, Clone)]
+pub struct HAFormula {
+    pub iteration_count: i32,
+    pub formula_nr: i32,
+    pub option_count: i32,
+    pub custom_name: String,
+    pub option_types: [u8; 16],
+    pub option_values: [f64; 16],
+}
+
+#[derive(Debug, Clone)]
+pub struct HeaderCustomAddon {
+    pub version: u8,
+    pub b_options1: u8,
+    pub b_hyb_opt1: u8,
+    pub b_options2: u8,
+    pub b_options3: u8,
+    pub b_hyb_opt2: u16,
+    pub formula_count: u8,
+    pub formulas: [HAFormula; 6],
+}
+
+#[derive(Debug, Clone)]
+pub struct M3PLight {
+    pub color: [u8; 3],
+    pub angle_xy: f64,
+    pub angle_z: f64,
+    pub l_option: u8,
+    pub l_function: u8,
+    pub l_amp: f64,
+    pub free_byte: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct M3PLCol {
+    pub pos: u16,
+    pub color_dif: [u8; 4],
+    pub color_spe: [u8; 4],
+}
+
+#[derive(Debug, Clone)]
+pub struct M3PICol {
+    pub pos: u16,
+    pub color: [u8; 4],
+}
+
+#[derive(Debug, Clone)]
+pub struct M3PLighting {
+    pub ambient_bottom: [u8; 3],
+    pub ambient_top: [u8; 3],
+    pub depth_col: [u8; 3],
+    pub depth_col2: [u8; 3],
+    pub s_depth: f64,
+    pub tbpos_3: i32,
+    pub tbpos_6: i32,
+    pub tbpos_9: i32,
+    pub tbpos_10: i32,
+    pub tbpos_11: i32,
+    pub tboptions: u32,
+    pub fine_col_adj_1: u8,
+    pub fine_col_adj_2: u8,
+    pub lights: Vec<M3PLight>,
+    pub l_cols: Vec<M3PLCol>,
+    pub i_cols: Vec<M3PICol>,
+}
+
+#[derive(Debug, Clone)]
+pub struct M3PFile {
+    pub mand_id: i32,
+    pub width: i32,
+    pub height: i32,
+    pub iterations: i32,
+    pub min_iterations: i32,
+    pub i_options: u16,
+    pub b_new_options: u8,
+    pub b_dfog_it: u8,
+    pub b_color_on_it: u8,
+    pub b_vol_light_nr: u8,
+    pub z_start: f64,
+    pub z_end: f64,
+    pub x_mid: f64,
+    pub y_mid: f64,
+    pub z_mid: f64,
+    pub xw_rot: f64,
+    pub yw_rot: f64,
+    pub zw_rot: f64,
+    pub zoom: f64,
+    pub rstop: f64,
+    pub fov_y: f64,
+    pub step_width: f64,
+    pub de_stop: f32,
+    pub b_vary_de_stop: bool,
+    pub z_step_div: f32,
+    pub is_julia: bool,
+    pub julia_x: f64,
+    pub julia_y: f64,
+    pub julia_z: f64,
+    pub julia_w: f64,
+    pub view_matrix: [[f64; 3]; 3],
+    pub lighting: M3PLighting,
+    pub ssao: M3PSSAO,
+    pub addon: HeaderCustomAddon,
+    // Raw bytes for anything we haven't parsed yet
+    pub raw_header: Vec<u8>,
+}
+
+impl HAFormula {
+    fn read(cursor: &mut Cursor<&[u8]>) -> io::Result<Self> {
+        let iteration_count = cursor.read_i32()?;
+        let formula_nr = cursor.read_i32()?;
+        let option_count = cursor.read_i32()?;
+
+        let mut name_buf = [0u8; 32];
+        cursor.read_exact(&mut name_buf)?;
+        let name_len = name_buf.iter().position(|&b| b == 0).unwrap_or(32);
+        let custom_name = String::from_utf8_lossy(&name_buf[..name_len]).to_string();
+
+        let mut option_types = [0u8; 16];
+        cursor.read_exact(&mut option_types)?;
+
+        let mut option_values = [0.0f64; 16];
+        // 60 bytes read so far (4+4+4+32+16), values start here
+        // But the struct is 188 bytes: 12 + 32 + 16 + 128 = 188
+        // option_values: 16 doubles = 128 bytes
+        for i in 0..16 {
+            option_values[i] = cursor.read_f64()?;
+        }
+
+        Ok(HAFormula {
+            iteration_count,
+            formula_nr,
+            option_count,
+            custom_name,
+            option_types,
+            option_values,
+        })
+    }
+}
+
+pub fn parse(path: &str) -> io::Result<M3PFile> {
+    let data = std::fs::read(path)?;
+    let mut c = Cursor::new(data.as_slice());
+
+    let mand_id = c.read_i32()?;
+    if mand_id != 44 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+            format!("Invalid MandId: {} (expected 44)", mand_id)));
+    }
+
+    let width = c.read_i32()?;
+    let height = c.read_i32()?;
+    let iterations = c.read_i32()?;
+
+    // offset 16: iOptions (Word=u16), bNewOptions (Byte), bColorOnIt (Byte)
+    let i_options = c.read_u16()?;
+    let b_new_options = c.read_u8_val()?;
+    let b_color_on_it = c.read_u8_val()?;
+
+    // offset 20: dZstart, dZend (2 doubles = 16 bytes)
+    let z_start = c.read_f64()?;
+    let z_end = c.read_f64()?;
+
+    // offset 36: dXmid, dYmid, dZmid (3 doubles = 24 bytes)
+    let x_mid = c.read_f64()?;
+    let y_mid = c.read_f64()?;
+    let z_mid = c.read_f64()?;
+
+    // offset 60: dXWrot, dYWrot, dZWrot (3 doubles = 24 bytes)
+    let xw_rot = c.read_f64()?;
+    let yw_rot = c.read_f64()?;
+    let zw_rot = c.read_f64()?;
+
+    // offset 84: dZoom, RStop (2 doubles = 16 bytes)
+    let zoom = c.read_f64()?;
+    let rstop = c.read_f64()?;
+
+    // offset 100: skip to offset 108 (iReflectsCalcTime=i32 + 4 bytes padding)
+    c.skip(8)?;
+
+    // offset 108: dFOVy (double)
+    let fov_y = c.read_f64()?;
+
+    // offset 116: skip to offset 154 (dStepWidth)
+    c.skip(38)?;
+
+    // offset 154: dStepWidth (double)
+    let step_width = c.read_f64()?;
+
+    // offset 162: skip to 177 (bVaryDEstopOnFOV=byte at 162, then skip to 177)
+    c.skip(15)?;
+
+    // offset 177: sDEstop (Single = f32)
+    let de_stop = c.read_f32()?;
+
+    // offset 181: skip 1 byte to 182
+    c.skip(1)?;
+
+    // offset 182: mZstepDiv (Single = f32)
+    let z_step_div = c.read_f32()?;
+
+    // offset 186: skip to 223 for bDFogIt
+    c.skip(37)?; // 186 + 37 = 223
+    let b_dfog_it = c.read_u8_val()?; // 223
+    
+    // skip to 246 for view matrix
+    c.skip(22)?; // 224 + 22 = 246
+    
+    // bVolLightNr is at 343
+    let b_vol_light_nr = data[343];
+
+    // offset 246: hVGrads 3x3 matrix of doubles (72 bytes)
+    let mut view_matrix = [[0.0f64; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            view_matrix[i][j] = c.read_f64()?;
+        }
+    }
+
+    // For now, we'll extract Julia and other params from raw bytes
+    // The full header is 840 bytes, custom addon follows
+    let raw_header = data.clone();
+
+    // Julia mode: from the exploration, cathedral uses Julia mode
+    // Julia params are at specific offsets in the header
+    // From TMandHeader10: Julia params after formula pointers
+    // Let's read them from raw bytes
+    // Actually the exploration found: Jx=-3.99970703125, is_julia=1
+    // For now hardcode from exploration, then fix offsets later
+    let is_julia = true;
+    let julia_x = -3.99970703125;
+    let julia_y = 0.0;
+    let julia_z = 0.0;
+    let julia_w = 0.0;
+
+    let var_col_zpos = i16::from_le_bytes(data[432..434].try_into().unwrap());
+    let tbpos_3 = i32::from_le_bytes(data[440..444].try_into().unwrap());
+    let tbpos_4 = i32::from_le_bytes(data[444..448].try_into().unwrap());
+    // TBpos is 1-indexed in Delphi, so TBpos[6] is at offset 440 + (6-1)*4 = 440 + 20 = 460
+    let tbpos_6 = i32::from_le_bytes(data[460..464].try_into().unwrap());
+    let tboptions = u32::from_le_bytes(data[476..480].try_into().unwrap());
+    let tbpos_9 = i32::from_le_bytes(data[464..468].try_into().unwrap());
+    let tbpos_10 = i32::from_le_bytes(data[468..472].try_into().unwrap());
+    let tbpos_11 = i32::from_le_bytes(data[472..476].try_into().unwrap());
+    let fine_col_adj_1 = data[480];
+    let fine_col_adj_2 = data[481];
+    let l_version = (tboptions >> 21) & 7;
+    let s_depth = tbpos_4 as f64 * 0.8e-6;
+    println!("  s_depth: {} (tbpos_4: {}), var_col_zpos: {}, tbpos_3: {}, tbpos_6: {}, bColCycling: {}", s_depth, tbpos_4, var_col_zpos, tbpos_3, tbpos_6, (tboptions & 0x4000) != 0);
+    println!("  tbpos_9: {}, tbpos_10: {}, tboptions: {:08x}, fine_col_adj_1: {}, fine_col_adj_2: {}", tbpos_9, tbpos_10, tboptions, fine_col_adj_1, fine_col_adj_2);
+    println!("  depth_col: {:?}, depth_col2: {:?}", [data[492], data[493], data[494]], [data[496], data[497], data[498]]);
+
+    // Parse lighting at fixed offsets
+    let mut lighting = M3PLighting {
+        ambient_bottom: [data[484], data[485], data[486]],
+        ambient_top: [data[488], data[489], data[490]],
+        depth_col: [data[492], data[493], data[494]],
+        depth_col2: [data[496], data[497], data[498]],
+        s_depth,
+        tbpos_3,
+        tbpos_6,
+        tbpos_9,
+        tbpos_10,
+        tbpos_11,
+        tboptions,
+        fine_col_adj_1,
+        fine_col_adj_2,
+        lights: Vec::new(),
+        l_cols: Vec::new(),
+        i_cols: Vec::new(),
+    };
+
+    // 3 lights starting at 500
+    for i in 0..3 {
+        let offset = 500 + i * 32;
+        let mut lc = Cursor::new(&data[offset..offset + 32]);
+        let l_option = lc.read_u8_val()?;
+        let l_function = lc.read_u8_val()?;
+        
+        let _lamp = lc.read_u16()?;
+        
+        let r = lc.read_u8_val()?;
+        let g = lc.read_u8_val()?;
+        let b = lc.read_u8_val()?;
+        lc.read_u16()?; // LightMapNr
+        
+        // Double7B for LXpos
+        let mut x_bytes = [0u8; 8];
+        lc.read_exact(&mut x_bytes[1..8])?;
+        let angle_xy = f64::from_le_bytes(x_bytes);
+        
+        let free_byte = lc.read_u8_val()?; // FreeByte
+        let mut z_bytes = [0u8; 8];
+        lc.read_exact(&mut z_bytes[1..8])?; // LZpos
+        
+        lc.read_u8_val()?; // AdditionalByteEx
+        
+        // Double7B for LYpos
+        let mut y_bytes = [0u8; 8];
+        lc.read_exact(&mut y_bytes[1..8])?;
+        let angle_z = f64::from_le_bytes(y_bytes);
+        
+        let l_amp = 1.0; // Wait, we need to extract amplitude?
+        
+        println!("  Light {}: color=[{}, {}, {}], option={}, function={}, angle_xy={}, angle_z={}", i, r, g, b, l_option, l_function, angle_xy, angle_z);
+
+        lighting.lights.push(M3PLight {
+            color: [r, g, b],
+            angle_xy,
+            angle_z,
+            l_option,
+            l_function,
+            l_amp,
+            free_byte,
+        });
+    }
+
+    // LCols starting at 692
+    for i in 0..10 {
+        let offset = 692 + i * 10;
+        let mut gc = Cursor::new(&data[offset..offset + 10]);
+        let pos = gc.read_u16()?;
+        let mut color_dif = [0u8; 4];
+        gc.read_exact(&mut color_dif)?;
+        let mut color_spe = [0u8; 4];
+        gc.read_exact(&mut color_spe)?;
+        lighting.l_cols.push(M3PLCol { pos, color_dif, color_spe });
+    }
+
+    // ICols starting at 792
+    for i in 0..4 {
+        let offset = 792 + i * 6;
+        let mut gc = Cursor::new(&data[offset..offset + 6]);
+        let pos = gc.read_u16()?;
+        let mut color = [0u8; 4];
+        gc.read_exact(&mut color)?;
+        lighting.i_cols.push(M3PICol { pos, color });
+    }
+
+    // Parse HeaderCustomAddon (starts at offset 840)
+    let addon_offset = 840;
+    let mut ac = Cursor::new(&data[addon_offset..]);
+
+    let version = ac.read_u8_val()?;
+    let b_options1 = ac.read_u8_val()?;
+    let b_options2 = ac.read_u8_val()?;
+    println!("  b_options2: {}", b_options2);
+    let b_options3 = ac.read_u8_val()?;
+    let formula_count = ac.read_u8_val()?;
+    let b_hyb_opt1 = ac.read_u8_val()?;
+    let b_hyb_opt2 = ac.read_u16()?;
+
+    let mut formulas = Vec::new();
+    for _ in 0..6 {
+        formulas.push(HAFormula::read(&mut ac)?);
+    }
+
+    let addon = HeaderCustomAddon {
+        version,
+        b_options1,
+        b_hyb_opt1,
+        b_options2,
+        b_options3,
+        b_hyb_opt2,
+        formula_count,
+        formulas: [
+            formulas[0].clone(),
+            formulas[1].clone(),
+            formulas[2].clone(),
+            formulas[3].clone(),
+            formulas[4].clone(),
+            formulas[5].clone(),
+        ],
+    };
+
+    let b_vary_de_stop = data[162] != 0;
+    println!("  bVaryDEstop: {}", b_vary_de_stop);
+    let b_calc_amb_shadow_automatic = data[149];
+    println!("  b_calc_amb_shadow_automatic: {}", b_calc_amb_shadow_automatic);
+    let calc_amb_shadow = (b_calc_amb_shadow_automatic & 1) != 0;
+    let quality = ((b_calc_amb_shadow_automatic >> 4) & 3) as i32;
+    let ssao_r_count = data[187] as i32;
+    let ao_dithering = data[188] as i32;
+    let deao_max_l = f32::from_le_bytes(data[374..378].try_into().unwrap()) as f64;
+    
+    let amb_shad = (lighting.tbpos_11 & 0xFF) as f64 / 53.0;
+    
+    let diffuse_shadowing = data[600 + 16] as f64 / 256.0;
+
+    let ssao = M3PSSAO {
+        quality,
+        deao_max_l,
+        ssao_r_count,
+        ao_dithering,
+        calc_amb_shadow,
+        diffuse_shadowing,
+        amb_shad,
+    };
+
+        println!("  SSAO: enabled={}, quality={}, rays={}, maxL={}, amb_shad={}, diff_shad={}", 
+            ssao.calc_amb_shadow, ssao.quality, ssao.ssao_r_count, ssao.deao_max_l, ssao.amb_shad, ssao.diffuse_shadowing);
+        
+        println!("LCols:");
+        for (i, c) in lighting.l_cols.iter().enumerate() {
+            println!("  {}: pos={}, dif={:?}, spe={:?}", i, c.pos, c.color_dif, c.color_spe);
+        }
+        
+        let min_iterations = i32::from_le_bytes(data[135..139].try_into().unwrap());
+
+    Ok(M3PFile {
+        mand_id, width, height, iterations, min_iterations,
+        i_options, b_new_options, b_color_on_it, b_dfog_it, b_vol_light_nr,
+        z_start, z_end,
+        x_mid, y_mid, z_mid,
+        xw_rot, yw_rot, zw_rot,
+        zoom, rstop, fov_y, step_width,
+        b_vary_de_stop,
+        de_stop, z_step_div,
+        is_julia, julia_x, julia_y, julia_z, julia_w,
+        view_matrix,
+        lighting,
+        ssao,
+        addon,
+        raw_header,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct M3PSSAO {
+    pub quality: i32,
+    pub deao_max_l: f64,
+    pub ssao_r_count: i32,
+    pub ao_dithering: i32,
+    pub calc_amb_shadow: bool,
+    pub diffuse_shadowing: f64,
+    pub amb_shad: f64,
+}

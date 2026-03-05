@@ -1,0 +1,9 @@
+[package]
+name = "makepad-mb3d-render"
+version = "0.1.0"
+edition = "2021"
+description = "MB3D fractal renderer - parses M3P files, ray-marches fractals, outputs PNG"
+
+[dependencies]
+makepad-zune-png = { path = "../../libs/zune/zune-png" }
+makepad-zune-core = { path = "../../libs/zune/zune-core" }
