@@ -12,16 +12,18 @@ struct Options {
     m3p_path: String,
     output_path: String,
     scale: f64,
+    adaptive_ao: bool,
 }
 
 fn usage(program: &str) -> String {
-    format!("Usage: {program} [--scale <factor>] [input.m3p] [output.png]")
+    format!("Usage: {program} [--scale <factor>] [--no-adaptive-ao] [input.m3p] [output.png]")
 }
 
 fn parse_args() -> Result<Option<Options>, String> {
     let mut args = std::env::args();
     let program = args.next().unwrap_or_else(|| "makepad-mb3d-render".to_string());
     let mut scale = 1.0f64;
+    let mut adaptive_ao = true;
     let mut positional = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -37,6 +39,7 @@ fn parse_args() -> Result<Option<Options>, String> {
                     return Err(format!("--scale must be a positive finite number\n{}", usage(&program)));
                 }
             }
+            "--no-adaptive-ao" => adaptive_ao = false,
             "-h" | "--help" => {
                 println!("{}", usage(&program));
                 return Ok(None);
@@ -59,6 +62,7 @@ fn parse_args() -> Result<Option<Options>, String> {
             .cloned()
             .unwrap_or_else(|| "cathedral_test.png".to_string()),
         scale,
+        adaptive_ao,
     }))
 }
 
@@ -89,6 +93,7 @@ fn main() {
     }
 
     let mut params = render::RenderParams::from_m3p(&m3p_file);
+    params.adaptive_ao_subsampling = options.adaptive_ao;
     if (options.scale - 1.0).abs() > f64::EPSILON {
         params.camera.width = (m3p_file.width as f64 * options.scale).round().max(1.0) as i32;
         params.camera.height = (m3p_file.height as f64 * options.scale).round().max(1.0) as i32;

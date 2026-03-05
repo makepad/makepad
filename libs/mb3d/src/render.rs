@@ -87,6 +87,7 @@ impl Camera {
 pub struct RenderParams {
     pub camera: Camera,
     pub iter_params: IterParams,
+    pub adaptive_ao_subsampling: bool,
     pub max_ray_length: f64,   // maximum ray length in world units
     pub de_stop: f64,          // DE threshold for surface hit (world units, adjusted by de_scale)
     pub s_z_step_div: f64,     // effective step multiplier: sZstepDiv * de_scale
@@ -237,6 +238,7 @@ impl RenderParams {
                 julia_y: m3p.julia_y,
                 julia_z: m3p.julia_z,
             },
+            adaptive_ao_subsampling: true,
             max_ray_length,
             de_stop,
             s_z_step_div,
@@ -389,7 +391,6 @@ fn estimate_normal_grad(
     let rt = right.normalize().scale(eps);
     let upv = up.normalize().scale(eps);
 
-    // Central differences measured in camera basis directions.
     let dz = calc_de(pos.add(fwd), formulas, params, de_floor).1
            - calc_de(pos.sub(fwd), formulas, params, de_floor).1;
     let dx = calc_de(pos.add(rt), formulas, params, de_floor).1
@@ -478,7 +479,6 @@ fn smooth_normal_mb3d(
 
     let mut dnn = calc_de(pos, formulas, params, de_floor).1;
     if smooth_n < 8 {
-        // RMCalculateNormals: after doubling Noffset, smooth midpoint uses +/-X and +/-Y probes.
         dnn = (
             dnn
             + calc_de(pos.add(right.normalize().scale(-noffset2)), formulas, params, de_floor).1
@@ -560,13 +560,6 @@ fn calc_hs_soft_bits_mb3d(
     formulas: &HybridProgram,
     params: &RenderParams,
 ) -> i32 {
-    let n = normal.normalize();
-    let l = light_dir.normalize();
-    let hs_vec = l.scale(-1.0);
-    if n.dot(hs_vec) > 0.0 {
-        return 0;
-    }
-
     let view_dir = ray_dir.normalize();
 
     // Pre-refine HS start along the view direction so CalcHSsoft starts close to the same
@@ -629,8 +622,15 @@ fn calc_hs_soft_bits_mb3d(
         return 63;
     }
 
+    let n = normal.normalize();
+    let l = light_dir.normalize();
     let v = view_dir;
+    let hs_vec = l.scale(-1.0);
     let zz2mul = -hs_vec.dot(v); // == dot(light_dir, ray_dir)
+
+    if n.dot(hs_vec) > 0.0 {
+        return 0;
+    }
 
     let mut d_t1 = max_l_hs;
     let mut zz2_steps = depth_steps;
@@ -869,8 +869,11 @@ pub fn render(formulas: &HybridProgram, params: &RenderParams, lighting: &crate:
                             .wrapping_add((thread_idx as u32).wrapping_mul(0x9e37_79b9))
                             .wrapping_add(0x2456_3487);
 
-                        if let PixelResult::Hit { depth, iters, shadow_steps } =
-                            ray_march(origin, dir, formulas, params, seed)
+                        if let PixelResult::Hit {
+                            depth,
+                            iters,
+                            shadow_steps,
+                        } = ray_march(origin, dir, formulas, params, seed)
                         {
                             local_hits += 1;
                             depth_chunk[idx] = depth;
