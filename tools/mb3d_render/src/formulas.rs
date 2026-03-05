@@ -55,19 +55,26 @@ pub struct IterParams {
 /// Box-fold + sphere-fold + scale
 pub struct AmazingBox {
     pub scale: f64,
-    pub min_r: f64,
+    pub scale_div_min_r2: f64,
+    pub min_r2: f64,
     pub fold: f64,
 }
 
 impl AmazingBox {
     pub fn new(scale: f64, min_r: f64, fold: f64) -> Self {
-        AmazingBox { scale, min_r, fold }
+        let min_r = min_r.max(1.0e-40);
+        let min_r2 = min_r * min_r;
+        let scale_div_min_r2 = scale / min_r2;
+        AmazingBox {
+            scale,
+            scale_div_min_r2,
+            min_r2,
+            fold,
+        }
     }
 
-    /// One iteration. Returns the derivative scale factor.
-    pub fn iterate(&self, state: &mut IterState) -> f64 {
-        let fold = self.fold;
-
+    /// One iteration for MB3D's HybridCubeDE.
+    pub fn iterate(&self, state: &mut IterState) {
         // Box fold: clamp each axis to [-fold, fold], then reflect
         // equivalent to: x = clamp(x, -fold, fold) * 2 - x
         let f = self.fold;
@@ -75,24 +82,24 @@ impl AmazingBox {
         state.y = (state.y + f).abs() - (state.y - f).abs() - state.y;
         state.z = (state.z + f).abs() - (state.z - f).abs() - state.z;
 
-        // Sphere fold
+        // Sphere fold using the packed constants from FillCustomVBufWithVars:
+        // [PVar-24] = scale / min_r^2, [PVar-32] = min_r^2
         let rr = state.x * state.x + state.y * state.y + state.z * state.z;
-        let min_r = self.min_r.max(1e-40); // MB3D uses Max(1e-40, MinR)
-        let min_r2 = min_r * min_r;
-        let m = if rr < min_r2 {
-            self.scale / min_r2
+        let m = if rr < self.min_r2 {
+            self.scale_div_min_r2
         } else if rr < 1.0 {
             self.scale / rr
         } else {
             self.scale
         };
 
+        // MB3D's hybrid DE uses w as the common DE accumulator.
+        state.w *= m;
+
         // Scale and add constant
         state.x = state.x * m + state.cx;
         state.y = state.y * m + state.cy;
         state.z = state.z * m + state.cz;
-
-        m.abs()
     }
 }
 
@@ -151,8 +158,8 @@ impl MengerIFS {
         MengerIFS { scale, cx, cy, cz, rot }
     }
 
-    /// One iteration. Returns the derivative scale factor.
-    pub fn iterate(&self, state: &mut IterState) -> f64 {
+    /// One iteration for MB3D's hybrid IFS path.
+    pub fn iterate(&self, state: &mut IterState) {
         // Fold: absolute value
         state.x = state.x.abs();
         state.y = state.y.abs();
@@ -184,8 +191,6 @@ impl MengerIFS {
 
         // w tracks cumulative scale for DE
         state.w *= self.scale;
-
-        self.scale
     }
 }
 
@@ -201,20 +206,10 @@ pub struct FormulaSlot {
 }
 
 impl FormulaSlot {
-    pub fn iterate(&self, state: &mut IterState) -> f64 {
+    pub fn iterate(&self, state: &mut IterState) {
         match &self.kind {
             FormulaKind::AmazingBox(f) => f.iterate(state),
             FormulaKind::MengerIFS(f) => f.iterate(state),
-        }
-    }
-
-    /// Whether this formula adds a constant (c) term, affecting DR tracking.
-    /// Mandelbox-type: dr = dr * |m| + 1.0 (the +1 comes from d/dc of x*m+c)
-    /// IFS-type: dr = dr * scale (no constant addition)
-    pub fn has_c_add(&self) -> bool {
-        match &self.kind {
-            FormulaKind::AmazingBox(_) => true,
-            FormulaKind::MengerIFS(_) => false,
         }
     }
 }
@@ -222,7 +217,8 @@ impl FormulaSlot {
 /// Run hybrid iteration (alternating mode) and compute distance estimation
 pub fn hybrid_de(pos: (f64, f64, f64), formulas: &[FormulaSlot], params: &IterParams) -> (i32, f64) {
     let mut state = IterState::new(pos.0, pos.1, pos.2, params);
-    state.w = 1.0; // cumulative scale for IFS DE
+    // MB3D doHybridPasDE initializes w := 1 for the common AmBox + IFS path.
+    state.w = 1.0;
     state.dr = 1.0;
 
     let mut total_iters = 0i32;
@@ -247,17 +243,7 @@ pub fn hybrid_de(pos: (f64, f64, f64), formulas: &[FormulaSlot], params: &IterPa
         }
 
         let slot = &formulas[current_formula];
-        let scale_factor = slot.iterate(&mut state);
-
-        // Update DE derivative.
-        // Mandelbox-like formulas include a constant add term, which contributes +1
-        // to the derivative recurrence (dr = dr * |m| + 1).
-        // IFS-like formulas are pure scale transforms (dr = dr * scale).
-        if slot.has_c_add() {
-            state.dr = state.dr * scale_factor.abs() + 1.0;
-        } else {
-            state.dr = state.dr * scale_factor.abs();
-        }
+        slot.iterate(&mut state);
 
         total_iters += 1;
         current_iters_left -= 1;
@@ -270,12 +256,9 @@ pub fn hybrid_de(pos: (f64, f64, f64), formulas: &[FormulaSlot], params: &IterPa
 
     state.iters = total_iters;
 
-    // Distance estimation
-    // For Mandelbox-type: DE = (r - rstop_surface) / |dr|
-    // More standard: DE = r / |dr| * 0.5 * ln(r) but for box fractals:
     let r = state.r2.sqrt();
-    let de = if state.dr.abs() > 1e-30 {
-        r / state.dr.abs()
+    let de = if state.w.abs() > 1e-30 {
+        r / state.w.abs()
     } else {
         0.0
     };
@@ -303,19 +286,20 @@ pub fn build_formulas(m3p: &crate::m3p::M3PFile) -> Vec<FormulaSlot> {
         let kind = match f.formula_nr {
             4 => {
                 // Amazing Box (Mandelbox) built-in formula.
-                // Assembly reads constants from PVar buffer packed by FillCustomVBufWithVars:
-                //   [PVar-16] = scale (from opt[0] type 0)
-                //   [PVar-24] = scale/minR² (from opt[1] type 7)
-                //   [PVar-32] = minR² (from opt[1] type 7)
-                //   [PVar-40] = fold (from opt[2] type 11)
-                //
-                // Type 7 (BoxscaleMinR): minR = Max(1e-40, value), minR² = minR²
-                // Type 11 (Folding16): stores fold value directly
-                let scale = f.option_values[0]; // 0.9995
-                let min_r = f.option_values[1].max(1e-40); // Max(1e-40, -14.9997) ≈ 0
-                let fold = f.option_values[2];  // 0.5
+                // FillCustomVBufWithVars packs opt[1] type 7 as:
+                // scale/min_r^2 and min_r^2, where min_r is clamped by Max(1e-40, raw).
+                let scale = f.option_values[0];
+                let min_r = f.option_values[1];
+                let fold = f.option_values[2];
+                let clamped_min_r = min_r.max(1.0e-40);
 
-                eprintln!("  AmazingBox: scale={}, minR={:.2e}, fold={}", scale, min_r, fold);
+                eprintln!(
+                    "  AmazingBox: scale={}, raw_minR={}, minR={:.2e}, fold={}",
+                    scale,
+                    min_r,
+                    clamped_min_r,
+                    fold
+                );
                 FormulaKind::AmazingBox(AmazingBox::new(scale, min_r, fold))
             },
             _ => {

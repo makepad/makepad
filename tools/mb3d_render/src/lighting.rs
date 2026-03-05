@@ -2,53 +2,6 @@ use crate::render::Vec3;
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy)]
-struct LightingConfig {
-    tone_gamma: f64,
-    tone_gain: f64,
-    tone_bias: f64,
-    diffuse_strength: f64,
-    specular_strength: f64,
-    specular_power: f64,
-    specular2_strength: f64,
-    specular2_power: f64,
-    rim_strength: f64,
-    rim_power: f64,
-    fog_strength: f64,
-    fog_gamma: f64,
-    iter_tint_strength: f64,
-    light0_scale: f64,
-    light1_scale: f64,
-}
-
-fn env_f64(name: &str, default: f64) -> f64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(default)
-}
-
-fn config() -> &'static LightingConfig {
-    static CFG: OnceLock<LightingConfig> = OnceLock::new();
-    CFG.get_or_init(|| LightingConfig {
-        tone_gamma: env_f64("TONE_GAMMA", 0.6),
-        tone_gain: env_f64("TONE_GAIN", 0.8),
-        tone_bias: env_f64("TONE_BIAS", -0.05),
-        diffuse_strength: env_f64("LIGHT_DIFFUSE", 1.0),
-        specular_strength: env_f64("LIGHT_SPEC", 0.6),
-        specular_power: env_f64("LIGHT_SPEC_POW", 48.0),
-        specular2_strength: env_f64("LIGHT_SPEC2", 0.15),
-        specular2_power: env_f64("LIGHT_SPEC2_POW", 16.0),
-        rim_strength: env_f64("LIGHT_RIM", 0.05),
-        rim_power: env_f64("LIGHT_RIM_POW", 2.8),
-        fog_strength: env_f64("FOG_STRENGTH", 0.04),
-        fog_gamma: env_f64("FOG_GAMMA", 1.2),
-        iter_tint_strength: env_f64("ITER_TINT", 0.45),
-        light0_scale: env_f64("LIGHT0_SCALE", 0.35),
-        light1_scale: env_f64("LIGHT1_SCALE", 0.85),
-    })
-}
-
-#[derive(Clone, Copy)]
 struct ParsedLight {
     idx: usize,
     dir: Vec3,
@@ -126,6 +79,15 @@ fn parse_light(idx: usize, l: &crate::m3p::M3PLight, camera: &crate::render::Cam
         i_light_pos,
         is_positional,
     })
+}
+
+fn ao_step_jitter(pixel_x: i32, pixel_y: i32, ray_idx: usize) -> f64 {
+    let mut v = (pixel_x as u32).wrapping_mul(73_856_093)
+        ^ (pixel_y as u32).wrapping_mul(19_349_663)
+        ^ (ray_idx as u32).wrapping_mul(83_492_791);
+    v ^= v >> 13;
+    v = v.wrapping_mul(1_274_126_177);
+    (v as f64) / (u32::MAX as f64)
 }
 
 fn cos_tables() -> &'static CosTables {
@@ -298,8 +260,10 @@ pub fn shade(
     _p: Vec3,
     _camera: &crate::render::Camera,
     ao_factor: f64,
-    direct_light_factor: f64,
+    _direct_light_factor: f64,
     depth: f64,
+    pixel_x: i32,
+    pixel_y: i32,
     y_pos: f64,
     max_depth: f64,
     lighting: &crate::m3p::M3PLighting,
@@ -308,71 +272,85 @@ pub fn shade(
     params: &crate::render::RenderParams,
     debug: bool,
 ) -> [u8; 3] {
-    let cfg = config();
-    let strict_mb3d = true;
-
     let m_zz = depth / params.step_width;
 
-    // AO is estimated in render pass; keep the expensive per-shade AO path optional.
     let mut final_ao = ao_factor.clamp(0.0, 1.0);
-    // Base-first workflow: keep AO ray pass opt-in while core lighting is tuned.
-    if ssao.calc_amb_shadow && env_f64("SHADE_AO_RAYS", 0.0) != 0.0 {
+    // MB3D's real AO is the DEAO pass. SSAO modes are separate post-processes.
+    if ssao.calc_amb_shadow && ssao.mode == 3 {
         let mut final_ao_val = 0.0;
-        
-        let num_rays = if ssao.quality == 0 { 3 } else { 
-            let mut count = 1;
-            let abr = std::f64::consts::PI * 0.5 / (ssao.quality as f64 + 0.9);
-            for iy in 1..=ssao.quality {
-                let itmp = ((iy as f64 * abr).sin() * std::f64::consts::PI * 2.0 / abr).round() as i32;
-                count += itmp.max(1);
-            }
-            count as usize
+        let normal_basis_w = normal.normalize();
+        let normal_basis_u = if normal_basis_w.x.abs() > 0.1 {
+            Vec3::new(0.0, 1.0, 0.0).cross(normal_basis_w).normalize()
+        } else {
+            Vec3::new(1.0, 0.0, 0.0).cross(normal_basis_w).normalize()
         };
-        
-        if debug {
-            println!("  num_rays: {}, quality: {}", num_rays, ssao.quality);
-        }
-        
-        let mut min_ra = vec![0.0; num_rays];
-        let mut rot_m = vec![Vec3::new(0.0, 0.0, 0.0); num_rays];
-        
-        let abr = std::f64::consts::PI * 0.5 / (ssao.quality as f64 + 0.9);
-        let mut ray_idx = 0;
-        
-        if ssao.quality > 0 {
-            rot_m[0] = normal;
-            ray_idx += 1;
+        let normal_basis_v = normal_basis_w.cross(normal_basis_u);
+        let make_world_dir = |polar: f64, azimuth: f64| {
+            let (sy, cy) = polar.sin_cos();
+            let (sz, cz) = azimuth.sin_cos();
+            let local_dir = Vec3::new(sy * cz, sy * sz, cy);
+            normal_basis_u
+                .scale(local_dir.x)
+                .add(normal_basis_v.scale(local_dir.y))
+                .add(normal_basis_w.scale(local_dir.z))
+                .normalize()
+        };
+        let (dither_y, dither_x) = if ssao.ao_dithering > 0 {
+            let denom = ssao.ao_dithering as f64;
+            (
+                (pixel_y.rem_euclid(ssao.ao_dithering + 1) as f64) * 0.5 / denom,
+                (pixel_x.rem_euclid(ssao.ao_dithering + 1) as f64) * 0.5 / denom,
+            )
+        } else {
+            (0.25, 0.0)
+        };
+
+        let mut rot_m = Vec::new();
+        let (row_abr, d_step_mul, d_min_a_dif, correction_weight) = if ssao.quality == 0 {
+            let row_abr = std::f64::consts::PI / 3.0;
+            let polar = if ssao.ao_dithering > 0 {
+                (dither_y + 0.5) * 50.0_f64.to_radians()
+            } else {
+                row_abr * 0.5
+            };
+            for itmp in 0..3 {
+                let azimuth = (itmp as f64 + dither_x) * std::f64::consts::PI * 2.0 / 3.0;
+                rot_m.push(make_world_dir(polar, azimuth));
+            }
+            (row_abr, 1.8, -1.0, 0.3)
+        } else {
+            let row_abr = std::f64::consts::PI * 0.5 / (ssao.quality as f64 + 0.9);
+            if dither_y >= 0.1 {
+                rot_m.push(normal_basis_w);
+            }
             for iy in 1..=ssao.quality {
-                let itmp = ((iy as f64 * abr).sin() * std::f64::consts::PI * 2.0 / abr).round() as i32;
-                let itmp_f = itmp.max(1) as f64;
-                for ix in 0..itmp.max(1) {
-                    let angle_y = abr * (iy as f64 + 0.25 - 0.25);
-                    let angle_z = (ix as f64) * std::f64::consts::PI * 2.0 / itmp_f;
-                    
-                    let sy = angle_y.sin();
-                    let cy = angle_y.cos();
-                    let sz = angle_z.sin();
-                    let cz = angle_z.cos();
-                    
-                    let local_dir = Vec3::new(sy * cz, sy * sz, cy);
-                    
-                    let w = normal;
-                    let u = if w.x.abs() > 0.1 { Vec3::new(0.0, 1.0, 0.0).cross(w).normalize() } else { Vec3::new(1.0, 0.0, 0.0).cross(w).normalize() };
-                    let v = w.cross(u);
-                    
-                    rot_m[ray_idx] = u.scale(local_dir.x).add(v.scale(local_dir.y)).add(w.scale(local_dir.z)).normalize();
-                    ray_idx += 1;
+                let row_count = ((iy as f64 * row_abr).sin() * std::f64::consts::PI * 2.0 / row_abr)
+                    .round()
+                    .max(1.0) as i32;
+                let polar = row_abr * (iy as f64 + dither_y - 0.25);
+                for ix in 0..row_count {
+                    let azimuth = (ix as f64 + dither_x) * std::f64::consts::PI * 2.0 / row_count as f64;
+                    rot_m.push(make_world_dir(polar, azimuth));
                 }
             }
-        } else {
-            rot_m[0] = normal;
-            rot_m[1] = normal.add(_camera.right).normalize();
-            rot_m[2] = normal.add(_camera.up).normalize();
+            let correction_weight = if ssao.quality == 1 { 0.2 } else { 0.1666 };
+            (
+                row_abr,
+                1.0 + row_abr.sin(),
+                (row_abr * 1.2).cos(),
+                correction_weight,
+            )
+        };
+        let ray_count = rot_m.len();
+        let mut min_ra = vec![0.0; ray_count];
+
+        if debug {
+            println!("  num_rays: {}, quality: {}", ray_count, ssao.quality);
         }
-        
-        let d_step_mul = 1.0 + abr.sin();
-        let de_mul = ((num_rays as f64) * 0.5).sqrt();
-        
+
+        let de_mul = ((ray_count as f64) * 0.5).sqrt();
+        let overlap_abr = 1.2 / (1.0 / de_mul).asin();
+
         // MB3D AO math operates in step units.
         let step_ao = 1.0 + m_zz.abs() * params.de_stop_factor;
 
@@ -392,20 +370,20 @@ pub fn shade(
             params.de_stop_header / (d_step_mul * d_step_mul)
         };
         
-        for i in 0..num_rays {
+        for i in 0..ray_count {
             let s_vec = rot_m[i];
             
             let mut dt1 = step_ao_actual * d_step_mul;
             let mut s_tmp = 1.0;
             
-            let mut b_first_step = false; // bMCTFirstStepRandom is false for this file
+            let mut b_first_step = params.first_step_random;
             
             loop {
                 let mut b_end = false;
                 
                 if b_first_step {
                     b_first_step = false;
-                    dt1 = dt1 * 1.25; // Average of (rand * 1.5 + 0.5)
+                    dt1 *= ao_step_jitter(pixel_x, pixel_y, i) * 1.5 + 0.5;
                 } else if dt1 > max_dist_steps {
                     dt1 = max_dist_steps;
                     b_end = true;
@@ -414,7 +392,7 @@ pub fn shade(
                 let probe_pos = _p.add(s_vec.scale(dt1 * params.step_width));
                 
                 let (_, de_world) = crate::formulas::hybrid_de((probe_pos.x, probe_pos.y, probe_pos.z), formulas, &params.iter_params);
-                let dt2 = de_world / params.step_width;
+                let dt2 = de_world * params.de_scale / params.step_width;
                 
                 let md_d10 = 0.1 / (max_dist_steps * de_mul);
                 let val = ((dt2 - ms_de_stop) / dt1 + md_d10).min(s_tmp);
@@ -423,7 +401,9 @@ pub fn shade(
                 }
                 
                 if debug && i == 0 {
-                    println!("    AO ray 0 step(steps): dt1={:.4e}, dt2={:.4e}, ms_de_stop={:.4e}, val={:.4}, s_tmp={:.4}", dt1, dt2, ms_de_stop, val, s_tmp);
+                    println!("    AO ray 0 step: dt1={}, dt2={}, ms_de_stop={}, val={}, s_tmp={}", dt1, dt2, ms_de_stop, val, s_tmp);
+                    println!("      probe_pos offset from hit_pos: {:?}", probe_pos.sub(_p));
+                    println!("      de_world: {:e}, dt1 * step_width: {:e}, s_vec: {:?}", de_world, dt1 * params.step_width, s_vec);
                 }
                 
                 if s_tmp < 0.02 {
@@ -442,18 +422,16 @@ pub fn shade(
         }
         
         // Correction step
-        let mut s_add = vec![0.0; num_rays];
-        let d_min_a_dif = (abr * 1.2).cos();
-        let correction_weight = if ssao.quality == 1 { 0.2 } else { 0.1666 };
+        let mut s_add = vec![0.0; ray_count];
         
-        for iy in 0..num_rays {
+        for iy in 0..ray_count {
             let mut max_add = 1.0 - min_ra[iy];
             if max_add > 0.0 {
-                for ix in 0..num_rays {
+                for ix in 0..ray_count {
                     if ix != iy {
                         let d_tmp = rot_m[iy].dot(rot_m[ix]);
                         if d_tmp > d_min_a_dif {
-                            let overlap = min_ra[ix] - d_tmp.acos() * abr + 1.0;
+                            let overlap = min_ra[ix] - d_tmp.acos() * overlap_abr + 1.0;
                             if overlap > 0.0 {
                                 s_add[iy] += max_add.min(overlap) * correction_weight;
                             }
@@ -461,15 +439,18 @@ pub fn shade(
                     }
                 }
             }
+            if debug && iy == 0 {
+                println!("    AO correction ray 0: min_ra={}, s_add={}, total_for_ray={}", min_ra[iy], s_add[iy], (s_add[iy] + min_ra[iy]).min(1.0));
+            }
         }
         
-        for iy in 0..num_rays {
+        for iy in 0..ray_count {
             final_ao_val += (s_add[iy] + min_ra[iy]).min(1.0);
         }
 
         // Matches CalcAmbShadowDEfor1pos:
         // AmbShadowNorm = 1 - dAmount/RayCount.
-        let amb_shadow_norm = (1.0 - final_ao_val / num_rays as f64).clamp(0.0, 1.0);
+        let amb_shadow_norm = (1.0 - final_ao_val / ray_count as f64).clamp(0.0, 1.0);
         let s_amplitude = ssao.amb_shad;
 
         // Matches PaintThread.calcAmbshadow:
@@ -573,20 +554,11 @@ pub fn shade(
 
     let s_diff_base = (lighting.tbpos_5 as f64 * 0.02).max(0.0);
     let s_spec_base = (((lighting.tbpos_7 & 0x0FFF) as f64) * 0.02).max(0.004);
-    let s_diff = if strict_mb3d {
-        s_diff_base
-    } else {
-        s_diff_base * cfg.diffuse_strength
-    };
-    let s_spec = if strict_mb3d {
-        s_spec_base
-    } else {
-        s_spec_base * cfg.specular_strength
-    };
+    let s_diff = s_diff_base;
+    let s_spec = s_spec_base;
 
     // view_dir is passed as object->camera.
-    let v_to_cam = view_dir.normalize();
-    let v_from_cam = v_to_cam.scale(-1.0);
+    let v_from_cam = view_dir.normalize().scale(-1.0);
     let n = normal.normalize();
     let cam_up = _camera.up.normalize();
 
@@ -601,7 +573,6 @@ pub fn shade(
     // Diffuse light accumulation
     let mut total_diffuse = Vec3::new(0.0, 0.0, 0.0);
     let mut total_specular = Vec3::new(0.0, 0.0, 0.0);
-    let mut total_specular2 = Vec3::new(0.0, 0.0, 0.0);
 
     // For each light:
     for pl in &parsed_lights {
@@ -624,10 +595,7 @@ pub fn shade(
         let light_gate = if no_hs { hs_mul } else { 0.0 };
 
         let diff_dot = apply_diff_mode_mb3d(pl.diff_mode, n.dot(pl.dir), d_rough, lighting.calc_pix_col_sqr);
-        let mut diff_shadowed = diff_dot * light_gate;
-        if !strict_mb3d {
-            diff_shadowed *= direct_light_factor;
-        }
+        let diff_shadowed = diff_dot * light_gate;
         total_diffuse = total_diffuse.add(pl.color.scale(diff_shadowed));
         
         if debug {
@@ -648,18 +616,8 @@ pub fn shade(
             }
             if spec_mul > 0.0 {
                 let spec_pow = spec_dot.powf(pl.spec_power);
-                let mut spec_shadowed = spec_pow * spec_mul * light_gate;
-                if !strict_mb3d {
-                    spec_shadowed *= direct_light_factor;
-                }
+                let spec_shadowed = spec_pow * spec_mul * light_gate;
                 total_specular = total_specular.add(pl.color.scale(spec_shadowed));
-            }
-
-            if !strict_mb3d {
-                let spec_pow2 = spec_dot.powf(cfg.specular2_power);
-                total_specular2 = total_specular2.add(
-                    pl.color.scale(spec_pow2 * cfg.specular2_strength * diff_ao * direct_light_factor)
-                );
             }
         }
     }
@@ -692,26 +650,14 @@ pub fn shade(
         dep_c2.z * s + dep_c.z * (1.0 - s),
     );
 
-    // Final color
-    let mut final_color = if strict_mb3d {
-        Vec3::new(
-            amb_light.x * diffuse_color.x + diffuse_color.x * s_diff * total_diffuse.x
-                + spec_color.x * total_specular.x,
-            amb_light.y * diffuse_color.y + diffuse_color.y * s_diff * total_diffuse.y
-                + spec_color.y * total_specular.y,
-            amb_light.z * diffuse_color.z + diffuse_color.z * s_diff * total_diffuse.z
-                + spec_color.z * total_specular.z,
-        )
-    } else {
-        Vec3::new(
-            amb_light.x * diffuse_color.x + diffuse_color.x * s_diff * total_diffuse.x
-                + spec_color.x * (total_specular.x + total_specular2.x),
-            amb_light.y * diffuse_color.y + diffuse_color.y * s_diff * total_diffuse.y
-                + spec_color.y * (total_specular.y + total_specular2.y),
-            amb_light.z * diffuse_color.z + diffuse_color.z * s_diff * total_diffuse.z
-                + spec_color.z * (total_specular.z + total_specular2.z),
-        )
-    };
+    let mut final_color = Vec3::new(
+        amb_light.x * diffuse_color.x + diffuse_color.x * s_diff * total_diffuse.x
+            + spec_color.x * total_specular.x,
+        amb_light.y * diffuse_color.y + diffuse_color.y * s_diff * total_diffuse.y
+            + spec_color.y * total_specular.y,
+        amb_light.z * diffuse_color.z + diffuse_color.z * s_diff * total_diffuse.z
+            + spec_color.z * total_specular.z,
+    );
 
     if debug {
         println!("  normal: {:?}", n);
@@ -734,21 +680,6 @@ pub fn shade(
     if z_pos >= 32768 {
         final_color = dep_c_interp;
     }
-
-    if !strict_mb3d {
-        // Non-source experimental boosts (disabled in strict mode).
-        let rim = (1.0 - n.dot(v_to_cam).max(0.0)).powf(cfg.rim_power) * cfg.rim_strength;
-        final_color = final_color.add(Vec3::new(rim, rim, rim));
-
-        let fog_t = if max_depth > 1e-20 {
-            (depth / max_depth).clamp(0.0, 1.0).powf(cfg.fog_gamma) * cfg.fog_strength
-        } else {
-            0.0
-        };
-        let fog_color = amb_top;
-        final_color = final_color.scale(1.0 - fog_t).add(fog_color.scale(fog_t));
-    }
-
 
     let mut d_tmp = if z_pos < 32768 {
         (1.0 + (z_pos_f - 28000.0) * lighting.s_depth).max(0.0)
@@ -867,21 +798,11 @@ pub fn shade(
     
     // No depth fog for now
     
-    let final_color_toned = if strict_mb3d {
-        Vec3::new(
-            final_color.x.clamp(0.0, 1.0),
-            final_color.y.clamp(0.0, 1.0),
-            final_color.z.clamp(0.0, 1.0),
-        )
-    } else {
-        // Non-source experimental tone mapping (disabled in strict mode).
-        let tone = |c: f64| ((c.clamp(0.0, 1.0).powf(cfg.tone_gamma) * cfg.tone_gain) + cfg.tone_bias).clamp(0.0, 1.0);
-        Vec3::new(
-            tone(final_color.x),
-            tone(final_color.y),
-            tone(final_color.z),
-        )
-    };
+    let final_color_toned = Vec3::new(
+        final_color.x.clamp(0.0, 1.0),
+        final_color.y.clamp(0.0, 1.0),
+        final_color.z.clamp(0.0, 1.0),
+    );
 
     [
         (final_color_toned.x * 255.0) as u8,

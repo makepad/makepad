@@ -181,45 +181,43 @@ pub struct RenderParams {
 fn compute_de_scale(m3p: &crate::m3p::M3PFile) -> f64 {
     let addon = &m3p.addon;
     let end_to = (addon.b_hyb_opt1 & 7) as usize;
-    
-    // First, determine DEoption exactly like MB3D's CheckFormulaOptions
-    let mut de_option = -1;
+    let mut total_scale = 0.0;
+    let mut total_weight = 0.0;
+
     for i in 0..=end_to.min(5) {
         let f = &addon.formulas[i];
-        if f.iteration_count == 0 { continue; }
-        
-        let de = de_option;
-        // iDEoption for Amazing Box (4) is 11. For MengerIFS (20) it is 2.
-        let f_de = match f.formula_nr {
-            4 => 11,
-            20 => 2,
-            _ => 0, // default fallback
+        let iter_count = f.iteration_count.abs() as f64;
+        if iter_count == 0.0 {
+            continue;
+        }
+
+        let formula_scale = match f.formula_nr {
+            // HeaderTrafos: if j in [5,11], x1 += (scale * 1.2 + 1) / scale
+            4 => {
+                let scale = f.option_values[0];
+                if scale < 0.0 {
+                    0.65
+                } else if scale.abs() > 1.0e-30 {
+                    (scale * 1.2 + 1.0) / scale
+                } else {
+                    1.0
+                }
+            }
+            // We do not yet have the full built-in dADEscale table.
+            // Falling back to 1.0 keeps the marcher stable while still
+            // honoring the dominant Amazing Box contribution in this hybrid.
+            _ => 1.0,
         };
-        
-        de_option = match f_de {
-            -1 | 21 | 22 => de,
-            2 => if [2, 5, 6, 11].contains(&de) { f_de } else { 0 },
-            4 => if [5, 6].contains(&de) { f_de } else { 0 },
-            5 => if de == 4 { 4 } else if [2, 11].contains(&de) { 2 } else if de != 6 { 0 } else { f_de },
-            6 => if [2, 4, 5, 11].contains(&de) { f_de } else { 0 },
-            11 => if [2, 5].contains(&de) { 2 } else if de != 6 { 0 } else { f_de },
-            _ => f_de,
-        };
-    }
-    if de_option > 19 {
-        de_option = -1;
+
+        total_scale += formula_scale * iter_count;
+        total_weight += iter_count;
     }
 
-    let is_custom_de = [2, 5, 6, 11].contains(&de_option);
-    if !is_custom_de {
-        return 1.0;
+    if total_weight > 0.0 {
+        total_scale / total_weight
+    } else {
+        1.0
     }
-
-    // Since our DE formula (r / |dr|) returns distance in world units,
-    // and we don't scale our ray direction by StepWidth,
-    // we don't need to divide the DE scale by StepWidth.
-    // We can just return 1.0.
-    1.0
 }
 
 impl RenderParams {
@@ -296,11 +294,7 @@ impl RenderParams {
         } else {
             m3p.b_dfog_it as u16
         };
-        let first_step_random = std::env::var("MB3D_FIRST_STEP_RANDOM")
-            .ok()
-            .and_then(|v| v.parse::<i32>().ok())
-            .map(|v| v != 0)
-            .unwrap_or((m3p.i_options & 1) != 0);
+        let first_step_random = (m3p.i_options & 1) != 0;
 
         RenderParams {
             camera,
@@ -900,44 +894,12 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
     eprintln!("Ray march complete in {:.1}s ({} hits / {} pixels)",
         start.elapsed().as_secs_f64(), total_hits, w * h);
 
-    // Optional iteration post-smoothing for experiments.
-    // Keep disabled by default for source-faithful behavior.
-    let use_iter_median = std::env::var("ITER_MEDIAN")
-        .ok()
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let smooth_iter = if use_iter_median {
-        smooth_iter_buf(&iter_buf, w, h)
-    } else {
-        iter_buf.clone()
-    };
+    let smooth_iter = iter_buf.clone();
 
     // Pass 3: compute normals and shade
     let mut pixels = vec![0u8; w * h * 4];
     let debug_mode = std::env::var("DEBUG_MODE").unwrap_or_default();
 
-    eprintln!("  Iter median filter: {}", if use_iter_median { "on" } else { "off" });
-    let detail_normal_mix = std::env::var("DETAIL_NORMAL_MIX").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-    let shadow_steps = std::env::var("SHADOW_STEPS").ok()
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(48);
-    let shadow_strength = std::env::var("SHADOW_STRENGTH").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(1.0)
-        .clamp(0.0, 1.0);
-    let simple_deao = std::env::var("SIMPLE_DEAO")
-        .ok()
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let strict_mb3d = true;
-    let disable_shadows = std::env::var("MB3D_DISABLE_SHADOWS")
-        .ok()
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let shadow_light_dir = crate::lighting::dominant_shadow_light_dir(lighting, &params.camera);
     let soft_hs_light = crate::lighting::soft_hs_light_dir(lighting, &params.camera, params);
 
     thread::scope(|s| {
@@ -952,10 +914,7 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
             let shadow_buf = &shadow_buf;
             let debug_mode = &debug_mode;
             let next_y = Arc::clone(&next_y);
-            let shadow_light_dir = shadow_light_dir;
             let soft_hs_light = soft_hs_light;
-            let detail_normal_mix = detail_normal_mix;
-            let simple_deao = simple_deao;
             
             threads.push(s.spawn(move || {
                 let mut local_pixels = Vec::new();
@@ -1043,6 +1002,8 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                     1.0,
                                     1.0,
                                     d,
+                                    x as i32,
+                                    y as i32,
                                     (y as f64 + 0.5) / h as f64,
                                     params.max_ray_length,
                                     lighting,
@@ -1076,73 +1037,29 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                     &params.iter_params,
                                     params.de_floor,
                                 );
-                                let normal_screen = screen_space_normal(&depth_buf, x, y, w, h, params.step_width);
-                                let normal_shade = normal_mb3d
-                                    .scale(1.0 - detail_normal_mix)
-                                    .add(normal_screen.scale(detail_normal_mix))
-                                    .normalize();
-                                
-                                // Source-faithful default: AO is handled in lighting::shade (ray-based path).
-                                // Keep old simple DEAO as opt-in experiment.
-                                let ao_factor = if simple_deao {
-                                    let mut deao = 0.0;
-                                    let ao_base = params.de_stop * 2.0;
-                                    for i in 1..=5 {
-                                        let step_dist = ao_base * (i as f64);
-                                        let ao_pos = hit_pos.add(normal_shade.scale(step_dist));
-                                        let (_, de) = calc_de(ao_pos, formulas, &params.iter_params, params.de_floor);
-                                        deao += (step_dist - de).max(0.0) / step_dist;
-                                    }
-                                    let mut d_amb_s = (1.0 - deao / 5.0 * 2.0).clamp(0.0, 1.0);
-                                    let s_amplitude = ssao.amb_shad;
-                                    if s_amplitude > 1.0 {
-                                        d_amb_s = d_amb_s + (s_amplitude - 1.0) * (d_amb_s * d_amb_s - d_amb_s);
-                                    } else {
-                                        d_amb_s = 1.0 - s_amplitude * (1.0 - d_amb_s);
-                                    }
-                                    d_amb_s
-                                } else {
-                                    1.0
-                                };
-                                let direct_light_factor = if strict_mb3d {
-                                    1.0
-                                } else if let Some(light_dir) = shadow_light_dir {
-                                    let shadow_raw = soft_shadow(
-                                        hit_pos.add(normal_shade.scale(params.de_stop * 4.0)),
-                                        light_dir,
-                                        formulas,
-                                        params,
-                                        shadow_steps,
-                                        params.max_ray_length * 0.25,
-                                    );
-                                    1.0 - shadow_strength * (1.0 - shadow_raw)
-                                } else {
-                                    1.0
-                                };
+                                let normal_shade = normal_mb3d;
+                                let ao_factor = 1.0;
+                                let direct_light_factor = 1.0;
 
                                 let is_center = x == w / 2 && y == h / 2;
 
                                 // Packed PsiLight.Shadow equivalent:
                                 // low 10 bits = march/fog counter, high 6 bits = softHS factor.
                                 let mut shadow_word = shadow_buf[idx] & 0x3ff;
-                                if strict_mb3d {
-                                    if !disable_shadows {
-                                        if let Some((_li, light_dir, i_light_pos)) = soft_hs_light {
-                                        shadow_word |= 0xFC00;
-                                        let soft_bits = calc_hs_soft_bits_mb3d(
-                                            hit_pos,
-                                            d,
-                                            dir,
-                                            normal_shade,
-                                            light_dir,
-                                            i_light_pos,
-                                            y,
-                                            formulas,
-                                            params,
-                                        );
-                                        shadow_word = (shadow_word & 0x03FF) | (soft_bits << 10);
-                                    }
-                                    }
+                                if let Some((_li, light_dir, i_light_pos)) = soft_hs_light {
+                                    shadow_word |= 0xFC00;
+                                    let soft_bits = calc_hs_soft_bits_mb3d(
+                                        hit_pos,
+                                        d,
+                                        dir,
+                                        normal_shade,
+                                        light_dir,
+                                        i_light_pos,
+                                        y,
+                                        formulas,
+                                        params,
+                                    );
+                                    shadow_word = (shadow_word & 0x03FF) | (soft_bits << 10);
                                 }
 
                                 crate::lighting::shade(
@@ -1158,6 +1075,8 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                     ao_factor,
                                     direct_light_factor,
                                     d,
+                                    x as i32,
+                                    y as i32,
                                     (y as f64 + 0.5) / h as f64,
                                     params.max_ray_length,
                                     lighting,
