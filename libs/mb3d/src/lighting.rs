@@ -1,6 +1,8 @@
 use crate::render::Vec3;
 use std::sync::OnceLock;
 
+const DEAO_SUBSAMPLE_MIN_RAYS: usize = 12;
+
 #[derive(Clone, Copy)]
 struct ParsedLight {
     idx: usize,
@@ -529,6 +531,15 @@ pub fn shade(
                 correction_weight,
             )
         };
+        if params.adaptive_ao_subsampling && scratch.rot_m.len() >= DEAO_SUBSAMPLE_MIN_RAYS {
+            let mut write = 0usize;
+            for read in (0..scratch.rot_m.len()).step_by(2) {
+                scratch.rot_m[write] = scratch.rot_m[read];
+                write += 1;
+            }
+            scratch.rot_m.truncate(write);
+        }
+
         let ray_count = scratch.rot_m.len();
         scratch.min_ra.clear();
         scratch.min_ra.resize(ray_count, 0.0);
@@ -578,7 +589,11 @@ pub fn shade(
                 
                 let probe_pos = hit_pos.add(s_vec.scale(dt1 * params.step_width));
                 
-                let (_, de_world) = crate::formulas::hybrid_de((probe_pos.x, probe_pos.y, probe_pos.z), formulas, &params.iter_params);
+                let (_, de_world) = crate::formulas::hybrid_de(
+                    (probe_pos.x, probe_pos.y, probe_pos.z),
+                    formulas,
+                    &params.iter_params,
+                );
                 let dt2 = de_world * params.de_scale / params.step_width;
                 
                 let md_d10 = 0.1 / (max_dist_steps * de_mul);
