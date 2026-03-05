@@ -149,6 +149,9 @@ pub struct RenderParams {
     pub s_z_step_div_raw: f64,
     pub b_dfog_it: u8,
     pub b_vol_light_nr: u8,
+    pub b_calculate_hard_shadow: u8,
+    pub b_hs_calculated: u8,
+    pub b_calc1_hs_soft: u8,
     pub step_width: f64,       // StepWidth from header
     pub de_stop_factor: f64,   // mctDEstopFactor: how DEstop scales with distance
     pub max_step: f64,         // maximum step size (world units)
@@ -288,6 +291,9 @@ impl RenderParams {
             de_stop_factor,
             b_dfog_it: m3p.b_dfog_it,
             b_vol_light_nr: m3p.b_vol_light_nr,
+            b_calculate_hard_shadow: m3p.b_calculate_hard_shadow,
+            b_hs_calculated: m3p.b_hs_calculated,
+            b_calc1_hs_soft: m3p.b_calc1_hs_soft,
             max_step,
             de_floor,
             de_scale,
@@ -719,6 +725,10 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
         .ok()
         .map(|v| v == "1")
         .unwrap_or(false);
+    let strict_mb3d = std::env::var("STRICT_MB3D")
+        .ok()
+        .map(|v| v != "0")
+        .unwrap_or(true);
     let shadow_light_dir = crate::lighting::dominant_shadow_light_dir(lighting, &params.camera);
 
     thread::scope(|s| {
@@ -884,7 +894,11 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                 } else {
                                     1.0
                                 };
-                                let direct_light_factor = if let Some(light_dir) = shadow_light_dir {
+                                let direct_light_factor = if strict_mb3d {
+                                    // MB3D hard shadows are encoded per-light in PsiLight.Shadow high bits.
+                                    // Until that path is source-identical, avoid non-source global darkening.
+                                    1.0
+                                } else if let Some(light_dir) = shadow_light_dir {
                                     let shadow_raw = soft_shadow(
                                         hit_pos.add(normal_shade.scale(params.de_stop * 4.0)),
                                         light_dir,

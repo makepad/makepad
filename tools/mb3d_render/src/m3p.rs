@@ -121,6 +121,9 @@ pub struct M3PFile {
     pub b_dfog_it: u8,
     pub b_color_on_it: u8,
     pub b_vol_light_nr: u8,
+    pub b_calculate_hard_shadow: u8,
+    pub b_hs_calculated: u8,
+    pub b_calc1_hs_soft: u8,
     pub z_start: f64,
     pub z_end: f64,
     pub x_mid: f64,
@@ -262,6 +265,9 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     
     // bVolLightNr is at 343
     let b_vol_light_nr = data[343];
+    let b_calculate_hard_shadow = data[133];
+    let b_calc1_hs_soft = data[139];
+    let b_hs_calculated = data[163];
 
     // offset 246: hVGrads 3x3 matrix of doubles (72 bytes)
     let mut view_matrix = [[0.0f64; 3]; 3];
@@ -271,21 +277,16 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         }
     }
 
-    // For now, we'll extract Julia and other params from raw bytes
-    // The full header is 840 bytes, custom addon follows
+    // Keep raw header bytes for parity/debug.
     let raw_header = data.clone();
 
-    // Julia mode: from the exploration, cathedral uses Julia mode
-    // Julia params are at specific offsets in the header
-    // From TMandHeader10: Julia params after formula pointers
-    // Let's read them from raw bytes
-    // Actually the exploration found: Jx=-3.99970703125, is_julia=1
-    // For now hardcode from exploration, then fix offsets later
-    let is_julia = true;
-    let julia_x = -3.99970703125;
-    let julia_y = 0.0;
-    let julia_z = 0.0;
-    let julia_w = 0.0;
+    // TMandHeader10:
+    //   bIsJulia @190, dJx/dJy/dJz/dJw @191..222
+    let is_julia = data[190] != 0;
+    let julia_x = f64::from_le_bytes(data[191..199].try_into().unwrap());
+    let julia_y = f64::from_le_bytes(data[199..207].try_into().unwrap());
+    let julia_z = f64::from_le_bytes(data[207..215].try_into().unwrap());
+    let julia_w = f64::from_le_bytes(data[215..223].try_into().unwrap());
 
     let var_col_zpos = i16::from_le_bytes(data[432..434].try_into().unwrap());
     let roughness_factor = data[434];
@@ -453,6 +454,9 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
 
     let b_vary_de_stop = data[162] != 0;
     println!("  bVaryDEstop: {}", b_vary_de_stop);
+    println!(
+        "  hard shadow flags: bCalculateHardShadow=0x{b_calculate_hard_shadow:02x}, bCalc1HSsoft=0x{b_calc1_hs_soft:02x}, bHScalculated=0x{b_hs_calculated:02x}"
+    );
     let b_calc_amb_shadow_automatic = data[149];
     println!("  b_calc_amb_shadow_automatic: {}", b_calc_amb_shadow_automatic);
     let calc_amb_shadow = (b_calc_amb_shadow_automatic & 1) != 0;
@@ -492,6 +496,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     Ok(M3PFile {
         mand_id, width, height, iterations, min_iterations,
         i_options, b_new_options, b_color_on_it, b_dfog_it, b_vol_light_nr,
+        b_calculate_hard_shadow, b_hs_calculated, b_calc1_hs_soft,
         z_start, z_end,
         x_mid, y_mid, z_mid,
         xw_rot, yw_rot, zw_rot,
