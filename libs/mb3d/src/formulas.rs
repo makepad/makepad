@@ -8,15 +8,10 @@ pub struct IterState {
     pub cx: f64,
     pub cy: f64,
     pub cz: f64,
-    pub dr: f64,      // derivative for DE
     pub r2: f64,      // squared radius
     pub iters: i32,   // iteration count reached
     pub max_iters: i32,
     pub rstop: f64,   // bailout radius squared
-    pub is_julia: bool,
-    pub julia_x: f64,
-    pub julia_y: f64,
-    pub julia_z: f64,
 }
 
 impl IterState {
@@ -26,15 +21,10 @@ impl IterState {
             cx: if params.is_julia { params.julia_x } else { x },
             cy: if params.is_julia { params.julia_y } else { y },
             cz: if params.is_julia { params.julia_z } else { z },
-            dr: 1.0,
             r2: 0.0,
             iters: 0,
             max_iters: params.max_iters,
             rstop: params.rstop,  // MB3D compares r² against RStop directly (not RStop²)
-            is_julia: params.is_julia,
-            julia_x: params.julia_x,
-            julia_y: params.julia_y,
-            julia_z: params.julia_z,
         }
     }
 }
@@ -219,7 +209,6 @@ pub fn hybrid_de(pos: (f64, f64, f64), formulas: &[FormulaSlot], params: &IterPa
     let mut state = IterState::new(pos.0, pos.1, pos.2, params);
     // MB3D doHybridPasDE initializes w := 1 for the common AmBox + IFS path.
     state.w = 1.0;
-    state.dr = 1.0;
 
     let mut total_iters = 0i32;
     let mut current_formula = 0;
@@ -291,15 +280,6 @@ pub fn build_formulas(m3p: &crate::m3p::M3PFile) -> Vec<FormulaSlot> {
                 let scale = f.option_values[0];
                 let min_r = f.option_values[1];
                 let fold = f.option_values[2];
-                let clamped_min_r = min_r.max(1.0e-40);
-
-                eprintln!(
-                    "  AmazingBox: scale={}, raw_minR={}, minR={:.2e}, fold={}",
-                    scale,
-                    min_r,
-                    clamped_min_r,
-                    fold
-                );
                 FormulaKind::AmazingBox(AmazingBox::new(scale, min_r, fold))
             },
             _ => {
