@@ -38,6 +38,7 @@ workspace.members = [
     "studio/desktop",
     "tools/cargo_makepad",
     "tools/tui_test",
+    "tools/mb3d_render",
     "libs/git",
     "libs/fast_inflate",
     # "libs/voice",

@@ -1,0 +1,4 @@
+import struct
+with open('../../local/mb3d/cathedral.m3p', 'rb') as f:
+    data = f.read()
+    print("bColorOnIt:", data[123])
