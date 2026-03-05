@@ -165,7 +165,7 @@ impl MathView {
         let layout_font = {
             let mut fonts = cx.fonts.borrow_mut();
             let family = fonts.get_or_load_font_family(font_family_id);
-            family.fonts().first().cloned()
+            family.and_then(|f| f.fonts().first().cloned())
         };
 
         let Some(layout_font) = layout_font else {

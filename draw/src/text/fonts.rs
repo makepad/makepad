@@ -128,7 +128,7 @@ impl Fonts {
         self.layouter.define_font(id, definition);
     }
 
-    pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> Rc<FontFamily> {
+    pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> Option<Rc<FontFamily>> {
         self.layouter.get_or_load_font_family(id)
     }
 
