@@ -84,6 +84,9 @@ pub struct M3PICol {
 
 #[derive(Debug, Clone)]
 pub struct M3PLighting {
+    pub roughness_factor: u8,
+    pub additional_options: u8,
+    pub calc_pix_col_sqr: bool,
     pub dyn_fog_col: [u8; 3],
     pub dyn_fog_col2: [u8; 3],
     pub ambient_bottom: [u8; 3],
@@ -285,6 +288,9 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let julia_w = 0.0;
 
     let var_col_zpos = i16::from_le_bytes(data[432..434].try_into().unwrap());
+    let roughness_factor = data[434];
+    let _b_color_map = data[435];
+    let additional_options = data[439];
     // TLightingParas9 stores TBpos[3..11] starting at offset 440.
     let tbpos_3 = i32::from_le_bytes(data[440..444].try_into().unwrap());  // TBpos[3]
     let tbpos_4 = i32::from_le_bytes(data[444..448].try_into().unwrap());  // TBpos[4]
@@ -299,12 +305,16 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let fine_col_adj_2 = data[481];
     let l_version = (tboptions >> 21) & 7;
     let s_depth = tbpos_4 as f64 * 0.8e-6;
-    println!("  s_depth: {} (tbpos_4: {}), var_col_zpos: {}, tbpos_3: {}, tbpos_5: {}, tbpos_6: {}, tbpos_7: {}, bColCycling: {}", s_depth, tbpos_4, var_col_zpos, tbpos_3, tbpos_5, tbpos_6, tbpos_7, (tboptions & 0x4000) != 0);
+    println!("  s_depth: {} (tbpos_4: {}), var_col_zpos: {}, roughness_factor: {}, tbpos_3: {}, tbpos_5: {}, tbpos_6: {}, tbpos_7: {}, bColCycling: {}",
+        s_depth, tbpos_4, var_col_zpos, roughness_factor, tbpos_3, tbpos_5, tbpos_6, tbpos_7, (tboptions & 0x4000) != 0);
     println!("  tbpos_9: {}, tbpos_10: {}, tboptions: {:08x}, fine_col_adj_1: {}, fine_col_adj_2: {}", tbpos_9, tbpos_10, tboptions, fine_col_adj_1, fine_col_adj_2);
     println!("  depth_col: {:?}, depth_col2: {:?}", [data[492], data[493], data[494]], [data[496], data[497], data[498]]);
 
     // Parse lighting at fixed offsets
     let mut lighting = M3PLighting {
+        roughness_factor,
+        additional_options,
+        calc_pix_col_sqr: (additional_options & 1) != 0,
         dyn_fog_col: [data[487], data[491], data[495]],
         dyn_fog_col2: [data[436], data[437], data[438]],
         ambient_bottom: [data[484], data[485], data[486]],
