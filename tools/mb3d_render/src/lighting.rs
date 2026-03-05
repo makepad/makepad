@@ -664,6 +664,34 @@ pub fn shade(
         }
     }
 
+
+    let i_dfunc = ((lighting.tboptions >> 30) & 0x3) as i32;
+    let s = if b_amb_rel_obj {
+        (v_from_cam.y.asin() / std::f64::consts::PI + 0.5).clamp(0.0, 1.0)
+    } else {
+        let yy = y_pos.clamp(0.0, 1.0);
+        match i_dfunc {
+            1 => yy * yy,
+            0 => yy,
+            _ => yy.sqrt(),
+        }
+    };
+    let dep_c = Vec3::new(
+        lighting.depth_col[0] as f64 / 255.0,
+        lighting.depth_col[1] as f64 / 255.0,
+        lighting.depth_col[2] as f64 / 255.0,
+    );
+    let dep_c2 = Vec3::new(
+        lighting.depth_col2[0] as f64 / 255.0,
+        lighting.depth_col2[1] as f64 / 255.0,
+        lighting.depth_col2[2] as f64 / 255.0,
+    );
+    let dep_c_interp = Vec3::new(
+        dep_c2.x * s + dep_c.x * (1.0 - s),
+        dep_c2.y * s + dep_c.y * (1.0 - s),
+        dep_c2.z * s + dep_c.z * (1.0 - s),
+    );
+
     // Final color
     let mut final_color = if strict_mb3d {
         Vec3::new(
@@ -696,6 +724,17 @@ pub fn shade(
         println!("  final_ao: {:.4}", final_ao);
     }
 
+    // Calculate Zpos
+    let z_pos_f = 32767.0 - (params.z_cmul / 256.0) * ((m_zz * params.z_corr + 1.0).sqrt() - 1.0);
+    let mut z_pos = z_pos_f.round().clamp(0.0, 32767.0) as i32;
+    if depth >= max_depth * 0.9999 {
+        z_pos = 32768;
+    }
+
+    if z_pos >= 32768 {
+        final_color = dep_c_interp;
+    }
+
     if !strict_mb3d {
         // Non-source experimental boosts (disabled in strict mode).
         let rim = (1.0 - n.dot(v_to_cam).max(0.0)).powf(cfg.rim_power) * cfg.rim_strength;
@@ -710,14 +749,11 @@ pub fn shade(
         final_color = final_color.scale(1.0 - fog_t).add(fog_color.scale(fog_t));
     }
 
-    // Calculate Zpos
-    let z_pos_f = 32767.0 - (params.z_cmul / 256.0) * ((m_zz * params.z_corr + 1.0).sqrt() - 1.0);
-    let z_pos = z_pos_f.round().clamp(0.0, 32767.0) as i32;
 
     let mut d_tmp = if z_pos < 32768 {
-        ((z_pos as f64 - 28000.0) * lighting.s_depth + 1.0).max(0.0)
+        (1.0 + (z_pos_f - 28000.0) * lighting.s_depth).max(0.0)
     } else {
-        (1.0f64 - (1.0f64 - 28000.0f64 * lighting.s_depth).max(0.0f64)).max(0.0f64)
+        (1.0 - (60768.0 - z_pos_f) * lighting.s_depth).max(0.0)
     };
     
     // Calculate sShad, sShadZmul, sShadGr
@@ -802,51 +838,17 @@ pub fn shade(
         println!("  s_shad: {:.4}, s_shad_z_mul: {:.4}, s_shad_gr: {:.4}, d_fog: {:.4}, d_tmp3: {:.4}", s_shad, s_shad_z_mul, s_shad_gr, d_fog, d_tmp3);
     }
 
-    if d_tmp < 1.0 {
-        d_tmp = 1.0 - f64::powi(1.0 - d_tmp, 2);
-    }
+    // if d_tmp < 1.0 {
+    //     d_tmp = 1.0 - (1.0 - d_tmp);
+    // }
 
-    let i_dfunc = ((lighting.tboptions >> 30) & 0x3) as i32;
-    let s = if b_amb_rel_obj {
-        (v_from_cam.y.asin() / std::f64::consts::PI + 0.5).clamp(0.0, 1.0)
-    } else {
-        let yy = y_pos.clamp(0.0, 1.0);
-        match i_dfunc {
-            1 => yy * yy,
-            0 => yy,
-            _ => yy.sqrt(),
-        }
-    };
-    let dep_c = Vec3::new(
-        lighting.depth_col[0] as f64 / 255.0,
-        lighting.depth_col[1] as f64 / 255.0,
-        lighting.depth_col[2] as f64 / 255.0,
-    );
-    let dep_c2 = Vec3::new(
-        lighting.depth_col2[0] as f64 / 255.0,
-        lighting.depth_col2[1] as f64 / 255.0,
-        lighting.depth_col2[2] as f64 / 255.0,
-    );
-    let dep_c_interp = Vec3::new(
-        dep_c2.x * s + dep_c.x * (1.0 - s),
-        dep_c2.y * s + dep_c.y * (1.0 - s),
-        dep_c2.z * s + dep_c.z * (1.0 - s),
-    );
 
-    if z_pos < 32768 {
-        final_color = Vec3::new(
-            final_color.x * d_tmp,
-            final_color.y * d_tmp,
-            final_color.z * d_tmp,
-        );
-    }
-    
     // LiLSDAI[4] := Add2SVecsWeight2(LiLSDAI[4], DepC, Max0S(1 - dTmp));
     let t_dep = (1.0f64 - d_tmp).max(0.0f64);
     final_color = Vec3::new(
-        final_color.x + dep_c_interp.x * t_dep,
-        final_color.y + dep_c_interp.y * t_dep,
-        final_color.z + dep_c_interp.z * t_dep,
+        final_color.x * d_tmp + dep_c_interp.x * t_dep,
+        final_color.y * d_tmp + dep_c_interp.y * t_dep,
+        final_color.z * d_tmp + dep_c_interp.z * t_dep,
     );
 
     if (b_dfog_options & 1) != 0 {

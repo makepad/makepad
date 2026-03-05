@@ -148,6 +148,8 @@ pub struct RenderParams {
     pub s_z_step_div: f64,     // effective step multiplier: sZstepDiv * de_scale
     pub s_z_step_div_raw: f64,
     pub b_dfog_it: u8,
+    pub d_fog_on_it: u16,
+    pub first_step_random: bool,
     pub b_vol_light_nr: u8,
     pub b_calculate_hard_shadow: u8,
     pub b_hs_calculated: u8,
@@ -258,12 +260,18 @@ impl RenderParams {
         let x1 = 0.001 * m3p.height as f64 / (0.001f64.sin() * fov_y_rad.max(1.0 / 65535.0));
         let de_stop_factor = if m3p.b_vary_de_stop { 1.0 / x1 } else { 0.0 };
 
-        let z_corr = (fov_y_rad.max(1.0) / m3p.height as f64).sin();
+        let fov_y_rad_for_z = m3p.fov_y.max(1.0) * std::f64::consts::PI / 180.0;
+        let z_corr = (fov_y_rad_for_z / m3p.height as f64).sin();
         let z_cmul = 32767.0 * 256.0 / ((((m3p.z_end - m3p.z_start) / m3p.step_width) * z_corr + 1.0).sqrt() - 0.999999999);
 
-        // Maximum step size (in world units)
-        // MB3D: max_step = max(DEstop, 0.4) * mctMH04ZSD * StepWidth
-        let mct_mh04_zsd = m3p.width.max(m3p.height) as f64;
+        // MB3D: mctMH04ZSD = max(width,height) * 0.5 * sqrt(sZstepDiv + 0.0001) * max(0.001, sRaystepLimiter)
+        let s_raystep_limiter = (m3p.s_raystep_limiter as f64).max(0.001);
+        let mct_mh04_zsd = m3p.width.max(m3p.height) as f64
+            * 0.5
+            * (s_z_step_div_raw + 0.0001).sqrt()
+            * s_raystep_limiter;
+
+        // Maximum step size (in world units) near camera; marcher uses dynamic value with current DEstop.
         let max_step = de_stop_header.max(0.4) * mct_mh04_zsd * step_width;
 
         // DE floor: min 0.25 * effective DEstop (in world units)
@@ -281,6 +289,18 @@ impl RenderParams {
         eprintln!("  max_step: {:.6e}", max_step);
         eprintln!("  de_floor: {:.6e}", de_floor);
         eprintln!("  iSmNormals: {}", ((m3p.i_options >> 6) & 0x0F));
+        eprintln!("  mctMH04ZSD: {:.6}", mct_mh04_zsd);
+
+        let d_fog_on_it = if (m3p.b_vol_light_nr & 7) > 0 {
+            65535
+        } else {
+            m3p.b_dfog_it as u16
+        };
+        let first_step_random = std::env::var("MB3D_FIRST_STEP_RANDOM")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .map(|v| v != 0)
+            .unwrap_or((m3p.i_options & 1) != 0);
 
         RenderParams {
             camera,
@@ -301,6 +321,8 @@ impl RenderParams {
             step_width,
             de_stop_factor,
             b_dfog_it: m3p.b_dfog_it,
+            d_fog_on_it,
+            first_step_random,
             b_vol_light_nr: m3p.b_vol_light_nr,
             b_calculate_hard_shadow: m3p.b_calculate_hard_shadow,
             b_hs_calculated: m3p.b_hs_calculated,
@@ -514,12 +536,32 @@ fn calc_hs_soft_bits_mb3d(
     formulas: &[FormulaSlot],
     params: &RenderParams,
 ) -> i32 {
+    let view_dir = ray_dir.normalize();
+
+    // Pre-refine HS start along the view direction so CalcHSsoft starts close to the same
+    // DE-stop boundary used by the primary marcher.
+    let mut refined_pos = hit_pos;
+    let mut refined_depth = depth_world.max(0.0);
+    let mut refine_step = params.step_width;
+    for _ in 0..8 {
+        let (_, de_ref) = calc_de(refined_pos, formulas, &params.iter_params, params.de_floor);
+        let de_stop_ref = params.de_stop * (1.0 + refined_depth.abs() * params.de_stop_factor);
+        if de_ref <= de_stop_ref {
+            refined_pos = refined_pos.add(view_dir.scale(-refine_step));
+            refined_depth = (refined_depth - refine_step).max(0.0);
+        } else {
+            refined_pos = refined_pos.add(view_dir.scale(refine_step));
+            refined_depth += refine_step;
+        }
+        refine_step *= 0.5;
+    }
+
     // CalcPart shifts the HS start point by -0.1 march units before CalcHS/CalcHSsoft.
-    let mut depth_steps = depth_world / params.step_width - 0.1;
+    let mut depth_steps = refined_depth / params.step_width - 0.1;
     if depth_steps < 0.0 {
         depth_steps = 0.0;
     }
-    let mut pos = hit_pos.add(ray_dir.normalize().scale(-0.1 * params.step_width));
+    let mut pos = refined_pos.add(view_dir.scale(-0.1 * params.step_width));
 
     let zz = depth_steps.abs();
     let zend_steps = (params.max_ray_length / params.step_width).max(1.0e-30);
@@ -558,7 +600,7 @@ fn calc_hs_soft_bits_mb3d(
 
     let n = normal.normalize();
     let l = light_dir.normalize();
-    let v = ray_dir.normalize();
+    let v = view_dir;
     let hs_vec = l.scale(-1.0);
     let zz2mul = -hs_vec.dot(v); // == dot(light_dir, ray_dir)
 
@@ -568,18 +610,18 @@ fn calc_hs_soft_bits_mb3d(
 
     let mut d_t1 = max_l_hs;
     let mut zz2_world = depth_steps * params.step_width;
-    let mut ms_de_stop_world = params.de_stop * (1.0 + zz2_world * params.de_stop_factor);
-    let mut step_factor_diff = 2.0f64;
+    let mut ms_de_stop_world = params.de_stop * (1.0 + zz2_world.abs() * params.de_stop_factor);
+    let mut step_factor_diff = 1.0f64;
     let (mut iters, mut de_world) = calc_de(pos, formulas, &params.iter_params, params.de_floor);
-    let mut de_steps = de_world / params.step_width;
 
     loop {
         let r_last_de_world = de_world;
+        let max_step_world = (ms_de_stop_world.max(0.4 * params.step_width)) * params.mct_mh04_zsd;
         let r_last_step_world = ((de_world - params.ms_de_sub * ms_de_stop_world)
             * params.s_z_step_div_raw
             * step_factor_diff)
             .max(0.011 * params.step_width)
-            .min(params.max_step);
+            .min(max_step_world);
         if r_last_step_world <= 0.0 {
             break;
         }
@@ -588,10 +630,9 @@ fn calc_hs_soft_bits_mb3d(
 
         pos = pos.add(l.scale(r_last_step_world));
         zz2_world += r_last_step_world * zz2mul;
-        ms_de_stop_world = params.de_stop * (1.0 + zz2_world * params.de_stop_factor);
+        ms_de_stop_world = params.de_stop * (1.0 + zz2_world.abs() * params.de_stop_factor);
 
         (iters, de_world) = calc_de(pos, formulas, &params.iter_params, params.de_floor);
-        de_steps = de_world / params.step_width;
 
         let traveled = (max_l_hs - d_t1).max(0.0);
         let soft_term = ((de_world - ms_de_stop_world) / params.step_width) * zr_s_mul / (traveled + 0.011)
@@ -603,7 +644,6 @@ fn calc_hs_soft_bits_mb3d(
         }
         if de_world > r_last_de_world + r_last_step_world {
             de_world = r_last_de_world + r_last_step_world;
-            de_steps = de_world / params.step_width;
         }
         if r_last_de_world > de_world + 1.0e-30 {
             let s_tmp = r_last_step_world / (r_last_de_world - de_world);
@@ -626,14 +666,23 @@ fn calc_hs_soft_bits_mb3d(
 }
 
 /// Ray march a single pixel, matching MB3D's RayMarch procedure.
-pub fn ray_march(origin: Vec3, dir: Vec3, formulas: &[FormulaSlot], params: &RenderParams) -> PixelResult {
+pub fn ray_march(
+    origin: Vec3,
+    dir: Vec3,
+    formulas: &[FormulaSlot],
+    params: &RenderParams,
+    seed0: u32,
+) -> PixelResult {
     let mut t = 0.0f64;
-    let mut last_de = f64::MAX;
-    let mut last_step = 0.0f64;
+    let mut last_de: f64;
+    let mut last_step: f64;
     let mut rsfmul: f64 = 1.0;
-    let mut steps_taken = 0i32;
+    let mut step_count = 0.0f64;
+    let mut seed = seed0;
+    let mut first_step = params.first_step_random;
     let de_stop = params.de_stop;
     let de_floor = params.de_floor;
+    let dfog_on_it = params.d_fog_on_it;
 
     // First evaluation at starting position
     let pos = origin.add(dir.scale(t));
@@ -642,11 +691,15 @@ pub fn ray_march(origin: Vec3, dir: Vec3, formulas: &[FormulaSlot], params: &Ren
     // Check if already inside the set
     let current_destop = de_stop * (1.0 + t * params.de_stop_factor);
     if iters >= params.iter_params.max_iters || de < current_destop {
-        return PixelResult::Hit { depth: t, iters, shadow_steps: steps_taken };
+        return PixelResult::Hit {
+            depth: t,
+            iters,
+            shadow_steps: step_count.round().clamp(0.0, 1023.0) as i32,
+        };
     }
 
     // Initialize last step from first DE
-    last_step = de * params.s_z_step_div;
+    last_step = (de * params.s_z_step_div).max(0.011 * params.step_width);
     last_de = de;
 
     let max_steps = 2000000;
@@ -664,10 +717,25 @@ pub fn ray_march(origin: Vec3, dir: Vec3, formulas: &[FormulaSlot], params: &Ren
 
         // Check if not hit — take next step
         if iters < params.iter_params.max_iters && de >= current_destop {
-            // Base-correct primary march path (matches prior working render geometry).
-            let mut step = de * params.s_z_step_div * rsfmul;
-            if step > params.max_step {
-                step = params.max_step;
+            // Source path: step from (DE - msDEsub*msDEstop), min floor, then clamp by dynamic max-step.
+            let mut step = ((de - params.ms_de_sub * current_destop) * params.s_z_step_div * rsfmul)
+                .max(0.011 * params.step_width);
+            let max_step_here = (current_destop.max(0.4 * params.step_width)) * params.mct_mh04_zsd;
+
+            if max_step_here < step {
+                if dfog_on_it == 0 || iters == dfog_on_it as i32 {
+                    step_count += max_step_here / step;
+                }
+                step = max_step_here;
+            } else if dfog_on_it == 0 || iters == dfog_on_it as i32 {
+                step_count += 1.0;
+            }
+
+            if first_step {
+                seed = seed.wrapping_mul(214013).wrapping_add(2531011);
+                first_step = false;
+                let jitter = ((seed & 0x7fff_ffff) as f64) * (1.0 / 2147483647.0);
+                step *= jitter;
             }
 
             // Overshoot detection (RSFmul update)
@@ -685,7 +753,6 @@ pub fn ray_march(origin: Vec3, dir: Vec3, formulas: &[FormulaSlot], params: &Ren
             last_de = de;
             last_step = step;
             t += step;
-            steps_taken += 1;
 
             if t > params.max_ray_length {
                 return PixelResult::Miss;
@@ -712,7 +779,7 @@ pub fn ray_march(origin: Vec3, dir: Vec3, formulas: &[FormulaSlot], params: &Ren
             return PixelResult::Hit {
                 depth: t,
                 iters: final_iters,
-                shadow_steps: steps_taken,
+                shadow_steps: step_count.round().clamp(0.0, 1023.0) as i32,
             };
         }
     }
@@ -790,7 +857,12 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                     
                     for x in 0..w {
                         let (origin, dir) = params.camera.ray_for_pixel(x as i32, y as i32);
-                        let result = ray_march(origin, dir, formulas, params);
+                        let seed = (x as u32)
+                            .wrapping_mul(0x45d9f3b)
+                            .wrapping_add((y as u32).wrapping_mul(0x2710_0001))
+                            .wrapping_add((thread_idx as u32).wrapping_mul(0x9e37_79b9))
+                            .wrapping_add(0x2456_3487);
+                        let result = ray_march(origin, dir, formulas, params, seed);
                         
                         match result {
                             PixelResult::Hit { depth, iters, shadow_steps } => {
@@ -861,6 +933,10 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
         .map(|v| v == "1")
         .unwrap_or(false);
     let strict_mb3d = true;
+    let disable_shadows = std::env::var("MB3D_DISABLE_SHADOWS")
+        .ok()
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let shadow_light_dir = crate::lighting::dominant_shadow_light_dir(lighting, &params.camera);
     let soft_hs_light = crate::lighting::soft_hs_light_dir(lighting, &params.camera, params);
 
@@ -1050,7 +1126,8 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                 // low 10 bits = march/fog counter, high 6 bits = softHS factor.
                                 let mut shadow_word = shadow_buf[idx] & 0x3ff;
                                 if strict_mb3d {
-                                    if let Some((_li, light_dir, i_light_pos)) = soft_hs_light {
+                                    if !disable_shadows {
+                                        if let Some((_li, light_dir, i_light_pos)) = soft_hs_light {
                                         shadow_word |= 0xFC00;
                                         let soft_bits = calc_hs_soft_bits_mb3d(
                                             hit_pos,
@@ -1064,6 +1141,7 @@ pub fn render(formulas: &[FormulaSlot], params: &RenderParams, lighting: &crate:
                                             params,
                                         );
                                         shadow_word = (shadow_word & 0x03FF) | (soft_bits << 10);
+                                    }
                                     }
                                 }
 
