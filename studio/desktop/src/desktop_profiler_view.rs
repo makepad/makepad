@@ -192,7 +192,6 @@ struct DesktopProfilerEventChart {
 
 impl DesktopProfilerEventChart {
     fn profiler_build_id_from_context(&self, cx: &Cx, data: &AppData) -> Option<QueryId> {
-        let path = cx.widget_tree().path_to(self.uid);
         path.iter()
             .rev()
             .copied()
