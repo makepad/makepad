@@ -22,6 +22,8 @@ pub struct WasmConfig {
     pub threads: bool,
     pub optimize_size: bool,
     pub split: bool,
+    pub split_functions: bool,
+    pub split_functions_threshold: usize,
 }
 
 fn format_section_counts(summary: &WasmSectionSummary) -> String {
@@ -91,7 +93,7 @@ fn print_brotli_size_report(
     }
 }
 
-pub fn generate_html(wasm: &str, split_data_path: Option<&str>, config: &WasmConfig) -> String {
+pub fn generate_html(wasm: &str, split_data_path: Option<&str>, secondary_wasm_path: Option<&str>, config: &WasmConfig) -> String {
     let init = if config.bindgen {
         format!(
             "
@@ -111,10 +113,13 @@ pub fn generate_html(wasm: &str, split_data_path: Option<&str>, config: &WasmCon
             "
         )
     } else {
-        let split_options = if let Some(split_data_path) = split_data_path {
-            format!(", undefined, {{ split_data_url: '{split_data_path}' }}")
-        } else {
-            String::new()
+        let split_options = match (split_data_path, secondary_wasm_path) {
+            (Some(data), Some(funcs)) => format!(
+                ", undefined, {{ split_data_url: '{data}', secondary_wasm_url: '{funcs}' }}"
+            ),
+            (Some(data), None) => format!(", undefined, {{ split_data_url: '{data}' }}"),
+            (None, Some(funcs)) => format!(", undefined, {{ secondary_wasm_url: '{funcs}' }}"),
+            (None, None) => String::new(),
         };
         format!(
             "
@@ -576,6 +581,48 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         fs::read(&wasm_source).map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?
     };
 
+    // Function splitting: split large functions into primary (stubs) + secondary (real bodies)
+    let secondary_wasm_dest = app_dir.join(format!("{}.secondary.wasm", build_crate));
+    let secondary_wasm_path = if config.split_functions {
+        if config.bindgen {
+            return Err("--split-functions is not supported together with --bindgen".to_string());
+        }
+        let result = wasm_split_functions(&output, config.split_functions_threshold)
+            .map_err(|e| format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e))?;
+        if result.split_count == 0 {
+            println!("Function split: no functions above threshold ({} bytes), skipping", config.split_functions_threshold);
+            let _ = fs::remove_file(&secondary_wasm_dest);
+            remove_brotli_artifact(&secondary_wasm_dest);
+            None
+        } else {
+            println!(
+                "Function split: {} of {} functions split (threshold: {} bytes)",
+                result.split_count, result.total_functions, config.split_functions_threshold
+            );
+            println!(
+                "  primary:   {} bytes",
+                result.primary_wasm.len()
+            );
+            println!(
+                "  secondary: {} bytes",
+                result.secondary_wasm.len()
+            );
+            output = result.primary_wasm;
+            fs::write(&secondary_wasm_dest, &result.secondary_wasm)
+                .map_err(|e| format!("Can't write file {:?} {:?}", secondary_wasm_dest, e))?;
+            if config.brotli {
+                brotli_compress(&secondary_wasm_dest);
+            } else {
+                remove_brotli_artifact(&secondary_wasm_dest);
+            }
+            Some(format!("./{}.secondary.wasm", build_crate))
+        }
+    } else {
+        let _ = fs::remove_file(&secondary_wasm_dest);
+        remove_brotli_artifact(&secondary_wasm_dest);
+        None
+    };
+
     let split_data_dest = app_dir.join(format!("{}.data.bin", build_crate));
     let mut split_data_bytes = None;
     let mut split_brotli_bytes = None;
@@ -625,7 +672,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     };
     // generate html file
     let index_path = app_dir.join("index.html");
-    let html = generate_html(build_crate, split_data_path.as_deref(), &config);
+    let html = generate_html(build_crate, split_data_path.as_deref(), secondary_wasm_path.as_deref(), &config);
     fs::write(&index_path, &html.as_bytes())
         .map_err(|e| format!("Can't write {:?} {:?} ", index_path, e))?;
     if config.brotli {

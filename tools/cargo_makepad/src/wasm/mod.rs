@@ -31,6 +31,13 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     } else if v == "--no-threads" {
         config.threads = false;
         true
+    } else if v == "--split-functions" {
+        config.split_functions = true;
+        true
+    } else if let Some(threshold) = v.strip_prefix("--split-functions=") {
+        config.split_functions = true;
+        config.split_functions_threshold = threshold.parse::<usize>().unwrap_or(200);
+        true
     } else {
         false
     }
@@ -57,6 +64,8 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         threads: true,
         optimize_size: false,
         split: false,
+        split_functions: false,
+        split_functions_threshold: 200,
     };
 
     // pull out options

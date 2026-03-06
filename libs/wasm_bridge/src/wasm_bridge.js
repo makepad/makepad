@@ -450,6 +450,7 @@ export class WasmBridge {
             wasm._has_thread_support = env.memory !== undefined;
             wasm._memory = env.memory? env.memory: wasm.exports.memory;
             wasm._module = module;
+            wasm._env = env;
             if (split_config && split_config.preloaded_split && split_config.preloaded_split.version === 1) {
                 this.apply_split_data_segments(wasm, split_config.preloaded_split.segments);
             }
@@ -462,6 +463,7 @@ export class WasmBridge {
                     wasm._has_thread_support = true;
                     wasm._memory = env.memory;
                     wasm._module = module;
+                    wasm._env = env;
                     if (split_config && split_config.preloaded_split && split_config.preloaded_split.version === 1) {
                         this.apply_split_data_segments(wasm, split_config.preloaded_split.segments);
                     }
@@ -479,28 +481,64 @@ export class WasmBridge {
     }
     
     static fetch_and_instantiate_wasm(wasm_url, memory, split_config) {
-        if (split_config && split_config.split_data_url) {
-            return Promise.all([fetch(wasm_url), fetch(split_config.split_data_url)])
-                .then(async ([wasm_response, split_response]) => {
-                    if (!wasm_response.ok) {
-                        throw new Error(`failed to fetch wasm: ${wasm_response.status}`);
-                    }
-                    if (!split_response.ok) {
-                        throw new Error(`failed to fetch split data: ${split_response.status}`);
-                    }
-                    const wasm_bytes = new Uint8Array(await wasm_response.arrayBuffer());
+        const has_split_data = split_config && split_config.split_data_url;
+        const has_secondary = split_config && split_config.secondary_wasm_url;
+
+        if (has_split_data || has_secondary) {
+            // Build list of fetches: primary wasm + optional split data + optional secondary wasm
+            const fetches = [fetch(wasm_url)];
+            if (has_split_data) fetches.push(fetch(split_config.split_data_url));
+            if (has_secondary) fetches.push(fetch(split_config.secondary_wasm_url));
+
+            return Promise.all(fetches).then(async (responses) => {
+                let idx = 0;
+                const wasm_response = responses[idx++];
+                const split_response = has_split_data ? responses[idx++] : null;
+                const secondary_response = has_secondary ? responses[idx++] : null;
+
+                if (!wasm_response.ok) {
+                    throw new Error(`failed to fetch wasm: ${wasm_response.status}`);
+                }
+                if (split_response && !split_response.ok) {
+                    throw new Error(`failed to fetch split data: ${split_response.status}`);
+                }
+                if (secondary_response && !secondary_response.ok) {
+                    throw new Error(`failed to fetch secondary wasm: ${secondary_response.status}`);
+                }
+
+                const wasm_bytes = new Uint8Array(await wasm_response.arrayBuffer());
+                let preloaded_split = undefined;
+
+                // Handle data segment splitting
+                if (split_response) {
                     const split_bytes = new Uint8Array(await split_response.arrayBuffer());
                     const split = this.parse_split_data_blob(split_bytes);
                     if (split.version === 1) {
-                        const module = await WebAssembly.compile(wasm_bytes);
-                        return this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, {preloaded_split: split});
+                        preloaded_split = {preloaded_split: split};
+                    } else {
+                        // v2: rebuild wasm inline — but we can't use compileStreaming anymore
+                        const rebuilt_bytes = this.rebuild_split_wasm(wasm_bytes, split.segments);
+                        const module = await WebAssembly.compile(rebuilt_bytes);
+                        const wasm = await this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, undefined);
+                        // If secondary wasm, instantiate it with primary exports
+                        if (secondary_response) {
+                            await this._instantiate_secondary(secondary_response, wasm);
+                        }
+                        return wasm;
                     }
-                    const rebuilt_bytes = this.rebuild_split_wasm(wasm_bytes, split.segments);
-                    const module = await WebAssembly.compile(rebuilt_bytes);
-                    return this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, undefined);
-                }, error => {
-                    console.error(error);
-                });
+                }
+
+                const module = await WebAssembly.compile(wasm_bytes);
+                const wasm = await this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, preloaded_split);
+
+                // Instantiate secondary module to patch table with real function bodies
+                if (secondary_response) {
+                    await this._instantiate_secondary(secondary_response, wasm);
+                }
+                return wasm;
+            }, error => {
+                console.error(error);
+            });
         }
         return WebAssembly.compileStreaming(fetch(wasm_url))
             .then(
@@ -509,6 +547,20 @@ export class WasmBridge {
                 console.error(error)
             }
         )
+    }
+
+    static async _instantiate_secondary(secondary_response, primary_wasm) {
+        const secondary_bytes = await secondary_response.arrayBuffer();
+        const secondary_module = await WebAssembly.compile(secondary_bytes);
+        // The secondary module imports from two modules:
+        // "env" — the same env imports the primary uses
+        // "primary" — all exported functions/tables/memories/globals from primary
+        const imports = {
+            env: primary_wasm._env || {},
+            primary: primary_wasm.exports
+        };
+        await WebAssembly.instantiate(secondary_module, imports);
+        // Table is now patched via the secondary's active element segments
     }
 }
 

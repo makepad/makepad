@@ -102,6 +102,7 @@ impl<'a> Reader<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct WasmSection {
     pub type_id: u8,
     pub start: usize,
@@ -424,6 +425,741 @@ pub fn wasm_optimize_size(buf: &[u8]) -> Result<Vec<u8>, WasmParseError> {
     wasm_strip_custom_sections(buf)
 }
 
+// ---------------------------------------------------------------------------
+// Function splitting: Binaryen-style module splitting
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct WasmFuncType {
+    params: Vec<u8>,
+    #[allow(dead_code)]
+    results: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct WasmLimits {
+    has_max: bool,
+    min: u32,
+    max: u32,
+}
+
+#[derive(Clone, Debug)]
+struct WasmImport {
+    module: String,
+    field: String,
+    kind: u8,
+    descriptor: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct WasmTableDef {
+    reftype: u8,
+    limits: WasmLimits,
+}
+
+#[derive(Clone, Debug)]
+struct WasmMemoryDef {
+    limits: WasmLimits,
+}
+
+#[derive(Clone, Debug)]
+struct WasmGlobalDef {
+    valtype: u8,
+    mutable: u8,
+}
+
+#[derive(Clone, Debug)]
+struct WasmExport {
+    name: String,
+    kind: u8,
+    index: u32,
+}
+
+/// Byte range [start..end) in the original buffer for a function body entry
+/// (includes the body_size prefix).
+#[derive(Clone, Debug)]
+struct WasmCodeBody {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Debug)]
+struct WasmModuleInfo {
+    types: Vec<WasmFuncType>,
+    imports: Vec<WasmImport>,
+    num_func_imports: u32,
+    num_table_imports: u32,
+    num_memory_imports: u32,
+    num_global_imports: u32,
+    func_type_indices: Vec<u32>,
+    tables: Vec<WasmTableDef>,
+    memories: Vec<WasmMemoryDef>,
+    globals: Vec<WasmGlobalDef>,
+    exports: Vec<WasmExport>,
+    code_bodies: Vec<WasmCodeBody>,
+    start_func_index: Option<u32>,
+    sections: Vec<WasmSection>,
+}
+
+fn read_limits(reader: &mut Reader<'_>) -> Result<WasmLimits, WasmParseError> {
+    let flag = reader.read_u8()?;
+    let min = reader.read_var_u32()?;
+    let (has_max, max) = if flag & 1 != 0 {
+        (true, reader.read_var_u32()?)
+    } else {
+        (false, 0)
+    };
+    Ok(WasmLimits { has_max, min, max })
+}
+
+fn encode_limits(limits: &WasmLimits) -> Vec<u8> {
+    let mut out = Vec::new();
+    if limits.has_max {
+        out.push(1);
+        out.extend_from_slice(&encode_var_u32(limits.min));
+        out.extend_from_slice(&encode_var_u32(limits.max));
+    } else {
+        out.push(0);
+        out.extend_from_slice(&encode_var_u32(limits.min));
+    }
+    out
+}
+
+fn read_string(reader: &mut Reader<'_>) -> Result<String, WasmParseError> {
+    let len = reader.read_var_u32()? as usize;
+    let bytes = reader.read_vec(len)?;
+    String::from_utf8(bytes).map_err(|_| WasmParseError)
+}
+
+fn encode_string(s: &str) -> Vec<u8> {
+    let mut out = encode_var_u32(s.len() as u32);
+    out.extend_from_slice(s.as_bytes());
+    out
+}
+
+fn parse_type_section(buf: &[u8], section: &WasmSection) -> Result<Vec<WasmFuncType>, WasmParseError> {
+    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
+    let count = reader.read_var_u32()? as usize;
+    let mut types = Vec::with_capacity(count);
+    for _ in 0..count {
+        if reader.read_u8()? != 0x60 {
+            return Err(WasmParseError);
+        }
+        let param_count = reader.read_var_u32()? as usize;
+        let params = reader.read_vec(param_count)?;
+        let result_count = reader.read_var_u32()? as usize;
+        let results = reader.read_vec(result_count)?;
+        types.push(WasmFuncType { params, results });
+    }
+    Ok(types)
+}
+
+fn parse_import_section(buf: &[u8], section: &WasmSection) -> Result<Vec<WasmImport>, WasmParseError> {
+    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
+    let count = reader.read_var_u32()? as usize;
+    let mut imports = Vec::with_capacity(count);
+    for _ in 0..count {
+        let module = read_string(&mut reader)?;
+        let field = read_string(&mut reader)?;
+        let kind = reader.read_u8()?;
+        let desc_start = reader.offset;
+        match kind {
+            0 => { reader.read_var_u32()?; } // func: type index
+            1 => { reader.read_u8()?; read_limits(&mut reader)?; } // table: reftype + limits
+            2 => { read_limits(&mut reader)?; } // memory: limits
+            3 => { reader.read_u8()?; reader.read_u8()?; } // global: valtype + mut
+            _ => return Err(WasmParseError),
+        }
+        let desc_end = reader.offset;
+        let desc_bytes = buf[section.payload_start + desc_start..section.payload_start + desc_end].to_vec();
+        imports.push(WasmImport { module, field, kind, descriptor: desc_bytes });
+    }
+    Ok(imports)
+}
+
+fn parse_function_section(buf: &[u8], section: &WasmSection) -> Result<Vec<u32>, WasmParseError> {
+    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
+    let count = reader.read_var_u32()? as usize;
+    let mut indices = Vec::with_capacity(count);
+    for _ in 0..count {
+        indices.push(reader.read_var_u32()?);
+    }
+    Ok(indices)
+}
+
+fn parse_table_section(buf: &[u8], section: &WasmSection) -> Result<Vec<WasmTableDef>, WasmParseError> {
+    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
+    let count = reader.read_var_u32()? as usize;
+    let mut tables = Vec::with_capacity(count);
+    for _ in 0..count {
+        let reftype = reader.read_u8()?;
+        let limits = read_limits(&mut reader)?;
+        tables.push(WasmTableDef { reftype, limits });
+    }
+    Ok(tables)
+}
+
+fn parse_memory_section(buf: &[u8], section: &WasmSection) -> Result<Vec<WasmMemoryDef>, WasmParseError> {
+    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
+    let count = reader.read_var_u32()? as usize;
+    let mut memories = Vec::with_capacity(count);
+    for _ in 0..count {
+        let limits = read_limits(&mut reader)?;
+        memories.push(WasmMemoryDef { limits });
+    }
+    Ok(memories)
+}
+
+fn parse_global_section(buf: &[u8], section: &WasmSection) -> Result<Vec<WasmGlobalDef>, WasmParseError> {
+    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
+    let count = reader.read_var_u32()? as usize;
+    let mut globals = Vec::with_capacity(count);
+    for _ in 0..count {
+        let valtype = reader.read_u8()?;
+        let mutable = reader.read_u8()?;
+        // Skip init_expr: scan for end byte (0x0b) at top block level.
+        // MVP init_exprs have no nested blocks.
+        loop {
+            let byte = reader.read_u8()?;
+            if byte == 0x0b {
+                break;
+            }
+            // Skip operands of common init_expr instructions
+            match byte {
+                0x41 => { reader.read_var_i32()?; } // i32.const
+                0x42 => { // i64.const (var_i64)
+                    loop {
+                        let b = reader.read_u8()?;
+                        if b & 0x80 == 0 { break; }
+                    }
+                }
+                0x43 => { reader.skip(4)?; } // f32.const
+                0x44 => { reader.skip(8)?; } // f64.const
+                0x23 => { reader.read_var_u32()?; } // global.get
+                0xD2 => { reader.read_var_u32()?; } // ref.func
+                0xD0 => { reader.read_u8()?; } // ref.null
+                _ => {} // unknown, hope it has no operands
+            }
+        }
+        globals.push(WasmGlobalDef { valtype, mutable });
+    }
+    Ok(globals)
+}
+
+fn parse_export_section(buf: &[u8], section: &WasmSection) -> Result<Vec<WasmExport>, WasmParseError> {
+    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
+    let count = reader.read_var_u32()? as usize;
+    let mut exports = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = read_string(&mut reader)?;
+        let kind = reader.read_u8()?;
+        let index = reader.read_var_u32()?;
+        exports.push(WasmExport { name, kind, index });
+    }
+    Ok(exports)
+}
+
+fn parse_code_bodies(buf: &[u8], section: &WasmSection) -> Result<Vec<WasmCodeBody>, WasmParseError> {
+    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
+    let count = reader.read_var_u32()? as usize;
+    let mut bodies = Vec::with_capacity(count);
+    for _ in 0..count {
+        let body_start = section.payload_start + reader.offset;
+        let body_size = reader.read_var_u32()? as usize;
+        let content_start = section.payload_start + reader.offset;
+        reader.skip(body_size)?;
+        let _ = content_start; // body bytes are at content_start..content_start+body_size
+        bodies.push(WasmCodeBody {
+            start: body_start,
+            end: section.payload_start + reader.offset,
+        });
+    }
+    Ok(bodies)
+}
+
+fn parse_wasm_module_info(buf: &[u8]) -> Result<WasmModuleInfo, WasmParseError> {
+    let sections = read_wasm_sections(buf)?;
+    let mut info = WasmModuleInfo {
+        types: Vec::new(),
+        imports: Vec::new(),
+        num_func_imports: 0,
+        num_table_imports: 0,
+        num_memory_imports: 0,
+        num_global_imports: 0,
+        func_type_indices: Vec::new(),
+        tables: Vec::new(),
+        memories: Vec::new(),
+        globals: Vec::new(),
+        exports: Vec::new(),
+        code_bodies: Vec::new(),
+        start_func_index: None,
+        sections,
+    };
+
+    for section in &info.sections {
+        match section.type_id {
+            1 => info.types = parse_type_section(buf, section)?,
+            2 => info.imports = parse_import_section(buf, section)?,
+            3 => info.func_type_indices = parse_function_section(buf, section)?,
+            4 => info.tables = parse_table_section(buf, section)?,
+            5 => info.memories = parse_memory_section(buf, section)?,
+            6 => info.globals = parse_global_section(buf, section)?,
+            7 => info.exports = parse_export_section(buf, section)?,
+            8 => {
+                let mut reader = Reader::new(&buf[section.payload_start..section.end]);
+                info.start_func_index = Some(reader.read_var_u32()?);
+            }
+            10 => info.code_bodies = parse_code_bodies(buf, section)?,
+            _ => {}
+        }
+    }
+
+    // Count imports by kind
+    for imp in &info.imports {
+        match imp.kind {
+            0 => info.num_func_imports += 1,
+            1 => info.num_table_imports += 1,
+            2 => info.num_memory_imports += 1,
+            3 => info.num_global_imports += 1,
+            _ => {}
+        }
+    }
+
+    Ok(info)
+}
+
+// Phase 2: Stub generation
+
+/// Generate a forwarding stub body for a function with the given type.
+/// The stub forwards all arguments through call_indirect to the given table slot.
+fn generate_stub_body(type_idx: u32, param_count: u32, table_slot: u32) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(0x00); // 0 local declaration groups
+    for i in 0..param_count {
+        body.push(0x20); // local.get
+        body.extend_from_slice(&encode_var_u32(i));
+    }
+    body.push(0x41); // i32.const
+    body.extend_from_slice(&encode_var_i32(table_slot as i32));
+    body.push(0x11); // call_indirect
+    body.extend_from_slice(&encode_var_u32(type_idx));
+    body.push(0x00); // table index 0
+    body.push(0x0b); // end
+    body
+}
+
+// Phase 3: Primary module generation
+
+fn build_primary_module(
+    buf: &[u8],
+    info: &WasmModuleInfo,
+    split_indices: &[usize],
+    table_base_slot: u32,
+    num_split: u32,
+) -> Result<Vec<u8>, WasmParseError> {
+    let mut out = Vec::with_capacity(buf.len());
+    out.extend_from_slice(&buf[..8]); // magic + version
+
+    // Build set for quick lookup
+    let split_set: std::collections::HashSet<usize> = split_indices.iter().copied().collect();
+
+    // Sections must be emitted in order. Walk through original sections and
+    // replace/augment as needed. We may also need to INSERT a table section
+    // if the original module has none.
+    let mut emitted_table_section = false;
+    let has_table_section = info.sections.iter().any(|s| s.type_id == 4);
+
+    for section in &info.sections {
+        match section.type_id {
+            4 => {
+                // Rewrite table section: grow first table by num_split
+                emitted_table_section = true;
+                let mut payload = Vec::new();
+                let total = info.num_table_imports as usize + info.tables.len();
+                payload.extend_from_slice(&encode_var_u32(info.tables.len() as u32));
+                for (i, table) in info.tables.iter().enumerate() {
+                    payload.push(table.reftype);
+                    if i == 0 {
+                        // First defined table: grow it
+                        let new_min = table.limits.min + num_split;
+                        let new_limits = WasmLimits {
+                            has_max: table.limits.has_max,
+                            min: new_min,
+                            max: if table.limits.has_max {
+                                std::cmp::max(table.limits.max, new_min)
+                            } else {
+                                0
+                            },
+                        };
+                        payload.extend_from_slice(&encode_limits(&new_limits));
+                    } else {
+                        payload.extend_from_slice(&encode_limits(&table.limits));
+                    }
+                    let _ = total; // suppress unused
+                }
+                out.push(4);
+                out.extend_from_slice(&encode_var_u32(payload.len() as u32));
+                out.extend_from_slice(&payload);
+            }
+            7 => {
+                // Rewrite export section: append exports for defined funcs, tables, memories, globals
+                let mut payload = Vec::new();
+                let num_existing = info.exports.len() as u32;
+                let num_new_func = info.func_type_indices.len() as u32;
+                let num_new_table = info.tables.len() as u32;
+                let num_new_mem = info.memories.len() as u32;
+                let num_new_global = info.globals.len() as u32;
+                let total_exports = num_existing + num_new_func + num_new_table + num_new_mem + num_new_global;
+                payload.extend_from_slice(&encode_var_u32(total_exports));
+
+                // Existing exports
+                for ex in &info.exports {
+                    payload.extend_from_slice(&encode_string(&ex.name));
+                    payload.push(ex.kind);
+                    payload.extend_from_slice(&encode_var_u32(ex.index));
+                }
+
+                // Export all defined functions as $f<abs_index>
+                for i in 0..info.func_type_indices.len() {
+                    let abs_idx = info.num_func_imports + i as u32;
+                    let name = format!("$f{}", abs_idx);
+                    payload.extend_from_slice(&encode_string(&name));
+                    payload.push(0x00); // function
+                    payload.extend_from_slice(&encode_var_u32(abs_idx));
+                }
+
+                // Export all defined tables as $t<abs_index>
+                for i in 0..info.tables.len() {
+                    let abs_idx = info.num_table_imports + i as u32;
+                    let name = format!("$t{}", abs_idx);
+                    payload.extend_from_slice(&encode_string(&name));
+                    payload.push(0x01); // table
+                    payload.extend_from_slice(&encode_var_u32(abs_idx));
+                }
+
+                // Export all defined memories as $m<abs_index>
+                for i in 0..info.memories.len() {
+                    let abs_idx = info.num_memory_imports + i as u32;
+                    let name = format!("$m{}", abs_idx);
+                    payload.extend_from_slice(&encode_string(&name));
+                    payload.push(0x02); // memory
+                    payload.extend_from_slice(&encode_var_u32(abs_idx));
+                }
+
+                // Export all defined globals as $g<abs_index>
+                for i in 0..info.globals.len() {
+                    let abs_idx = info.num_global_imports + i as u32;
+                    let name = format!("$g{}", abs_idx);
+                    payload.extend_from_slice(&encode_string(&name));
+                    payload.push(0x03); // global
+                    payload.extend_from_slice(&encode_var_u32(abs_idx));
+                }
+
+                out.push(7);
+                out.extend_from_slice(&encode_var_u32(payload.len() as u32));
+                out.extend_from_slice(&payload);
+            }
+            10 => {
+                // Rewrite code section: replace split function bodies with stubs
+                let mut payload = Vec::new();
+                payload.extend_from_slice(&encode_var_u32(info.code_bodies.len() as u32));
+
+                for (i, body) in info.code_bodies.iter().enumerate() {
+                    if split_set.contains(&i) {
+                        let split_order = split_indices.iter().position(|&x| x == i).unwrap();
+                        let type_idx = info.func_type_indices[i];
+                        let param_count = info.types[type_idx as usize].params.len() as u32;
+                        let slot = table_base_slot + split_order as u32;
+                        let stub = generate_stub_body(type_idx, param_count, slot);
+                        payload.extend_from_slice(&encode_var_u32(stub.len() as u32));
+                        payload.extend_from_slice(&stub);
+                    } else {
+                        // Copy original body verbatim
+                        payload.extend_from_slice(&buf[body.start..body.end]);
+                    }
+                }
+
+                out.push(10);
+                out.extend_from_slice(&encode_var_u32(payload.len() as u32));
+                out.extend_from_slice(&payload);
+            }
+            _ => {
+                // Before emitting sections after table (type_id > 4), insert table
+                // section if original had none and we need one.
+                if !has_table_section && !emitted_table_section && section.type_id > 4 {
+                    emitted_table_section = true;
+                    // Insert a new funcref table
+                    let mut payload = Vec::new();
+                    payload.extend_from_slice(&encode_var_u32(1)); // 1 table
+                    payload.push(0x70); // funcref
+                    let limits = WasmLimits { has_max: true, min: num_split, max: num_split };
+                    payload.extend_from_slice(&encode_limits(&limits));
+                    out.push(4);
+                    out.extend_from_slice(&encode_var_u32(payload.len() as u32));
+                    out.extend_from_slice(&payload);
+                }
+                // Copy section verbatim
+                out.extend_from_slice(&buf[section.start..section.end]);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+// Phase 4: Secondary module generation
+
+fn build_secondary_module(
+    buf: &[u8],
+    info: &WasmModuleInfo,
+    split_indices: &[usize],
+    table_base_slot: u32,
+) -> Result<Vec<u8>, WasmParseError> {
+    let num_defined = info.func_type_indices.len() as u32;
+    let num_split = split_indices.len() as u32;
+
+    let mut out = Vec::new();
+    // Magic + version
+    out.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+    // 1. Type section: copy verbatim from original
+    if let Some(section) = info.sections.iter().find(|s| s.type_id == 1) {
+        out.extend_from_slice(&buf[section.start..section.end]);
+    }
+
+    // 2. Import section: all original imports + all primary defined items
+    {
+        let mut payload = Vec::new();
+
+        // Count total imports
+        let num_func_imports_secondary = info.num_func_imports + num_defined;
+        let num_table_imports_secondary = info.num_table_imports + info.tables.len() as u32;
+        let num_memory_imports_secondary = info.num_memory_imports + info.memories.len() as u32;
+        let num_global_imports_secondary = info.num_global_imports + info.globals.len() as u32;
+        let total_imports = num_func_imports_secondary
+            + num_table_imports_secondary
+            + num_memory_imports_secondary
+            + num_global_imports_secondary;
+        payload.extend_from_slice(&encode_var_u32(total_imports));
+
+        // Original function imports (preserve func indices 0..num_func_imports-1)
+        for imp in &info.imports {
+            if imp.kind == 0 {
+                payload.extend_from_slice(&encode_string(&imp.module));
+                payload.extend_from_slice(&encode_string(&imp.field));
+                payload.push(0x00);
+                payload.extend_from_slice(&imp.descriptor);
+            }
+        }
+
+        // Primary defined functions (preserve func indices num_func_imports..num_func_imports+num_defined-1)
+        for i in 0..num_defined {
+            let abs_idx = info.num_func_imports + i;
+            let name = format!("$f{}", abs_idx);
+            payload.extend_from_slice(&encode_string("primary"));
+            payload.extend_from_slice(&encode_string(&name));
+            payload.push(0x00); // function
+            payload.extend_from_slice(&encode_var_u32(info.func_type_indices[i as usize]));
+        }
+
+        // Original table imports
+        for imp in &info.imports {
+            if imp.kind == 1 {
+                payload.extend_from_slice(&encode_string(&imp.module));
+                payload.extend_from_slice(&encode_string(&imp.field));
+                payload.push(0x01);
+                payload.extend_from_slice(&imp.descriptor);
+            }
+        }
+
+        // Primary defined tables
+        for i in 0..info.tables.len() {
+            let abs_idx = info.num_table_imports + i as u32;
+            let name = format!("$t{}", abs_idx);
+            let table = &info.tables[i];
+            payload.extend_from_slice(&encode_string("primary"));
+            payload.extend_from_slice(&encode_string(&name));
+            payload.push(0x01); // table
+            payload.push(table.reftype);
+            // Import with the grown limits (primary grew the table)
+            let grown_limits = if i == 0 {
+                WasmLimits {
+                    has_max: table.limits.has_max,
+                    min: table.limits.min + num_split,
+                    max: if table.limits.has_max {
+                        std::cmp::max(table.limits.max, table.limits.min + num_split)
+                    } else {
+                        0
+                    },
+                }
+            } else {
+                table.limits.clone()
+            };
+            payload.extend_from_slice(&encode_limits(&grown_limits));
+        }
+
+        // Original memory imports
+        for imp in &info.imports {
+            if imp.kind == 2 {
+                payload.extend_from_slice(&encode_string(&imp.module));
+                payload.extend_from_slice(&encode_string(&imp.field));
+                payload.push(0x02);
+                payload.extend_from_slice(&imp.descriptor);
+            }
+        }
+
+        // Primary defined memories
+        for i in 0..info.memories.len() {
+            let abs_idx = info.num_memory_imports + i as u32;
+            let name = format!("$m{}", abs_idx);
+            payload.extend_from_slice(&encode_string("primary"));
+            payload.extend_from_slice(&encode_string(&name));
+            payload.push(0x02); // memory
+            payload.extend_from_slice(&encode_limits(&info.memories[i].limits));
+        }
+
+        // Original global imports
+        for imp in &info.imports {
+            if imp.kind == 3 {
+                payload.extend_from_slice(&encode_string(&imp.module));
+                payload.extend_from_slice(&encode_string(&imp.field));
+                payload.push(0x03);
+                payload.extend_from_slice(&imp.descriptor);
+            }
+        }
+
+        // Primary defined globals
+        for i in 0..info.globals.len() {
+            let abs_idx = info.num_global_imports + i as u32;
+            let name = format!("$g{}", abs_idx);
+            let global = &info.globals[i];
+            payload.extend_from_slice(&encode_string("primary"));
+            payload.extend_from_slice(&encode_string(&name));
+            payload.push(0x03); // global
+            payload.push(global.valtype);
+            payload.push(global.mutable);
+        }
+
+        out.push(2); // import section
+        out.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        out.extend_from_slice(&payload);
+    }
+
+    // 3. Function section: K entries
+    {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&encode_var_u32(num_split));
+        for &def_idx in split_indices {
+            payload.extend_from_slice(&encode_var_u32(info.func_type_indices[def_idx]));
+        }
+        out.push(3);
+        out.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        out.extend_from_slice(&payload);
+    }
+
+    // 9. Element section: active segment patching table slots
+    // The first table in the secondary's index space is at table index 0
+    // (the first imported table).
+    {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&encode_var_u32(1)); // 1 segment
+
+        // Mode 0: active, table 0
+        payload.push(0x00);
+        // Offset expression: i32.const table_base_slot
+        payload.extend_from_slice(&encode_const_i32_expr(table_base_slot));
+        // Function count
+        payload.extend_from_slice(&encode_var_u32(num_split));
+        // Function indices: the defined functions in secondary start after all imports
+        let secondary_func_import_count = info.num_func_imports + num_defined;
+        for i in 0..num_split {
+            payload.extend_from_slice(&encode_var_u32(secondary_func_import_count + i));
+        }
+
+        out.push(9); // element section
+        out.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        out.extend_from_slice(&payload);
+    }
+
+    // 10. Code section: K original function bodies verbatim
+    {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&encode_var_u32(num_split));
+        for &def_idx in split_indices {
+            let body = &info.code_bodies[def_idx];
+            payload.extend_from_slice(&buf[body.start..body.end]);
+        }
+        out.push(10); // code section
+        out.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        out.extend_from_slice(&payload);
+    }
+
+    Ok(out)
+}
+
+// Phase 5: Public API
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WasmFunctionSplitResult {
+    pub primary_wasm: Vec<u8>,
+    pub secondary_wasm: Vec<u8>,
+    pub split_count: usize,
+    pub total_functions: usize,
+}
+
+pub fn wasm_split_functions(
+    buf: &[u8],
+    threshold: usize,
+) -> Result<WasmFunctionSplitResult, WasmParseError> {
+    let info = parse_wasm_module_info(buf)?;
+    let num_defined = info.func_type_indices.len();
+
+    // Select functions to split based on body size threshold
+    let mut split_indices = Vec::new();
+    for (i, body) in info.code_bodies.iter().enumerate() {
+        let body_size = body.end - body.start;
+        if body_size >= threshold {
+            // Don't split the start function
+            if let Some(start_idx) = info.start_func_index {
+                if start_idx == info.num_func_imports + i as u32 {
+                    continue;
+                }
+            }
+            split_indices.push(i);
+        }
+    }
+
+    if split_indices.is_empty() {
+        return Ok(WasmFunctionSplitResult {
+            primary_wasm: buf.to_vec(),
+            secondary_wasm: Vec::new(),
+            split_count: 0,
+            total_functions: num_defined,
+        });
+    }
+
+    let num_split = split_indices.len() as u32;
+
+    // Compute table base slot: the original table's initial size
+    let table_base_slot = if let Some(table) = info.tables.first() {
+        table.limits.min
+    } else {
+        0
+    };
+
+    let primary_wasm = build_primary_module(buf, &info, &split_indices, table_base_slot, num_split)?;
+    let secondary_wasm = build_secondary_module(buf, &info, &split_indices, table_base_slot)?;
+
+    Ok(WasmFunctionSplitResult {
+        primary_wasm,
+        secondary_wasm,
+        split_count: split_indices.len(),
+        total_functions: num_defined,
+    })
+}
+
+// ---------------------------------------------------------------------------
+
 pub fn wasm_split_data_segments(buf: &[u8]) -> Result<WasmDataSplitResult, WasmParseError> {
     let sections = read_wasm_sections(buf)?;
     let Some(data_section) = sections.iter().find(|section| section.type_id == 11) else {
@@ -696,5 +1432,195 @@ mod tests {
                 ]),
             ])
         );
+    }
+
+    // --- Function splitting tests ---
+
+    /// Build a type section with given function types.
+    /// Each entry is (param_count, result_count) with all types being i32.
+    fn type_section(types: &[(u32, u32)]) -> Vec<u8> {
+        let mut payload = encode_var_u32(types.len() as u32);
+        for &(params, results) in types {
+            payload.push(0x60);
+            payload.extend_from_slice(&encode_var_u32(params));
+            for _ in 0..params {
+                payload.push(0x7f); // i32
+            }
+            payload.extend_from_slice(&encode_var_u32(results));
+            for _ in 0..results {
+                payload.push(0x7f); // i32
+            }
+        }
+        let mut section = vec![1]; // type section id
+        section.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        section.extend_from_slice(&payload);
+        section
+    }
+
+    /// Build a function section mapping defined functions to type indices.
+    fn function_section(type_indices: &[u32]) -> Vec<u8> {
+        let mut payload = encode_var_u32(type_indices.len() as u32);
+        for &idx in type_indices {
+            payload.extend_from_slice(&encode_var_u32(idx));
+        }
+        let mut section = vec![3]; // function section id
+        section.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        section.extend_from_slice(&payload);
+        section
+    }
+
+    /// Build a table section with one funcref table.
+    fn table_section(initial: u32, max: Option<u32>) -> Vec<u8> {
+        let mut payload = encode_var_u32(1); // 1 table
+        payload.push(0x70); // funcref
+        if let Some(max) = max {
+            payload.push(0x01); // has max
+            payload.extend_from_slice(&encode_var_u32(initial));
+            payload.extend_from_slice(&encode_var_u32(max));
+        } else {
+            payload.push(0x00); // no max
+            payload.extend_from_slice(&encode_var_u32(initial));
+        }
+        let mut section = vec![4]; // table section id
+        section.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        section.extend_from_slice(&payload);
+        section
+    }
+
+    /// Build an export section exporting a function.
+    fn export_section(exports: &[(&str, u8, u32)]) -> Vec<u8> {
+        let mut payload = encode_var_u32(exports.len() as u32);
+        for &(name, kind, index) in exports {
+            payload.extend_from_slice(&encode_var_u32(name.len() as u32));
+            payload.extend_from_slice(name.as_bytes());
+            payload.push(kind);
+            payload.extend_from_slice(&encode_var_u32(index));
+        }
+        let mut section = vec![7]; // export section id
+        section.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        section.extend_from_slice(&payload);
+        section
+    }
+
+    /// Build a code section with given function bodies (raw bytes, without size prefix).
+    fn code_section(bodies: &[&[u8]]) -> Vec<u8> {
+        let mut payload = encode_var_u32(bodies.len() as u32);
+        for body in bodies {
+            payload.extend_from_slice(&encode_var_u32(body.len() as u32));
+            payload.extend_from_slice(body);
+        }
+        let mut section = vec![10]; // code section id
+        section.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        section.extend_from_slice(&payload);
+        section
+    }
+
+    #[test]
+    fn split_functions_no_functions_above_threshold() {
+        // A module with one small function — nothing should be split
+        let small_body = &[0x00, 0x0b]; // 0 locals, end
+        let wasm = wasm_with_sections(&[
+            type_section(&[(0, 0)]),
+            function_section(&[0]),
+            code_section(&[small_body]),
+        ]);
+
+        let result = wasm_split_functions(&wasm, 100).unwrap();
+        assert_eq!(result.split_count, 0);
+        assert_eq!(result.total_functions, 1);
+        assert!(result.secondary_wasm.is_empty());
+        assert_eq!(result.primary_wasm, wasm);
+    }
+
+    #[test]
+    fn split_functions_splits_large_function() {
+        // Create a module with:
+        // - Type 0: () -> ()  (no params, no results)
+        // - Type 1: (i32) -> (i32)
+        // - Function 0: type 0, small body
+        // - Function 1: type 1, large body (should be split)
+        let small_body = &[0x00, 0x0b]; // 0 locals, end
+        let mut large_body = vec![0x00]; // 0 locals
+        for _ in 0..250 {
+            large_body.push(0x01); // nop
+        }
+        large_body.push(0x20); // local.get
+        large_body.push(0x00); // index 0
+        large_body.push(0x0b); // end
+
+        let wasm = wasm_with_sections(&[
+            type_section(&[(0, 0), (1, 1)]),
+            function_section(&[0, 1]),
+            table_section(0, Some(0)),
+            export_section(&[("main", 0x00, 0)]),
+            code_section(&[small_body, &large_body]),
+        ]);
+
+        let result = wasm_split_functions(&wasm, 10).unwrap();
+        assert_eq!(result.split_count, 1);
+        assert_eq!(result.total_functions, 2);
+        assert!(!result.secondary_wasm.is_empty());
+        assert!(result.primary_wasm.len() < wasm.len());
+
+        // Validate primary is valid WASM
+        assert_eq!(&result.primary_wasm[..4], b"\0asm");
+        // Validate secondary is valid WASM
+        assert_eq!(&result.secondary_wasm[..4], b"\0asm");
+    }
+
+    #[test]
+    fn split_functions_stub_body_structure() {
+        // Test stub generation for a (i32, i32) -> i32 function
+        let stub = generate_stub_body(0, 2, 5);
+        // Expected: 0x00 (0 locals), 0x20 0x00 (local.get 0), 0x20 0x01 (local.get 1),
+        //           0x41 0x05 (i32.const 5), 0x11 0x00 0x00 (call_indirect type=0 table=0), 0x0b (end)
+        assert_eq!(stub[0], 0x00); // 0 local groups
+        assert_eq!(stub[1], 0x20); // local.get
+        assert_eq!(stub[2], 0x00); // param 0
+        assert_eq!(stub[3], 0x20); // local.get
+        assert_eq!(stub[4], 0x01); // param 1
+        assert_eq!(stub[5], 0x41); // i32.const
+        assert_eq!(stub[6], 0x05); // table slot 5
+        assert_eq!(stub[7], 0x11); // call_indirect
+        assert_eq!(stub[8], 0x00); // type index 0
+        assert_eq!(stub[9], 0x00); // table index 0
+        assert_eq!(stub[10], 0x0b); // end
+    }
+
+    #[test]
+    fn split_functions_no_params_stub() {
+        // A () -> () function stub
+        let stub = generate_stub_body(2, 0, 0);
+        // Expected: 0x00, 0x41 0x00, 0x11 0x02 0x00, 0x0b
+        assert_eq!(stub[0], 0x00); // 0 local groups
+        assert_eq!(stub[1], 0x41); // i32.const
+        assert_eq!(stub[2], 0x00); // table slot 0
+        assert_eq!(stub[3], 0x11); // call_indirect
+        assert_eq!(stub[4], 0x02); // type index 2
+        assert_eq!(stub[5], 0x00); // table index 0
+        assert_eq!(stub[6], 0x0b); // end
+    }
+
+    #[test]
+    fn split_functions_parse_module_info() {
+        let wasm = wasm_with_sections(&[
+            type_section(&[(0, 0), (1, 1)]),
+            function_section(&[0, 1]),
+            table_section(10, Some(20)),
+            export_section(&[("f", 0x00, 0)]),
+            code_section(&[&[0x00, 0x0b], &[0x00, 0x0b]]),
+        ]);
+
+        let info = parse_wasm_module_info(&wasm).unwrap();
+        assert_eq!(info.types.len(), 2);
+        assert_eq!(info.types[0].params.len(), 0);
+        assert_eq!(info.types[0].results.len(), 0);
+        assert_eq!(info.types[1].params.len(), 1);
+        assert_eq!(info.types[1].results.len(), 1);
+        assert_eq!(info.func_type_indices.len(), 2);
+        assert_eq!(info.tables.len(), 1);
+        assert_eq!(info.exports.len(), 1);
+        assert_eq!(info.exports[0].name, "f");
+        assert_eq!(info.code_bodies.len(), 2);
     }
 }
