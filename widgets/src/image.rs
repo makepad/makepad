@@ -147,7 +147,7 @@ impl Image {
         let data = if let Some(data) = cx.get_resource(handle) {
             data
         } else {
-            cx.load_all_script_resources();
+            cx.load_script_resource(handle);
             match cx.get_resource(handle) {
                 Some(data) => data,
                 None => {
