@@ -137,9 +137,6 @@ impl Widget for MathView {
 
 impl MathView {
     fn compile_math(&mut self, cx: &mut Cx2d) {
-        // Match DrawText behavior so crate/http resources start loading
-        // before we attempt to resolve the math font family.
-        cx.cx.cx.load_all_script_resources();
         let font_family_id = self.draw_text.text_style.font_family_id();
         self.draw_text.text_style.ensure_fonts_loaded(cx.cx.cx);
         if self.text == self.old_text

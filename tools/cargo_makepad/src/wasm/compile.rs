@@ -678,7 +678,38 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                     let path = path.strip_prefix("/").unwrap();
 
                     let path = root.join(&path);
+                    let compressed_path = path.parent().and_then(|parent| {
+                        path.file_name()
+                            .map(|name| parent.join(format!("{}.br", name.to_string_lossy())))
+                    });
                     //println!("OPENING {:?}", path);
+                    if let Some(compressed_path) = compressed_path.as_ref() {
+                        if let Ok(mut file_handle) = File::open(compressed_path) {
+                            let mut body = Vec::<u8>::new();
+                            if file_handle.read_to_end(&mut body).is_ok() {
+                                let coop_coep_headers = if threaded {
+                                    "Cross-Origin-Embedder-Policy: require-corp\r\n\
+                                    Cross-Origin-Opener-Policy: same-origin\r\n"
+                                } else {
+                                    ""
+                                };
+                                let header = format!(
+                                    "HTTP/1.1 200 OK\r\n\
+                                    Content-Type: {}\r\n\
+                                    {}\
+                                    Content-encoding: br\r\n\
+                                    Cache-Control: max-age:0\r\n\
+                                    Content-Length: {}\r\n\
+                                    Connection: close\r\n\r\n",
+                                    mime_type,
+                                    coop_coep_headers,
+                                    body.len()
+                                );
+                                let _ = response_sender.send(HttpServerResponse { header, body });
+                                continue;
+                            }
+                        }
+                    }
                     if let Ok(mut file_handle) = File::open(&path) {
                         let mut body = Vec::<u8>::new();
                         if file_handle.read_to_end(&mut body).is_ok() {

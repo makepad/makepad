@@ -181,6 +181,115 @@ fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
 }
 
 impl Cx {
+    fn load_script_resource_impl(
+        &mut self,
+        handle: ScriptHandle,
+        #[cfg(target_arch = "wasm32")] crate_manifests: &HashMap<String, String>,
+    ) {
+        // On wasm, skip loading if we haven't received ToWasmInit yet (os_type is Unknown).
+        #[cfg(target_arch = "wasm32")]
+        if matches!(self.os_type(), crate::cx::OsType::Unknown) {
+            return;
+        }
+
+        let is_packaged = self.package_root.is_some();
+
+        #[cfg(target_arch = "wasm32")]
+        let mut pending_http = None::<(LiveId, ScriptHandle, String)>;
+
+        {
+            let mut resources = self.script_data.resources.resources.borrow_mut();
+            let Some(res) = resources.iter_mut().find(|res| res.handle == handle) else {
+                return;
+            };
+
+            if !matches!(res.data, CxScriptResourceData::NotLoaded) {
+                return;
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            if res.web_url.is_none() {
+                if let Some(dep_path) = resolve_dependency_path_from_manifests(
+                    &res.abs_path,
+                    None,
+                    None,
+                    crate_manifests,
+                ) {
+                    res.dependency_path = Some(dep_path.clone());
+                    res.web_url = Some(format!("/{}", dep_path));
+                }
+            }
+
+            if let Some(dep_path) = res.dependency_path.as_deref() {
+                if let Ok(data) = self.get_dependency(dep_path) {
+                    res.data = CxScriptResourceData::Loaded(data);
+                    return;
+                }
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                if let Some(url) = res.web_url.clone() {
+                    let request_id = LiveId::unique();
+                    res.data = CxScriptResourceData::Loading;
+                    pending_http = Some((request_id, res.handle, url));
+                } else {
+                    res.data = CxScriptResourceData::Error(format!(
+                        "Failed to load resource: {} (dep: {:?}, packaged: {})",
+                        res.abs_path, res.dependency_path, is_packaged,
+                    ));
+                }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if is_packaged {
+                    #[cfg(not(target_os = "android"))]
+                    if let Some(dep_path) = res.dependency_path.as_deref() {
+                        if let Some(data) = load_packaged_resource(self, dep_path) {
+                            res.data = CxScriptResourceData::Loaded(data);
+                            return;
+                        }
+                    }
+                } else if let Some(result) = load_file_direct(&res.abs_path) {
+                    res.data = match result {
+                        Ok(data) => CxScriptResourceData::Loaded(data),
+                        Err(e) => CxScriptResourceData::Error(e),
+                    };
+                    return;
+                }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                res.data = CxScriptResourceData::Error(format!(
+                    "Failed to load resource: {} (dep: {:?}, packaged: {})",
+                    res.abs_path, res.dependency_path, is_packaged,
+                ));
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        if let Some((request_id, handle, url)) = pending_http {
+            self.script_data
+                .resources
+                .http_resources
+                .push(CxScriptHttpResource { request_id, handle });
+            self.http_request(request_id, HttpRequest::new(url, Default::default()));
+        }
+    }
+
+    pub fn load_script_resource(&mut self, handle: ScriptHandle) {
+        #[cfg(target_arch = "wasm32")]
+        let crate_manifests = self.script_data.crate_manifests.borrow().clone();
+
+        self.load_script_resource_impl(
+            handle,
+            #[cfg(target_arch = "wasm32")]
+            &crate_manifests,
+        );
+    }
+
     /// Load all script resources that are still pending.
     ///
     /// Each platform uses a different loading strategy:
@@ -200,96 +309,17 @@ impl Cx {
         #[cfg(target_arch = "wasm32")]
         let crate_manifests = self.script_data.crate_manifests.borrow().clone();
 
-        let is_packaged = self.package_root.is_some();
+        let handles = {
+            let resources = self.script_data.resources.resources.borrow();
+            resources.iter().map(|res| res.handle).collect::<Vec<_>>()
+        };
 
-        // Collect HTTP requests to issue after releasing the borrow (wasm only).
-        #[cfg(target_arch = "wasm32")]
-        let mut pending_http = Vec::<(LiveId, ScriptHandle, String)>::new();
-
-        {
-            let mut resources = self.script_data.resources.resources.borrow_mut();
-            for res in resources.iter_mut() {
-                if !matches!(res.data, CxScriptResourceData::NotLoaded) {
-                    continue;
-                }
-
-                // --- Wasm: resolve web_url from crate manifests if missing ---
+        for handle in handles {
+            self.load_script_resource_impl(
+                handle,
                 #[cfg(target_arch = "wasm32")]
-                if res.web_url.is_none() {
-                    if let Some(dep_path) = resolve_dependency_path_from_manifests(
-                        &res.abs_path,
-                        None,
-                        None,
-                        &crate_manifests,
-                    ) {
-                        res.dependency_path = Some(dep_path.clone());
-                        res.web_url = Some(format!("/{}", dep_path));
-                    }
-                }
-
-                // --- Step 1: Try the dependency table ---
-                // On android this calls through to the JNI asset manager.
-                if let Some(dep_path) = res.dependency_path.as_deref() {
-                    if let Ok(data) = self.get_dependency(dep_path) {
-                        res.data = CxScriptResourceData::Loaded(data);
-                        continue;
-                    }
-                }
-
-                // --- Step 2: Platform-specific loading ---
-
-                // Wasm: issue an async HTTP request for the web_url.
-                #[cfg(target_arch = "wasm32")]
-                {
-                    if let Some(url) = res.web_url.clone() {
-                        let request_id = LiveId::unique();
-                        res.data = CxScriptResourceData::Loading;
-                        pending_http.push((request_id, res.handle, url));
-                        continue;
-                    }
-                }
-
-                // Native platforms: try packaged or direct file depending on mode.
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    if is_packaged {
-                        // Packaged mode: only load from the packaged location.
-                        // Android: get_dependency above already tried JNI — nothing more to do.
-                        #[cfg(not(target_os = "android"))]
-                        if let Some(dep_path) = res.dependency_path.as_deref() {
-                            if let Some(data) = load_packaged_resource(self, dep_path) {
-                                res.data = CxScriptResourceData::Loaded(data);
-                                continue;
-                            }
-                        }
-                    } else {
-                        // Unpackaged (dev) mode: load directly from the filesystem.
-                        if let Some(result) = load_file_direct(&res.abs_path) {
-                            res.data = match result {
-                                Ok(data) => CxScriptResourceData::Loaded(data),
-                                Err(e) => CxScriptResourceData::Error(e),
-                            };
-                            continue;
-                        }
-                    }
-                }
-
-                // --- Step 3: Error ---
-                res.data = CxScriptResourceData::Error(format!(
-                    "Failed to load resource: {} (dep: {:?}, packaged: {})",
-                    res.abs_path, res.dependency_path, is_packaged,
-                ));
-            }
-        }
-
-        // Wasm: fire HTTP requests outside the borrow.
-        #[cfg(target_arch = "wasm32")]
-        for (request_id, handle, url) in pending_http {
-            self.script_data
-                .resources
-                .http_resources
-                .push(CxScriptHttpResource { request_id, handle });
-            self.http_request(request_id, HttpRequest::new(url, Default::default()));
+                &crate_manifests,
+            );
         }
     }
 }
