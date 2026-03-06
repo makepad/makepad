@@ -49,8 +49,6 @@ impl Cx {
                     self.os.window_geom = tw.window_info.into();
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
-                    // Ensure script resources deferred during pre-init are queued now.
-                    self.load_all_script_resources();
                     self.call_event_handler(&Event::Startup);
                     self.redraw_all();
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});

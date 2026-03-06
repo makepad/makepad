@@ -93,7 +93,7 @@ impl Gltf3D {
             };
         }
 
-        cx.load_all_script_resources();
+        cx.load_script_resource(handle);
 
         if let Some(data) = cx.get_resource(handle) {
             let abs_path = Self::resource_metadata_by_handle(cx, handle)
