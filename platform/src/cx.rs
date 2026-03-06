@@ -19,6 +19,7 @@ use {
         script::script::CxScriptData,
         thread::SignalToUI,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
+        uniform_buffer::CxUniformBufferPool,
         window::CxWindowPool,
     },
     makepad_futures::{
@@ -60,6 +61,7 @@ pub struct Cx {
     pub draw_lists: CxDrawListPool,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
+    pub uniform_buffers: CxUniformBufferPool,
     pub(crate) geometries: CxGeometryPool,
 
     pub draw_shaders: CxDrawShaders,
@@ -346,6 +348,7 @@ impl Cx {
             draw_matrices: Default::default(),
             geometries: Default::default(),
             textures,
+            uniform_buffers: Default::default(),
 
             draw_shaders: Default::default(),
 

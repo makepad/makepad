@@ -277,6 +277,20 @@ impl Cx {
                         shp.dyn_uniform_buffer_id,
                         &draw_item.os.user_uniforms.buffer,
                     );
+                    for (slot, idx) in shp.custom_uniform_buffer_ids.iter().enumerate() {
+                        if let Some(uniform_buffer) = draw_call.uniform_buffer_slots[slot].as_ref()
+                        {
+                            let cx_uniform_buffer =
+                                &mut self.uniform_buffers[uniform_buffer.uniform_buffer_id()];
+                            cx_uniform_buffer
+                                .os
+                                .buffer
+                                .update_with_constant_bytes(d3d11_cx, &cx_uniform_buffer.data);
+                            buffer_slot(d3d11_cx, *idx, &cx_uniform_buffer.os.buffer.buffer);
+                        } else {
+                            buffer_slot(d3d11_cx, *idx, &None);
+                        }
+                    }
                     buffer_slot_opt(
                         d3d11_cx,
                         shp.draw_call_uniform_buffer_id,
@@ -817,6 +831,11 @@ pub struct CxOsDrawCall {
 }
 
 #[derive(Default, Clone)]
+pub struct CxOsUniformBuffer {
+    pub buffer: D3d11Buffer,
+}
+
+#[derive(Default, Clone)]
 pub struct D3d11Buffer {
     pub last_size: usize,
     pub buffer: Option<ID3D11Buffer>,
@@ -932,6 +951,32 @@ impl D3d11Buffer {
             .as_ptr() as *const _
         };
         self.create_buffer_or_update(d3d11_cx, &buffer_desc, len_slots, data);
+    }
+
+    pub fn update_with_constant_bytes(&mut self, d3d11_cx: &D3d11Cx, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        let padded_len = data.len().next_multiple_of(16);
+        let mut padded = Vec::with_capacity(padded_len);
+        padded.extend_from_slice(data);
+        padded.resize(padded_len, 0);
+        let len_slots = padded.len() >> 2;
+
+        let buffer_desc = D3D11_BUFFER_DESC {
+            Usage: D3D11_USAGE_DYNAMIC,
+            ByteWidth: padded.len() as u32,
+            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+            CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+            MiscFlags: 0,
+            StructureByteStride: 0,
+        };
+        self.create_buffer_or_update(
+            d3d11_cx,
+            &buffer_desc,
+            len_slots,
+            padded.as_ptr() as *const _,
+        );
     }
 }
 
@@ -1630,6 +1675,7 @@ pub struct CxOsDrawShader {
     pub pass_uniform_buffer_id: Option<u32>,
     pub draw_list_uniform_buffer_id: Option<u32>,
     pub dyn_uniform_buffer_id: Option<u32>,
+    pub custom_uniform_buffer_ids: Vec<u32>,
     pub scope_uniform_buffer_id: Option<u32>,
 }
 
@@ -1927,6 +1973,11 @@ impl CxOsDrawShader {
             .map(|i| i as u32);
         // dyn_uniform_buffer_id uses the IoUniform cbuffer at register b2
         let dyn_uniform_buffer_id = Some(2);
+        let custom_uniform_buffer_ids = mapping
+            .uniform_buffers
+            .iter()
+            .map(|input| input.buffer_index as u32)
+            .collect();
         let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u32);
 
         Some(Self {
@@ -1943,6 +1994,7 @@ impl CxOsDrawShader {
             pass_uniform_buffer_id,
             draw_list_uniform_buffer_id,
             dyn_uniform_buffer_id,
+            custom_uniform_buffer_ids,
             scope_uniform_buffer_id,
         })
     }

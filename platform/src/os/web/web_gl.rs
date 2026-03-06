@@ -539,6 +539,9 @@ pub struct CxOsDrawShader {
 pub struct CxOsTexture {}
 
 #[derive(Clone, Default)]
+pub struct CxOsUniformBuffer {}
+
+#[derive(Clone, Default)]
 pub struct CxOsGeometry {
     pub vb_id: Option<usize>,
     pub ib_id: Option<usize>,
