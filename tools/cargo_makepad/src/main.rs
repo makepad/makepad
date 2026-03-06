@@ -48,6 +48,9 @@ fn show_help() {
         "       --optimize-size                           Alias for --strip"
     );
     println!(
+        "       --wasm-opt                                Run Binaryen wasm-opt -Os for IR-level optimization (optional; requires binaryen)"
+    );
+    println!(
         "       --split[=200]                             Split wasm payloads; bare --split uses a cold-first automatic split policy"
     );
     println!(

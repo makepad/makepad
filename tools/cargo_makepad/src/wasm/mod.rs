@@ -28,6 +28,9 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     } else if v == "--optimize-size" {
         enable_strip_pipeline(config);
         true
+    } else if v == "--wasm-opt" {
+        config.wasm_opt = true;
+        true
     } else if v == "--split" {
         enable_split_pipeline(config, None);
         true
@@ -81,6 +84,7 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         bindgen: false,
         threads: true,
         optimize_size: false,
+        wasm_opt: false,
         split: false,
         split_auto: false,
         split_functions: false,

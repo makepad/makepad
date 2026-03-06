@@ -4,7 +4,14 @@ use crate::makepad_shell::*;
 use crate::makepad_wasm_strip::*;
 use crate::utils::*;
 use std::{
-    collections::HashMap, fs, fs::File, io::prelude::*, net::SocketAddr, path::PathBuf, sync::mpsc,
+    collections::HashMap,
+    fs,
+    fs::File,
+    io::prelude::*,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::mpsc,
 };
 
 pub struct WasmBuildResult {
@@ -21,6 +28,7 @@ pub struct WasmConfig {
     pub bindgen: bool,
     pub threads: bool,
     pub optimize_size: bool,
+    pub wasm_opt: bool,
     pub split: bool,
     pub split_auto: bool,
     pub split_functions: bool,
@@ -76,6 +84,57 @@ fn print_wasm_split_report(primary_bytes: usize, split_bytes: usize, segments: u
     println!("  split data blob: {} bytes", split_bytes);
     println!("  segment count:   {}", segments);
     println!("  split total:     {} bytes", primary_bytes + split_bytes);
+}
+
+/// Run Binaryen wasm-opt -Os on the given wasm bytes if the tool is installed.
+/// Returns the optimized bytes on success, or the original bytes on failure (with a note).
+fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
+    let build_dir = cwd.join("target/makepad-wasm-opt-tmp");
+    if fs::create_dir_all(&build_dir).is_err() {
+        println!("wasm-opt: skipped (cannot create temp dir)");
+        return data.to_vec();
+    }
+    let in_path = build_dir.join("in.wasm");
+    let out_path = build_dir.join("out.wasm");
+    if fs::write(&in_path, data).is_err() {
+        println!("wasm-opt: skipped (cannot write temp file)");
+        return data.to_vec();
+    }
+    let args = vec![
+        "--all-features".into(),
+        "-Os".into(),
+        "-o".into(),
+        out_path.to_string_lossy().into_owned(),
+        in_path.to_string_lossy().into_owned(),
+    ];
+    let status = Command::new("wasm-opt").args(&args).current_dir(cwd).output();
+    match status {
+        Ok(ref output) if output.status.success() => match fs::read(&out_path) {
+            Ok(optimized) => {
+                let _ = fs::remove_file(&in_path);
+                let _ = fs::remove_file(&out_path);
+                println!("wasm-opt: {} -> {} bytes", data.len(), optimized.len());
+                return optimized;
+            }
+            Err(_) => {
+                println!("wasm-opt: skipped (cannot read output)");
+            }
+        },
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.trim().is_empty() {
+                println!("wasm-opt: skipped (Binaryen wasm-opt failed; install from https://github.com/WebAssembly/binaryen)");
+            } else {
+                println!("wasm-opt: skipped ({})", stderr.lines().next().unwrap_or(stderr.trim()));
+            }
+        }
+        Err(e) => {
+            println!("wasm-opt: skipped ({e})");
+        }
+    }
+    let _ = fs::remove_file(&in_path);
+    let _ = fs::remove_file(&out_path);
+    data.to_vec()
 }
 
 fn print_brotli_size_report(
@@ -601,6 +660,10 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     } else {
         fs::read(&wasm_source).map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?
     };
+
+    if config.wasm_opt {
+        output = try_wasm_opt(&output, &cwd);
+    }
 
     // `--split` implies function splitting as part of the higher-level split pipeline.
     let split_functions_enabled = config.split || config.split_functions;
