@@ -3724,6 +3724,37 @@ pub fn main() {
             }
         }
         shader.test_compile_draw(gpu_stage_4i)
+
+        println("GPU stage 4j: scalar cast aliases")
+        let gpu_stage_4j = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+            limit: shader.uniform(4.0)
+
+            probe: fn() {
+                let stop_u = uint(self.limit)
+                let stop_i = int(self.limit)
+                var last_f = float(stop_i)
+                for step_idx in 0..8 {
+                    if step_idx >= stop_u {
+                        return vec4(float(step_idx), last_f, 0.0, 1.0)
+                    }
+                    last_f = float(step_idx)
+                }
+                return vec4(last_f, float(stop_i), 0.0, 1.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe()
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4j)
     };
     vm.eval(gpu_mb3d_shader_stages);
 

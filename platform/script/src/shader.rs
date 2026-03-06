@@ -1071,7 +1071,12 @@ impl ShaderFnCompiler {
         }
 
         if let Some(name) = vm.bx.heap.pod_type_name(pod_ty) {
+            let alias_ok =
+                (name == id!(f32) && used_name == id!(float))
+                    || (name == id!(u32) && used_name == id!(uint))
+                    || (name == id!(i32) && used_name == id!(int));
             if name != used_name
+                && !alias_ok
                 && used_name != id!(self)
                 && used_name != id!(vec2)
                 && used_name != id!(vec3)
