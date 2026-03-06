@@ -1,4 +1,22 @@
 const AUDIO_WORKLET_SIGNAL_BATCHING = 8;
+const SPLIT_SLOT_EXPORT_PREFIX = "__mp_split_slot_";
+
+function patch_split_table(primary_exports, secondary_exports) {
+    const split_table = primary_exports.__mp_split_table;
+    if (!(split_table instanceof WebAssembly.Table)) {
+        throw new Error("primary wasm missing __mp_split_table export");
+    }
+    for (const [name, value] of Object.entries(secondary_exports)) {
+        if (!name.startsWith(SPLIT_SLOT_EXPORT_PREFIX)) {
+            continue;
+        }
+        const slot = Number.parseInt(name.slice(SPLIT_SLOT_EXPORT_PREFIX.length), 10);
+        if (!Number.isInteger(slot)) {
+            continue;
+        }
+        split_table.set(slot, value);
+    }
+}
 
 class AudioWorklet extends AudioWorkletProcessor {
     constructor(options) {
@@ -10,10 +28,11 @@ class AudioWorklet extends AudioWorkletProcessor {
             if (!thread_info.secondary_module) {
                 return;
             }
-            await WebAssembly.instantiate(thread_info.secondary_module, {
+            const secondary_instance = await WebAssembly.instantiate(thread_info.secondary_module, {
                 env,
                 primary: primary_wasm.exports
             });
+            patch_split_table(primary_wasm.exports, secondary_instance.exports);
         };
         
         function chars_to_string(chars_ptr, len) {

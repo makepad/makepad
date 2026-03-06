@@ -1154,7 +1154,8 @@ fn build_primary_module(
                 let num_new_table = info.tables.len() as u32;
                 let num_new_mem = info.memories.len() as u32;
                 let num_new_global = info.globals.len() as u32;
-                let total_exports = num_existing + num_new_func + num_new_table + num_new_mem + num_new_global;
+                let num_split_table = 1u32;
+                let total_exports = num_existing + num_new_func + num_new_table + num_new_mem + num_new_global + num_split_table;
                 payload.extend_from_slice(&encode_var_u32(total_exports));
 
                 // Existing exports
@@ -1172,6 +1173,11 @@ fn build_primary_module(
                     payload.push(0x00); // function
                     payload.extend_from_slice(&encode_var_u32(abs_idx));
                 }
+
+                // Export the table used by split stubs so the runtime can patch it later.
+                payload.extend_from_slice(&encode_string("__mp_split_table"));
+                payload.push(0x01); // table
+                payload.extend_from_slice(&encode_var_u32(0));
 
                 // Export all defined tables as $t<abs_index>
                 for i in 0..info.tables.len() {
@@ -1402,26 +1408,21 @@ fn build_secondary_module(
         out.extend_from_slice(&payload);
     }
 
-    // 9. Element section: active segment patching table slots
-    // The first table in the secondary's index space is at table index 0
-    // (the first imported table).
+    // 9. Export section: expose split functions by the table slot they should patch.
     {
         let mut payload = Vec::new();
-        payload.extend_from_slice(&encode_var_u32(1)); // 1 segment
-
-        // Mode 0: active, table 0
-        payload.push(0x00);
-        // Offset expression: i32.const table_base_slot
-        payload.extend_from_slice(&encode_const_i32_expr(table_base_slot));
-        // Function count
         payload.extend_from_slice(&encode_var_u32(num_split));
-        // Function indices: the defined functions in secondary start after all imports
+
         let secondary_func_import_count = info.num_func_imports + num_defined;
         for i in 0..num_split {
+            let slot = table_base_slot + i;
+            let name = format!("__mp_split_slot_{}", slot);
+            payload.extend_from_slice(&encode_string(&name));
+            payload.push(0x00); // function
             payload.extend_from_slice(&encode_var_u32(secondary_func_import_count + i));
         }
 
-        out.push(9); // element section
+        out.push(7); // export section
         out.extend_from_slice(&encode_var_u32(payload.len() as u32));
         out.extend_from_slice(&payload);
     }
@@ -2100,6 +2101,64 @@ mod tests {
         assert_eq!(result.total_functions, 2);
         assert!(result.primary_wasm.len() < wasm.len());
         assert!(!result.secondary_wasm.is_empty());
+    }
+
+    #[test]
+    fn split_functions_primary_exports_split_table() {
+        let small_body = &[0x00, 0x0b];
+        let mut large_body = vec![0x00];
+        for _ in 0..250 {
+            large_body.push(0x01);
+        }
+        large_body.push(0x20);
+        large_body.push(0x00);
+        large_body.push(0x0b);
+
+        let wasm = wasm_with_sections(&[
+            type_section(&[(0, 0), (1, 1)]),
+            function_section(&[0, 1]),
+            table_section(0, Some(0)),
+            export_section(&[("main", 0x00, 0)]),
+            code_section(&[small_body, &large_body]),
+        ]);
+
+        let result = wasm_split_functions(&wasm, 10).unwrap();
+        let sections = read_wasm_sections(&result.primary_wasm).unwrap();
+        let export_section = sections.iter().find(|section| section.type_id == 7).unwrap();
+        let exports = parse_export_section(&result.primary_wasm, export_section).unwrap();
+        assert!(exports
+            .iter()
+            .any(|export| export.name == "__mp_split_table" && export.kind == 0x01));
+    }
+
+    #[test]
+    fn split_functions_secondary_exports_patch_slots_without_element_section() {
+        let small_body = &[0x00, 0x0b];
+        let mut large_body = vec![0x00];
+        for _ in 0..250 {
+            large_body.push(0x01);
+        }
+        large_body.push(0x20);
+        large_body.push(0x00);
+        large_body.push(0x0b);
+
+        let wasm = wasm_with_sections(&[
+            type_section(&[(0, 0), (1, 1)]),
+            function_section(&[0, 1]),
+            table_section(0, Some(0)),
+            export_section(&[("main", 0x00, 0)]),
+            code_section(&[small_body, &large_body]),
+        ]);
+
+        let result = wasm_split_functions(&wasm, 10).unwrap();
+        let sections = read_wasm_sections(&result.secondary_wasm).unwrap();
+        assert!(!sections.iter().any(|section| section.type_id == 9));
+
+        let export_section = sections.iter().find(|section| section.type_id == 7).unwrap();
+        let exports = parse_export_section(&result.secondary_wasm, export_section).unwrap();
+        assert!(exports
+            .iter()
+            .any(|export| export.name == "__mp_split_slot_0" && export.kind == 0x00));
     }
 
     #[test]

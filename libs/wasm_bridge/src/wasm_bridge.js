@@ -114,6 +114,9 @@ export function init_env(env) {
 }
 
 export class WasmBridge {
+    static SPLIT_DATA_VERSION = 2;
+    static SPLIT_SLOT_EXPORT_PREFIX = "__mp_split_slot_";
+
     constructor(wasm, dispatch) {
         this.wasm = wasm;
         if(wasm === undefined){
@@ -278,38 +281,24 @@ export class WasmBridge {
             throw new Error("invalid split data blob header");
         }
         const version = view.getUint32(4, true);
-        if (version !== 1 && version !== 2) {
+        if (version !== this.SPLIT_DATA_VERSION) {
             throw new Error("unsupported split data blob version");
         }
         const count = view.getUint32(8, true);
         let offset = 12;
         const segments = [];
         for (let i = 0; i < count; i++) {
-            let kind = 0;
-            let memory_index = 0;
-            let address = 0;
-            let len = 0;
-            if (version === 1) {
-                if (offset + 8 > bytes.byteLength) {
-                    throw new Error("truncated split data segment header");
-                }
-                address = view.getUint32(offset, true);
-                offset += 4;
-                len = view.getUint32(offset, true);
-                offset += 4;
-            } else {
-                if (offset + 13 > bytes.byteLength) {
-                    throw new Error("truncated split data segment header");
-                }
-                kind = bytes[offset];
-                offset += 1;
-                memory_index = view.getUint32(offset, true);
-                offset += 4;
-                address = view.getUint32(offset, true);
-                offset += 4;
-                len = view.getUint32(offset, true);
-                offset += 4;
+            if (offset + 13 > bytes.byteLength) {
+                throw new Error("truncated split data segment header");
             }
+            const kind = bytes[offset];
+            offset += 1;
+            const memory_index = view.getUint32(offset, true);
+            offset += 4;
+            const address = view.getUint32(offset, true);
+            offset += 4;
+            const len = view.getUint32(offset, true);
+            offset += 4;
             if (offset + len > bytes.byteLength) {
                 throw new Error("truncated split data segment payload");
             }
@@ -322,18 +311,6 @@ export class WasmBridge {
             offset += len;
         }
         return {version, segments};
-    }
-
-    static apply_split_data_segments(wasm, segments) {
-        const memory = wasm._memory || wasm.exports.memory;
-        const u8 = new Uint8Array(memory.buffer);
-        for (const segment of segments) {
-            const end = segment.offset + segment.bytes.length;
-            if (end > u8.length) {
-                throw new Error("split data segment exceeds wasm memory size");
-            }
-            u8.set(segment.bytes, segment.offset);
-        }
     }
 
     static read_var_u32(bytes, offset) {
@@ -438,7 +415,55 @@ export class WasmBridge {
         throw new Error("split wasm missing data section");
     }
 
-    static instantiate_wasm(module, memory, env, split_config) {
+    static patch_split_table(primary_exports, secondary_exports) {
+        const split_table = primary_exports.__mp_split_table;
+        if (!(split_table instanceof WebAssembly.Table)) {
+            throw new Error("primary wasm missing __mp_split_table export");
+        }
+
+        for (const [name, value] of Object.entries(secondary_exports)) {
+            if (!name.startsWith(this.SPLIT_SLOT_EXPORT_PREFIX)) {
+                continue;
+            }
+            const slot = Number.parseInt(name.slice(this.SPLIT_SLOT_EXPORT_PREFIX.length), 10);
+            if (!Number.isInteger(slot)) {
+                continue;
+            }
+            split_table.set(slot, value);
+        }
+    }
+
+    static async compile_primary_module(wasm_bytes, split_response_promise) {
+        if (!split_response_promise) {
+            return WebAssembly.compile(wasm_bytes);
+        }
+        const split_response = await split_response_promise;
+        if (!split_response.ok) {
+            throw new Error(`failed to fetch split data: ${split_response.status}`);
+        }
+        const split_bytes = new Uint8Array(await split_response.arrayBuffer());
+        const split = this.parse_split_data_blob(split_bytes);
+        const rebuilt_bytes = this.rebuild_split_wasm(wasm_bytes, split.segments);
+        return WebAssembly.compile(rebuilt_bytes);
+    }
+
+    static async attach_secondary_wasm(primary_wasm, secondary_response_promise, defer_secondary) {
+        if (!secondary_response_promise) {
+            return;
+        }
+        primary_wasm._secondary_ready = (async () => {
+            const secondary_response = await secondary_response_promise;
+            if (!secondary_response.ok) {
+                throw new Error(`failed to fetch secondary wasm: ${secondary_response.status}`);
+            }
+            await this._instantiate_secondary(secondary_response, primary_wasm);
+        })();
+        if (!defer_secondary) {
+            await primary_wasm._secondary_ready;
+        }
+    }
+
+    static instantiate_wasm(module, memory, env) {
         let set_wasm = init_env(env);
 
         if (memory !== undefined) {
@@ -451,9 +476,6 @@ export class WasmBridge {
             wasm._memory = env.memory? env.memory: wasm.exports.memory;
             wasm._module = module;
             wasm._env = env;
-            if (split_config && split_config.preloaded_split && split_config.preloaded_split.version === 1) {
-                this.apply_split_data_segments(wasm, split_config.preloaded_split.segments);
-            }
             return wasm
         }, error => {
             if (error.name == "LinkError") { // retry as multithreaded
@@ -464,9 +486,6 @@ export class WasmBridge {
                     wasm._memory = env.memory;
                     wasm._module = module;
                     wasm._env = env;
-                    if (split_config && split_config.preloaded_split && split_config.preloaded_split.version === 1) {
-                        this.apply_split_data_segments(wasm, split_config.preloaded_split.segments);
-                    }
                     return wasm
                 }, error => {
                     console.error(error);
@@ -501,55 +520,9 @@ export class WasmBridge {
                 }
 
                 const wasm_bytes = new Uint8Array(await wasm_response.arrayBuffer());
-                let preloaded_split = undefined;
-                let split_response = null;
-
-                // Handle data segment splitting
-                if (split_response_promise) {
-                    split_response = await split_response_promise;
-                    if (!split_response.ok) {
-                        throw new Error(`failed to fetch split data: ${split_response.status}`);
-                    }
-                    const split_bytes = new Uint8Array(await split_response.arrayBuffer());
-                    const split = this.parse_split_data_blob(split_bytes);
-                    if (split.version === 1) {
-                        preloaded_split = {preloaded_split: split};
-                    } else {
-                        // v2: rebuild wasm inline — but we can't use compileStreaming anymore
-                        const rebuilt_bytes = this.rebuild_split_wasm(wasm_bytes, split.segments);
-                        const module = await WebAssembly.compile(rebuilt_bytes);
-                        const wasm = await this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, undefined);
-                        if (secondary_response_promise) {
-                            wasm._secondary_ready = (async () => {
-                                const secondary_response = await secondary_response_promise;
-                                if (!secondary_response.ok) {
-                                    throw new Error(`failed to fetch secondary wasm: ${secondary_response.status}`);
-                                }
-                                await this._instantiate_secondary(secondary_response, wasm);
-                            })();
-                            if (!defer_secondary) {
-                                await wasm._secondary_ready;
-                            }
-                        }
-                        return wasm;
-                    }
-                }
-
-                const module = await WebAssembly.compile(wasm_bytes);
-                const wasm = await this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, preloaded_split);
-
-                if (secondary_response_promise) {
-                    wasm._secondary_ready = (async () => {
-                        const secondary_response = await secondary_response_promise;
-                        if (!secondary_response.ok) {
-                            throw new Error(`failed to fetch secondary wasm: ${secondary_response.status}`);
-                        }
-                        await this._instantiate_secondary(secondary_response, wasm);
-                    })();
-                    if (!defer_secondary) {
-                        await wasm._secondary_ready;
-                    }
-                }
+                const module = await this.compile_primary_module(wasm_bytes, split_response_promise);
+                const wasm = await this.instantiate_wasm(module, memory, {_post_signal: _ => {}});
+                await this.attach_secondary_wasm(wasm, secondary_response_promise, defer_secondary);
                 return wasm;
             })().catch(error => {
                 console.error(error);
@@ -557,7 +530,7 @@ export class WasmBridge {
         }
         return WebAssembly.compileStreaming(fetch(wasm_url))
             .then(
-            (module) => this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, split_config),
+            (module) => this.instantiate_wasm(module, memory, {_post_signal: _ => {}}),
             error => {
                 console.error(error)
             }
@@ -568,15 +541,12 @@ export class WasmBridge {
         const secondary_bytes = await secondary_response.arrayBuffer();
         const secondary_module = await WebAssembly.compile(secondary_bytes);
         primary_wasm._secondary_module = secondary_module;
-        // The secondary module imports from two modules:
-        // "env" — the same env imports the primary uses
-        // "primary" — all exported functions/tables/memories/globals from primary
         const imports = {
             env: primary_wasm._env || {},
             primary: primary_wasm.exports
         };
-        await WebAssembly.instantiate(secondary_module, imports);
-        // Table is now patched via the secondary's active element segments
+        const secondary_instance = await WebAssembly.instantiate(secondary_module, imports);
+        this.patch_split_table(primary_wasm.exports, secondary_instance.exports);
     }
 }
 

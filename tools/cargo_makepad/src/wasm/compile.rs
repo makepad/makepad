@@ -27,6 +27,12 @@ pub struct WasmConfig {
     pub split_auto_primary_bytes: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AutoSplitOutcome {
+    NotAttempted,
+    Deferred { target_met: bool },
+}
+
 fn format_section_counts(summary: &WasmSectionSummary) -> String {
     if summary.counts.is_empty() {
         return "none".to_string();
@@ -601,6 +607,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     // Function splitting: split large functions into primary (stubs) + secondary (real bodies)
     let secondary_wasm_dest = app_dir.join(format!("{}.secondary.wasm", build_crate));
     let mut defer_secondary_wasm = false;
+    let mut auto_split_outcome = AutoSplitOutcome::NotAttempted;
     let secondary_wasm_path = if split_functions_enabled {
         if config.bindgen {
             return Err(if config.split {
@@ -623,12 +630,19 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         let result = if let Some(target_before_data_split) = auto_target_before_data_split {
             let cold_result = wasm_split_functions_to_target_primary_size_cold(&output, target_before_data_split)
                 .map_err(|e| format!("Cannot auto split wasm functions {:?}: {:?}", wasm_source, e))?;
-            if cold_result.split_count > 0 && cold_result.primary_wasm.len() <= target_before_data_split {
+            if cold_result.split_count > 0 && cold_result.primary_wasm.len() < output.len() {
                 defer_secondary_wasm = true;
+                auto_split_outcome = AutoSplitOutcome::Deferred {
+                    target_met: cold_result.primary_wasm.len() <= target_before_data_split,
+                };
                 cold_result
             } else {
-                wasm_split_functions_to_target_primary_size(&output, target_before_data_split)
-                    .map_err(|e| format!("Cannot auto split wasm functions {:?}: {:?}", wasm_source, e))?
+                WasmFunctionSplitResult {
+                    primary_wasm: output.clone(),
+                    secondary_wasm: Vec::new(),
+                    split_count: 0,
+                    total_functions: cold_result.total_functions,
+                }
             }
         } else {
             wasm_split_functions(&output, config.split_functions_threshold)
@@ -644,7 +658,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                         );
                     } else {
                         println!(
-                            "Function split: no functions could reach the auto target ({} bytes), skipping",
+                            "Function split: no defer-safe cold split could reduce startup path enough for the auto target ({} bytes), skipping",
                             target_primary_bytes
                         );
                     }
@@ -664,10 +678,13 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     "Function split: {} of {} functions split (auto target primary: {} bytes)",
                     result.split_count, result.total_functions, target_primary_bytes
                 );
-                if defer_secondary_wasm {
-                    println!("  mode: cold-first split, secondary deferred");
-                } else if auto_target_before_data_split.is_some() {
-                    println!("  mode: full split, secondary remains on the startup path");
+                if let AutoSplitOutcome::Deferred { target_met } = auto_split_outcome {
+                    if target_met {
+                        println!("  mode: cold-first split, secondary deferred");
+                    } else {
+                        println!("  mode: cold-first partial split, secondary deferred");
+                        println!("  note: auto target not reached without putting secondary on the startup path");
+                    }
                 }
             } else {
                 println!(
