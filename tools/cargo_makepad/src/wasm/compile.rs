@@ -250,7 +250,7 @@ fn brotli_compress(dest_path: &PathBuf) -> usize {
     let data = fs::read(&dest_path).expect("Can't read file");
     {
         let mut writer =
-            brotli::CompressorWriter::new(&mut brotli_data, 4096 /* buffer size */, 12, 22);
+            brotli::CompressorWriter::new(&mut brotli_data, 65536 /* buffer size */, 11, 24);
         writer.write_all(&data).expect("Can't write data");
     }
     let mut brotli_file = File::create(dest_path_br).unwrap();
