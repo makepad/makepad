@@ -278,30 +278,50 @@ export class WasmBridge {
             throw new Error("invalid split data blob header");
         }
         const version = view.getUint32(4, true);
-        if (version !== 1) {
+        if (version !== 1 && version !== 2) {
             throw new Error("unsupported split data blob version");
         }
         const count = view.getUint32(8, true);
         let offset = 12;
         const segments = [];
         for (let i = 0; i < count; i++) {
-            if (offset + 8 > bytes.byteLength) {
-                throw new Error("truncated split data segment header");
+            let kind = 0;
+            let memory_index = 0;
+            let address = 0;
+            let len = 0;
+            if (version === 1) {
+                if (offset + 8 > bytes.byteLength) {
+                    throw new Error("truncated split data segment header");
+                }
+                address = view.getUint32(offset, true);
+                offset += 4;
+                len = view.getUint32(offset, true);
+                offset += 4;
+            } else {
+                if (offset + 13 > bytes.byteLength) {
+                    throw new Error("truncated split data segment header");
+                }
+                kind = bytes[offset];
+                offset += 1;
+                memory_index = view.getUint32(offset, true);
+                offset += 4;
+                address = view.getUint32(offset, true);
+                offset += 4;
+                len = view.getUint32(offset, true);
+                offset += 4;
             }
-            const address = view.getUint32(offset, true);
-            offset += 4;
-            const len = view.getUint32(offset, true);
-            offset += 4;
             if (offset + len > bytes.byteLength) {
                 throw new Error("truncated split data segment payload");
             }
             segments.push({
+                kind,
+                memory_index,
                 offset: address,
                 bytes: bytes.slice(offset, offset + len),
             });
             offset += len;
         }
-        return segments;
+        return {version, segments};
     }
 
     static apply_split_data_segments(wasm, segments) {
@@ -316,17 +336,106 @@ export class WasmBridge {
         }
     }
 
-    static async load_split_data(wasm, split_config) {
-        if (!split_config || !split_config.split_data_url) {
-            return;
+    static read_var_u32(bytes, offset) {
+        let result = 0;
+        let shift = 0;
+        while (offset < bytes.length) {
+            const byte = bytes[offset++];
+            result |= (byte & 0x7f) << shift;
+            if ((byte & 0x80) === 0) {
+                return {value: result >>> 0, offset};
+            }
+            shift += 7;
         }
-        const response = await fetch(split_config.split_data_url);
-        if (!response.ok) {
-            throw new Error(`failed to fetch split data: ${response.status}`);
+        throw new Error("truncated var_u32");
+    }
+
+    static encode_var_u32(value) {
+        const out = [];
+        do {
+            let byte = value & 0x7f;
+            value >>>= 7;
+            if (value !== 0) {
+                byte |= 0x80;
+            }
+            out.push(byte);
+        } while (value !== 0);
+        return out;
+    }
+
+    static encode_var_i32(value) {
+        const out = [];
+        while (true) {
+            let byte = value & 0x7f;
+            value >>= 7;
+            const done = (value === 0 && (byte & 0x40) === 0) || (value === -1 && (byte & 0x40) !== 0);
+            if (done) {
+                out.push(byte);
+                return out;
+            }
+            out.push(byte | 0x80);
         }
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        const segments = this.parse_split_data_blob(bytes);
-        this.apply_split_data_segments(wasm, segments);
+    }
+
+    static encode_split_data_section_payload(segments) {
+        const payload = [];
+        payload.push(...this.encode_var_u32(segments.length));
+        for (const segment of segments) {
+            if (segment.kind === 1) {
+                payload.push(1);
+                payload.push(...this.encode_var_u32(segment.bytes.length));
+                for (const byte of segment.bytes) {
+                    payload.push(byte);
+                }
+            } else {
+                if (segment.memory_index === 0) {
+                    payload.push(0);
+                } else {
+                    payload.push(2);
+                    payload.push(...this.encode_var_u32(segment.memory_index));
+                }
+                payload.push(0x41);
+                payload.push(...this.encode_var_i32(segment.offset | 0));
+                payload.push(0x0b);
+                payload.push(...this.encode_var_u32(segment.bytes.length));
+                for (const byte of segment.bytes) {
+                    payload.push(byte);
+                }
+            }
+        }
+        return new Uint8Array(payload);
+    }
+
+    static rebuild_split_wasm(wasm_bytes, segments) {
+        const data_payload = this.encode_split_data_section_payload(segments);
+        let offset = 8;
+        while (offset < wasm_bytes.length) {
+            const section_start = offset;
+            const type_id = wasm_bytes[offset++];
+            const payload_len_info = this.read_var_u32(wasm_bytes, offset);
+            const payload_start = payload_len_info.offset;
+            const payload_end = payload_start + payload_len_info.value;
+            if (payload_end > wasm_bytes.length) {
+                throw new Error("truncated wasm section payload");
+            }
+            if (type_id === 11) {
+                const encoded_len = Uint8Array.from(this.encode_var_u32(data_payload.length));
+                const rebuilt = new Uint8Array(
+                    section_start + 1 + encoded_len.length + data_payload.length + (wasm_bytes.length - payload_end)
+                );
+                rebuilt.set(wasm_bytes.slice(0, section_start), 0);
+                let out_offset = section_start;
+                rebuilt[out_offset++] = 11;
+                rebuilt.set(encoded_len, out_offset);
+                out_offset += encoded_len.length;
+                rebuilt.set(data_payload, out_offset);
+                out_offset += data_payload.length;
+                rebuilt.set(wasm_bytes.slice(payload_end), out_offset);
+                return rebuilt;
+            }
+            offset = payload_end;
+        }
+        throw new Error("split wasm missing data section");
     }
 
     static instantiate_wasm(module, memory, env, split_config) {
@@ -341,7 +450,9 @@ export class WasmBridge {
             wasm._has_thread_support = env.memory !== undefined;
             wasm._memory = env.memory? env.memory: wasm.exports.memory;
             wasm._module = module;
-            await this.load_split_data(wasm, split_config);
+            if (split_config && split_config.preloaded_split && split_config.preloaded_split.version === 1) {
+                this.apply_split_data_segments(wasm, split_config.preloaded_split.segments);
+            }
             return wasm
         }, error => {
             if (error.name == "LinkError") { // retry as multithreaded
@@ -351,7 +462,9 @@ export class WasmBridge {
                     wasm._has_thread_support = true;
                     wasm._memory = env.memory;
                     wasm._module = module;
-                    await this.load_split_data(wasm, split_config);
+                    if (split_config && split_config.preloaded_split && split_config.preloaded_split.version === 1) {
+                        this.apply_split_data_segments(wasm, split_config.preloaded_split.segments);
+                    }
                     return wasm
                 }, error => {
                     console.error(error);
@@ -366,6 +479,29 @@ export class WasmBridge {
     }
     
     static fetch_and_instantiate_wasm(wasm_url, memory, split_config) {
+        if (split_config && split_config.split_data_url) {
+            return Promise.all([fetch(wasm_url), fetch(split_config.split_data_url)])
+                .then(async ([wasm_response, split_response]) => {
+                    if (!wasm_response.ok) {
+                        throw new Error(`failed to fetch wasm: ${wasm_response.status}`);
+                    }
+                    if (!split_response.ok) {
+                        throw new Error(`failed to fetch split data: ${split_response.status}`);
+                    }
+                    const wasm_bytes = new Uint8Array(await wasm_response.arrayBuffer());
+                    const split_bytes = new Uint8Array(await split_response.arrayBuffer());
+                    const split = this.parse_split_data_blob(split_bytes);
+                    if (split.version === 1) {
+                        const module = await WebAssembly.compile(wasm_bytes);
+                        return this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, {preloaded_split: split});
+                    }
+                    const rebuilt_bytes = this.rebuild_split_wasm(wasm_bytes, split.segments);
+                    const module = await WebAssembly.compile(rebuilt_bytes);
+                    return this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, undefined);
+                }, error => {
+                    console.error(error);
+                });
+        }
         return WebAssembly.compileStreaming(fetch(wasm_url))
             .then(
             (module) => this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, split_config),

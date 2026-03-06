@@ -254,6 +254,8 @@ struct WasmDataSegment {
     bytes: Vec<u8>,
 }
 
+const SPLIT_DATA_VERSION_V2: u32 = 2;
+
 fn encode_var_u32(mut value: u32) -> Vec<u8> {
     let mut out = Vec::new();
     loop {
@@ -344,25 +346,28 @@ fn parse_data_segments(
 fn encode_split_data(segments: &[WasmDataSegment]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"MPDS");
-    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&SPLIT_DATA_VERSION_V2.to_le_bytes());
     out.extend_from_slice(&(segments.len() as u32).to_le_bytes());
     for segment in segments {
-        if let WasmDataSegmentKind::Active { offset, .. } = segment.kind {
-            out.extend_from_slice(&offset.to_le_bytes());
-            out.extend_from_slice(&(segment.bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(&segment.bytes);
+        match segment.kind {
+            WasmDataSegmentKind::Active {
+                memory_index,
+                offset,
+            } => {
+                out.push(0);
+                out.extend_from_slice(&memory_index.to_le_bytes());
+                out.extend_from_slice(&offset.to_le_bytes());
+            }
+            WasmDataSegmentKind::Passive => {
+                out.push(1);
+                out.extend_from_slice(&0u32.to_le_bytes());
+                out.extend_from_slice(&0u32.to_le_bytes());
+            }
         }
+        out.extend_from_slice(&(segment.bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&segment.bytes);
     }
     out
-}
-
-fn encode_split_data_segments(segments: &[WasmDataSegment]) -> Vec<u8> {
-    let active_segments = segments
-        .iter()
-        .filter(|segment| matches!(segment.kind, WasmDataSegmentKind::Active { .. }))
-        .cloned()
-        .collect::<Vec<_>>();
-    encode_split_data(&active_segments)
 }
 
 fn encode_rewritten_data_section(segments: &[WasmDataSegment]) -> Result<Vec<u8>, WasmParseError> {
@@ -386,8 +391,7 @@ fn encode_rewritten_data_section(segments: &[WasmDataSegment]) -> Result<Vec<u8>
             }
             WasmDataSegmentKind::Passive => {
                 payload.push(1);
-                payload.extend_from_slice(&encode_var_u32(segment.bytes.len() as u32));
-                payload.extend_from_slice(&segment.bytes);
+                payload.push(0);
             }
         }
     }
@@ -431,36 +435,14 @@ pub fn wasm_split_data_segments(buf: &[u8]) -> Result<WasmDataSplitResult, WasmP
     };
 
     let segments = parse_data_segments(buf, data_section)?;
-    let has_data_count = sections.iter().any(|section| section.type_id == 12);
-    let has_passive_segments = segments
-        .iter()
-        .any(|segment| matches!(segment.kind, WasmDataSegmentKind::Passive));
-
-    let active_segment_count = segments
-        .iter()
-        .filter(|segment| matches!(segment.kind, WasmDataSegmentKind::Active { .. }))
-        .count();
-
-    if active_segment_count == 0 {
-        return Ok(WasmDataSplitResult {
-            primary_wasm: buf.to_vec(),
-            split_data: Vec::new(),
-            segment_count: 0,
-        });
-    }
-
-    let primary_wasm = if has_data_count || has_passive_segments {
-        let rewritten_payload = encode_rewritten_data_section(&segments)?;
-        rewrite_wasm_section(buf, 11, &rewritten_payload)?
-    } else {
-        rewrite_wasm(buf, |section| section.type_id != 11)?
-    };
-    let split_data = encode_split_data_segments(&segments);
+    let rewritten_payload = encode_rewritten_data_section(&segments)?;
+    let primary_wasm = rewrite_wasm_section(buf, 11, &rewritten_payload)?;
+    let split_data = encode_split_data(&segments);
 
     Ok(WasmDataSplitResult {
         primary_wasm,
         split_data,
-        segment_count: active_segment_count,
+        segment_count: segments.len(),
     })
 }
 
@@ -540,19 +522,34 @@ mod tests {
         wasm
     }
 
-    fn decode_split_data(bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
+    fn decode_split_data(bytes: &[u8]) -> Vec<WasmDataSegment> {
         assert_eq!(&bytes[..4], b"MPDS");
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        assert_eq!(version, 1);
+        assert_eq!(version, SPLIT_DATA_VERSION_V2);
         let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         let mut i = 12;
         let mut out = Vec::new();
         for _ in 0..count {
+            let kind = bytes[i];
+            i += 1;
+            let memory_index = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+            i += 4;
             let offset = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
             i += 4;
             let len = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
             i += 4;
-            out.push((offset, bytes[i..i + len].to_vec()));
+            let kind = match kind {
+                0 => WasmDataSegmentKind::Active {
+                    memory_index,
+                    offset,
+                },
+                1 => WasmDataSegmentKind::Passive,
+                _ => panic!("unexpected split segment kind"),
+            };
+            out.push(WasmDataSegment {
+                kind,
+                bytes: bytes[i..i + len].to_vec(),
+            });
             i += len;
         }
         out
@@ -636,10 +633,19 @@ mod tests {
 
         let split = wasm_split_data_segments(&wasm).unwrap();
         assert_eq!(split.segment_count, 1);
-        assert_eq!(split.primary_wasm, wasm_with_sections(&[ty, mem]));
         assert_eq!(
             decode_split_data(&split.split_data),
-            vec![(7, vec![1, 2, 3, 4])]
+            vec![WasmDataSegment {
+                kind: WasmDataSegmentKind::Active {
+                    memory_index: 0,
+                    offset: 7,
+                },
+                bytes: vec![1, 2, 3, 4],
+            }]
+        );
+        assert_eq!(
+            split.primary_wasm,
+            wasm_with_sections(&[ty, mem, data_section(7, &[])])
         );
     }
 
@@ -656,10 +662,26 @@ mod tests {
         let wasm = wasm_with_sections(&[ty.clone(), mem.clone(), data_count.clone(), data]);
 
         let split = wasm_split_data_segments(&wasm).unwrap();
-        assert_eq!(split.segment_count, 1);
+        assert_eq!(split.segment_count, 3);
         assert_eq!(
             decode_split_data(&split.split_data),
-            vec![(7, vec![1, 2, 3, 4])]
+            vec![
+                WasmDataSegment {
+                    kind: WasmDataSegmentKind::Passive,
+                    bytes: vec![9, 9],
+                },
+                WasmDataSegment {
+                    kind: WasmDataSegmentKind::Active {
+                        memory_index: 0,
+                        offset: 7,
+                    },
+                    bytes: vec![1, 2, 3, 4],
+                },
+                WasmDataSegment {
+                    kind: WasmDataSegmentKind::Passive,
+                    bytes: vec![5],
+                },
+            ]
         );
         assert_eq!(
             split.primary_wasm,
@@ -668,9 +690,9 @@ mod tests {
                 mem,
                 data_count,
                 raw_data_section(&[
-                    passive_data_segment(&[9, 9]),
+                    passive_data_segment(&[]),
                     active_data_segment(7, &[]),
-                    passive_data_segment(&[5]),
+                    passive_data_segment(&[]),
                 ]),
             ])
         );

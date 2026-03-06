@@ -266,7 +266,11 @@ const WASM_RUSTFLAGS_SINGLE_THREADED: &str =
     "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C opt-level=z";
 
 fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, String> {
-    let target_spec_dir = cwd.join("target/makepad-wasm-target");
+    let target_spec_dir = if threaded {
+        cwd.join("target/makepad-wasm-target/threads")
+    } else {
+        cwd.join("target/makepad-wasm-target/single")
+    };
     mkdir(&target_spec_dir)?;
     let target_spec_path = target_spec_dir.join(format!("{WASM_TARGET_TRIPLE}.json"));
 
