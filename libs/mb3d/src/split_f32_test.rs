@@ -1,4 +1,4 @@
-use crate::{formulas, lighting, m3p, render};
+use crate::{formulas, m3p, render};
 use makepad_zune_core::bit_depth::BitDepth;
 use makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_core::options::EncoderOptions;
@@ -159,56 +159,6 @@ struct CathedralScene {
     ambient_bottom: F4,
     sky_color: F4,
     sky_color2: F4,
-}
-
-#[derive(Clone, Copy, Default)]
-struct GpuUniforms {
-    bg_color: F4,
-    sky_color: F4,
-    sky_color2: F4,
-    surface_color: F4,
-    surface_color2: F4,
-    light_color: F4,
-    amb_top: F4,
-    amb_bottom: F4,
-    cam_right: F3,
-    cam_up: F3,
-    cam_forward: F3,
-    is_julia: bool,
-    julia_x: f64,
-    julia_y: f64,
-    julia_z: f64,
-    light_dir: F3,
-    rot0: F3,
-    rot1: F3,
-    rot2: F3,
-    mid_x: F2,
-    mid_y: F2,
-    mid_z: F2,
-    fov_y: f32,
-    step_width: f32,
-    z_start_delta: f32,
-    max_ray_length: f32,
-    de_stop: f32,
-    de_stop_factor: f32,
-    s_z_step_div: f32,
-    ms_de_sub: f32,
-    mct_mh04_zsd: f32,
-    de_floor: f32,
-    bin_search_steps: usize,
-    rstop: f32,
-    max_iters: f32,
-    slot0_iters: f32,
-    slot1_iters: f32,
-    repeat_from_slot: f32,
-    ab_scale: f32,
-    ab_scale_div_min_r2: f32,
-    ab_min_r2: f32,
-    ab_fold: f32,
-    menger_scale: f32,
-    menger_cx: f32,
-    menger_cy: f32,
-    menger_cz: f32,
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -859,86 +809,6 @@ fn select_primary_light(m3p: &m3p::M3PFile, camera: &render::Camera) -> (F3, F4)
             w: 1.0,
         },
     )
-}
-
-fn build_uniforms(scene: &CathedralScene, width: usize) -> GpuUniforms {
-    let scale = (width as f64 / scene.base_width).max(0.001);
-    let mut params = render::RenderParams::from_m3p(&scene.m3p);
-    params.apply_image_scale(scale);
-
-    let inv_step = 1.0 / params.step_width.max(1.0e-30);
-    GpuUniforms {
-        bg_color: rgb4([0x0d, 0x10, 0x14]),
-        sky_color: scene.sky_color,
-        sky_color2: scene.sky_color2,
-        surface_color: rgb4([0xb2, 0xb1, 0xab]),
-        surface_color2: rgb4([0x7f, 0x7f, 0x79]),
-        light_color: scene.light_color,
-        amb_top: scene.ambient_top,
-        amb_bottom: scene.ambient_bottom,
-        cam_right: F3 {
-            x: (params.camera.right.x * inv_step) as f32,
-            y: (params.camera.right.y * inv_step) as f32,
-            z: (params.camera.right.z * inv_step) as f32,
-        },
-        cam_up: F3 {
-            x: (params.camera.up.x * inv_step) as f32,
-            y: (params.camera.up.y * inv_step) as f32,
-            z: (params.camera.up.z * inv_step) as f32,
-        },
-        cam_forward: F3 {
-            x: (params.camera.forward.x * inv_step) as f32,
-            y: (params.camera.forward.y * inv_step) as f32,
-            z: (params.camera.forward.z * inv_step) as f32,
-        },
-        is_julia: params.iter_params.is_julia,
-        julia_x: params.iter_params.julia_x,
-        julia_y: params.iter_params.julia_y,
-        julia_z: params.iter_params.julia_z,
-        light_dir: scene.light_dir,
-        rot0: F3 {
-            x: scene.menger.rot.m[0][0] as f32,
-            y: scene.menger.rot.m[0][1] as f32,
-            z: scene.menger.rot.m[0][2] as f32,
-        },
-        rot1: F3 {
-            x: scene.menger.rot.m[1][0] as f32,
-            y: scene.menger.rot.m[1][1] as f32,
-            z: scene.menger.rot.m[1][2] as f32,
-        },
-        rot2: F3 {
-            x: scene.menger.rot.m[2][0] as f32,
-            y: scene.menger.rot.m[2][1] as f32,
-            z: scene.menger.rot.m[2][2] as f32,
-        },
-        mid_x: split_f64(params.camera.mid.x),
-        mid_y: split_f64(params.camera.mid.y),
-        mid_z: split_f64(params.camera.mid.z),
-        fov_y: params.camera.fov_y as f32,
-        step_width: params.step_width as f32,
-        z_start_delta: (params.camera.z_start - params.camera.mid.z) as f32,
-        max_ray_length: params.max_ray_length as f32,
-        de_stop: params.de_stop as f32,
-        de_stop_factor: params.de_stop_factor as f32,
-        s_z_step_div: params.s_z_step_div as f32,
-        ms_de_sub: params.ms_de_sub as f32,
-        mct_mh04_zsd: params.mct_mh04_zsd as f32,
-        de_floor: params.de_floor as f32,
-        bin_search_steps: params.bin_search_steps as usize,
-        rstop: params.iter_params.rstop as f32,
-        max_iters: params.iter_params.max_iters as f32,
-        slot0_iters: scene.formula0_iters,
-        slot1_iters: scene.formula1_iters,
-        repeat_from_slot: scene.repeat_from_slot,
-        ab_scale: scene.amazing.scale as f32,
-        ab_scale_div_min_r2: scene.amazing.scale_div_min_r2 as f32,
-        ab_min_r2: scene.amazing.min_r2 as f32,
-        ab_fold: scene.amazing.fold as f32,
-        menger_scale: scene.menger.scale as f32,
-        menger_cx: scene.menger.cx as f32,
-        menger_cy: scene.menger.cy as f32,
-        menger_cz: scene.menger.cz as f32,
-    }
 }
 
 fn build_ds_uploads(scene: &CathedralScene, width: usize) -> GpuDsUploads {
@@ -1900,7 +1770,7 @@ fn render_selfcontained_shaderlike_pixels<R: PortNum + Send + Sync>(
                     hits += 1;
                     let depth_f64 = depth.to_f64();
                     let hit_pos_num = origin.add(dir.scale(depth));
-                    let hit_pos = numvec3_to_vec3(hit_pos_num);
+                    let _hit_pos = numvec3_to_vec3(hit_pos_num);
                     let ray_dir = numvec3_to_vec3(dir).normalize();
                     let surface = standalone_surface_sample_num(
                         &uploads,
