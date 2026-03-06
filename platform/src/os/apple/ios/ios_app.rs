@@ -316,19 +316,19 @@ impl IosApp {
     }
 
     pub fn draw_size_will_change() {
-        // Avoid re-entrant calls by checking if we're already in a with_ios_app call
-        if IOS_APP
+        // Avoid re-entrant calls by checking if we're already in a with_ios_app call.
+        // We must drop the borrow *before* calling check_window_geom, because
+        // check_window_geom calls with_ios_app which tries to borrow_mut again.
+        let should_call = IOS_APP
             .try_with(|app| {
-                if let Ok(app_ref) = app.try_borrow_mut() {
-                    if app_ref.is_some() {
-                        Self::check_window_geom();
-                    }
-                    // Otherwise we skip the call, should be safe since draw_size_will_change is called again afterwards
+                match app.try_borrow_mut() {
+                    Ok(app_ref) => app_ref.is_some(),
+                    Err(_) => false, // already borrowed (re-entrant call), skip
                 }
             })
-            .is_err()
-        {
-            // IOS_APP is not accessible on this thread, ignore the call (this shouldn't happen)
+            .unwrap_or(false);
+        if should_call {
+            Self::check_window_geom();
         }
     }
 
