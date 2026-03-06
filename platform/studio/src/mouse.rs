@@ -14,11 +14,15 @@ impl KeyModifiers {
     /// The primary modifier is Logo key (Command ⌘) on macOS
     /// and the Control key on all other platforms.
     pub fn is_primary(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.logo || self.control
+        }
         #[cfg(target_vendor = "apple")]
         {
             self.logo
         }
-        #[cfg(not(target_vendor = "apple"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(target_vendor = "apple")))]
         {
             self.control
         }
