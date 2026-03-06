@@ -40,8 +40,8 @@ use {
                     Controls::{MARGINS, WM_MOUSELEAVE},
                     Input::{
                         Ime::{
-                            ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, CFS_POINT,
-                            COMPOSITIONFORM,
+                            ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, ImmAssociateContext,
+                            CFS_POINT, COMPOSITIONFORM, HIMC,
                         },
                         KeyboardAndMouse::{
                             GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
@@ -118,6 +118,8 @@ pub struct Win32Window {
     pub hwnd: HWND,
     pub track_mouse_event: bool,
     pub is_fullscreen: bool,
+
+    ime_saved_himc: HIMC,
 }
 
 impl Win32Window {
@@ -186,6 +188,7 @@ impl Win32Window {
             hwnd,
             track_mouse_event: false,
             is_fullscreen,
+            ime_saved_himc: HIMC::default(),
         }
     }
 
@@ -1025,6 +1028,16 @@ impl Win32Window {
             replace_last: replace_last,
             ..Default::default()
         }))
+    }
+
+    pub fn set_ime_active(&mut self, active: bool) {
+        if active {
+            if !self.ime_saved_himc.is_invalid() {
+                unsafe { ImmAssociateContext(self.hwnd, self.ime_saved_himc) };
+            }
+        } else {
+            self.ime_saved_himc = unsafe { ImmAssociateContext(self.hwnd, HIMC::default()) };
+        }
     }
 
     pub fn virtual_key_to_key_code(wparam: WPARAM) -> KeyCode {
