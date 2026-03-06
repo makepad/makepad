@@ -91,6 +91,27 @@ pub fn main() {
         dummy: f32,
     }
 
+    #[derive(Script, ScriptHook)]
+    #[repr(C)]
+    pub struct RustUniformBufferTest {
+        #[live]
+        pick: Vec2f,
+        #[live]
+        scale: Vec2f,
+        #[live]
+        gain: f32,
+        #[live]
+        pad: f32,
+    }
+
+    fn rust_uniform_buffer_test_pod(vm: &mut ScriptVm) -> ScriptValue {
+        let pod = RustUniformBufferTest::script_pod(vm).expect("Cant make a pod type");
+        vm.bx
+            .heap
+            .pod_type_name_set(pod, id_lut!(RustUniformBufferTest));
+        pod.into()
+    }
+
     // Test struct for script_apply_eval stress test
     // Mimics the draw_bg pattern used in widgets
     #[derive(Script, ScriptHook, Default)]
@@ -2131,6 +2152,80 @@ pub fn main() {
         }
         shader.test_compile_draw(gpu_stage_1)
 
+        println("GPU stage 1a: scalar helper inference through traced call")
+        let gpu_stage_1a = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            ds_make: fn(v) { return vec2(v, 0.0) }
+            ds_two_sum: fn(a, b) {
+                let s = a + b
+                let bb = s - a
+                let e = (a - (s - bb)) + (b - bb)
+                return vec2(s, e)
+            }
+            ds_add: fn(a, b) {
+                let s = self.ds_two_sum(a.x, b.x)
+                return vec2(s.x, s.y + a.y + b.y)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let v = self.ds_add(vec2(1.0, 0.1), vec2(2.0, 0.2))
+                self.pixel = vec4(v.x * 0.1, v.y * 0.1 + 0.5, 0.3, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_1a)
+
+        println("GPU stage 1b: nested scalar helper chain")
+        let gpu_stage_1b = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            ds_quick_two_sum: fn(a, b) {
+                let s = a + b
+                let e = b - (s - a)
+                return vec2(s, e)
+            }
+            ds_split: fn(a) {
+                let c = 4097.0 * a
+                let hi = c - (c - a)
+                let lo = a - hi
+                return vec2(hi, lo)
+            }
+            ds_two_prod: fn(a, b) {
+                let p = a * b
+                let a_split = self.ds_split(a)
+                let b_split = self.ds_split(b)
+                let e = ((a_split.x * b_split.x - p) + a_split.x * b_split.y + a_split.y * b_split.x) + a_split.y * b_split.y
+                return vec2(p, e)
+            }
+            ds_norm: fn(v) {
+                return self.ds_quick_two_sum(v.x, v.y)
+            }
+            ds_mul: fn(a, b) {
+                let p = self.ds_two_prod(a.x, b.x)
+                return self.ds_norm(self.ds_quick_two_sum(p.x, p.y + a.x * b.y + a.y * b.x + a.y * b.y))
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let v = self.ds_mul(vec2(1.0, 0.125), vec2(2.0, 0.25))
+                self.pixel = vec4(v.x * 0.1, v.y * 0.1 + 0.5, 0.3, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_1b)
+
         println("GPU stage 2: hybrid_de skeleton")
         let gpu_stage_2 = #(GpuShaderStageTest::script_shader(vm)){
             vertex_pos: shader.vertex_position(vec4f)
@@ -2996,6 +3091,639 @@ pub fn main() {
             }
         }
         shader.test_compile_draw(gpu_stage_4)
+
+        println("GPU stage 4a: vec2 if-expression")
+        let gpu_stage_4a = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+            sel: shader.uniform(0.0)
+            uv0: shader.uniform(vec2f)
+
+            choose: fn() {
+                let cx = if self.sel > 0.5 { self.uv0 } else { vec2(0.25, 0.75) }
+                return cx
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let c = self.choose()
+                self.pixel = vec4(c.x, c.y, 0.0, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4a)
+
+        println("GPU stage 4a2: vec2 if-expression from uniform buffer")
+        let gpu_stage_4a2_uniforms = struct{
+            pick: vec2f,
+        }
+        let gpu_stage_4a2 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+            sel: shader.uniform(0.0)
+            ubuf: shader.uniform_buffer(gpu_stage_4a2_uniforms)
+
+            choose: fn(px) {
+                let cx = if self.sel > 0.5 { self.ubuf.pick } else { px }
+                return cx
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let c = self.choose(vec2(0.25, 0.75))
+                self.pixel = vec4(c.x, c.y, 0.0, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4a2)
+
+        println("GPU stage 4a3: vec2 if-expression from Rust POD uniform buffer")
+        let gpu_stage_4a3_uniforms = #(rust_uniform_buffer_test_pod(vm))
+        let gpu_stage_4a3 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+            sel: shader.uniform(0.0)
+            ubuf: shader.uniform_buffer(gpu_stage_4a3_uniforms)
+
+            choose: fn(px) {
+                let cx = if self.sel > 0.5 { self.ubuf.pick } else { px }
+                return cx
+            }
+
+            ds_quick_two_sum: fn(a, b) {
+                let s = a + b
+                let e = b - (s - a)
+                return vec2(s, e)
+            }
+
+            tweak: fn(v) {
+                let s = self.ds_quick_two_sum(v.x, self.ubuf.scale.x)
+                return vec2(s.x, s.y)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let c = self.choose(vec2(0.25, 0.75))
+                let t = self.tweak(c)
+                self.pixel = vec4(t.x, t.y, 0.0, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4a3)
+
+        println("GPU stage 4b: vec2 var reassignment in nested loop")
+        let gpu_stage_4b = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            loop_probe: fn() {
+                var refine_t = vec2(0.0, 0.0)
+                var refine_step = vec2(-0.5, 0.125)
+                for i in 0..8 {
+                    refine_t = refine_t + refine_step
+                    if refine_t.x < 0.0 {
+                        refine_step = vec2(-abs(refine_step.x), -abs(refine_step.y)) * 0.55
+                    } else {
+                        refine_step = vec2(abs(refine_step.x), abs(refine_step.y)) * 0.55
+                    }
+                }
+                return refine_t
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let c = self.loop_probe()
+                self.pixel = vec4(c.x, c.y, 0.0, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4b)
+
+        println("GPU stage 4c: branch-local var in nested loop")
+        let gpu_stage_4c = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            probe: fn(sel) {
+                if sel > 0.5 {
+                    return vec2(1.0, 0.0)
+                } else {
+                    var refine_t = vec2(0.0, 0.0)
+                    var refine_step = vec2(-0.5, 0.125)
+                    for i in 0..8 {
+                        refine_t = refine_t + refine_step
+                        if refine_t.x < 0.0 {
+                            refine_step = vec2(-abs(refine_step.x), -abs(refine_step.y)) * 0.55
+                        } else {
+                            refine_step = vec2(abs(refine_step.x), abs(refine_step.y)) * 0.55
+                        }
+                    }
+                    return refine_t
+                }
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let c = self.probe(0.0)
+                self.pixel = vec4(c.x, c.y, 0.0, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4c)
+
+        println("GPU stage 4d: branch-local var with nested helper calls")
+        let gpu_stage_4d = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            ds_new: fn(v) { return vec2(v, 0.0) }
+            ds_add: fn(a, b) { return vec2(a.x + b.x, a.y + b.y) }
+            ds_abs: fn(a) {
+                if a.x < 0.0 || (a.x == 0.0 && a.y < 0.0) {
+                    return vec2(-a.x, -a.y)
+                }
+                return a
+            }
+            ds_mul: fn(a, b) {
+                return vec2(a.x * b.x, a.y * b.x + a.x * b.y)
+            }
+
+            probe: fn(sel) {
+                if sel > 0.5 {
+                    return vec2(1.0, 0.0)
+                } else {
+                    var last_step = vec2(1.0, 0.125)
+                    var refine_t = vec2(0.0, 0.0)
+                    var refine_step = self.ds_mul(last_step, self.ds_new(-0.5))
+                    for i in 0..8 {
+                        refine_t = self.ds_add(refine_t, refine_step)
+                        if refine_t.x < 0.0 {
+                            refine_step = self.ds_mul(self.ds_abs(refine_step), self.ds_new(-0.55))
+                        } else {
+                            refine_step = self.ds_mul(self.ds_abs(refine_step), self.ds_new(0.55))
+                        }
+                    }
+                    return refine_t
+                }
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let c = self.probe(0.0)
+                self.pixel = vec4(c.x, c.y, 0.0, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4d)
+
+        println("GPU stage 4e: outer var captured by else-local helper init")
+        let gpu_stage_4e = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            ds_new: fn(v) { return vec2(v, 0.0) }
+            ds_add: fn(a, b) { return vec2(a.x + b.x, a.y + b.y) }
+            ds_abs: fn(a) {
+                if a.x < 0.0 || (a.x == 0.0 && a.y < 0.0) {
+                    return vec2(-a.x, -a.y)
+                }
+                return a
+            }
+            ds_mul: fn(a, b) {
+                return vec2(a.x * b.x, a.y * b.x + a.x * b.y)
+            }
+
+            probe: fn(sel) {
+                var last_step = vec2(1.0, 0.125)
+                var t = vec2(0.0, 0.0)
+                for i in 0..2 {
+                    if sel > 0.5 {
+                        last_step = vec2(0.25, 0.0625)
+                    } else {
+                        var refine_step = self.ds_mul(last_step, self.ds_new(-0.5))
+                        for j in 0..4 {
+                            t = self.ds_add(t, refine_step)
+                            if t.x < 0.0 {
+                                refine_step = self.ds_mul(self.ds_abs(refine_step), self.ds_new(-0.55))
+                            } else {
+                                refine_step = self.ds_mul(self.ds_abs(refine_step), self.ds_new(0.55))
+                            }
+                        }
+                    }
+                }
+                return t
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let c = self.probe(0.0)
+                self.pixel = vec4(c.x, c.y, 0.0, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4e)
+
+        println("GPU stage 4f: branch return reads outer vec2 var fields")
+        let gpu_stage_4f = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            ds_add: fn(a, b) { return vec2(a.x + b.x, a.y + b.y) }
+
+            probe: fn(sel) {
+                var t = vec2(0.0, 0.0)
+                let step = vec2(1.0, 0.125)
+                for i in 0..2 {
+                    if sel > 0.5 {
+                        t = self.ds_add(t, step)
+                    } else {
+                        return vec4(t.x, t.y, 0.0, 1.0)
+                    }
+                }
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe(0.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4f)
+
+        println("GPU stage 4f2: unary not on helper call inside if")
+        let gpu_stage_4f2 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            is_small: fn(v) {
+                return v < 0.5
+            }
+
+            probe: fn(sel) {
+                if !self.is_small(sel) {
+                    return vec4(1.0, 0.0, 0.0, 1.0)
+                } else {
+                    return vec4(0.0, 1.0, 0.0, 1.0)
+                }
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe(0.25)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4f2)
+
+        println("GPU stage 4f3: loop bool-and before else vec4 return")
+        let gpu_stage_4f3 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            probe: fn(sel) {
+                var t = vec2(0.0, 0.0)
+                for i in 0..2 {
+                    if sel > 0.5 && sel < 1.0 {
+                        t = vec2(1.0, 0.25)
+                    } else {
+                        return vec4(t.x, t.y, 0.0, 1.0)
+                    }
+                }
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe(0.25)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4f3)
+
+        println("GPU stage 4f4: loop bool-and helper call before else vec4 return")
+        let gpu_stage_4f4 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            is_small: fn(v) {
+                return v < 1.0
+            }
+
+            probe: fn(sel) {
+                var t = vec2(0.0, 0.0)
+                for i in 0..2 {
+                    if sel > 0.5 && self.is_small(sel) {
+                        t = vec2(1.0, 0.25)
+                    } else {
+                        return vec4(t.x, t.y, 0.0, 1.0)
+                    }
+                }
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe(0.25)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4f4)
+
+        println("GPU stage 4f5: prior if plus bool-and before else vec4 return")
+        let gpu_stage_4f5 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            is_small: fn(v) {
+                return v < 1.0
+            }
+
+            probe: fn(sel) {
+                var t = vec2(0.0, 0.0)
+                var de = 0.0
+                for i in 0..2 {
+                    if de > 1.0 {
+                        de = 1.0
+                    }
+                    if sel > 0.5 && self.is_small(sel) {
+                        t = vec2(1.0, 0.25)
+                    } else {
+                        return vec4(t.x, t.y, 0.0, 1.0)
+                    }
+                }
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe(0.25)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4f5)
+
+        println("GPU stage 4f6: vec2 helper logic before else vec4 return")
+        let gpu_stage_4f6 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            ds_lt: fn(a, b) { return a.x < b.x || (a.x == b.x && a.y < b.y) }
+            ds_gt: fn(a, b) { return a.x > b.x || (a.x == b.x && a.y > b.y) }
+
+            probe: fn(sel) {
+                var t = vec2(0.0, 0.0)
+                var de = vec2(0.0, 0.0)
+                let max_de = vec2(-1.0, 0.0)
+                let current_stop = vec2(-2.0, 0.0)
+                for i in 0..2 {
+                    if self.ds_gt(de, max_de) {
+                        de = max_de
+                    }
+                    if sel > 0.5 && !self.ds_lt(de, current_stop) {
+                        t = vec2(1.0, 0.25)
+                    } else {
+                        return vec4(t.x, t.y, 0.0, 1.0)
+                    }
+                }
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe(0.25)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4f6)
+
+        println("GPU stage 4g: reduced ray_march structure")
+        let gpu_stage_4g = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            controls0: shader.uniform(vec4f)
+            step_width: shader.uniform(vec2f)
+            max_ray_length: shader.uniform(vec2f)
+            s_z_step_div: shader.uniform(vec2f)
+
+            ds_new: fn(v) { return vec2(v, 0.0) }
+            ds_add: fn(a, b) { return vec2(a.x + b.x, a.y + b.y) }
+            ds_sub: fn(a, b) { return vec2(a.x - b.x, a.y - b.y) }
+            ds_mul: fn(a, b) { return vec2(a.x * b.x, a.y * b.x + a.x * b.y) }
+            ds_div: fn(a, b) { return vec2(a.x / b.x, 0.0) }
+            ds_lt: fn(a, b) { return a.x < b.x || (a.x == b.x && a.y < b.y) }
+            ds_gt: fn(a, b) { return a.x > b.x || (a.x == b.x && a.y > b.y) }
+            ds_max: fn(a, b) {
+                if self.ds_lt(a, b) { return b }
+                return a
+            }
+
+            scene_destop_at_steps: fn(depth_steps) {
+                if depth_steps.x < 0.5 {
+                    return vec2(0.001, 0.0)
+                }
+                return vec2(0.02, 0.0)
+            }
+
+            calc_de: fn(px, py, pz) {
+                return vec4(1.0, 0.01, 0.0, 0.0)
+            }
+
+            ray_march: fn(ox, oy, oz, dx, dy, dz) {
+                var t = vec2(0.0, 0.0)
+                var last_de = vec2(0.0, 0.0)
+                var last_step = vec2(0.0, 0.0)
+
+                let first_eval = self.calc_de(ox, oy, oz)
+                let first_de = vec2(first_eval.y, first_eval.z)
+                let first_stop = self.scene_destop_at_steps(self.ds_div(t, self.step_width))
+                if first_eval.x >= self.controls0.y || self.ds_lt(first_de, first_stop) {
+                    return vec4(t.x, t.y, first_eval.x, 1.0)
+                }
+
+                last_step = self.ds_max(
+                    self.ds_mul(first_de, self.s_z_step_div),
+                    self.ds_mul(self.step_width, self.ds_new(0.75))
+                )
+                last_de = first_de
+
+                for step_idx in 0..8 {
+                    let depth_steps = self.ds_div(t, self.step_width)
+                    let current_stop = self.scene_destop_at_steps(depth_steps)
+                    let px = self.ds_add(ox, self.ds_mul(dx, t))
+                    let py = self.ds_add(oy, self.ds_mul(dy, t))
+                    let pz = self.ds_add(oz, self.ds_mul(dz, t))
+                    let eval = self.calc_de(px, py, pz)
+                    var de = vec2(eval.y, eval.z)
+
+                    let max_de = self.ds_add(last_de, last_step)
+                    if self.ds_gt(de, max_de) {
+                        de = max_de
+                    }
+
+                    if eval.x < self.controls0.y && !self.ds_lt(de, current_stop) {
+                        let step = self.ds_max(
+                            self.ds_mul(de, self.s_z_step_div),
+                            self.ds_mul(self.step_width, self.ds_new(0.75))
+                        )
+                        last_de = de
+                        last_step = step
+                        t = self.ds_add(t, step)
+
+                        if self.ds_gt(t, self.max_ray_length) {
+                            return vec4(0.0, 0.0, 0.0, 0.0)
+                        }
+                    } else {
+                        return vec4(t.x, t.y, 0.0, 1.0)
+                    }
+                }
+
+                return vec4(0.0, 0.0, 0.0, 0.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.ray_march(
+                    vec2(0.0, 0.0),
+                    vec2(0.0, 0.0),
+                    vec2(-3.0, 0.0),
+                    vec2(0.0, 0.0),
+                    vec2(0.0, 0.0),
+                    vec2(1.0, 0.0)
+                )
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4g)
+
+        println("GPU stage 4h: statement-only if before else-return")
+        let gpu_stage_4h = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            ds_add: fn(a, b) { return vec2(a.x + b.x, a.y + b.y) }
+            ds_gt: fn(a, b) { return a.x > b.x || (a.x == b.x && a.y > b.y) }
+
+            probe: fn(sel) {
+                var t = vec2(0.0, 0.0)
+                var de = vec2(0.0, 0.0)
+                let max_de = vec2(-1.0, 0.0)
+                for i in 0..2 {
+                    if self.ds_gt(de, max_de) {
+                        de = max_de
+                    }
+                    if sel > 0.5 {
+                        t = self.ds_add(t, vec2(1.0, 0.125))
+                    } else {
+                        return vec4(t.x, t.y, 0.0, 1.0)
+                    }
+                }
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe(0.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4h)
+
+        println("GPU stage 4i: vec2 var from call fields before else-return")
+        let gpu_stage_4i = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            calc_de: fn(px, py, pz) {
+                return vec4(1.0, 0.01, 0.0, 0.0)
+            }
+
+            probe: fn(sel) {
+                var t = vec2(0.0, 0.0)
+                for i in 0..2 {
+                    let eval = self.calc_de(vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(0.0, 0.0))
+                    var de = vec2(eval.y, eval.z)
+                    if sel > 0.5 {
+                        de = vec2(1.0, 0.0)
+                    } else {
+                        return vec4(t.x, t.y, 0.0, 1.0)
+                    }
+                }
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe(0.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4i)
     };
     vm.eval(gpu_mb3d_shader_stages);
 
