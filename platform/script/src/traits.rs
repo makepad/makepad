@@ -256,6 +256,67 @@ where
         Self: Sized,
     {
         use crate::pod::*;
+        use makepad_math::{Mat4f, Quat, Vec2f, Vec3f, Vec4f};
+        use std::any::TypeId;
+
+        fn align_up(offset: usize, align: usize) -> usize {
+            if align == 0 {
+                return offset;
+            }
+            let rem = offset % align;
+            if rem == 0 {
+                offset
+            } else {
+                offset + (align - rem)
+            }
+        }
+
+        fn rust_repr_layout_for_type_id(
+            heap: &ScriptHeap,
+            type_id: ScriptTypeId,
+        ) -> Option<(usize, usize)> {
+            if type_id == TypeId::of::<f32>() {
+                return Some((std::mem::size_of::<f32>(), std::mem::align_of::<f32>()));
+            }
+            if type_id == TypeId::of::<f64>() {
+                return Some((std::mem::size_of::<f64>(), std::mem::align_of::<f64>()));
+            }
+            if type_id == TypeId::of::<u32>() {
+                return Some((std::mem::size_of::<u32>(), std::mem::align_of::<u32>()));
+            }
+            if type_id == TypeId::of::<i32>() {
+                return Some((std::mem::size_of::<i32>(), std::mem::align_of::<i32>()));
+            }
+            if type_id == TypeId::of::<bool>() {
+                return Some((std::mem::size_of::<bool>(), std::mem::align_of::<bool>()));
+            }
+            if type_id == TypeId::of::<Vec2f>() {
+                return Some((std::mem::size_of::<Vec2f>(), std::mem::align_of::<Vec2f>()));
+            }
+            if type_id == TypeId::of::<Vec3f>() {
+                return Some((std::mem::size_of::<Vec3f>(), std::mem::align_of::<Vec3f>()));
+            }
+            if type_id == TypeId::of::<Vec4f>() {
+                return Some((std::mem::size_of::<Vec4f>(), std::mem::align_of::<Vec4f>()));
+            }
+            if type_id == TypeId::of::<Mat4f>() {
+                return Some((std::mem::size_of::<Mat4f>(), std::mem::align_of::<Mat4f>()));
+            }
+            if type_id == TypeId::of::<Quat>() {
+                return Some((std::mem::size_of::<Quat>(), std::mem::align_of::<Quat>()));
+            }
+
+            let type_check = heap.registered_type(type_id)?;
+            let mut offset = 0usize;
+            let mut align = 1usize;
+            for (_, field_type_id) in type_check.props.iter_rust_instance_ordered() {
+                let (field_size, field_align) = rust_repr_layout_for_type_id(heap, field_type_id)?;
+                offset = align_up(offset, field_align);
+                offset += field_size;
+                align = align.max(field_align);
+            }
+            Some((align_up(offset, align), align))
+        }
 
         // First ensure the proto is built so type reflection is available
         Self::script_proto(vm);
@@ -266,6 +327,7 @@ where
         // Build pod fields from the type props
         // Use iter_rust_instance_ordered to skip config fields (live fields before #[deref])
         let mut fields = Vec::new();
+        let mut ordered_layout = Vec::new();
 
         for (field_name, field_type_id) in type_check.props.iter_rust_instance_ordered() {
             // Try to get the pod type for this field's type
@@ -284,6 +346,7 @@ where
                     },
                     default: pod_type_data.default,
                 });
+                ordered_layout.push((field_name, field_type_id, pod_type_data.ty.clone()));
             } else {
                 // Field type doesn't have a corresponding pod type
                 return None;
@@ -295,7 +358,35 @@ where
         vm.bx.heap.set_object_storage_vec2(pod_obj);
         vm.bx.heap.set_notproto(pod_obj);
 
+        let mut rust_offset = 0usize;
+        let mut shader_offset = 0usize;
+        for (field_name, field_type_id, shader_ty) in &ordered_layout {
+            let (rust_size, rust_align) =
+                rust_repr_layout_for_type_id(&vm.bx.heap, *field_type_id)?;
+            rust_offset = align_up(rust_offset, rust_align);
+            shader_offset = align_up(shader_offset, shader_ty.align_of());
+            assert!(
+                rust_offset == shader_offset,
+                "Rust POD field offset mismatch for {}.{}: Rust repr(C) offset is {}, shader POD offset is {}. Add explicit padding fields for std140 compatibility.",
+                std::any::type_name::<Self>(),
+                field_name,
+                rust_offset,
+                shader_offset
+            );
+            rust_offset += rust_size;
+            shader_offset += shader_ty.size_of();
+        }
+
         let pod_ty = ScriptPodTy::new_struct(fields);
+        let rust_size = rust_repr_layout_for_type_id(&vm.bx.heap, type_id)?.0;
+        let pod_size = pod_ty.size_of();
+        assert!(
+            rust_size == pod_size,
+            "Rust POD size mismatch for {}: Rust repr(C) size is {}, shader POD size is {}. Add explicit padding fields for std140 compatibility.",
+            std::any::type_name::<Self>(),
+            rust_size,
+            pod_size
+        );
 
         let pt = vm.bx.heap.new_pod_type(pod_obj, None, pod_ty, NIL);
         vm.bx.heap.set_object_pod_type(pod_obj, pt);

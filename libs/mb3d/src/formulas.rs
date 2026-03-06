@@ -361,6 +361,63 @@ fn advance_formula_slot(program: &HybridProgram, slot_idx: &mut usize, remaining
     }
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct DebugTraceStep {
+    pub iter: i32,
+    pub slot_idx: usize,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub w: f64,
+    pub r2: f64,
+}
+
+#[cfg(test)]
+pub fn debug_trace_hybrid(
+    pos: (f64, f64, f64),
+    program: &HybridProgram,
+    params: &IterParams,
+    max_steps: usize,
+) -> Vec<DebugTraceStep> {
+    if program.slots.is_empty() {
+        return Vec::new();
+    }
+
+    let mut state = IterState::new(pos.0, pos.1, pos.2, params);
+    state.w = 1.0;
+
+    let mut total_iters = 0i32;
+    let mut slot_idx = 0usize;
+    let mut remaining = program.slots[0].iteration_count;
+    let mut out = Vec::new();
+
+    for _ in 0..max_steps {
+        advance_formula_slot(program, &mut slot_idx, &mut remaining);
+        let slot = &program.slots[slot_idx];
+        slot.iterate(&mut state);
+
+        total_iters += 1;
+        remaining -= 1;
+        state.r2 = state.x * state.x + state.y * state.y + state.z * state.z;
+        out.push(DebugTraceStep {
+            iter: total_iters,
+            slot_idx,
+            x: state.x,
+            y: state.y,
+            z: state.z,
+            w: state.w,
+            r2: state.r2,
+        });
+
+        if state.r2 > state.rstop || total_iters >= state.max_iters {
+            break;
+        }
+    }
+
+    out
+}
+
 pub fn hybrid_de(pos: (f64, f64, f64), program: &HybridProgram, params: &IterParams) -> (i32, f64) {
     if program.slots.is_empty() {
         return (0, 0.0);

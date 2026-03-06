@@ -145,7 +145,7 @@ pub fn define_pod_module(heap: &mut ScriptHeap, native: &mut ScriptNative) -> Sc
     let pod_u32 = heap.pod_def_atom(
         pod,
         id_lut!(u32),
-        None,
+        Some(id_lut!(uint)),
         ScriptPodTy::U32,
         id_lut!(pod_u32),
         ScriptValue::from_u32(0),
@@ -154,7 +154,7 @@ pub fn define_pod_module(heap: &mut ScriptHeap, native: &mut ScriptNative) -> Sc
     let pod_i32 = heap.pod_def_atom(
         pod,
         id_lut!(i32),
-        None,
+        Some(id_lut!(int)),
         ScriptPodTy::I32,
         id_lut!(pod_i32),
         ScriptValue::from_i32(0),

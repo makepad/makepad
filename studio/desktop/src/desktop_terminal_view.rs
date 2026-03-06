@@ -207,6 +207,8 @@ pub struct DesktopTerminalView {
     last_finger_abs: Option<Vec2d>,
     #[rust]
     last_frame: Option<TerminalFramebuffer>,
+    #[rust]
+    ime_pos: Option<Vec2d>,
 }
 
 impl ScriptHook for DesktopTerminalView {}
@@ -315,6 +317,14 @@ impl DesktopTerminalView {
         let y = self.max_scroll_pixels_for_total_lines(total_lines);
         let _ = self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, y));
         self.follow_output = true;
+    }
+
+    fn scrollbar_total_lines(frame: &TerminalFramebuffer) -> usize {
+        // Custom scroll-region apps like Codex report `is_tui = true`, but they
+        // can still have real scrollback above the viewport. Capping these
+        // frames to `pty_rows` collapses the scrollbar to a single screen and
+        // causes redraws to clamp the scroll position back to the top.
+        frame.total_lines
     }
 
     fn invalidate_glyph_cache_if_needed(&mut self, cx: &Cx2d) {
@@ -543,6 +553,10 @@ impl DesktopTerminalView {
                 let cursor_col = (frame.cursor_col as usize).min(cols.saturating_sub(1));
                 let cx_x = origin_x + cursor_col as f64 * cell_width;
                 let cx_y = origin_y + visible_row as f64 * cell_height + self.cursor_y_offset;
+                self.ime_pos = Some(dvec2(
+                    cx_x - self.unscrolled_rect.pos.x,
+                    cx_y - self.unscrolled_rect.pos.y + cell_height,
+                ));
                 self.draw_cursor.focus = if has_focus { 1.0 } else { 0.0 };
                 self.draw_cursor.draw_abs(
                     cx,
@@ -946,6 +960,7 @@ impl Widget for DesktopTerminalView {
         self.viewport_rect = cx.turtle().rect();
         self.unscrolled_rect = cx.turtle().rect_unscrolled();
         self.refresh_cell_metrics(cx);
+        self.ime_pos = Some(dvec2(self.pad_x, self.pad_y + self.cell_height));
 
         let path = scope
             .data
@@ -987,13 +1002,7 @@ impl Widget for DesktopTerminalView {
 
         let total_lines_for_scroll = frame
             .as_ref()
-            .map(|frame| {
-                if frame.is_tui {
-                    frame.total_lines.min(pty_rows as usize)
-                } else {
-                    frame.total_lines
-                }
-            })
+            .map(Self::scrollbar_total_lines)
             .unwrap_or(0);
         self.last_total_lines = total_lines_for_scroll;
 
@@ -1041,6 +1050,11 @@ impl Widget for DesktopTerminalView {
             .set_used(self.viewport_rect.size.x.max(1.0), used_height);
         self.scroll_bars.end(cx);
         self.area = self.scroll_bars.area();
+        if path.is_some() && cx.has_key_focus(self.scroll_bars.area()) {
+            if let Some(ime_pos) = self.ime_pos {
+                cx.show_text_ime(self.scroll_bars.area(), ime_pos);
+            }
+        }
         DrawStep::done()
     }
 
@@ -1164,7 +1178,11 @@ impl Widget for DesktopTerminalView {
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Text);
             }
-            Hit::KeyFocus(_) | Hit::KeyFocusLost(_) => {
+            Hit::KeyFocus(_) => {
+                self.draw_bg.redraw(cx);
+            }
+            Hit::KeyFocusLost(_) => {
+                cx.hide_text_ime();
                 self.draw_bg.redraw(cx);
             }
             Hit::KeyDown(e) => {
@@ -1309,5 +1327,34 @@ fn map_keycode(kc: KeyCode) -> TermKeyCode {
         KeyCode::F11 => TK::F11,
         KeyCode::F12 => TK::F12,
         _ => TK::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollbar_total_lines_preserves_scrollback_for_custom_scroll_region_apps() {
+        let frame = TerminalFramebuffer {
+            is_tui: true,
+            rows: 20,
+            total_lines: 240,
+            ..Default::default()
+        };
+
+        assert_eq!(DesktopTerminalView::scrollbar_total_lines(&frame), 240);
+    }
+
+    #[test]
+    fn scrollbar_total_lines_keeps_plain_terminal_history() {
+        let frame = TerminalFramebuffer {
+            is_tui: false,
+            rows: 20,
+            total_lines: 75,
+            ..Default::default()
+        };
+
+        assert_eq!(DesktopTerminalView::scrollbar_total_lines(&frame), 75);
     }
 }
