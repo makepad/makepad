@@ -88,7 +88,7 @@ pub use {
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType},
-        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,
         draw_pass::{
@@ -133,6 +133,9 @@ pub use {
             NetworkResponsesEvent,
             NextFrame,
             NextFrameEvent,
+            SelectionHandleDragEvent,
+            SelectionHandleKind,
+            SelectionHandlePhase,
             TextClipboardEvent,
             TextInputEvent,
             TextRangeReplaceEvent,
