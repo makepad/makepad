@@ -544,6 +544,19 @@ impl Cx {
                         shgl.uniforms
                             .user_uniforms_binding
                             .bind_buffer(gl, &draw_item.os.user_uniforms);
+                        for (slot, binding) in shgl.uniforms.custom_uniforms_bindings.iter().enumerate() {
+                            if let Some(uniform_buffer) = draw_call.uniform_buffer_slots[slot].as_ref() {
+                                let cx_uniform_buffer =
+                                    &mut self.uniform_buffers[uniform_buffer.uniform_buffer_id()];
+                                cx_uniform_buffer
+                                    .os
+                                    .buffer
+                                    .update_uniform_buffer_bytes(gl, &cx_uniform_buffer.data);
+                                binding.bind_buffer(gl, &cx_uniform_buffer.os.buffer);
+                            } else {
+                                binding.bind_buffer(gl, &OpenglBuffer::default());
+                            }
+                        }
                         shgl.uniforms
                             .live_uniforms_binding
                             .bind_buffer(gl, &shgl.uniforms.live_uniforms);
@@ -944,6 +957,7 @@ pub struct GlShaderUniforms {
     pub draw_list_uniforms_binding: OpenglUniformBlockBinding,
     pub draw_call_uniforms_binding: OpenglUniformBlockBinding,
     pub user_uniforms_binding: OpenglUniformBlockBinding,
+    pub custom_uniforms_bindings: Vec<OpenglUniformBlockBinding>,
     pub live_uniforms_binding: OpenglUniformBlockBinding,
     pub const_table_uniform: OpenglUniform,
     pub live_uniforms: OpenglBuffer,
@@ -974,6 +988,11 @@ impl GlShaderUniforms {
                 program,
                 "userUniforms",
             ),
+            custom_uniforms_bindings: mapping
+                .uniform_buffers
+                .iter()
+                .map(|input| GlShader::opengl_get_uniform_block_binding(gl, program, &input.block_name))
+                .collect(),
             live_uniforms_binding: GlShader::opengl_get_uniform_block_binding(
                 gl,
                 program,
@@ -1754,10 +1773,9 @@ pub struct OpenglUniformBlockBinding {
 impl OpenglUniformBlockBinding {
     #[allow(unused)]
     fn bind_buffer(&self, gl: &LibGl, buf: &OpenglBuffer) {
-        if let Some(gl_buf) = buf.gl_buffer {
-            if let Some(index) = self.index {
-                unsafe { (gl.glBindBufferBase)(gl_sys::UNIFORM_BUFFER, index, gl_buf) };
-            }
+        if let Some(index) = self.index {
+            let gl_buf = buf.gl_buffer.unwrap_or(0);
+            unsafe { (gl.glBindBufferBase)(gl_sys::UNIFORM_BUFFER, index, gl_buf) };
         }
     }
 }
@@ -1820,6 +1838,11 @@ impl CxOsDrawCall {
             vao.free(gl);
         }
     }
+}
+
+#[derive(Default, Clone)]
+pub struct CxOsUniformBuffer {
+    pub buffer: OpenglBuffer,
 }
 
 #[derive(Clone, Default)]
@@ -2439,6 +2462,12 @@ impl OpenglBuffer {
     }
 
     pub fn update_uniform_buffer(&mut self, gl: &LibGl, data: &[f32]) {
+        self.update_uniform_buffer_bytes(gl, unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        });
+    }
+
+    pub fn update_uniform_buffer_bytes(&mut self, gl: &LibGl, data: &[u8]) {
         if data.is_empty() {
             return;
         }
@@ -2449,7 +2478,7 @@ impl OpenglBuffer {
             (gl.glBindBuffer)(gl_sys::UNIFORM_BUFFER, self.gl_buffer.unwrap());
             (gl.glBufferData)(
                 gl_sys::UNIFORM_BUFFER,
-                (data.len() * mem::size_of::<f32>()) as gl_sys::GLsizeiptr,
+                data.len() as gl_sys::GLsizeiptr,
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW,
             );

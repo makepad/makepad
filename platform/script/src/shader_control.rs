@@ -454,7 +454,7 @@ impl ShaderFnCompiler {
             .rev()
             .find(|v| matches!(v, ShaderMe::FnBody { .. }))
         {
-            if let ShaderMe::FnBody { ret, escaped } = me {
+            if let ShaderMe::FnBody { ret, escaped, .. } = me {
                 if let Some(ret) = ret {
                     if ty != *ret {
                         script_err_inconsistent!(self.trap, "return type changed");
@@ -548,7 +548,10 @@ impl ShaderFnCompiler {
                         .ok();
                     }
                 }
-                self.mes.push(ShaderMe::ForLoop { var_id: id });
+                self.mes.push(ShaderMe::ForLoop {
+                    var_id: id,
+                    stack_depth: self.stack.types.len(),
+                });
             } else {
                 script_err_unexpected!(self.trap, "unexpected in shader control");
             }
@@ -560,7 +563,7 @@ impl ShaderFnCompiler {
     pub(crate) fn handle_for_end(&mut self) {
         if let Some(me) = self.mes.pop() {
             match me {
-                ShaderMe::ForLoop { .. } | ShaderMe::LoopBody => {
+                ShaderMe::ForLoop { .. } | ShaderMe::LoopBody { .. } => {
                     self.out.push_str("}\n");
                     self.shader_scope.exit_scope();
                 }
@@ -576,7 +579,9 @@ impl ShaderFnCompiler {
     pub(crate) fn handle_loop(&mut self) {
         self.shader_scope.enter_scope();
         self.out.push_str("while(true){\n");
-        self.mes.push(ShaderMe::LoopBody);
+        self.mes.push(ShaderMe::LoopBody {
+            stack_depth: self.stack.types.len(),
+        });
     }
 
     pub(crate) fn handle_break(&mut self) {

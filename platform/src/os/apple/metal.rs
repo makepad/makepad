@@ -371,6 +371,23 @@ impl Cx {
                         uniform_bytes_uploaded = uniform_bytes_uploaded
                             .saturating_add((draw_call.dyn_uniforms.len() * 4 * 2) as u64);
                     }
+                    for (slot, id) in shp.custom_uniform_buffer_ids.iter().enumerate() {
+                        let Some(uniform_buffer) = draw_call.uniform_buffer_slots[slot].as_ref() else {
+                            let () = msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
+                            let () = msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
+                            continue;
+                        };
+                        let data = &self.uniform_buffers[uniform_buffer.uniform_buffer_id()].data;
+                        if data.is_empty() {
+                            let () = msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
+                            let () = msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
+                            continue;
+                        }
+                        let () = msg_send![encoder, setVertexBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 atIndex: *id];
+                        let () = msg_send![encoder, setFragmentBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 atIndex: *id];
+                        uniform_bytes_uploaded = uniform_bytes_uploaded
+                            .saturating_add((data.len() * 2) as u64);
+                    }
                     if let Some(id) = shp.scope_uniform_buffer_id {
                         let scope_buf = &sh.mapping.scope_uniforms_buf;
                         if !scope_buf.is_empty() {
@@ -1157,7 +1174,7 @@ impl Cx {
             if let Some(os_shader_id) = found_os_shader_id {
                 cx_shader.os_shader_id = Some(os_shader_id);
             } else {
-                if let Some(shp) = CxOsDrawShader::new(metal_cx, mtlsl, &bindings) {
+                if let Some(shp) = CxOsDrawShader::new(metal_cx, mtlsl, &cx_shader.mapping, &bindings) {
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
@@ -1309,6 +1326,7 @@ pub struct CxOsDrawShader {
     pass_uniform_buffer_id: Option<u64>,
     draw_list_uniform_buffer_id: Option<u64>,
     dyn_uniform_buffer_id: Option<u64>,
+    custom_uniform_buffer_ids: Vec<u64>,
     scope_uniform_buffer_id: Option<u64>,
     pub mtlsl: String,
 }
@@ -1511,6 +1529,7 @@ impl CxOsDrawShader {
     pub(crate) fn new(
         metal_cx: &MetalCx,
         mtlsl: String,
+        mapping: &CxDrawShaderMapping,
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
         let options = RcObjcId::from_owned(unsafe { msg_send![class!(MTLCompileOptions), new] });
@@ -1597,6 +1616,11 @@ impl CxOsDrawShader {
             .map(|i| i as u64);
         // dyn_uniform_buffer_id is not in bindings, it uses the IoUniform struct at buffer(2)
         let dyn_uniform_buffer_id = Some(2);
+        let custom_uniform_buffer_ids = mapping
+            .uniform_buffers
+            .iter()
+            .map(|input| input.buffer_index as u64)
+            .collect();
         // scope_uniform_buffer_id comes from bindings if there are scope uniforms
         let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u64);
 
@@ -1607,6 +1631,7 @@ impl CxOsDrawShader {
             pass_uniform_buffer_id,
             draw_list_uniform_buffer_id,
             dyn_uniform_buffer_id,
+            custom_uniform_buffer_ids,
             scope_uniform_buffer_id,
             mtlsl,
         });
@@ -1617,6 +1642,9 @@ impl CxOsDrawShader {
 pub struct CxOsDrawCall {
     instance_buffer: MetalBuffer,
 }
+
+#[derive(Default)]
+pub struct CxOsUniformBuffer {}
 
 #[derive(Default)]
 pub struct CxOsGeometry {

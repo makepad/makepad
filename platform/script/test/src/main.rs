@@ -84,6 +84,13 @@ pub fn main() {
         enum_test: ShaderEnum,
     }
 
+    #[derive(Script, ScriptHook)]
+    #[repr(C)]
+    pub struct GpuShaderStageTest {
+        #[live]
+        dummy: f32,
+    }
+
     // Test struct for script_apply_eval stress test
     // Mimics the draw_bg pattern used in widgets
     #[derive(Script, ScriptHook, Default)]
@@ -2007,6 +2014,990 @@ pub fn main() {
     };
 
     vm.eval(code);
+
+    let gpu_mb3d_shader_stages = script! {
+        use mod.std.println
+        use mod.pod.*
+        use mod.math.*
+        use mod.shader
+
+        println("GPU stage 0: base shader")
+        let gpu_stage_0 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+            sky0: shader.uniform(#x535f73)
+            sky1: shader.uniform(#xa8b4c4)
+
+            sky_for_y: fn(y) {
+                let t = clamp(pow(1.0 - y, 0.7), 0.0, 1.0)
+                return mix(self.sky0.rgb, self.sky1.rgb, t)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = vec4(self.sky_for_y(self.v_uv.y), 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_0)
+
+        println("GPU stage 1: double-single helpers")
+        let gpu_stage_1 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            ds_make: fn(v) {
+                return vec2(v, 0.0)
+            }
+
+            ds_norm: fn(v) {
+                let s = v.x + v.y
+                let e = v.y - (s - v.x)
+                return vec2(s, e)
+            }
+
+            ds_add: fn(a, b) {
+                let s = a.x + b.x
+                let bb = s - a.x
+                let e = (a.x - (s - bb)) + (b.x - bb) + a.y + b.y
+                return self.ds_norm(vec2(s, e))
+            }
+
+            ds_sub: fn(a, b) {
+                return self.ds_add(a, vec2(-b.x, -b.y))
+            }
+
+            ds_add_f: fn(a, b) {
+                return self.ds_add(a, vec2(b, 0.0))
+            }
+
+            ds_mul_f: fn(a, b) {
+                return self.ds_norm(vec2(a.x * b, a.y * b))
+            }
+
+            ds_mul: fn(a, b) {
+                let p = a.x * b.x
+                let e = a.x * b.y + a.y * b.x + a.y * b.y
+                return self.ds_norm(vec2(p, e))
+            }
+
+            ds_div: fn(a, b) {
+                let q1 = a.x / b.x
+                let r = self.ds_sub(a, self.ds_mul_f(b, q1))
+                let q2 = r.x / b.x
+                return self.ds_norm(vec2(q1, q2))
+            }
+
+            ds_abs: fn(a) {
+                if a.x < 0.0 || (a.x == 0.0 && a.y < 0.0) {
+                    return vec2(-a.x, -a.y)
+                }
+                return a
+            }
+
+            ds_box_fold: fn(a, fold) {
+                let plus_abs = self.ds_abs(self.ds_add_f(a, fold))
+                let minus_abs = self.ds_abs(self.ds_add_f(a, -fold))
+                return self.ds_sub(self.ds_sub(plus_abs, minus_abs), a)
+            }
+
+            ds_to_f: fn(a) {
+                return a.x + a.y
+            }
+
+            ds_sqrt: fn(a) {
+                let root = sqrt(max(self.ds_to_f(a), 0.0))
+                return vec2(root, 0.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let a = self.ds_make(1.0)
+                let b = self.ds_mul(self.ds_add_f(a, 2.0), vec2(3.0, 0.1))
+                let c = self.ds_box_fold(b, 1.0)
+                let d = self.ds_div(self.ds_sqrt(self.ds_mul(c, c)), vec2(2.0, 0.0))
+                let v = clamp(self.ds_to_f(d) * 0.1, 0.0, 1.0)
+                self.pixel = vec4(v, 1.0 - v, 0.3, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_1)
+
+        println("GPU stage 2: hybrid_de skeleton")
+        let gpu_stage_2 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            rot0: shader.uniform(vec3f)
+            rot1: shader.uniform(vec3f)
+            rot2: shader.uniform(vec3f)
+            slot0_iters: shader.uniform(1.0)
+            slot1_iters: shader.uniform(1.0)
+            repeat_from_slot: shader.uniform(0.0)
+            ab_scale: shader.uniform(-1.0)
+            ab_scale_div_min_r2: shader.uniform(-1.0)
+            ab_min_r2: shader.uniform(0.25)
+            ab_fold: shader.uniform(1.0)
+            menger_scale: shader.uniform(3.0)
+            menger_cx: shader.uniform(1.0)
+            menger_cy: shader.uniform(1.0)
+            menger_cz: shader.uniform(0.5)
+            rstop: shader.uniform(20.0)
+            max_iters: shader.uniform(48.0)
+
+            ds_make: fn(v) { return vec2(v, 0.0) }
+            ds_norm: fn(v) {
+                let s = v.x + v.y
+                let e = v.y - (s - v.x)
+                return vec2(s, e)
+            }
+            ds_add: fn(a, b) {
+                let s = a.x + b.x
+                let bb = s - a.x
+                let e = (a.x - (s - bb)) + (b.x - bb) + a.y + b.y
+                return self.ds_norm(vec2(s, e))
+            }
+            ds_sub: fn(a, b) { return self.ds_add(a, vec2(-b.x, -b.y)) }
+            ds_add_f: fn(a, b) { return self.ds_add(a, vec2(b, 0.0)) }
+            ds_mul_f: fn(a, b) { return self.ds_norm(vec2(a.x * b, a.y * b)) }
+            ds_mul: fn(a, b) {
+                let p = a.x * b.x
+                let e = a.x * b.y + a.y * b.x + a.y * b.y
+                return self.ds_norm(vec2(p, e))
+            }
+            ds_div: fn(a, b) {
+                let q1 = a.x / b.x
+                let r = self.ds_sub(a, self.ds_mul_f(b, q1))
+                let q2 = r.x / b.x
+                return self.ds_norm(vec2(q1, q2))
+            }
+            ds_abs: fn(a) {
+                if a.x < 0.0 || (a.x == 0.0 && a.y < 0.0) {
+                    return vec2(-a.x, -a.y)
+                }
+                return a
+            }
+            ds_box_fold: fn(a, fold) {
+                let plus_abs = self.ds_abs(self.ds_add_f(a, fold))
+                let minus_abs = self.ds_abs(self.ds_add_f(a, -fold))
+                return self.ds_sub(self.ds_sub(plus_abs, minus_abs), a)
+            }
+            ds_to_f: fn(a) { return a.x + a.y }
+            ds_sqrt: fn(a) {
+                let root = sqrt(max(self.ds_to_f(a), 0.0))
+                return vec2(root, 0.0)
+            }
+
+            hybrid_de: fn(px, py, pz) {
+                let cx = px
+                let cy = py
+                let cz = pz
+                var x = px
+                var y = py
+                var z = pz
+                var w = vec2(1.0, 0.0)
+                var r2 = vec2(0.0, 0.0)
+                var iters = 0.0
+                var slot = 0.0
+                var remaining = self.slot0_iters
+
+                for i in 0..16 {
+                    if remaining <= 0.0 {
+                        slot += 1.0
+                        if slot >= 2.0 {
+                            slot = self.repeat_from_slot
+                        }
+                        if slot < 0.5 {
+                            remaining = self.slot0_iters
+                        } else {
+                            remaining = self.slot1_iters
+                        }
+                    }
+
+                    if slot < 0.5 {
+                        x = self.ds_box_fold(x, self.ab_fold)
+                        y = self.ds_box_fold(y, self.ab_fold)
+                        z = self.ds_box_fold(z, self.ab_fold)
+
+                        let rr = self.ds_to_f(self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z)))
+                        var m = self.ab_scale
+                        if rr < self.ab_min_r2 {
+                            m = self.ab_scale_div_min_r2
+                        } else if rr < 1.0 {
+                            m = self.ab_scale / max(rr, 0.0000001)
+                        }
+                        w = self.ds_mul_f(w, m)
+                        x = self.ds_add(self.ds_mul_f(x, m), cx)
+                        y = self.ds_add(self.ds_mul_f(y, m), cy)
+                        z = self.ds_add(self.ds_mul_f(z, m), cz)
+                    } else {
+                        x = self.ds_abs(x)
+                        y = self.ds_abs(y)
+                        z = self.ds_abs(z)
+
+                        if self.ds_to_f(x) < self.ds_to_f(y) {
+                            let t = x
+                            x = y
+                            y = t
+                        }
+                        if self.ds_to_f(x) < self.ds_to_f(z) {
+                            let t = x
+                            x = z
+                            z = t
+                        }
+                        if self.ds_to_f(y) < self.ds_to_f(z) {
+                            let t = y
+                            y = z
+                            z = t
+                        }
+
+                        let nx = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot0.x), self.ds_mul_f(y, self.rot0.y)), self.ds_mul_f(z, self.rot0.z))
+                        let ny = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot1.x), self.ds_mul_f(y, self.rot1.y)), self.ds_mul_f(z, self.rot1.z))
+                        let nz = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot2.x), self.ds_mul_f(y, self.rot2.y)), self.ds_mul_f(z, self.rot2.z))
+
+                        let sf = self.menger_scale - 1.0
+                        x = self.ds_add_f(self.ds_mul_f(nx, self.menger_scale), -self.menger_cx * sf)
+                        y = self.ds_add_f(self.ds_mul_f(ny, self.menger_scale), -self.menger_cy * sf)
+                        let z_scaled = self.ds_mul_f(nz, self.menger_scale)
+                        let c = self.menger_cz * sf
+                        z = self.ds_add_f(self.ds_abs(self.ds_add_f(z_scaled, -c)), -c)
+                        z = vec2(-z.x, -z.y)
+                        w = self.ds_mul_f(w, self.menger_scale)
+                    }
+
+                    iters += 1.0
+                    remaining -= 1.0
+                    r2 = self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z))
+                    if self.ds_to_f(r2) > self.rstop || iters >= self.max_iters {
+                        break
+                    }
+                }
+
+                let r = self.ds_sqrt(r2)
+                let de = self.ds_div(r, self.ds_abs(w))
+                return vec3(iters, de.x, de.y)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let h = self.hybrid_de(vec2(0.1, 0.0), vec2(0.2, 0.0), vec2(0.3, 0.0))
+                self.pixel = vec4(h.x * 0.02, clamp(h.y, 0.0, 1.0), clamp(h.z + 0.5, 0.0, 1.0), 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_2)
+
+        println("GPU stage 2a: loop no early return")
+        let gpu_stage_2a = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            loop_probe: fn() {
+                var t = 0.0
+                for i in 0..16 {
+                    t += 1.0
+                }
+                return vec2(t, 0.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let hit = self.loop_probe()
+                self.pixel = vec4(hit.x * 0.05, 0.2, 0.3, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_2a)
+
+        println("GPU stage 2b: loop with direct early return")
+        let gpu_stage_2b = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            loop_probe: fn() {
+                var t = 0.0
+                for i in 0..16 {
+                    if t > 3.0 {
+                        return vec2(t, 1.0)
+                    }
+                    t += 1.0
+                }
+                return vec2(-1.0, 0.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let hit = self.loop_probe()
+                self.pixel = vec4(hit.x * 0.05, hit.y * 0.5, 0.3, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_2b)
+
+        println("GPU stage 2c: loop with if/else early return")
+        let gpu_stage_2c = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            loop_probe: fn() {
+                var t = 0.0
+                for i in 0..16 {
+                    if t < 3.0 {
+                        t += 1.0
+                    } else {
+                        return vec2(t, 1.0)
+                    }
+                }
+                return vec2(-1.0, 0.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let hit = self.loop_probe()
+                self.pixel = vec4(hit.x * 0.05, hit.y * 0.5, 0.3, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_2c)
+
+        println("GPU stage 2d: calc_de inside loop")
+        let gpu_stage_2d = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            rot0: shader.uniform(vec3f)
+            rot1: shader.uniform(vec3f)
+            rot2: shader.uniform(vec3f)
+            slot0_iters: shader.uniform(1.0)
+            slot1_iters: shader.uniform(1.0)
+            repeat_from_slot: shader.uniform(0.0)
+            ab_scale: shader.uniform(-1.0)
+            ab_scale_div_min_r2: shader.uniform(-1.0)
+            ab_min_r2: shader.uniform(0.25)
+            ab_fold: shader.uniform(1.0)
+            menger_scale: shader.uniform(3.0)
+            menger_cx: shader.uniform(1.0)
+            menger_cy: shader.uniform(1.0)
+            menger_cz: shader.uniform(0.5)
+            rstop: shader.uniform(20.0)
+            max_iters: shader.uniform(48.0)
+            de_floor: shader.uniform(0.00025)
+            de_stop: shader.uniform(0.001)
+
+            ds_make: fn(v) { return vec2(v, 0.0) }
+            ds_norm: fn(v) {
+                let s = v.x + v.y
+                let e = v.y - (s - v.x)
+                return vec2(s, e)
+            }
+            ds_add: fn(a, b) {
+                let s = a.x + b.x
+                let bb = s - a.x
+                let e = (a.x - (s - bb)) + (b.x - bb) + a.y + b.y
+                return self.ds_norm(vec2(s, e))
+            }
+            ds_sub: fn(a, b) { return self.ds_add(a, vec2(-b.x, -b.y)) }
+            ds_add_f: fn(a, b) { return self.ds_add(a, vec2(b, 0.0)) }
+            ds_mul_f: fn(a, b) { return self.ds_norm(vec2(a.x * b, a.y * b)) }
+            ds_mul: fn(a, b) {
+                let p = a.x * b.x
+                let e = a.x * b.y + a.y * b.x + a.y * b.y
+                return self.ds_norm(vec2(p, e))
+            }
+            ds_div: fn(a, b) {
+                let q1 = a.x / b.x
+                let r = self.ds_sub(a, self.ds_mul_f(b, q1))
+                let q2 = r.x / b.x
+                return self.ds_norm(vec2(q1, q2))
+            }
+            ds_abs: fn(a) {
+                if a.x < 0.0 || (a.x == 0.0 && a.y < 0.0) { return vec2(-a.x, -a.y) }
+                return a
+            }
+            ds_box_fold: fn(a, fold) {
+                let plus_abs = self.ds_abs(self.ds_add_f(a, fold))
+                let minus_abs = self.ds_abs(self.ds_add_f(a, -fold))
+                return self.ds_sub(self.ds_sub(plus_abs, minus_abs), a)
+            }
+            ds_to_f: fn(a) { return a.x + a.y }
+            ds_sqrt: fn(a) {
+                let root = sqrt(max(self.ds_to_f(a), 0.0))
+                return vec2(root, 0.0)
+            }
+
+            hybrid_de: fn(px, py, pz) {
+                let cx = px
+                let cy = py
+                let cz = pz
+                var x = px
+                var y = py
+                var z = pz
+                var w = vec2(1.0, 0.0)
+                var r2 = vec2(0.0, 0.0)
+                var iters = 0.0
+                var slot = 0.0
+                var remaining = self.slot0_iters
+                for i in 0..16 {
+                    if remaining <= 0.0 {
+                        slot += 1.0
+                        if slot >= 2.0 { slot = self.repeat_from_slot }
+                        if slot < 0.5 { remaining = self.slot0_iters } else { remaining = self.slot1_iters }
+                    }
+                    if slot < 0.5 {
+                        x = self.ds_box_fold(x, self.ab_fold)
+                        y = self.ds_box_fold(y, self.ab_fold)
+                        z = self.ds_box_fold(z, self.ab_fold)
+                        let rr = self.ds_to_f(self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z)))
+                        var m = self.ab_scale
+                        if rr < self.ab_min_r2 { m = self.ab_scale_div_min_r2 } else if rr < 1.0 { m = self.ab_scale / max(rr, 0.0000001) }
+                        w = self.ds_mul_f(w, m)
+                        x = self.ds_add(self.ds_mul_f(x, m), cx)
+                        y = self.ds_add(self.ds_mul_f(y, m), cy)
+                        z = self.ds_add(self.ds_mul_f(z, m), cz)
+                    } else {
+                        x = self.ds_abs(x)
+                        y = self.ds_abs(y)
+                        z = self.ds_abs(z)
+                        if self.ds_to_f(x) < self.ds_to_f(y) { let t = x x = y y = t }
+                        if self.ds_to_f(x) < self.ds_to_f(z) { let t = x x = z z = t }
+                        if self.ds_to_f(y) < self.ds_to_f(z) { let t = y y = z z = t }
+                        let nx = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot0.x), self.ds_mul_f(y, self.rot0.y)), self.ds_mul_f(z, self.rot0.z))
+                        let ny = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot1.x), self.ds_mul_f(y, self.rot1.y)), self.ds_mul_f(z, self.rot1.z))
+                        let nz = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot2.x), self.ds_mul_f(y, self.rot2.y)), self.ds_mul_f(z, self.rot2.z))
+                        let sf = self.menger_scale - 1.0
+                        x = self.ds_add_f(self.ds_mul_f(nx, self.menger_scale), -self.menger_cx * sf)
+                        y = self.ds_add_f(self.ds_mul_f(ny, self.menger_scale), -self.menger_cy * sf)
+                        let z_scaled = self.ds_mul_f(nz, self.menger_scale)
+                        let c = self.menger_cz * sf
+                        z = self.ds_add_f(self.ds_abs(self.ds_add_f(z_scaled, -c)), -c)
+                        z = vec2(-z.x, -z.y)
+                        w = self.ds_mul_f(w, self.menger_scale)
+                    }
+                    iters += 1.0
+                    remaining -= 1.0
+                    r2 = self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z))
+                    if self.ds_to_f(r2) > self.rstop || iters >= self.max_iters { break }
+                }
+                let r = self.ds_sqrt(r2)
+                let de = self.ds_div(r, self.ds_abs(w))
+                return vec3(iters, de.x, de.y)
+            }
+
+            calc_de: fn(px, py, pz) {
+                let raw = self.hybrid_de(px, py, pz)
+                let de_raw = max(raw.y + raw.z, self.de_floor)
+                return vec2(raw.x, de_raw)
+            }
+
+            march_probe: fn(px, py, pz) {
+                var t = 0.0
+                let first_eval = self.calc_de(px, py, pz)
+                if first_eval.x >= self.max_iters || first_eval.y < self.de_stop {
+                    return vec2(0.0, first_eval.x)
+                }
+                for i in 0..16 {
+                    let eval = self.calc_de(px, py, pz)
+                    var de = eval.y
+                    if de > 1.0 {
+                        de = 1.0
+                    }
+                    if eval.x < self.max_iters && de >= self.de_stop {
+                        t += 1.0
+                    } else {
+                        return vec2(t, eval.x)
+                    }
+                }
+                return vec2(-1.0, 0.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let hit = self.march_probe(vec2(0.1, 0.0), vec2(0.2, 0.0), vec2(0.3, 0.0))
+                self.pixel = vec4(hit.x * 0.05, hit.y * 0.05, 0.3, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_2d)
+
+        println("GPU stage 2e: loop statement-only if with nested return")
+        let gpu_stage_2e = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+            limit: shader.uniform(8.0)
+
+            march_probe: fn() {
+                var t = 0.0
+                for i in 0..16 {
+                    if t < self.limit {
+                        t += 1.0
+                        if t > 32.0 {
+                            return vec2(-1.0, 0.0)
+                        }
+                    } else {
+                        return vec2(t, 1.0)
+                    }
+                }
+                return vec2(-1.0, 0.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let hit = self.march_probe()
+                self.pixel = vec4(clamp(hit.x * 0.1, 0.0, 1.0), clamp(hit.y * 0.1, 0.0, 1.0), 0.3, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_2e)
+
+        println("GPU stage 3: ray march main loop")
+        let gpu_stage_3 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            rot0: shader.uniform(vec3f)
+            rot1: shader.uniform(vec3f)
+            rot2: shader.uniform(vec3f)
+            slot0_iters: shader.uniform(1.0)
+            slot1_iters: shader.uniform(1.0)
+            repeat_from_slot: shader.uniform(0.0)
+            ab_scale: shader.uniform(-1.0)
+            ab_scale_div_min_r2: shader.uniform(-1.0)
+            ab_min_r2: shader.uniform(0.25)
+            ab_fold: shader.uniform(1.0)
+            menger_scale: shader.uniform(3.0)
+            menger_cx: shader.uniform(1.0)
+            menger_cy: shader.uniform(1.0)
+            menger_cz: shader.uniform(0.5)
+            rstop: shader.uniform(20.0)
+            max_iters: shader.uniform(48.0)
+            step_width: shader.uniform(0.001)
+            de_stop: shader.uniform(0.001)
+            de_stop_factor: shader.uniform(0.0)
+            s_z_step_div: shader.uniform(1.0)
+            ms_de_sub: shader.uniform(1.0)
+            mct_mh04_zsd: shader.uniform(1.0)
+            de_floor: shader.uniform(0.00025)
+            max_ray_length: shader.uniform(128.0)
+
+            ds_make: fn(v) { return vec2(v, 0.0) }
+            ds_norm: fn(v) {
+                let s = v.x + v.y
+                let e = v.y - (s - v.x)
+                return vec2(s, e)
+            }
+            ds_add: fn(a, b) {
+                let s = a.x + b.x
+                let bb = s - a.x
+                let e = (a.x - (s - bb)) + (b.x - bb) + a.y + b.y
+                return self.ds_norm(vec2(s, e))
+            }
+            ds_sub: fn(a, b) { return self.ds_add(a, vec2(-b.x, -b.y)) }
+            ds_add_f: fn(a, b) { return self.ds_add(a, vec2(b, 0.0)) }
+            ds_mul_f: fn(a, b) { return self.ds_norm(vec2(a.x * b, a.y * b)) }
+            ds_mul: fn(a, b) {
+                let p = a.x * b.x
+                let e = a.x * b.y + a.y * b.x + a.y * b.y
+                return self.ds_norm(vec2(p, e))
+            }
+            ds_div: fn(a, b) {
+                let q1 = a.x / b.x
+                let r = self.ds_sub(a, self.ds_mul_f(b, q1))
+                let q2 = r.x / b.x
+                return self.ds_norm(vec2(q1, q2))
+            }
+            ds_abs: fn(a) {
+                if a.x < 0.0 || (a.x == 0.0 && a.y < 0.0) {
+                    return vec2(-a.x, -a.y)
+                }
+                return a
+            }
+            ds_box_fold: fn(a, fold) {
+                let plus_abs = self.ds_abs(self.ds_add_f(a, fold))
+                let minus_abs = self.ds_abs(self.ds_add_f(a, -fold))
+                return self.ds_sub(self.ds_sub(plus_abs, minus_abs), a)
+            }
+            ds_to_f: fn(a) { return a.x + a.y }
+            ds_sqrt: fn(a) {
+                let root = sqrt(max(self.ds_to_f(a), 0.0))
+                return vec2(root, 0.0)
+            }
+
+            hybrid_de: fn(px, py, pz) {
+                let cx = px
+                let cy = py
+                let cz = pz
+                var x = px
+                var y = py
+                var z = pz
+                var w = vec2(1.0, 0.0)
+                var r2 = vec2(0.0, 0.0)
+                var iters = 0.0
+                var slot = 0.0
+                var remaining = self.slot0_iters
+                for i in 0..16 {
+                    if remaining <= 0.0 {
+                        slot += 1.0
+                        if slot >= 2.0 { slot = self.repeat_from_slot }
+                        if slot < 0.5 { remaining = self.slot0_iters } else { remaining = self.slot1_iters }
+                    }
+                    if slot < 0.5 {
+                        x = self.ds_box_fold(x, self.ab_fold)
+                        y = self.ds_box_fold(y, self.ab_fold)
+                        z = self.ds_box_fold(z, self.ab_fold)
+                        let rr = self.ds_to_f(self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z)))
+                        var m = self.ab_scale
+                        if rr < self.ab_min_r2 { m = self.ab_scale_div_min_r2 } else if rr < 1.0 { m = self.ab_scale / max(rr, 0.0000001) }
+                        w = self.ds_mul_f(w, m)
+                        x = self.ds_add(self.ds_mul_f(x, m), cx)
+                        y = self.ds_add(self.ds_mul_f(y, m), cy)
+                        z = self.ds_add(self.ds_mul_f(z, m), cz)
+                    } else {
+                        x = self.ds_abs(x)
+                        y = self.ds_abs(y)
+                        z = self.ds_abs(z)
+                        if self.ds_to_f(x) < self.ds_to_f(y) { let t = x x = y y = t }
+                        if self.ds_to_f(x) < self.ds_to_f(z) { let t = x x = z z = t }
+                        if self.ds_to_f(y) < self.ds_to_f(z) { let t = y y = z z = t }
+                        let nx = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot0.x), self.ds_mul_f(y, self.rot0.y)), self.ds_mul_f(z, self.rot0.z))
+                        let ny = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot1.x), self.ds_mul_f(y, self.rot1.y)), self.ds_mul_f(z, self.rot1.z))
+                        let nz = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot2.x), self.ds_mul_f(y, self.rot2.y)), self.ds_mul_f(z, self.rot2.z))
+                        let sf = self.menger_scale - 1.0
+                        x = self.ds_add_f(self.ds_mul_f(nx, self.menger_scale), -self.menger_cx * sf)
+                        y = self.ds_add_f(self.ds_mul_f(ny, self.menger_scale), -self.menger_cy * sf)
+                        let z_scaled = self.ds_mul_f(nz, self.menger_scale)
+                        let c = self.menger_cz * sf
+                        z = self.ds_add_f(self.ds_abs(self.ds_add_f(z_scaled, -c)), -c)
+                        z = vec2(-z.x, -z.y)
+                        w = self.ds_mul_f(w, self.menger_scale)
+                    }
+                    iters += 1.0
+                    remaining -= 1.0
+                    r2 = self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z))
+                    if self.ds_to_f(r2) > self.rstop || iters >= self.max_iters { break }
+                }
+                let r = self.ds_sqrt(r2)
+                let de = self.ds_div(r, self.ds_abs(w))
+                return vec3(iters, de.x, de.y)
+            }
+
+            calc_de: fn(px, py, pz) {
+                let raw = self.hybrid_de(px, py, pz)
+                let de_raw = max(raw.y + raw.z, self.de_floor)
+                return vec2(raw.x, de_raw)
+            }
+
+            pos_x: fn(ox, dir, t) { return self.ds_add(ox, self.ds_mul_f(self.ds_make(t), dir.x)) }
+            pos_y: fn(oy, dir, t) { return self.ds_add(oy, self.ds_mul_f(self.ds_make(t), dir.y)) }
+            pos_z: fn(oz, dir, t) { return self.ds_add(oz, self.ds_mul_f(self.ds_make(t), dir.z)) }
+
+            ray_march: fn(ox, oy, oz, dir) {
+                var t = 0.0
+                var last_de = 0.0
+                var last_step = 0.0
+                var rsfmul = 1.0
+
+                let first_eval = self.calc_de(ox, oy, oz)
+                let first_destop = self.de_stop
+                if first_eval.x >= self.max_iters || first_eval.y < first_destop {
+                    return vec2(0.0, first_eval.x)
+                }
+
+                last_de = first_eval.y
+                last_step = max(first_eval.y * self.s_z_step_div, 0.11 * self.step_width)
+
+                for step_idx in 0..16 {
+                    let depth_steps = abs(t) / max(self.step_width, 0.0000001)
+                    let current_destop = self.de_stop * (1.0 + depth_steps * self.de_stop_factor)
+                    let px = self.pos_x(ox, dir, t)
+                    let py = self.pos_y(oy, dir, t)
+                    let pz = self.pos_z(oz, dir, t)
+                    let eval = self.calc_de(px, py, pz)
+                    var de = eval.y
+                    if de > last_de + last_step {
+                        de = last_de + last_step
+                    }
+                    if eval.x < self.max_iters && de >= current_destop {
+                        var step = max((de - self.ms_de_sub * current_destop) * self.s_z_step_div * rsfmul, 0.11 * self.step_width)
+                        let max_step_here = max(current_destop, 0.4 * self.step_width) * self.mct_mh04_zsd
+                        if max_step_here < step {
+                            step = max_step_here
+                        }
+                        if last_de > de + 0.0000001 {
+                            let ratio = last_step / max(last_de - de, 0.0000001)
+                            if ratio < 1.0 { rsfmul = max(ratio, 0.5) } else { rsfmul = 1.0 }
+                        } else {
+                            rsfmul = 1.0
+                        }
+                        last_de = de
+                        last_step = step
+                        t += step
+                        if t > self.max_ray_length {
+                            return vec2(-1.0, 0.0)
+                        }
+                    } else {
+                        return vec2(t, eval.x)
+                    }
+                }
+                return vec2(-1.0, 0.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let hit = self.ray_march(vec2(0.1, 0.0), vec2(0.2, 0.0), vec2(0.3, 0.0), vec3(0.0, 0.0, 1.0))
+                self.pixel = vec4(clamp(hit.x * 0.1, 0.0, 1.0), clamp(hit.y * 0.02, 0.0, 1.0), 0.4, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_3)
+
+        println("GPU stage 4: ray march refinement loop")
+        let gpu_stage_4 = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+
+            rot0: shader.uniform(vec3f)
+            rot1: shader.uniform(vec3f)
+            rot2: shader.uniform(vec3f)
+            slot0_iters: shader.uniform(1.0)
+            slot1_iters: shader.uniform(1.0)
+            repeat_from_slot: shader.uniform(0.0)
+            ab_scale: shader.uniform(-1.0)
+            ab_scale_div_min_r2: shader.uniform(-1.0)
+            ab_min_r2: shader.uniform(0.25)
+            ab_fold: shader.uniform(1.0)
+            menger_scale: shader.uniform(3.0)
+            menger_cx: shader.uniform(1.0)
+            menger_cy: shader.uniform(1.0)
+            menger_cz: shader.uniform(0.5)
+            rstop: shader.uniform(20.0)
+            max_iters: shader.uniform(48.0)
+            step_width: shader.uniform(0.001)
+            de_stop: shader.uniform(0.001)
+            de_stop_factor: shader.uniform(0.0)
+            s_z_step_div: shader.uniform(1.0)
+            ms_de_sub: shader.uniform(1.0)
+            mct_mh04_zsd: shader.uniform(1.0)
+            de_floor: shader.uniform(0.00025)
+            max_ray_length: shader.uniform(128.0)
+
+            ds_make: fn(v) { return vec2(v, 0.0) }
+            ds_norm: fn(v) {
+                let s = v.x + v.y
+                let e = v.y - (s - v.x)
+                return vec2(s, e)
+            }
+            ds_add: fn(a, b) {
+                let s = a.x + b.x
+                let bb = s - a.x
+                let e = (a.x - (s - bb)) + (b.x - bb) + a.y + b.y
+                return self.ds_norm(vec2(s, e))
+            }
+            ds_sub: fn(a, b) { return self.ds_add(a, vec2(-b.x, -b.y)) }
+            ds_add_f: fn(a, b) { return self.ds_add(a, vec2(b, 0.0)) }
+            ds_mul_f: fn(a, b) { return self.ds_norm(vec2(a.x * b, a.y * b)) }
+            ds_mul: fn(a, b) {
+                let p = a.x * b.x
+                let e = a.x * b.y + a.y * b.x + a.y * b.y
+                return self.ds_norm(vec2(p, e))
+            }
+            ds_div: fn(a, b) {
+                let q1 = a.x / b.x
+                let r = self.ds_sub(a, self.ds_mul_f(b, q1))
+                let q2 = r.x / b.x
+                return self.ds_norm(vec2(q1, q2))
+            }
+            ds_abs: fn(a) {
+                if a.x < 0.0 || (a.x == 0.0 && a.y < 0.0) { return vec2(-a.x, -a.y) }
+                return a
+            }
+            ds_box_fold: fn(a, fold) {
+                let plus_abs = self.ds_abs(self.ds_add_f(a, fold))
+                let minus_abs = self.ds_abs(self.ds_add_f(a, -fold))
+                return self.ds_sub(self.ds_sub(plus_abs, minus_abs), a)
+            }
+            ds_to_f: fn(a) { return a.x + a.y }
+            ds_sqrt: fn(a) {
+                let root = sqrt(max(self.ds_to_f(a), 0.0))
+                return vec2(root, 0.0)
+            }
+            hybrid_de: fn(px, py, pz) {
+                let cx = px
+                let cy = py
+                let cz = pz
+                var x = px
+                var y = py
+                var z = pz
+                var w = vec2(1.0, 0.0)
+                var r2 = vec2(0.0, 0.0)
+                var iters = 0.0
+                var slot = 0.0
+                var remaining = self.slot0_iters
+                for i in 0..16 {
+                    if remaining <= 0.0 {
+                        slot += 1.0
+                        if slot >= 2.0 { slot = self.repeat_from_slot }
+                        if slot < 0.5 { remaining = self.slot0_iters } else { remaining = self.slot1_iters }
+                    }
+                    if slot < 0.5 {
+                        x = self.ds_box_fold(x, self.ab_fold)
+                        y = self.ds_box_fold(y, self.ab_fold)
+                        z = self.ds_box_fold(z, self.ab_fold)
+                        let rr = self.ds_to_f(self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z)))
+                        var m = self.ab_scale
+                        if rr < self.ab_min_r2 { m = self.ab_scale_div_min_r2 } else if rr < 1.0 { m = self.ab_scale / max(rr, 0.0000001) }
+                        w = self.ds_mul_f(w, m)
+                        x = self.ds_add(self.ds_mul_f(x, m), cx)
+                        y = self.ds_add(self.ds_mul_f(y, m), cy)
+                        z = self.ds_add(self.ds_mul_f(z, m), cz)
+                    } else {
+                        x = self.ds_abs(x)
+                        y = self.ds_abs(y)
+                        z = self.ds_abs(z)
+                        if self.ds_to_f(x) < self.ds_to_f(y) { let t = x x = y y = t }
+                        if self.ds_to_f(x) < self.ds_to_f(z) { let t = x x = z z = t }
+                        if self.ds_to_f(y) < self.ds_to_f(z) { let t = y y = z z = t }
+                        let nx = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot0.x), self.ds_mul_f(y, self.rot0.y)), self.ds_mul_f(z, self.rot0.z))
+                        let ny = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot1.x), self.ds_mul_f(y, self.rot1.y)), self.ds_mul_f(z, self.rot1.z))
+                        let nz = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot2.x), self.ds_mul_f(y, self.rot2.y)), self.ds_mul_f(z, self.rot2.z))
+                        let sf = self.menger_scale - 1.0
+                        x = self.ds_add_f(self.ds_mul_f(nx, self.menger_scale), -self.menger_cx * sf)
+                        y = self.ds_add_f(self.ds_mul_f(ny, self.menger_scale), -self.menger_cy * sf)
+                        let z_scaled = self.ds_mul_f(nz, self.menger_scale)
+                        let c = self.menger_cz * sf
+                        z = self.ds_add_f(self.ds_abs(self.ds_add_f(z_scaled, -c)), -c)
+                        z = vec2(-z.x, -z.y)
+                        w = self.ds_mul_f(w, self.menger_scale)
+                    }
+                    iters += 1.0
+                    remaining -= 1.0
+                    r2 = self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z))
+                    if self.ds_to_f(r2) > self.rstop || iters >= self.max_iters { break }
+                }
+                let r = self.ds_sqrt(r2)
+                let de = self.ds_div(r, self.ds_abs(w))
+                return vec3(iters, de.x, de.y)
+            }
+            calc_de: fn(px, py, pz) {
+                let raw = self.hybrid_de(px, py, pz)
+                let de_raw = max(raw.y + raw.z, self.de_floor)
+                return vec2(raw.x, de_raw)
+            }
+            pos_x: fn(ox, dir, t) { return self.ds_add(ox, self.ds_mul_f(self.ds_make(t), dir.x)) }
+            pos_y: fn(oy, dir, t) { return self.ds_add(oy, self.ds_mul_f(self.ds_make(t), dir.y)) }
+            pos_z: fn(oz, dir, t) { return self.ds_add(oz, self.ds_mul_f(self.ds_make(t), dir.z)) }
+
+            ray_march: fn(ox, oy, oz, dir) {
+                var t = 0.0
+                var last_de = 0.0
+                var last_step = 0.0
+                var rsfmul = 1.0
+                let first_eval = self.calc_de(ox, oy, oz)
+                let first_destop = self.de_stop
+                if first_eval.x >= self.max_iters || first_eval.y < first_destop {
+                    return vec2(0.0, first_eval.x)
+                }
+                last_de = first_eval.y
+                last_step = max(first_eval.y * self.s_z_step_div, 0.11 * self.step_width)
+                for step_idx in 0..16 {
+                    let depth_steps = abs(t) / max(self.step_width, 0.0000001)
+                    let current_destop = self.de_stop * (1.0 + depth_steps * self.de_stop_factor)
+                    let px = self.pos_x(ox, dir, t)
+                    let py = self.pos_y(oy, dir, t)
+                    let pz = self.pos_z(oz, dir, t)
+                    let eval = self.calc_de(px, py, pz)
+                    var de = eval.y
+                    if de > last_de + last_step { de = last_de + last_step }
+                    if eval.x < self.max_iters && de >= current_destop {
+                        var step = max((de - self.ms_de_sub * current_destop) * self.s_z_step_div * rsfmul, 0.11 * self.step_width)
+                        let max_step_here = max(current_destop, 0.4 * self.step_width) * self.mct_mh04_zsd
+                        if max_step_here < step { step = max_step_here }
+                        if last_de > de + 0.0000001 {
+                            let ratio = last_step / max(last_de - de, 0.0000001)
+                            if ratio < 1.0 { rsfmul = max(ratio, 0.5) } else { rsfmul = 1.0 }
+                        } else {
+                            rsfmul = 1.0
+                        }
+                        last_de = de
+                        last_step = step
+                        t += step
+                        if t > self.max_ray_length { return vec2(-1.0, 0.0) }
+                    } else {
+                        var refine_t = t
+                        var refine_step = -0.5 * last_step
+                        for i in 0..8 {
+                            refine_t += refine_step
+                            let rx = self.pos_x(ox, dir, refine_t)
+                            let ry = self.pos_y(oy, dir, refine_t)
+                            let rz = self.pos_z(oz, dir, refine_t)
+                            let depth_steps = abs(refine_t) / max(self.step_width, 0.0000001)
+                            let stop_here = self.de_stop * (1.0 + depth_steps * self.de_stop_factor)
+                            let reval = self.calc_de(rx, ry, rz)
+                            if reval.x >= self.max_iters || reval.y < stop_here {
+                                refine_step = -abs(refine_step) * 0.55
+                            } else {
+                                refine_step = abs(refine_step) * 0.55
+                            }
+                        }
+                        let fx = self.pos_x(ox, dir, refine_t)
+                        let fy = self.pos_y(oy, dir, refine_t)
+                        let fz = self.pos_z(oz, dir, refine_t)
+                        let final_eval = self.calc_de(fx, fy, fz)
+                        return vec2(refine_t, final_eval.x)
+                    }
+                }
+                return vec2(-1.0, 0.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                let hit = self.ray_march(vec2(0.1, 0.0), vec2(0.2, 0.0), vec2(0.3, 0.0), vec3(0.0, 0.0, 1.0))
+                self.pixel = vec4(clamp(hit.x * 0.1, 0.0, 1.0), clamp(hit.y * 0.02, 0.0, 1.0), 0.4, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4)
+    };
+    vm.eval(gpu_mb3d_shader_stages);
 
     // ========================================
     // Regex tests

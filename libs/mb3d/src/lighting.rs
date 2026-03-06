@@ -440,31 +440,21 @@ pub fn soft_hs_light_dir(
     Some((idx, pl.dir, pl.i_light_pos))
 }
 
-/// Shade a hit pixel using a stable two-light material model.
-pub fn shade(
-    normal: Vec3,
-    roughness: f64,
-    view_dir: Vec3,
-    iters: i32,
-    shadow_steps: i32,
-    max_iters: i32,
-    min_iters: i32,
-    hit_pos: Vec3,
+pub(crate) fn compute_final_ao_mb3d(
     ao_factor: f64,
+    normal: Vec3,
+    hit_pos: Vec3,
     depth: f64,
     pixel_x: i32,
     pixel_y: i32,
-    y_pos: f64,
-    max_depth: f64,
-    cache: &LightingCache,
     ssao: &crate::m3p::M3PSSAO,
     formulas: &crate::formulas::HybridProgram,
     params: &crate::render::RenderParams,
     scratch: &mut ShadeScratch,
-) -> [u8; 3] {
+) -> f64 {
     let m_zz = depth / params.step_width;
-
     let mut final_ao = ao_factor.clamp(0.0, 1.0);
+
     // MB3D's real AO is the DEAO pass. SSAO modes are separate post-processes.
     if ssao.calc_amb_shadow && ssao.mode == 3 {
         let mut final_ao_val = 0.0;
@@ -567,18 +557,18 @@ pub fn shade(
         } else {
             params.de_stop_header / (d_step_mul * d_step_mul)
         };
-        
+
         for i in 0..ray_count {
             let s_vec = scratch.rot_m[i];
-            
+
             let mut dt1 = step_ao_actual * d_step_mul;
             let mut s_tmp = 1.0;
-            
+
             let mut b_first_step = params.first_step_random;
-            
+
             loop {
                 let mut b_end = false;
-                
+
                 if b_first_step {
                     b_first_step = false;
                     dt1 *= ao_step_jitter(pixel_x, pixel_y, i) * 1.5 + 0.5;
@@ -586,34 +576,34 @@ pub fn shade(
                     dt1 = max_dist_steps;
                     b_end = true;
                 }
-                
+
                 let probe_pos = hit_pos.add(s_vec.scale(dt1 * params.step_width));
-                
+
                 let (_, de_world) = crate::formulas::hybrid_de(
                     (probe_pos.x, probe_pos.y, probe_pos.z),
                     formulas,
                     &params.iter_params,
                 );
                 let dt2 = de_world * params.de_scale / params.step_width;
-                
+
                 let md_d10 = 0.1 / (max_dist_steps * de_mul);
                 let val = ((dt2 - ms_de_stop) / dt1 + md_d10).min(s_tmp);
                 if val < s_tmp {
                     s_tmp = val;
                 }
-                
+
                 if s_tmp < 0.02 {
                     break;
                 }
-                
+
                 let step_add = if dt2 > dt1 * d_step_mul { dt2 } else { dt1 * d_step_mul };
                 dt1 += step_add;
-                
+
                 if b_end {
                     break;
                 }
             }
-            
+
             scratch.min_ra[i] = s_tmp.max(0.0) * de_mul;
         }
 
@@ -633,22 +623,14 @@ pub fn shade(
                 }
             }
         }
-        
+
         for iy in 0..ray_count {
             final_ao_val += (scratch.s_add[iy] + scratch.min_ra[iy]).min(1.0);
         }
 
-        // Matches CalcAmbShadowDEfor1pos:
-        // AmbShadowNorm = 1 - dAmount/RayCount.
         let amb_shadow_norm = (1.0 - final_ao_val / ray_count as f64).clamp(0.0, 1.0);
         let s_amplitude = ssao.amb_shad;
 
-        // Matches PaintThread.calcAmbshadow:
-        // if amp>1:
-        //   dAmbS = 1 - AmbShadowNorm;
-        //   dAmbS += (amp-1) * (dAmbS^2 - dAmbS)
-        // else:
-        //   dAmbS = 1 - amp * AmbShadowNorm
         let mut d_amb_s = if s_amplitude > 1.0 {
             let mut d = 1.0 - amb_shadow_norm;
             d = d + (s_amplitude - 1.0) * (d * d - d);
@@ -660,6 +642,29 @@ pub fn shade(
         d_amb_s = d_amb_s.clamp(0.0, 1.0);
         final_ao = d_amb_s;
     }
+
+    final_ao
+}
+
+pub(crate) fn shade_with_final_ao_mb3d(
+    normal: Vec3,
+    roughness: f64,
+    view_dir: Vec3,
+    iters: i32,
+    shadow_steps: i32,
+    max_iters: i32,
+    min_iters: i32,
+    hit_pos: Vec3,
+    final_ao: f64,
+    depth: f64,
+    y_pos: f64,
+    max_depth: f64,
+    cache: &LightingCache,
+    ssao: &crate::m3p::M3PSSAO,
+    params: &crate::render::RenderParams,
+) -> [u8; 3] {
+    let m_zz = depth / params.step_width;
+
     // MB3D: dFog := sDiffuseShadowing * (dAmbSh - 1) + 1
     //      = (1 - sDiffuseShadowing) + sDiffuseShadowing * dAmbSh.
     let diffuse_shadowing = ssao.diffuse_shadowing.clamp(0.0, 1.0);
@@ -679,16 +684,11 @@ pub fn shade(
     let si_gradient = si_gradient_f.round() as i32;
 
     // Calculate ir
-    // iDif[0] is sColZmul * PLV.zPos
-    // sColZmul = 11 * -0.005 / (1.689668e-12 * 1920) = -16954034875.5
-    // PLV.zPos = depth + z1
     let plv_z_pos = depth + cache.z1;
     let i_dif_0 = cache.s_col_z_mul * plv_z_pos;
     
     let ir_f = ((si_gradient as f64 - cache.s_c_start) * cache.s_c_mul + i_dif_0) * 16384.0;
     let ir = ir_f.round() as i32;
-    
-    // bColCycling is true
     let ir_cycled = ir & 32767;
     
     let diffuse_color =
@@ -714,7 +714,6 @@ pub fn shade(
     let mut total_diffuse = Vec3::new(0.0, 0.0, 0.0);
     let mut total_specular = Vec3::new(0.0, 0.0, 0.0);
 
-    // For each light:
     for pl in &cache.parsed_lights {
         let li = pl.idx;
         let i_hs_enabled = 1 - (((pl.l_option >> 6) & 1) as i32);
@@ -738,7 +737,6 @@ pub fn shade(
         let diff_shadowed = diff_dot * light_gate;
         total_diffuse = total_diffuse.add(pl.color.scale(diff_shadowed));
         
-        // MB3D DotOf2VecNormalize: reflect camera->object vector on normal, then dot with light.
         let reflect_view = v_from_cam.sub(n.scale(2.0 * n.dot(v_from_cam)));
         let spec_dot = pl.dir.dot(reflect_view);
         if spec_dot > 0.0 {
@@ -755,7 +753,6 @@ pub fn shade(
             }
         }
     }
-
 
     let s = if cache.b_amb_rel_obj {
         (v_from_cam.y.asin() / std::f64::consts::PI + 0.5).clamp(0.0, 1.0)
@@ -782,7 +779,6 @@ pub fn shade(
             + spec_color.z * total_specular.z,
     );
 
-    // Calculate Zpos
     let z_pos_f = 32767.0 - (params.z_cmul / 256.0) * ((m_zz * params.z_corr + 1.0).sqrt() - 1.0);
     let mut z_pos = z_pos_f.round().clamp(0.0, 32767.0) as i32;
     if depth >= max_depth * 0.9999 {
@@ -799,7 +795,6 @@ pub fn shade(
         (1.0 - (60768.0 - z_pos_f) * cache.s_depth).max(0.0)
     };
     
-    // Calculate sShad, sShadZmul, sShadGr
     let tbpos_3 = cache.tbpos_3;
     let tbpos_6 = cache.tbpos_6;
     let mut s_tmp_shad = 128.0;
@@ -808,7 +803,6 @@ pub fn shade(
     
     let mut d_tmp_shad = 2.2 / params.s_z_step_div_raw;
     let mut s_shad_gr = (tbpos_6 as f64 - 53.0) * params.s_z_step_div_raw * 0.00065;
-    // ImScale is 1.0 in almost all calls to MakeLightValsFromHeaderLight
     let mut s_dyn_fog_mul = params.s_z_step_div_raw * 0.015;
     
     if b_vol_light {
@@ -831,7 +825,6 @@ pub fn shade(
     let sqrt_tbpos3_shr_16 = ((tbpos_3 >> 16) as f64).sqrt();
     let s_shad_z_mul = d_tmp_shad * 0.7 / cache.depth_range * (128.0 - sqrt_tbpos3_shr_16 * 11.313708);
 
-    // MB3D uses PsiLight.Shadow (ray-march DE count), not fractal escape iterations.
     let ir_for_fog = if b_vol_light {
         let mut eax = shadow_steps & 0x3FF;
         let cl = eax >> 7;
@@ -860,12 +853,6 @@ pub fn shade(
         cache.dyn_fog_col.z * (d_fog - d_tmp3) + cache.dyn_fog_col2.z * d_tmp3,
     );
 
-    // if d_tmp < 1.0 {
-    //     d_tmp = 1.0 - (1.0 - d_tmp);
-    // }
-
-
-    // LiLSDAI[4] := Add2SVecsWeight2(LiLSDAI[4], DepC, Max0S(1 - dTmp));
     let t_dep = (1.0f64 - d_tmp).max(0.0f64);
     final_color = Vec3::new(
         final_color.x * d_tmp + dep_c_interp.x * t_dep,
@@ -887,8 +874,6 @@ pub fn shade(
         final_color.z + fog_add.z,
     );
     
-    // No depth fog for now
-    
     let final_color_toned = Vec3::new(
         final_color.x.clamp(0.0, 1.0),
         final_color.y.clamp(0.0, 1.0),
@@ -900,4 +885,58 @@ pub fn shade(
         (final_color_toned.y * 255.0) as u8,
         (final_color_toned.z * 255.0) as u8,
     ]
+}
+
+/// Shade a hit pixel using a stable two-light material model.
+pub fn shade(
+    normal: Vec3,
+    roughness: f64,
+    view_dir: Vec3,
+    iters: i32,
+    shadow_steps: i32,
+    max_iters: i32,
+    min_iters: i32,
+    hit_pos: Vec3,
+    ao_factor: f64,
+    depth: f64,
+    pixel_x: i32,
+    pixel_y: i32,
+    y_pos: f64,
+    max_depth: f64,
+    cache: &LightingCache,
+    ssao: &crate::m3p::M3PSSAO,
+    formulas: &crate::formulas::HybridProgram,
+    params: &crate::render::RenderParams,
+    scratch: &mut ShadeScratch,
+) -> [u8; 3] {
+    let m_zz = depth / params.step_width;
+    let final_ao = compute_final_ao_mb3d(
+        ao_factor,
+        normal,
+        hit_pos,
+        depth,
+        pixel_x,
+        pixel_y,
+        ssao,
+        formulas,
+        params,
+        scratch,
+    );
+    shade_with_final_ao_mb3d(
+        normal,
+        roughness,
+        view_dir,
+        iters,
+        shadow_steps,
+        max_iters,
+        min_iters,
+        hit_pos,
+        final_ao,
+        depth,
+        y_pos,
+        max_depth,
+        cache,
+        ssao,
+        params,
+    )
 }

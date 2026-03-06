@@ -34,6 +34,9 @@ pub struct CxOsGeometry {}
 #[derive(Default, Clone)]
 pub struct CxOsTexture {}
 
+#[derive(Default, Clone)]
+pub struct CxOsUniformBuffer {}
+
 #[derive(Default)]
 pub struct CxOsDrawShader {
     pub source_hash: u64,
