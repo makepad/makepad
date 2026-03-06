@@ -5,5 +5,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-brotli = "5.0"
+brotli = "8.0"
 deflate = "1.0"

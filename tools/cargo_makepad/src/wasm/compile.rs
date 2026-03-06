@@ -232,6 +232,18 @@ fn brotli_compress(dest_path: &PathBuf) -> usize {
     brotli_data.len()
 }
 
+fn remove_brotli_artifact(dest_path: &PathBuf) {
+    let source_file_name = match dest_path.file_name() {
+        Some(name) => name.to_string_lossy().to_string(),
+        None => return,
+    };
+    let dest_path_br = match dest_path.parent() {
+        Some(parent) => parent.join(format!("{}.br", source_file_name)),
+        None => return,
+    };
+    let _ = fs::remove_file(dest_path_br);
+}
+
 pub fn cp_brotli(
     source_path: &PathBuf,
     dest_path: &PathBuf,
@@ -241,6 +253,8 @@ pub fn cp_brotli(
     cp(source_path, dest_path, exec)?;
     if compress {
         brotli_compress(dest_path);
+    } else {
+        remove_brotli_artifact(dest_path);
     }
     Ok(())
 }
@@ -363,6 +377,8 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 cp(&source_path, &dest_path, false)?;
                 if config.brotli {
                     brotli_compress(&dest_path);
+                } else {
+                    remove_brotli_artifact(&dest_path);
                 }
                 Ok(())
             },
@@ -487,6 +503,8 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 cp(&source_path2, &dest_path, false)?;
                 if config.brotli {
                     brotli_compress(&dest_path);
+                } else {
+                    remove_brotli_artifact(&dest_path);
                 }
                 Ok(())
             })?;
@@ -571,6 +589,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         output = split.primary_wasm;
         if split.split_data.is_empty() {
             let _ = fs::remove_file(&split_data_dest);
+            remove_brotli_artifact(&split_data_dest);
             None
         } else {
             split_data_bytes = Some(split.split_data.len());
@@ -578,11 +597,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 .map_err(|e| format!("Can't write file {:?} {:?} ", split_data_dest, e))?;
             if config.brotli {
                 split_brotli_bytes = Some(brotli_compress(&split_data_dest));
+            } else {
+                remove_brotli_artifact(&split_data_dest);
             }
             Some(format!("./{}.data.bin", build_crate))
         }
     } else {
         let _ = fs::remove_file(&split_data_dest);
+        remove_brotli_artifact(&split_data_dest);
         None
     };
 
@@ -594,6 +616,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     let wasm_brotli_bytes = if config.brotli {
         Some(brotli_compress(&wasm_dest))
     } else {
+        remove_brotli_artifact(&wasm_dest);
         None
     };
     // generate html file
@@ -603,6 +626,8 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         .map_err(|e| format!("Can't write {:?} {:?} ", index_path, e))?;
     if config.brotli {
         brotli_compress(&index_path);
+    } else {
+        remove_brotli_artifact(&index_path);
     }
     if let Some(wasm_brotli_bytes) = wasm_brotli_bytes {
         print_brotli_size_report(
@@ -632,6 +657,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     println!("*.jpg => image/jpg");
     println!("*.svg => image/svg+xml");
     println!("*.md => text/markdown");
+    println!("*.bin => application/octet-stream");
     Ok(WasmBuildResult { app_dir })
 }
 
@@ -771,6 +797,8 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                         "image/svg+xml"
                     } else if path.ends_with(".glb") {
                         "model/gltf-binary"
+                    } else if path.ends_with(".bin") {
+                        "application/octet-stream"
                     } else if path.ends_with(".md") {
                         "text/markdown"
                     } else if path.ends_with(".woff") {
