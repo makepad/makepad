@@ -235,6 +235,11 @@ impl Cx {
                 CxOsOp::CopyToClipboard(_request) => {
                     crate::error!("Clipboard actions not yet implemented for tvOS");
                 }
+                CxOsOp::SetPrimarySelection(_) => {}
+                CxOsOp::ShowSelectionHandles { .. } => {}
+                CxOsOp::UpdateSelectionHandles { .. } => {}
+                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::AccessibilityUpdate(_) => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }

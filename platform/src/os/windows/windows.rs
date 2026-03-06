@@ -454,6 +454,11 @@ impl Cx {
                 CxOsOp::CopyToClipboard(content) => unsafe {
                     Win32Window::copy_to_clipboard(&content);
                 },
+                CxOsOp::SetPrimarySelection(_) => {}
+                CxOsOp::ShowSelectionHandles { .. } => {}
+                CxOsOp::UpdateSelectionHandles { .. } => {}
+                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::SetCursor(cursor) => {
                     with_win32_app(|app| app.set_mouse_cursor(cursor));
                 }

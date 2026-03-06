@@ -30,6 +30,7 @@ pub struct XlibApp {
     event_loop_running: bool,
     pub xim: x11_sys::XIM,
     pub clipboard: String,
+    pub primary_selection: String,
     pub display_fd: c_int,
     //pub signal_fds: [c_int; 2],
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
@@ -67,6 +68,7 @@ impl XlibApp {
                 display_fd,
                 //signal_fds,
                 clipboard: String::new(),
+                primary_selection: String::new(),
                 last_scroll_time: 0.0,
                 last_click_time: 0.0,
                 last_click_pos: (0, 0),
@@ -180,6 +182,11 @@ impl XlibApp {
                             targets.len() as i32,
                         );
                     } else if request.target == self.atoms.utf8_string {
+                        let text = if request.selection == self.atoms.primary {
+                            &self.primary_selection
+                        } else {
+                            &self.clipboard
+                        };
                         x11_sys::XChangeProperty(
                             self.display,
                             request.requestor,
@@ -187,8 +194,8 @@ impl XlibApp {
                             self.atoms.utf8_string,
                             8,
                             x11_sys::PropModeReplace as i32,
-                            self.clipboard.as_ptr() as *const _ as *const c_uchar,
-                            self.clipboard.len() as i32,
+                            text.as_ptr() as *const _ as *const c_uchar,
+                            text.len() as i32,
                         );
                     } else {
                         response.property = 0;
@@ -929,10 +936,17 @@ impl XlibApp {
         x11_sys::XSetSelectionOwner(self.display, self.atoms.clipboard, window_id, time);
         x11_sys::XFlush(self.display);
     }
+
+    pub unsafe fn set_primary_selection(&mut self, text: &str, window_id: c_ulong, time: u64) {
+        self.primary_selection = text.to_string();
+        x11_sys::XSetSelectionOwner(self.display, self.atoms.primary, window_id, time);
+        x11_sys::XFlush(self.display);
+    }
 }
 
 pub struct XlibAtoms {
     pub clipboard: x11_sys::Atom,
+    pub primary: x11_sys::Atom,
     pub net_wm_moveresize: x11_sys::Atom,
     pub net_wm_icon: x11_sys::Atom,
     pub cardinal: x11_sys::Atom,
@@ -957,6 +971,7 @@ impl XlibAtoms {
         unsafe {
             Self {
                 clipboard: x11_sys::XInternAtom(display, "CLIPBOARD\0".as_ptr() as *const _, 0),
+                primary: x11_sys::XInternAtom(display, "PRIMARY\0".as_ptr() as *const _, 0),
                 net_wm_moveresize: x11_sys::XInternAtom(
                     display,
                     "_NET_WM_MOVERESIZE\0".as_ptr() as *const _,

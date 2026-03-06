@@ -111,6 +111,19 @@ fn generate_wp(protocols: &Path) -> io::Result<String> {
     out.push_str("    }\n");
     out.push_str("}\n\n");
 
+    out.push_str("#[cfg(feature = \"unstable\")]\n");
+    out.push_str("pub mod primary_selection {\n");
+    out.push_str("    pub mod zv1 {\n");
+    out.push_str(&indent(
+        &generate_client_module(
+            &protocols.join("unstable/primary-selection/primary-selection-unstable-v1.xml"),
+            &[],
+        )?,
+        8,
+    ));
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+
     out.push_str("pub mod viewporter {\n");
     out.push_str(&indent(
         &generate_client_module(&protocols.join("stable/viewporter/viewporter.xml"), &[])?,

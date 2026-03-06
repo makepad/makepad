@@ -69,6 +69,22 @@ pub trait CxOsApi {
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
 }
 
+/// Type-erased accessibility tree update payload. PartialEq always returns
+/// false — accessibility updates are never deduplicated.
+pub struct AccessibilityUpdatePayload(pub Box<dyn std::any::Any + Send>);
+
+impl PartialEq for AccessibilityUpdatePayload {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
+impl std::fmt::Debug for AccessibilityUpdatePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AccessibilityUpdatePayload(..)")
+    }
+}
+
 #[derive(PartialEq)]
 pub enum CxOsOp {
     CreateWindow(WindowId),
@@ -112,6 +128,11 @@ pub enum CxOsOp {
     },
     HideClipboardActions,
     CopyToClipboard(String),
+    SetPrimarySelection(String),
+    ShowSelectionHandles { start: Vec2d, end: Vec2d },
+    UpdateSelectionHandles { start: Vec2d, end: Vec2d },
+    HideSelectionHandles,
+    AccessibilityUpdate(AccessibilityUpdatePayload),
 
     CheckPermission {
         permission: crate::permission::Permission,
@@ -195,6 +216,11 @@ impl std::fmt::Debug for CxOsOp {
             Self::ShowClipboardActions { .. } => write!(f, "ShowClipboardActions"),
             Self::HideClipboardActions => write!(f, "HideClipboardActions"),
             Self::CopyToClipboard(..) => write!(f, "CopyToClipboard"),
+            Self::SetPrimarySelection(..) => write!(f, "SetPrimarySelection"),
+            Self::ShowSelectionHandles { .. } => write!(f, "ShowSelectionHandles"),
+            Self::UpdateSelectionHandles { .. } => write!(f, "UpdateSelectionHandles"),
+            Self::HideSelectionHandles => write!(f, "HideSelectionHandles"),
+            Self::AccessibilityUpdate(..) => write!(f, "AccessibilityUpdate"),
 
             Self::CheckPermission { .. } => write!(f, "CheckPermission"),
             Self::RequestPermission { .. } => write!(f, "RequestPermission"),
@@ -478,6 +504,38 @@ impl Cx {
     pub fn copy_to_clipboard(&mut self, content: &str) {
         self.platform_ops
             .push(CxOsOp::CopyToClipboard(content.to_owned()));
+    }
+
+    /// Sets the primary selection (Linux middle-click paste).
+    /// No-op on non-Linux platforms.
+    pub fn set_primary_selection(&mut self, content: &str) {
+        self.platform_ops
+            .push(CxOsOp::SetPrimarySelection(content.to_owned()));
+    }
+
+    /// Forward an accessibility tree update to the platform adapter.
+    ///
+    /// The `update` is a type-erased `accesskit::TreeUpdate`. Platform backends
+    /// downcast it when an accessibility adapter is active.
+    pub fn update_accessibility_tree(&mut self, update: Box<dyn std::any::Any + Send>) {
+        self.platform_ops.push(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(update)));
+    }
+
+    /// Show native selection handles at the given start and end positions (mobile).
+    pub fn show_selection_handles(&mut self, start: Vec2d, end: Vec2d) {
+        self.platform_ops
+            .push(CxOsOp::ShowSelectionHandles { start, end });
+    }
+
+    /// Update positions of visible selection handles (mobile).
+    pub fn update_selection_handles(&mut self, start: Vec2d, end: Vec2d) {
+        self.platform_ops
+            .push(CxOsOp::UpdateSelectionHandles { start, end });
+    }
+
+    /// Hide selection handles (mobile).
+    pub fn hide_selection_handles(&mut self) {
+        self.platform_ops.push(CxOsOp::HideSelectionHandles);
     }
 
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {

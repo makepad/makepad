@@ -446,9 +446,24 @@ impl WaylandCx {
                             state.set_clipboard_text(qhandle, serial, content);
                         }
                     } else {
-                        state.clipboard_text = content;
+                        state.clipboard_text = content.clone();
+                        state.pending_clipboard_copy = Some(content);
                     }
                 }
+                CxOsOp::SetPrimarySelection(content) => {
+                    if let Some(serial) = state.keyboard_serial.or(state.pointer_serial) {
+                        if state.primary_selection_manager.is_some() {
+                            let qh = self.qhandle.as_ref().unwrap();
+                            state.set_primary_selection_text(qh, serial, content);
+                        }
+                    } else {
+                        state.primary_selection_text = content;
+                    }
+                }
+                CxOsOp::ShowSelectionHandles { .. } => {}
+                CxOsOp::UpdateSelectionHandles { .. } => {}
+                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::StartDragging(items) => {
                     state.start_internal_drag(items);
                 }
