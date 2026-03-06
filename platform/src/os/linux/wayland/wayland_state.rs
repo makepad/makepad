@@ -32,6 +32,10 @@ use wayland_protocols::{
             wp_cursor_shape_manager_v1::{self, WpCursorShapeManagerV1},
         },
         fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+        primary_selection::zv1::client::{
+            zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
+            zwp_primary_selection_offer_v1, zwp_primary_selection_source_v1,
+        },
         text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3},
         viewporter::client::{wp_viewport, wp_viewporter},
     },
@@ -75,6 +79,8 @@ pub(crate) struct WaylandState {
     pub(crate) data_offers: Vec<ClipboardOffer>,
     pending_clipboard_read: Option<PendingClipboardRead>,
     pending_paste_text_input: Option<String>,
+    /// Queued clipboard copy content waiting for a serial from keyboard/pointer.
+    pub(crate) pending_clipboard_copy: Option<String>,
     pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
     pub(crate) clipboard_text: String,
     pub(crate) cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
@@ -95,6 +101,10 @@ pub(crate) struct WaylandState {
     pub(crate) xkb_cx: xkb_sys::XkbContext,
     pub(crate) text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
     pub(crate) text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
+    pub(crate) primary_selection_manager: Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
+    pub(crate) primary_selection_device: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
+    pub(crate) primary_selection_source: Option<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1>,
+    pub(crate) primary_selection_text: String,
     pub(crate) last_resize_edge: Option<xdg_toplevel::ResizeEdge>,
     event_callback: Option<Box<dyn FnMut(&mut WaylandState, XlibEvent)>>,
 
@@ -119,6 +129,7 @@ impl WaylandState {
             data_offers: Vec::new(),
             pending_clipboard_read: None,
             pending_paste_text_input: None,
+            pending_clipboard_copy: None,
             internal_drag_items: None,
             clipboard_text: String::new(),
             cursor_manager: None,
@@ -137,6 +148,10 @@ impl WaylandState {
             xkb_cx: xkb_sys::XkbContext::new().unwrap(),
             text_input: None,
             text_input_manager: None,
+            primary_selection_manager: None,
+            primary_selection_device: None,
+            primary_selection_source: None,
+            primary_selection_text: String::new(),
             last_mouse_pos: dvec2(0., 0.),
             last_resize_edge: None,
             timers: SelectTimers::new(),
@@ -251,6 +266,17 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                         (),
                     );
                     state.text_input_manager = Some(text_input_manager);
+                }
+                "zwp_primary_selection_device_manager_v1" => {
+                    let manager = wl_registry
+                        .bind::<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1, _, _>(
+                        name,
+                        1,
+                        qhandle,
+                        (),
+                    );
+                    state.primary_selection_manager = Some(manager);
+                    state.ensure_primary_selection_device(qhandle);
                 }
                 _ => {}
             }
@@ -602,6 +628,57 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandState {
     }
 }
 
+impl Dispatch<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
+        _event: <zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // We only set primary selection, not read it.
+    }
+
+    fn event_created_child(
+        opcode: u16,
+        qhandle: &QueueHandle<Self>,
+    ) -> Arc<dyn wayland_client::backend::ObjectData> {
+        match opcode {
+            zwp_primary_selection_device_v1::EVT_DATA_OFFER_OPCODE => {
+                qhandle.make_data::<zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1, ()>(())
+            }
+            _ => unreachable!(
+                "zwp_primary_selection_device_v1 created unknown child for opcode {}",
+                opcode
+            ),
+        }
+    }
+}
+
+impl Dispatch<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _proxy: &zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
+        event: <zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_primary_selection_source_v1::Event::Send { mime_type: _, fd } => {
+                use std::io::Write;
+                let mut file = std::fs::File::from(fd);
+                let _ = file.write_all(state.primary_selection_text.as_bytes());
+            }
+            zwp_primary_selection_source_v1::Event::Cancelled => {
+                state.primary_selection_source = None;
+            }
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<zwp_text_input_manager_v3::ZwpTextInputManagerV3, ()> for WaylandState {
     fn event(
         state: &mut Self,
@@ -632,9 +709,13 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                 surface,
                 keys,
             } => {
+                state.keyboard_serial = Some(serial);
+                state.flush_pending_clipboard_copy(qhandle, serial);
                 // state.do_callback(XlibEvent::AppGotFocus);
             }
             wl_keyboard::Event::Leave { serial, surface } => {
+                state.keyboard_serial = Some(serial);
+                state.flush_pending_clipboard_copy(qhandle, serial);
                 // state.do_callback(XlibEvent::AppLostFocus);
             }
             wl_keyboard::Event::Key {
@@ -647,6 +728,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                     match key_state {
                         wl_keyboard::KeyState::Pressed => {
                             state.keyboard_serial = Some(serial);
+                            state.flush_pending_clipboard_copy(qhandle, serial);
                             let (key_code, text_str) =
                                 if let Some(xkb_state) = state.xkb_state.as_mut() {
                                     (
@@ -773,6 +855,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 surface_y,
             } => {
                 state.pointer_serial = Some(serial);
+                state.flush_pending_clipboard_copy(qhandle, serial);
                 let mut window_id = None;
                 state.windows.iter().for_each(|win| {
                     if win.base_surface.id() == surface.id() {
@@ -786,9 +869,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
             }
             wl_pointer::Event::Leave { serial, surface: _ } => {
                 state.pointer_serial = Some(serial);
+                state.flush_pending_clipboard_copy(qhandle, serial);
                 if let Some(window_id) = state.current_window {
                     state.do_callback(XlibEvent::WindowLostFocus(window_id));
                 }
+                state.last_resize_edge = None;
             }
             wl_pointer::Event::Motion {
                 time,
@@ -896,6 +981,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 state: key_state,
             } => {
                 state.pointer_serial = Some(serial);
+                state.flush_pending_clipboard_copy(qhandle, serial);
                 if let Some(btn) = wayland_type::from_mouse(button) {
                     if let Some(window_id) = state.current_window {
                         match key_state {
@@ -1067,6 +1153,8 @@ delegate_noop!(WaylandState: ignore wl_shm::WlShm);
 delegate_noop!(WaylandState: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(WaylandState: ignore wl_buffer::WlBuffer);
 // delegate_noop!(WaylandState: ignore xdg_positioner::XdgPositioner);
+delegate_noop!(WaylandState: ignore zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1);
+delegate_noop!(WaylandState: ignore zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1);
 
 impl Dispatch<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, ()> for WaylandState {
     fn event(
@@ -1088,6 +1176,37 @@ impl WaylandState {
                 (self.data_device_manager.as_ref(), self.seat.as_ref())
             {
                 self.data_device = Some(data_device_manager.get_data_device(seat, qhandle, ()));
+            }
+        }
+    }
+
+    fn ensure_primary_selection_device(&mut self, qhandle: &QueueHandle<Self>) {
+        if self.primary_selection_device.is_none() {
+            if let (Some(manager), Some(seat)) =
+                (self.primary_selection_manager.as_ref(), self.seat.as_ref())
+            {
+                self.primary_selection_device = Some(manager.get_device(seat, qhandle, ()));
+            }
+        }
+    }
+
+    pub(crate) fn set_primary_selection_text(
+        &mut self,
+        qhandle: &QueueHandle<Self>,
+        serial: u32,
+        text: String,
+    ) {
+        self.primary_selection_text = text;
+        if let Some(device) = self.primary_selection_device.as_ref() {
+            if let Some(manager) = self.primary_selection_manager.as_ref() {
+                let source = manager.create_source(qhandle, ());
+                source.offer("text/plain;charset=utf-8".to_string());
+                source.offer("text/plain".to_string());
+                source.offer("UTF8_STRING".to_string());
+                source.offer("STRING".to_string());
+                source.offer("TEXT".to_string());
+                device.set_selection(Some(&source), serial);
+                self.primary_selection_source = Some(source);
             }
         }
     }
@@ -1133,6 +1252,13 @@ impl WaylandState {
             data_device.set_selection(Some(&source), serial);
             self.clipboard_source = Some(source);
             self.clipboard_text = text;
+        }
+    }
+
+    /// Flush a pending clipboard copy now that a serial is available.
+    pub(crate) fn flush_pending_clipboard_copy(&mut self, qhandle: &QueueHandle<Self>, serial: u32) {
+        if let Some(text) = self.pending_clipboard_copy.take() {
+            self.set_clipboard_text(qhandle, serial, text);
         }
     }
 
