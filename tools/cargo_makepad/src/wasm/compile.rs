@@ -20,9 +20,78 @@ pub struct WasmConfig {
     pub brotli: bool,
     pub bindgen: bool,
     pub threads: bool,
+    pub optimize_size: bool,
+    pub split: bool,
 }
 
-pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
+fn format_section_counts(summary: &WasmSectionSummary) -> String {
+    if summary.counts.is_empty() {
+        return "none".to_string();
+    }
+
+    summary
+        .counts
+        .iter()
+        .map(|(name, count)| {
+            if *count == 1 {
+                name.clone()
+            } else {
+                format!("{name} x{count}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_wasm_size_report(report: &WasmSizeReport) {
+    println!("Wasm size report:");
+    println!("  original:  {} bytes", report.original_bytes);
+    println!("  stripped:  {} bytes", report.stripped_bytes);
+    println!("  optimized: {} bytes", report.optimized_bytes);
+    println!(
+        "  debug sections removed:  {} bytes ({})",
+        report.debug_sections.total_bytes,
+        format_section_counts(&report.debug_sections)
+    );
+    println!(
+        "  custom sections removed: {} bytes ({})",
+        report.custom_sections.total_bytes,
+        format_section_counts(&report.custom_sections)
+    );
+}
+
+fn print_wasm_split_report(primary_bytes: usize, split_bytes: usize, segments: usize) {
+    println!("Wasm split report:");
+    println!("  primary wasm:    {} bytes", primary_bytes);
+    println!("  split data blob: {} bytes", split_bytes);
+    println!("  segment count:   {}", segments);
+    println!("  split total:     {} bytes", primary_bytes + split_bytes);
+}
+
+fn print_brotli_size_report(
+    wasm_bytes: usize,
+    wasm_brotli_bytes: usize,
+    split_bytes: Option<usize>,
+    split_brotli_bytes: Option<usize>,
+) {
+    println!("Brotli size report:");
+    println!(
+        "  wasm:            {} -> {} bytes",
+        wasm_bytes, wasm_brotli_bytes
+    );
+    if let (Some(split_bytes), Some(split_brotli_bytes)) = (split_bytes, split_brotli_bytes) {
+        println!(
+            "  split data blob: {} -> {} bytes",
+            split_bytes, split_brotli_bytes
+        );
+        println!(
+            "  compressed total: {} bytes",
+            wasm_brotli_bytes + split_brotli_bytes
+        );
+    }
+}
+
+pub fn generate_html(wasm: &str, split_data_path: Option<&str>, config: &WasmConfig) -> String {
     let init = if config.bindgen {
         format!(
             "
@@ -42,11 +111,16 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
             "
         )
     } else {
+        let split_options = if let Some(split_data_path) = split_data_path {
+            format!(", undefined, {{ split_data_url: '{split_data_path}' }}")
+        } else {
+            String::new()
+        };
         format!(
             "
             const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
             const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
-                './{wasm}.wasm'
+                './{wasm}.wasm'{split_options}
             );
             "
         )
@@ -137,7 +211,7 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
     )
 }
 
-fn brotli_compress(dest_path: &PathBuf) {
+fn brotli_compress(dest_path: &PathBuf) -> usize {
     let source_file_name = dest_path.file_name().unwrap().to_string_lossy().to_string();
     let dest_path_br = dest_path
         .parent()
@@ -155,6 +229,7 @@ fn brotli_compress(dest_path: &PathBuf) {
     }
     let mut brotli_file = File::create(dest_path_br).unwrap();
     brotli_file.write_all(&brotli_data).unwrap();
+    brotli_data.len()
 }
 
 pub fn cp_brotli(
@@ -172,9 +247,9 @@ pub fn cp_brotli(
 
 const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
-const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
+const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
 const WASM_RUSTFLAGS_SINGLE_THREADED: &str =
-    "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C opt-level=z";
+    "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C opt-level=z";
 
 fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, String> {
     let target_spec_dir = cwd.join("target/makepad-wasm-target");
@@ -215,8 +290,12 @@ fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, Stri
         );
     }
 
-    fs::write(&target_spec_path, target_spec)
-        .map_err(|e| format!("Can't write wasm target spec {:?}: {:?}", target_spec_path, e))?;
+    fs::write(&target_spec_path, target_spec).map_err(|e| {
+        format!(
+            "Can't write wasm target spec {:?}: {:?}",
+            target_spec_path, e
+        )
+    })?;
     Ok(target_spec_path)
 }
 
@@ -412,7 +491,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 Ok(())
             })?;
         }
-
     }
     let wasm_source = if config.bindgen {
         shell(
@@ -459,30 +537,80 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     };
 
     let wasm_dest = app_dir.join(format!("{}.wasm", build_crate));
-    if config.strip {
-        if let Ok(data) = fs::read(&wasm_source) {
-            if let Ok(strip) = wasm_strip_debug(&data) {
-                fs::write(&wasm_dest, strip)
-                    .map_err(|e| format!("Can't write file {:?} {:?} ", wasm_dest, e))?;
-            } else {
-                return Err(format!("Cannot parse wasm {:?}", wasm_source));
-            }
+    let mut output = if config.optimize_size || config.strip {
+        let data = fs::read(&wasm_source)
+            .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
+
+        if config.optimize_size {
+            let report = wasm_size_report(&data)
+                .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?;
+            print_wasm_size_report(&report);
+            wasm_optimize_size(&data).map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
         } else {
-            return Err(format!("Cannot read wasm file {:?}", wasm_source));
+            wasm_strip_custom_sections(&data)
+                .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
         }
     } else {
-        cp(&wasm_source, &wasm_dest, false)?;
-    }
-    if config.brotli {
-        brotli_compress(&wasm_dest);
-    }
+        fs::read(&wasm_source).map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?
+    };
+
+    let split_data_dest = app_dir.join(format!("{}.data.bin", build_crate));
+    let mut split_data_bytes = None;
+    let mut split_brotli_bytes = None;
+    let split_data_path = if config.split {
+        if config.bindgen {
+            return Err("--split is not supported together with --bindgen".to_string());
+        }
+        let split = wasm_split_data_segments(&output)
+            .map_err(|_| format!("Cannot split wasm data section {:?}", wasm_source))?;
+        print_wasm_split_report(
+            split.primary_wasm.len(),
+            split.split_data.len(),
+            split.segment_count,
+        );
+        output = split.primary_wasm;
+        if split.split_data.is_empty() {
+            let _ = fs::remove_file(&split_data_dest);
+            None
+        } else {
+            split_data_bytes = Some(split.split_data.len());
+            fs::write(&split_data_dest, &split.split_data)
+                .map_err(|e| format!("Can't write file {:?} {:?} ", split_data_dest, e))?;
+            if config.brotli {
+                split_brotli_bytes = Some(brotli_compress(&split_data_dest));
+            }
+            Some(format!("./{}.data.bin", build_crate))
+        }
+    } else {
+        let _ = fs::remove_file(&split_data_dest);
+        None
+    };
+
+    fs::write(&wasm_dest, output)
+        .map_err(|e| format!("Can't write file {:?} {:?} ", wasm_dest, e))?;
+    let wasm_bytes = fs::metadata(&wasm_dest)
+        .map_err(|e| format!("Can't stat file {:?} {:?} ", wasm_dest, e))?
+        .len() as usize;
+    let wasm_brotli_bytes = if config.brotli {
+        Some(brotli_compress(&wasm_dest))
+    } else {
+        None
+    };
     // generate html file
     let index_path = app_dir.join("index.html");
-    let html = generate_html(build_crate, &config);
+    let html = generate_html(build_crate, split_data_path.as_deref(), &config);
     fs::write(&index_path, &html.as_bytes())
         .map_err(|e| format!("Can't write {:?} {:?} ", index_path, e))?;
     if config.brotli {
         brotli_compress(&index_path);
+    }
+    if let Some(wasm_brotli_bytes) = wasm_brotli_bytes {
+        print_brotli_size_report(
+            wasm_bytes,
+            wasm_brotli_bytes,
+            split_data_bytes,
+            split_brotli_bytes,
+        );
     }
     println!("Created wasm package: {:?}", app_dir);
     if config.threads {

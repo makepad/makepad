@@ -9,6 +9,13 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     } else if v == "--strip" {
         config.strip = true;
         true
+    } else if v == "--optimize-size" {
+        config.optimize_size = true;
+        config.strip = true;
+        true
+    } else if v == "--split" {
+        config.split = true;
+        true
     } else if v == "--small-fonts" {
         config.small_fonts = true;
         true
@@ -48,6 +55,8 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         small_fonts: false,
         bindgen: false,
         threads: true,
+        optimize_size: false,
+        split: false,
     };
 
     // pull out options

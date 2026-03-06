@@ -1,4 +1,4 @@
-use std::mem;
+use std::{collections::BTreeMap, mem};
 
 #[derive(Clone, Debug)]
 struct Reader<'a> {
@@ -67,13 +67,69 @@ impl<'a> Reader<'a> {
         }
         Ok(result)
     }
+
+    fn read_var_i32(&mut self) -> Result<i32, WasmParseError> {
+        let mut result = 0i32;
+        let mut shift = 0;
+        let mut byte;
+
+        loop {
+            byte = self.read_u8()?;
+            result |= ((byte & 0x7f) as i32) << shift;
+            shift += 7;
+            if (byte & 0x80) == 0 {
+                break;
+            }
+            if shift >= 35 {
+                return Err(WasmParseError);
+            }
+        }
+
+        if shift < 32 && (byte & 0x40) != 0 {
+            result |= !0 << shift;
+        }
+
+        Ok(result)
+    }
+
+    fn read_vec(&mut self, len: usize) -> Result<Vec<u8>, WasmParseError> {
+        if len > self.bytes.len() {
+            return Err(WasmParseError);
+        }
+        let out = self.bytes[..len].to_vec();
+        self.skip(len)?;
+        Ok(out)
+    }
 }
 
 pub struct WasmSection {
     pub type_id: u8,
     pub start: usize,
     pub end: usize,
+    pub payload_start: usize,
     pub name: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WasmSectionSummary {
+    pub total_bytes: usize,
+    pub counts: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WasmSizeReport {
+    pub original_bytes: usize,
+    pub stripped_bytes: usize,
+    pub optimized_bytes: usize,
+    pub debug_sections: WasmSectionSummary,
+    pub custom_sections: WasmSectionSummary,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WasmDataSplitResult {
+    pub primary_wasm: Vec<u8>,
+    pub split_data: Vec<u8>,
+    pub segment_count: usize,
 }
 
 fn read_wasm_sections(buf: &[u8]) -> Result<Vec<WasmSection>, WasmParseError> {
@@ -99,6 +155,7 @@ fn read_wasm_sections(buf: &[u8]) -> Result<Vec<WasmSection>, WasmParseError> {
                         start: offset,
                         type_id,
                         end: offset + payload_len + (start - offset),
+                        payload_start: start,
                         name: name.to_string(),
                     })
                 } else {
@@ -111,6 +168,7 @@ fn read_wasm_sections(buf: &[u8]) -> Result<Vec<WasmSection>, WasmParseError> {
                     start: offset,
                     type_id,
                     end: offset + payload_len + (start - offset),
+                    payload_start: start,
                     name: "".to_string(),
                 });
                 reader.skip(payload_len)?;
@@ -122,16 +180,318 @@ fn read_wasm_sections(buf: &[u8]) -> Result<Vec<WasmSection>, WasmParseError> {
     Ok(sections)
 }
 
-pub fn wasm_strip_debug(buf: &[u8]) -> Result<Vec<u8>, WasmParseError> {
-    let mut strip = Vec::new();
-    strip.extend_from_slice(&[0, 97, 115, 109, 1, 0, 0, 0]);
+fn is_debug_section(section: &WasmSection) -> bool {
+    section.type_id == 0 && section.name.starts_with(".debug")
+}
+
+fn is_custom_section(section: &WasmSection) -> bool {
+    section.type_id == 0
+}
+
+fn summarize_sections<F>(sections: &[WasmSection], filter: F) -> WasmSectionSummary
+where
+    F: Fn(&WasmSection) -> bool,
+{
+    let mut summary = WasmSectionSummary::default();
+    for section in sections.iter().filter(|section| filter(section)) {
+        summary.total_bytes += section.end - section.start;
+        let key = if section.name.is_empty() {
+            format!("section-{}", section.type_id)
+        } else {
+            section.name.clone()
+        };
+        *summary.counts.entry(key).or_insert(0) += 1;
+    }
+    summary
+}
+
+fn rewrite_wasm<F>(buf: &[u8], keep_section: F) -> Result<Vec<u8>, WasmParseError>
+where
+    F: Fn(&WasmSection) -> bool,
+{
     let sections = read_wasm_sections(buf)?;
-    // lets rewrite it
+    let mut rewritten = Vec::with_capacity(buf.len());
+    rewritten.extend_from_slice(&buf[..8]);
     for section in &sections {
-        if section.type_id != 0 {
-            // !section.name.starts_with(".debug"){
-            strip.extend_from_slice(&buf[section.start..section.end]);
+        if keep_section(section) {
+            rewritten.extend_from_slice(&buf[section.start..section.end]);
         }
     }
-    Ok(strip)
+    Ok(rewritten)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WasmDataSegment {
+    offset: u32,
+    bytes: Vec<u8>,
+}
+
+fn parse_const_i32_expr(reader: &mut Reader<'_>) -> Result<u32, WasmParseError> {
+    if reader.read_u8()? != 0x41 {
+        return Err(WasmParseError);
+    }
+    let value = reader.read_var_i32()?;
+    if value < 0 {
+        return Err(WasmParseError);
+    }
+    if reader.read_u8()? != 0x0b {
+        return Err(WasmParseError);
+    }
+    Ok(value as u32)
+}
+
+fn parse_data_segments(
+    buf: &[u8],
+    data_section: &WasmSection,
+) -> Result<Vec<WasmDataSegment>, WasmParseError> {
+    let mut reader = Reader::new(&buf[data_section.payload_start..data_section.end]);
+    let segment_count = reader.read_var_u32()? as usize;
+    let mut segments = Vec::with_capacity(segment_count);
+
+    for _ in 0..segment_count {
+        let flags = reader.read_var_u32()?;
+        let offset = match flags {
+            0 => parse_const_i32_expr(&mut reader)?,
+            2 => {
+                if reader.read_var_u32()? != 0 {
+                    return Err(WasmParseError);
+                }
+                parse_const_i32_expr(&mut reader)?
+            }
+            _ => return Err(WasmParseError),
+        };
+        let len = reader.read_var_u32()? as usize;
+        let bytes = reader.read_vec(len)?;
+        segments.push(WasmDataSegment { offset, bytes });
+    }
+
+    if !reader.bytes.is_empty() {
+        return Err(WasmParseError);
+    }
+
+    Ok(segments)
+}
+
+fn encode_split_data(segments: &[WasmDataSegment]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"MPDS");
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&(segments.len() as u32).to_le_bytes());
+    for segment in segments {
+        out.extend_from_slice(&segment.offset.to_le_bytes());
+        out.extend_from_slice(&(segment.bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&segment.bytes);
+    }
+    out
+}
+
+pub fn wasm_size_report(buf: &[u8]) -> Result<WasmSizeReport, WasmParseError> {
+    let sections = read_wasm_sections(buf)?;
+    let stripped = rewrite_wasm(buf, |section| !is_debug_section(section))?;
+    let optimized = rewrite_wasm(buf, |section| !is_custom_section(section))?;
+    Ok(WasmSizeReport {
+        original_bytes: buf.len(),
+        stripped_bytes: stripped.len(),
+        optimized_bytes: optimized.len(),
+        debug_sections: summarize_sections(&sections, is_debug_section),
+        custom_sections: summarize_sections(&sections, is_custom_section),
+    })
+}
+
+pub fn wasm_strip_debug(buf: &[u8]) -> Result<Vec<u8>, WasmParseError> {
+    rewrite_wasm(buf, |section| !is_debug_section(section))
+}
+
+pub fn wasm_strip_custom_sections(buf: &[u8]) -> Result<Vec<u8>, WasmParseError> {
+    rewrite_wasm(buf, |section| !is_custom_section(section))
+}
+
+pub fn wasm_optimize_size(buf: &[u8]) -> Result<Vec<u8>, WasmParseError> {
+    wasm_strip_custom_sections(buf)
+}
+
+pub fn wasm_split_data_segments(buf: &[u8]) -> Result<WasmDataSplitResult, WasmParseError> {
+    let sections = read_wasm_sections(buf)?;
+    if sections.iter().any(|section| section.type_id == 12) {
+        return Err(WasmParseError);
+    }
+
+    let Some(data_section) = sections.iter().find(|section| section.type_id == 11) else {
+        return Ok(WasmDataSplitResult {
+            primary_wasm: buf.to_vec(),
+            split_data: Vec::new(),
+            segment_count: 0,
+        });
+    };
+
+    let segments = parse_data_segments(buf, data_section)?;
+    let primary_wasm = rewrite_wasm(buf, |section| section.type_id != 11)?;
+    let split_data = encode_split_data(&segments);
+
+    Ok(WasmDataSplitResult {
+        primary_wasm,
+        split_data,
+        segment_count: segments.len(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_var_u32(mut value: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    fn custom_section(name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut data = encode_var_u32(name.len() as u32);
+        data.extend_from_slice(name.as_bytes());
+        data.extend_from_slice(payload);
+
+        let mut out = vec![0];
+        out.extend_from_slice(&encode_var_u32(data.len() as u32));
+        out.extend_from_slice(&data);
+        out
+    }
+
+    fn standard_type_section() -> Vec<u8> {
+        vec![1, 4, 1, 0x60, 0, 0]
+    }
+
+    fn memory_section() -> Vec<u8> {
+        vec![5, 3, 1, 0, 1]
+    }
+
+    fn data_section(offset: u8, bytes: &[u8]) -> Vec<u8> {
+        let mut payload = vec![1, 0, 0x41, offset, 0x0b];
+        payload.extend_from_slice(&encode_var_u32(bytes.len() as u32));
+        payload.extend_from_slice(bytes);
+        let mut section = vec![11];
+        section.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        section.extend_from_slice(&payload);
+        section
+    }
+
+    fn wasm_with_sections(sections: &[Vec<u8>]) -> Vec<u8> {
+        let mut wasm = vec![0, 97, 115, 109, 1, 0, 0, 0];
+        for section in sections {
+            wasm.extend_from_slice(section);
+        }
+        wasm
+    }
+
+    fn decode_split_data(bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
+        assert_eq!(&bytes[..4], b"MPDS");
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(version, 1);
+        let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let mut i = 12;
+        let mut out = Vec::new();
+        for _ in 0..count {
+            let offset = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+            i += 4;
+            let len = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+            i += 4;
+            out.push((offset, bytes[i..i + len].to_vec()));
+            i += len;
+        }
+        out
+    }
+
+    #[test]
+    fn strip_debug_removes_only_debug_custom_sections() {
+        let debug = custom_section(".debug_info", &[0xaa, 0xbb]);
+        let other = custom_section("producers", &[0x01]);
+        let ty = standard_type_section();
+        let wasm = wasm_with_sections(&[debug, other.clone(), ty.clone()]);
+
+        let stripped = wasm_strip_debug(&wasm).unwrap();
+        assert_eq!(stripped, wasm_with_sections(&[other, ty]));
+    }
+
+    #[test]
+    fn optimize_size_removes_all_custom_sections() {
+        let debug = custom_section(".debug_info", &[0xaa, 0xbb]);
+        let other = custom_section("name", &[0x01, 0x02]);
+        let ty = standard_type_section();
+        let wasm = wasm_with_sections(&[debug, ty.clone(), other]);
+
+        let optimized = wasm_optimize_size(&wasm).unwrap();
+        assert_eq!(optimized, wasm_with_sections(&[ty]));
+    }
+
+    #[test]
+    fn optimize_size_preserves_standard_sections_byte_for_byte() {
+        let ty = standard_type_section();
+        let wasm = wasm_with_sections(std::slice::from_ref(&ty));
+
+        let optimized = wasm_optimize_size(&wasm).unwrap();
+        assert_eq!(optimized, wasm);
+    }
+
+    #[test]
+    fn strip_custom_sections_removes_all_custom_sections() {
+        let debug = custom_section(".debug_info", &[0xaa, 0xbb]);
+        let other = custom_section("producers", &[0x01]);
+        let ty = standard_type_section();
+        let wasm = wasm_with_sections(&[debug, other, ty.clone()]);
+
+        let stripped = wasm_strip_custom_sections(&wasm).unwrap();
+        assert_eq!(stripped, wasm_with_sections(&[ty]));
+    }
+
+    #[test]
+    fn optimize_size_rejects_malformed_wasm() {
+        let malformed = vec![0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1];
+        assert_eq!(wasm_optimize_size(&malformed), Err(WasmParseError));
+    }
+
+    #[test]
+    fn size_report_tracks_stripped_and_optimized_sizes() {
+        let debug = custom_section(".debug_info", &[0xaa, 0xbb]);
+        let other = custom_section("producers", &[0x01]);
+        let ty = standard_type_section();
+        let wasm = wasm_with_sections(&[debug.clone(), other.clone(), ty]);
+
+        let report = wasm_size_report(&wasm).unwrap();
+        assert_eq!(report.original_bytes, wasm.len());
+        assert_eq!(report.stripped_bytes, wasm.len() - (debug.len()));
+        assert_eq!(
+            report.optimized_bytes,
+            wasm.len() - (debug.len() + other.len())
+        );
+        assert_eq!(report.debug_sections.total_bytes, debug.len());
+        assert_eq!(
+            report.custom_sections.total_bytes,
+            debug.len() + other.len()
+        );
+    }
+
+    #[test]
+    fn split_data_segments_extracts_data_section() {
+        let ty = standard_type_section();
+        let mem = memory_section();
+        let data = data_section(7, &[1, 2, 3, 4]);
+        let wasm = wasm_with_sections(&[ty.clone(), mem.clone(), data]);
+
+        let split = wasm_split_data_segments(&wasm).unwrap();
+        assert_eq!(split.segment_count, 1);
+        assert_eq!(split.primary_wasm, wasm_with_sections(&[ty, mem]));
+        assert_eq!(
+            decode_split_data(&split.split_data),
+            vec![(7, vec![1, 2, 3, 4])]
+        );
+    }
 }

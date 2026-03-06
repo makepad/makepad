@@ -1,8 +1,8 @@
 mod android;
 mod apple;
 mod check;
-mod open_harmony;
 mod desktop;
+mod open_harmony;
 mod studio;
 mod tunnel;
 mod utils;
@@ -13,11 +13,11 @@ use std::borrow::Cow;
 use android::*;
 use apple::*;
 use check::*;
+use desktop::*;
 pub use makepad_network;
 pub use makepad_shell;
 pub use makepad_wasm_strip;
 use open_harmony::*;
-use desktop::*;
 use studio::*;
 use tunnel::*;
 use wasm::*;
@@ -39,7 +39,13 @@ fn show_help() {
     println!("       --port=8010                               The port to run the wasm webserver");
     println!("       --lan                                     Bind the webserver to your lan ip");
     println!(
-        "       --strip                                   Strip the wasm file of debug symbols"
+        "       --strip                                   Strip custom wasm sections from the output file"
+    );
+    println!(
+        "       --optimize-size                           Enable the explicit shipping-size wasm pass (implies --strip)"
+    );
+    println!(
+        "       --split                                   Split wasm data segments into a secondary payload"
     );
     println!(
         "       --brotli                                  Use brotli to compress the wasm file"
@@ -57,7 +63,9 @@ fn show_help() {
     );
     println!("    apple <ios|tvos> [options] build <cargo args>        Builds the project for the simulator");
     println!("    apple <ios|tvos> [options] run-sim <cargo args>      Builds and runs on the aarch64 simulator");
-    println!("    apple <ios|tvos> [options] run-device <cargo args>   Builds and runs on a real device");
+    println!(
+        "    apple <ios|tvos> [options] run-device <cargo args>   Builds and runs on a real device"
+    );
     println!(" * Note: in order for Makepad to be able to install an ios application on a real device, a provisioning");
     println!("   profile is needed. To create one, make an empty application in xcode and give it an organisation");
     println!("   name and a product name. Then, copy those exactly (without spaces/odd characters) into the below '--org' and '--app' options");

@@ -5,9 +5,9 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
-            Event, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent, TextClipboardEvent,
-            TimerEvent, ToWasmMsgEvent, TouchUpdateEvent, VideoPlaybackCompletedEvent,
-            VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
+            Event, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent,
+            TextClipboardEvent, TimerEvent, ToWasmMsgEvent, TouchUpdateEvent,
+            VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent, VideoSource, VideoTextureUpdatedEvent, WindowGeom,
             WindowGeomChangeEvent,
         },
@@ -580,34 +580,39 @@ impl Cx {
                         request_id: request_id as u32,
                     });
                 }
-                CxOsOp::PrepareVideoPlayback(video_id, source, _external_texture_id, texture_id, autoplay, should_loop) => {
-                    match source {
-                        VideoSource::Network(url) => {
-                            self.os.from_wasm(FromWasmPrepareVideoPlayback {
-                                video_id_lo: video_id.lo(),
-                                video_id_hi: video_id.hi(),
-                                texture_id: texture_id.0,
-                                source_url: url,
-                                autoplay,
-                                should_loop,
-                            });
-                        }
-                        VideoSource::InMemory(_) => {
-                            let error = "VideoSource::InMemory is not supported on web".to_string();
-                            crate::error!("{}", error);
-                            self.call_event_handler(&Event::VideoDecodingError(
-                                VideoDecodingErrorEvent { video_id, error },
-                            ));
-                        }
-                        VideoSource::Filesystem(_) => {
-                            let error = "VideoSource::Filesystem is not supported on web".to_string();
-                            crate::error!("{}", error);
-                            self.call_event_handler(&Event::VideoDecodingError(
-                                VideoDecodingErrorEvent { video_id, error },
-                            ));
-                        }
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _external_texture_id,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                ) => match source {
+                    VideoSource::Network(url) => {
+                        self.os.from_wasm(FromWasmPrepareVideoPlayback {
+                            video_id_lo: video_id.lo(),
+                            video_id_hi: video_id.hi(),
+                            texture_id: texture_id.0,
+                            source_url: url,
+                            autoplay,
+                            should_loop,
+                        });
                     }
-                }
+                    VideoSource::InMemory(_) => {
+                        let error = "VideoSource::InMemory is not supported on web".to_string();
+                        crate::error!("{}", error);
+                        self.call_event_handler(&Event::VideoDecodingError(
+                            VideoDecodingErrorEvent { video_id, error },
+                        ));
+                    }
+                    VideoSource::Filesystem(_) => {
+                        let error = "VideoSource::Filesystem is not supported on web".to_string();
+                        crate::error!("{}", error);
+                        self.call_event_handler(&Event::VideoDecodingError(
+                            VideoDecodingErrorEvent { video_id, error },
+                        ));
+                    }
+                },
                 CxOsOp::BeginVideoPlayback(video_id) => {
                     self.os.from_wasm(FromWasmBeginVideoPlayback {
                         video_id_lo: video_id.lo(),
@@ -742,7 +747,6 @@ impl CxOsApi for Cx {
             FromWasmTextCopyResponse::to_js_code(),
             FromWasmShowTextIME::to_js_code(),
             FromWasmHideTextIME::to_js_code(),
-            FromWasmCreateThread::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
             FromWasmCancelHTTPRequest::to_js_code(),
             FromWasmCheckPermission::to_js_code(),
@@ -780,12 +784,16 @@ impl CxOsApi for Cx {
             FromWasmSeekVideoPlayback::to_js_code(),
             FromWasmCleanupVideoPlaybackResources::to_js_code(),
         ]);
+        #[cfg(target_feature = "atomics")]
+        self.os
+            .append_from_wasm_js(&[FromWasmCreateThread::to_js_code()]);
     }
 
     fn seconds_since_app_start(&self) -> f64 {
         0.0
     }
 
+    #[cfg(target_feature = "atomics")]
     fn spawn_thread<F>(&mut self, f: F)
     where
         F: FnOnce() + Send + 'static,
@@ -796,6 +804,13 @@ impl CxOsApi for Cx {
             context_ptr: context_ptr as u32,
             timer: 0,
         });
+    }
+
+    #[cfg(not(target_feature = "atomics"))]
+    fn spawn_thread<F>(&mut self, _f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
     }
 
     fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace) {
@@ -828,6 +843,7 @@ impl CxOsApi for Cx {
 }
 
 impl Cx {
+    #[cfg(target_feature = "atomics")]
     #[allow(dead_code)]
     pub(crate) fn spawn_timer_thread<F>(&mut self, timer: u32, f: F)
     where
@@ -841,6 +857,14 @@ impl Cx {
         });
     }
 
+    #[cfg(not(target_feature = "atomics"))]
+    #[allow(dead_code)]
+    pub(crate) fn spawn_timer_thread<F>(&mut self, _timer: u32, _f: F)
+    where
+        F: Fn() + Send + 'static,
+    {
+    }
+
     pub fn time_now() -> f64 {
         unsafe { js_time_now() }
     }
@@ -851,14 +875,14 @@ extern "C" {
 }
 
 #[export_name = "wasm_thread_entrypoint"]
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
     closure();
 }
 
 #[export_name = "wasm_thread_timer_entrypoint"]
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 pub unsafe extern "C" fn wasm_thread_timer_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn Fn() + Send + 'static>);
     closure();
@@ -866,7 +890,7 @@ pub unsafe extern "C" fn wasm_thread_timer_entrypoint(closure_ptr: u32) {
 }
 
 #[export_name = "wasm_thread_alloc_tls_and_stack"]
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
     let mut v = Vec::<u64>::new();
     v.reserve_exact(tls_size as usize);

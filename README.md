@@ -107,6 +107,27 @@ cargo makepad wasm install-toolchain
 cargo makepad wasm run -p makepad-example-splash --release
 ```
 
+For smaller shipped wasm output, enable the opt-in post-link size pass. It keeps the existing custom-section stripping behavior, prints a wasm size report, and pairs well with the existing `small` profile:
+
+```bash
+cargo makepad wasm build -p makepad-example-splash --profile=small --optimize-size
+```
+
+To split the wasm data section into a secondary payload, add `--split`:
+
+```bash
+cargo makepad wasm build -p makepad-example-splash --release --optimize-size --split
+```
+
+Notes:
+
+- `--optimize-size` is a shipping-size feature, not a testcase reducer.
+- It does not add a Binaryen dependency and does not implement Binaryen-style function splitting.
+- `--profile=small` remains independent; combine it with `--optimize-size` for the smallest current output.
+- `--no-threads` trims the web thread bridge and thread exports from the wasm when threading support is disabled.
+- The wasm linker also packs relocations before the post-link size and split passes.
+- `--split` currently emits a primary wasm plus a `<crate>.data.bin` payload and hydrates memory before app startup.
+
 3. Open:
 
 ```text

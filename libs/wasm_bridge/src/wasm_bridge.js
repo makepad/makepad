@@ -269,27 +269,89 @@ export class WasmBridge {
         })
     }
 
-    static instantiate_wasm(module, memory, env) {
+    static parse_split_data_blob(bytes) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        if (bytes.byteLength < 12) {
+            throw new Error("split data blob too small");
+        }
+        if (String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) !== "MPDS") {
+            throw new Error("invalid split data blob header");
+        }
+        const version = view.getUint32(4, true);
+        if (version !== 1) {
+            throw new Error("unsupported split data blob version");
+        }
+        const count = view.getUint32(8, true);
+        let offset = 12;
+        const segments = [];
+        for (let i = 0; i < count; i++) {
+            if (offset + 8 > bytes.byteLength) {
+                throw new Error("truncated split data segment header");
+            }
+            const address = view.getUint32(offset, true);
+            offset += 4;
+            const len = view.getUint32(offset, true);
+            offset += 4;
+            if (offset + len > bytes.byteLength) {
+                throw new Error("truncated split data segment payload");
+            }
+            segments.push({
+                offset: address,
+                bytes: bytes.slice(offset, offset + len),
+            });
+            offset += len;
+        }
+        return segments;
+    }
+
+    static apply_split_data_segments(wasm, segments) {
+        const memory = wasm._memory || wasm.exports.memory;
+        const u8 = new Uint8Array(memory.buffer);
+        for (const segment of segments) {
+            const end = segment.offset + segment.bytes.length;
+            if (end > u8.length) {
+                throw new Error("split data segment exceeds wasm memory size");
+            }
+            u8.set(segment.bytes, segment.offset);
+        }
+    }
+
+    static async load_split_data(wasm, split_config) {
+        if (!split_config || !split_config.split_data_url) {
+            return;
+        }
+        const response = await fetch(split_config.split_data_url);
+        if (!response.ok) {
+            throw new Error(`failed to fetch split data: ${response.status}`);
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        const segments = this.parse_split_data_blob(bytes);
+        this.apply_split_data_segments(wasm, segments);
+    }
+
+    static instantiate_wasm(module, memory, env, split_config) {
         let set_wasm = init_env(env);
 
         if (memory !== undefined) {
             env.memory = memory;
         }
         
-        return WebAssembly.instantiate(module, {env}).then(wasm => {
+        return WebAssembly.instantiate(module, {env}).then(async wasm => {
             set_wasm(wasm);
             wasm._has_thread_support = env.memory !== undefined;
             wasm._memory = env.memory? env.memory: wasm.exports.memory;
             wasm._module = module;
+            await this.load_split_data(wasm, split_config);
             return wasm
         }, error => {
             if (error.name == "LinkError") { // retry as multithreaded
                 env.memory = this.create_shared_memory();
-                return WebAssembly.instantiate(module, {env}).then(wasm => {
+                return WebAssembly.instantiate(module, {env}).then(async wasm => {
                     set_wasm(wasm);
                     wasm._has_thread_support = true;
                     wasm._memory = env.memory;
                     wasm._module = module;
+                    await this.load_split_data(wasm, split_config);
                     return wasm
                 }, error => {
                     console.error(error);
@@ -303,10 +365,10 @@ export class WasmBridge {
         })
     }
     
-    static fetch_and_instantiate_wasm(wasm_url, memory) {
+    static fetch_and_instantiate_wasm(wasm_url, memory, split_config) {
         return WebAssembly.compileStreaming(fetch(wasm_url))
             .then(
-            (module) => this.instantiate_wasm(module, memory, {_post_signal: _ => {}}),
+            (module) => this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, split_config),
             error => {
                 console.error(error)
             }
