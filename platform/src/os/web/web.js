@@ -1053,14 +1053,6 @@ export class WasmWebBrowser extends WasmBridge {
         return this.new_from_wasm(ret_ptr);
     }
     
-    do_wasm_pump() {
-        let to_wasm = this.to_wasm;
-        this.to_wasm = this.new_to_wasm();
-        let from_wasm = this.wasm_process_msg(to_wasm);
-        from_wasm.dispatch_on_app();
-        from_wasm.free();
-    }
-    
     
     // init and setup
     
