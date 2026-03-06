@@ -113,7 +113,7 @@ For smaller shipped wasm output, use the shipping-size optimization pass. It kee
 cargo makepad wasm build -p makepad-example-splash --profile=small --strip
 ```
 
-To split the wasm payloads, add `--split`. To override the function-splitting threshold, pass it on `--split`:
+To split the wasm payloads, add `--split`. Bare `--split` uses an automatic heuristic that targets a `1.5 MB` primary wasm after the data split. To override the function-splitting threshold directly, pass it on `--split`:
 
 ```bash
 cargo makepad wasm build -p makepad-example-splash --release --strip --split=200
@@ -128,6 +128,7 @@ Notes:
 - `--no-threads` trims the web thread bridge and thread exports from the wasm when threading support is disabled.
 - The wasm linker also packs relocations before the post-link size and split passes.
 - `--split` emits a primary wasm plus secondary payloads and also implies function splitting.
+- Bare `--split` uses an automatic target-size heuristic; `--split=200` switches to an explicit function-body threshold.
 
 3. Open:
 

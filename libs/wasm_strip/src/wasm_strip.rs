@@ -1107,6 +1107,56 @@ pub struct WasmFunctionSplitResult {
     pub total_functions: usize,
 }
 
+fn empty_function_split_result(buf: &[u8], total_functions: usize) -> WasmFunctionSplitResult {
+    WasmFunctionSplitResult {
+        primary_wasm: buf.to_vec(),
+        secondary_wasm: Vec::new(),
+        split_count: 0,
+        total_functions,
+    }
+}
+
+fn selectable_function_indices(info: &WasmModuleInfo) -> Vec<usize> {
+    let mut split_indices = Vec::new();
+    for i in 0..info.code_bodies.len() {
+        if let Some(start_idx) = info.start_func_index {
+            if start_idx == info.num_func_imports + i as u32 {
+                continue;
+            }
+        }
+        split_indices.push(i);
+    }
+    split_indices
+}
+
+fn build_function_split_result(
+    buf: &[u8],
+    info: &WasmModuleInfo,
+    split_indices: &[usize],
+) -> Result<WasmFunctionSplitResult, WasmParseError> {
+    let num_defined = info.func_type_indices.len();
+    if split_indices.is_empty() {
+        return Ok(empty_function_split_result(buf, num_defined));
+    }
+
+    let num_split = split_indices.len() as u32;
+    let table_base_slot = if let Some(table) = info.tables.first() {
+        table.limits.min
+    } else {
+        0
+    };
+
+    let primary_wasm = build_primary_module(buf, info, split_indices, table_base_slot, num_split)?;
+    let secondary_wasm = build_secondary_module(buf, info, split_indices, table_base_slot)?;
+
+    Ok(WasmFunctionSplitResult {
+        primary_wasm,
+        secondary_wasm,
+        split_count: split_indices.len(),
+        total_functions: num_defined,
+    })
+}
+
 pub fn wasm_split_functions(
     buf: &[u8],
     threshold: usize,
@@ -1116,46 +1166,80 @@ pub fn wasm_split_functions(
 
     // Select functions to split based on body size threshold
     let mut split_indices = Vec::new();
-    for (i, body) in info.code_bodies.iter().enumerate() {
+    for i in selectable_function_indices(&info) {
+        let body = &info.code_bodies[i];
         let body_size = body.end - body.start;
         if body_size >= threshold {
-            // Don't split the start function
-            if let Some(start_idx) = info.start_func_index {
-                if start_idx == info.num_func_imports + i as u32 {
-                    continue;
-                }
-            }
             split_indices.push(i);
         }
     }
 
     if split_indices.is_empty() {
-        return Ok(WasmFunctionSplitResult {
-            primary_wasm: buf.to_vec(),
-            secondary_wasm: Vec::new(),
-            split_count: 0,
-            total_functions: num_defined,
-        });
+        return Ok(empty_function_split_result(buf, num_defined));
     }
 
-    let num_split = split_indices.len() as u32;
+    build_function_split_result(buf, &info, &split_indices)
+}
 
-    // Compute table base slot: the original table's initial size
-    let table_base_slot = if let Some(table) = info.tables.first() {
-        table.limits.min
-    } else {
-        0
+pub fn wasm_split_functions_to_target_primary_size(
+    buf: &[u8],
+    target_primary_bytes: usize,
+) -> Result<WasmFunctionSplitResult, WasmParseError> {
+    let info = parse_wasm_module_info(buf)?;
+    let num_defined = info.func_type_indices.len();
+
+    if buf.len() <= target_primary_bytes {
+        return Ok(empty_function_split_result(buf, num_defined));
+    }
+
+    let mut ranked = selectable_function_indices(&info);
+    if ranked.is_empty() {
+        return Ok(empty_function_split_result(buf, num_defined));
+    }
+    ranked.sort_unstable_by(|&a, &b| {
+        let size_a = info.code_bodies[a].end - info.code_bodies[a].start;
+        let size_b = info.code_bodies[b].end - info.code_bodies[b].start;
+        size_b.cmp(&size_a).then_with(|| a.cmp(&b))
+    });
+
+    let table_base_slot = info.tables.first().map(|table| table.limits.min).unwrap_or(0);
+    let primary_len_for_count = |count: usize| -> Result<usize, WasmParseError> {
+        let mut split_indices = ranked[..count].to_vec();
+        split_indices.sort_unstable();
+        let primary = build_primary_module(
+            buf,
+            &info,
+            &split_indices,
+            table_base_slot,
+            split_indices.len() as u32,
+        )?;
+        Ok(primary.len())
     };
 
-    let primary_wasm = build_primary_module(buf, &info, &split_indices, table_base_slot, num_split)?;
-    let secondary_wasm = build_secondary_module(buf, &info, &split_indices, table_base_slot)?;
+    let chosen_count = if primary_len_for_count(ranked.len())? > target_primary_bytes {
+        ranked.len()
+    } else {
+        let mut low = 1usize;
+        let mut high = ranked.len();
+        let mut best = ranked.len();
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            if primary_len_for_count(mid)? <= target_primary_bytes {
+                best = mid;
+                if mid == 1 {
+                    break;
+                }
+                high = mid - 1;
+            } else {
+                low = mid + 1;
+            }
+        }
+        best
+    };
 
-    Ok(WasmFunctionSplitResult {
-        primary_wasm,
-        secondary_wasm,
-        split_count: split_indices.len(),
-        total_functions: num_defined,
-    })
+    let mut split_indices = ranked[..chosen_count].to_vec();
+    split_indices.sort_unstable();
+    build_function_split_result(buf, &info, &split_indices)
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,6 +1650,32 @@ mod tests {
         assert_eq!(&result.primary_wasm[..4], b"\0asm");
         // Validate secondary is valid WASM
         assert_eq!(&result.secondary_wasm[..4], b"\0asm");
+    }
+
+    #[test]
+    fn split_functions_auto_target_primary_size() {
+        let small_body = &[0x00, 0x0b];
+        let mut large_body = vec![0x00];
+        for _ in 0..250 {
+            large_body.push(0x01);
+        }
+        large_body.push(0x20);
+        large_body.push(0x00);
+        large_body.push(0x0b);
+
+        let wasm = wasm_with_sections(&[
+            type_section(&[(0, 0), (1, 1)]),
+            function_section(&[0, 1]),
+            table_section(0, Some(0)),
+            export_section(&[("main", 0x00, 0)]),
+            code_section(&[small_body, &large_body]),
+        ]);
+
+        let result = wasm_split_functions_to_target_primary_size(&wasm, wasm.len() - 20).unwrap();
+        assert_eq!(result.split_count, 1);
+        assert_eq!(result.total_functions, 2);
+        assert!(result.primary_wasm.len() < wasm.len());
+        assert!(!result.secondary_wasm.is_empty());
     }
 
     #[test]

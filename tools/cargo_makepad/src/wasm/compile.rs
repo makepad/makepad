@@ -24,6 +24,7 @@ pub struct WasmConfig {
     pub split: bool,
     pub split_functions: bool,
     pub split_functions_threshold: usize,
+    pub split_auto_primary_bytes: Option<usize>,
 }
 
 fn format_section_counts(summary: &WasmSectionSummary) -> String {
@@ -594,18 +595,47 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 "--split-functions is not supported together with --bindgen".to_string()
             });
         }
-        let result = wasm_split_functions(&output, config.split_functions_threshold)
-            .map_err(|e| format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e))?;
+        let result = if config.split && config.split_auto_primary_bytes.is_some() {
+            let target_primary_bytes = config.split_auto_primary_bytes.unwrap();
+            let estimated_primary_after_data_split = wasm_split_data_segments(&output)
+                .map_err(|_| format!("Cannot estimate wasm data split {:?}", wasm_source))?;
+            let data_bytes_removed = output
+                .len()
+                .saturating_sub(estimated_primary_after_data_split.primary_wasm.len());
+            let target_before_data_split = target_primary_bytes + data_bytes_removed;
+            wasm_split_functions_to_target_primary_size(&output, target_before_data_split)
+                .map_err(|e| format!("Cannot auto split wasm functions {:?}: {:?}", wasm_source, e))?
+        } else {
+            wasm_split_functions(&output, config.split_functions_threshold)
+                .map_err(|e| format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e))?
+        };
         if result.split_count == 0 {
-            println!("Function split: no functions above threshold ({} bytes), skipping", config.split_functions_threshold);
+            if let Some(target_primary_bytes) = config.split_auto_primary_bytes {
+                println!(
+                    "Function split: primary already within auto target ({} bytes), skipping",
+                    target_primary_bytes
+                );
+            } else {
+                println!(
+                    "Function split: no functions above threshold ({} bytes), skipping",
+                    config.split_functions_threshold
+                );
+            }
             let _ = fs::remove_file(&secondary_wasm_dest);
             remove_brotli_artifact(&secondary_wasm_dest);
             None
         } else {
-            println!(
-                "Function split: {} of {} functions split (threshold: {} bytes)",
-                result.split_count, result.total_functions, config.split_functions_threshold
-            );
+            if let Some(target_primary_bytes) = config.split_auto_primary_bytes {
+                println!(
+                    "Function split: {} of {} functions split (auto target primary: {} bytes)",
+                    result.split_count, result.total_functions, target_primary_bytes
+                );
+            } else {
+                println!(
+                    "Function split: {} of {} functions split (threshold: {} bytes)",
+                    result.split_count, result.total_functions, config.split_functions_threshold
+                );
+            }
             println!(
                 "  primary:   {} bytes",
                 result.primary_wasm.len()
