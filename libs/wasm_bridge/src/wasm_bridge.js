@@ -483,34 +483,33 @@ export class WasmBridge {
     static fetch_and_instantiate_wasm(wasm_url, memory, split_config) {
         const has_split_data = split_config && split_config.split_data_url;
         const has_secondary = split_config && split_config.secondary_wasm_url;
+        const defer_secondary = !!(split_config && split_config.defer_secondary_wasm);
 
         if (has_split_data || has_secondary) {
-            // Build list of fetches: primary wasm + optional split data + optional secondary wasm
-            const fetches = [fetch(wasm_url)];
-            if (has_split_data) fetches.push(fetch(split_config.split_data_url));
-            if (has_secondary) fetches.push(fetch(split_config.secondary_wasm_url));
+            return (async () => {
+                const wasm_response_promise = fetch(wasm_url);
+                const split_response_promise = has_split_data
+                    ? fetch(split_config.split_data_url)
+                    : null;
+                const secondary_response_promise = has_secondary
+                    ? fetch(split_config.secondary_wasm_url)
+                    : null;
 
-            return Promise.all(fetches).then(async (responses) => {
-                let idx = 0;
-                const wasm_response = responses[idx++];
-                const split_response = has_split_data ? responses[idx++] : null;
-                const secondary_response = has_secondary ? responses[idx++] : null;
-
+                const wasm_response = await wasm_response_promise;
                 if (!wasm_response.ok) {
                     throw new Error(`failed to fetch wasm: ${wasm_response.status}`);
-                }
-                if (split_response && !split_response.ok) {
-                    throw new Error(`failed to fetch split data: ${split_response.status}`);
-                }
-                if (secondary_response && !secondary_response.ok) {
-                    throw new Error(`failed to fetch secondary wasm: ${secondary_response.status}`);
                 }
 
                 const wasm_bytes = new Uint8Array(await wasm_response.arrayBuffer());
                 let preloaded_split = undefined;
+                let split_response = null;
 
                 // Handle data segment splitting
-                if (split_response) {
+                if (split_response_promise) {
+                    split_response = await split_response_promise;
+                    if (!split_response.ok) {
+                        throw new Error(`failed to fetch split data: ${split_response.status}`);
+                    }
                     const split_bytes = new Uint8Array(await split_response.arrayBuffer());
                     const split = this.parse_split_data_blob(split_bytes);
                     if (split.version === 1) {
@@ -520,9 +519,17 @@ export class WasmBridge {
                         const rebuilt_bytes = this.rebuild_split_wasm(wasm_bytes, split.segments);
                         const module = await WebAssembly.compile(rebuilt_bytes);
                         const wasm = await this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, undefined);
-                        // If secondary wasm, instantiate it with primary exports
-                        if (secondary_response) {
-                            await this._instantiate_secondary(secondary_response, wasm);
+                        if (secondary_response_promise) {
+                            wasm._secondary_ready = (async () => {
+                                const secondary_response = await secondary_response_promise;
+                                if (!secondary_response.ok) {
+                                    throw new Error(`failed to fetch secondary wasm: ${secondary_response.status}`);
+                                }
+                                await this._instantiate_secondary(secondary_response, wasm);
+                            })();
+                            if (!defer_secondary) {
+                                await wasm._secondary_ready;
+                            }
                         }
                         return wasm;
                     }
@@ -531,12 +538,20 @@ export class WasmBridge {
                 const module = await WebAssembly.compile(wasm_bytes);
                 const wasm = await this.instantiate_wasm(module, memory, {_post_signal: _ => {}}, preloaded_split);
 
-                // Instantiate secondary module to patch table with real function bodies
-                if (secondary_response) {
-                    await this._instantiate_secondary(secondary_response, wasm);
+                if (secondary_response_promise) {
+                    wasm._secondary_ready = (async () => {
+                        const secondary_response = await secondary_response_promise;
+                        if (!secondary_response.ok) {
+                            throw new Error(`failed to fetch secondary wasm: ${secondary_response.status}`);
+                        }
+                        await this._instantiate_secondary(secondary_response, wasm);
+                    })();
+                    if (!defer_secondary) {
+                        await wasm._secondary_ready;
+                    }
                 }
                 return wasm;
-            }, error => {
+            })().catch(error => {
                 console.error(error);
             });
         }

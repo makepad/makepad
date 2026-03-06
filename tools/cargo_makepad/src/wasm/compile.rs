@@ -94,7 +94,13 @@ fn print_brotli_size_report(
     }
 }
 
-pub fn generate_html(wasm: &str, split_data_path: Option<&str>, secondary_wasm_path: Option<&str>, config: &WasmConfig) -> String {
+pub fn generate_html(
+    wasm: &str,
+    split_data_path: Option<&str>,
+    secondary_wasm_path: Option<&str>,
+    defer_secondary_wasm: bool,
+    config: &WasmConfig,
+) -> String {
     let init = if config.bindgen {
         format!(
             "
@@ -114,12 +120,19 @@ pub fn generate_html(wasm: &str, split_data_path: Option<&str>, secondary_wasm_p
             "
         )
     } else {
+        let defer_secondary = if defer_secondary_wasm {
+            ", defer_secondary_wasm: true"
+        } else {
+            ""
+        };
         let split_options = match (split_data_path, secondary_wasm_path) {
             (Some(data), Some(funcs)) => format!(
-                ", undefined, {{ split_data_url: '{data}', secondary_wasm_url: '{funcs}' }}"
+                ", undefined, {{ split_data_url: '{data}', secondary_wasm_url: '{funcs}'{defer_secondary} }}"
             ),
             (Some(data), None) => format!(", undefined, {{ split_data_url: '{data}' }}"),
-            (None, Some(funcs)) => format!(", undefined, {{ secondary_wasm_url: '{funcs}' }}"),
+            (None, Some(funcs)) => format!(
+                ", undefined, {{ secondary_wasm_url: '{funcs}'{defer_secondary} }}"
+            ),
             (None, None) => String::new(),
         };
         format!(
@@ -587,6 +600,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 
     // Function splitting: split large functions into primary (stubs) + secondary (real bodies)
     let secondary_wasm_dest = app_dir.join(format!("{}.secondary.wasm", build_crate));
+    let mut defer_secondary_wasm = false;
     let secondary_wasm_path = if split_functions_enabled {
         if config.bindgen {
             return Err(if config.split {
@@ -595,26 +609,46 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 "--split-functions is not supported together with --bindgen".to_string()
             });
         }
-        let result = if config.split && config.split_auto_primary_bytes.is_some() {
+        let auto_target_before_data_split = if config.split && config.split_auto_primary_bytes.is_some() {
             let target_primary_bytes = config.split_auto_primary_bytes.unwrap();
             let estimated_primary_after_data_split = wasm_split_data_segments(&output)
                 .map_err(|_| format!("Cannot estimate wasm data split {:?}", wasm_source))?;
             let data_bytes_removed = output
                 .len()
                 .saturating_sub(estimated_primary_after_data_split.primary_wasm.len());
-            let target_before_data_split = target_primary_bytes + data_bytes_removed;
-            wasm_split_functions_to_target_primary_size(&output, target_before_data_split)
-                .map_err(|e| format!("Cannot auto split wasm functions {:?}: {:?}", wasm_source, e))?
+            Some(target_primary_bytes + data_bytes_removed)
+        } else {
+            None
+        };
+        let result = if let Some(target_before_data_split) = auto_target_before_data_split {
+            let cold_result = wasm_split_functions_to_target_primary_size_cold(&output, target_before_data_split)
+                .map_err(|e| format!("Cannot auto split wasm functions {:?}: {:?}", wasm_source, e))?;
+            if cold_result.split_count > 0 && cold_result.primary_wasm.len() <= target_before_data_split {
+                defer_secondary_wasm = true;
+                cold_result
+            } else {
+                wasm_split_functions_to_target_primary_size(&output, target_before_data_split)
+                    .map_err(|e| format!("Cannot auto split wasm functions {:?}: {:?}", wasm_source, e))?
+            }
         } else {
             wasm_split_functions(&output, config.split_functions_threshold)
                 .map_err(|e| format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e))?
         };
         if result.split_count == 0 {
             if let Some(target_primary_bytes) = config.split_auto_primary_bytes {
-                println!(
-                    "Function split: primary already within auto target ({} bytes), skipping",
-                    target_primary_bytes
-                );
+                if let Some(target_before_data_split) = auto_target_before_data_split {
+                    if output.len() <= target_before_data_split {
+                        println!(
+                            "Function split: primary already within auto target ({} bytes), skipping",
+                            target_primary_bytes
+                        );
+                    } else {
+                        println!(
+                            "Function split: no functions could reach the auto target ({} bytes), skipping",
+                            target_primary_bytes
+                        );
+                    }
+                }
             } else {
                 println!(
                     "Function split: no functions above threshold ({} bytes), skipping",
@@ -630,6 +664,11 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     "Function split: {} of {} functions split (auto target primary: {} bytes)",
                     result.split_count, result.total_functions, target_primary_bytes
                 );
+                if defer_secondary_wasm {
+                    println!("  mode: cold-first split, secondary deferred");
+                } else if auto_target_before_data_split.is_some() {
+                    println!("  mode: full split, secondary remains on the startup path");
+                }
             } else {
                 println!(
                     "Function split: {} of {} functions split (threshold: {} bytes)",
@@ -709,7 +748,13 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     };
     // generate html file
     let index_path = app_dir.join("index.html");
-    let html = generate_html(build_crate, split_data_path.as_deref(), secondary_wasm_path.as_deref(), &config);
+    let html = generate_html(
+        build_crate,
+        split_data_path.as_deref(),
+        secondary_wasm_path.as_deref(),
+        defer_secondary_wasm,
+        &config,
+    );
     fs::write(&index_path, &html.as_bytes())
         .map_err(|e| format!("Can't write {:?} {:?} ", index_path, e))?;
     if config.brotli {

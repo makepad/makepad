@@ -35,6 +35,11 @@ export class WasmWebBrowser extends WasmBridge {
         this.signal_timeout = null;
         this.workers = [];
         this.thread_stack_size = 2 * 1024 * 1024;
+        this.buffer_upload_serial = 0;
+        this.loader_removed = false;
+        this.loader_seen_animation_frame = false;
+        this.loader_quiet_animation_frames = 0;
+        this.loader_fallback_timer = null;
         this.init_detection();
         this.midi_inputs = [];
         this.midi_outputs = [];
@@ -74,9 +79,59 @@ export class WasmWebBrowser extends WasmBridge {
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
         this.do_wasm_pump();
+        this.schedule_loader_fallback();
+    }
+
+    remove_canvas_loader() {
+        if (this.loader_removed) {
+            return;
+        }
+        this.loader_removed = true;
+        if (this.loader_fallback_timer) {
+            clearTimeout(this.loader_fallback_timer);
+            this.loader_fallback_timer = null;
+        }
         var loaders = document.getElementsByClassName('canvas_loader');
-        for (var i = 0; i < loaders.length; i ++) {
-            loaders[i].parentNode.removeChild(loaders[i])
+        while (loaders.length > 0) {
+            let loader = loaders[0];
+            if (loader.parentNode) {
+                loader.parentNode.removeChild(loader);
+            }
+            else {
+                break;
+            }
+        }
+    }
+
+    schedule_loader_fallback() {
+        if (this.loader_removed || this.loader_fallback_timer) {
+            return;
+        }
+        this.loader_fallback_timer = window.setTimeout(() => {
+            this.remove_canvas_loader();
+        }, 1500);
+    }
+
+    update_startup_loader(pump_duration_ms) {
+        if (this.loader_removed) {
+            return;
+        }
+        this.schedule_loader_fallback();
+        if (!this.in_animation_frame) {
+            if (pump_duration_ms > 32) {
+                this.loader_quiet_animation_frames = 0;
+            }
+            return;
+        }
+        this.loader_seen_animation_frame = true;
+        if (pump_duration_ms <= 16) {
+            this.loader_quiet_animation_frames += 1;
+        }
+        else {
+            this.loader_quiet_animation_frames = 0;
+        }
+        if (this.loader_seen_animation_frame && this.loader_quiet_animation_frames >= 2) {
+            this.remove_canvas_loader();
         }
     }
     
@@ -278,16 +333,19 @@ export class WasmWebBrowser extends WasmBridge {
         if (this.audio_context) {
             return
         }
-        if (!this.wasm._has_thread_support) {
-            console.warn("FromWasmStartAudioOutput skipped: wasm threading support is unavailable");
-            return
-        }
-        const thread_info = this.alloc_thread_stack(args.context_ptr);
-        if (!thread_info) {
-            console.warn("FromWasmStartAudioOutput skipped: thread stack allocation prerequisites are unavailable");
-            return
-        }
         const start_worklet = async () => {
+            if (this.wasm._secondary_ready) {
+                await this.wasm._secondary_ready;
+            }
+            if (!this.wasm._has_thread_support) {
+                console.warn("FromWasmStartAudioOutput skipped: wasm threading support is unavailable");
+                return;
+            }
+            const thread_info = this.alloc_thread_stack(args.context_ptr);
+            if (!thread_info) {
+                console.warn("FromWasmStartAudioOutput skipped: thread stack allocation prerequisites are unavailable");
+                return;
+            }
 
             await this.audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", {credentials: 'omit'});
             
@@ -327,7 +385,7 @@ export class WasmWebBrowser extends WasmBridge {
             latencyHint: "interactive",
             sampleRate: 48000
         });
-        start_worklet();
+        start_worklet().catch(err => console.error(err));
         window.addEventListener('mousedown', user_interact_hook)
         window.addEventListener('touchstart', user_interact_hook)
     }
@@ -483,22 +541,27 @@ export class WasmWebBrowser extends WasmBridge {
     // example build command:
     // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
     FromWasmCreateThread(args) {
-        if (!this.wasm._has_thread_support) {
-            console.error("FromWasmCreateThread not available, wasm file not compiled with threading support");
-            return
-        }
-        let thread_info = this.alloc_thread_stack(args.context_ptr, args.timer);
-        if (!thread_info) {
-            console.error("FromWasmCreateThread not available, thread stack allocation prerequisites are missing");
-            return
-        }
-        let worker = new Worker(
-            './makepad_platform/web_worker.js',
-            {type: 'module'}
-        );
-        worker.postMessage(thread_info);
-        
-        this.workers.push(worker);
+        (async () => {
+            if (this.wasm._secondary_ready) {
+                await this.wasm._secondary_ready;
+            }
+            if (!this.wasm._has_thread_support) {
+                console.error("FromWasmCreateThread not available, wasm file not compiled with threading support");
+                return;
+            }
+            let thread_info = this.alloc_thread_stack(args.context_ptr, args.timer);
+            if (!thread_info) {
+                console.error("FromWasmCreateThread not available, thread stack allocation prerequisites are missing");
+                return;
+            }
+            let worker = new Worker(
+                './makepad_platform/web_worker.js',
+                {type: 'module'}
+            );
+            worker.postMessage(thread_info);
+            
+            this.workers.push(worker);
+        })().catch(err => console.error(err));
     }
     
     start_signal_poll() {
@@ -962,11 +1025,14 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     do_wasm_pump() {
+        let started = performance.now();
+        this.buffer_upload_serial += 1;
         let to_wasm = this.to_wasm;
         this.to_wasm = this.new_to_wasm();
         let from_wasm = this.wasm_process_msg(to_wasm);
         from_wasm.dispatch_on_app();
         from_wasm.free();
+        this.update_startup_loader(performance.now() - started);
     }
     
 
