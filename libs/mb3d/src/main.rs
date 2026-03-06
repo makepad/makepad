@@ -1,8 +1,4 @@
-mod m3p;
-mod formulas;
-mod render;
-mod lighting;
-
+use makepad_mb3d_render::{formulas, m3p, render};
 use makepad_zune_core::bit_depth::BitDepth;
 use makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_core::options::EncoderOptions;
