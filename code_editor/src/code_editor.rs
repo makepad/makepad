@@ -529,6 +529,15 @@ impl CodeEditor {
 
         self.scroll_bars.end(cx);
 
+        if !self.read_only && cx.has_key_focus(self.scroll_bars.area()) {
+            let area_rect = self.scroll_bars.area().clipped_rect(cx);
+            let ime_pos = self
+                .last_cursor_screen_pos
+                .map(|pos| self.viewport_rect.pos - area_rect.pos + pos + dvec2(0.0, self.cell_size.y))
+                .unwrap_or_else(|| self.viewport_rect.pos - area_rect.pos + dvec2(0.0, self.cell_size.y));
+            cx.show_text_ime(self.scroll_bars.area(), ime_pos);
+        }
+
         if session.update_folds() {
             cx.redraw_area_in_draw(self.scroll_bars.area());
         } else if self.keep_cursor_in_view.is_locked() {
@@ -659,6 +668,7 @@ impl CodeEditor {
         let mut keyboard_moved_cursor = false;
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::KeyFocusLost(_) => {
+                cx.hide_text_ime();
                 // Don't dim selection if external_selection_focus is active
                 // (cross-child selection where PortalList has focus)
                 if !self.external_selection_focus {
