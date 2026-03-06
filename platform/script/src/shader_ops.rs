@@ -13,6 +13,43 @@ use crate::*;
 use std::fmt::Write;
 
 impl ShaderFnCompiler {
+    pub(crate) fn handle_not(
+        &mut self,
+        vm: &mut ScriptVm,
+        output: &mut ShaderOutput,
+        _opargs: OpcodeArgs,
+    ) {
+        let (t1, s1) = self.pop_resolved(vm, output);
+        let concrete = t1.make_concrete(&vm.bx.code.builtins.pod);
+        let mut s = self.stack.new_string();
+        let ty = match concrete {
+            Some(pod_ty) if pod_ty == vm.bx.code.builtins.pod.pod_bool => {
+                write!(s, "(!{})", s1).ok();
+                ShaderType::Pod(pod_ty)
+            }
+            Some(pod_ty)
+                if pod_ty == vm.bx.code.builtins.pod.pod_i32
+                    || pod_ty == vm.bx.code.builtins.pod.pod_u32 =>
+            {
+                write!(s, "(~{})", s1).ok();
+                ShaderType::Pod(pod_ty)
+            }
+            Some(pod_ty) => {
+                script_err_shader!(
+                    self.trap,
+                    "`!` in shaders only supports bool, i32, or u32; got {}",
+                    format_pod_type_name(&vm.bx.heap, pod_ty)
+                );
+                ShaderType::Error(NIL)
+            }
+            None => {
+                script_err_shader!(self.trap, "`!` in shaders requires a concrete type");
+                ShaderType::Error(NIL)
+            }
+        };
+        self.stack.push(self.trap.pass(), ty, s);
+    }
+
     pub(crate) fn handle_neg(
         &mut self,
         vm: &mut ScriptVm,
@@ -136,23 +173,42 @@ impl ShaderFnCompiler {
     pub(crate) fn handle_logic_phi(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
         // Loop to handle nested logic ops that may complete at the same IP
         loop {
-            let should_handle = if let Some(ShaderMe::LogicOp { target_ip, .. }) = self.mes.last() {
-                self.trap.ip.index >= *target_ip
-            } else {
-                false
-            };
+            let ready_logic_index = self
+                .mes
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, me)| match me {
+                    ShaderMe::FnBody { .. }
+                    | ShaderMe::ForLoop { .. }
+                    | ShaderMe::LoopBody { .. }
+                    | ShaderMe::IfBody { .. } => None,
+                    ShaderMe::LogicOp { target_ip, .. } if self.trap.ip.index >= *target_ip => {
+                        Some(index)
+                    }
+                    ShaderMe::LogicOp { .. }
+                    | ShaderMe::BuiltinCall { .. }
+                    | ShaderMe::PodBuiltinMethod { .. }
+                    | ShaderMe::ScriptCall { .. }
+                    | ShaderMe::Pod { .. }
+                    | ShaderMe::ArrayConstruct { .. }
+                    | ShaderMe::TextureBuiltin { .. } => Some(usize::MAX),
+                });
 
-            if !should_handle {
+            let Some(index) = ready_logic_index else {
+                break;
+            };
+            if index == usize::MAX {
                 break;
             }
 
             // Pop the LogicOp and combine with the second operand on the stack
-            if let Some(ShaderMe::LogicOp {
+            if let ShaderMe::LogicOp {
                 op,
                 first_operand,
                 first_type,
                 ..
-            }) = self.mes.pop()
+            } = self.mes.remove(index)
             {
                 // Pop the second operand (result of evaluating the RHS) - must resolve Id types
                 let (second_type, second_operand) = self.pop_resolved(vm, output);
