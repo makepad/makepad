@@ -13,6 +13,7 @@ use crate::{
     makepad_script::*,
     script::vm::*,
     texture::Texture,
+    uniform_buffer::UniformBuffer,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -23,6 +24,7 @@ use crate::makepad_script::{
 
 pub const DRAW_CALL_DYN_UNIFORMS: usize = 256;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 8;
+pub const DRAW_CALL_UNIFORM_BUFFER_SLOTS: usize = 2;
 pub const DRAW_CALL_DYN_INSTANCES: usize = 32;
 
 #[derive(Clone, Script, Debug)]
@@ -46,6 +48,8 @@ pub struct DrawVars {
     pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS],
     #[rust]
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
+    #[rust]
+    pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
     #[rust([0f32; DRAW_CALL_DYN_INSTANCES])]
     pub dyn_instances: [f32; DRAW_CALL_DYN_INSTANCES],
 }
@@ -122,6 +126,14 @@ impl DrawVars {
 
     pub fn empty_texture(&mut self, slot: usize) {
         self.texture_slots[slot] = None;
+    }
+
+    pub fn set_uniform_buffer(&mut self, slot: usize, uniform_buffer: &UniformBuffer) {
+        self.uniform_buffer_slots[slot] = Some(uniform_buffer.clone());
+    }
+
+    pub fn empty_uniform_buffer(&mut self, slot: usize) {
+        self.uniform_buffer_slots[slot] = None;
     }
 
     pub fn redraw(&self, cx: &mut Cx) {

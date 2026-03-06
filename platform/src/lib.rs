@@ -40,6 +40,7 @@ mod macos_menu;
 mod performance_stats;
 pub mod permission;
 mod texture;
+mod uniform_buffer;
 mod window;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod app_icon;
@@ -172,6 +173,7 @@ pub use {
         texture::{
             Texture, TextureAnimation, TextureFormat, TextureId, TextureSize, TextureUpdated,
         },
+        uniform_buffer::{UniformBuffer, UniformBufferId},
         thread::*,
         ui_runner::*,
         video::*,

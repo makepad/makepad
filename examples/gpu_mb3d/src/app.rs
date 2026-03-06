@@ -4,59 +4,21 @@ use std::path::PathBuf;
 
 app_main!(App);
 
+fn gpu_mb3d_uniforms_pod(vm: &mut ScriptVm) -> ScriptValue {
+    let pod = GpuMb3dUniforms::script_pod(vm).expect("Cant make a pod type");
+    vm.bx.heap.pod_type_name_set(pod, id_lut!(GpuMb3dUniforms));
+    pod.into()
+}
+
 script_mod! {
-    use mod.prelude.widgets_internal.*
-    use mod.widgets.*
+    use mod.prelude.widgets.*
+
+    let gpu_mb3d_uniforms = #(gpu_mb3d_uniforms_pod(vm))
 
     mod.widgets.DrawGpuMb3d = set_type_default() do #(DrawGpuMb3d::script_shader(vm)){
         ..mod.draw.DrawQuad
 
-        bg_color: #x0d1014
-        sky_color: #x535f73
-        sky_color2: #xa8b4c4
-        surface_color: #xb2b1ab
-        surface_color2: #x7f7f79
-        light_color: #xddd8cf
-        amb_top: #x8f8b82
-        amb_bottom: #x1b1c20
-
-        cam_right: vec3(1.0, 0.0, 0.0)
-        cam_up: vec3(0.0, 1.0, 0.0)
-        cam_forward: vec3(0.0, 0.0, 1.0)
-        light_dir: vec3(-0.35, 0.8, 0.45)
-        rot0: vec3(1.0, 0.0, 0.0)
-        rot1: vec3(0.0, 1.0, 0.0)
-        rot2: vec3(0.0, 0.0, 1.0)
-
-        mid_x: vec2(0.0, 0.0)
-        mid_y: vec2(0.0, 0.0)
-        mid_z: vec2(0.0, 0.0)
-
-        fov_y: 45.0
-        step_width: 0.001
-        z_start_delta: 0.0
-        max_ray_length: 128.0
-        de_stop: 0.001
-        de_stop_factor: 0.0
-        s_z_step_div: 1.0
-        ms_de_sub: 1.0
-        mct_mh04_zsd: 1.0
-        de_floor: 0.00025
-        rstop: 20.0
-        max_iters: 48.0
-        slot0_iters: 1.0
-        slot1_iters: 1.0
-        repeat_from_slot: 0.0
-
-        ab_scale: -1.0
-        ab_scale_div_min_r2: -1.0
-        ab_min_r2: 0.25
-        ab_fold: 1.0
-
-        menger_scale: 3.0
-        menger_cx: 1.0
-        menger_cy: 1.0
-        menger_cz: 0.5
+        scene: uniform_buffer(gpu_mb3d_uniforms)
 
         ds_make: fn(v) {
             return vec2(v, 0.0)
@@ -133,7 +95,7 @@ script_mod! {
 
         sky_for_y: fn(y) {
             let t = clamp(pow(1.0 - y, 0.7), 0.0, 1.0)
-            return mix(self.sky_color.rgb, self.sky_color2.rgb, t)
+            return mix(self.scene.sky_color.rgb, self.scene.sky_color2.rgb, t)
         }
 
         hybrid_de: fn(px, py, pz) {
@@ -147,32 +109,32 @@ script_mod! {
             var r2 = vec2(0.0, 0.0)
             var iters = 0.0
             var slot = 0.0
-            var remaining = self.slot0_iters
+            var remaining = self.scene.slot0_iters
 
             for i in 0..128 {
                 if remaining <= 0.0 {
                     slot += 1.0
                     if slot >= 2.0 {
-                        slot = self.repeat_from_slot
+                        slot = self.scene.repeat_from_slot
                     }
                     if slot < 0.5 {
-                        remaining = self.slot0_iters
+                        remaining = self.scene.slot0_iters
                     } else {
-                        remaining = self.slot1_iters
+                        remaining = self.scene.slot1_iters
                     }
                 }
 
                 if slot < 0.5 {
-                    x = self.ds_box_fold(x, self.ab_fold)
-                    y = self.ds_box_fold(y, self.ab_fold)
-                    z = self.ds_box_fold(z, self.ab_fold)
+                    x = self.ds_box_fold(x, self.scene.ab_fold)
+                    y = self.ds_box_fold(y, self.scene.ab_fold)
+                    z = self.ds_box_fold(z, self.scene.ab_fold)
 
                     let rr = self.ds_to_f(self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z)))
-                    var m = self.ab_scale
-                    if rr < self.ab_min_r2 {
-                        m = self.ab_scale_div_min_r2
+                    var m = self.scene.ab_scale
+                    if rr < self.scene.ab_min_r2 {
+                        m = self.scene.ab_scale_div_min_r2
                     } else if rr < 1.0 {
-                        m = self.ab_scale / max(rr, 0.0000001)
+                        m = self.scene.ab_scale / max(rr, 0.0000001)
                     }
 
                     w = self.ds_mul_f(w, m)
@@ -200,27 +162,27 @@ script_mod! {
                         z = t
                     }
 
-                    let nx = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot0.x), self.ds_mul_f(y, self.rot0.y)), self.ds_mul_f(z, self.rot0.z))
-                    let ny = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot1.x), self.ds_mul_f(y, self.rot1.y)), self.ds_mul_f(z, self.rot1.z))
-                    let nz = self.ds_add(self.ds_add(self.ds_mul_f(x, self.rot2.x), self.ds_mul_f(y, self.rot2.y)), self.ds_mul_f(z, self.rot2.z))
+                    let nx = self.ds_add(self.ds_add(self.ds_mul_f(x, self.scene.rot0.x), self.ds_mul_f(y, self.scene.rot0.y)), self.ds_mul_f(z, self.scene.rot0.z))
+                    let ny = self.ds_add(self.ds_add(self.ds_mul_f(x, self.scene.rot1.x), self.ds_mul_f(y, self.scene.rot1.y)), self.ds_mul_f(z, self.scene.rot1.z))
+                    let nz = self.ds_add(self.ds_add(self.ds_mul_f(x, self.scene.rot2.x), self.ds_mul_f(y, self.scene.rot2.y)), self.ds_mul_f(z, self.scene.rot2.z))
 
-                    let sf = self.menger_scale - 1.0
-                    x = self.ds_add_f(self.ds_mul_f(nx, self.menger_scale), -self.menger_cx * sf)
-                    y = self.ds_add_f(self.ds_mul_f(ny, self.menger_scale), -self.menger_cy * sf)
+                    let sf = self.scene.menger_scale - 1.0
+                    x = self.ds_add_f(self.ds_mul_f(nx, self.scene.menger_scale), -self.scene.menger_cx * sf)
+                    y = self.ds_add_f(self.ds_mul_f(ny, self.scene.menger_scale), -self.scene.menger_cy * sf)
 
-                    let z_scaled = self.ds_mul_f(nz, self.menger_scale)
-                    let c = self.menger_cz * sf
+                    let z_scaled = self.ds_mul_f(nz, self.scene.menger_scale)
+                    let c = self.scene.menger_cz * sf
                     z = self.ds_add_f(self.ds_abs(self.ds_add_f(z_scaled, -c)), -c)
                     z = vec2(-z.x, -z.y)
 
-                    w = self.ds_mul_f(w, self.menger_scale)
+                    w = self.ds_mul_f(w, self.scene.menger_scale)
                 }
 
                 iters += 1.0
                 remaining -= 1.0
 
                 r2 = self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z))
-                if self.ds_to_f(r2) > self.rstop || iters >= self.max_iters {
+                if self.ds_to_f(r2) > self.scene.rstop || iters >= self.scene.max_iters {
                     break
                 }
             }
@@ -232,7 +194,7 @@ script_mod! {
 
         calc_de: fn(px, py, pz) {
             let raw = self.hybrid_de(px, py, pz)
-            let de_raw = max(raw.y + raw.z, self.de_floor)
+            let de_raw = max(raw.y + raw.z, self.scene.de_floor)
             return vec2(raw.x, de_raw)
         }
 
@@ -255,17 +217,17 @@ script_mod! {
             var rsfmul = 1.0
 
             let first_eval = self.calc_de(ox, oy, oz)
-            let first_destop = self.de_stop
-            if first_eval.x >= self.max_iters || first_eval.y < first_destop {
+            let first_destop = self.scene.de_stop
+            if first_eval.x >= self.scene.max_iters || first_eval.y < first_destop {
                 return vec2(0.0, first_eval.x)
             }
 
             last_de = first_eval.y
-            last_step = max(first_eval.y * self.s_z_step_div, 0.11 * self.step_width)
+            last_step = max(first_eval.y * self.scene.s_z_step_div, 0.11 * self.scene.step_width)
 
             for step_idx in 0..128 {
-                let depth_steps = abs(t) / max(self.step_width, 0.0000001)
-                let current_destop = self.de_stop * (1.0 + depth_steps * self.de_stop_factor)
+                let depth_steps = abs(t) / max(self.scene.step_width, 0.0000001)
+                let current_destop = self.scene.de_stop * (1.0 + depth_steps * self.scene.de_stop_factor)
 
                 let px = self.pos_x(ox, dir, t)
                 let py = self.pos_y(oy, dir, t)
@@ -276,9 +238,9 @@ script_mod! {
                     de = last_de + last_step
                 }
 
-                if eval.x < self.max_iters && de >= current_destop {
-                    var step = max((de - self.ms_de_sub * current_destop) * self.s_z_step_div * rsfmul, 0.11 * self.step_width)
-                    let max_step_here = max(current_destop, 0.4 * self.step_width) * self.mct_mh04_zsd
+                if eval.x < self.scene.max_iters && de >= current_destop {
+                    var step = max((de - self.scene.ms_de_sub * current_destop) * self.scene.s_z_step_div * rsfmul, 0.11 * self.scene.step_width)
+                    let max_step_here = max(current_destop, 0.4 * self.scene.step_width) * self.scene.mct_mh04_zsd
                     if max_step_here < step {
                         step = max_step_here
                     }
@@ -297,7 +259,7 @@ script_mod! {
                     last_de = de
                     last_step = step
                     t += step
-                    if t > self.max_ray_length {
+                    if t > self.scene.max_ray_length {
                         return vec2(-1.0, 0.0)
                     }
                 } else {
@@ -308,10 +270,10 @@ script_mod! {
                         let rx = self.pos_x(ox, dir, refine_t)
                         let ry = self.pos_y(oy, dir, refine_t)
                         let rz = self.pos_z(oz, dir, refine_t)
-                        let depth_steps = abs(refine_t) / max(self.step_width, 0.0000001)
-                        let stop_here = self.de_stop * (1.0 + depth_steps * self.de_stop_factor)
+                        let depth_steps = abs(refine_t) / max(self.scene.step_width, 0.0000001)
+                        let stop_here = self.scene.de_stop * (1.0 + depth_steps * self.scene.de_stop_factor)
                         let reval = self.calc_de(rx, ry, rz)
-                        if reval.x >= self.max_iters || reval.y < stop_here {
+                        if reval.x >= self.scene.max_iters || reval.y < stop_here {
                             refine_step = -abs(refine_step) * 0.55
                         } else {
                             refine_step = abs(refine_step) * 0.55
@@ -334,7 +296,7 @@ script_mod! {
         }
 
         estimate_normal: fn(px, py, pz) {
-            let eps = max(self.de_stop * 6.0, self.step_width * 0.8)
+            let eps = max(self.scene.de_stop * 6.0, self.scene.step_width * 0.8)
             let d1 = self.de_only_f(self.ds_add_f(px, eps), self.ds_add_f(py, -eps), self.ds_add_f(pz, -eps))
             let d2 = self.de_only_f(self.ds_add_f(px, -eps), self.ds_add_f(py, -eps), self.ds_add_f(pz, eps))
             let d3 = self.de_only_f(self.ds_add_f(px, -eps), self.ds_add_f(py, eps), self.ds_add_f(pz, -eps))
@@ -349,20 +311,20 @@ script_mod! {
 
         shade_hit: fn(dir, depth, iters, px, py, pz) {
             let n = self.estimate_normal(px, py, pz)
-            let l = self.safe_normalize3(self.light_dir)
+            let l = self.safe_normalize3(self.scene.light_dir)
             let v = self.safe_normalize3(-dir)
             let h = self.safe_normalize3(l + v)
 
             let ndotl = max(dot(n, l), 0.0)
             let ndoth = max(dot(n, h), 0.0)
-            let hemi = mix(self.amb_bottom.rgb, self.amb_top.rgb, clamp(n.y * 0.5 + 0.5, 0.0, 1.0))
-            let iter_t = clamp(iters / max(self.max_iters, 1.0), 0.0, 1.0)
-            let stone = mix(self.surface_color2.rgb, self.surface_color.rgb, pow(1.0 - iter_t, 0.6))
-            let lit = stone * (hemi * 0.9 + self.light_color.rgb * (0.18 + 0.82 * ndotl))
-            let spec = self.light_color.rgb * pow(ndoth, 28.0) * 0.16
+            let hemi = mix(self.scene.amb_bottom.rgb, self.scene.amb_top.rgb, clamp(n.y * 0.5 + 0.5, 0.0, 1.0))
+            let iter_t = clamp(iters / max(self.scene.max_iters, 1.0), 0.0, 1.0)
+            let stone = mix(self.scene.surface_color2.rgb, self.scene.surface_color.rgb, pow(1.0 - iter_t, 0.6))
+            let lit = stone * (hemi * 0.9 + self.scene.light_color.rgb * (0.18 + 0.82 * ndotl))
+            let spec = self.scene.light_color.rgb * pow(ndoth, 28.0) * 0.16
             let fog_y = clamp(self.pos.y, 0.0, 1.0)
-            let fog = mix(self.sky_color.rgb, self.sky_color2.rgb, pow(1.0 - fog_y, 0.65))
-            let fog_t = clamp(depth / max(self.max_ray_length, 0.001), 0.0, 1.0)
+            let fog = mix(self.scene.sky_color.rgb, self.scene.sky_color2.rgb, pow(1.0 - fog_y, 0.65))
+            let fog_t = clamp(depth / max(self.scene.max_ray_length, 0.001), 0.0, 1.0)
             return mix(lit + spec, fog, fog_t * fog_t * 0.8)
         }
 
@@ -370,7 +332,7 @@ script_mod! {
             let frag = self.pos * self.rect_size
             let half_w = self.rect_size.x * 0.5
             let half_h = self.rect_size.y * 0.5
-            let fov_mul = (self.fov_y * 0.017453292519943295) / max(self.rect_size.y, 1.0)
+            let fov_mul = (self.scene.fov_y * 0.017453292519943295) / max(self.rect_size.y, 1.0)
 
             let cafx = (half_w - frag.x) * fov_mul
             let cafy = (frag.y - half_h) * fov_mul
@@ -381,17 +343,17 @@ script_mod! {
 
             let local_dir = self.safe_normalize3(vec3(-sx, sy, cx * cy))
             let dir = self.safe_normalize3(
-                self.cam_right * local_dir.x +
-                self.cam_up * local_dir.y +
-                self.cam_forward * local_dir.z
+                self.scene.cam_right * local_dir.x +
+                self.scene.cam_up * local_dir.y +
+                self.scene.cam_forward * local_dir.z
             )
 
-            let x_offset = (frag.x - half_w) * self.step_width
-            let y_offset = (frag.y - half_h) * self.step_width
+            let x_offset = (frag.x - half_w) * self.scene.step_width
+            let y_offset = (frag.y - half_h) * self.scene.step_width
 
-            let ox = self.ds_add_f(self.ds_add_f(self.ds_add_f(self.mid_x, self.cam_forward.x * self.z_start_delta), self.cam_right.x * x_offset), self.cam_up.x * y_offset)
-            let oy = self.ds_add_f(self.ds_add_f(self.ds_add_f(self.mid_y, self.cam_forward.y * self.z_start_delta), self.cam_right.y * x_offset), self.cam_up.y * y_offset)
-            let oz = self.ds_add_f(self.ds_add_f(self.ds_add_f(self.mid_z, self.cam_forward.z * self.z_start_delta), self.cam_right.z * x_offset), self.cam_up.z * y_offset)
+            let ox = self.ds_add_f(self.ds_add_f(self.ds_add_f(self.scene.mid_x, self.scene.cam_forward.x * self.scene.z_start_delta), self.scene.cam_right.x * x_offset), self.scene.cam_up.x * y_offset)
+            let oy = self.ds_add_f(self.ds_add_f(self.ds_add_f(self.scene.mid_y, self.scene.cam_forward.y * self.scene.z_start_delta), self.scene.cam_right.y * x_offset), self.scene.cam_up.y * y_offset)
+            let oz = self.ds_add_f(self.ds_add_f(self.ds_add_f(self.scene.mid_z, self.scene.cam_forward.z * self.scene.z_start_delta), self.scene.cam_right.z * x_offset), self.scene.cam_up.z * y_offset)
 
             let hit = self.ray_march(ox, oy, oz, dir)
             if hit.x < 0.0 {
@@ -414,6 +376,7 @@ script_mod! {
     mod.widgets.GpuMb3dView = set_type_default() do mod.widgets.GpuMb3dViewBase{
         width: Fill
         height: Fill
+        draw_gpu: mod.widgets.DrawGpuMb3d{}
     }
 
     startup() do #(App::script_component(vm)){
@@ -422,7 +385,7 @@ script_mod! {
                 window.inner_size: vec2(960, 540)
                 body +: {
                     flow: Overlay
-                    fractal := GpuMb3dView{}
+                    fractal := mod.widgets.GpuMb3dView{}
                     RoundedView{
                         width: Fit
                         height: Fit
@@ -507,11 +470,9 @@ struct CathedralScene {
     sky_color2: Vec4f,
 }
 
-#[derive(Script, ScriptHook)]
+#[derive(Clone, Copy, Default, Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawGpuMb3d {
-    #[deref]
-    draw_super: DrawQuad,
+pub struct GpuMb3dUniforms {
     #[live]
     pub bg_color: Vec4f,
     #[live]
@@ -531,23 +492,39 @@ pub struct DrawGpuMb3d {
     #[live]
     pub cam_right: Vec3f,
     #[live]
+    pub cam_right_pad: f32,
+    #[live]
     pub cam_up: Vec3f,
+    #[live]
+    pub cam_up_pad: f32,
     #[live]
     pub cam_forward: Vec3f,
     #[live]
+    pub cam_forward_pad: f32,
+    #[live]
     pub light_dir: Vec3f,
+    #[live]
+    pub light_dir_pad: f32,
     #[live]
     pub rot0: Vec3f,
     #[live]
+    pub rot0_pad: f32,
+    #[live]
     pub rot1: Vec3f,
     #[live]
+    pub rot1_pad: f32,
+    #[live]
     pub rot2: Vec3f,
+    #[live]
+    pub rot2_pad: f32,
     #[live]
     pub mid_x: Vec2f,
     #[live]
     pub mid_y: Vec2f,
     #[live]
     pub mid_z: Vec2f,
+    #[live]
+    pub mid_pad: Vec2f,
     #[live]
     pub fov_y: f32,
     #[live]
@@ -594,6 +571,17 @@ pub struct DrawGpuMb3d {
     pub menger_cy: f32,
     #[live]
     pub menger_cz: f32,
+    #[live]
+    pub tail_pad: f32,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGpuMb3d {
+    #[rust]
+    scene_uniforms: Option<UniformBuffer>,
+    #[deref]
+    draw_super: DrawQuad,
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -630,7 +618,7 @@ impl GpuMb3dView {
         }
     }
 
-    fn configure_shader(&mut self, rect: Rect) {
+    fn configure_shader(&mut self, cx: &mut Cx2d, rect: Rect) {
         let Some(scene) = self.scene.as_ref() else {
             return;
         };
@@ -643,61 +631,77 @@ impl GpuMb3dView {
         params.apply_image_scale(scale);
 
         let inv_step = 1.0 / params.step_width.max(1.0e-30);
-        self.draw_gpu.cam_right = vec3f(
-            (params.camera.right.x * inv_step) as f32,
-            (params.camera.right.y * inv_step) as f32,
-            (params.camera.right.z * inv_step) as f32,
-        );
-        self.draw_gpu.cam_up = vec3f(
-            (params.camera.up.x * inv_step) as f32,
-            (params.camera.up.y * inv_step) as f32,
-            (params.camera.up.z * inv_step) as f32,
-        );
-        self.draw_gpu.cam_forward = vec3f(
-            (params.camera.forward.x * inv_step) as f32,
-            (params.camera.forward.y * inv_step) as f32,
-            (params.camera.forward.z * inv_step) as f32,
-        );
-
-        self.draw_gpu.mid_x = split_f64(params.camera.mid.x);
-        self.draw_gpu.mid_y = split_f64(params.camera.mid.y);
-        self.draw_gpu.mid_z = split_f64(params.camera.mid.z);
-        self.draw_gpu.fov_y = params.camera.fov_y as f32;
-        self.draw_gpu.step_width = params.step_width as f32;
-        self.draw_gpu.z_start_delta = (params.camera.z_start - params.camera.mid.z) as f32;
-        self.draw_gpu.max_ray_length = params.max_ray_length as f32;
-        self.draw_gpu.de_stop = params.de_stop as f32;
-        self.draw_gpu.de_stop_factor = params.de_stop_factor as f32;
-        self.draw_gpu.s_z_step_div = params.s_z_step_div as f32;
-        self.draw_gpu.ms_de_sub = params.ms_de_sub as f32;
-        self.draw_gpu.mct_mh04_zsd = params.mct_mh04_zsd as f32;
-        self.draw_gpu.de_floor = params.de_floor as f32;
-        self.draw_gpu.rstop = params.iter_params.rstop as f32;
-        self.draw_gpu.max_iters = params.iter_params.max_iters as f32;
-
-        self.draw_gpu.slot0_iters = scene.formula0_iters;
-        self.draw_gpu.slot1_iters = scene.formula1_iters;
-        self.draw_gpu.repeat_from_slot = scene.repeat_from_slot;
-
-        self.draw_gpu.ab_scale = scene.amazing.scale;
-        self.draw_gpu.ab_scale_div_min_r2 = scene.amazing.scale_div_min_r2;
-        self.draw_gpu.ab_min_r2 = scene.amazing.min_r2;
-        self.draw_gpu.ab_fold = scene.amazing.fold;
-
-        self.draw_gpu.menger_scale = scene.menger.scale;
-        self.draw_gpu.menger_cx = scene.menger.cx;
-        self.draw_gpu.menger_cy = scene.menger.cy;
-        self.draw_gpu.menger_cz = scene.menger.cz;
-        self.draw_gpu.rot0 = scene.menger.rot0;
-        self.draw_gpu.rot1 = scene.menger.rot1;
-        self.draw_gpu.rot2 = scene.menger.rot2;
-
-        self.draw_gpu.light_dir = scene.light_dir;
-        self.draw_gpu.light_color = scene.light_color;
-        self.draw_gpu.amb_top = scene.ambient_top;
-        self.draw_gpu.amb_bottom = scene.ambient_bottom;
-        self.draw_gpu.sky_color = scene.sky_color;
-        self.draw_gpu.sky_color2 = scene.sky_color2;
+        let uniforms = GpuMb3dUniforms {
+            bg_color: rgb4([0x0d, 0x10, 0x14]),
+            sky_color: scene.sky_color,
+            sky_color2: scene.sky_color2,
+            surface_color: rgb4([0xb2, 0xb1, 0xab]),
+            surface_color2: rgb4([0x7f, 0x7f, 0x79]),
+            light_color: scene.light_color,
+            amb_top: scene.ambient_top,
+            amb_bottom: scene.ambient_bottom,
+            cam_right: vec3f(
+                (params.camera.right.x * inv_step) as f32,
+                (params.camera.right.y * inv_step) as f32,
+                (params.camera.right.z * inv_step) as f32,
+            ),
+            cam_right_pad: 0.0,
+            cam_up: vec3f(
+                (params.camera.up.x * inv_step) as f32,
+                (params.camera.up.y * inv_step) as f32,
+                (params.camera.up.z * inv_step) as f32,
+            ),
+            cam_up_pad: 0.0,
+            cam_forward: vec3f(
+                (params.camera.forward.x * inv_step) as f32,
+                (params.camera.forward.y * inv_step) as f32,
+                (params.camera.forward.z * inv_step) as f32,
+            ),
+            cam_forward_pad: 0.0,
+            light_dir: scene.light_dir,
+            light_dir_pad: 0.0,
+            rot0: scene.menger.rot0,
+            rot0_pad: 0.0,
+            rot1: scene.menger.rot1,
+            rot1_pad: 0.0,
+            rot2: scene.menger.rot2,
+            rot2_pad: 0.0,
+            mid_x: split_f64(params.camera.mid.x),
+            mid_y: split_f64(params.camera.mid.y),
+            mid_z: split_f64(params.camera.mid.z),
+            mid_pad: Vec2f::default(),
+            fov_y: params.camera.fov_y as f32,
+            step_width: params.step_width as f32,
+            z_start_delta: (params.camera.z_start - params.camera.mid.z) as f32,
+            max_ray_length: params.max_ray_length as f32,
+            de_stop: params.de_stop as f32,
+            de_stop_factor: params.de_stop_factor as f32,
+            s_z_step_div: params.s_z_step_div as f32,
+            ms_de_sub: params.ms_de_sub as f32,
+            mct_mh04_zsd: params.mct_mh04_zsd as f32,
+            de_floor: params.de_floor as f32,
+            rstop: params.iter_params.rstop as f32,
+            max_iters: params.iter_params.max_iters as f32,
+            slot0_iters: scene.formula0_iters,
+            slot1_iters: scene.formula1_iters,
+            repeat_from_slot: scene.repeat_from_slot,
+            ab_scale: scene.amazing.scale,
+            ab_scale_div_min_r2: scene.amazing.scale_div_min_r2,
+            ab_min_r2: scene.amazing.min_r2,
+            ab_fold: scene.amazing.fold,
+            menger_scale: scene.menger.scale,
+            menger_cx: scene.menger.cx,
+            menger_cy: scene.menger.cy,
+            menger_cz: scene.menger.cz,
+            tail_pad: 0.0,
+        };
+        let uniform_buffer = self
+            .draw_gpu
+            .scene_uniforms
+            .get_or_insert_with(|| UniformBuffer::new(cx.cx))
+            .clone();
+        uniform_buffer.set_struct(cx.cx, &uniforms);
+        self.draw_gpu.draw_vars.set_uniform_buffer(0, &uniform_buffer);
     }
 }
 
@@ -707,7 +711,7 @@ impl Widget for GpuMb3dView {
 
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
-        self.configure_shader(rect);
+        self.configure_shader(cx, rect);
         self.draw_gpu.draw_abs(cx, rect);
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()

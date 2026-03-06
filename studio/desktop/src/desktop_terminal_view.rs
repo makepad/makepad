@@ -317,6 +317,14 @@ impl DesktopTerminalView {
         self.follow_output = true;
     }
 
+    fn scrollbar_total_lines(frame: &TerminalFramebuffer) -> usize {
+        // Custom scroll-region apps like Codex report `is_tui = true`, but they
+        // can still have real scrollback above the viewport. Capping these
+        // frames to `pty_rows` collapses the scrollbar to a single screen and
+        // causes redraws to clamp the scroll position back to the top.
+        frame.total_lines
+    }
+
     fn invalidate_glyph_cache_if_needed(&mut self, cx: &Cx2d) {
         let font_size = self.draw_text.text_style.font_size;
         let font_scale = self.draw_text.font_scale;
@@ -987,13 +995,7 @@ impl Widget for DesktopTerminalView {
 
         let total_lines_for_scroll = frame
             .as_ref()
-            .map(|frame| {
-                if frame.is_tui {
-                    frame.total_lines.min(pty_rows as usize)
-                } else {
-                    frame.total_lines
-                }
-            })
+            .map(Self::scrollbar_total_lines)
             .unwrap_or(0);
         self.last_total_lines = total_lines_for_scroll;
 
@@ -1309,5 +1311,34 @@ fn map_keycode(kc: KeyCode) -> TermKeyCode {
         KeyCode::F11 => TK::F11,
         KeyCode::F12 => TK::F12,
         _ => TK::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollbar_total_lines_preserves_scrollback_for_custom_scroll_region_apps() {
+        let frame = TerminalFramebuffer {
+            is_tui: true,
+            rows: 20,
+            total_lines: 240,
+            ..Default::default()
+        };
+
+        assert_eq!(DesktopTerminalView::scrollbar_total_lines(&frame), 240);
+    }
+
+    #[test]
+    fn scrollbar_total_lines_keeps_plain_terminal_history() {
+        let frame = TerminalFramebuffer {
+            is_tui: false,
+            rows: 20,
+            total_lines: 75,
+            ..Default::default()
+        };
+
+        assert_eq!(DesktopTerminalView::scrollbar_total_lines(&frame), 75);
     }
 }

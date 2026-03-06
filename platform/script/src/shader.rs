@@ -48,10 +48,14 @@ pub enum ShaderMe {
     FnBody {
         ret: Option<ScriptPodType>,
         escaped: bool, // true when all code paths have returned
+        stack_depth: usize,
     },
-    LoopBody,
+    LoopBody {
+        stack_depth: usize,
+    },
     ForLoop {
         var_id: LiveId,
+        stack_depth: usize,
     },
     IfBody {
         target_ip: u32,
@@ -412,6 +416,7 @@ impl ShaderFnCompiler {
         self.mes.push(ShaderMe::FnBody {
             ret: None,
             escaped: false,
+            stack_depth: self.stack.types.len(),
         });
         // alright lets go trace the opcodes
         self.trap.ip = fnip;
@@ -1531,10 +1536,13 @@ impl ShaderFnCompiler {
         }
         if let Some(me) = self.mes.last_mut() {
             match me {
-                ShaderMe::FnBody { .. }
-                | ShaderMe::ForLoop { .. }
-                | ShaderMe::LoopBody
-                | ShaderMe::IfBody { .. } => {
+                ShaderMe::FnBody { stack_depth, .. }
+                | ShaderMe::ForLoop { stack_depth, .. }
+                | ShaderMe::LoopBody { stack_depth }
+                | ShaderMe::IfBody { stack_depth, .. } => {
+                    if self.stack.types.len() <= *stack_depth {
+                        return;
+                    }
                     let (_ty, s) = self.stack.pop(self.trap.pass());
                     self.out.push_str(&s);
                     self.out.push_str(";\n");

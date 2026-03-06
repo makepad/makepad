@@ -315,6 +315,12 @@ pub enum PixelResult {
     Miss,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SurfaceSampleMb3d {
+    pub normal: Vec3,
+    pub roughness: f64,
+}
+
 struct RayGrid {
     dirs: Vec<Vec3>,
     row_origins: Vec<Vec3>,
@@ -585,6 +591,69 @@ fn smooth_normal_mb3d(
     (out_n, rough)
 }
 
+pub(crate) fn compute_surface_sample_mb3d(
+    hit_pos: Vec3,
+    depth: f64,
+    formulas: &HybridProgram,
+    params: &RenderParams,
+) -> SurfaceSampleMb3d {
+    let m_zz = depth / params.step_width;
+    let n_offset = mb3d_normal_offset(params, m_zz);
+
+    let (normal_basis, normal_coarse) = estimate_normal_grad(
+        hit_pos,
+        n_offset,
+        params.camera.forward,
+        params.camera.right,
+        params.camera.up,
+        formulas,
+        &params.iter_params,
+        params.de_floor,
+    );
+    let (normal_mb3d, roughness_mb3d) = smooth_normal_mb3d(
+        hit_pos,
+        normal_basis,
+        normal_coarse,
+        n_offset,
+        params.sm_normals,
+        params.camera.forward,
+        params.camera.right,
+        params.camera.up,
+        formulas,
+        &params.iter_params,
+        params.de_floor,
+    );
+
+    SurfaceSampleMb3d {
+        normal: normal_mb3d,
+        roughness: roughness_mb3d,
+    }
+}
+
+pub(crate) fn compute_soft_hs_bits_mb3d(
+    hit_pos: Vec3,
+    depth: f64,
+    ray_dir: Vec3,
+    normal: Vec3,
+    light_dir: Vec3,
+    i_light_pos: u8,
+    y: usize,
+    formulas: &HybridProgram,
+    params: &RenderParams,
+) -> i32 {
+    calc_hs_soft_bits_mb3d(
+        hit_pos,
+        depth,
+        ray_dir,
+        normal,
+        light_dir,
+        i_light_pos,
+        y,
+        formulas,
+        params,
+    )
+}
+
 /// CalcHSsoft port for directional lights, matching MB3D's packed soft-HS high bits.
 fn calc_hs_soft_bits_mb3d(
     hit_pos: Vec3,
@@ -848,6 +917,155 @@ pub fn ray_march(
     PixelResult::Miss
 }
 
+pub(crate) fn shade_from_primary_buffers(
+    formulas: &HybridProgram,
+    params: &RenderParams,
+    lighting: &crate::m3p::M3PLighting,
+    ssao: &crate::m3p::M3PSSAO,
+    depth_buf: &[f64],
+    iter_buf: &[i32],
+    shadow_buf: &[i32],
+) -> Vec<u8> {
+    let w = params.camera.width as usize;
+    let h = params.camera.height as usize;
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    assert_eq!(depth_buf.len(), w * h);
+    assert_eq!(iter_buf.len(), w * h);
+    assert_eq!(shadow_buf.len(), w * h);
+
+    let num_threads = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(h.max(1));
+    let rows_per_thread = h.div_ceil(num_threads);
+    let ray_grid = build_ray_grid(&params.camera, num_threads, rows_per_thread);
+
+    let mut pixels = vec![0u8; w * h * 4];
+    let soft_hs_light = crate::lighting::soft_hs_light_dir(lighting, &params.camera, params);
+    let lighting_cache = crate::lighting::LightingCache::new(lighting, &params.camera, params);
+
+    thread::scope(|s| {
+        let mut workers = Vec::new();
+
+        for (band_idx, pixel_chunk) in pixels.chunks_mut(rows_per_thread * w * 4).enumerate() {
+            let formulas = &formulas;
+            let params = &params;
+            let depth_buf = &depth_buf;
+            let iter_buf = &iter_buf;
+            let shadow_buf = &shadow_buf;
+            let ray_grid = &ray_grid;
+            let soft_hs_light = soft_hs_light;
+            let lighting_cache = &lighting_cache;
+            let y_start = band_idx * rows_per_thread;
+
+            workers.push(s.spawn(move || {
+                let mut shade_scratch = crate::lighting::ShadeScratch::default();
+                let row_count = pixel_chunk.len() / (w * 4);
+                for local_y in 0..row_count {
+                    let y = y_start + local_y;
+                    let row_offset = local_y * w * 4;
+
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        let offset = row_offset + x * 4;
+                        let depth = depth_buf[idx];
+                        let origin = ray_grid.row_origins[y].add(ray_grid.x_offsets[x]);
+
+                        if depth == f64::MAX {
+                            pixel_chunk[offset] = 10;
+                            pixel_chunk[offset + 1] = 10;
+                            pixel_chunk[offset + 2] = 15;
+                            pixel_chunk[offset + 3] = 255;
+                            continue;
+                        }
+
+                        let dir = ray_grid.dirs[idx];
+                        let hit_pos = origin.add(dir.scale(depth));
+                        let m_zz = depth / params.step_width;
+                        let n_offset = mb3d_normal_offset(params, m_zz);
+
+                        let (normal_basis, normal_coarse) = estimate_normal_grad(
+                            hit_pos,
+                            n_offset,
+                            params.camera.forward,
+                            params.camera.right,
+                            params.camera.up,
+                            formulas,
+                            &params.iter_params,
+                            params.de_floor,
+                        );
+                        let (normal_mb3d, roughness_mb3d) = smooth_normal_mb3d(
+                            hit_pos,
+                            normal_basis,
+                            normal_coarse,
+                            n_offset,
+                            params.sm_normals,
+                            params.camera.forward,
+                            params.camera.right,
+                            params.camera.up,
+                            formulas,
+                            &params.iter_params,
+                            params.de_floor,
+                        );
+
+                        let mut shadow_word = shadow_buf[idx] & 0x3ff;
+                        if let Some((_li, light_dir, i_light_pos)) = soft_hs_light {
+                            shadow_word |= 0xFC00;
+                            let soft_bits = calc_hs_soft_bits_mb3d(
+                                hit_pos,
+                                depth,
+                                dir,
+                                normal_mb3d,
+                                light_dir,
+                                i_light_pos,
+                                y,
+                                formulas,
+                                params,
+                            );
+                            shadow_word = (shadow_word & 0x03FF) | (soft_bits << 10);
+                        }
+
+                        let color = crate::lighting::shade(
+                            normal_mb3d,
+                            roughness_mb3d,
+                            dir.scale(-1.0),
+                            iter_buf[idx],
+                            shadow_word,
+                            params.iter_params.max_iters,
+                            params.iter_params.min_iters,
+                            hit_pos,
+                            1.0,
+                            depth,
+                            x as i32,
+                            y as i32,
+                            (y as f64 + 0.5) / h as f64,
+                            params.max_ray_length,
+                            lighting_cache,
+                            ssao,
+                            formulas,
+                            params,
+                            &mut shade_scratch,
+                        );
+
+                        pixel_chunk[offset] = color[0];
+                        pixel_chunk[offset + 1] = color[1];
+                        pixel_chunk[offset + 2] = color[2];
+                        pixel_chunk[offset + 3] = 255;
+                    }
+                }
+            }));
+        }
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+
+    pixels
+}
+
 use std::thread;
 
 /// Render the full image using two passes:
@@ -934,129 +1152,15 @@ pub fn render(formulas: &HybridProgram, params: &RenderParams, lighting: &crate:
     eprintln!("Ray march complete in {:.1}s ({} hits / {} pixels)",
         start.elapsed().as_secs_f64(), total_hits, w * h);
 
-    // Pass 2: compute normals and shade
-    let mut pixels = vec![0u8; w * h * 4];
-    let soft_hs_light = crate::lighting::soft_hs_light_dir(lighting, &params.camera, params);
-    let lighting_cache = crate::lighting::LightingCache::new(lighting, &params.camera, params);
-
-    thread::scope(|s| {
-        let mut workers = Vec::new();
-
-        for (band_idx, pixel_chunk) in pixels.chunks_mut(rows_per_thread * w * 4).enumerate() {
-            let formulas = &formulas;
-            let params = &params;
-            let depth_buf = &depth_buf;
-            let iter_buf = &iter_buf;
-            let shadow_buf = &shadow_buf;
-            let ray_grid = &ray_grid;
-            let soft_hs_light = soft_hs_light;
-            let lighting_cache = &lighting_cache;
-            let y_start = band_idx * rows_per_thread;
-
-            workers.push(s.spawn(move || {
-                let mut shade_scratch = crate::lighting::ShadeScratch::default();
-                let row_count = pixel_chunk.len() / (w * 4);
-                for local_y in 0..row_count {
-                    let y = y_start + local_y;
-                    let row_offset = local_y * w * 4;
-
-                    for x in 0..w {
-                        let idx = y * w + x;
-                        let offset = row_offset + x * 4;
-                        let depth = depth_buf[idx];
-                        let origin = ray_grid.row_origins[y].add(ray_grid.x_offsets[x]);
-
-                        if depth == f64::MAX {
-                            pixel_chunk[offset] = 10;
-                            pixel_chunk[offset + 1] = 10;
-                            pixel_chunk[offset + 2] = 15;
-                            pixel_chunk[offset + 3] = 255;
-                            continue;
-                        }
-
-                        let dir = ray_grid.dirs[idx];
-                        let hit_pos = origin.add(dir.scale(depth));
-                        let m_zz = depth / params.step_width;
-                        let n_offset = mb3d_normal_offset(params, m_zz);
-
-                        let (normal_basis, normal_coarse) = estimate_normal_grad(
-                            hit_pos,
-                            n_offset,
-                            params.camera.forward,
-                            params.camera.right,
-                            params.camera.up,
-                            formulas,
-                            &params.iter_params,
-                            params.de_floor,
-                        );
-                        let (normal_mb3d, roughness_mb3d) = smooth_normal_mb3d(
-                            hit_pos,
-                            normal_basis,
-                            normal_coarse,
-                            n_offset,
-                            params.sm_normals,
-                            params.camera.forward,
-                            params.camera.right,
-                            params.camera.up,
-                            formulas,
-                            &params.iter_params,
-                            params.de_floor,
-                        );
-
-                        // Packed PsiLight.Shadow equivalent:
-                        // low 10 bits = march/fog counter, high 6 bits = softHS factor.
-                        let mut shadow_word = shadow_buf[idx] & 0x3ff;
-                        if let Some((_li, light_dir, i_light_pos)) = soft_hs_light {
-                            shadow_word |= 0xFC00;
-                            let soft_bits = calc_hs_soft_bits_mb3d(
-                                hit_pos,
-                                depth,
-                                dir,
-                                normal_mb3d,
-                                light_dir,
-                                i_light_pos,
-                                y,
-                                formulas,
-                                params,
-                            );
-                            shadow_word = (shadow_word & 0x03FF) | (soft_bits << 10);
-                        }
-
-                        let color = crate::lighting::shade(
-                            normal_mb3d,
-                            roughness_mb3d,
-                            dir.scale(-1.0),
-                            iter_buf[idx],
-                            shadow_word,
-                            params.iter_params.max_iters,
-                            params.iter_params.min_iters,
-                            hit_pos,
-                            1.0,
-                            depth,
-                            x as i32,
-                            y as i32,
-                            (y as f64 + 0.5) / h as f64,
-                            params.max_ray_length,
-                            lighting_cache,
-                            ssao,
-                            formulas,
-                            params,
-                            &mut shade_scratch,
-                        );
-
-                        pixel_chunk[offset] = color[0];
-                        pixel_chunk[offset + 1] = color[1];
-                        pixel_chunk[offset + 2] = color[2];
-                        pixel_chunk[offset + 3] = 255;
-                    }
-                }
-            }));
-        }
-
-        for worker in workers {
-            worker.join().unwrap();
-        }
-    });
+    let pixels = shade_from_primary_buffers(
+        formulas,
+        params,
+        lighting,
+        ssao,
+        &depth_buf,
+        &iter_buf,
+        &shadow_buf,
+    );
 
     eprintln!("Render complete in {:.1}s", start.elapsed().as_secs_f64());
     pixels

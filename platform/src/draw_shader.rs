@@ -1,13 +1,13 @@
 use {
     crate::{
         cx::Cx,
-        draw_vars::DrawVars,
+        draw_vars::{DrawVars, DRAW_CALL_UNIFORM_BUFFER_SLOTS},
         geometry::GeometryId,
         makepad_live_id::*,
         makepad_script::heap::ScriptHeap,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
         makepad_script::shader::*,
-        makepad_script::value::ScriptObject,
+        makepad_script::value::{ScriptObject, ScriptPodType},
         makepad_script::NoTrap,
         makepad_script::ScriptObjectRef,
         os::CxOsDrawShader,
@@ -329,6 +329,16 @@ pub struct DrawShaderTextureInput {
     pub tex_type: TextureType,
 }
 
+#[derive(Clone, Debug)]
+pub struct DrawShaderUniformBufferInput {
+    pub id: LiveId,
+    pub block_name: String,
+    pub ty: ScriptPodType,
+    pub size: usize,
+    pub align: usize,
+    pub buffer_index: usize,
+}
+
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DrawShaderFlags {
     pub debug_draw: bool,
@@ -354,6 +364,7 @@ pub struct CxDrawShaderMapping {
     pub dyn_uniforms: DrawShaderInputs,
     pub geometries: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
+    pub uniform_buffers: Vec<DrawShaderUniformBufferInput>,
     pub samplers: Vec<ShaderSampler>,
     pub texture_sampler_indices: Vec<usize>,
     pub uses_time: bool,
@@ -498,6 +509,7 @@ impl CxDrawShaderMapping {
         // Geometries for vertex buffer fields
         let mut geometries = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         let mut textures = Vec::new();
+        let mut uniform_buffers = Vec::new();
         let mut texture_sampler_indices = Vec::new();
 
         let mut rect_pos = None;
@@ -580,6 +592,40 @@ impl CxDrawShaderMapping {
                 }
                 _ => (),
             }
+        }
+
+        for io in &output.io {
+            if let ShaderIoKind::UniformBuffer = io.kind {
+                let pod_ty = heap.pod_type_ref(io.ty);
+                if matches!(
+                    pod_ty.name,
+                    Some(id!(DrawPassUniforms))
+                        | Some(id!(DrawListUniforms))
+                        | Some(id!(DrawCallUniforms))
+                ) {
+                    continue;
+                }
+                let io_name = output.backend.map_io_name(io.name);
+                uniform_buffers.push(DrawShaderUniformBufferInput {
+                    id: io.name,
+                    block_name: format!("{}_Uniforms", io_name),
+                    ty: io.ty,
+                    size: pod_ty.ty.size_of(),
+                    align: pod_ty.ty.align_of(),
+                    buffer_index: io
+                        .buffer_index
+                        .expect("UniformBuffer must have buffer_index assigned"),
+                });
+            }
+        }
+
+        if uniform_buffers.len() > DRAW_CALL_UNIFORM_BUFFER_SLOTS {
+            panic!(
+                "shader {:?} declares {} custom uniform buffers but only {} draw-call slots are available",
+                source.as_object(),
+                uniform_buffers.len(),
+                DRAW_CALL_UNIFORM_BUFFER_SLOTS
+            );
         }
 
         instances.finalize();
@@ -761,6 +807,7 @@ impl CxDrawShaderMapping {
             dyn_uniforms,
             geometries,
             textures,
+            uniform_buffers,
             samplers: output.samplers.clone(),
             texture_sampler_indices,
             uses_time,
