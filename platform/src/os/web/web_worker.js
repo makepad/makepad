@@ -1,5 +1,15 @@
 onmessage = async function(e) {
     let thread_info = e.data;
+
+    async function instantiate_secondary(primary_wasm, env) {
+        if (!thread_info.secondary_module) {
+            return;
+        }
+        await WebAssembly.instantiate(thread_info.secondary_module, {
+            env,
+            primary: primary_wasm.exports
+        });
+    }
     
     function chars_to_string(chars_ptr, len) {
         let out = "";
@@ -294,26 +304,27 @@ onmessage = async function(e) {
     let wasm = null;
     const doit = inner_wasm => {
         wasm = inner_wasm;
-
-        if(!thread_info.wasm_bindgen) {
-            wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
-            wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
-        } else {
-            wasm.exports.__wbindgen_start();
-        }
-        if(thread_info.timer > 0){
-            this.setInterval(()=>{
-                wasm.exports.wasm_thread_timer_entrypoint(thread_info.context_ptr);
-            }, thread_info.timer);
-        }
-        else{
-            wasm.exports.wasm_thread_entrypoint(thread_info.context_ptr);
-            close();
-        }
+        return instantiate_secondary(wasm, env).then(() => {
+            if(!thread_info.wasm_bindgen) {
+                wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
+                wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
+            } else {
+                wasm.exports.__wbindgen_start();
+            }
+            if(thread_info.timer > 0){
+                this.setInterval(()=>{
+                    wasm.exports.wasm_thread_timer_entrypoint(thread_info.context_ptr);
+                }, thread_info.timer);
+            }
+            else{
+                wasm.exports.wasm_thread_entrypoint(thread_info.context_ptr);
+                close();
+            }
+        });
     };
     if(thread_info.wasm_bindgen) {
         let inner_wasm = await init({module_or_path: thread_info.module, memory: env.memory}, env);
-        doit(inner_wasm);
+        await doit(inner_wasm);
     } else {
         WebAssembly.instantiate(thread_info.module, {env}).then(doit, error => {
             console.error("Cannot instantiate wasm" + error);

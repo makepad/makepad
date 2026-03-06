@@ -552,6 +552,7 @@ export class WasmBridge {
     static async _instantiate_secondary(secondary_response, primary_wasm) {
         const secondary_bytes = await secondary_response.arrayBuffer();
         const secondary_module = await WebAssembly.compile(secondary_bytes);
+        primary_wasm._secondary_module = secondary_module;
         // The secondary module imports from two modules:
         // "env" — the same env imports the primary uses
         // "primary" — all exported functions/tables/memories/globals from primary

@@ -446,6 +446,7 @@ export class WasmWebBrowser extends WasmBridge {
         var ret = {
             timer,
             module: this.wasm._module,
+            secondary_module: this.wasm._secondary_module,
             memory: this.wasm._memory,
             context_ptr
         };

@@ -5,6 +5,16 @@ class AudioWorklet extends AudioWorkletProcessor {
         super (options);
         
         let thread_info = options.processorOptions.thread_info;
+
+        const instantiate_secondary = async (primary_wasm, env) => {
+            if (!thread_info.secondary_module) {
+                return;
+            }
+            await WebAssembly.instantiate(thread_info.secondary_module, {
+                env,
+                primary: primary_wasm.exports
+            });
+        };
         
         function chars_to_string(chars_ptr, len) {
             let out = "";
@@ -41,8 +51,9 @@ class AudioWorklet extends AudioWorkletProcessor {
                 
             }
         };
-        WebAssembly.instantiate(thread_info.module, {env}).then(wasm => {
-            
+        WebAssembly.instantiate(thread_info.module, {env}).then(async wasm => {
+            await instantiate_secondary(wasm, env);
+
             wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
             wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
             
