@@ -484,11 +484,13 @@ impl Cx {
                 CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(self).pos + pos;
                     d3d11_windows.iter_mut().for_each(|w| {
+                        w.win32_window.set_ime_active(true);
                         w.win32_window.set_ime_spot(pos);
                     });
                 }
                 CxOsOp::HideTextIME => {
                     d3d11_windows.iter_mut().for_each(|w| {
+                        w.win32_window.set_ime_active(false);
                         w.win32_window.set_ime_spot(Vec2d::default());
                     });
                 }
