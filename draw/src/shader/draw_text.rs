@@ -870,8 +870,10 @@ impl FontFamily {
             }
         }
 
-        // Slow path: attempt to progress pending resource loads, then re-check.
-        cx.load_all_script_resources();
+        // Slow path: request only the resources needed by this family, then re-check.
+        for member in &self.members {
+            cx.load_script_resource(member.handle);
+        }
         {
             let fonts_ref = fonts.borrow();
             if fonts_ref.is_font_family_complete(family_id) {
