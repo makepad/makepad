@@ -17,24 +17,50 @@ script_mod! {
 
     mod.widgets.DrawGpuMb3d = set_type_default() do #(DrawGpuMb3d::script_shader(vm)){
         ..mod.draw.DrawQuad
+        debug_layout: true
+        debug_code: true
 
         scene: uniform_buffer(gpu_mb3d_uniforms)
 
-        ds_make: fn(v) {
+        ds_new: fn(v) {
             return vec2(v, 0.0)
         }
 
-        ds_norm: fn(v) {
-            let s = v.x + v.y
-            let e = v.y - (s - v.x)
+        ds_quick_two_sum: fn(a, b) {
+            let s = a + b
+            let e = b - (s - a)
             return vec2(s, e)
         }
 
+        ds_two_sum: fn(a, b) {
+            let s = a + b
+            let bb = s - a
+            let e = (a - (s - bb)) + (b - bb)
+            return vec2(s, e)
+        }
+
+        ds_split: fn(a) {
+            let c = 4097.0 * a
+            let hi = c - (c - a)
+            let lo = a - hi
+            return vec2(hi, lo)
+        }
+
+        ds_two_prod: fn(a, b) {
+            let p = a * b
+            let a_split = self.ds_split(a)
+            let b_split = self.ds_split(b)
+            let e = ((a_split.x * b_split.x - p) + a_split.x * b_split.y + a_split.y * b_split.x) + a_split.y * b_split.y
+            return vec2(p, e)
+        }
+
+        ds_norm: fn(v) {
+            return self.ds_quick_two_sum(v.x, v.y)
+        }
+
         ds_add: fn(a, b) {
-            let s = a.x + b.x
-            let bb = s - a.x
-            let e = (a.x - (s - bb)) + (b.x - bb) + a.y + b.y
-            return self.ds_norm(vec2(s, e))
+            let s = self.ds_two_sum(a.x, b.x)
+            return self.ds_quick_two_sum(s.x, s.y + a.y + b.y)
         }
 
         ds_sub: fn(a, b) {
@@ -46,20 +72,22 @@ script_mod! {
         }
 
         ds_mul_f: fn(a, b) {
-            return self.ds_norm(vec2(a.x * b, a.y * b))
+            let p = self.ds_two_prod(a.x, b)
+            return self.ds_norm(self.ds_quick_two_sum(p.x, p.y + a.y * b))
         }
 
         ds_mul: fn(a, b) {
-            let p = a.x * b.x
-            let e = a.x * b.y + a.y * b.x + a.y * b.y
-            return self.ds_norm(vec2(p, e))
+            let p = self.ds_two_prod(a.x, b.x)
+            return self.ds_norm(self.ds_quick_two_sum(p.x, p.y + a.x * b.y + a.y * b.x + a.y * b.y))
         }
 
         ds_div: fn(a, b) {
             let q1 = a.x / b.x
             let r = self.ds_sub(a, self.ds_mul_f(b, q1))
             let q2 = r.x / b.x
-            return self.ds_norm(vec2(q1, q2))
+            let r2 = self.ds_sub(r, self.ds_mul_f(b, q2))
+            let q3 = r2.x / b.x
+            return self.ds_norm(self.ds_add_f(self.ds_quick_two_sum(q1, q2), q3))
         }
 
         ds_abs: fn(a) {
@@ -70,22 +98,50 @@ script_mod! {
         }
 
         ds_box_fold: fn(a, fold) {
-            let plus_abs = self.ds_abs(self.ds_add_f(a, fold))
-            let minus_abs = self.ds_abs(self.ds_add_f(a, -fold))
-            return self.ds_sub(self.ds_sub(plus_abs, minus_abs), a)
+            return self.ds_sub(
+                self.ds_sub(
+                    self.ds_abs(self.ds_add(a, fold)),
+                    self.ds_abs(self.ds_sub(a, fold))
+                ),
+                a
+            )
         }
 
         ds_to_f: fn(a) {
             return a.x + a.y
         }
 
-        ds_lt_f: fn(a, b) {
-            return self.ds_to_f(a) < b
+        ds_lt: fn(a, b) {
+            return a.x < b.x || (a.x == b.x && a.y < b.y)
+        }
+
+        ds_gt: fn(a, b) {
+            return a.x > b.x || (a.x == b.x && a.y > b.y)
+        }
+
+        ds_max: fn(a, b) {
+            if self.ds_lt(a, b) {
+                return b
+            }
+            return a
         }
 
         ds_sqrt: fn(a) {
             let root = sqrt(max(self.ds_to_f(a), 0.0))
-            return vec2(root, 0.0)
+            if root == 0.0 {
+                return self.ds_new(0.0)
+            }
+            let xds = self.ds_new(root)
+            return self.ds_mul_f(self.ds_add(xds, self.ds_div(a, xds)), 0.5)
+        }
+
+        ds3_len: fn(x, y, z) {
+            return self.ds_sqrt(
+                self.ds_add(
+                    self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)),
+                    self.ds_mul(z, z)
+                )
+            )
         }
 
         safe_normalize3: fn(v) {
@@ -93,246 +149,15 @@ script_mod! {
             return v / len
         }
 
-        sky_for_y: fn(y) {
-            let t = clamp(pow(1.0 - y, 0.7), 0.0, 1.0)
-            return mix(self.scene.sky_color.rgb, self.scene.sky_color2.rgb, t)
+        frag_coord: fn() {
+            return self.pos * self.rect_size
         }
 
-        hybrid_de: fn(px, py, pz) {
-            let cx = px
-            let cy = py
-            let cz = pz
-            var x = px
-            var y = py
-            var z = pz
-            var w = vec2(1.0, 0.0)
-            var r2 = vec2(0.0, 0.0)
-            var iters = 0.0
-            var slot = 0.0
-            var remaining = self.scene.slot0_iters
-
-            for i in 0..128 {
-                if remaining <= 0.0 {
-                    slot += 1.0
-                    if slot >= 2.0 {
-                        slot = self.scene.repeat_from_slot
-                    }
-                    if slot < 0.5 {
-                        remaining = self.scene.slot0_iters
-                    } else {
-                        remaining = self.scene.slot1_iters
-                    }
-                }
-
-                if slot < 0.5 {
-                    x = self.ds_box_fold(x, self.scene.ab_fold)
-                    y = self.ds_box_fold(y, self.scene.ab_fold)
-                    z = self.ds_box_fold(z, self.scene.ab_fold)
-
-                    let rr = self.ds_to_f(self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z)))
-                    var m = self.scene.ab_scale
-                    if rr < self.scene.ab_min_r2 {
-                        m = self.scene.ab_scale_div_min_r2
-                    } else if rr < 1.0 {
-                        m = self.scene.ab_scale / max(rr, 0.0000001)
-                    }
-
-                    w = self.ds_mul_f(w, m)
-                    x = self.ds_add(self.ds_mul_f(x, m), cx)
-                    y = self.ds_add(self.ds_mul_f(y, m), cy)
-                    z = self.ds_add(self.ds_mul_f(z, m), cz)
-                } else {
-                    x = self.ds_abs(x)
-                    y = self.ds_abs(y)
-                    z = self.ds_abs(z)
-
-                    if self.ds_to_f(x) < self.ds_to_f(y) {
-                        let t = x
-                        x = y
-                        y = t
-                    }
-                    if self.ds_to_f(x) < self.ds_to_f(z) {
-                        let t = x
-                        x = z
-                        z = t
-                    }
-                    if self.ds_to_f(y) < self.ds_to_f(z) {
-                        let t = y
-                        y = z
-                        z = t
-                    }
-
-                    let nx = self.ds_add(self.ds_add(self.ds_mul_f(x, self.scene.rot0.x), self.ds_mul_f(y, self.scene.rot0.y)), self.ds_mul_f(z, self.scene.rot0.z))
-                    let ny = self.ds_add(self.ds_add(self.ds_mul_f(x, self.scene.rot1.x), self.ds_mul_f(y, self.scene.rot1.y)), self.ds_mul_f(z, self.scene.rot1.z))
-                    let nz = self.ds_add(self.ds_add(self.ds_mul_f(x, self.scene.rot2.x), self.ds_mul_f(y, self.scene.rot2.y)), self.ds_mul_f(z, self.scene.rot2.z))
-
-                    let sf = self.scene.menger_scale - 1.0
-                    x = self.ds_add_f(self.ds_mul_f(nx, self.scene.menger_scale), -self.scene.menger_cx * sf)
-                    y = self.ds_add_f(self.ds_mul_f(ny, self.scene.menger_scale), -self.scene.menger_cy * sf)
-
-                    let z_scaled = self.ds_mul_f(nz, self.scene.menger_scale)
-                    let c = self.scene.menger_cz * sf
-                    z = self.ds_add_f(self.ds_abs(self.ds_add_f(z_scaled, -c)), -c)
-                    z = vec2(-z.x, -z.y)
-
-                    w = self.ds_mul_f(w, self.scene.menger_scale)
-                }
-
-                iters += 1.0
-                remaining -= 1.0
-
-                r2 = self.ds_add(self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)), self.ds_mul(z, z))
-                if self.ds_to_f(r2) > self.scene.rstop || iters >= self.scene.max_iters {
-                    break
-                }
-            }
-
-            let r = self.ds_sqrt(r2)
-            let de = self.ds_div(r, self.ds_abs(w))
-            return vec3(iters, de.x, de.y)
-        }
-
-        calc_de: fn(px, py, pz) {
-            let raw = self.hybrid_de(px, py, pz)
-            let de_raw = max(raw.y + raw.z, self.scene.de_floor)
-            return vec2(raw.x, de_raw)
-        }
-
-        pos_x: fn(ox, dir, t) {
-            return self.ds_add(ox, self.ds_mul_f(self.ds_make(t), dir.x))
-        }
-
-        pos_y: fn(oy, dir, t) {
-            return self.ds_add(oy, self.ds_mul_f(self.ds_make(t), dir.y))
-        }
-
-        pos_z: fn(oz, dir, t) {
-            return self.ds_add(oz, self.ds_mul_f(self.ds_make(t), dir.z))
-        }
-
-        ray_march: fn(ox, oy, oz, dir) {
-            var t = 0.0
-            var last_de = 0.0
-            var last_step = 0.0
-            var rsfmul = 1.0
-
-            let first_eval = self.calc_de(ox, oy, oz)
-            let first_destop = self.scene.de_stop
-            if first_eval.x >= self.scene.max_iters || first_eval.y < first_destop {
-                return vec2(0.0, first_eval.x)
-            }
-
-            last_de = first_eval.y
-            last_step = max(first_eval.y * self.scene.s_z_step_div, 0.11 * self.scene.step_width)
-
-            for step_idx in 0..128 {
-                let depth_steps = abs(t) / max(self.scene.step_width, 0.0000001)
-                let current_destop = self.scene.de_stop * (1.0 + depth_steps * self.scene.de_stop_factor)
-
-                let px = self.pos_x(ox, dir, t)
-                let py = self.pos_y(oy, dir, t)
-                let pz = self.pos_z(oz, dir, t)
-                let eval = self.calc_de(px, py, pz)
-                var de = eval.y
-                if de > last_de + last_step {
-                    de = last_de + last_step
-                }
-
-                if eval.x < self.scene.max_iters && de >= current_destop {
-                    var step = max((de - self.scene.ms_de_sub * current_destop) * self.scene.s_z_step_div * rsfmul, 0.11 * self.scene.step_width)
-                    let max_step_here = max(current_destop, 0.4 * self.scene.step_width) * self.scene.mct_mh04_zsd
-                    if max_step_here < step {
-                        step = max_step_here
-                    }
-
-                    if last_de > de + 0.0000001 {
-                        let ratio = last_step / max(last_de - de, 0.0000001)
-                        if ratio < 1.0 {
-                            rsfmul = max(ratio, 0.5)
-                        } else {
-                            rsfmul = 1.0
-                        }
-                    } else {
-                        rsfmul = 1.0
-                    }
-
-                    last_de = de
-                    last_step = step
-                    t += step
-                    if t > self.scene.max_ray_length {
-                        return vec2(-1.0, 0.0)
-                    }
-                } else {
-                    var refine_t = t
-                    var refine_step = -0.5 * last_step
-                    for i in 0..8 {
-                        refine_t += refine_step
-                        let rx = self.pos_x(ox, dir, refine_t)
-                        let ry = self.pos_y(oy, dir, refine_t)
-                        let rz = self.pos_z(oz, dir, refine_t)
-                        let depth_steps = abs(refine_t) / max(self.scene.step_width, 0.0000001)
-                        let stop_here = self.scene.de_stop * (1.0 + depth_steps * self.scene.de_stop_factor)
-                        let reval = self.calc_de(rx, ry, rz)
-                        if reval.x >= self.scene.max_iters || reval.y < stop_here {
-                            refine_step = -abs(refine_step) * 0.55
-                        } else {
-                            refine_step = abs(refine_step) * 0.55
-                        }
-                    }
-                    let fx = self.pos_x(ox, dir, refine_t)
-                    let fy = self.pos_y(oy, dir, refine_t)
-                    let fz = self.pos_z(oz, dir, refine_t)
-                    let final_eval = self.calc_de(fx, fy, fz)
-                    return vec2(refine_t, final_eval.x)
-                }
-            }
-
-            return vec2(-1.0, 0.0)
-        }
-
-        de_only_f: fn(px, py, pz) {
-            let eval = self.calc_de(px, py, pz)
-            return eval.y
-        }
-
-        estimate_normal: fn(px, py, pz) {
-            let eps = max(self.scene.de_stop * 6.0, self.scene.step_width * 0.8)
-            let d1 = self.de_only_f(self.ds_add_f(px, eps), self.ds_add_f(py, -eps), self.ds_add_f(pz, -eps))
-            let d2 = self.de_only_f(self.ds_add_f(px, -eps), self.ds_add_f(py, -eps), self.ds_add_f(pz, eps))
-            let d3 = self.de_only_f(self.ds_add_f(px, -eps), self.ds_add_f(py, eps), self.ds_add_f(pz, -eps))
-            let d4 = self.de_only_f(self.ds_add_f(px, eps), self.ds_add_f(py, eps), self.ds_add_f(pz, eps))
-            let n = vec3(
-                d1 - d2 - d3 + d4,
-                -d1 - d2 + d3 + d4,
-                -d1 + d2 - d3 + d4
-            )
-            return self.safe_normalize3(n)
-        }
-
-        shade_hit: fn(dir, depth, iters, px, py, pz) {
-            let n = self.estimate_normal(px, py, pz)
-            let l = self.safe_normalize3(self.scene.light_dir)
-            let v = self.safe_normalize3(-dir)
-            let h = self.safe_normalize3(l + v)
-
-            let ndotl = max(dot(n, l), 0.0)
-            let ndoth = max(dot(n, h), 0.0)
-            let hemi = mix(self.scene.amb_bottom.rgb, self.scene.amb_top.rgb, clamp(n.y * 0.5 + 0.5, 0.0, 1.0))
-            let iter_t = clamp(iters / max(self.scene.max_iters, 1.0), 0.0, 1.0)
-            let stone = mix(self.scene.surface_color2.rgb, self.scene.surface_color.rgb, pow(1.0 - iter_t, 0.6))
-            let lit = stone * (hemi * 0.9 + self.scene.light_color.rgb * (0.18 + 0.82 * ndotl))
-            let spec = self.scene.light_color.rgb * pow(ndoth, 28.0) * 0.16
-            let fog_y = clamp(self.pos.y, 0.0, 1.0)
-            let fog = mix(self.scene.sky_color.rgb, self.scene.sky_color2.rgb, pow(1.0 - fog_y, 0.65))
-            let fog_t = clamp(depth / max(self.scene.max_ray_length, 0.001), 0.0, 1.0)
-            return mix(lit + spec, fog, fog_t * fog_t * 0.8)
-        }
-
-        render_color: fn() {
-            let frag = self.pos * self.rect_size
+        primary_dir: fn() {
+            let frag = self.frag_coord()
             let half_w = self.rect_size.x * 0.5
             let half_h = self.rect_size.y * 0.5
-            let fov_mul = (self.scene.fov_y * 0.017453292519943295) / max(self.rect_size.y, 1.0)
+            let fov_mul = (self.scene.controls0.x * 0.017453292519943295) / max(self.rect_size.y, 1.0)
 
             let cafx = (half_w - frag.x) * fov_mul
             let cafy = (frag.y - half_h) * fov_mul
@@ -342,28 +167,383 @@ script_mod! {
             let cy = cos(cafy)
 
             let local_dir = self.safe_normalize3(vec3(-sx, sy, cx * cy))
-            let dir = self.safe_normalize3(
-                self.scene.cam_right * local_dir.x +
-                self.scene.cam_up * local_dir.y +
-                self.scene.cam_forward * local_dir.z
+            let cam_right = vec3(
+                self.ds_to_f(self.scene.cam_right_x),
+                self.ds_to_f(self.scene.cam_right_y),
+                self.ds_to_f(self.scene.cam_right_z)
+            )
+            let cam_up = vec3(
+                self.ds_to_f(self.scene.cam_up_x),
+                self.ds_to_f(self.scene.cam_up_y),
+                self.ds_to_f(self.scene.cam_up_z)
+            )
+            let cam_forward = vec3(
+                self.ds_to_f(self.scene.cam_forward_x),
+                self.ds_to_f(self.scene.cam_forward_y),
+                self.ds_to_f(self.scene.cam_forward_z)
             )
 
-            let x_offset = (frag.x - half_w) * self.scene.step_width
-            let y_offset = (frag.y - half_h) * self.scene.step_width
+            return self.safe_normalize3(
+                cam_right * local_dir.x +
+                cam_up * local_dir.y +
+                cam_forward * local_dir.z
+            )
+        }
 
-            let ox = self.ds_add_f(self.ds_add_f(self.ds_add_f(self.scene.mid_x, self.scene.cam_forward.x * self.scene.z_start_delta), self.scene.cam_right.x * x_offset), self.scene.cam_up.x * y_offset)
-            let oy = self.ds_add_f(self.ds_add_f(self.ds_add_f(self.scene.mid_y, self.scene.cam_forward.y * self.scene.z_start_delta), self.scene.cam_right.y * x_offset), self.scene.cam_up.y * y_offset)
-            let oz = self.ds_add_f(self.ds_add_f(self.ds_add_f(self.scene.mid_z, self.scene.cam_forward.z * self.scene.z_start_delta), self.scene.cam_right.z * x_offset), self.scene.cam_up.z * y_offset)
+        primary_march: fn() {
+            let frag = self.frag_coord()
+            let half_w = self.rect_size.x * 0.5
+            let half_h = self.rect_size.y * 0.5
+            let x_offset = self.ds_mul(self.ds_new(frag.x - half_w), self.scene.step_width)
+            let y_offset = self.ds_mul(self.ds_new(frag.y - half_h), self.scene.step_width)
+            let dir = self.primary_dir()
 
-            let hit = self.ray_march(ox, oy, oz, dir)
-            if hit.x < 0.0 {
-                return self.sky_for_y(self.pos.y)
+            let ox = self.ds_add(
+                self.ds_add(
+                    self.ds_add(self.scene.mid_x, self.ds_mul(self.scene.cam_forward_x, self.scene.z_start_delta)),
+                    self.ds_mul(self.scene.cam_right_x, x_offset)
+                ),
+                self.ds_mul(self.scene.cam_up_x, y_offset)
+            )
+            let oy = self.ds_add(
+                self.ds_add(
+                    self.ds_add(self.scene.mid_y, self.ds_mul(self.scene.cam_forward_y, self.scene.z_start_delta)),
+                    self.ds_mul(self.scene.cam_right_y, x_offset)
+                ),
+                self.ds_mul(self.scene.cam_up_y, y_offset)
+            )
+            let oz = self.ds_add(
+                self.ds_add(
+                    self.ds_add(self.scene.mid_z, self.ds_mul(self.scene.cam_forward_z, self.scene.z_start_delta)),
+                    self.ds_mul(self.scene.cam_right_z, x_offset)
+                ),
+                self.ds_mul(self.scene.cam_up_z, y_offset)
+            )
+
+            return self.ray_march(
+                ox,
+                oy,
+                oz,
+                self.ds_new(dir.x),
+                self.ds_new(dir.y),
+                self.ds_new(dir.z)
+            )
+        }
+
+        sky_for_y: fn(y) {
+            let t = clamp(pow(1.0 - y, 0.7), 0.0, 1.0)
+            return mix(self.scene.sky_color.rgb, self.scene.sky_color2.rgb, t)
+        }
+
+        calc_de: fn(px, py, pz) {
+            let cx = if self.scene.controls1.y > 0.5 { self.scene.julia_x } else { px }
+            let cy = if self.scene.controls1.y > 0.5 { self.scene.julia_y } else { py }
+            let cz = if self.scene.controls1.y > 0.5 { self.scene.julia_z } else { pz }
+
+            var x = px
+            var y = py
+            var z = pz
+            var w = vec2(1.0, 0.0)
+            var r2 = vec2(0.0, 0.0)
+            var iters = 0.0
+            var slot = 0.0
+            var remaining = self.scene.controls0.z
+
+            for i in 0..128 {
+                if remaining <= 0.0 {
+                    slot += 1.0
+                    if slot >= 2.0 {
+                        slot = self.scene.controls1.x
+                    }
+                    if slot < 0.5 {
+                        remaining = self.scene.controls0.z
+                    } else {
+                        remaining = self.scene.controls0.w
+                    }
+                }
+
+                if slot < 0.5 {
+                    x = self.ds_box_fold(x, self.scene.ab_fold)
+                    y = self.ds_box_fold(y, self.scene.ab_fold)
+                    z = self.ds_box_fold(z, self.scene.ab_fold)
+
+                    let rr = self.ds_add(
+                        self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)),
+                        self.ds_mul(z, z)
+                    )
+                    var m = self.scene.ab_scale
+                    if self.ds_lt(rr, self.scene.ab_min_r2) {
+                        m = self.scene.ab_scale_div_min_r2
+                    } else if self.ds_lt(rr, self.ds_new(1.0)) {
+                        m = self.ds_div(self.scene.ab_scale, rr)
+                    }
+
+                    w = self.ds_mul(w, m)
+                    x = self.ds_add(self.ds_mul(x, m), cx)
+                    y = self.ds_add(self.ds_mul(y, m), cy)
+                    z = self.ds_add(self.ds_mul(z, m), cz)
+                } else {
+                    x = self.ds_abs(x)
+                    y = self.ds_abs(y)
+                    z = self.ds_abs(z)
+
+                    if self.ds_lt(x, y) {
+                        let t = x
+                        x = y
+                        y = t
+                    }
+                    if self.ds_lt(x, z) {
+                        let t = x
+                        x = z
+                        z = t
+                    }
+                    if self.ds_lt(y, z) {
+                        let t = y
+                        y = z
+                        z = t
+                    }
+
+                    let nx = self.ds_add(
+                        self.ds_add(
+                            self.ds_mul(x, self.scene.rot0_x),
+                            self.ds_mul(y, self.scene.rot0_y)
+                        ),
+                        self.ds_mul(z, self.scene.rot0_z)
+                    )
+                    let ny = self.ds_add(
+                        self.ds_add(
+                            self.ds_mul(x, self.scene.rot1_x),
+                            self.ds_mul(y, self.scene.rot1_y)
+                        ),
+                        self.ds_mul(z, self.scene.rot1_z)
+                    )
+                    let nz = self.ds_add(
+                        self.ds_add(
+                            self.ds_mul(x, self.scene.rot2_x),
+                            self.ds_mul(y, self.scene.rot2_y)
+                        ),
+                        self.ds_mul(z, self.scene.rot2_z)
+                    )
+
+                    let sf = self.ds_sub(self.scene.menger_scale, self.ds_new(1.0))
+                    x = self.ds_sub(self.ds_mul(nx, self.scene.menger_scale), self.ds_mul(self.scene.menger_cx, sf))
+                    y = self.ds_sub(self.ds_mul(ny, self.scene.menger_scale), self.ds_mul(self.scene.menger_cy, sf))
+                    let c = self.ds_mul(self.scene.menger_cz, sf)
+                    z = self.ds_sub(c, self.ds_abs(self.ds_sub(self.ds_mul(nz, self.scene.menger_scale), c)))
+                    w = self.ds_mul(w, self.scene.menger_scale)
+                }
+
+                iters += 1.0
+                remaining -= 1.0
+                r2 = self.ds_add(
+                    self.ds_add(self.ds_mul(x, x), self.ds_mul(y, y)),
+                    self.ds_mul(z, z)
+                )
+                if self.ds_gt(r2, self.scene.rstop) || iters >= self.scene.controls0.y {
+                    break
+                }
             }
 
-            let px = self.pos_x(ox, dir, hit.x)
-            let py = self.pos_y(oy, dir, hit.x)
-            let pz = self.pos_z(oz, dir, hit.x)
-            return self.shade_hit(dir, hit.x, hit.y, px, py, pz)
+            let de = self.ds_max(self.ds_div(self.ds_sqrt(r2), self.ds_abs(w)), self.scene.de_floor)
+            return vec4(iters, de.x, de.y, 0.0)
+        }
+
+        scene_destop_at_steps: fn(depth_steps: vec2) -> vec2 {
+            return self.ds_mul(
+                self.scene.de_stop,
+                self.ds_add(self.ds_new(1.0), self.ds_mul(self.ds_abs(depth_steps), self.scene.de_stop_factor))
+            )
+        }
+
+        ray_march: fn(ox: vec2, oy: vec2, oz: vec2, dx: vec2, dy: vec2, dz: vec2) -> vec4 {
+            var t = vec2(0.0, 0.0)
+            var last_de = vec2(0.0, 0.0)
+            var last_step = vec2(0.0, 0.0)
+            var rsfmul = vec2(1.0, 0.0)
+
+            let first_eval = self.calc_de(ox, oy, oz)
+            let first_de = vec2(first_eval.y, first_eval.z)
+            let first_stop = self.scene_destop_at_steps(self.ds_div(t, self.scene.step_width))
+            if first_eval.x >= self.scene.controls0.y || self.ds_lt(first_de, first_stop) {
+                return vec4(t.x, t.y, first_eval.x, 1.0)
+            }
+
+            last_step = self.ds_max(
+                self.ds_mul(first_de, self.scene.s_z_step_div),
+                self.ds_mul(self.scene.step_width, self.ds_new(0.11))
+            )
+            last_de = first_de
+
+            for step_idx in 0..16384 {
+                let depth_steps = self.ds_div(t, self.scene.step_width)
+                let current_stop = self.scene_destop_at_steps(depth_steps)
+                let px = self.ds_add(ox, self.ds_mul(dx, t))
+                let py = self.ds_add(oy, self.ds_mul(dy, t))
+                let pz = self.ds_add(oz, self.ds_mul(dz, t))
+                let eval = self.calc_de(px, py, pz)
+                var de = vec2(eval.y, eval.z)
+
+                let max_de = self.ds_add(last_de, last_step)
+                if self.ds_gt(de, max_de) {
+                    de = max_de
+                }
+
+                if eval.x < self.scene.controls0.y && !self.ds_lt(de, current_stop) {
+                    var step = self.ds_max(
+                        self.ds_mul(
+                            self.ds_mul(
+                                self.ds_sub(de, self.ds_mul(self.scene.ms_de_sub, current_stop)),
+                                self.scene.s_z_step_div
+                            ),
+                            rsfmul
+                        ),
+                        self.ds_mul(self.scene.step_width, self.ds_new(0.11))
+                    )
+                    let max_step_here = self.ds_mul(
+                        self.ds_max(current_stop, self.ds_mul(self.scene.step_width, self.ds_new(0.4))),
+                        self.scene.mct_mh04_zsd
+                    )
+                    if self.ds_lt(max_step_here, step) {
+                        step = max_step_here
+                    }
+
+                    let de_eps = self.ds_add(de, self.ds_new(1.0e-30))
+                    if self.ds_gt(last_de, de_eps) {
+                        let denom = max(self.ds_to_f(self.ds_sub(last_de, de)), 1.0e-30)
+                        let ratio = self.ds_to_f(last_step) / denom
+                        if ratio < 1.0 {
+                            rsfmul = self.ds_new(max(ratio, 0.5))
+                        } else {
+                            rsfmul = self.ds_new(1.0)
+                        }
+                    } else {
+                        rsfmul = self.ds_new(1.0)
+                    }
+
+                    last_de = de
+                    last_step = step
+                    t = self.ds_add(t, step)
+
+                    if self.ds_gt(t, self.scene.max_ray_length) {
+                        return vec4(0.0, 0.0, 0.0, 0.0)
+                    }
+                } else {
+                    return vec4(t.x, t.y, 0.0, 1.0)
+                }
+            }
+
+            return vec4(0.0, 0.0, 0.0, 0.0)
+        }
+
+        calc_de_f: fn(px: vec2, py: vec2, pz: vec2) -> float {
+            let eval = self.calc_de(px, py, pz)
+            return eval.y + eval.z
+        }
+
+        estimate_normal: fn(px: vec2, py: vec2, pz: vec2, depth: vec2) -> vec3 {
+            let step_width = max(self.ds_to_f(self.scene.step_width), 1.0e-30)
+            let de_stop_header = self.ds_to_f(self.scene.de_stop_header)
+            let de_stop_factor = self.ds_to_f(self.scene.de_stop_factor)
+            let forward = self.safe_normalize3(vec3(
+                self.ds_to_f(self.scene.cam_forward_x),
+                self.ds_to_f(self.scene.cam_forward_y),
+                self.ds_to_f(self.scene.cam_forward_z)
+            ))
+            let right = self.safe_normalize3(vec3(
+                self.ds_to_f(self.scene.cam_right_x),
+                self.ds_to_f(self.scene.cam_right_y),
+                self.ds_to_f(self.scene.cam_right_z)
+            ))
+            let up = self.safe_normalize3(vec3(
+                self.ds_to_f(self.scene.cam_up_x),
+                self.ds_to_f(self.scene.cam_up_y),
+                self.ds_to_f(self.scene.cam_up_z)
+            ))
+
+            let m_zz = self.ds_to_f(depth) / step_width
+            let n_offset = min(de_stop_header, 1.0) * (1.0 + abs(m_zz) * de_stop_factor) * 0.15 * step_width
+
+            let dz = self.calc_de_f(
+                self.ds_add_f(px, forward.x * n_offset),
+                self.ds_add_f(py, forward.y * n_offset),
+                self.ds_add_f(pz, forward.z * n_offset)
+            ) - self.calc_de_f(
+                self.ds_add_f(px, -forward.x * n_offset),
+                self.ds_add_f(py, -forward.y * n_offset),
+                self.ds_add_f(pz, -forward.z * n_offset)
+            )
+            let dx = self.calc_de_f(
+                self.ds_add_f(px, right.x * n_offset),
+                self.ds_add_f(py, right.y * n_offset),
+                self.ds_add_f(pz, right.z * n_offset)
+            ) - self.calc_de_f(
+                self.ds_add_f(px, -right.x * n_offset),
+                self.ds_add_f(py, -right.y * n_offset),
+                self.ds_add_f(pz, -right.z * n_offset)
+            )
+            let dy = self.calc_de_f(
+                self.ds_add_f(px, up.x * n_offset),
+                self.ds_add_f(py, up.y * n_offset),
+                self.ds_add_f(pz, up.z * n_offset)
+            ) - self.calc_de_f(
+                self.ds_add_f(px, -up.x * n_offset),
+                self.ds_add_f(py, -up.y * n_offset),
+                self.ds_add_f(pz, -up.z * n_offset)
+            )
+
+            return self.safe_normalize3(
+                right * dx +
+                up * dy +
+                forward * dz
+            )
+        }
+
+        render_color: fn() -> vec3 {
+            let dir = self.primary_dir()
+            let frag = self.frag_coord()
+            let half_w = self.rect_size.x * 0.5
+            let half_h = self.rect_size.y * 0.5
+            let x_offset = self.ds_mul(self.ds_new(frag.x - half_w), self.scene.step_width)
+            let y_offset = self.ds_mul(self.ds_new(frag.y - half_h), self.scene.step_width)
+            let march = self.primary_march()
+
+            if march.w < 0.5 {
+                return self.sky_for_y(dir.y * 0.5 + 0.5)
+            }
+
+            let depth = vec2(march.x, march.y)
+            let ox = self.ds_add(
+                self.ds_add(
+                    self.ds_add(self.scene.mid_x, self.ds_mul(self.scene.cam_forward_x, self.scene.z_start_delta)),
+                    self.ds_mul(self.scene.cam_right_x, x_offset)
+                ),
+                self.ds_mul(self.scene.cam_up_x, y_offset)
+            )
+            let oy = self.ds_add(
+                self.ds_add(
+                    self.ds_add(self.scene.mid_y, self.ds_mul(self.scene.cam_forward_y, self.scene.z_start_delta)),
+                    self.ds_mul(self.scene.cam_right_y, x_offset)
+                ),
+                self.ds_mul(self.scene.cam_up_y, y_offset)
+            )
+            let oz = self.ds_add(
+                self.ds_add(
+                    self.ds_add(self.scene.mid_z, self.ds_mul(self.scene.cam_forward_z, self.scene.z_start_delta)),
+                    self.ds_mul(self.scene.cam_right_z, x_offset)
+                ),
+                self.ds_mul(self.scene.cam_up_z, y_offset)
+            )
+            let dx = self.ds_new(dir.x)
+            let dy = self.ds_new(dir.y)
+            let dz = self.ds_new(dir.z)
+            let px = self.ds_add(ox, self.ds_mul(dx, depth))
+            let py = self.ds_add(oy, self.ds_mul(dy, depth))
+            let pz = self.ds_add(oz, self.ds_mul(dz, depth))
+            let normal = self.estimate_normal(px, py, pz, depth)
+            let light_dir = self.safe_normalize3(self.scene.debug_light_dir)
+            let diffuse = max(dot(normal, light_dir), 0.0)
+            let base = normal * 0.5 + 0.5
+            return base * (0.2 + 0.8 * diffuse)
         }
 
         pixel: fn() {
@@ -401,7 +581,7 @@ script_mod! {
                             draw_text.text_style.font_size: 14
                         }
                         Label{
-                            text: "double-single fragment shader experiment"
+                            text: "primary march + raw normals"
                             draw_text.color: #xa9b2bf
                             draw_text.text_style.font_size: 10
                         }
@@ -436,21 +616,19 @@ impl AppMain for App {
 
 #[derive(Clone)]
 struct AmazingUniforms {
-    scale: f32,
-    scale_div_min_r2: f32,
-    min_r2: f32,
-    fold: f32,
+    scale: f64,
+    scale_div_min_r2: f64,
+    min_r2: f64,
+    fold: f64,
 }
 
 #[derive(Clone)]
 struct MengerUniforms {
-    scale: f32,
-    cx: f32,
-    cy: f32,
-    cz: f32,
-    rot0: Vec3f,
-    rot1: Vec3f,
-    rot2: Vec3f,
+    scale: f64,
+    cx: f64,
+    cy: f64,
+    cz: f64,
+    rot: formulas::Mat3,
 }
 
 #[derive(Clone)]
@@ -462,61 +640,70 @@ struct CathedralScene {
     repeat_from_slot: f32,
     amazing: AmazingUniforms,
     menger: MengerUniforms,
-    light_dir: Vec3f,
-    light_color: Vec4f,
-    ambient_top: Vec4f,
-    ambient_bottom: Vec4f,
+    debug_light_dir: Vec3f,
     sky_color: Vec4f,
     sky_color2: Vec4f,
 }
 
 #[derive(Clone, Copy, Default, Script, ScriptHook)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct GpuMb3dUniforms {
-    #[live]
-    pub bg_color: Vec4f,
     #[live]
     pub sky_color: Vec4f,
     #[live]
     pub sky_color2: Vec4f,
     #[live]
-    pub surface_color: Vec4f,
+    pub debug_light_dir: Vec3f,
     #[live]
-    pub surface_color2: Vec4f,
+    pub debug_light_pad: f32,
     #[live]
-    pub light_color: Vec4f,
+    pub cam_right_x: Vec2f,
     #[live]
-    pub amb_top: Vec4f,
+    pub cam_right_y: Vec2f,
     #[live]
-    pub amb_bottom: Vec4f,
+    pub cam_right_z: Vec2f,
     #[live]
-    pub cam_right: Vec3f,
+    pub cam_right_pad: Vec2f,
     #[live]
-    pub cam_right_pad: f32,
+    pub cam_up_x: Vec2f,
     #[live]
-    pub cam_up: Vec3f,
+    pub cam_up_y: Vec2f,
     #[live]
-    pub cam_up_pad: f32,
+    pub cam_up_z: Vec2f,
     #[live]
-    pub cam_forward: Vec3f,
+    pub cam_up_pad: Vec2f,
     #[live]
-    pub cam_forward_pad: f32,
+    pub cam_forward_x: Vec2f,
     #[live]
-    pub light_dir: Vec3f,
+    pub cam_forward_y: Vec2f,
     #[live]
-    pub light_dir_pad: f32,
+    pub cam_forward_z: Vec2f,
     #[live]
-    pub rot0: Vec3f,
+    pub cam_forward_pad: Vec2f,
     #[live]
-    pub rot0_pad: f32,
+    pub rot0_x: Vec2f,
     #[live]
-    pub rot1: Vec3f,
+    pub rot0_y: Vec2f,
     #[live]
-    pub rot1_pad: f32,
+    pub rot0_z: Vec2f,
     #[live]
-    pub rot2: Vec3f,
+    pub rot0_pad: Vec2f,
     #[live]
-    pub rot2_pad: f32,
+    pub rot1_x: Vec2f,
+    #[live]
+    pub rot1_y: Vec2f,
+    #[live]
+    pub rot1_z: Vec2f,
+    #[live]
+    pub rot1_pad: Vec2f,
+    #[live]
+    pub rot2_x: Vec2f,
+    #[live]
+    pub rot2_y: Vec2f,
+    #[live]
+    pub rot2_z: Vec2f,
+    #[live]
+    pub rot2_pad: Vec2f,
     #[live]
     pub mid_x: Vec2f,
     #[live]
@@ -526,53 +713,57 @@ pub struct GpuMb3dUniforms {
     #[live]
     pub mid_pad: Vec2f,
     #[live]
-    pub fov_y: f32,
+    pub julia_x: Vec2f,
     #[live]
-    pub step_width: f32,
+    pub julia_y: Vec2f,
     #[live]
-    pub z_start_delta: f32,
+    pub julia_z: Vec2f,
     #[live]
-    pub max_ray_length: f32,
+    pub julia_pad: Vec2f,
     #[live]
-    pub de_stop: f32,
+    pub step_width: Vec2f,
     #[live]
-    pub de_stop_factor: f32,
+    pub z_start_delta: Vec2f,
     #[live]
-    pub s_z_step_div: f32,
+    pub max_ray_length: Vec2f,
     #[live]
-    pub ms_de_sub: f32,
+    pub de_stop_header: Vec2f,
     #[live]
-    pub mct_mh04_zsd: f32,
+    pub de_stop: Vec2f,
     #[live]
-    pub de_floor: f32,
+    pub de_stop_factor: Vec2f,
     #[live]
-    pub rstop: f32,
+    pub s_z_step_div: Vec2f,
     #[live]
-    pub max_iters: f32,
+    pub ms_de_sub: Vec2f,
     #[live]
-    pub slot0_iters: f32,
+    pub mct_mh04_zsd: Vec2f,
     #[live]
-    pub slot1_iters: f32,
+    pub de_floor: Vec2f,
     #[live]
-    pub repeat_from_slot: f32,
+    pub rstop: Vec2f,
     #[live]
-    pub ab_scale: f32,
+    pub ab_scale: Vec2f,
     #[live]
-    pub ab_scale_div_min_r2: f32,
+    pub ab_scale_div_min_r2: Vec2f,
     #[live]
-    pub ab_min_r2: f32,
+    pub ab_min_r2: Vec2f,
     #[live]
-    pub ab_fold: f32,
+    pub ab_fold: Vec2f,
     #[live]
-    pub menger_scale: f32,
+    pub menger_scale: Vec2f,
     #[live]
-    pub menger_cx: f32,
+    pub menger_cx: Vec2f,
     #[live]
-    pub menger_cy: f32,
+    pub menger_cy: Vec2f,
     #[live]
-    pub menger_cz: f32,
+    pub menger_cz: Vec2f,
     #[live]
-    pub tail_pad: f32,
+    pub controls0: Vec4f,
+    #[live]
+    pub controls1: Vec4f,
+    #[live]
+    pub tail_pad: Vec2f,
 }
 
 #[derive(Script, ScriptHook)]
@@ -626,75 +817,7 @@ impl GpuMb3dView {
             return;
         }
 
-        let scale = (rect.size.x / scene.base_width).max(0.001);
-        let mut params = render::RenderParams::from_m3p(&scene.m3p);
-        params.apply_image_scale(scale);
-
-        let inv_step = 1.0 / params.step_width.max(1.0e-30);
-        let uniforms = GpuMb3dUniforms {
-            bg_color: rgb4([0x0d, 0x10, 0x14]),
-            sky_color: scene.sky_color,
-            sky_color2: scene.sky_color2,
-            surface_color: rgb4([0xb2, 0xb1, 0xab]),
-            surface_color2: rgb4([0x7f, 0x7f, 0x79]),
-            light_color: scene.light_color,
-            amb_top: scene.ambient_top,
-            amb_bottom: scene.ambient_bottom,
-            cam_right: vec3f(
-                (params.camera.right.x * inv_step) as f32,
-                (params.camera.right.y * inv_step) as f32,
-                (params.camera.right.z * inv_step) as f32,
-            ),
-            cam_right_pad: 0.0,
-            cam_up: vec3f(
-                (params.camera.up.x * inv_step) as f32,
-                (params.camera.up.y * inv_step) as f32,
-                (params.camera.up.z * inv_step) as f32,
-            ),
-            cam_up_pad: 0.0,
-            cam_forward: vec3f(
-                (params.camera.forward.x * inv_step) as f32,
-                (params.camera.forward.y * inv_step) as f32,
-                (params.camera.forward.z * inv_step) as f32,
-            ),
-            cam_forward_pad: 0.0,
-            light_dir: scene.light_dir,
-            light_dir_pad: 0.0,
-            rot0: scene.menger.rot0,
-            rot0_pad: 0.0,
-            rot1: scene.menger.rot1,
-            rot1_pad: 0.0,
-            rot2: scene.menger.rot2,
-            rot2_pad: 0.0,
-            mid_x: split_f64(params.camera.mid.x),
-            mid_y: split_f64(params.camera.mid.y),
-            mid_z: split_f64(params.camera.mid.z),
-            mid_pad: Vec2f::default(),
-            fov_y: params.camera.fov_y as f32,
-            step_width: params.step_width as f32,
-            z_start_delta: (params.camera.z_start - params.camera.mid.z) as f32,
-            max_ray_length: params.max_ray_length as f32,
-            de_stop: params.de_stop as f32,
-            de_stop_factor: params.de_stop_factor as f32,
-            s_z_step_div: params.s_z_step_div as f32,
-            ms_de_sub: params.ms_de_sub as f32,
-            mct_mh04_zsd: params.mct_mh04_zsd as f32,
-            de_floor: params.de_floor as f32,
-            rstop: params.iter_params.rstop as f32,
-            max_iters: params.iter_params.max_iters as f32,
-            slot0_iters: scene.formula0_iters,
-            slot1_iters: scene.formula1_iters,
-            repeat_from_slot: scene.repeat_from_slot,
-            ab_scale: scene.amazing.scale,
-            ab_scale_div_min_r2: scene.amazing.scale_div_min_r2,
-            ab_min_r2: scene.amazing.min_r2,
-            ab_fold: scene.amazing.fold,
-            menger_scale: scene.menger.scale,
-            menger_cx: scene.menger.cx,
-            menger_cy: scene.menger.cy,
-            menger_cz: scene.menger.cz,
-            tail_pad: 0.0,
-        };
+        let uniforms = build_uniforms(scene, rect.size.x.max(1.0) as usize);
         let uniform_buffer = self
             .draw_gpu
             .scene_uniforms
@@ -721,8 +844,7 @@ impl Widget for GpuMb3dView {
 }
 
 fn load_cathedral_scene() -> Result<CathedralScene, String> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../local/mb3d/cathedral.m3p");
+    let path = find_cathedral_path()?;
     let path_string = path.to_string_lossy().to_string();
     let m3p = m3p::parse(&path_string).map_err(|err| format!("failed to parse {path_string}: {err}"))?;
 
@@ -743,7 +865,10 @@ fn load_cathedral_scene() -> Result<CathedralScene, String> {
     }
 
     if active.len() != 2 {
-        return Err(format!("gpu_mb3d expects exactly 2 active formulas in cathedral.m3p, found {}", active.len()));
+        return Err(format!(
+            "gpu_mb3d expects exactly 2 active formulas in cathedral.m3p, found {}",
+            active.len()
+        ));
     }
 
     let amazing_formula = &active[0];
@@ -755,10 +880,11 @@ fn load_cathedral_scene() -> Result<CathedralScene, String> {
     }
 
     let amazing = AmazingUniforms {
-        scale: amazing_formula.option_values[0] as f32,
-        scale_div_min_r2: (amazing_formula.option_values[0] / (amazing_formula.option_values[1] * amazing_formula.option_values[1]).max(1.0e-40)) as f32,
-        min_r2: (amazing_formula.option_values[1] * amazing_formula.option_values[1]).max(1.0e-40) as f32,
-        fold: amazing_formula.option_values[2] as f32,
+        scale: amazing_formula.option_values[0],
+        scale_div_min_r2: amazing_formula.option_values[0]
+            / (amazing_formula.option_values[1] * amazing_formula.option_values[1]).max(1.0e-40),
+        min_r2: (amazing_formula.option_values[1] * amazing_formula.option_values[1]).max(1.0e-40),
+        fold: amazing_formula.option_values[2],
     };
 
     let menger_formula = &active[1];
@@ -784,17 +910,15 @@ fn load_cathedral_scene() -> Result<CathedralScene, String> {
     };
 
     let menger = MengerUniforms {
-        scale: menger_formula.option_values[0] as f32,
-        cx: menger_formula.option_values[1] as f32,
-        cy: menger_formula.option_values[2] as f32,
-        cz: menger_formula.option_values[3] as f32,
-        rot0: vec3f(rot.m[0][0] as f32, rot.m[0][1] as f32, rot.m[0][2] as f32),
-        rot1: vec3f(rot.m[1][0] as f32, rot.m[1][1] as f32, rot.m[1][2] as f32),
-        rot2: vec3f(rot.m[2][0] as f32, rot.m[2][1] as f32, rot.m[2][2] as f32),
+        scale: menger_formula.option_values[0],
+        cx: menger_formula.option_values[1],
+        cy: menger_formula.option_values[2],
+        cz: menger_formula.option_values[3],
+        rot,
     };
 
     let camera = render::Camera::from_m3p(&m3p);
-    let light = select_primary_light(&m3p, &camera);
+    let debug_light_dir = select_primary_light(&m3p, &camera);
 
     Ok(CathedralScene {
         base_width: m3p.width as f64,
@@ -803,17 +927,127 @@ fn load_cathedral_scene() -> Result<CathedralScene, String> {
         repeat_from_slot: repeat_from_slot.unwrap_or(0) as f32,
         amazing,
         menger,
-        light_dir: light.0,
-        light_color: light.1,
-        ambient_top: rgb4(m3p.lighting.ambient_top),
-        ambient_bottom: rgb4(m3p.lighting.ambient_bottom),
+        debug_light_dir,
         sky_color: rgb4(m3p.lighting.depth_col),
         sky_color2: rgb4(m3p.lighting.depth_col2),
         m3p,
     })
 }
 
-fn select_primary_light(m3p: &m3p::M3PFile, camera: &render::Camera) -> (Vec3f, Vec4f) {
+fn find_cathedral_path() -> Result<PathBuf, String> {
+    let relative = PathBuf::from("local/mb3d/cathedral.m3p");
+    if let Ok(cwd) = std::env::current_dir() {
+        for dir in cwd.ancestors() {
+            let candidate = dir.join(&relative);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for dir in exe.ancestors() {
+            let candidate = dir.join(&relative);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    for dir in PathBuf::from(env!("CARGO_MANIFEST_DIR")).ancestors() {
+        let candidate = dir.join(&relative);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "could not locate {} from current_dir, current_exe, or manifest dir {}",
+        relative.display(),
+        env!("CARGO_MANIFEST_DIR")
+    ))
+}
+
+fn build_uniforms(scene: &CathedralScene, width: usize) -> GpuMb3dUniforms {
+    let scale = (width as f64 / scene.base_width).max(0.001);
+    let mut params = render::RenderParams::from_m3p(&scene.m3p);
+    params.apply_image_scale(scale);
+
+    let cam_right = params.camera.right.normalize();
+    let cam_up = params.camera.up.normalize();
+    let cam_forward = params.camera.forward.normalize();
+
+    GpuMb3dUniforms {
+        sky_color: scene.sky_color,
+        sky_color2: scene.sky_color2,
+        debug_light_dir: scene.debug_light_dir,
+        debug_light_pad: 0.0,
+        cam_right_x: split_f64(cam_right.x),
+        cam_right_y: split_f64(cam_right.y),
+        cam_right_z: split_f64(cam_right.z),
+        cam_right_pad: Vec2f::default(),
+        cam_up_x: split_f64(cam_up.x),
+        cam_up_y: split_f64(cam_up.y),
+        cam_up_z: split_f64(cam_up.z),
+        cam_up_pad: Vec2f::default(),
+        cam_forward_x: split_f64(cam_forward.x),
+        cam_forward_y: split_f64(cam_forward.y),
+        cam_forward_z: split_f64(cam_forward.z),
+        cam_forward_pad: Vec2f::default(),
+        rot0_x: split_f64(scene.menger.rot.m[0][0]),
+        rot0_y: split_f64(scene.menger.rot.m[0][1]),
+        rot0_z: split_f64(scene.menger.rot.m[0][2]),
+        rot0_pad: Vec2f::default(),
+        rot1_x: split_f64(scene.menger.rot.m[1][0]),
+        rot1_y: split_f64(scene.menger.rot.m[1][1]),
+        rot1_z: split_f64(scene.menger.rot.m[1][2]),
+        rot1_pad: Vec2f::default(),
+        rot2_x: split_f64(scene.menger.rot.m[2][0]),
+        rot2_y: split_f64(scene.menger.rot.m[2][1]),
+        rot2_z: split_f64(scene.menger.rot.m[2][2]),
+        rot2_pad: Vec2f::default(),
+        mid_x: split_f64(params.camera.mid.x),
+        mid_y: split_f64(params.camera.mid.y),
+        mid_z: split_f64(params.camera.mid.z),
+        mid_pad: Vec2f::default(),
+        julia_x: split_f64(params.iter_params.julia_x),
+        julia_y: split_f64(params.iter_params.julia_y),
+        julia_z: split_f64(params.iter_params.julia_z),
+        julia_pad: Vec2f::default(),
+        step_width: split_f64(params.step_width),
+        z_start_delta: split_f64(params.camera.z_start - params.camera.mid.z),
+        max_ray_length: split_f64(params.max_ray_length),
+        de_stop_header: split_f64(params.de_stop_header),
+        de_stop: split_f64(params.de_stop),
+        de_stop_factor: split_f64(params.de_stop_factor),
+        s_z_step_div: split_f64(params.s_z_step_div),
+        ms_de_sub: split_f64(params.ms_de_sub),
+        mct_mh04_zsd: split_f64(params.mct_mh04_zsd),
+        de_floor: split_f64(params.de_floor),
+        rstop: split_f64(params.iter_params.rstop),
+        ab_scale: split_f64(scene.amazing.scale),
+        ab_scale_div_min_r2: split_f64(scene.amazing.scale_div_min_r2),
+        ab_min_r2: split_f64(scene.amazing.min_r2),
+        ab_fold: split_f64(scene.amazing.fold),
+        menger_scale: split_f64(scene.menger.scale),
+        menger_cx: split_f64(scene.menger.cx),
+        menger_cy: split_f64(scene.menger.cy),
+        menger_cz: split_f64(scene.menger.cz),
+        controls0: Vec4f {
+            x: params.camera.fov_y as f32,
+            y: params.iter_params.max_iters as f32,
+            z: scene.formula0_iters,
+            w: scene.formula1_iters,
+        },
+        controls1: Vec4f {
+            x: scene.repeat_from_slot,
+            y: if params.iter_params.is_julia { 1.0 } else { 0.0 },
+            z: 0.0,
+            w: 0.0,
+        },
+        tail_pad: Vec2f::default(),
+    }
+}
+
+fn select_primary_light(m3p: &m3p::M3PFile, camera: &render::Camera) -> Vec3f {
     for light in &m3p.lighting.lights {
         let mut opt = (light.l_option & 3) as i32;
         if opt == 3 {
@@ -838,34 +1072,10 @@ fn select_primary_light(m3p: &m3p::M3PFile, camera: &render::Camera) -> (Vec3f, 
             .add(f.scale(local_dir.z))
             .normalize();
 
-        let lamp_mul = if ((light.l_option >> 2) & 1) != 0 {
-            light.l_amp * 1.3
-        } else {
-            light.l_amp
-        } as f32;
-
-        let color = Vec4f {
-            x: (light.color[0] as f32 / 255.0) * lamp_mul,
-            y: (light.color[1] as f32 / 255.0) * lamp_mul,
-            z: (light.color[2] as f32 / 255.0) * lamp_mul,
-            w: 1.0,
-        };
-
-        return (
-            vec3f(dir.x as f32, dir.y as f32, dir.z as f32),
-            color,
-        );
+        return vec3f(dir.x as f32, dir.y as f32, dir.z as f32);
     }
 
-    (
-        vec3f(-0.35, 0.8, 0.45),
-        Vec4f {
-            x: 0.85,
-            y: 0.82,
-            z: 0.78,
-            w: 1.0,
-        },
-    )
+    vec3f(-0.35, 0.8, 0.45)
 }
 
 fn rgb4(color: [u8; 3]) -> Vec4f {

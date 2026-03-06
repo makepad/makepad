@@ -111,121 +111,6 @@ fn ds_box_fold(a: Vec2f, fold: Vec2f) -> Vec2f {
     ds_sub(ds_sub(ds_abs(ds_add(a, fold)), ds_abs(ds_sub(a, fold))), a)
 }
 
-fn hybrid_de_vec2_uniforms(scene: &GpuUniforms, px: Vec2f, py: Vec2f, pz: Vec2f) -> (f32, Vec2f) {
-    let cx = if scene.is_julia {
-        ds_from_split(split_f64(scene.julia_x))
-    } else {
-        px
-    };
-    let cy = if scene.is_julia {
-        ds_from_split(split_f64(scene.julia_y))
-    } else {
-        py
-    };
-    let cz = if scene.is_julia {
-        ds_from_split(split_f64(scene.julia_z))
-    } else {
-        pz
-    };
-
-    let mut x = px;
-    let mut y = py;
-    let mut z = pz;
-    let mut w = ds_new(1.0);
-    let mut r2 = ds_new(0.0);
-    let mut iters = 0.0f32;
-    let mut slot = 0usize;
-    let mut remaining = scene.slot0_iters.round() as i32;
-    let repeat_from_slot = scene.repeat_from_slot.round() as usize;
-    let max_iters = scene.max_iters.round() as i32;
-
-    for _ in 0..128 {
-        if remaining <= 0 {
-            slot += 1;
-            if slot >= 2 {
-                slot = repeat_from_slot;
-            }
-            remaining = if slot == 0 {
-                scene.slot0_iters.round() as i32
-            } else {
-                scene.slot1_iters.round() as i32
-            };
-        }
-
-        if slot == 0 {
-            let fold = ds_new(scene.ab_fold);
-            x = ds_box_fold(x, fold);
-            y = ds_box_fold(y, fold);
-            z = ds_box_fold(z, fold);
-
-            let rr = ds_add(ds_add(ds_mul(x, x), ds_mul(y, y)), ds_mul(z, z));
-            let m = if ds_lt(rr, ds_new(scene.ab_min_r2)) {
-                scene.ab_scale_div_min_r2
-            } else if ds_lt(rr, ds_new(1.0)) {
-                scene.ab_scale / ds_to_f(rr).max(1.0e-7)
-            } else {
-                scene.ab_scale
-            };
-
-            w = ds_mul_f(w, m);
-            x = ds_add(ds_mul_f(x, m), cx);
-            y = ds_add(ds_mul_f(y, m), cy);
-            z = ds_add(ds_mul_f(z, m), cz);
-        } else {
-            x = ds_abs(x);
-            y = ds_abs(y);
-            z = ds_abs(z);
-
-            if ds_lt(x, y) {
-                std::mem::swap(&mut x, &mut y);
-            }
-            if ds_lt(x, z) {
-                std::mem::swap(&mut x, &mut z);
-            }
-            if ds_lt(y, z) {
-                std::mem::swap(&mut y, &mut z);
-            }
-
-            let nx = ds_add(
-                ds_add(ds_mul_f(x, scene.rot0.x), ds_mul_f(y, scene.rot0.y)),
-                ds_mul_f(z, scene.rot0.z),
-            );
-            let ny = ds_add(
-                ds_add(ds_mul_f(x, scene.rot1.x), ds_mul_f(y, scene.rot1.y)),
-                ds_mul_f(z, scene.rot1.z),
-            );
-            let nz = ds_add(
-                ds_add(ds_mul_f(x, scene.rot2.x), ds_mul_f(y, scene.rot2.y)),
-                ds_mul_f(z, scene.rot2.z),
-            );
-
-            let sf = scene.menger_scale - 1.0;
-            x = ds_add_f(ds_mul_f(nx, scene.menger_scale), -scene.menger_cx * sf);
-            y = ds_add_f(ds_mul_f(ny, scene.menger_scale), -scene.menger_cy * sf);
-            let c = scene.menger_cz * sf;
-            z = ds_sub(ds_new(c), ds_abs(ds_add_f(ds_mul_f(nz, scene.menger_scale), -c)));
-            w = ds_mul_f(w, scene.menger_scale);
-        }
-
-        iters += 1.0;
-        remaining -= 1;
-        r2 = ds_add(ds_add(ds_mul(x, x), ds_mul(y, y)), ds_mul(z, z));
-        if ds_gt(r2, ds_new(scene.rstop)) || iters >= max_iters as f32 {
-            break;
-        }
-    }
-
-    let de = ds_div(ds_sqrt(r2), ds_abs(w));
-    (iters, de)
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ShaderHit {
-    depth: f32,
-    iters: f32,
-    hit: bool,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct Vec2MarchHit {
     depth: Vec2f,
@@ -1273,6 +1158,155 @@ fn render_ported_vec2_25pct() {
         "ported vec2 render: {}x{} hits={} output={}",
         out_w, out_h, hits, output_path
     );
+}
+
+#[test]
+#[ignore = "manual debug of vec2 center primary march progress"]
+fn debug_vec2_center_primary_progress() {
+    let path = format!("{}/../../local/mb3d/cathedral.m3p", env!("CARGO_MANIFEST_DIR"));
+    let scene = load_cathedral_scene(&path).expect("cathedral scene should load");
+    let width = 960usize;
+    let scale = (width as f64 / scene.base_width).max(0.001);
+    let mut params = render::RenderParams::from_m3p(&scene.m3p);
+    params.apply_image_scale(scale);
+    let out_w = params.camera.width as usize;
+    let out_h = params.camera.height as usize;
+    let center_x = out_w / 2;
+    let center_y = out_h / 2;
+
+    let uploads = build_ds_uploads(&scene, out_w);
+    let (origin, dir) = shaderlike_ray_for_pixel_vec2(&uploads, out_w, out_h, center_x, center_y);
+    let pos0 = vec2_num3_add(origin, vec2_num3_scale(dir, ds_new(0.0)));
+    let (iters0, de0) = calc_de_vec2_uploads(&uploads, pos0.x, pos0.y, pos0.z);
+    let stop0 = scene_destop_at_steps_vec2(&uploads, ds_new(0.0));
+
+    println!(
+        "center {}x{} pixel=({}, {}) step_width={:.9e} de_stop={:.9e} max_ray_length={:.9e} s_z_step_div={:.9e} ms_de_sub={:.9e} mct_mh04_zsd={:.9e}",
+        out_w,
+        out_h,
+        center_x,
+        center_y,
+        ds_to_f(ds_from_split(uploads.step_width)),
+        ds_to_f(ds_from_split(uploads.de_stop)),
+        ds_to_f(ds_from_split(uploads.max_ray_length)),
+        ds_to_f(ds_from_split(uploads.s_z_step_div)),
+        ds_to_f(ds_from_split(uploads.ms_de_sub)),
+        ds_to_f(ds_from_split(uploads.mct_mh04_zsd)),
+    );
+    println!(
+        "origin=({:.9e}, {:.9e}, {:.9e}) dir=({:.9e}, {:.9e}, {:.9e})",
+        ds_to_f(origin.x),
+        ds_to_f(origin.y),
+        ds_to_f(origin.z),
+        ds_to_f(dir.x),
+        ds_to_f(dir.y),
+        ds_to_f(dir.z),
+    );
+    println!(
+        "first_eval: iters={} de={:.9e} stop={:.9e} ratio={:.9e}",
+        iters0,
+        ds_to_f(de0),
+        ds_to_f(stop0),
+        ds_to_f(de0) / ds_to_f(stop0).max(1.0e-30),
+    );
+
+    let limits = [16384usize, 65536usize, 262144usize, 1048576usize, 2000000usize];
+    for limit in limits {
+        let mut t = ds_new(0.0);
+        let mut last_step;
+        let mut last_de;
+        let mut rsfmul = ds_new(1.0);
+        let pos = vec2_num3_add(origin, vec2_num3_scale(dir, t));
+        let (iters, de) = calc_de_vec2_uploads(&uploads, pos.x, pos.y, pos.z);
+        let current_destop = scene_destop_at_steps_vec2(&uploads, ds_div(t, ds_from_split(uploads.step_width)));
+        if iters >= uploads.max_iters || ds_lt(de, current_destop) {
+            println!("limit={} hit immediately", limit);
+            continue;
+        }
+        last_step = ds_max(
+            ds_mul(de, ds_from_split(uploads.s_z_step_div)),
+            ds_mul(ds_from_split(uploads.step_width), ds_new(0.11)),
+        );
+        last_de = de;
+
+        let mut hit = false;
+        let mut miss = false;
+        let mut steps_taken = 0usize;
+        for step_idx in 0..limit {
+            let current_destop =
+                scene_destop_at_steps_vec2(&uploads, ds_div(t, ds_from_split(uploads.step_width)));
+            let pos = vec2_num3_add(origin, vec2_num3_scale(dir, t));
+            let (iters, mut de) = calc_de_vec2_uploads(&uploads, pos.x, pos.y, pos.z);
+            let max_de = ds_add(last_de, last_step);
+            if ds_gt(de, max_de) {
+                de = max_de;
+            }
+
+            if iters < uploads.max_iters && !ds_lt(de, current_destop) {
+                let mut step = ds_max(
+                    ds_mul(
+                        ds_mul(
+                            ds_sub(de, ds_mul(ds_from_split(uploads.ms_de_sub), current_destop)),
+                            ds_from_split(uploads.s_z_step_div),
+                        ),
+                        rsfmul,
+                    ),
+                    ds_mul(ds_from_split(uploads.step_width), ds_new(0.11)),
+                );
+                let max_step_here = ds_mul(
+                    ds_max(current_destop, ds_mul(ds_from_split(uploads.step_width), ds_new(0.4))),
+                    ds_from_split(uploads.mct_mh04_zsd),
+                );
+                if ds_lt(max_step_here, step) {
+                    step = max_step_here;
+                }
+
+                let de_eps = ds_add(de, ds_new(1.0e-30));
+                if ds_gt(last_de, de_eps) {
+                    let denom = ds_to_f(ds_sub(last_de, de)).max(1.0e-30);
+                    let ratio = ds_to_f(last_step) / denom;
+                    rsfmul = if ratio < 1.0 {
+                        ds_new(ratio.max(0.5))
+                    } else {
+                        ds_new(1.0)
+                    };
+                } else {
+                    rsfmul = ds_new(1.0);
+                }
+
+                last_de = de;
+                last_step = step;
+                t = ds_add(t, step);
+                steps_taken = step_idx + 1;
+
+                if ds_gt(t, ds_from_split(uploads.max_ray_length)) {
+                    miss = true;
+                    break;
+                }
+            } else {
+                hit = true;
+                steps_taken = step_idx + 1;
+                break;
+            }
+        }
+
+        let state = if hit {
+            "hit"
+        } else if miss {
+            "miss"
+        } else {
+            "exhausted"
+        };
+        println!(
+            "limit={} state={} steps_taken={} depth={:.9e} depth_steps={:.9e} last_de={:.9e}",
+            limit,
+            state,
+            steps_taken,
+            ds_to_f(t),
+            ds_to_f(ds_div(t, ds_from_split(uploads.step_width))),
+            ds_to_f(last_de),
+        );
+    }
 }
 
 #[test]

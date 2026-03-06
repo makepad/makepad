@@ -414,14 +414,43 @@ impl ShaderOutput {
     }
 
     pub fn create_struct_defs(&mut self, vm: &ScriptVm, out: &mut String) {
+        let mut plain_structs = self.structs.clone();
+        let mut packed_structs = BTreeSet::new();
+
         for io in &self.io {
             let ty = io.ty;
-            if let ScriptPodTy::Struct { .. } = vm.bx.heap.pod_type_ref(ty).ty {
-                self.structs.insert(ty);
+            if !matches!(vm.bx.heap.pod_type_ref(ty).ty, ScriptPodTy::Struct { .. }) {
+                continue;
+            }
+
+            if matches!(self.backend, ShaderBackend::Metal)
+                && matches!(
+                    io.kind,
+                    ShaderIoKind::UniformBuffer
+                        | ShaderIoKind::VertexBuffer
+                        | ShaderIoKind::RustInstance
+                        | ShaderIoKind::DynInstance
+                )
+            {
+                packed_structs.insert(ty);
+            } else {
+                plain_structs.insert(ty);
             }
         }
-        self.backend
-            .pod_struct_defs(&vm.bx.heap, &self.structs, out);
+
+        for ty in &packed_structs {
+            plain_structs.remove(ty);
+        }
+
+        self.structs.extend(plain_structs.iter().copied());
+        self.structs.extend(packed_structs.iter().copied());
+
+        if matches!(self.backend, ShaderBackend::Metal) {
+            self.backend
+                .pod_struct_defs_mixed(&vm.bx.heap, &plain_structs, &packed_structs, out);
+        } else {
+            self.backend.pod_struct_defs(&vm.bx.heap, &self.structs, out);
+        }
     }
 
     pub fn create_functions(&self, out: &mut String) {
