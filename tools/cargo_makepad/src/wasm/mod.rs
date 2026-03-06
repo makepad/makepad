@@ -2,16 +2,14 @@ mod compile;
 mod sdk;
 use compile::WasmConfig;
 
-const DEFAULT_SPLIT_AUTO_PRIMARY_BYTES: usize = 1_500_000;
-
 fn enable_strip_pipeline(config: &mut WasmConfig) {
     config.strip = true;
     config.optimize_size = true;
 }
 
-fn enable_split_pipeline(config: &mut WasmConfig, threshold: Option<usize>, auto_primary_bytes: Option<usize>) {
+fn enable_split_pipeline(config: &mut WasmConfig, threshold: Option<usize>) {
     config.split = true;
-    config.split_auto_primary_bytes = auto_primary_bytes;
+    config.split_auto = threshold.is_none();
     if let Some(threshold) = threshold {
         config.split_functions_threshold = threshold;
     }
@@ -31,14 +29,10 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
         enable_strip_pipeline(config);
         true
     } else if v == "--split" {
-        enable_split_pipeline(config, None, Some(DEFAULT_SPLIT_AUTO_PRIMARY_BYTES));
+        enable_split_pipeline(config, None);
         true
     } else if let Some(threshold) = v.strip_prefix("--split=") {
-        enable_split_pipeline(
-            config,
-            Some(threshold.parse::<usize>().unwrap_or(200)),
-            None,
-        );
+        enable_split_pipeline(config, Some(threshold.parse::<usize>().unwrap_or(200)));
         true
     } else if v == "--small-fonts" {
         config.small_fonts = true;
@@ -88,9 +82,9 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         threads: true,
         optimize_size: false,
         split: false,
+        split_auto: false,
         split_functions: false,
         split_functions_threshold: 200,
-        split_auto_primary_bytes: None,
     };
 
     // pull out options

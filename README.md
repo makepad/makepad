@@ -113,7 +113,7 @@ For smaller shipped wasm output, use the shipping-size optimization pass. It kee
 cargo makepad wasm build -p makepad-example-splash --profile=small --strip
 ```
 
-To split the wasm payloads, add `--split`. Bare `--split` uses an automatic heuristic that targets a `1.5 MB` primary wasm after the data split. It only uses defer-safe cold functions, so startup can begin on the primary first and patch the secondary later. If the cold-only pass cannot reach the target, auto mode now keeps startup-safe behavior instead of forcing the secondary onto the startup path. To override the function-splitting threshold directly, pass it on `--split`:
+To split the wasm payloads, add `--split`. Bare `--split` now uses an automatic cold-first policy: it first moves defer-safe cold functions into a secondary wasm so startup can begin on the primary first, and if there are no useful cold candidates it falls back to the normal function split so the app still gets a secondary wasm. To override the function-splitting threshold directly, pass it on `--split`:
 
 ```bash
 cargo makepad wasm build -p makepad-example-splash --release --strip --split=200
@@ -128,8 +128,8 @@ Notes:
 - `--no-threads` trims the web thread bridge and thread exports from the wasm when threading support is disabled.
 - The wasm linker also packs relocations before the post-link size and split passes.
 - `--split` emits a primary wasm plus secondary payloads and also implies function splitting.
-- Bare `--split` uses an automatic target-size heuristic with a cold-first deferred policy.
-- Auto mode only uses defer-safe cold splits; if that cannot meet the target, it keeps startup-safe behavior instead of forcing a full startup-path split.
+- Bare `--split` uses an automatic cold-first split policy.
+- Auto mode defers the secondary when it finds defer-safe cold functions, otherwise it falls back to the normal startup-path split so the app still gets a secondary wasm.
 - `--split=200` switches to an explicit function-body threshold.
 
 3. Open:

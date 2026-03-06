@@ -1651,6 +1651,24 @@ pub fn wasm_split_functions_to_target_primary_size_cold(
     build_function_split_result(buf, &info, &split_indices)
 }
 
+pub fn wasm_split_functions_cold(buf: &[u8]) -> Result<WasmFunctionSplitResult, WasmParseError> {
+    let info = parse_wasm_module_info(buf)?;
+    let num_defined = info.func_type_indices.len();
+
+    let startup_hot = startup_hot_function_indices(buf, &info)?;
+    let mut split_indices = selectable_function_indices(&info)
+        .into_iter()
+        .filter(|index| !startup_hot.contains(index))
+        .collect::<Vec<_>>();
+
+    if split_indices.is_empty() {
+        return Ok(empty_function_split_result(buf, num_defined));
+    }
+
+    split_indices.sort_unstable();
+    build_function_split_result(buf, &info, &split_indices)
+}
+
 // ---------------------------------------------------------------------------
 
 pub fn wasm_split_data_segments(buf: &[u8]) -> Result<WasmDataSplitResult, WasmParseError> {

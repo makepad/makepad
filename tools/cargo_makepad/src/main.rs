@@ -48,7 +48,7 @@ fn show_help() {
         "       --optimize-size                           Alias for --strip"
     );
     println!(
-        "       --split[=200]                             Split wasm payloads; bare --split auto-targets a 1.5 MB primary wasm with a cold-first deferred policy"
+        "       --split[=200]                             Split wasm payloads; bare --split uses a cold-first automatic split policy"
     );
     println!(
         "       --brotli                                  Use brotli to compress the wasm file"
