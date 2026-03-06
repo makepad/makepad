@@ -2,19 +2,36 @@ mod compile;
 mod sdk;
 use compile::WasmConfig;
 
+fn enable_strip_pipeline(config: &mut WasmConfig) {
+    config.strip = true;
+    config.optimize_size = true;
+}
+
+fn enable_split_pipeline(config: &mut WasmConfig, threshold: Option<usize>) {
+    config.split = true;
+    if let Some(threshold) = threshold {
+        config.split_functions_threshold = threshold;
+    }
+}
+
 fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     if let Some(opt) = v.strip_prefix("--port=") {
         config.port = Some(opt.parse::<u16>().unwrap_or(8010));
         true
-    } else if v == "--strip" {
+    } else if v == "--strip-custom-sections" {
         config.strip = true;
+        true
+    } else if v == "--strip" {
+        enable_strip_pipeline(config);
         true
     } else if v == "--optimize-size" {
-        config.optimize_size = true;
-        config.strip = true;
+        enable_strip_pipeline(config);
         true
     } else if v == "--split" {
-        config.split = true;
+        enable_split_pipeline(config, None);
+        true
+    } else if let Some(threshold) = v.strip_prefix("--split=") {
+        enable_split_pipeline(config, Some(threshold.parse::<usize>().unwrap_or(200)));
         true
     } else if v == "--small-fonts" {
         config.small_fonts = true;

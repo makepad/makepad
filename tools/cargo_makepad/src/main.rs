@@ -39,13 +39,16 @@ fn show_help() {
     println!("       --port=8010                               The port to run the wasm webserver");
     println!("       --lan                                     Bind the webserver to your lan ip");
     println!(
-        "       --strip                                   Strip custom wasm sections from the output file"
+        "       --strip                                   Shipping-size wasm optimization pass (implies custom-section stripping)"
     );
     println!(
-        "       --optimize-size                           Enable the explicit shipping-size wasm pass (implies --strip)"
+        "       --strip-custom-sections                   Legacy mode: only strip custom wasm sections"
     );
     println!(
-        "       --split                                   Split wasm data segments into a secondary payload"
+        "       --optimize-size                           Alias for --strip"
+    );
+    println!(
+        "       --split[=200]                             Split wasm payloads; function splitting is implied and threshold is configurable"
     );
     println!(
         "       --brotli                                  Use brotli to compress the wasm file"

@@ -581,11 +581,18 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         fs::read(&wasm_source).map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?
     };
 
+    // `--split` implies function splitting as part of the higher-level split pipeline.
+    let split_functions_enabled = config.split || config.split_functions;
+
     // Function splitting: split large functions into primary (stubs) + secondary (real bodies)
     let secondary_wasm_dest = app_dir.join(format!("{}.secondary.wasm", build_crate));
-    let secondary_wasm_path = if config.split_functions {
+    let secondary_wasm_path = if split_functions_enabled {
         if config.bindgen {
-            return Err("--split-functions is not supported together with --bindgen".to_string());
+            return Err(if config.split {
+                "--split is not supported together with --bindgen".to_string()
+            } else {
+                "--split-functions is not supported together with --bindgen".to_string()
+            });
         }
         let result = wasm_split_functions(&output, config.split_functions_threshold)
             .map_err(|e| format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e))?;

@@ -107,26 +107,27 @@ cargo makepad wasm install-toolchain
 cargo makepad wasm run -p makepad-example-splash --release
 ```
 
-For smaller shipped wasm output, enable the opt-in post-link size pass. It keeps the existing custom-section stripping behavior, prints a wasm size report, and pairs well with the existing `small` profile:
+For smaller shipped wasm output, use the shipping-size optimization pass. It keeps the post-link size reduction behavior and pairs well with the existing `small` profile:
 
 ```bash
-cargo makepad wasm build -p makepad-example-splash --profile=small --optimize-size
+cargo makepad wasm build -p makepad-example-splash --profile=small --strip
 ```
 
-To split the wasm data section into a secondary payload, add `--split`:
+To split the wasm payloads, add `--split`. To override the function-splitting threshold, pass it on `--split`:
 
 ```bash
-cargo makepad wasm build -p makepad-example-splash --release --optimize-size --split
+cargo makepad wasm build -p makepad-example-splash --release --strip --split=200
 ```
 
 Notes:
 
-- `--optimize-size` is a shipping-size feature, not a testcase reducer.
-- It does not add a Binaryen dependency and does not implement Binaryen-style function splitting.
-- `--profile=small` remains independent; combine it with `--optimize-size` for the smallest current output.
+- `--strip` is a shipping-size feature, not a testcase reducer.
+- `--optimize-size` is kept as an alias for `--strip`.
+- `--strip-custom-sections` preserves the old behavior when you only want to remove custom sections.
+- `--profile=small` remains independent; combine it with `--strip` for the smallest current output.
 - `--no-threads` trims the web thread bridge and thread exports from the wasm when threading support is disabled.
 - The wasm linker also packs relocations before the post-link size and split passes.
-- `--split` currently emits a primary wasm plus a `<crate>.data.bin` payload and hydrates memory before app startup.
+- `--split` emits a primary wasm plus secondary payloads and also implies function splitting.
 
 3. Open:
 
