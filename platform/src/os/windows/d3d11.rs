@@ -627,7 +627,7 @@ impl D3d11Window {
         let mut win32_window =
             Box::new(Win32Window::new(window_id, title, position, is_fullscreen));
         win32_window.init(inner_size);
-
+        win32_window.set_ime_active(false);
         let wg = win32_window.get_window_geom();
 
         let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
