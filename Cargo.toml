@@ -19,8 +19,6 @@ workspace.members = [
     "examples/pdf",
     "examples/text_input",
     "examples/counter",
-    "examples/gpu_mb3d",
-#    "examples/matrix",
     "libs/gltf",
     "libs/splat",
     "libs/makepad_physics",
@@ -42,8 +40,6 @@ workspace.members = [
     "libs/mb3d",
     "libs/git",
     "libs/fast_inflate",
-    # "libs/voice",
-#    "libs/matrix",
 ]
 
 workspace.exclude = [
