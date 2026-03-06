@@ -45,9 +45,6 @@ fn show_help() {
         "       --strip-custom-sections                   Legacy mode: only strip custom wasm sections"
     );
     println!(
-        "       --optimize-size                           Alias for --strip"
-    );
-    println!(
         "       --wasm-opt                                Run Binaryen wasm-opt -Os for IR-level optimization (optional; requires binaryen)"
     );
     println!(

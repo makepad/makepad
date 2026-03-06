@@ -25,9 +25,6 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     } else if v == "--strip" {
         enable_strip_pipeline(config);
         true
-    } else if v == "--optimize-size" {
-        enable_strip_pipeline(config);
-        true
     } else if v == "--wasm-opt" {
         config.wasm_opt = true;
         true

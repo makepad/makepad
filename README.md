@@ -113,24 +113,31 @@ For smaller shipped wasm output, use the shipping-size optimization pass. It kee
 cargo makepad wasm build -p makepad-example-splash --profile=small --strip
 ```
 
-To split the wasm payloads, add `--split`. Bare `--split` now uses an automatic cold-first policy: it first moves defer-safe cold functions into a secondary wasm so startup can begin on the primary first, and if there are no useful cold candidates it falls back to the normal function split so the app still gets a secondary wasm. To override the function-splitting threshold directly, pass it on `--split`:
+To split the wasm payloads, add `--split`. Bare `--split` uses an automatic cold-first policy: it first moves defer-safe cold functions into a secondary wasm so startup can begin on the primary first, and if there are no useful cold candidates it falls back to the normal function split. To override the function-splitting threshold directly:
 
 ```bash
 cargo makepad wasm build -p makepad-example-splash --release --strip --split=200
 ```
 
+For maximum size reduction, combine `--wasm-opt` (Binaryen IR optimization) and `--brotli` (compression). Install Binaryen for `--wasm-opt` (e.g. `brew install binaryen` or `apt install binaryen`):
+
+```bash
+cargo makepad wasm build -p makepad-example-splash --release --wasm-opt --strip --split --brotli
+```
+
 Notes:
 
-- `--strip` is a shipping-size feature, not a testcase reducer.
-- `--optimize-size` is kept as an alias for `--strip`.
+- `--strip` strips custom sections (names, producers, etc.) for smaller binaries.
 - `--strip-custom-sections` preserves the old behavior when you only want to remove custom sections.
-- `--profile=small` remains independent; combine it with `--strip` for the smallest current output.
-- `--no-threads` trims the web thread bridge and thread exports from the wasm when threading support is disabled.
-- The wasm linker also packs relocations before the post-link size and split passes.
-- `--split` emits a primary wasm plus secondary payloads and also implies function splitting.
+- `--wasm-opt` runs Binaryen `wasm-opt -Os` for IR-level optimization (optional; requires [Binaryen](https://github.com/WebAssembly/binaryen)).
+- `--brotli` compresses `.wasm` and assets with Brotli for delivery.
+- `--profile=small` uses smaller fonts and pairs well with `--strip`.
+- `--no-threads` trims the web thread bridge and thread exports when threading is disabled.
+- The wasm linker packs relocations before the post-link size and split passes.
+- `--split` emits a primary wasm plus secondary payloads (`.secondary.wasm`, `.data.bin`) and implies function splitting.
 - Bare `--split` uses an automatic cold-first split policy.
-- Auto mode defers the secondary when it finds defer-safe cold functions, otherwise it falls back to the normal startup-path split so the app still gets a secondary wasm.
-- `--split=200` switches to an explicit function-body threshold.
+- Auto mode defers the secondary when it finds defer-safe cold functions, otherwise falls back to the normal startup-path split.
+- `--split=200` switches to an explicit function-body threshold (bytes).
 
 3. Open:
 
