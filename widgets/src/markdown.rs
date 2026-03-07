@@ -243,6 +243,8 @@ struct ListState {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Markdown {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]
@@ -653,6 +655,8 @@ impl MarkdownRef {
 
 #[derive(Script, ScriptHook, Widget)]
 struct MarkdownLink {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]

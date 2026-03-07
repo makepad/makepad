@@ -130,6 +130,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Chart3D {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]

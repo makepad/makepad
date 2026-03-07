@@ -11,6 +11,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct TurtleStep {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]
