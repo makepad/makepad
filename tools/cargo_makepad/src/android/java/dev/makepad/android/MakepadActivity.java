@@ -17,6 +17,10 @@ import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
+import android.media.MediaFormat;
 import android.media.midi.MidiDevice;
 import android.media.midi.MidiDeviceInfo;
 import android.media.midi.MidiManager;
@@ -556,6 +560,38 @@ class MakepadSurface
     }
 }
 
+class CameraPreviewSurface extends SurfaceView implements SurfaceHolder.Callback {
+    private final long mVideoId;
+
+    public CameraPreviewSurface(Context context, long videoId) {
+        super(context);
+        mVideoId = videoId;
+        getHolder().addCallback(this);
+        setZOrderMediaOverlay(true);
+    }
+
+    @Override
+    public void surfaceCreated(SurfaceHolder holder) {
+        Surface surface = holder.getSurface();
+        if (surface != null) {
+            MakepadNative.onCameraPreviewSurfaceReady(mVideoId, surface, getWidth(), getHeight());
+        }
+    }
+
+    @Override
+    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        Surface surface = holder.getSurface();
+        if (surface != null) {
+            MakepadNative.onCameraPreviewSurfaceReady(mVideoId, surface, width, height);
+        }
+    }
+
+    @Override
+    public void surfaceDestroyed(SurfaceHolder holder) {
+        MakepadNative.onCameraPreviewSurfaceDestroyed(mVideoId);
+    }
+}
+
 class SelectionHandleView extends View {
     public SelectionHandleView(Context context, int color, int sizePx) {
         super(context);
@@ -619,6 +655,7 @@ public class MakepadActivity
     // native camera preview overlays
     private FrameLayout mRootLayout;
     private FrameLayout mCameraPreviewOverlay;
+    private HashMap<Long, CameraPreviewSurface> mCameraPreviewViews = new HashMap<>();
 
     // selection handles overlay
     private static final int SELECTION_HANDLE_START = 0;
@@ -746,6 +783,13 @@ public class MakepadActivity
 
     @Override
     protected void onDestroy() {
+        if (mCameraPreviewOverlay != null) {
+            for (Long videoId : mCameraPreviewViews.keySet()) {
+                MakepadNative.onCameraPreviewSurfaceDestroyed(videoId);
+            }
+            mCameraPreviewViews.clear();
+            mCameraPreviewOverlay.removeAllViews();
+        }
         if (mSelectionHandleOverlay != null) {
             mSelectionHandleOverlay.removeAllViews();
             mSelectionHandleOverlay = null;
@@ -1408,6 +1452,166 @@ public class MakepadActivity
         }
     }
 
+    public void attachCameraNativePreview(final long videoId, final int left, final int top, final int right, final int bottom) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mCameraPreviewOverlay == null) {
+                    return;
+                }
+                CameraPreviewSurface preview = mCameraPreviewViews.get(videoId);
+                if (preview == null) {
+                    preview = new CameraPreviewSurface(MakepadActivity.this, videoId);
+                    mCameraPreviewViews.put(videoId, preview);
+                    mCameraPreviewOverlay.addView(preview);
+                }
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    Math.max(1, right - left),
+                    Math.max(1, bottom - top)
+                );
+                lp.leftMargin = left;
+                lp.topMargin = top;
+                preview.setLayoutParams(lp);
+                preview.setVisibility(View.VISIBLE);
+            }
+        });
+    }
+
+    public void updateCameraNativePreview(final long videoId, final int left, final int top, final int right, final int bottom, final boolean visible) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                CameraPreviewSurface preview = mCameraPreviewViews.get(videoId);
+                if (preview == null) {
+                    if (visible) {
+                        attachCameraNativePreview(videoId, left, top, right, bottom);
+                    }
+                    return;
+                }
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    Math.max(1, right - left),
+                    Math.max(1, bottom - top)
+                );
+                lp.leftMargin = left;
+                lp.topMargin = top;
+                preview.setLayoutParams(lp);
+                preview.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
+            }
+        });
+    }
+
+    public void detachCameraNativePreview(final long videoId) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                CameraPreviewSurface preview = mCameraPreviewViews.remove(videoId);
+                if (preview != null && mCameraPreviewOverlay != null) {
+                    mCameraPreviewOverlay.removeView(preview);
+                }
+            }
+        });
+    }
+
+    private static boolean codecLooksSoftware(MediaCodecInfo info) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            if (info.isSoftwareOnly()) return true;
+            if (info.isHardwareAccelerated()) return false;
+        }
+        String name = info.getName().toLowerCase();
+        return name.startsWith("omx.google.") || name.startsWith("c2.android.") || name.contains("sw");
+    }
+
+    private static boolean codecLooksHardware(MediaCodecInfo info) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            if (info.isHardwareAccelerated()) return true;
+            if (info.isSoftwareOnly()) return false;
+        }
+        return !codecLooksSoftware(info);
+    }
+
+    public int[] queryH264CodecSupport() {
+        boolean encHw = false;
+        boolean encSw = false;
+        boolean decHw = false;
+        boolean decSw = false;
+        int maxWidth = 0;
+        int maxHeight = 0;
+        int maxFps = 0;
+        int maxBitrate = 0;
+        int widthAlign = 2;
+        int heightAlign = 2;
+
+        try {
+            MediaCodecList list = new MediaCodecList(MediaCodecList.ALL_CODECS);
+            for (MediaCodecInfo info : list.getCodecInfos()) {
+                String[] types = info.getSupportedTypes();
+                boolean supportsAvc = false;
+                for (String t : types) {
+                    if ("video/avc".equalsIgnoreCase(t)) {
+                        supportsAvc = true;
+                        break;
+                    }
+                }
+                if (!supportsAvc) {
+                    continue;
+                }
+
+                boolean hw = codecLooksHardware(info);
+                boolean sw = codecLooksSoftware(info);
+
+                boolean probeOk = false;
+                MediaCodec codec = null;
+                try {
+                    codec = MediaCodec.createByCodecName(info.getName());
+                    probeOk = codec != null;
+                } catch (Throwable ignored) {
+                    probeOk = false;
+                } finally {
+                    if (codec != null) {
+                        try { codec.release(); } catch (Throwable ignored) {}
+                    }
+                }
+                if (!probeOk) {
+                    continue;
+                }
+
+                try {
+                    MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType("video/avc");
+                    if (caps != null && caps.getVideoCapabilities() != null) {
+                        MediaCodecInfo.VideoCapabilities vc = caps.getVideoCapabilities();
+                        maxWidth = Math.max(maxWidth, vc.getSupportedWidths().getUpper().intValue());
+                        maxHeight = Math.max(maxHeight, vc.getSupportedHeights().getUpper().intValue());
+                        maxBitrate = Math.max(maxBitrate, vc.getBitrateRange().getUpper().intValue());
+                        maxFps = Math.max(maxFps, vc.getSupportedFrameRates().getUpper().intValue());
+                        widthAlign = Math.max(widthAlign, vc.getWidthAlignment());
+                        heightAlign = Math.max(heightAlign, vc.getHeightAlignment());
+                    }
+                } catch (Throwable ignored) {}
+
+                if (info.isEncoder()) {
+                    if (hw) encHw = true;
+                    if (sw) encSw = true;
+                } else {
+                    if (hw) decHw = true;
+                    if (sw) decSw = true;
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        return new int[] {
+            encHw ? 1 : 0,
+            encSw ? 1 : 0,
+            decHw ? 1 : 0,
+            decSw ? 1 : 0,
+            maxWidth,
+            maxHeight,
+            maxFps,
+            maxBitrate,
+            widthAlign,
+            heightAlign,
+        };
+    }
+
     public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop) {
         VideoPlayer VideoPlayer = new VideoPlayer(this, videoId);
         VideoPlayer.setSource(source);
@@ -1476,6 +1680,7 @@ public class MakepadActivity
             runnable.cleanupVideoPlaybackResources();
             runnable = null;
         }
+        detachCameraNativePreview(videoId);
     }
     
                 
