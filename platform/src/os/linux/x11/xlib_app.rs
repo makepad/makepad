@@ -55,7 +55,13 @@ impl XlibApp {
         unsafe {
             let display = x11_sys::XOpenDisplay(ptr::null());
             let display_fd = x11_sys::XConnectionNumber(display);
-            let xim = x11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+            x11_sys::setlocale(x11_sys::LC_CTYPE, b"\0".as_ptr() as *const c_char);
+            x11_sys::XSetLocaleModifiers(b"\0".as_ptr() as *const c_char);
+            let mut xim = x11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+            if xim.is_null() {
+                x11_sys::XSetLocaleModifiers(ptr::null());
+                xim = x11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+            }
             //let mut signal_fds = [0, 0];
             //libc_sys::pipe(signal_fds.as_mut_ptr());
             x11_sys::XrmInitialize();
@@ -91,6 +97,9 @@ impl XlibApp {
             let mut event = mem::MaybeUninit::uninit();
             x11_sys::XNextEvent(self.display, event.as_mut_ptr());
             let mut event = event.assume_init();
+            if x11_sys::XFilterEvent(&mut event as *mut x11_sys::XEvent, x11_sys::None as c_ulong) != 0 {
+                continue;
+            }
             match event.type_ as u32 {
                 x11_sys::SelectionNotify => {
                     let selection = event.xselection;
@@ -517,32 +526,34 @@ impl XlibApp {
                         };
 
                         if !block_text {
-                            // decode the character
-                            let mut buffer = [0u8; 32];
-                            let mut keysym = mem::MaybeUninit::uninit();
-                            let mut status = mem::MaybeUninit::uninit();
-                            let count = x11_sys::Xutf8LookupString(
-                                window.xic.unwrap(),
-                                &mut event.xkey,
-                                buffer.as_mut_ptr() as *mut c_char,
-                                buffer.len() as c_int,
-                                keysym.as_mut_ptr(),
-                                status.as_mut_ptr(),
-                            );
-                            //let keysym = keysym.assume_init();
-                            let status = status.assume_init();
-                            if status != x11_sys::XBufferOverflow {
-                                let utf8 = std::str::from_utf8(&buffer[..count as usize])
-                                    .unwrap_or("")
-                                    .to_string();
-                                let char_code = utf8.chars().next().unwrap_or('\0');
-                                if char_code >= ' ' && char_code != 127 as char {
-                                    self.do_callback(XlibEvent::TextInput(TextInputEvent {
-                                        input: utf8,
-                                        was_paste: false,
-                                        replace_last: false,
-                                        ..Default::default()
-                                    }));
+                            // Decode committed characters from XIM/XIC (e.g. ibus, fcitx)
+                            if let Some(xic) = window.xic {
+                                let mut buffer = [0u8; 128];
+                                let mut keysym = mem::MaybeUninit::uninit();
+                                let mut status = mem::MaybeUninit::uninit();
+                                let count = x11_sys::Xutf8LookupString(
+                                    xic,
+                                    &mut event.xkey,
+                                    buffer.as_mut_ptr() as *mut c_char,
+                                    buffer.len() as c_int,
+                                    keysym.as_mut_ptr(),
+                                    status.as_mut_ptr(),
+                                );
+                                let status = status.assume_init();
+                                if status == x11_sys::XLookupChars || status == x11_sys::XLookupBoth {
+                                    if count > 0 && status != x11_sys::XBufferOverflow {
+                                        let utf8 = std::str::from_utf8(&buffer[..count as usize])
+                                            .unwrap_or("")
+                                            .to_string();
+                                        if !utf8.is_empty() {
+                                            self.do_callback(XlibEvent::TextInput(TextInputEvent {
+                                                input: utf8,
+                                                was_paste: false,
+                                                replace_last: false,
+                                                ..Default::default()
+                                            }));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -606,7 +617,28 @@ impl XlibApp {
                         }
                     }
                 }
-
+                x11_sys::FocusIn => {
+                    let event = event.xfocus;
+                    if let Some(window_ptr) = self.window_map.get(&event.window) {
+                        let window = &mut (**window_ptr);
+                        if window.ime_active {
+                            if let Some(xic) = window.xic {
+                                x11_sys::XSetICFocus(xic);
+                            }
+                        }
+                        window.send_focus_event();
+                    }
+                }
+                x11_sys::FocusOut => {
+                    let event = event.xfocus;
+                    if let Some(window_ptr) = self.window_map.get(&event.window) {
+                        let window = &mut (**window_ptr);
+                        if let Some(xic) = window.xic {
+                            x11_sys::XUnsetICFocus(xic);
+                        }
+                        window.send_focus_lost_event();
+                    }
+                }
                 _ => {}
             }
         }
