@@ -25,6 +25,8 @@ pub struct XlibWindow {
     pub ime_spot: Vec2d,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2d,
+    // When ime_active is false, XSetICFocus is not used so the IME candidate window does not show.
+    pub ime_active: bool,
 }
 /*
 #[derive(Clone)]
@@ -51,6 +53,7 @@ impl XlibWindow {
             ime_spot: Vec2d::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
+            ime_active: false,
         }
     }
 
@@ -212,16 +215,20 @@ impl XlibWindow {
                 x11_sys::XFlush(display);
             }
 
-            let xic = x11_sys::XCreateIC(
-                get_xlib_app_global().xim,
-                x11_sys::XNInputStyle.as_ptr(),
-                (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
-                x11_sys::XNClientWindow.as_ptr(),
-                window,
-                x11_sys::XNFocusWindow.as_ptr(),
-                window,
-                ptr::null_mut() as *mut c_void,
-            );
+            let xic = if !get_xlib_app_global().xim.is_null() {
+                Some(x11_sys::XCreateIC(
+                    get_xlib_app_global().xim,
+                    x11_sys::XNInputStyle.as_ptr(),
+                    (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
+                    x11_sys::XNClientWindow.as_ptr(),
+                    window,
+                    x11_sys::XNFocusWindow.as_ptr(),
+                    window,
+                    ptr::null_mut() as *mut c_void,
+                ))
+            } else {
+                None
+            };
 
             // Create a window
             get_xlib_app_global().window_map.insert(window, self);
@@ -229,7 +236,7 @@ impl XlibWindow {
             self.attributes = Some(attributes);
             self.visual_info = Some(visual_info);
             self.window = Some(window);
-            self.xic = Some(xic);
+            self.xic = xic;
             self.last_window_geom = self.get_window_geom();
 
             let new_geom = self.get_window_geom();
@@ -397,7 +404,59 @@ impl XlibWindow {
     }
 
     pub fn set_ime_spot(&mut self, spot: Vec2d) {
+        if self.ime_spot == spot {
+            return;
+        }
         self.ime_spot = spot;
+        let Some(xic) = self.xic else {
+            return;
+        };
+        let dpi_factor = self.get_dpi_factor();
+        let spot_px = x11_sys::XPoint {
+            x: (spot.x *dpi_factor) as i16,
+            y: (spot.y *dpi_factor) as i16
+        };
+        let area_px = x11_sys::XRectangle {
+            x: spot_px.x,
+            y: spot_px.y,
+            width: 1,
+            height: 1
+        };
+        unsafe {
+            let preedit_attr = x11_sys::XVaCreateNestedList(
+                0,
+                x11_sys::XNSpotLocation.as_ptr(),
+                &spot_px,
+                x11_sys::XNArea.as_ptr(),
+                &area_px,
+                ptr::null_mut::<c_void>(),
+            );
+            if preedit_attr.is_null() {
+                return;
+            }
+
+            x11_sys::XSetICValues(
+                xic,
+                x11_sys::XNPreeditAttributes.as_ptr(),
+                preedit_attr,
+                ptr::null_mut::<c_void>(),
+            );
+            x11_sys::XFree(preedit_attr);
+        }
+    }
+
+    pub fn set_ime_active(&mut self, active: bool) {
+        if self.ime_active == active {
+            return;
+        }
+        self.ime_active = active;
+        if let Some(xic) = self.xic {
+            if self.ime_active {
+                unsafe { x11_sys::XSetICFocus(xic) };
+            } else {
+                unsafe { x11_sys::XUnsetICFocus(xic) };
+            }
+        }
     }
 
     pub fn get_position(&self) -> Vec2d {

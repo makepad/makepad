@@ -526,10 +526,12 @@ impl X11Cx {
                     let pos = area.clipped_rect(&cx).pos + pos;
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_spot(pos);
+                        w.xlib_window.set_ime_active(true);
                     });
                 }
                 CxOsOp::HideTextIME => {
                     opengl_windows.iter_mut().for_each(|w| {
+                        w.xlib_window.set_ime_active(false);
                         w.xlib_window.set_ime_spot(dvec2(0.0, 0.0));
                     });
                 }
