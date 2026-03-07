@@ -14,6 +14,7 @@ import android.Manifest;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Rect;
+import android.graphics.drawable.GradientDrawable;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.midi.MidiDevice;
@@ -37,6 +38,7 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -52,6 +54,7 @@ import android.text.Editable;
 import android.text.InputType;
 import android.text.Selection;
 import android.text.SpannableStringBuilder;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 
 import java.io.BufferedReader;
@@ -553,6 +556,19 @@ class MakepadSurface
     }
 }
 
+class SelectionHandleView extends View {
+    public SelectionHandleView(Context context, int color, int sizePx) {
+        super(context);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.OVAL);
+        bg.setColor(color);
+        setBackground(bg);
+        setClickable(true);
+        setFocusable(false);
+        setLayoutParams(new FrameLayout.LayoutParams(sizePx, sizePx));
+    }
+}
+
 class ResizingLayout
     extends
         LinearLayout
@@ -600,6 +616,21 @@ public class MakepadActivity
     private int[] mSelectionBounds = new int[4]; // left, top, right, bottom
     private int mKeyboardShift = 0; // keyboard shift amount from Rust
 
+    // native camera preview overlays
+    private FrameLayout mRootLayout;
+    private FrameLayout mCameraPreviewOverlay;
+
+    // selection handles overlay
+    private static final int SELECTION_HANDLE_START = 0;
+    private static final int SELECTION_HANDLE_END = 1;
+    private static final int SELECTION_DRAG_BEGIN = 0;
+    private static final int SELECTION_DRAG_MOVE = 1;
+    private static final int SELECTION_DRAG_END = 2;
+    private FrameLayout mSelectionHandleOverlay;
+    private SelectionHandleView mSelectionHandleStart;
+    private SelectionHandleView mSelectionHandleEnd;
+    private int mSelectionHandleSizePx;
+
     static {
         System.loadLibrary("makepad");
     }
@@ -630,7 +661,32 @@ public class MakepadActivity
         // Put it inside a parent layout which can resize it using padding
         ResizingLayout layout = new ResizingLayout(this);
         layout.addView(view);
-        setContentView(layout);
+
+        mRootLayout = new FrameLayout(this);
+        mRootLayout.addView(layout);
+
+        mCameraPreviewOverlay = new FrameLayout(this);
+        mRootLayout.addView(mCameraPreviewOverlay);
+
+        mSelectionHandleOverlay = new FrameLayout(this);
+        mSelectionHandleOverlay.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        mSelectionHandleOverlay.setClickable(false);
+        mSelectionHandleOverlay.setFocusable(false);
+        mSelectionHandleOverlay.setVisibility(View.GONE);
+        mRootLayout.addView(mSelectionHandleOverlay);
+
+        mSelectionHandleSizePx = Math.max(24, (int) (getResources().getDisplayMetrics().density * 24.0f));
+        mSelectionHandleStart = new SelectionHandleView(this, 0xFF4A90E2, mSelectionHandleSizePx);
+        mSelectionHandleEnd = new SelectionHandleView(this, 0xFF4A90E2, mSelectionHandleSizePx);
+        mSelectionHandleStart.setOnTouchListener(createSelectionHandleDragListener(SELECTION_HANDLE_START));
+        mSelectionHandleEnd.setOnTouchListener(createSelectionHandleDragListener(SELECTION_HANDLE_END));
+        mSelectionHandleOverlay.addView(mSelectionHandleStart);
+        mSelectionHandleOverlay.addView(mSelectionHandleEnd);
+
+        setContentView(mRootLayout);
 
         MakepadNative.activityOnCreate(this);
 
@@ -690,6 +746,12 @@ public class MakepadActivity
 
     @Override
     protected void onDestroy() {
+        if (mSelectionHandleOverlay != null) {
+            mSelectionHandleOverlay.removeAllViews();
+            mSelectionHandleOverlay = null;
+            mSelectionHandleStart = null;
+            mSelectionHandleEnd = null;
+        }
         super.onDestroy();
         MakepadNative.activityOnDestroy();
     }
@@ -1062,6 +1124,95 @@ public class MakepadActivity
     private void onDestroyActionModeInternal(ActionMode mode) {
         mActionMode = null;
         mHasSelection = false;
+    }
+
+    private View.OnTouchListener createSelectionHandleDragListener(final int handleKind) {
+        return new View.OnTouchListener() {
+            private final int[] rootLocation = new int[2];
+
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+                if (mRootLayout == null) {
+                    return false;
+                }
+                mRootLayout.getLocationOnScreen(rootLocation);
+                float absX = event.getRawX() - rootLocation[0];
+                float absY = event.getRawY() - rootLocation[1];
+                int action = event.getActionMasked();
+
+                if (action == MotionEvent.ACTION_DOWN) {
+                    setSelectionHandlePosition(v, absX, absY);
+                    MakepadNative.onSelectionHandleDrag(handleKind, SELECTION_DRAG_BEGIN, absX, absY, event.getEventTime());
+                    return true;
+                }
+                if (action == MotionEvent.ACTION_MOVE) {
+                    setSelectionHandlePosition(v, absX, absY);
+                    MakepadNative.onSelectionHandleDrag(handleKind, SELECTION_DRAG_MOVE, absX, absY, event.getEventTime());
+                    return true;
+                }
+                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    setSelectionHandlePosition(v, absX, absY);
+                    MakepadNative.onSelectionHandleDrag(handleKind, SELECTION_DRAG_END, absX, absY, event.getEventTime());
+                    return true;
+                }
+                return false;
+            }
+        };
+    }
+
+    private void setSelectionHandlePosition(View handle, float x, float y) {
+        if (handle == null) {
+            return;
+        }
+        handle.setX(x - (mSelectionHandleSizePx * 0.5f));
+        handle.setY(y - (mSelectionHandleSizePx * 0.5f));
+    }
+
+    public void showSelectionHandles(final float startX, final float startY, final float endX, final float endY) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mSelectionHandleOverlay == null || mSelectionHandleStart == null || mSelectionHandleEnd == null) {
+                    return;
+                }
+                mSelectionHandleOverlay.setVisibility(View.VISIBLE);
+                setSelectionHandlePosition(mSelectionHandleStart, startX, startY);
+                setSelectionHandlePosition(mSelectionHandleEnd, endX, endY);
+                mSelectionHandleStart.setVisibility(View.VISIBLE);
+                mSelectionHandleEnd.setVisibility(View.VISIBLE);
+                mSelectionHandleOverlay.bringToFront();
+            }
+        });
+    }
+
+    public void updateSelectionHandles(final float startX, final float startY, final float endX, final float endY) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mSelectionHandleOverlay == null || mSelectionHandleStart == null || mSelectionHandleEnd == null) {
+                    return;
+                }
+                mSelectionHandleOverlay.setVisibility(View.VISIBLE);
+                setSelectionHandlePosition(mSelectionHandleStart, startX, startY);
+                setSelectionHandlePosition(mSelectionHandleEnd, endX, endY);
+                mSelectionHandleStart.setVisibility(View.VISIBLE);
+                mSelectionHandleEnd.setVisibility(View.VISIBLE);
+            }
+        });
+    }
+
+    public void hideSelectionHandles() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mSelectionHandleOverlay == null || mSelectionHandleStart == null || mSelectionHandleEnd == null) {
+                    return;
+                }
+                mSelectionHandleStart.setVisibility(View.GONE);
+                mSelectionHandleEnd.setVisibility(View.GONE);
+                mSelectionHandleOverlay.setVisibility(View.GONE);
+            }
+        });
     }
 
     public void requestHttp(long id, long metadataId, String url, String method, String headers, byte[] body) {

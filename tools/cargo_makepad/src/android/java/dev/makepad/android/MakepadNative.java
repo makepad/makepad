@@ -41,6 +41,9 @@ public class MakepadNative {
     public native static void onClipboardAction(String action);
     public native static void onClipboardPaste(String content);
 
+    // selection handles
+    public native static void onSelectionHandleDrag(int handle, int phase, float x, float y, long timeMillis);
+
     // IME events - unified text state notification (Java→Rust)
     // Called when IME changes text (composition, commit, delete, selection change)
     public native static void onImeTextStateChanged(

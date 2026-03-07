@@ -44,6 +44,7 @@ use {
             VideoPlaybackResourcesReleasedEvent,
             //HttpRequest,
             //HttpMethod,
+            SelectionHandleDragEvent,
             VideoTextureUpdatedEvent,
             VirtualKeyboardEvent,
             WindowGeom,
@@ -731,6 +732,21 @@ impl Cx {
                 let e = Event::ImeAction(ImeActionEvent { action });
                 self.call_event_handler(&e);
             }
+            FromJavaMessage::SelectionHandleDrag {
+                handle,
+                phase,
+                abs,
+                time,
+            } => {
+                let dpi_factor = self.last_window_geom.dpi_factor;
+                let e = Event::SelectionHandleDrag(SelectionHandleDragEvent {
+                    handle,
+                    phase,
+                    abs: abs / dpi_factor,
+                    time,
+                });
+                self.call_event_handler(&e);
+            }
             FromJavaMessage::Init(_) => {}
         }
     }
@@ -1372,9 +1388,20 @@ impl Cx {
                     android_jni::to_java_copy_to_clipboard(content);
                 },
                 CxOsOp::SetPrimarySelection(_) => {}
-                CxOsOp::ShowSelectionHandles { .. } => {}
-                CxOsOp::UpdateSelectionHandles { .. } => {}
-                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::ShowSelectionHandles { start, end } => unsafe {
+                    let dpi_factor = self.last_window_geom.dpi_factor;
+                    android_jni::to_java_show_selection_handles(start * dpi_factor, end * dpi_factor);
+                }
+                CxOsOp::UpdateSelectionHandles { start, end } => unsafe {
+                    let dpi_factor = self.last_window_geom.dpi_factor;
+                    android_jni::to_java_update_selection_handles(
+                        start * dpi_factor,
+                        end * dpi_factor,
+                    );
+                }
+                CxOsOp::HideSelectionHandles => unsafe {
+                    android_jni::to_java_hide_selection_handles();
+                }
                 CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::ShowClipboardActions {
                     has_selection,

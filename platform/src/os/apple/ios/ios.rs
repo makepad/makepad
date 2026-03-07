@@ -322,6 +322,9 @@ impl Cx {
             IosEvent::Scroll(e) => self.call_event_handler(&Event::Scroll(e.into())),
             IosEvent::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
             IosEvent::TextRangeReplace(e) => self.call_event_handler(&Event::TextRangeReplace(e)),
+            IosEvent::SelectionHandleDrag(e) => {
+                self.call_event_handler(&Event::SelectionHandleDrag(e))
+            }
 
             IosEvent::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
@@ -445,9 +448,15 @@ impl Cx {
                     with_ios_app(|app| app.copy_to_clipboard(&content));
                 }
                 CxOsOp::SetPrimarySelection(_) => {}
-                CxOsOp::ShowSelectionHandles { .. } => {}
-                CxOsOp::UpdateSelectionHandles { .. } => {}
-                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::ShowSelectionHandles { start, end } => {
+                    IosApp::show_selection_handles(start, end);
+                }
+                CxOsOp::UpdateSelectionHandles { start, end } => {
+                    IosApp::update_selection_handles(start, end);
+                }
+                CxOsOp::HideSelectionHandles => {
+                    IosApp::hide_selection_handles();
+                }
                 CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::FullscreenWindow(_window_id) => {
                     with_ios_app(|app| app.set_fullscreen(true));

@@ -12,6 +12,7 @@ use {
     },
     std::{
         cell::{Cell, RefCell},
+        collections::HashMap,
         ffi::c_void,
         rc::Rc,
         time::Instant,
@@ -87,12 +88,14 @@ pub struct IosClasses {
     pub mtk_view: *const Class,
     pub mtk_view_delegate: *const Class,
     pub gesture_recognizer_handler: *const Class,
+    pub selection_handle_gesture_handler: *const Class,
     pub textfield_delegate: *const Class,
     pub timer_delegate: *const Class,
     pub edit_menu_delegate: *const Class,
     // UITextInput protocol classes for IME support
     pub text_position: *const Class,
     pub text_range: *const Class,
+    pub text_selection_rect: *const Class,
     pub text_input_view: *const Class,
 }
 impl IosClasses {
@@ -103,12 +106,14 @@ impl IosClasses {
             mtk_view: define_mtk_view(),
             mtk_view_delegate: define_mtk_view_delegate(),
             gesture_recognizer_handler: define_gesture_recognizer_handler(),
+            selection_handle_gesture_handler: define_selection_handle_gesture_handler(),
             textfield_delegate: define_textfield_delegate(),
             timer_delegate: define_ios_timer_delegate(),
             edit_menu_delegate: define_edit_menu_interaction_delegate(),
             // All UITextInput classes enabled
             text_position: define_makepad_text_position(),
             text_range: define_makepad_text_range(),
+            text_selection_rect: define_makepad_selection_rect(),
             text_input_view: define_text_input_view(),
         }
     }
@@ -154,6 +159,16 @@ pub struct IosApp {
     last_keyboard_config: Option<crate::ime::TextInputConfig>,
     /// Root view controller for status bar / home indicator control
     pub view_controller: Option<ObjcId>,
+    /// Native camera preview layers keyed by video_id.
+    pub camera_preview_layers: HashMap<u64, ObjcId>,
+    /// Selection handles overlayed over the MTK view (iOS 15+ custom implementation).
+    selection_handle_start_view: Option<ObjcId>,
+    selection_handle_end_view: Option<ObjcId>,
+    selection_handle_start_handler: Option<ObjcId>,
+    selection_handle_end_handler: Option<ObjcId>,
+    /// iOS 16+ runtime-selected native selection display interaction.
+    native_selection_display_interaction: Option<ObjcId>,
+    has_native_selection_display_api: bool,
 }
 
 impl IosApp {
@@ -186,6 +201,13 @@ impl IosApp {
                 keyboard_observer_delegate: None,
                 last_keyboard_config: None,
                 view_controller: None,
+                camera_preview_layers: HashMap::new(),
+                selection_handle_start_view: None,
+                selection_handle_end_view: None,
+                selection_handle_start_handler: None,
+                selection_handle_end_handler: None,
+                native_selection_display_interaction: None,
+                has_native_selection_display_api: false,
             }
         }
     }
@@ -267,9 +289,71 @@ impl IosApp {
             (*text_input_view).set_ivar::<BOOL>("floating_cursor_active", NO);
             (*text_input_view).set_ivar::<f64>("floating_cursor_last_x", 0.0);
             (*text_input_view).set_ivar::<f64>("floating_cursor_last_y", 0.0);
+            (*text_input_view).set_ivar::<f64>("selection_handle_start_x", 0.0);
+            (*text_input_view).set_ivar::<f64>("selection_handle_start_y", 0.0);
+            (*text_input_view).set_ivar::<f64>("selection_handle_end_x", 0.0);
+            (*text_input_view).set_ivar::<f64>("selection_handle_end_y", 0.0);
+            (*text_input_view).set_ivar::<BOOL>("selection_handles_visible", NO);
 
             let () = msg_send![text_input_view, setUserInteractionEnabled: YES];
             let () = msg_send![mtk_view_obj, addSubview: text_input_view];
+
+            // iOS 16+: use UITextSelectionDisplayInteraction when available.
+            // We keep the custom handle overlay as a fallback and event source.
+            let selection_display_cls: ObjcId = makepad_objc_sys::runtime::objc_getClass(
+                b"UITextSelectionDisplayInteraction\0".as_ptr() as *const _,
+            ) as ObjcId;
+            if !selection_display_cls.is_null() {
+                let interaction: ObjcId = msg_send![selection_display_cls, alloc];
+                if interaction != nil {
+                    let can_init: BOOL = msg_send![interaction, respondsToSelector: sel!(initWithTextInput:)];
+                    if can_init == YES {
+                        let interaction: ObjcId =
+                            msg_send![interaction, initWithTextInput: text_input_view];
+                        if interaction != nil {
+                            let () = msg_send![mtk_view_obj, addInteraction: interaction];
+                            self.native_selection_display_interaction = Some(interaction);
+                            self.has_native_selection_display_api = true;
+                        }
+                    }
+                }
+            }
+
+            // iOS 15+ custom selection handles (fallback and explicit drag surface).
+            let selection_handle_start = self.create_selection_handle_view();
+            let selection_handle_end = self.create_selection_handle_view();
+
+            let start_handler: ObjcId =
+                msg_send![get_ios_class_global().selection_handle_gesture_handler, alloc];
+            let start_handler: ObjcId = msg_send![start_handler, init];
+            (*start_handler).set_ivar::<i64>("handle_kind", 0);
+            let start_pan: ObjcId = msg_send![class!(UIPanGestureRecognizer), alloc];
+            let start_pan: ObjcId = msg_send![
+                start_pan,
+                initWithTarget: start_handler
+                action: sel!(handleSelectionHandlePan:)
+            ];
+            let () = msg_send![selection_handle_start, addGestureRecognizer: start_pan];
+
+            let end_handler: ObjcId =
+                msg_send![get_ios_class_global().selection_handle_gesture_handler, alloc];
+            let end_handler: ObjcId = msg_send![end_handler, init];
+            (*end_handler).set_ivar::<i64>("handle_kind", 1);
+            let end_pan: ObjcId = msg_send![class!(UIPanGestureRecognizer), alloc];
+            let end_pan: ObjcId = msg_send![
+                end_pan,
+                initWithTarget: end_handler
+                action: sel!(handleSelectionHandlePan:)
+            ];
+            let () = msg_send![selection_handle_end, addGestureRecognizer: end_pan];
+
+            let () = msg_send![mtk_view_obj, addSubview: selection_handle_start];
+            let () = msg_send![mtk_view_obj, addSubview: selection_handle_end];
+
+            self.selection_handle_start_view = Some(selection_handle_start);
+            self.selection_handle_end_view = Some(selection_handle_end);
+            self.selection_handle_start_handler = Some(start_handler);
+            self.selection_handle_end_handler = Some(end_handler);
 
             // Set up textfield delegate for keyboard notifications only
             let textfield_dlg: ObjcId = msg_send![get_ios_class_global().textfield_delegate, alloc];
@@ -295,10 +379,13 @@ impl IosApp {
             let () = msg_send![window_obj, makeKeyAndVisible];
 
             // Initialize UIEditMenuInteraction for clipboard actions (iOS 16+)
-            let edit_menu_cls: ObjcId = makepad_objc_sys::runtime::objc_getClass(b"UIEditMenuInteraction\0".as_ptr() as *const _) as ObjcId;
+            let edit_menu_cls: ObjcId = makepad_objc_sys::runtime::objc_getClass(
+                b"UIEditMenuInteraction\0".as_ptr() as *const _,
+            ) as ObjcId;
             if !edit_menu_cls.is_null() {
                 // Store MTKView reference in the delegate for accessing menu rect
-                (*self.edit_menu_delegate_instance).set_ivar("mtk_view", mtk_view_obj as *mut c_void);
+                (*self.edit_menu_delegate_instance)
+                    .set_ivar("mtk_view", mtk_view_obj as *mut c_void);
 
                 // Create UIEditMenuInteraction with our delegate
                 let edit_menu_interaction: ObjcId = msg_send![edit_menu_cls, alloc];
@@ -315,7 +402,28 @@ impl IosApp {
         }
     }
 
-    pub fn draw_size_will_change() {
+    fn create_selection_handle_view(&self) -> ObjcId {
+        unsafe {
+            let handle_size = 24.0;
+            let handle: ObjcId = msg_send![class!(UIView), alloc];
+            let handle: ObjcId = msg_send![handle, initWithFrame: NSRect {
+                origin: NSPoint { x: 0.0, y: 0.0 },
+                size: NSSize {
+                    width: handle_size,
+                    height: handle_size,
+                },
+            }];
+            let color: ObjcId = msg_send![class!(UIColor), systemBlueColor];
+            let () = msg_send![handle, setBackgroundColor: color];
+            let layer: ObjcId = msg_send![handle, layer];
+            let () = msg_send![layer, setCornerRadius: handle_size * 0.5];
+            let () = msg_send![handle, setUserInteractionEnabled: YES];
+            let () = msg_send![handle, setHidden: YES];
+            handle
+        }
+    }
+
+    pub fn draw_size_will_change(_view: ObjcId, _size: NSSize) {
         // Avoid re-entrant calls by checking if we're already in a with_ios_app call.
         // We must drop the borrow *before* calling check_window_geom, because
         // check_window_geom calls with_ios_app which tries to borrow_mut again.
@@ -849,10 +957,17 @@ impl IosApp {
                 let () = msg_send![edit_menu_interaction, presentEditMenuWithConfiguration: config];
             } else {
                 // iOS 15: UIMenuController fallback
-                let menu_controller: ObjcId = msg_send![class!(UIMenuController), sharedMenuController];
+                let menu_controller: ObjcId =
+                    msg_send![class!(UIMenuController), sharedMenuController];
                 let target_rect = NSRect {
-                    origin: NSPoint { x: rect.pos.x, y: rect.pos.y },
-                    size: NSSize { width: rect.size.x.max(1.0), height: rect.size.y.max(1.0) },
+                    origin: NSPoint {
+                        x: rect.pos.x,
+                        y: rect.pos.y,
+                    },
+                    size: NSSize {
+                        width: rect.size.x.max(1.0),
+                        height: rect.size.y.max(1.0),
+                    },
                 };
                 let () = msg_send![mtk_view, becomeFirstResponder];
                 let () = msg_send![menu_controller, setTargetRect: target_rect inView: mtk_view];
@@ -885,10 +1000,158 @@ impl IosApp {
                 let () = msg_send![edit_menu_interaction, dismissMenu];
             } else {
                 // iOS 15: UIMenuController fallback
-                let menu_controller: ObjcId = msg_send![class!(UIMenuController), sharedMenuController];
+                let menu_controller: ObjcId =
+                    msg_send![class!(UIMenuController), sharedMenuController];
                 let () = msg_send![menu_controller, setMenuVisible: NO animated: YES];
             }
         }
+    }
+
+    fn update_native_selection_display(start: DVec2, end: DVec2, visible: bool) {
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
+                    if !app.has_native_selection_display_api {
+                        return;
+                    }
+                    let Some(text_input_view) = app.text_input_view else {
+                        return;
+                    };
+                    unsafe {
+                        (*text_input_view).set_ivar::<f64>("selection_handle_start_x", start.x);
+                        (*text_input_view).set_ivar::<f64>("selection_handle_start_y", start.y);
+                        (*text_input_view).set_ivar::<f64>("selection_handle_end_x", end.x);
+                        (*text_input_view).set_ivar::<f64>("selection_handle_end_y", end.y);
+                        (*text_input_view).set_ivar::<BOOL>(
+                            "selection_handles_visible",
+                            if visible { YES } else { NO },
+                        );
+
+                        // UITextSelectionDisplayInteraction listens via the input delegate.
+                        let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
+                        if input_delegate != nil {
+                            let () = msg_send![input_delegate, selectionWillChange: text_input_view];
+                            let () = msg_send![input_delegate, selectionDidChange: text_input_view];
+                        }
+
+                        if let Some(interaction) = app.native_selection_display_interaction {
+                            let has_refresh: BOOL =
+                                msg_send![interaction, respondsToSelector: sel!(setNeedsSelectionUpdate)];
+                            if has_refresh == YES {
+                                let () = msg_send![interaction, setNeedsSelectionUpdate];
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn set_selection_handle_center(handle: ObjcId, center: DVec2) {
+        unsafe {
+            let () = msg_send![
+                handle,
+                setCenter: NSPoint {
+                    x: center.x,
+                    y: center.y,
+                }
+            ];
+        }
+    }
+
+    pub fn show_selection_handles(start: DVec2, end: DVec2) {
+        Self::update_native_selection_display(start, end, true);
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
+                    if let Some(start_view) = app.selection_handle_start_view {
+                        Self::set_selection_handle_center(start_view, start);
+                        unsafe {
+                            let () = msg_send![start_view, setHidden: NO];
+                            let parent: ObjcId = msg_send![start_view, superview];
+                            if parent != nil {
+                                let () = msg_send![parent, bringSubviewToFront: start_view];
+                            }
+                        }
+                    }
+                    if let Some(end_view) = app.selection_handle_end_view {
+                        Self::set_selection_handle_center(end_view, end);
+                        unsafe {
+                            let () = msg_send![end_view, setHidden: NO];
+                            let parent: ObjcId = msg_send![end_view, superview];
+                            if parent != nil {
+                                let () = msg_send![parent, bringSubviewToFront: end_view];
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn update_selection_handles(start: DVec2, end: DVec2) {
+        Self::update_native_selection_display(start, end, true);
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
+                    if let Some(start_view) = app.selection_handle_start_view {
+                        Self::set_selection_handle_center(start_view, start);
+                    }
+                    if let Some(end_view) = app.selection_handle_end_view {
+                        Self::set_selection_handle_center(end_view, end);
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn hide_selection_handles() {
+        Self::update_native_selection_display(dvec2(0.0, 0.0), dvec2(0.0, 0.0), false);
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
+                    if let Some(start_view) = app.selection_handle_start_view {
+                        unsafe {
+                            let () = msg_send![start_view, setHidden: YES];
+                        }
+                    }
+                    if let Some(end_view) = app.selection_handle_end_view {
+                        unsafe {
+                            let () = msg_send![end_view, setHidden: YES];
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn send_selection_handle_drag(
+        handle: SelectionHandleKind,
+        phase: SelectionHandlePhase,
+        abs: DVec2,
+    ) {
+        let time = IOS_APP
+            .try_with(|app| {
+                if let Ok(mut app_ref) = app.try_borrow_mut() {
+                    if let Some(ref mut app) = *app_ref {
+                        return Some(app.time_now());
+                    }
+                }
+                None
+            })
+            .ok()
+            .flatten();
+
+        let Some(time) = time else {
+            return;
+        };
+
+        IosApp::do_callback(IosEvent::SelectionHandleDrag(SelectionHandleDragEvent {
+            handle,
+            phase,
+            abs,
+            time,
+        }));
     }
 
     // Action dispatch methods called from MakepadView's action handlers

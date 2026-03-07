@@ -20,6 +20,7 @@ workspace.members = [
     "examples/exf",
     "examples/shader",
     "examples/text_input",
+    "examples/text_selection",
     "examples/counter",
     "libs/gltf",
     "libs/splat",
