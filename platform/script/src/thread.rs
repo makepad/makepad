@@ -230,11 +230,17 @@ impl ScriptThread {
     }
 
     pub fn call_has_me(&self) -> bool {
-        self.mes.len() > self.calls.last().unwrap().bases.mes
+        self.calls
+            .last()
+            .map(|call| self.mes.len() > call.bases.mes)
+            .unwrap_or(false)
     }
 
     pub fn call_has_try(&self) -> bool {
-        self.tries.len() > self.calls.last().unwrap().bases.tries
+        self.calls
+            .last()
+            .map(|call| self.tries.len() > call.bases.tries)
+            .unwrap_or(false)
     }
 
     // lets resolve an id to a ScriptValue

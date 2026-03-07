@@ -1464,6 +1464,7 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Default);
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::KeyFocus(_) => {
