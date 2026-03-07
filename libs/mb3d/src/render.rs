@@ -1,6 +1,10 @@
 use crate::formulas::{self, HybridProgram, IterParams};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 const MB3D_MIN_STEP_UNITS: f64 = 0.11;
+const BACKGROUND_RGBA: [u8; 4] = [10, 10, 15, 255];
+const AA_2X2_SUBPIXELS: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
 
 #[derive(Debug, Clone, Copy)]
 pub struct Vec3 {
@@ -37,6 +41,7 @@ impl Vec3 {
 ///   Ystart + py * Vgrads[1] + px * Vgrads[0]
 /// where Ystart = camera + z1*forward - halfH*up - halfW*right
 /// and z1 = (z_start - z_mid) / StepWidth
+#[derive(Clone, Copy)]
 pub struct Camera {
     pub mid: Vec3,        // Xmid, Ymid, Zmid
     pub right: Vec3,      // Vgrads[0]: magnitude = StepWidth
@@ -84,10 +89,18 @@ impl Camera {
 
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AntialiasingMode {
+    None,
+    X2,
+}
+
+#[derive(Clone)]
 pub struct RenderParams {
     pub camera: Camera,
     pub iter_params: IterParams,
     pub adaptive_ao_subsampling: bool,
+    pub antialiasing: AntialiasingMode,
     pub max_ray_length: f64,   // maximum ray length in world units
     pub de_stop: f64,          // DE threshold for surface hit (world units, adjusted by de_scale)
     pub s_z_step_div: f64,     // effective step multiplier: sZstepDiv * de_scale
@@ -240,6 +253,7 @@ impl RenderParams {
                 julia_z: m3p.julia_z,
             },
             adaptive_ao_subsampling: true,
+            antialiasing: AntialiasingMode::None,
             max_ray_length,
             de_stop,
             s_z_step_div,
@@ -321,28 +335,162 @@ pub(crate) struct SurfaceSampleMb3d {
     pub roughness: f64,
 }
 
+#[derive(Clone, Copy)]
+struct SharedWriteBuf<T> {
+    ptr: *mut T,
+}
+
+unsafe impl<T: Send> Send for SharedWriteBuf<T> {}
+unsafe impl<T: Send> Sync for SharedWriteBuf<T> {}
+
+impl<T> SharedWriteBuf<T> {
+    fn new(slice: &mut [T]) -> Self {
+        Self { ptr: slice.as_mut_ptr() }
+    }
+
+    unsafe fn write(&self, idx: usize, value: T) {
+        self.ptr.add(idx).write(value);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SharedByteBuf {
+    ptr: *mut u8,
+}
+
+unsafe impl Send for SharedByteBuf {}
+unsafe impl Sync for SharedByteBuf {}
+
+impl SharedByteBuf {
+    fn new(slice: &mut [u8]) -> Self {
+        Self { ptr: slice.as_mut_ptr() }
+    }
+
+    unsafe fn write_rgba(&self, idx: usize, rgba: [u8; 4]) {
+        let dst = self.ptr.add(idx * 4);
+        std::ptr::copy_nonoverlapping(rgba.as_ptr(), dst, 4);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RaySampler {
+    base_origin: Vec3,
+    right_step: Vec3,
+    up_step: Vec3,
+    right_dir: Vec3,
+    up_dir: Vec3,
+    forward_dir: Vec3,
+    half_w: f64,
+    half_h: f64,
+    fov_mul: f64,
+}
+
+impl RaySampler {
+    fn new(camera: &Camera) -> Self {
+        let inv_step_width = 1.0 / camera.step_width;
+        let right_dir = camera.right.scale(inv_step_width);
+        let up_dir = camera.up.scale(inv_step_width);
+        let forward_dir = camera.forward.scale(inv_step_width);
+        let half_w = camera.width as f64 * 0.5;
+        let half_h = camera.height as f64 * 0.5;
+        let base_origin = camera
+            .mid
+            .add(forward_dir.scale(camera.z_start - camera.mid.z))
+            .add(camera.right.scale(-half_w))
+            .add(camera.up.scale(-half_h));
+        let fov_mul = camera.fov_y * std::f64::consts::PI / 180.0 / camera.height.max(1) as f64;
+
+        Self {
+            base_origin,
+            right_step: camera.right,
+            up_step: camera.up,
+            right_dir,
+            up_dir,
+            forward_dir,
+            half_w,
+            half_h,
+            fov_mul,
+        }
+    }
+
+    fn sample(&self, sample_x: f64, sample_y: f64) -> (Vec3, Vec3) {
+        let cafx = (self.half_w - sample_x) * self.fov_mul;
+        let cafy = (sample_y - self.half_h) * self.fov_mul;
+        let (sin_x, cos_x) = cafx.sin_cos();
+        let (sin_y, cos_y) = cafy.sin_cos();
+        let local_dir = Vec3::new(-sin_x, sin_y, cos_x * cos_y).normalize();
+        let dir = self
+            .right_dir
+            .scale(local_dir.x)
+            .add(self.up_dir.scale(local_dir.y))
+            .add(self.forward_dir.scale(local_dir.z))
+            .normalize();
+        let origin = self
+            .base_origin
+            .add(self.right_step.scale(sample_x))
+            .add(self.up_step.scale(sample_y));
+        (origin, dir)
+    }
+}
+
 struct RayGrid {
     dirs: Vec<Vec3>,
     row_origins: Vec<Vec3>,
     x_offsets: Vec<Vec3>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PrimaryHit {
+    hit_pos: Vec3,
+    ray_dir: Vec3,
+    depth: f64,
+    iters: i32,
+    shadow_steps: i32,
+    y_pos: f64,
+}
+
+fn available_thread_count(total_jobs: usize) -> usize {
+    thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(total_jobs.max(1))
+}
+
+fn background_rgba() -> [u8; 4] {
+    BACKGROUND_RGBA
+}
+
+fn pixel_seed(x: usize, y: usize, salt: u32) -> u32 {
+    let mut v = (x as u32).wrapping_mul(0x45d9_f3b);
+    v ^= (y as u32).wrapping_mul(0x2710_0001);
+    v ^= salt.wrapping_mul(0x9e37_79b9);
+    v ^ 0x2456_3487
+}
+
+fn accumulate_rgba(acc: &mut [f64; 3], rgba: [u8; 4], weight: f64) {
+    acc[0] += rgba[0] as f64 * weight;
+    acc[1] += rgba[1] as f64 * weight;
+    acc[2] += rgba[2] as f64 * weight;
+}
+
+fn finalize_accumulated_rgba(acc: [f64; 3]) -> [u8; 4] {
+    [
+        acc[0].round().clamp(0.0, 255.0) as u8,
+        acc[1].round().clamp(0.0, 255.0) as u8,
+        acc[2].round().clamp(0.0, 255.0) as u8,
+        255,
+    ]
+}
+
 fn build_ray_grid(camera: &Camera, num_threads: usize, rows_per_thread: usize) -> RayGrid {
     let w = camera.width as usize;
     let h = camera.height as usize;
-    let half_w = camera.width as f64 * 0.5;
-    let half_h = camera.height as f64 * 0.5;
-    let inv_step_width = 1.0 / camera.step_width;
-    let r = camera.right.scale(inv_step_width);
-    let u = camera.up.scale(inv_step_width);
-    let f = camera.forward.scale(inv_step_width);
-    let fov_rad = camera.fov_y * std::f64::consts::PI / 180.0;
-    let fov_mul = fov_rad / camera.height as f64;
+    let sampler = RaySampler::new(camera);
 
     let mut sin_x = vec![0.0; w];
     let mut cos_x = vec![0.0; w];
     for x in 0..w {
-        let cafx = (half_w - x as f64) * fov_mul;
+        let cafx = (sampler.half_w - x as f64) * sampler.fov_mul;
         let (sx, cx) = cafx.sin_cos();
         sin_x[x] = sx;
         cos_x[x] = cx;
@@ -351,19 +499,19 @@ fn build_ray_grid(camera: &Camera, num_threads: usize, rows_per_thread: usize) -
     let mut sin_y = vec![0.0; h];
     let mut cos_y = vec![0.0; h];
     for y in 0..h {
-        let cafy = (y as f64 - half_h) * fov_mul;
+        let cafy = (y as f64 - sampler.half_h) * sampler.fov_mul;
         let (sy, cy) = cafy.sin_cos();
         sin_y[y] = sy;
         cos_y[y] = cy;
     }
 
-    let base_start = camera
-        .mid
-        .add(f.scale(camera.z_start - camera.mid.z))
-        .add(r.scale(-half_w * camera.step_width));
     let mut row_origins = Vec::with_capacity(h);
     for y in 0..h {
-        row_origins.push(base_start.add(u.scale((y as f64 - half_h) * camera.step_width)));
+        row_origins.push(
+            sampler
+                .base_origin
+                .add(sampler.up_step.scale(y as f64)),
+        );
     }
 
     let mut x_offsets = Vec::with_capacity(w);
@@ -381,9 +529,9 @@ fn build_ray_grid(camera: &Camera, num_threads: usize, rows_per_thread: usize) -
             let cos_x = &cos_x;
             let sin_y = &sin_y;
             let cos_y = &cos_y;
-            let r = r;
-            let u = u;
-            let f = f;
+            let r = sampler.right_dir;
+            let u = sampler.up_dir;
+            let f = sampler.forward_dir;
 
             workers.push(s.spawn(move || {
                 let row_count = dir_chunk.len() / w;
@@ -651,6 +799,94 @@ pub(crate) fn compute_soft_hs_bits_mb3d(
         y,
         formulas,
         params,
+    )
+}
+
+fn march_primary_hit(
+    origin: Vec3,
+    ray_dir: Vec3,
+    y_pos: f64,
+    formulas: &HybridProgram,
+    params: &RenderParams,
+    seed: u32,
+) -> Option<PrimaryHit> {
+    match ray_march(origin, ray_dir, formulas, params, seed) {
+        PixelResult::Hit {
+            depth,
+            iters,
+            shadow_steps,
+        } => Some(PrimaryHit {
+            hit_pos: origin.add(ray_dir.scale(depth)),
+            ray_dir,
+            depth,
+            iters,
+            shadow_steps,
+            y_pos,
+        }),
+        PixelResult::Miss => None,
+    }
+}
+
+fn compute_shadow_word_mb3d(
+    hit: PrimaryHit,
+    normal: Vec3,
+    y: usize,
+    soft_hs_light: Option<(usize, Vec3, u8)>,
+    formulas: &HybridProgram,
+    params: &RenderParams,
+) -> i32 {
+    let mut shadow_word = hit.shadow_steps & 0x3ff;
+    if let Some((_li, light_dir, i_light_pos)) = soft_hs_light {
+        shadow_word |= 0xFC00;
+        let soft_bits = compute_soft_hs_bits_mb3d(
+            hit.hit_pos,
+            hit.depth,
+            hit.ray_dir,
+            normal,
+            light_dir,
+            i_light_pos,
+            y,
+            formulas,
+            params,
+        );
+        shadow_word = (shadow_word & 0x03FF) | (soft_bits << 10);
+    }
+    shadow_word
+}
+
+fn shade_primary_hit(
+    hit: PrimaryHit,
+    normal: Vec3,
+    roughness: f64,
+    shadow_word: i32,
+    pixel_x: i32,
+    pixel_y: i32,
+    lighting_cache: &crate::lighting::LightingCache,
+    ssao: &crate::m3p::M3PSSAO,
+    formulas: &HybridProgram,
+    params: &RenderParams,
+    shade_scratch: &mut crate::lighting::ShadeScratch,
+) -> [u8; 3] {
+    crate::lighting::shade(
+        normal,
+        roughness,
+        hit.ray_dir.scale(-1.0),
+        hit.iters,
+        shadow_word,
+        params.iter_params.max_iters,
+        params.iter_params.min_iters,
+        hit.hit_pos,
+        1.0,
+        hit.depth,
+        pixel_x,
+        pixel_y,
+        hit.y_pos,
+        params.max_ray_length,
+        lighting_cache,
+        ssao,
+        formulas,
+        params,
+        shade_scratch,
     )
 }
 
@@ -935,124 +1171,75 @@ pub(crate) fn shade_from_primary_buffers(
     assert_eq!(iter_buf.len(), w * h);
     assert_eq!(shadow_buf.len(), w * h);
 
-    let num_threads = thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(h.max(1));
+    let num_threads = available_thread_count(w * h);
     let rows_per_thread = h.div_ceil(num_threads);
     let ray_grid = build_ray_grid(&params.camera, num_threads, rows_per_thread);
 
     let mut pixels = vec![0u8; w * h * 4];
     let soft_hs_light = crate::lighting::soft_hs_light_dir(lighting, &params.camera, params);
     let lighting_cache = crate::lighting::LightingCache::new(lighting, &params.camera, params);
+    let pixel_buf = SharedByteBuf::new(&mut pixels);
+    let next_pixel = AtomicUsize::new(0);
 
     thread::scope(|s| {
         let mut workers = Vec::new();
 
-        for (band_idx, pixel_chunk) in pixels.chunks_mut(rows_per_thread * w * 4).enumerate() {
-            let formulas = &formulas;
-            let params = &params;
-            let depth_buf = &depth_buf;
-            let iter_buf = &iter_buf;
-            let shadow_buf = &shadow_buf;
+        for _worker_idx in 0..num_threads {
+            let formulas = formulas;
+            let params = params;
+            let depth_buf = depth_buf;
+            let iter_buf = iter_buf;
+            let shadow_buf = shadow_buf;
             let ray_grid = &ray_grid;
             let soft_hs_light = soft_hs_light;
             let lighting_cache = &lighting_cache;
-            let y_start = band_idx * rows_per_thread;
-
+            let pixel_buf = pixel_buf;
+            let next_pixel = &next_pixel;
             workers.push(s.spawn(move || {
                 let mut shade_scratch = crate::lighting::ShadeScratch::default();
-                let row_count = pixel_chunk.len() / (w * 4);
-                for local_y in 0..row_count {
-                    let y = y_start + local_y;
-                    let row_offset = local_y * w * 4;
+                loop {
+                    let idx = next_pixel.fetch_add(1, Ordering::Relaxed);
+                    if idx >= w * h {
+                        break;
+                    }
 
-                    for x in 0..w {
-                        let idx = y * w + x;
-                        let offset = row_offset + x * 4;
-                        let depth = depth_buf[idx];
-                        let origin = ray_grid.row_origins[y].add(ray_grid.x_offsets[x]);
+                    let x = idx % w;
+                    let y = idx / w;
+                    let depth = depth_buf[idx];
+                    if depth == f64::MAX {
+                        unsafe { pixel_buf.write_rgba(idx, background_rgba()) };
+                        continue;
+                    }
 
-                        if depth == f64::MAX {
-                            pixel_chunk[offset] = 10;
-                            pixel_chunk[offset + 1] = 10;
-                            pixel_chunk[offset + 2] = 15;
-                            pixel_chunk[offset + 3] = 255;
-                            continue;
-                        }
+                    let hit = PrimaryHit {
+                        hit_pos: ray_grid.row_origins[y]
+                            .add(ray_grid.x_offsets[x])
+                            .add(ray_grid.dirs[idx].scale(depth)),
+                        ray_dir: ray_grid.dirs[idx],
+                        depth,
+                        iters: iter_buf[idx],
+                        shadow_steps: shadow_buf[idx],
+                        y_pos: (y as f64 + 0.5) / h as f64,
+                    };
+                    let surface = compute_surface_sample_mb3d(hit.hit_pos, hit.depth, formulas, params);
+                    let shadow_word =
+                        compute_shadow_word_mb3d(hit, surface.normal, y, soft_hs_light, formulas, params);
+                    let color = shade_primary_hit(
+                        hit,
+                        surface.normal,
+                        surface.roughness,
+                        shadow_word,
+                        x as i32,
+                        y as i32,
+                        lighting_cache,
+                        ssao,
+                        formulas,
+                        params,
+                        &mut shade_scratch,
+                    );
 
-                        let dir = ray_grid.dirs[idx];
-                        let hit_pos = origin.add(dir.scale(depth));
-                        let m_zz = depth / params.step_width;
-                        let n_offset = mb3d_normal_offset(params, m_zz);
-
-                        let (normal_basis, normal_coarse) = estimate_normal_grad(
-                            hit_pos,
-                            n_offset,
-                            params.camera.forward,
-                            params.camera.right,
-                            params.camera.up,
-                            formulas,
-                            &params.iter_params,
-                            params.de_floor,
-                        );
-                        let (normal_mb3d, roughness_mb3d) = smooth_normal_mb3d(
-                            hit_pos,
-                            normal_basis,
-                            normal_coarse,
-                            n_offset,
-                            params.sm_normals,
-                            params.camera.forward,
-                            params.camera.right,
-                            params.camera.up,
-                            formulas,
-                            &params.iter_params,
-                            params.de_floor,
-                        );
-
-                        let mut shadow_word = shadow_buf[idx] & 0x3ff;
-                        if let Some((_li, light_dir, i_light_pos)) = soft_hs_light {
-                            shadow_word |= 0xFC00;
-                            let soft_bits = calc_hs_soft_bits_mb3d(
-                                hit_pos,
-                                depth,
-                                dir,
-                                normal_mb3d,
-                                light_dir,
-                                i_light_pos,
-                                y,
-                                formulas,
-                                params,
-                            );
-                            shadow_word = (shadow_word & 0x03FF) | (soft_bits << 10);
-                        }
-
-                        let color = crate::lighting::shade(
-                            normal_mb3d,
-                            roughness_mb3d,
-                            dir.scale(-1.0),
-                            iter_buf[idx],
-                            shadow_word,
-                            params.iter_params.max_iters,
-                            params.iter_params.min_iters,
-                            hit_pos,
-                            1.0,
-                            depth,
-                            x as i32,
-                            y as i32,
-                            (y as f64 + 0.5) / h as f64,
-                            params.max_ray_length,
-                            lighting_cache,
-                            ssao,
-                            formulas,
-                            params,
-                            &mut shade_scratch,
-                        );
-
-                        pixel_chunk[offset] = color[0];
-                        pixel_chunk[offset + 1] = color[1];
-                        pixel_chunk[offset + 2] = color[2];
-                        pixel_chunk[offset + 3] = 255;
+                    unsafe {
+                        pixel_buf.write_rgba(idx, [color[0], color[1], color[2], 255]);
                     }
                 }
             }));
@@ -1066,7 +1253,120 @@ pub(crate) fn shade_from_primary_buffers(
     pixels
 }
 
-use std::thread;
+fn render_2x2_antialias(
+    formulas: &HybridProgram,
+    params: &RenderParams,
+    lighting: &crate::m3p::M3PLighting,
+    ssao: &crate::m3p::M3PSSAO,
+) -> Vec<u8> {
+    let out_w = params.camera.width as usize;
+    let out_h = params.camera.height as usize;
+    if out_w == 0 || out_h == 0 {
+        return Vec::new();
+    }
+
+    let mut aa_params = params.clone();
+    aa_params.apply_image_scale(2.0);
+
+    let aa_h = aa_params.camera.height as usize;
+    let num_threads = available_thread_count(out_w * out_h);
+    let ray_sampler = RaySampler::new(&aa_params.camera);
+    let soft_hs_light =
+        crate::lighting::soft_hs_light_dir(lighting, &aa_params.camera, &aa_params);
+    let lighting_cache = crate::lighting::LightingCache::new(lighting, &aa_params.camera, &aa_params);
+    let mut pixels = vec![0u8; out_w * out_h * 4];
+    let pixel_buf = SharedByteBuf::new(&mut pixels);
+    let next_pixel = AtomicUsize::new(0);
+
+    let full_pixels = thread::scope(|s| {
+        let mut workers = Vec::new();
+
+        for _worker_idx in 0..num_threads {
+            let formulas = formulas;
+            let aa_params = &aa_params;
+            let lighting_cache = &lighting_cache;
+            let soft_hs_light = soft_hs_light;
+            let ray_sampler = ray_sampler;
+            let pixel_buf = pixel_buf;
+            let next_pixel = &next_pixel;
+
+            workers.push(s.spawn(move || {
+                let mut shade_scratch = crate::lighting::ShadeScratch::default();
+                let mut full_pixels = 0u64;
+
+                loop {
+                    let idx = next_pixel.fetch_add(1, Ordering::Relaxed);
+                    if idx >= out_w * out_h {
+                        break;
+                    }
+
+                    let x = idx % out_w;
+                    let y = idx / out_w;
+                    let mut color_acc = [0.0f64; 3];
+
+                    for (sample_idx, (sx, sy)) in AA_2X2_SUBPIXELS.iter().copied().enumerate() {
+                        let hx = x * 2 + sx;
+                        let hy = y * 2 + sy;
+                        let (origin, ray_dir) = ray_sampler.sample(hx as f64, hy as f64);
+                        let y_pos = (hy as f64 + 0.5) / aa_h.max(1) as f64;
+                        if let Some(hit) = march_primary_hit(
+                            origin,
+                            ray_dir,
+                            y_pos,
+                            formulas,
+                            aa_params,
+                            pixel_seed(hx, hy, sample_idx as u32),
+                        ) {
+                            let surface =
+                                compute_surface_sample_mb3d(hit.hit_pos, hit.depth, formulas, aa_params);
+                            let shadow_word = compute_shadow_word_mb3d(
+                                hit,
+                                surface.normal,
+                                hy,
+                                soft_hs_light,
+                                formulas,
+                                aa_params,
+                            );
+                            let color = shade_primary_hit(
+                                hit,
+                                surface.normal,
+                                surface.roughness,
+                                shadow_word,
+                                hx as i32,
+                                hy as i32,
+                                lighting_cache,
+                                ssao,
+                                formulas,
+                                aa_params,
+                                &mut shade_scratch,
+                            );
+                            accumulate_rgba(&mut color_acc, [color[0], color[1], color[2], 255], 0.25);
+                        } else {
+                            accumulate_rgba(&mut color_acc, background_rgba(), 0.25);
+                        }
+                    }
+
+                    unsafe {
+                        pixel_buf.write_rgba(idx, finalize_accumulated_rgba(color_acc));
+                    }
+                    full_pixels += 1;
+                }
+
+                full_pixels
+            }));
+        }
+
+        let mut full_total = 0u64;
+        for worker in workers {
+            full_total += worker.join().unwrap();
+        }
+        full_total
+    });
+
+    eprintln!("2x2 AA fully averaged {} pixels", full_pixels);
+
+    pixels
+}
 
 /// Render the full image using two passes:
 /// 1. Ray march to build depth + iteration buffers
@@ -1078,6 +1378,14 @@ pub fn render(formulas: &HybridProgram, params: &RenderParams, lighting: &crate:
         return Vec::new();
     }
 
+    if params.antialiasing == AntialiasingMode::X2 {
+        eprintln!("Rendering {}x{} with 2x2 AA ...", w, h);
+        let start = std::time::Instant::now();
+        let pixels = render_2x2_antialias(formulas, params, lighting, ssao);
+        eprintln!("Render complete in {:.1}s", start.elapsed().as_secs_f64());
+        return pixels;
+    }
+
     // Pass 1: build depth and iteration buffers
     let mut depth_buf = vec![f64::MAX; w * h];
     let mut iter_buf = vec![0i32; w * h];
@@ -1086,54 +1394,50 @@ pub fn render(formulas: &HybridProgram, params: &RenderParams, lighting: &crate:
     eprintln!("Rendering {}x{} ...", w, h);
     let start = std::time::Instant::now();
     
-    let num_threads = thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(h.max(1));
+    let num_threads = available_thread_count(w * h);
     let rows_per_thread = h.div_ceil(num_threads);
-    let band_len = rows_per_thread * w;
     let ray_grid = build_ray_grid(&params.camera, num_threads, rows_per_thread);
+    let depth_writer = SharedWriteBuf::new(&mut depth_buf);
+    let iter_writer = SharedWriteBuf::new(&mut iter_buf);
+    let shadow_writer = SharedWriteBuf::new(&mut shadow_buf);
+    let next_pixel = AtomicUsize::new(0);
     eprintln!("Using {} threads", num_threads);
     
     let total_hits = thread::scope(|s| {
         let mut workers = Vec::new();
         let ray_grid = &ray_grid;
-        for (thread_idx, ((depth_chunk, iter_chunk), shadow_chunk)) in depth_buf
-            .chunks_mut(band_len)
-            .zip(iter_buf.chunks_mut(band_len))
-            .zip(shadow_buf.chunks_mut(band_len))
-            .enumerate()
-        {
-            let formulas = &formulas;
-            let params = &params;
-            let y_start = thread_idx * rows_per_thread;
+        for _worker_idx in 0..num_threads {
+            let formulas = formulas;
+            let params = params;
+            let depth_writer = depth_writer;
+            let iter_writer = iter_writer;
+            let shadow_writer = shadow_writer;
+            let next_pixel = &next_pixel;
             workers.push(s.spawn(move || {
-                let row_count = depth_chunk.len() / w;
                 let mut local_hits = 0u64;
+                loop {
+                    let idx = next_pixel.fetch_add(1, Ordering::Relaxed);
+                    if idx >= w * h {
+                        break;
+                    }
 
-                for local_y in 0..row_count {
-                    let y = y_start + local_y;
-                    let row_offset = local_y * w;
-                    for x in 0..w {
-                        let idx = row_offset + x;
-                        let origin = ray_grid.row_origins[y].add(ray_grid.x_offsets[x]);
-                        let dir = ray_grid.dirs[y * w + x];
-                        let seed = (x as u32)
-                            .wrapping_mul(0x45d9f3b)
-                            .wrapping_add((y as u32).wrapping_mul(0x2710_0001))
-                            .wrapping_add((thread_idx as u32).wrapping_mul(0x9e37_79b9))
-                            .wrapping_add(0x2456_3487);
+                    let x = idx % w;
+                    let y = idx / w;
+                    let origin = ray_grid.row_origins[y].add(ray_grid.x_offsets[x]);
+                    let dir = ray_grid.dirs[idx];
+                    let seed = pixel_seed(x, y, 0);
 
-                        if let PixelResult::Hit {
-                            depth,
-                            iters,
-                            shadow_steps,
-                        } = ray_march(origin, dir, formulas, params, seed)
-                        {
-                            local_hits += 1;
-                            depth_chunk[idx] = depth;
-                            iter_chunk[idx] = iters;
-                            shadow_chunk[idx] = shadow_steps;
+                    if let PixelResult::Hit {
+                        depth,
+                        iters,
+                        shadow_steps,
+                    } = ray_march(origin, dir, formulas, params, seed)
+                    {
+                        local_hits += 1;
+                        unsafe {
+                            depth_writer.write(idx, depth);
+                            iter_writer.write(idx, iters);
+                            shadow_writer.write(idx, shadow_steps);
                         }
                     }
                 }
