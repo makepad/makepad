@@ -1034,9 +1034,12 @@ impl Win32Window {
         if active {
             if !self.ime_saved_himc.is_invalid() {
                 unsafe { ImmAssociateContext(self.hwnd, self.ime_saved_himc) };
+                self.ime_saved_himc = HIMC::default();
             }
         } else {
-            self.ime_saved_himc = unsafe { ImmAssociateContext(self.hwnd, HIMC::default()) };
+            if self.ime_saved_himc.is_invalid() {
+                self.ime_saved_himc = unsafe { ImmAssociateContext(self.hwnd, HIMC::default()) };
+            }
         }
     }
 

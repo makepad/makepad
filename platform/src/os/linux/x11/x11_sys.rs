@@ -72,6 +72,14 @@ pub const EnterWindowMask: u32 = 16;
 pub const LeaveWindowMask: u32 = 32;
 pub const XBufferOverflow: i32 = -1;
 
+pub const XLookupNone: i32 = 1;
+pub const XLookupChars: i32 = 2;
+pub const XLookupKeySym: i32 = 3;
+pub const XLookupBoth: i32 = 4;
+
+pub const FocusIn: u32 = 9;
+pub const FocusOut: u32 = 10;
+
 pub const QueuedAlready: i32 = 0;
 pub const QueuedAfterReading: i32 = 1;
 pub const QueuedAfterFlush: i32 = 2;
@@ -89,6 +97,9 @@ pub const XIMStatusNothing: u32 = 1024;
 pub const XNInputStyle: &'static [u8; 11usize] = b"inputStyle\0";
 pub const XNClientWindow: &'static [u8; 13usize] = b"clientWindow\0";
 pub const XNFocusWindow: &'static [u8; 12usize] = b"focusWindow\0";
+pub const XNPreeditAttributes: &'static [u8; 18usize] = b"preeditAttributes\0";
+pub const XNSpotLocation: &'static [u8; 13usize] = b"spotLocation\0";
+pub const XNArea: &'static [u8; 5usize] = b"area\0";
 
 pub const Mod1Mask: u32 = 8;
 pub const ShiftMask: u32 = 1;
@@ -228,6 +239,13 @@ pub const XK_Right: u32 = 65363;
 pub const XK_Down: u32 = 65364;
 pub const XK_Up: u32 = 65362;
 
+pub const LC_CTYPE: c_int = 0;
+
+#[link(name = "c")]
+extern "C" {
+    pub fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
+}
+
 #[link(name = "Xcursor")]
 extern "C" {
     pub fn XcursorLibraryLoadCursor(dpy: *mut Display, file: *const c_char) -> Cursor;
@@ -354,6 +372,18 @@ extern "C" {
 
     pub fn XCreateIC(arg1: XIM, ...) -> XIC;
 
+    pub fn XSetLocaleModifiers(arg1: *const c_char) -> *const c_char;
+
+    pub fn XSetICFocus(arg1: XIC);
+
+    pub fn XUnsetICFocus(arg1: XIC);
+
+    pub fn XSetICValues(arg1: XIC, ...) -> *mut c_char;
+
+    pub fn XVaCreateNestedList(arg1: c_int, ...) -> *mut c_void;
+
+    pub fn XFilterEvent(arg1: *mut XEvent, arg2: Window) -> c_int;
+
     pub fn XDestroyWindow(arg1: *mut Display, arg2: Window) -> c_int;
 
     pub fn XIconifyWindow(arg1: *mut Display, arg2: Window, arg3: c_int) -> c_int;
@@ -409,6 +439,22 @@ extern "C" {
         arg4: *mut KeySym,
         arg5: *mut XComposeStatus,
     ) -> c_int;
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct XPoint {
+    pub x: c_short,
+    pub y: c_short,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct XRectangle {
+    pub x: c_short,
+    pub y: c_short,
+    pub width: u16,
+    pub height: u16,
 }
 
 #[repr(C)]
