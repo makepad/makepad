@@ -500,8 +500,12 @@ fn orbit_scene_from_ds_uploads<R: PortNum>(scene: &GpuDsUploads) -> OrbitScene<R
     }
 }
 impl PortNum for Ds {
-    fn zero() -> Self { Self::new(0.0) }
-    fn one() -> Self { Self::new(1.0) }
+    fn zero() -> Self {
+        Self::new(0.0)
+    }
+    fn one() -> Self {
+        Self::new(1.0)
+    }
     fn from_f64(v: f64) -> Self {
         let hi = v as f32;
         Self {
@@ -509,21 +513,37 @@ impl PortNum for Ds {
             lo: (v - hi as f64) as f32,
         }
     }
-    fn from_split(v: F2) -> Self { Self::from_split(v) }
-    fn to_f64(self) -> f64 { self.hi as f64 + self.lo as f64 }
-    fn add(self, other: Self) -> Self { self.add(other) }
-    fn sub(self, other: Self) -> Self { self.sub(other) }
-    fn mul(self, other: Self) -> Self { self.mul(other) }
-    fn div(self, other: Self) -> Self { self.div(other) }
-    fn abs(self) -> Self { self.abs() }
-    fn sqrt(self) -> Self { self.sqrt() }
-    fn cmp(self, other: Self) -> std::cmp::Ordering { self.cmp(other) }
+    fn from_split(v: F2) -> Self {
+        Self::from_split(v)
+    }
+    fn to_f64(self) -> f64 {
+        self.hi as f64 + self.lo as f64
+    }
+    fn add(self, other: Self) -> Self {
+        self.add(other)
+    }
+    fn sub(self, other: Self) -> Self {
+        self.sub(other)
+    }
+    fn mul(self, other: Self) -> Self {
+        self.mul(other)
+    }
+    fn div(self, other: Self) -> Self {
+        self.div(other)
+    }
+    fn abs(self) -> Self {
+        self.abs()
+    }
+    fn sqrt(self) -> Self {
+        self.sqrt()
+    }
+    fn cmp(self, other: Self) -> std::cmp::Ordering {
+        self.cmp(other)
+    }
 }
 
 fn box_fold_num<R: PortNum>(a: R, fold: R) -> R {
-    a.add(fold).abs()
-        .sub(a.sub(fold).abs())
-        .sub(a)
+    a.add(fold).abs().sub(a.sub(fold).abs()).sub(a)
 }
 
 fn hybrid_de_scene<R: PortNum>(scene: &OrbitScene<R>, px: R, py: R, pz: R) -> (f32, R) {
@@ -599,12 +619,8 @@ fn hybrid_de_scene<R: PortNum>(scene: &OrbitScene<R>, px: R, py: R, pz: R) -> (f
                 .add(z.mul(scene.rot2[2]));
 
             let sf = scene.menger_scale.sub(R::one());
-            x = nx
-                .mul(scene.menger_scale)
-                .sub(scene.menger_cx.mul(sf));
-            y = ny
-                .mul(scene.menger_scale)
-                .sub(scene.menger_cy.mul(sf));
+            x = nx.mul(scene.menger_scale).sub(scene.menger_cx.mul(sf));
+            y = ny.mul(scene.menger_scale).sub(scene.menger_cy.mul(sf));
 
             let c = scene.menger_cz.mul(sf);
             z = c.sub(nz.mul(scene.menger_scale).sub(c).abs());
@@ -689,16 +705,11 @@ fn load_cathedral_scene(path: &str) -> Result<CathedralScene, String> {
         0.0
     };
 
-    let rot = if rot_x == 0.0 && rot_y == 0.0 && rot_z == 0.0
-    {
+    let rot = if rot_x == 0.0 && rot_y == 0.0 && rot_z == 0.0 {
         formulas::Mat3::identity()
     } else {
         let d2r = std::f64::consts::PI / 180.0;
-        formulas::Mat3::from_euler(
-            rot_x * d2r,
-            rot_y * d2r,
-            rot_z * d2r,
-        )
+        formulas::Mat3::from_euler(rot_x * d2r, rot_y * d2r, rot_z * d2r)
     };
 
     let menger_scale = if menger_formula.option_count > 0 {
@@ -930,7 +941,12 @@ struct StandaloneCosTables {
 }
 
 fn standalone_light_local_dir(angle_xy: f64, angle_z: f64) -> render::Vec3 {
-    render::Vec3::new(-angle_xy.sin(), -angle_z.sin(), -(angle_xy.cos() * angle_z.cos())).normalize()
+    render::Vec3::new(
+        -angle_xy.sin(),
+        -angle_z.sin(),
+        -(angle_xy.cos() * angle_z.cos()),
+    )
+    .normalize()
 }
 
 fn standalone_light_is_active_non_lightmap(l: &m3p::M3PLight) -> bool {
@@ -993,7 +1009,10 @@ fn parse_standalone_light(
     })
 }
 
-fn build_standalone_color_stops(lighting: &m3p::M3PLighting, specular: bool) -> Vec<StandaloneColorStop> {
+fn build_standalone_color_stops(
+    lighting: &m3p::M3PLighting,
+    specular: bool,
+) -> Vec<StandaloneColorStop> {
     let mut stops = Vec::with_capacity(lighting.l_cols.len() + 1);
     for stop in &lighting.l_cols {
         let color = if specular {
@@ -1147,7 +1166,12 @@ fn standalone_get_cos_tab_val_inner(tnr: i32, dotp: f64, rough: f64, square: boo
     }
 }
 
-fn standalone_apply_diff_mode_mb3d(mode: i32, ndotl: f64, rough: f64, calc_pix_col_sqr: bool) -> f64 {
+fn standalone_apply_diff_mode_mb3d(
+    mode: i32,
+    ndotl: f64,
+    rough: f64,
+    calc_pix_col_sqr: bool,
+) -> f64 {
     standalone_get_cos_tab_val_inner(mode, ndotl, rough, calc_pix_col_sqr)
 }
 
@@ -1191,9 +1215,9 @@ fn build_standalone_lighting_state(
 
     let mut s_c_start =
         ((lighting.tbpos_9 + 30) as f64 * 0.01111111111111111).powi(2) * 32767.0 - 10900.0;
-    let mut s_c_mul =
-        ((lighting.tbpos_10 + 30) as f64 * 0.01111111111111111).powi(2) * 32767.0 - 10900.0
-            - s_c_start;
+    let mut s_c_mul = ((lighting.tbpos_10 + 30) as f64 * 0.01111111111111111).powi(2) * 32767.0
+        - 10900.0
+        - s_c_start;
     if (lighting.tboptions & 0x10000) != 0 {
         let adjusted =
             s_c_start + s_c_mul * (lighting.fine_col_adj_2 as i32 - 30) as f64 * 0.0166666666666666;
@@ -1326,7 +1350,11 @@ fn standalone_shade_with_final_ao_mb3d(
 
     let v_from_cam = view_dir.normalize().scale(-1.0);
     let n = normal.normalize();
-    let ny = if state.b_amb_rel_obj { n.y } else { n.dot(state.cam_up) };
+    let ny = if state.b_amb_rel_obj {
+        n.y
+    } else {
+        n.dot(state.cam_up)
+    };
     let w_top = (ny * 0.5 + 0.5).clamp(0.0, 1.0);
     let w_bot = 1.0 - w_top;
     let amb_light = state
@@ -1374,7 +1402,8 @@ fn standalone_shade_with_final_ao_mb3d(
             }
             if spec_mul > 0.0 {
                 let spec_pow = spec_dot.powf(pl.spec_power);
-                total_specular = total_specular.add(pl.color.scale(spec_pow * spec_mul * light_gate));
+                total_specular =
+                    total_specular.add(pl.color.scale(spec_pow * spec_mul * light_gate));
             }
         }
     }
@@ -1396,11 +1425,14 @@ fn standalone_shade_with_final_ao_mb3d(
     );
 
     let mut final_color = render::Vec3::new(
-        amb_light.x * diffuse_color.x + diffuse_color.x * state.s_diff * total_diffuse.x
+        amb_light.x * diffuse_color.x
+            + diffuse_color.x * state.s_diff * total_diffuse.x
             + spec_color.x * total_specular.x,
-        amb_light.y * diffuse_color.y + diffuse_color.y * state.s_diff * total_diffuse.y
+        amb_light.y * diffuse_color.y
+            + diffuse_color.y * state.s_diff * total_diffuse.y
             + spec_color.y * total_specular.y,
-        amb_light.z * diffuse_color.z + diffuse_color.z * state.s_diff * total_diffuse.z
+        amb_light.z * diffuse_color.z
+            + diffuse_color.z * state.s_diff * total_diffuse.z
             + spec_color.z * total_specular.z,
     );
 
@@ -1647,10 +1679,7 @@ fn ray_march_scene_num<R: PortNum>(
         };
     }
 
-    last_step = num_max(
-        de.mul(params.s_z_step_div),
-        params.step_width.mul_f64(0.11),
-    );
+    last_step = num_max(de.mul(params.s_z_step_div), params.step_width.mul_f64(0.11));
     last_de = de;
 
     for _ in 0..2_000_000 {
@@ -1670,8 +1699,8 @@ fn ray_march_scene_num<R: PortNum>(
                     .mul(rsfmul),
                 params.step_width.mul_f64(0.11),
             );
-            let max_step_here = num_max(current_destop, params.step_width.mul_f64(0.4))
-                .mul(params.mct_mh04_zsd);
+            let max_step_here =
+                num_max(current_destop, params.step_width.mul_f64(0.4)).mul(params.mct_mh04_zsd);
 
             if max_step_here.cmp(step) == std::cmp::Ordering::Less {
                 if params.d_fog_on_it == 0 || iters == params.d_fog_on_it {
@@ -1746,7 +1775,8 @@ fn render_selfcontained_shaderlike_pixels<R: PortNum + Send + Sync>(
     let uploads = build_ds_uploads(scene, width);
     let orbit = orbit_scene_from_ds_uploads::<R>(&uploads);
     let march = build_march_params_from_ds_uploads::<R>(&uploads);
-    let lighting_state = build_standalone_lighting_state(&scene.m3p.lighting, &params.camera, &params);
+    let lighting_state =
+        build_standalone_lighting_state(&scene.m3p.lighting, &params.camera, &params);
     let soft_hs_light = standalone_soft_hs_light_dir(&scene.m3p.lighting, &params.camera, &params);
 
     let mut pixels = vec![0u8; width * height * 4];
@@ -1878,7 +1908,8 @@ fn standalone_surface_sample_num<R: PortNum>(
     let up = split_vec3_to_vec3(uploads.cam_up).normalize();
 
     let m_zz = depth / step_width;
-    let n_offset = de_stop_header.min(1.0) * (1.0 + m_zz.abs() * de_stop_factor) * 0.15 * step_width;
+    let n_offset =
+        de_stop_header.min(1.0) * (1.0 + m_zz.abs() * de_stop_factor) * 0.15 * step_width;
 
     let fwd = forward.scale(n_offset);
     let rt = right.scale(n_offset);
@@ -1919,7 +1950,10 @@ fn standalone_surface_sample_num<R: PortNum>(
     let create_xy_vecs_from_normals_mb3d = |n: render::Vec3| {
         let d = n.y * n.y + n.x * n.x;
         if d < 1.0e-50 {
-            return (render::Vec3::new(1.0, 0.0, 0.0), render::Vec3::new(0.0, 1.0, 0.0));
+            return (
+                render::Vec3::new(1.0, 0.0, 0.0),
+                render::Vec3::new(0.0, 1.0, 0.0),
+            );
         }
         let denom = (d + n.z * n.z + 1.0e-100).sqrt();
         let half_angle = (-n.z / denom).clamp(-1.0, 1.0).acos() * 0.5;
@@ -1941,13 +1975,12 @@ fn standalone_surface_sample_num<R: PortNum>(
 
     let mut dnn = calc_de_scene_num_at_numpos(orbit, march, hit_pos);
     if smooth_n < 8 {
-        dnn = (
-            dnn
-                + calc_de_scene_num_at_numpos(orbit, march, offset_num_pos(hit_pos, right, -noffset2))
-                + calc_de_scene_num_at_numpos(orbit, march, offset_num_pos(hit_pos, right, noffset2))
-                + calc_de_scene_num_at_numpos(orbit, march, offset_num_pos(hit_pos, up, -noffset2))
-                + calc_de_scene_num_at_numpos(orbit, march, offset_num_pos(hit_pos, up, noffset2))
-        ) * 0.2;
+        dnn = (dnn
+            + calc_de_scene_num_at_numpos(orbit, march, offset_num_pos(hit_pos, right, -noffset2))
+            + calc_de_scene_num_at_numpos(orbit, march, offset_num_pos(hit_pos, right, noffset2))
+            + calc_de_scene_num_at_numpos(orbit, march, offset_num_pos(hit_pos, up, -noffset2))
+            + calc_de_scene_num_at_numpos(orbit, march, offset_num_pos(hit_pos, up, noffset2)))
+            * 0.2;
     }
 
     let (vx_basis, vy_basis) = create_xy_vecs_from_normals_mb3d(normal_basis);
@@ -2087,11 +2120,10 @@ fn standalone_soft_hs_bits_num<R: PortNum>(
     loop {
         let r_last_de_world = de_world;
         let max_step_world = (ms_de_stop_world.max(0.4 * step_width)) * mct_mh04_zsd;
-        let r_last_step_world = ((de_world - ms_de_sub * ms_de_stop_world)
-            * s_z_step_div_raw
-            * step_factor_diff)
-            .max(0.11 * step_width)
-            .min(max_step_world);
+        let r_last_step_world =
+            ((de_world - ms_de_sub * ms_de_stop_world) * s_z_step_div_raw * step_factor_diff)
+                .max(0.11 * step_width)
+                .min(max_step_world);
         if r_last_step_world <= 0.0 {
             break;
         }
@@ -2104,9 +2136,8 @@ fn standalone_soft_hs_bits_num<R: PortNum>(
 
         de_world = calc_de_scene_num_at_numpos(orbit, march, pos);
         let traveled = (max_l_hs - d_t1).max(0.0);
-        let soft_term =
-            ((de_world - ms_de_stop_world) / step_width) * zr_s_mul / (traveled + 0.11)
-                + (traveled / max_l_hs.max(1.0e-30)).powi(8);
+        let soft_term = ((de_world - ms_de_stop_world) / step_width) * zr_s_mul / (traveled + 0.11)
+            + (traveled / max_l_hs.max(1.0e-30)).powi(8);
         zr_soft = zr_soft.min(soft_term);
 
         if de_world <= ms_de_stop_world {
@@ -2130,9 +2161,7 @@ fn standalone_soft_hs_bits_num<R: PortNum>(
         }
     }
 
-    (zr_soft.clamp(0.0, 1.0) * 63.4)
-        .round()
-        .clamp(0.0, 63.0) as i32
+    (zr_soft.clamp(0.0, 1.0) * 63.4).round().clamp(0.0, 63.0) as i32
 }
 
 fn standalone_ao_step_jitter(pixel_x: i32, pixel_y: i32, ray_idx: usize) -> f64 {
@@ -2173,9 +2202,13 @@ fn standalone_deao_num<R: PortNum>(
 
     let normal_basis_w = normal.normalize();
     let normal_basis_u = if normal_basis_w.x.abs() > 0.1 {
-        render::Vec3::new(0.0, 1.0, 0.0).cross(normal_basis_w).normalize()
+        render::Vec3::new(0.0, 1.0, 0.0)
+            .cross(normal_basis_w)
+            .normalize()
     } else {
-        render::Vec3::new(1.0, 0.0, 0.0).cross(normal_basis_w).normalize()
+        render::Vec3::new(1.0, 0.0, 0.0)
+            .cross(normal_basis_w)
+            .normalize()
     };
     let normal_basis_v = normal_basis_w.cross(normal_basis_u);
     let make_world_dir = |polar: f64, azimuth: f64| {
@@ -2257,9 +2290,7 @@ fn standalone_deao_num<R: PortNum>(
     let de_mul = ((ray_count as f64) * 0.5).sqrt();
     let overlap_abr = 1.2 / (1.0 / de_mul).asin();
     let step_ao = 1.0 + m_zz.abs() * de_stop_factor;
-    let s_max_d = ssao.deao_max_l as f64
-        * 0.5
-        * ((width * width + height * height) as f64).sqrt();
+    let s_max_d = ssao.deao_max_l as f64 * 0.5 * ((width * width + height * height) as f64).sqrt();
 
     let mut ms_de_stop_steps = de_stop_header * step_ao;
     if ms_de_stop_steps > 10000.0 {
@@ -2363,12 +2394,14 @@ fn standalone_deao_num<R: PortNum>(
 #[test]
 #[ignore = "manual render of self-contained generic ds shaderlike path at 1920x1080"]
 fn render_selfcontained_ds_1080p() {
-    let path = format!("{}/../../local/mb3d/cathedral.m3p", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../local/mb3d/cathedral.m3p",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let scene = load_cathedral_scene(&path).expect("cathedral scene should load");
     let width = 1920usize;
-    let (pixels, out_w, out_h, hits) =
-        render_selfcontained_shaderlike_pixels::<Ds>(&scene, width)
-            .expect("self-contained ds pixels should render");
+    let (pixels, out_w, out_h, hits) = render_selfcontained_shaderlike_pixels::<Ds>(&scene, width)
+        .expect("self-contained ds pixels should render");
     let output_path = "/tmp/mb3d_selfcontained_ds_1920x1080.png";
     encode_png(output_path, &pixels, out_w, out_h).expect("self-contained ds png should encode");
     println!(
@@ -2380,12 +2413,14 @@ fn render_selfcontained_ds_1080p() {
 #[test]
 #[ignore = "manual render of self-contained generic ds shaderlike path at 480x270"]
 fn render_selfcontained_ds_25pct() {
-    let path = format!("{}/../../local/mb3d/cathedral.m3p", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../local/mb3d/cathedral.m3p",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let scene = load_cathedral_scene(&path).expect("cathedral scene should load");
     let width = 480usize;
-    let (pixels, out_w, out_h, hits) =
-        render_selfcontained_shaderlike_pixels::<Ds>(&scene, width)
-            .expect("self-contained ds pixels should render");
+    let (pixels, out_w, out_h, hits) = render_selfcontained_shaderlike_pixels::<Ds>(&scene, width)
+        .expect("self-contained ds pixels should render");
     let output_path = "/tmp/mb3d_selfcontained_ds_480x270.png";
     encode_png(output_path, &pixels, out_w, out_h).expect("self-contained ds png should encode");
     println!(
@@ -2397,12 +2432,14 @@ fn render_selfcontained_ds_25pct() {
 #[test]
 #[ignore = "manual render of self-contained generic ds shaderlike path at 960xH"]
 fn render_selfcontained_ds_960p() {
-    let path = format!("{}/../../local/mb3d/cathedral.m3p", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../local/mb3d/cathedral.m3p",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let scene = load_cathedral_scene(&path).expect("cathedral scene should load");
     let width = 960usize;
-    let (pixels, out_w, out_h, hits) =
-        render_selfcontained_shaderlike_pixels::<Ds>(&scene, width)
-            .expect("self-contained ds pixels should render");
+    let (pixels, out_w, out_h, hits) = render_selfcontained_shaderlike_pixels::<Ds>(&scene, width)
+        .expect("self-contained ds pixels should render");
     let output_path = "/tmp/mb3d_selfcontained_ds_960.png";
     encode_png(output_path, &pixels, out_w, out_h).expect("self-contained ds png should encode");
     println!(
