@@ -373,6 +373,53 @@ pub struct DebugTraceStep {
     pub r2: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct OrbitState {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub w: f64,
+    pub r2: f64,
+    pub de: f64,
+    pub iters: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OrbitHistory {
+    pub state: OrbitState,
+    pub trap_min_x: f64,
+    pub trap_min_y: f64,
+    pub trap_min_z: f64,
+    pub trap_min_r: f64,
+    pub fold_x: f64,
+    pub fold_y: f64,
+    pub fold_z: f64,
+    pub fold_any: f64,
+    pub branch_reciprocal: i32,
+    pub branch_outer: i32,
+    pub sign_flip_x: i32,
+    pub sign_flip_y: i32,
+    pub sign_flip_z: i32,
+}
+
+fn sign_bucket(value: f64) -> i8 {
+    if value > 1.0e-30 {
+        1
+    } else if value < -1.0e-30 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn record_sign_flip(prev: f64, next: f64, counter: &mut i32) {
+    let prev = sign_bucket(prev);
+    let next = sign_bucket(next);
+    if prev != 0 && next != 0 && prev != next {
+        *counter += 1;
+    }
+}
+
 #[cfg(test)]
 pub fn debug_trace_hybrid(
     pos: (f64, f64, f64),
@@ -454,6 +501,139 @@ pub fn hybrid_de(pos: (f64, f64, f64), program: &HybridProgram, params: &IterPar
     };
 
     (total_iters, de)
+}
+
+pub fn hybrid_orbit_history(
+    pos: (f64, f64, f64),
+    program: &HybridProgram,
+    params: &IterParams,
+) -> OrbitHistory {
+    let mut history = OrbitHistory {
+        state: OrbitState {
+            x: pos.0,
+            y: pos.1,
+            z: pos.2,
+            w: 0.0,
+            r2: pos.0 * pos.0 + pos.1 * pos.1 + pos.2 * pos.2,
+            de: 0.0,
+            iters: 0,
+        },
+        trap_min_x: pos.0.abs(),
+        trap_min_y: pos.1.abs(),
+        trap_min_z: pos.2.abs(),
+        trap_min_r: (pos.0 * pos.0 + pos.1 * pos.1 + pos.2 * pos.2).sqrt(),
+        fold_x: 0.0,
+        fold_y: 0.0,
+        fold_z: 0.0,
+        fold_any: 0.0,
+        branch_reciprocal: 0,
+        branch_outer: 0,
+        sign_flip_x: 0,
+        sign_flip_y: 0,
+        sign_flip_z: 0,
+    };
+
+    if program.slots.is_empty() {
+        return history;
+    }
+
+    let mut state = IterState::new(pos.0, pos.1, pos.2, params);
+    state.w = 1.0;
+
+    let mut total_iters = 0i32;
+    let mut slot_idx = 0usize;
+    let mut remaining = program.slots[0].iteration_count;
+
+    loop {
+        advance_formula_slot(program, &mut slot_idx, &mut remaining);
+        let slot = &program.slots[slot_idx];
+        let prev_x = state.x;
+        let prev_y = state.y;
+        let prev_z = state.z;
+
+        match &slot.kind {
+            FormulaKind::AmazingBox(f) => {
+                let fold = f.fold;
+                let (folded_x, folded_y) = simd_box_fold_xy(state.x, state.y, fold);
+                let folded_z = (state.z + fold).abs() - (state.z - fold).abs() - state.z;
+
+                let fold_dx = (folded_x - state.x).abs();
+                let fold_dy = (folded_y - state.y).abs();
+                let fold_dz = (folded_z - state.z).abs();
+                history.fold_x += fold_dx;
+                history.fold_y += fold_dy;
+                history.fold_z += fold_dz;
+                history.fold_any += fold_dx + fold_dy + fold_dz;
+
+                state.x = folded_x;
+                state.y = folded_y;
+                state.z = folded_z;
+
+                let rr = simd_dot2(state.x, state.y) + state.z * state.z;
+                let m = if rr < f.min_r2 {
+                    f.scale_div_min_r2
+                } else if rr < 1.0 {
+                    history.branch_reciprocal += 1;
+                    f.scale / rr
+                } else {
+                    history.branch_outer += 1;
+                    f.scale
+                };
+
+                state.w *= m;
+
+                let (next_x, next_y) = simd_mul_add_xy(state.x, state.y, m, state.cx, state.cy);
+                state.x = next_x;
+                state.y = next_y;
+                state.z = state.z * m + state.cz;
+            }
+            FormulaKind::MengerIFS(f) => {
+                f.iterate(&mut state);
+            }
+        }
+
+        total_iters += 1;
+        remaining -= 1;
+        state.r2 = state.x * state.x + state.y * state.y + state.z * state.z;
+
+        history.trap_min_x = history.trap_min_x.min(state.x.abs());
+        history.trap_min_y = history.trap_min_y.min(state.y.abs());
+        history.trap_min_z = history.trap_min_z.min(state.z.abs());
+        history.trap_min_r = history.trap_min_r.min(state.r2.sqrt());
+        record_sign_flip(prev_x, state.x, &mut history.sign_flip_x);
+        record_sign_flip(prev_y, state.y, &mut history.sign_flip_y);
+        record_sign_flip(prev_z, state.z, &mut history.sign_flip_z);
+
+        if state.r2 > state.rstop || total_iters >= state.max_iters {
+            break;
+        }
+    }
+
+    let r = state.r2.sqrt();
+    let de = if state.w.abs() > 1.0e-30 {
+        r / state.w.abs()
+    } else {
+        0.0
+    };
+
+    history.state = OrbitState {
+        x: state.x,
+        y: state.y,
+        z: state.z,
+        w: state.w,
+        r2: state.r2,
+        de,
+        iters: total_iters,
+    };
+    history
+}
+
+pub fn hybrid_orbit_state(
+    pos: (f64, f64, f64),
+    program: &HybridProgram,
+    params: &IterParams,
+) -> OrbitState {
+    hybrid_orbit_history(pos, program, params).state
 }
 
 pub fn build_formulas(m3p: &crate::m3p::M3PFile) -> HybridProgram {

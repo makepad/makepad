@@ -2,9 +2,10 @@
 name = "makepad-mb3d-render"
 version = "0.1.0"
 edition = "2021"
-description = "MB3D fractal renderer - parses M3P files, ray-marches fractals, outputs PNG"
+description = "MB3D fractal renderer - parses M3P files, ray-marches fractals, outputs PNG or OpenEXR"
 
 [dependencies]
+makepad-openexr = { path = "../openexr" }
 makepad-zune-png = { path = "../zune/zune-png" }
 makepad-zune-core = { path = "../zune/zune-core" }
 makepad-math = { path = "../math" }
