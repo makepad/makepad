@@ -48,20 +48,6 @@ impl Into<OsType> for WBrowserInfo {
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmGetDeps {
-    pub gpu_info: WGpuInfo,
-    pub cpu_cores: u32,
-    pub xr_capabilities: WXrCapabilities,
-    pub browser_info: WBrowserInfo,
-}
-
-#[derive(ToWasm)]
-pub struct WDepLoaded {
-    pub path: String,
-    pub data: WasmDataU8,
-}
-
-#[derive(ToWasm)]
 pub struct WWindowInfo {
     pub is_fullscreen: bool,
     pub can_fullscreen: bool,
@@ -108,7 +94,10 @@ impl Into<XrCapabilities> for WXrCapabilities {
 
 #[derive(ToWasm)]
 pub struct ToWasmInit {
-    pub deps: Vec<WDepLoaded>,
+    pub gpu_info: WGpuInfo,
+    pub cpu_cores: u32,
+    pub xr_capabilities: WXrCapabilities,
+    pub browser_info: WBrowserInfo,
     pub window_info: WWindowInfo,
 }
 
@@ -596,4 +585,36 @@ pub struct WAudioDevice {
 #[derive(ToWasm)]
 pub struct ToWasmAudioDeviceList {
     pub devices: Vec<WAudioDevice>,
+}
+
+// Video Playback API
+
+#[derive(ToWasm)]
+pub struct ToWasmVideoPlaybackPrepared {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+    pub video_width: u32,
+    pub video_height: u32,
+    pub duration_lo: u32,
+    pub duration_hi: u32,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmVideoTextureUpdated {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+    pub current_position_lo: u32,
+    pub current_position_hi: u32,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmVideoPlaybackCompleted {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmVideoPlaybackResourcesReleased {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
 }

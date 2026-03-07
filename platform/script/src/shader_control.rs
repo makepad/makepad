@@ -88,7 +88,7 @@ impl ShaderFnCompiler {
         None
     }
 
-    pub(crate) fn handle_if_else_phi(&mut self, vm: &ScriptVm, output: &ShaderOutput) {
+    pub(crate) fn handle_if_else_phi(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
         // Loop to handle ALL IfBodies whose target_ip has been reached.
         // This is important for match/else-if chains where multiple ifs end at the same position.
         loop {
@@ -129,7 +129,7 @@ impl ShaderFnCompiler {
 
                 if self.stack.types.len() > stack_depth {
                     // Else branch has a value on the stack
-                    let (ty, val) = self.stack.pop(self.trap.pass());
+                    let (ty, val) = self.pop_resolved(vm, output);
 
                     // Check if the else value is void
                     let else_concrete = ty.make_concrete(&vm.bx.code.builtins.pod);
@@ -294,11 +294,26 @@ impl ShaderFnCompiler {
         });
     }
 
-    pub(crate) fn handle_if_else(&mut self, vm: &ScriptVm, opargs: OpcodeArgs) {
+    pub(crate) fn handle_if_else(
+        &mut self,
+        vm: &mut ScriptVm,
+        output: &mut ShaderOutput,
+        opargs: OpcodeArgs,
+    ) {
+        let popped = if let Some(ShaderMe::IfBody { stack_depth, .. }) = self.mes.last() {
+            if self.stack.types.len() > *stack_depth {
+                Some(self.pop_resolved(vm, output))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         if let Some(ShaderMe::IfBody {
             target_ip,
             start_pos,
-            stack_depth,
+            stack_depth: _,
             phi,
             phi_type,
             has_return,
@@ -307,8 +322,7 @@ impl ShaderFnCompiler {
             created_unreachable: _,
         }) = self.mes.last_mut()
         {
-            if self.stack.types.len() > *stack_depth {
-                let (ty, val) = self.stack.pop(self.trap.pass());
+            if let Some((ty, val)) = popped {
                 // Check if the type is void - if so, don't create a phi, just emit as statement
                 let concrete_ty = ty.make_concrete(&vm.bx.code.builtins.pod);
                 let is_void = concrete_ty
@@ -454,7 +468,7 @@ impl ShaderFnCompiler {
             .rev()
             .find(|v| matches!(v, ShaderMe::FnBody { .. }))
         {
-            if let ShaderMe::FnBody { ret, escaped } = me {
+            if let ShaderMe::FnBody { ret, escaped, .. } = me {
                 if let Some(ret) = ret {
                     if ty != *ret {
                         script_err_inconsistent!(self.trap, "return type changed");
@@ -548,7 +562,10 @@ impl ShaderFnCompiler {
                         .ok();
                     }
                 }
-                self.mes.push(ShaderMe::ForLoop { var_id: id });
+                self.mes.push(ShaderMe::ForLoop {
+                    var_id: id,
+                    stack_depth: self.stack.types.len(),
+                });
             } else {
                 script_err_unexpected!(self.trap, "unexpected in shader control");
             }
@@ -560,7 +577,7 @@ impl ShaderFnCompiler {
     pub(crate) fn handle_for_end(&mut self) {
         if let Some(me) = self.mes.pop() {
             match me {
-                ShaderMe::ForLoop { .. } | ShaderMe::LoopBody => {
+                ShaderMe::ForLoop { .. } | ShaderMe::LoopBody { .. } => {
                     self.out.push_str("}\n");
                     self.shader_scope.exit_scope();
                 }
@@ -576,7 +593,9 @@ impl ShaderFnCompiler {
     pub(crate) fn handle_loop(&mut self) {
         self.shader_scope.enter_scope();
         self.out.push_str("while(true){\n");
-        self.mes.push(ShaderMe::LoopBody);
+        self.mes.push(ShaderMe::LoopBody {
+            stack_depth: self.stack.types.len(),
+        });
     }
 
     pub(crate) fn handle_break(&mut self) {

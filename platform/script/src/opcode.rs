@@ -259,6 +259,9 @@ impl fmt::Debug for Opcode {
 impl fmt::Display for Opcode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
+            Self::NOP => return write!(f, "nop"),
+            Self::NOT => return write!(f, "!"),
+            Self::NEG => return write!(f, "neg"),
             Self::MUL => return write!(f, "*"),
             Self::DIV => return write!(f, "/"),
             Self::MOD => return write!(f, "%"),

@@ -40,8 +40,8 @@ pub mod ime;
 mod macos_menu;
 mod performance_stats;
 pub mod permission;
-pub mod studio;
 mod texture;
+mod uniform_buffer;
 mod window;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod app_icon;
@@ -73,6 +73,7 @@ pub use ::windows;
 
 pub use makepad_futures;
 pub use makepad_network;
+pub use makepad_studio_protocol as studio;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
 pub use makepad_script::trap;
@@ -89,7 +90,7 @@ pub use {
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType},
-        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,
         draw_pass::{
@@ -134,6 +135,9 @@ pub use {
             NetworkResponsesEvent,
             NextFrame,
             NextFrameEvent,
+            SelectionHandleDragEvent,
+            SelectionHandleKind,
+            SelectionHandlePhase,
             TextClipboardEvent,
             TextInputEvent,
             TextRangeReplaceEvent,
@@ -171,6 +175,7 @@ pub use {
         texture::{
             Texture, TextureAnimation, TextureFormat, TextureId, TextureSize, TextureUpdated,
         },
+        uniform_buffer::{UniformBuffer, UniformBufferId},
         thread::*,
         ui_runner::*,
         video::*,

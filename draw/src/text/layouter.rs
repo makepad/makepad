@@ -29,7 +29,7 @@ const PTS_PER_INCH: f32 = 72.0;
 
 #[derive(Debug)]
 pub struct Layouter {
-    loader: Loader,
+    pub(crate) loader: Loader,
     cache_size: usize,
     cached_params: VecDeque<OwnedLayoutParams>,
     cached_results: HashMap<OwnedLayoutParams, Rc<LaidoutText>>,
@@ -141,9 +141,7 @@ impl Default for Settings {
                         max_estimated_segments: 1000,
                     },
                     outline_rasterization_mode: rasterizer::OutlineRasterizationMode::Msdf,
-                    grayscale_atlas_size: Size::new(1024, 1024),
-                    color_atlas_size: Size::new(512, 512),
-                    msdf_atlas_size: Size::new(1024, 1024),
+                    atlas_size: Size::new(4096, 4096),
                 },
             },
             cache_size: 4096,

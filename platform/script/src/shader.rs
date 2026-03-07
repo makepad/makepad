@@ -48,10 +48,14 @@ pub enum ShaderMe {
     FnBody {
         ret: Option<ScriptPodType>,
         escaped: bool, // true when all code paths have returned
+        stack_depth: usize,
     },
-    LoopBody,
+    LoopBody {
+        stack_depth: usize,
+    },
     ForLoop {
         var_id: LiveId,
+        stack_depth: usize,
     },
     IfBody {
         target_ip: u32,
@@ -412,6 +416,7 @@ impl ShaderFnCompiler {
         self.mes.push(ShaderMe::FnBody {
             ret: None,
             escaped: false,
+            stack_depth: self.stack.types.len(),
         });
         // alright lets go trace the opcodes
         self.trap.ip = fnip;
@@ -439,6 +444,13 @@ impl ShaderFnCompiler {
                 body.parser.opcodes[self.trap.ip.index as usize]
             };
 
+            if self.skip_next_pop_to_me {
+                let next_is_pop_to_me = matches!(opcode.as_opcode(), Some((Opcode::POP_TO_ME, _)));
+                if !next_is_pop_to_me {
+                    self.skip_next_pop_to_me = false;
+                }
+            }
+
             // Skip processing when in unreachable code (after a return in current branch)
             // But still need to process control flow opcodes to maintain structure
             if self.is_unreachable() {
@@ -452,7 +464,7 @@ impl ShaderFnCompiler {
                             if self.is_parent_scope_unreachable() {
                                 self.handle_if_else_unreachable(args);
                             } else {
-                                self.handle_if_else(vm, args);
+                                self.handle_if_else(vm, output, args);
                             }
                         }
                         _ => {}
@@ -460,17 +472,22 @@ impl ShaderFnCompiler {
                 }
                 self.trap.goto_next();
                 self.handle_if_else_phi_unreachable();
-            } else if let Some((opcode, args)) = opcode.as_opcode() {
-                self.opcode(vm, output, opcode, args);
-                self.trap.goto_next();
-                self.handle_logic_phi(vm, output);
-                self.handle_if_else_phi(vm, output);
             } else {
-                // id or immediate value
-                self.push_immediate(opcode, &vm.bx.code.builtins.pod, &output.backend);
-                self.trap.goto_next();
+                // A short-circuit RHS ends at the current IP, so resolve it before
+                // the next opcode/immediate consumes the stack value.
                 self.handle_logic_phi(vm, output);
-                self.handle_if_else_phi(vm, output);
+                if let Some((opcode, args)) = opcode.as_opcode() {
+                    self.opcode(vm, output, opcode, args);
+                    self.trap.goto_next();
+                    self.handle_logic_phi(vm, output);
+                    self.handle_if_else_phi(vm, output);
+                } else {
+                    // id or immediate value
+                    self.push_immediate(opcode, &vm.bx.code.builtins.pod, &output.backend);
+                    self.trap.goto_next();
+                    self.handle_logic_phi(vm, output);
+                    self.handle_if_else_phi(vm, output);
+                }
             }
             // alright lets see if we have a trap, ifso we can log it
             if let Some(err) = self.trap.err.borrow_mut().pop_front() {
@@ -1054,7 +1071,12 @@ impl ShaderFnCompiler {
         }
 
         if let Some(name) = vm.bx.heap.pod_type_name(pod_ty) {
+            let alias_ok =
+                (name == id!(f32) && used_name == id!(float))
+                    || (name == id!(u32) && used_name == id!(uint))
+                    || (name == id!(i32) && used_name == id!(int));
             if name != used_name
+                && !alias_ok
                 && used_name != id!(self)
                 && used_name != id!(vec2)
                 && used_name != id!(vec3)
@@ -1077,7 +1099,7 @@ impl ShaderFnCompiler {
     ) {
         match opcode {
             // Arithmetic
-            Opcode::NOT => {}
+            Opcode::NOT => self.handle_not(vm, output, opargs),
             Opcode::NEG => self.handle_neg(vm, output, opargs, "-"),
             Opcode::MUL => self.handle_arithmetic(vm, output, opargs, "*", false),
             Opcode::DIV => self.handle_arithmetic(vm, output, opargs, "/", false),
@@ -1403,7 +1425,7 @@ impl ShaderFnCompiler {
             // IF
             Opcode::IF_TEST => self.handle_if_test(opargs),
 
-            Opcode::IF_ELSE => self.handle_if_else(vm, opargs),
+            Opcode::IF_ELSE => self.handle_if_else(vm, output, opargs),
             // Use
             Opcode::USE => {
                 script_err_shader!(self.trap, "USE: `use` imports not supported in shaders");
@@ -1531,10 +1553,13 @@ impl ShaderFnCompiler {
         }
         if let Some(me) = self.mes.last_mut() {
             match me {
-                ShaderMe::FnBody { .. }
-                | ShaderMe::ForLoop { .. }
-                | ShaderMe::LoopBody
-                | ShaderMe::IfBody { .. } => {
+                ShaderMe::FnBody { stack_depth, .. }
+                | ShaderMe::ForLoop { stack_depth, .. }
+                | ShaderMe::LoopBody { stack_depth }
+                | ShaderMe::IfBody { stack_depth, .. } => {
+                    if self.stack.types.len() <= *stack_depth {
+                        return;
+                    }
                     let (_ty, s) = self.stack.pop(self.trap.pass());
                     self.out.push_str(&s);
                     self.out.push_str(";\n");

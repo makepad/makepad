@@ -716,6 +716,23 @@ impl Texture {
         *updated = updated.update(None);
     }
 
+    /// Replace the pixel data and dimensions of a BGRA u32 texture.
+    /// Unlike `put_back_vec_u32`, this also updates width and height,
+    /// making it safe for image sources that change resolution (e.g.
+    /// animated images with varying frame sizes, or lazily-loaded images
+    /// replacing a placeholder).
+    pub fn set_data_u32(&self, cx: &mut Cx, new_width: usize, new_height: usize, new_data: Vec<u32>) {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let (width, height, data, updated) = match &mut cx_texture.format {
+            TextureFormat::VecBGRAu8_32 { width, height, data, updated } => (width, height, data, updated),
+            _ => panic!("incorrect texture format for u32 image data"),
+        };
+        *width = new_width;
+        *height = new_height;
+        *data = Some(new_data);
+        *updated = updated.update(None);
+    }
+
     pub fn put_back_vec_u32(&self, cx: &mut Cx, new_data: Vec<u32>, dirty_rect: Option<RectUsize>) {
         let cx_texture = &mut cx.textures[self.texture_id()];
         let (data, updated) = match &mut cx_texture.format {

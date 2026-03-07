@@ -17,9 +17,9 @@ use {
         os::CxOs,
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
-        studio::ScreenshotRequest,
         thread::SignalToUI,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
+        uniform_buffer::CxUniformBufferPool,
         window::CxWindowPool,
     },
     makepad_futures::{
@@ -27,7 +27,8 @@ use {
         executor::{Executor, Spawner},
     },
     makepad_network::NetworkRuntime,
-    makepad_script::{ScriptVm, ScriptVmBase},
+    makepad_studio_protocol::ScreenshotRequest,
+    makepad_script::*,
     std::{
         any::{Any, TypeId},
         cell::RefCell,
@@ -60,6 +61,7 @@ pub struct Cx {
     pub draw_lists: CxDrawListPool,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
+    pub uniform_buffers: CxUniformBufferPool,
     pub(crate) geometries: CxGeometryPool,
 
     pub draw_shaders: CxDrawShaders,
@@ -132,6 +134,7 @@ pub struct Cx {
 
     pub widget_tree_ptr: *mut (),
     pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
+    pub widget_query_callback: Option<fn(&Cx, &str) -> Vec<String>>,
 
     pub net: Arc<NetworkRuntime>,
 }
@@ -142,60 +145,90 @@ pub struct CxRef(pub Rc<RefCell<Cx>>);
 pub struct CxDependency {
     pub data: Option<Result<Rc<Vec<u8>>, String>>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct AndroidParams {
+    #[live]
     pub cache_path: String,
+    #[live]
     pub data_path: String,
+    #[live]
     pub density: f64,
+    #[live]
     pub is_emulator: bool,
+    #[live]
     pub has_xr_mode: bool,
+    #[live]
     pub android_version: String,
+    #[live]
     pub build_number: String,
+    #[live]
     pub kernel_version: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct IosParams {
+    #[live]
     pub data_path: String,
+    #[live]
     pub device_model: String,
+    #[live]
     pub system_version: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct OpenHarmonyParams {
+    #[live]
     pub files_dir: String,
+    #[live]
     pub cache_dir: String,
+    #[live]
     pub temp_dir: String,
+    #[live]
     pub device_type: String,
+    #[live]
     pub os_full_name: String,
+    #[live]
     pub display_density: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct WebParams {
+    #[live]
     pub protocol: String,
+    #[live]
     pub host: String,
+    #[live]
     pub hostname: String,
+    #[live]
     pub pathname: String,
+    #[live]
     pub search: String,
+    #[live]
     pub hash: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct LinuxWindowParams {
+    #[live]
     pub custom_window_chrome: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Script, ScriptHook)]
 pub enum OsType {
+    #[pick]
     Unknown,
     Windows,
     Macos,
+    #[live(IosParams::default())]
     Ios(IosParams),
+    #[live(AndroidParams::default())]
     Android(AndroidParams),
+    #[live(OpenHarmonyParams::default())]
     OpenHarmony(OpenHarmonyParams),
+    #[live(LinuxWindowParams::default())]
     LinuxWindow(LinuxWindowParams),
     LinuxDirect,
+    #[live(WebParams::default())]
     Web(WebParams),
 }
 
@@ -277,6 +310,13 @@ impl Cx {
         if let Ok(mut sender) = ACTION_SENDER_GLOBAL.lock() {
             *sender = Some(action_sender);
         }
+        // On platforms that use a shim backend (wasm, android), install it
+        // before creating the NetworkRuntime so it picks up the real backend.
+        #[cfg(target_arch = "wasm32")]
+        crate::os::web_network::install_network_backend_shim();
+        #[cfg(target_os = "android")]
+        crate::os::linux::android::android_network::install_network_backend_shim();
+
         let net = Arc::new(NetworkRuntime::new(Default::default()));
         net.set_wake_fn(Some(Arc::new(|| {
             SignalToUI::set_ui_signal();
@@ -308,6 +348,7 @@ impl Cx {
             draw_matrices: Default::default(),
             geometries: Default::default(),
             textures,
+            uniform_buffers: Default::default(),
 
             draw_shaders: Default::default(),
 
@@ -362,10 +403,14 @@ impl Cx {
             widget_query_invalidation_event: None,
             widget_tree_ptr: std::ptr::null_mut(),
             widget_tree_dump_callback: None,
+            widget_query_callback: None,
             net,
 
+            script_data: CxScriptData {
+                crate_manifests: vm.bx.code.crate_manifests.clone(),
+                ..Default::default()
+            },
             script_vm: Some(vm.bx),
-            script_data: Default::default(),
         }
     }
 }

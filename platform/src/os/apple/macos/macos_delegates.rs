@@ -654,10 +654,14 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
 
     extern "C" fn key_down(this: &Object, _sel: Sel, event: ObjcId) {
-        let _cw = get_cocoa_window(this);
-        unsafe {
-            let input_context: ObjcId = msg_send![this, inputContext];
-            let () = msg_send![input_context, handleEvent: event];
+        let cw = get_cocoa_window(this);
+        // Only forward to NSTextInputContext when IME is active (a text field has focus).
+        // Otherwise, typing outside the TextInput still trigger the system IME.
+        if (cw.ime_active) {
+            unsafe {
+                let input_context: ObjcId = msg_send![this, inputContext];
+                let () = msg_send![input_context, handleEvent: event];
+            }
         }
     }
 

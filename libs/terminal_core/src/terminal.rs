@@ -1087,6 +1087,12 @@ fn func_key(ss3_char: u8, csi_num: u16, modifier: u8) -> Vec<u8> {
 mod tests {
     use super::{Color, Terminal};
 
+    fn write_line(screen: &mut crate::screen::Screen, ch: char) {
+        screen.write_char(ch);
+        screen.do_linefeed();
+        screen.do_carriage_return();
+    }
+
     #[test]
     fn dsr_cursor_position_reply() {
         let mut terminal = Terminal::new(80, 24);
@@ -1130,5 +1136,612 @@ mod tests {
         assert_eq!(terminal.default_fg.r, 0xab);
         assert_eq!(terminal.default_fg.g, 0xcd);
         assert_eq!(terminal.default_fg.b, 0xef);
+    }
+
+    #[test]
+    fn dcs_with_c1_st_terminator_does_not_block_following_output() {
+        let mut terminal = Terminal::new(80, 24);
+        terminal.process_bytes(b"\x1bP=1s\x9c");
+        terminal.process_bytes(b"ok");
+
+        let screen = terminal.screen();
+        assert_eq!(screen.grid.cell(0, 0).codepoint, 'o');
+        assert_eq!(screen.grid.cell(1, 0).codepoint, 'k');
+    }
+
+    #[test]
+    fn resize_grow_pulls_scrollback_if_at_bottom() {
+        let mut terminal = Terminal::new(4, 3);
+        write_line(&mut terminal.primary, 'A');
+        write_line(&mut terminal.primary, 'B');
+        write_line(&mut terminal.primary, 'C');
+        write_line(&mut terminal.primary, 'D');
+        terminal.primary.write_char('E');
+
+        // A and B scrolled off; C D E visible at rows 0-2.
+        assert_eq!(terminal.primary.scrollback_len(), 2);
+        terminal.resize(4, 5);
+
+        let screen = terminal.screen();
+        // Cursor was at the bottom, so scrollback is pulled into the grid.
+        assert_eq!(screen.grid.cell(0, 0).codepoint, 'A');
+        assert_eq!(screen.grid.cell(0, 1).codepoint, 'B');
+        assert_eq!(screen.grid.cell(0, 2).codepoint, 'C');
+        assert_eq!(screen.grid.cell(0, 3).codepoint, 'D');
+        assert_eq!(screen.grid.cell(0, 4).codepoint, 'E');
+        // Scrollback consumed
+        assert_eq!(screen.scrollback_len(), 0);
+        // Cursor moves down
+        assert_eq!(screen.cursor.y, 4);
+    }
+
+    /// On grow, scrollback is pulled to keep content anchored to the bottom
+    /// (matching macOS Terminal).  The TUI app receives SIGWINCH and redraws.
+    #[test]
+    #[test]
+    fn resize_shrink_bottom_anchors_when_text_below_cursor() {
+        let mut terminal = Terminal::new(4, 5);
+        write_line(&mut terminal.primary, 'A');
+        write_line(&mut terminal.primary, 'B');
+        write_line(&mut terminal.primary, 'C');
+        write_line(&mut terminal.primary, 'D');
+        terminal.primary.write_char('E');
+
+        // Text extends to row 4 but cursor is at row 1.
+        // Because there is text below the cursor, shrinking should
+        // bottom-anchor: push top rows to scrollback, keep bottom rows.
+        terminal.primary.move_cursor_to(0, 1);
+        terminal.resize(4, 3);
+
+        let screen = terminal.screen();
+        assert_eq!(screen.grid.cell(0, 0).codepoint, 'C');
+        assert_eq!(screen.grid.cell(0, 1).codepoint, 'D');
+        assert_eq!(screen.grid.cell(0, 2).codepoint, 'E');
+        assert_eq!(screen.scrollback_len(), 2);
+        assert_eq!(screen.cursor.y, 0);
+    }
+
+    #[test]
+    fn resize_grow_pulls_scrollback_when_screen_was_full() {
+        let mut terminal = Terminal::new(4, 3);
+        write_line(&mut terminal.primary, 'A');
+        write_line(&mut terminal.primary, 'B');
+        write_line(&mut terminal.primary, 'C');
+        write_line(&mut terminal.primary, 'D');
+        terminal.primary.write_char('E');
+
+        // A and B scrolled off; C D E visible at rows 0-2.
+        assert_eq!(terminal.primary.scrollback_len(), 2);
+
+        // Move cursor to top (TUI apps can place cursor anywhere)
+        terminal.primary.move_cursor_to(0, 0);
+
+        terminal.resize(4, 5);
+
+        let screen = terminal.screen();
+        // Screen was full, so scrollback is pulled regardless of cursor position.
+        assert_eq!(screen.grid.cell(0, 0).codepoint, 'A');
+        assert_eq!(screen.grid.cell(0, 1).codepoint, 'B');
+        assert_eq!(screen.grid.cell(0, 2).codepoint, 'C');
+        assert_eq!(screen.grid.cell(0, 3).codepoint, 'D');
+        assert_eq!(screen.grid.cell(0, 4).codepoint, 'E');
+        // Scrollback consumed
+        assert_eq!(screen.scrollback_len(), 0);
+        // Cursor shifted down by pulled count
+        assert_eq!(screen.cursor.y, 2);
+    }
+
+    // ---------------------------------------------------------------
+    // Codex-like TUI simulation tests
+    // ---------------------------------------------------------------
+
+    /// Helper: creates a terminal with shell output that scrolls (creating
+    /// scrollback), then draws a Codex-like TUI using cursor positioning.
+    /// Returns the terminal with cursor at the input prompt (middle of screen).
+    fn setup_codex_tui(cols: u16, rows: u16) -> Terminal {
+        let mut t = Terminal::new(cols as usize, rows as usize);
+
+        // Phase 1: shell output fills the screen and creates scrollback.
+        for i in 0..60u32 {
+            let line = format!("shell line {}\r\n", i);
+            t.process_bytes(line.as_bytes());
+        }
+
+        // Phase 2: Codex draws its TUI with cursor positioning.
+        // Set scroll region for content area (rows 3 to rows-2, 1-based).
+        t.process_bytes(format!("\x1b[3;{}r", rows - 2).as_bytes());
+
+        // Header on row 1 (1-based) with blue bg.
+        t.process_bytes(b"\x1b[1;1H\x1b[44m");
+        let hdr = format!("{:<width$}", "=== Codex ===", width = cols as usize);
+        t.process_bytes(hdr.as_bytes());
+        t.process_bytes(b"\x1b[0m");
+
+        // Separator on row 2.
+        t.process_bytes(b"\x1b[2;1H");
+        for _ in 0..cols {
+            t.process_bytes(b"-");
+        }
+
+        // Content in the scroll region.
+        for r in 3..=(rows - 2) {
+            t.process_bytes(format!("\x1b[{};1H", r).as_bytes());
+            let content = format!("content {}", r);
+            t.process_bytes(content.as_bytes());
+        }
+
+        // Input prompt on row rows-1 (1-based).
+        t.process_bytes(format!("\x1b[{};1H> ", rows - 1).as_bytes());
+
+        // Status bar on row rows (1-based) with green bg.
+        t.process_bytes(format!("\x1b[{};1H\x1b[42m", rows).as_bytes());
+        let status = format!("{:<width$}", "status: ok", width = cols as usize);
+        t.process_bytes(status.as_bytes());
+        t.process_bytes(b"\x1b[0m");
+
+        // Cursor back to input prompt area.
+        t.process_bytes(format!("\x1b[{};3H", rows - 1).as_bytes());
+
+        t
+    }
+
+    /// Helper: read a grid row as a trimmed string.
+    fn grid_row_text(terminal: &Terminal, row: usize) -> String {
+        let screen = terminal.screen();
+        let cols = screen.cols();
+        let mut s = String::new();
+        for col in 0..cols {
+            s.push(screen.grid.cell(col, row).codepoint);
+        }
+        s.trim_end().to_string()
+    }
+
+    fn snapshot_grid(terminal: &Terminal) -> Vec<Vec<char>> {
+        let screen = terminal.screen();
+        let rows = screen.rows();
+        let cols = screen.cols();
+        let mut out = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let mut line = Vec::with_capacity(cols);
+            for col in 0..cols {
+                line.push(screen.grid.cell(col, row).codepoint);
+            }
+            out.push(line);
+        }
+        out
+    }
+
+    fn setup_makepad_tui_like_with_hi(cols: u16, rows: u16) -> Terminal {
+        let mut t = Terminal::new(cols as usize, rows as usize);
+
+        // Seed deep pre-TUI history with ls-like output so resize behavior is
+        // exercised against realistic prior content (as in a shell session).
+        for i in 0..220u32 {
+            let line = format!(
+                "-rw-r--r--  1 user  staff  {:>6} Mar  3 12:{:02} file_{:03}.txt\r\n",
+                1024 + i,
+                i % 60,
+                i
+            );
+            t.process_bytes(line.as_bytes());
+        }
+
+        let scroll_bottom = rows - 4;
+        t.process_bytes(format!("\x1b[1;{}r", scroll_bottom).as_bytes());
+
+        // Header block in scroll region.
+        t.process_bytes(b"\x1b[1;1H+--------------------------------------------+");
+        t.process_bytes(b"\x1b[2;1H| >_ TUI Test (v0.1.0)                     |");
+        t.process_bytes(b"\x1b[3;1H|                                            |");
+        t.process_bytes(b"\x1b[4;1H| model: fake-model /model to change       |");
+        t.process_bytes(b"\x1b[5;1H| directory: ~/makepad                     |");
+        t.process_bytes(b"\x1b[6;1H+--------------------------------------------+");
+
+        // Simulate "hi" + 10 streamed responses in the scroll region.
+        t.process_bytes(format!("\x1b[{};1H", scroll_bottom).as_bytes());
+        t.process_bytes(b"\x1b[K> hi\n");
+        for i in 1..=10 {
+            let line = format!("\x1b[K[{}/10] hi\n", i);
+            t.process_bytes(line.as_bytes());
+        }
+
+        // Pinned prompt/status area.
+        let prompt_row = rows - 1;
+        let status_row = rows;
+        t.process_bytes(format!("\x1b[{};1H\x1b[K> ", prompt_row).as_bytes());
+        t.process_bytes(format!("\x1b[{};1H\x1b[Kfake-model - 100% left\n", status_row).as_bytes());
+        t.process_bytes(format!("\x1b[{};3H", prompt_row).as_bytes());
+        t
+    }
+
+    fn render_like_tui_resize(terminal: &mut Terminal, rows: u16) {
+        let scroll_bottom = rows - 4;
+        let working_row = rows - 3;
+        let prompt_row = rows - 2;
+        let blank_row = rows - 1;
+        let status_row = rows;
+
+        terminal.process_bytes(b"\x1b[r");
+        terminal.process_bytes(format!("\x1b[{working_row};1H\x1b[K").as_bytes());
+        terminal.process_bytes(format!("\x1b[{prompt_row};1H\x1b[K> ").as_bytes());
+        terminal.process_bytes(format!("\x1b[{blank_row};1H\x1b[K").as_bytes());
+        terminal
+            .process_bytes(format!("\x1b[{status_row};1H\x1b[Kfake-model - 100% left").as_bytes());
+        terminal.process_bytes(format!("\x1b[1;{scroll_bottom}r").as_bytes());
+        terminal.process_bytes(format!("\x1b[{prompt_row};3H").as_bytes());
+    }
+
+    fn render_like_codex_resize(terminal: &mut Terminal, cols: u16, rows: u16) {
+        // Codex-style redraw on SIGWINCH: re-establish region and fixed rows.
+        terminal.process_bytes(format!("\x1b[3;{}r", rows - 2).as_bytes());
+
+        terminal.process_bytes(b"\x1b[1;1H\x1b[K");
+        let hdr = format!("{:<width$}", "=== Codex ===", width = cols as usize);
+        terminal.process_bytes(hdr.as_bytes());
+
+        terminal.process_bytes(b"\x1b[2;1H\x1b[K");
+        let sep = "-".repeat(cols as usize);
+        terminal.process_bytes(sep.as_bytes());
+
+        for r in 3..=(rows - 2) {
+            terminal.process_bytes(format!("\x1b[{};1H\x1b[K", r).as_bytes());
+            let content = format!("content {}", r);
+            terminal.process_bytes(content.as_bytes());
+        }
+
+        terminal.process_bytes(format!("\x1b[{};1H\x1b[K> ", rows - 1).as_bytes());
+        terminal.process_bytes(format!("\x1b[{};1H\x1b[K", rows).as_bytes());
+        let status = format!("{:<width$}", "status: ok", width = cols as usize);
+        terminal.process_bytes(status.as_bytes());
+        terminal.process_bytes(format!("\x1b[{};3H", rows - 1).as_bytes());
+    }
+
+    fn assert_codex_frame_invariants(terminal: &Terminal, cols: u16, rows: u16) {
+        let screen = terminal.screen();
+        let row0 = grid_row_text(terminal, 0);
+        assert!(
+            row0.starts_with("=== Codex ==="),
+            "header row corrupted: '{}'",
+            row0
+        );
+        let row1 = grid_row_text(terminal, 1);
+        assert!(
+            row1.starts_with("---"),
+            "separator row corrupted: '{}'",
+            row1
+        );
+        let prompt_row = rows as usize - 2;
+        let status_row = rows as usize - 1;
+        let prompt = grid_row_text(terminal, prompt_row);
+        let status = grid_row_text(terminal, status_row);
+        assert!(
+            prompt.starts_with(">"),
+            "prompt row corrupted at {}: '{}'",
+            prompt_row,
+            prompt
+        );
+        assert!(
+            status.starts_with("status: ok"),
+            "status row corrupted at {}: '{}'",
+            status_row,
+            status
+        );
+        assert_eq!(screen.cols(), cols as usize);
+        assert_eq!(screen.rows(), rows as usize);
+        assert_eq!(screen.cursor.y, prompt_row);
+        assert_eq!(screen.cursor.x, 2);
+    }
+
+    #[test]
+    fn codex_tui_grid_positions_stable_after_width_resize() {
+        let mut t = setup_codex_tui(80, 24);
+
+        // Verify initial layout.
+        assert!(grid_row_text(&t, 0).starts_with("=== Codex ==="));
+        assert!(grid_row_text(&t, 1).starts_with("---"));
+        assert!(grid_row_text(&t, 2).starts_with("content 3"));
+        assert!(grid_row_text(&t, 22).starts_with("> "));
+        assert!(grid_row_text(&t, 23).starts_with("status: ok"));
+        // Cursor at input prompt.
+        assert_eq!(t.screen().cursor.y, 22); // row 23 is 0-based 22
+
+        let sb_before = t.primary.scrollback_len();
+
+        // Resize wider — only cols change.
+        t.resize(100, 24);
+
+        // Grid content must stay at the SAME row positions.
+        assert!(
+            grid_row_text(&t, 0).starts_with("=== Codex ==="),
+            "row 0 after resize: '{}'",
+            grid_row_text(&t, 0)
+        );
+        assert!(
+            grid_row_text(&t, 1).starts_with("---"),
+            "row 1 after resize: '{}'",
+            grid_row_text(&t, 1)
+        );
+        assert!(
+            grid_row_text(&t, 22).starts_with("> "),
+            "row 22 after resize: '{}'",
+            grid_row_text(&t, 22)
+        );
+        assert!(
+            grid_row_text(&t, 23).starts_with("status: ok"),
+            "row 23 after resize: '{}'",
+            grid_row_text(&t, 23)
+        );
+
+        // Cursor y must not shift.
+        assert_eq!(t.screen().cursor.y, 22);
+
+        // used_rows must cover the full screen (content drawn to bottom).
+        assert_eq!(t.screen().used_rows(), 24);
+
+        // Scrollback may change size (reflow) but must not be pulled into grid.
+        assert!(
+            t.primary.scrollback_len() <= sb_before,
+            "scrollback should not grow: was {}, now {}",
+            sb_before,
+            t.primary.scrollback_len()
+        );
+    }
+
+    #[test]
+    #[test]
+    fn codex_tui_grid_positions_stable_after_narrower_resize() {
+        let mut t = setup_codex_tui(80, 24);
+
+        // Resize narrower.
+        t.resize(60, 24);
+
+        // Grid content must stay at same rows (truncated horizontally, not shifted).
+        assert!(
+            grid_row_text(&t, 0).starts_with("=== Codex ==="),
+            "row 0: '{}'",
+            grid_row_text(&t, 0)
+        );
+        assert!(
+            grid_row_text(&t, 22).starts_with("> "),
+            "row 22: '{}'",
+            grid_row_text(&t, 22)
+        );
+        // Status bar text truncated to 60 cols but still on row 23.
+        assert!(
+            grid_row_text(&t, 23).starts_with("status: ok"),
+            "row 23: '{}'",
+            grid_row_text(&t, 23)
+        );
+
+        assert_eq!(t.screen().cursor.y, 22);
+        assert_eq!(t.screen().used_rows(), 24);
+    }
+
+    #[test]
+    fn codex_tui_used_rows_reflects_content_not_cursor() {
+        let mut t = setup_codex_tui(80, 24);
+
+        // Cursor is at row 22 (input prompt), but content extends to row 23.
+        assert_eq!(t.screen().cursor.y, 22);
+        assert_eq!(t.screen().used_rows(), 24); // content on all 24 rows
+
+        // After resize, used_rows must still cover all content, not snap to cursor.
+        t.resize(100, 24);
+        assert!(
+            t.screen().used_rows() >= 24,
+            "used_rows={} should be >= 24 after width resize",
+            t.screen().used_rows()
+        );
+
+        // The viewport total (scrollback + used_rows) should be enough to scroll to bottom.
+        let total = t.primary.scrollback_len() + t.screen().used_rows();
+        assert!(
+            total >= 24,
+            "total_lines={} should be >= viewport rows",
+            total
+        );
+    }
+
+    #[test]
+    fn codex_tui_styles_preserved_after_reflow() {
+        let mut t = setup_codex_tui(80, 24);
+
+        // Row 0 has blue bg (header).
+        let header_bg = t.screen().grid.cell(0, 0).style.bg;
+        assert_ne!(header_bg, Color::Default, "header should have colored bg");
+
+        // Row 23 has green bg (status bar).
+        let status_bg = t.screen().grid.cell(0, 23).style.bg;
+        assert_ne!(status_bg, Color::Default, "status should have colored bg");
+
+        // Resize wider.
+        t.resize(100, 24);
+
+        // Content cells should preserve their styles.
+        let new_header_bg = t.screen().grid.cell(0, 0).style.bg;
+        assert_eq!(
+            new_header_bg, header_bg,
+            "header bg should be preserved: {:?} vs {:?}",
+            new_header_bg, header_bg
+        );
+
+        let new_status_bg = t.screen().grid.cell(0, 23).style.bg;
+        assert_eq!(
+            new_status_bg, status_bg,
+            "status bg should be preserved: {:?} vs {:?}",
+            new_status_bg, status_bg
+        );
+    }
+
+    #[test]
+    fn scrollback_reflows_when_width_changes() {
+        let mut t = Terminal::new(20, 5);
+
+        // Write a long line that wraps at 20 cols.
+        let long_line = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"; // 36 chars
+        for ch in long_line.chars() {
+            t.primary.write_char(ch);
+        }
+        t.primary.do_linefeed();
+        t.primary.do_carriage_return();
+        t.primary.write_char('X');
+
+        // At 20 cols, "ABCDE..." wraps into 2 rows. Then newline, then X.
+        // Row 0: ABCDEFGHIJKLMNOPQRST (wrapped)
+        // Row 1: UVWXYZ0123456789     (not wrapped)
+        // Row 2: X
+        assert_eq!(t.screen().grid.cell(0, 0).codepoint, 'A');
+        assert!(t.screen().grid.line_wrapped[0]); // first row is wrapped
+
+        // Scroll the content off into scrollback so we can test scrollback reflow.
+        for _ in 0..5 {
+            t.primary.do_linefeed();
+            t.primary.do_carriage_return();
+        }
+        // Now those rows are in scrollback.
+        assert!(t.primary.scrollback_len() >= 2);
+
+        let sb = t.primary.scrollback();
+        // First scrollback row should be the wrapped 'A..T' row.
+        assert_eq!(sb[0][0].codepoint, 'A');
+
+        // Resize wider — the wrapped line should unwrap in scrollback.
+        t.resize(40, 5);
+
+        let sb = t.primary.scrollback();
+        // The 36-char line should now fit in one 40-col row in scrollback.
+        assert_eq!(sb.len(), t.primary.scrollback_len());
+        // Find the row with 'A'.
+        let a_row = sb.iter().position(|row| row[0].codepoint == 'A').unwrap();
+        assert_eq!(
+            sb[a_row][35].codepoint, '9',
+            "full line should be in one row"
+        );
+        // Should NOT be wrapped anymore.
+        assert!(
+            !t.primary.scrollback_wrapped[a_row],
+            "unwrapped line should not be marked wrapped"
+        );
+    }
+
+    /// Shrink pushes top rows into scrollback to keep cursor visible,
+    /// anchoring content to the bottom (matches macOS Terminal).
+    #[test]
+
+    /// Shrink + grow round-trip restores content from scrollback.
+    #[test]
+    #[test]
+    #[test]
+    fn makepad_tui_hi_up_down_resize_restores_framebuffer() {
+        let mut t = setup_makepad_tui_like_with_hi(80, 20);
+        render_like_tui_resize(&mut t, 20);
+        let before = snapshot_grid(&t);
+        let before_cursor = (t.screen().cursor.x, t.screen().cursor.y);
+
+        for r in 21..=40 {
+            t.resize(80, r);
+            render_like_tui_resize(&mut t, r as u16);
+        }
+        for r in (20..40).rev() {
+            t.resize(80, r);
+            render_like_tui_resize(&mut t, r as u16);
+        }
+
+        let after = snapshot_grid(&t);
+        let after_cursor = (t.screen().cursor.x, t.screen().cursor.y);
+        if after != before {
+            let first_diff = before
+                .iter()
+                .zip(after.iter())
+                .enumerate()
+                .find(|(_, (a, b))| a != b)
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            let before_line: String = before[first_diff].iter().collect();
+            let after_line: String = after[first_diff].iter().collect();
+            panic!(
+                "grid should round-trip after up/down resize; first differing row={} before='{}' after='{}'",
+                first_diff,
+                before_line.trim_end(),
+                after_line.trim_end()
+            );
+        }
+        assert_eq!(
+            after_cursor, before_cursor,
+            "cursor should round-trip after up/down resize"
+        );
+    }
+
+    #[test]
+    fn codex_tui_up_down_resize_restores_framebuffer() {
+        let mut t = setup_codex_tui(80, 20);
+        render_like_codex_resize(&mut t, 80, 20);
+        let before = snapshot_grid(&t);
+        let before_cursor = (t.screen().cursor.x, t.screen().cursor.y);
+
+        for r in 21..=40 {
+            t.resize(80, r);
+            render_like_codex_resize(&mut t, 80, r as u16);
+        }
+        for r in (20..40).rev() {
+            t.resize(80, r);
+            render_like_codex_resize(&mut t, 80, r as u16);
+        }
+
+        let after = snapshot_grid(&t);
+        let after_cursor = (t.screen().cursor.x, t.screen().cursor.y);
+        if after != before {
+            let first_diff = before
+                .iter()
+                .zip(after.iter())
+                .enumerate()
+                .find(|(_, (a, b))| a != b)
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            let before_line: String = before[first_diff].iter().collect();
+            let after_line: String = after[first_diff].iter().collect();
+            panic!(
+                "codex grid should round-trip after up/down resize; first differing row={} before='{}' after='{}'",
+                first_diff,
+                before_line.trim_end(),
+                after_line.trim_end()
+            );
+        }
+        assert_eq!(
+            after_cursor, before_cursor,
+            "codex cursor should round-trip after up/down resize"
+        );
+    }
+
+    #[test]
+    fn codex_tui_stress_resize_redraw_matches_fresh_frame() {
+        let mut t = setup_codex_tui(80, 20);
+        render_like_codex_resize(&mut t, 80, 20);
+        assert_codex_frame_invariants(&t, 80, 20);
+
+        let sequence: &[(u16, u16)] =
+            &[(100, 34), (72, 18), (120, 40), (64, 16), (90, 28), (80, 20)];
+
+        for _cycle in 0..3 {
+            for (cols, rows) in sequence {
+                t.resize(*cols as usize, *rows as usize);
+                render_like_codex_resize(&mut t, *cols, *rows);
+                assert_codex_frame_invariants(&t, *cols, *rows);
+            }
+        }
+
+        // Final 80x20 redraw should match a fresh terminal at 80x20 exactly.
+        t.resize(80, 20);
+        render_like_codex_resize(&mut t, 80, 20);
+        let final_snapshot = snapshot_grid(&t);
+
+        let mut fresh = setup_codex_tui(80, 20);
+        render_like_codex_resize(&mut fresh, 80, 20);
+        let fresh_snapshot = snapshot_grid(&fresh);
+
+        assert_eq!(
+            final_snapshot, fresh_snapshot,
+            "stress resize/redraw should converge to fresh codex frame"
+        );
     }
 }

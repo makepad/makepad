@@ -18,7 +18,7 @@ pub type FontData = SharedBytes;
 pub struct Loader {
     shaper: Rc<RefCell<Shaper>>,
     rasterizer: Rc<RefCell<rasterizer::Rasterizer>>,
-    font_family_definitions: HashMap<FontFamilyId, FontFamilyDefinition>,
+    pub(crate) font_family_definitions: HashMap<FontFamilyId, FontFamilyDefinition>,
     font_definitions: HashMap<FontId, FontDefinition>,
     font_family_cache: HashMap<FontFamilyId, Rc<FontFamily>>,
     font_cache: HashMap<FontId, Rc<Font>>,
@@ -43,13 +43,7 @@ impl Loader {
     }
 
     pub fn is_font_family_known(&self, id: FontFamilyId) -> bool {
-        if self.font_family_definitions.contains_key(&id) {
-            return true;
-        }
-        if self.font_family_cache.contains_key(&id) {
-            return true;
-        }
-        false
+        self.font_family_definitions.contains_key(&id) || self.font_family_cache.contains_key(&id)
     }
 
     pub fn is_font_known(&self, id: FontId) -> bool {
@@ -75,6 +69,20 @@ impl Loader {
         id: FontFamilyId,
         definition: FontFamilyDefinition,
     ) {
+        // Skip cache eviction if the definition is unchanged.
+        if let Some(existing) = self.font_family_definitions.get(&id) {
+            if *existing == definition {
+                return;
+            }
+        }
+        if let Some(cached) = self.font_family_cache.get(&id) {
+            let cached_ids: Vec<FontId> = cached.fonts().iter().map(|f| f.id()).collect();
+            if cached_ids == definition.font_ids
+                && definition.expected_member_count == definition.font_ids.len()
+            {
+                return;
+            }
+        }
         self.font_family_cache.remove(&id);
         self.font_family_definitions.insert(id, definition);
     }
@@ -102,7 +110,8 @@ impl Loader {
     fn load_font_family(&mut self, id: FontFamilyId) -> FontFamily {
         let definition = self
             .font_family_definitions
-            .remove(&id)
+            .get(&id)
+            .cloned()
             .unwrap_or_else(|| panic!("font family {:?} is not defined", id));
         FontFamily::new(
             id,
@@ -128,11 +137,15 @@ impl Loader {
             .font_definitions
             .remove(&id)
             .expect("font is not defined");
+        let mut face = FontFace::from_data_and_index(definition.data, definition.index)
+            .expect("failed to load font from definition");
+        if !definition.variations.is_empty() {
+            face.set_variations(&definition.variations);
+        }
         Font::new(
             id.clone(),
             self.rasterizer.clone(),
-            FontFace::from_data_and_index(definition.data, definition.index)
-                .expect("failed to load font from definition"),
+            face,
             definition.ascender_fudge_in_ems,
             definition.descender_fudge_in_ems,
         )
@@ -145,9 +158,10 @@ pub struct Settings {
     pub rasterizer: rasterizer::Settings,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FontFamilyDefinition {
     pub font_ids: Vec<FontId>,
+    pub expected_member_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +170,8 @@ pub struct FontDefinition {
     pub index: u32,
     pub ascender_fudge_in_ems: f32,
     pub descender_fudge_in_ems: f32,
+    /// Font variation axis settings as (tag_u32, value) pairs.
+    pub variations: Vec<(u32, f32)>,
 }
 
 #[cfg(test)]

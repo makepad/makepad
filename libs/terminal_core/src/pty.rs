@@ -321,19 +321,17 @@ impl Pty {
         })
     }
 
-    pub fn write(&self, data: &[u8]) -> io::Result<()> {
+    pub fn try_write(&self, data: &[u8]) -> io::Result<usize> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            return write_all_fd(self.master_fd, data);
+            return write_fd_once(self.master_fd, data);
         }
         #[cfg(windows)]
         {
             let mut stdin = self.stdin.lock().map_err(|_| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "terminal stdin lock poisoned")
             })?;
-            stdin.write_all(data)?;
-            stdin.flush()?;
-            return Ok(());
+            return stdin.write(data);
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
@@ -343,6 +341,24 @@ impl Pty {
                 "PTY not implemented for this platform",
             ));
         }
+    }
+
+    pub fn write(&self, data: &[u8]) -> io::Result<()> {
+        let mut offset = 0usize;
+        while offset < data.len() {
+            match self.try_write(&data[offset..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "PTY write returned 0",
+                    ));
+                }
+                Ok(n) => offset += n,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
     }
 
     pub fn writer_clone(&self) -> PtyWriter {
@@ -676,6 +692,28 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn write_fd_once(fd: i32, data: &[u8]) -> io::Result<usize> {
+    let n = unsafe { libc_ffi::write(fd, data.as_ptr() as *const _, data.len()) };
+    if n > 0 {
+        return Ok(n as usize);
+    }
+    if n == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "PTY write returned 0",
+        ));
+    }
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(code) if code == libc_ffi::EINTR => Err(io::Error::new(io::ErrorKind::Interrupted, err)),
+        Some(code) if code == libc_ffi::EAGAIN || code == libc_ffi::EWOULDBLOCK => {
+            Err(io::Error::new(io::ErrorKind::WouldBlock, err))
+        }
+        _ => Err(err),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

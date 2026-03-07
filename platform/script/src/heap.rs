@@ -21,6 +21,7 @@ pub struct ScriptHeap {
     pub modules: ScriptObject,
     pub(crate) gc_last: ScriptHeapGcLast,
     pub(crate) mark_vec: Vec<ScriptGcMark>,
+    pub(crate) object_reuse_epoch: u64,
 
     pub(crate) root_objects: Rc<RefCell<HashMap<ScriptObject, usize>>>,
     pub(crate) root_arrays: Rc<RefCell<HashMap<ScriptArray, usize>>>,
@@ -195,6 +196,16 @@ impl ScriptHeap {
 
     pub fn object_data(&self, ptr: ScriptObject) -> &ScriptObjectData {
         &self.objects[ptr]
+    }
+
+    /// Monotonic counter bumped when object slots are freed/reused.
+    /// Used by higher layers to evict caches keyed by ScriptObject identity.
+    pub fn object_reuse_epoch(&self) -> u64 {
+        self.object_reuse_epoch
+    }
+
+    pub(crate) fn bump_object_reuse_epoch(&mut self) {
+        self.object_reuse_epoch = self.object_reuse_epoch.wrapping_add(1);
     }
 
     pub fn type_check(&self, index: ScriptTypeIndex) -> &ScriptTypeCheck {

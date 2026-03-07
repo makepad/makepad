@@ -13,11 +13,10 @@ metadata.makepad-auto-version = "4ghwd5Pq8xlLJrln_NpXXshbpeE="
 makepad-platform = { path = "../platform", version = "2.0.0", default-features = false }
 makepad-svg = { path = "../libs/svg", version = "1.0.0" }
 makepad-live-id = { path = "../libs/live_id", version = "1.0.0" }
-makepad-gltf = { path = "../libs/gltf", version = "1.0.0" }
 
 rustybuzz = { version = "0.18.0", path = "../libs/rustybuzz" }
 unicode-bidi = { version = "0.3", path = "../libs/unicode/unicode-bidi" }
-ab_glyph_rasterizer = { version = "0.1.8", path = "../libs/ab_glyph_rasterizer"}
+ab_glyph_rasterizer = { version = "0.1.8", path = "../libs/ab_glyph_rasterizer" }
 sdfer = { path = "../libs/sdfer", version = "0.2.1" }
 fxhash = { version = "0.2.1", path = "../libs/fxhash" }
 unicode-linebreak = { version = "0.1.5", path = "../libs/unicode/unicode-linebreak" }

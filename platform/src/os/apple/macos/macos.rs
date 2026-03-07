@@ -674,11 +674,13 @@ impl Cx {
                 CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(self).pos + pos;
                     metal_windows.iter_mut().for_each(|w| {
+                        w.cocoa_window.set_ime_active(true);
                         w.cocoa_window.set_ime_spot(pos);
                     });
                 }
                 CxOsOp::HideTextIME => {
                     metal_windows.iter_mut().for_each(|w| {
+                        w.cocoa_window.set_ime_active(false);
                         w.cocoa_window.set_ime_spot(dvec2(0.0, 0.0));
                     });
                 }
@@ -719,6 +721,11 @@ impl Cx {
                 CxOsOp::CopyToClipboard(content) => {
                     with_macos_app(|app| app.copy_to_clipboard(&content));
                 }
+                CxOsOp::SetPrimarySelection(_) => {}
+                CxOsOp::ShowSelectionHandles { .. } => {}
+                CxOsOp::UpdateSelectionHandles { .. } => {}
+                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::SaveFileDialog(settings) => {
                     with_macos_app(|app| app.open_save_file_dialog(settings));
                 }

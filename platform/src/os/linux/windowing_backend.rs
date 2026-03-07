@@ -1,12 +1,15 @@
 use super::super::shared_framebuf::PollTimers;
+use super::gstreamer_sys::LibGStreamer;
 use super::linux_media::CxLinuxMedia;
+use super::linux_video_playback::GStreamerVideoPlayer;
 
 use crate::{
     cx::Cx,
+    makepad_live_id::LiveId,
     opengl_cx::OpenglCx,
     CxOsApi, OpenUrlInPlace,
 };
-use std::{cell::RefCell, rc::Rc, time::Instant};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
 // Import OpenglCx from x11 for the unified type
 
 fn env_var_is_nonempty(name: &str) -> bool {
@@ -171,6 +174,8 @@ pub struct CxOs {
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
     pub opengl_cx: Option<OpenglCx>,
+    pub(crate) video_players: HashMap<LiveId, GStreamerVideoPlayer>,
+    pub(crate) gstreamer: Option<LibGStreamer>,
 }
 
 impl CxOs {

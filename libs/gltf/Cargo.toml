@@ -11,3 +11,4 @@ repository = "https://github.com/makepad/makepad/"
 [dependencies]
 makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }
 makepad-base64 = { path = "../base64", version = "1.0.0" }
+makepad-math = { path = "../math", version = "1.0.0" }

@@ -15,6 +15,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.xr = undefined;
     this._missing_shader_ids = new Set();
     this._gl_error_reports = new Set();
+    this.video_players = {};
     this.init_webgl_context();
 
     this.load_deps();
@@ -245,7 +246,60 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmCompileWebGLShader(args) {
-    function get_attrib_locations(gl, program, base, slots) {
+    function is_integer_attrib_type(gl, ty) {
+      return (
+        ty === gl.INT ||
+        ty === gl.INT_VEC2 ||
+        ty === gl.INT_VEC3 ||
+        ty === gl.INT_VEC4 ||
+        ty === gl.UNSIGNED_INT ||
+        ty === gl.UNSIGNED_INT_VEC2 ||
+        ty === gl.UNSIGNED_INT_VEC3 ||
+        ty === gl.UNSIGNED_INT_VEC4 ||
+        ty === gl.BOOL ||
+        ty === gl.BOOL_VEC2 ||
+        ty === gl.BOOL_VEC3 ||
+        ty === gl.BOOL_VEC4
+      );
+    }
+
+    function attrib_pointer_type(gl, ty) {
+      if (
+        ty === gl.INT ||
+        ty === gl.INT_VEC2 ||
+        ty === gl.INT_VEC3 ||
+        ty === gl.INT_VEC4 ||
+        ty === gl.BOOL ||
+        ty === gl.BOOL_VEC2 ||
+        ty === gl.BOOL_VEC3 ||
+        ty === gl.BOOL_VEC4
+      ) {
+        return gl.INT;
+      }
+      if (
+        ty === gl.UNSIGNED_INT ||
+        ty === gl.UNSIGNED_INT_VEC2 ||
+        ty === gl.UNSIGNED_INT_VEC3 ||
+        ty === gl.UNSIGNED_INT_VEC4
+      ) {
+        return gl.UNSIGNED_INT;
+      }
+      return gl.FLOAT;
+    }
+
+    function get_active_attrib_types(gl, program) {
+      let out = {};
+      let count = gl.getProgramParameter(program, gl.ACTIVE_ATTRIBUTES);
+      for (let i = 0; i < count; i++) {
+        let info = gl.getActiveAttrib(program, i);
+        if (info) {
+          out[info.name] = info.type;
+        }
+      }
+      return out;
+    }
+
+    function get_attrib_locations(gl, program, base, slots, active_attrib_types) {
       let attrib_locs = [];
       let attribs = slots >> 2;
       let stride = slots * 4;
@@ -253,11 +307,16 @@ export class WasmWebGL extends WasmWebBrowser {
       for (let i = 0; i < attribs; i++) {
         let size = slots - i * 4;
         if (size > 4) size = 4;
+        let name = base + i;
+        let gl_type = active_attrib_types[name] ?? active_attrib_types[name + "[0]"] ?? gl.FLOAT;
+        let integer = is_integer_attrib_type(gl, gl_type);
         attrib_locs.push({
-          loc: gl.getAttribLocation(program, base + i),
+          loc: gl.getAttribLocation(program, name),
           offset: i * 16,
           size: size,
           stride: slots * 4,
+          integer: integer,
+          gl_type: attrib_pointer_type(gl, gl_type),
         });
       }
       return attrib_locs;
@@ -353,6 +412,7 @@ export class WasmWebGL extends WasmWebBrowser {
       program,
       "liveUniforms",
     );
+    let active_attrib_types = get_active_attrib_types(gl, program);
 
     this.draw_shaders[args.shader_id] = {
       vertex: args.vertex,
@@ -362,12 +422,14 @@ export class WasmWebGL extends WasmWebBrowser {
         program,
         "packed_geometry_",
         args.geometry_slots,
+        active_attrib_types,
       ),
       inst_attribs: get_attrib_locations(
         gl,
         program,
         "packed_instance_",
         args.instance_slots,
+        active_attrib_types,
       ),
       pass_uniforms_binding: pass_uniforms_binding,
       draw_list_uniforms_binding: draw_list_uniforms_binding,
@@ -462,14 +524,24 @@ export class WasmWebGL extends WasmWebBrowser {
       if (attr.loc < 0) {
         continue;
       }
-      gl.vertexAttribPointer(
-        attr.loc,
-        attr.size,
-        gl.FLOAT,
-        false,
-        attr.stride,
-        attr.offset,
-      );
+      if (attr.integer) {
+        gl.vertexAttribIPointer(
+          attr.loc,
+          attr.size,
+          attr.gl_type,
+          attr.stride,
+          attr.offset,
+        );
+      } else {
+        gl.vertexAttribPointer(
+          attr.loc,
+          attr.size,
+          attr.gl_type,
+          false,
+          attr.stride,
+          attr.offset,
+        );
+      }
       gl.enableVertexAttribArray(attr.loc);
       gl.vertexAttribDivisor(attr.loc, 0);
     }
@@ -481,14 +553,24 @@ export class WasmWebGL extends WasmWebBrowser {
       if (attr.loc < 0) {
         continue;
       }
-      gl.vertexAttribPointer(
-        attr.loc,
-        attr.size,
-        gl.FLOAT,
-        false,
-        attr.stride,
-        attr.offset,
-      );
+      if (attr.integer) {
+        gl.vertexAttribIPointer(
+          attr.loc,
+          attr.size,
+          attr.gl_type,
+          attr.stride,
+          attr.offset,
+        );
+      } else {
+        gl.vertexAttribPointer(
+          attr.loc,
+          attr.size,
+          attr.gl_type,
+          false,
+          attr.stride,
+          attr.offset,
+        );
+      }
       gl.enableVertexAttribArray(attr.loc);
       gl.vertexAttribDivisor(attr.loc, 1);
     }
@@ -498,7 +580,7 @@ export class WasmWebGL extends WasmWebBrowser {
       this.index_buffers[args.geom_ib_id].gl_buf,
     );
     gl.bindVertexArray(null);
-    this.assert_no_gl_error(gl, "alloc_vao");
+
   }
 
   FromWasmDrawCall(args) {
@@ -619,7 +701,6 @@ export class WasmWebGL extends WasmWebBrowser {
         0,
         instances,
       );
-      this.assert_no_gl_error(gl, "draw_left_eye");
 
       let right = xr.right_eye;
       let rvp = right.viewport;
@@ -642,7 +723,6 @@ export class WasmWebGL extends WasmWebBrowser {
         0,
         instances,
       );
-      this.assert_no_gl_error(gl, "draw_right_eye");
     } else {
       this.upload_uniform_buffer_data(
         gl,
@@ -656,7 +736,6 @@ export class WasmWebGL extends WasmWebBrowser {
         0,
         instances,
       );
-      this.assert_no_gl_error(gl, "draw");
     }
 
     gl.bindVertexArray(null);
@@ -893,6 +972,207 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.ONE_MINUS_SRC_ALPHA,
     );
     gl.enable(gl.BLEND);
+  }
+
+  // Video Playback API
+
+  FromWasmPrepareVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let video = document.createElement("video");
+    video.crossOrigin = "anonymous";
+    video.playsInline = true;
+    video.preload = "auto";
+    video.loop = args.should_loop;
+    video.muted = args.autoplay; // Mute only if autoplay (browser requirement)
+
+    let player = {
+      video: video,
+      texture_id: args.texture_id,
+      video_id_lo: args.video_id_lo,
+      video_id_hi: args.video_id_hi,
+      playing: false,
+      texture_initialized: false,
+    };
+
+    this.video_players[key] = player;
+
+    video.addEventListener("loadedmetadata", () => {
+      let duration_ms = Math.round(video.duration * 1000);
+      this.to_wasm.ToWasmVideoPlaybackPrepared({
+        video_id_lo: args.video_id_lo,
+        video_id_hi: args.video_id_hi,
+        video_width: video.videoWidth,
+        video_height: video.videoHeight,
+        duration_lo: duration_ms & 0xFFFFFFFF,
+        duration_hi: Math.floor(duration_ms / 0x100000000),
+      });
+      this.do_wasm_pump();
+    });
+
+    video.addEventListener("ended", () => {
+      player.playing = false;
+      this.to_wasm.ToWasmVideoPlaybackCompleted({
+        video_id_lo: args.video_id_lo,
+        video_id_hi: args.video_id_hi,
+      });
+      this.do_wasm_pump();
+    });
+
+    video.addEventListener("play", () => {
+      player.playing = true;
+      this.ensure_video_animation_frame();
+    });
+
+    video.addEventListener("pause", () => {
+      player.playing = false;
+    });
+
+    video.src = args.source_url;
+
+    if (args.autoplay) {
+      video.play().catch(e => {
+        console.warn("Video autoplay failed:", e);
+      });
+    }
+  }
+
+  FromWasmBeginVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.play().catch(e => {
+        console.warn("Video play failed:", e);
+      });
+    }
+  }
+
+  FromWasmPauseVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.pause();
+    }
+  }
+
+  FromWasmResumeVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.play().catch(e => {
+        console.warn("Video resume failed:", e);
+      });
+    }
+  }
+
+  FromWasmMuteVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.muted = true;
+    }
+  }
+
+  FromWasmUnmuteVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.muted = false;
+    }
+  }
+
+  FromWasmSeekVideoPlayback(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      let position_ms = args.position_ms_lo + args.position_ms_hi * 0x100000000;
+      player.video.currentTime = position_ms / 1000.0;
+    }
+  }
+
+  FromWasmCleanupVideoPlaybackResources(args) {
+    let key = args.video_id_lo + "_" + args.video_id_hi;
+    let player = this.video_players[key];
+    if (player) {
+      player.video.pause();
+      player.video.removeAttribute("src");
+      player.video.load();
+      player.playing = false;
+      delete this.video_players[key];
+
+      this.to_wasm.ToWasmVideoPlaybackResourcesReleased({
+        video_id_lo: args.video_id_lo,
+        video_id_hi: args.video_id_hi,
+      });
+      this.do_wasm_pump();
+    }
+  }
+
+  ensure_video_animation_frame() {
+    if (this.video_anim_frame_id) {
+      return;
+    }
+    this.video_anim_frame_id = window.requestAnimationFrame(() => {
+      this.video_anim_frame_id = 0;
+      this.update_video_textures();
+    });
+  }
+
+  update_video_textures() {
+    let gl = this.gl;
+    let any_playing = false;
+    let any_updated = false;
+
+    for (let key in this.video_players) {
+      let player = this.video_players[key];
+      if (!player.playing) continue;
+
+      any_playing = true;
+
+      let video = player.video;
+      if (video.readyState < 2) continue;
+
+      any_updated = true;
+
+      let gl_tex = this.textures[player.texture_id];
+      if (!gl_tex) {
+        gl_tex = gl.createTexture();
+        this.textures[player.texture_id] = gl_tex;
+      }
+
+      gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+
+      if (!player.texture_initialized) {
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        player.texture_initialized = true;
+      }
+
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        video,
+      );
+
+      let current_ms = Math.round(video.currentTime * 1000);
+      this.to_wasm.ToWasmVideoTextureUpdated({
+        video_id_lo: player.video_id_lo,
+        video_id_hi: player.video_id_hi,
+        current_position_lo: current_ms & 0xFFFFFFFF,
+        current_position_hi: Math.floor(current_ms / 0x100000000),
+      });
+    }
+
+    if (any_updated) {
+      this.do_wasm_pump();
+    }
+    if (any_playing) {
+      this.ensure_video_animation_frame();
+    }
   }
 
   init_webgl_context() {

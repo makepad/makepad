@@ -108,7 +108,8 @@ impl ScriptHook for CachedWidget {
             if let Some(template_value) = self.template_value {
                 widget.script_apply(vm, apply, scope, template_value);
             }
-            vm.cx_mut().widget_tree_mark_dirty(self.uid);
+            let widget = widget.clone();
+            vm.cx_mut().widget_tree_insert_child_deep(self.uid, self.template_id, widget);
             return;
         }
 
@@ -134,7 +135,9 @@ impl ScriptHook for CachedWidget {
                 .insert(self.template_id, widget.clone());
             self.widget = Some(widget);
         }
-        vm.cx_mut().widget_tree_mark_dirty(self.uid);
+        if let Some(widget) = &self.widget {
+            vm.cx_mut().widget_tree_insert_child_deep(self.uid, self.template_id, widget.clone());
+        }
     }
 }
 

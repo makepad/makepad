@@ -8,7 +8,7 @@ use {
     std::collections::BTreeMap,
     std::fmt,
     std::fmt::{Debug, Error, Formatter},
-    std::rc::Rc,
+    std::rc::{Rc, Weak},
     std::sync::atomic::{AtomicU64, Ordering},
     std::sync::Arc,
 };
@@ -30,6 +30,110 @@ pub trait WidgetNode: ScriptApply {
     }
     /// Enumerate direct children for widget-tree indexing.
     fn children(&self, _visit: &mut dyn FnMut(LiveId, WidgetRef)) {}
+
+    /// Find a descendant by child-id path, walking through `children()`.
+    /// Each segment is matched anywhere in the current subtree, i.e.
+    /// `a.b` behaves like `*.a.*.b`.
+    fn child_by_path(&self, path: &[LiveId]) -> WidgetRef {
+        fn find_descendant_by_name_bfs(
+            root: &WidgetRef,
+            target: LiveId,
+            queue: &mut std::collections::VecDeque<WidgetRef>,
+        ) -> WidgetRef {
+            queue.clear();
+            let mut found = WidgetRef::empty();
+
+            if !root.try_children(&mut |name, child| {
+                if found.is_empty() && name == target {
+                    found = child.clone();
+                }
+                queue.push_back(child);
+            }) {
+                return WidgetRef::empty();
+            }
+            if !found.is_empty() {
+                return found;
+            }
+
+            while let Some(node) = queue.pop_front() {
+                let mut found_here = WidgetRef::empty();
+                if !node.try_children(&mut |name, child| {
+                    if found_here.is_empty() && name == target {
+                        found_here = child.clone();
+                    }
+                    queue.push_back(child);
+                }) {
+                    return WidgetRef::empty();
+                }
+                if !found_here.is_empty() {
+                    return found_here;
+                }
+            }
+
+            WidgetRef::empty()
+        }
+
+        if path.is_empty() {
+            return WidgetRef::empty();
+        }
+        let first = path[0];
+
+        let mut queue = std::collections::VecDeque::<WidgetRef>::new();
+        let mut current = WidgetRef::empty();
+
+        queue.clear();
+        self.children(&mut |name, child| {
+            if !current.is_empty() {
+                queue.push_back(child);
+                return;
+            }
+            if name == first {
+                current = child.clone();
+            }
+            queue.push_back(child);
+        });
+
+        if current.is_empty() {
+            while let Some(node) = queue.pop_front() {
+                let mut found_here = WidgetRef::empty();
+                if !node.try_children(&mut |name, child| {
+                    if found_here.is_empty() && name == first {
+                        found_here = child.clone();
+                    }
+                    queue.push_back(child);
+                }) {
+                    return WidgetRef::empty();
+                }
+                if !found_here.is_empty() {
+                    current = found_here;
+                    break;
+                }
+            }
+            if current.is_empty() {
+                return current;
+            }
+        }
+
+        for i in 1..path.len() {
+            current = find_descendant_by_name_bfs(&current, path[i], &mut queue);
+            if current.is_empty() {
+                return current;
+            }
+        }
+
+        current
+    }
+
+    fn child(&self, id: LiveId) -> WidgetRef {
+        let mut found = WidgetRef::empty();
+        self.children(&mut |name, child| {
+            if found.is_empty() && name == id {
+                found = child;
+            }
+        });
+        found
+    }
+    
     /// If true, global widget-tree search/flood will not traverse this node's descendants.
     /// The node is still indexed and can still be matched directly by name/path.
     fn skip_widget_tree_search(&self) -> bool {
@@ -85,6 +189,17 @@ pub trait WidgetNode: ScriptApply {
     fn selection_get_full_text(&self) -> String {
         String::new()
     }
+    
+    fn script_call_live(
+        &mut self,
+        _vm: &mut ScriptVm,
+        _method: LiveId,
+        _args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        ScriptAsyncResult::MethodNotFound
+    }
+    
+    fn script_result_live(&mut self, _vm: &mut ScriptVm, _id: ScriptAsyncId, _result: ScriptValue) {}
 }
 
 pub trait Widget: WidgetNode {
@@ -333,6 +448,9 @@ pub struct WidgetRefInner {
 #[derive(Clone, Default)]
 pub struct WidgetRef(Rc<RefCell<Option<WidgetRefInner>>>);
 
+#[derive(Clone, Default)]
+pub struct WidgetWeakRef(Weak<RefCell<Option<WidgetRefInner>>>);
+
 impl Debug for WidgetRef {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         write!(f, "WidgetRef {}", self.widget_uid().0)
@@ -459,6 +577,21 @@ impl PartialEq for WidgetRef {
         !Rc::ptr_eq(&self.0, &other.0)
     }
 }
+
+impl PartialEq for WidgetWeakRef {
+    fn eq(&self, other: &WidgetWeakRef) -> bool {
+        Weak::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for WidgetWeakRef {}
+
+impl PartialEq<WidgetRef> for WidgetWeakRef {
+    fn eq(&self, other: &WidgetRef) -> bool {
+        let other_weak = Rc::downgrade(&other.0);
+        Weak::ptr_eq(&self.0, &other_weak)
+    }
+}
 pub trait OptionWidgetRefExt {
     fn into_ref(self) -> WidgetRef;
 }
@@ -508,6 +641,10 @@ impl WidgetRef {
 
     pub fn new_with_inner(widget: Box<dyn Widget>) -> Self {
         Self(Rc::new(RefCell::new(Some(WidgetRefInner { widget }))))
+    }
+
+    pub fn downgrade(&self) -> WidgetWeakRef {
+        WidgetWeakRef(Rc::downgrade(&self.0))
     }
     /// ## handle event with a sweep area
     ///
@@ -748,6 +885,24 @@ impl WidgetRef {
         } else {
             String::new()
         }
+    }
+
+    pub fn child_by_path(&self, path: &[LiveId]) -> WidgetRef {
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                return inner.widget.child_by_path(path);
+            }
+        }
+        WidgetRef::empty()
+    }
+
+    pub fn child(&self, id: LiveId) -> WidgetRef {
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                return inner.widget.child(id);
+            }
+        }
+        WidgetRef::empty()
     }
 
     pub fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
@@ -1076,6 +1231,16 @@ impl WidgetRef {
         if set_ui_after_apply {
             vm.with_cx_mut(|cx| set_ui_root(cx, self));
         }
+    }
+}
+
+impl WidgetWeakRef {
+    pub fn upgrade(&self) -> Option<WidgetRef> {
+        self.0.upgrade().map(WidgetRef)
+    }
+
+    pub fn to_widget_ref(&self) -> WidgetRef {
+        self.upgrade().unwrap_or_else(WidgetRef::empty)
     }
 }
 

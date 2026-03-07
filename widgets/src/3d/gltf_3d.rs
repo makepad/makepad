@@ -1,7 +1,10 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 use std::{path::PathBuf, rc::Rc};
 
-use super::scene_3d::{apply_scene_to_draw_pbr, register_draw_call_anchor, scene_state_from_scope};
+use super::{
+    gltf_bridge::GltfRenderer,
+    scene_3d::{apply_scene_to_draw_pbr, register_draw_call_anchor, scene_state_from_scope},
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -90,7 +93,7 @@ impl Gltf3D {
             };
         }
 
-        cx.load_all_script_resources();
+        cx.load_script_resource(handle);
 
         if let Some(data) = cx.get_resource(handle) {
             let abs_path = Self::resource_metadata_by_handle(cx, handle)

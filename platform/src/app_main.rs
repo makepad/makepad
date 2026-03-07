@@ -84,7 +84,7 @@ macro_rules! app_main {
     ( $ app: ident) => {
         #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
         pub fn app_main() {
-            //Cx::init_log();
+            Cx::init_log();
             if Cx::pre_start() {
                 return;
             }
@@ -197,6 +197,7 @@ macro_rules! app_main {
         #[export_name = "wasm_create_app"]
         #[cfg(target_arch = "wasm32")]
         pub extern "C" fn create_wasm_app() -> u32 {
+            Cx::init_log();
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                 if let Event::Startup = event {

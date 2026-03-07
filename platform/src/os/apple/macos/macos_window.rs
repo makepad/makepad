@@ -27,6 +27,8 @@ pub struct MacosWindow {
     pub(crate) view: ObjcId,
     pub(crate) window: ObjcId,
     pub(crate) ime_spot: Vec2d,
+    // When ime_active is false, key events are not forward to NSTextInputContext so IME dose not active.
+    pub(crate) ime_active: bool,
     pub(crate) is_fullscreen: bool,
     pub(crate) last_mouse_pos: Vec2d,
     window_delegate: ObjcId,
@@ -55,6 +57,7 @@ impl MacosWindow {
                 last_window_geom: None,
                 ime_spot: Vec2d::default(),
                 last_mouse_pos: Vec2d::default(),
+                ime_active: false,
             }
         }
     }
@@ -483,6 +486,10 @@ impl MacosWindow {
             replace_last: replace_last,
             ..Default::default()
         }))
+    }
+
+    pub fn set_ime_active(&mut self, active: bool) {
+        self.ime_active = active;
     }
 
     #[cfg(target_os = "macos")]

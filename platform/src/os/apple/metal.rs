@@ -16,9 +16,9 @@ use {
             shared_framebuf::PresentableDraw,
         },
         script::vm::*,
-        studio::{AppToStudio, GPUSample},
         texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel},
     },
+    makepad_studio_protocol::{AppToStudio, GPUSample},
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
     makepad_zune_png::{
         makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},
@@ -370,6 +370,23 @@ impl Cx {
                         let () = msg_send![encoder, setFragmentBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
                         uniform_bytes_uploaded = uniform_bytes_uploaded
                             .saturating_add((draw_call.dyn_uniforms.len() * 4 * 2) as u64);
+                    }
+                    for (slot, id) in shp.custom_uniform_buffer_ids.iter().enumerate() {
+                        let Some(uniform_buffer) = draw_call.uniform_buffer_slots[slot].as_ref() else {
+                            let () = msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
+                            let () = msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
+                            continue;
+                        };
+                        let data = &self.uniform_buffers[uniform_buffer.uniform_buffer_id()].data;
+                        if data.is_empty() {
+                            let () = msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
+                            let () = msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
+                            continue;
+                        }
+                        let () = msg_send![encoder, setVertexBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 atIndex: *id];
+                        let () = msg_send![encoder, setFragmentBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 atIndex: *id];
+                        uniform_bytes_uploaded = uniform_bytes_uploaded
+                            .saturating_add((data.len() * 2) as u64);
                     }
                     if let Some(id) = shp.scope_uniform_buffer_id {
                         let scope_buf = &sh.mapping.scope_uniforms_buf;
@@ -1157,7 +1174,7 @@ impl Cx {
             if let Some(os_shader_id) = found_os_shader_id {
                 cx_shader.os_shader_id = Some(os_shader_id);
             } else {
-                if let Some(shp) = CxOsDrawShader::new(metal_cx, mtlsl, &bindings) {
+                if let Some(shp) = CxOsDrawShader::new(metal_cx, mtlsl, &cx_shader.mapping, &bindings) {
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
@@ -1309,6 +1326,7 @@ pub struct CxOsDrawShader {
     pass_uniform_buffer_id: Option<u64>,
     draw_list_uniform_buffer_id: Option<u64>,
     dyn_uniform_buffer_id: Option<u64>,
+    custom_uniform_buffer_ids: Vec<u64>,
     scope_uniform_buffer_id: Option<u64>,
     pub mtlsl: String,
 }
@@ -1511,6 +1529,7 @@ impl CxOsDrawShader {
     pub(crate) fn new(
         metal_cx: &MetalCx,
         mtlsl: String,
+        mapping: &CxDrawShaderMapping,
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
         let options = RcObjcId::from_owned(unsafe { msg_send![class!(MTLCompileOptions), new] });
@@ -1597,6 +1616,11 @@ impl CxOsDrawShader {
             .map(|i| i as u64);
         // dyn_uniform_buffer_id is not in bindings, it uses the IoUniform struct at buffer(2)
         let dyn_uniform_buffer_id = Some(2);
+        let custom_uniform_buffer_ids = mapping
+            .uniform_buffers
+            .iter()
+            .map(|input| input.buffer_index as u64)
+            .collect();
         // scope_uniform_buffer_id comes from bindings if there are scope uniforms
         let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u64);
 
@@ -1607,6 +1631,7 @@ impl CxOsDrawShader {
             pass_uniform_buffer_id,
             draw_list_uniform_buffer_id,
             dyn_uniform_buffer_id,
+            custom_uniform_buffer_ids,
             scope_uniform_buffer_id,
             mtlsl,
         });
@@ -1617,6 +1642,9 @@ impl CxOsDrawShader {
 pub struct CxOsDrawCall {
     instance_buffer: MetalBuffer,
 }
+
+#[derive(Default)]
+pub struct CxOsUniformBuffer {}
 
 #[derive(Default)]
 pub struct CxOsGeometry {
@@ -1959,11 +1987,29 @@ impl CxTexture {
             let bpe_val: ObjcId = msg_send![class!(NSNumber), numberWithUnsignedInteger: 4u64];
             let _: () = msg_send![dict, setObject: bpe_val forKey: bpe_key];
 
+            // IOSurfaceBytesPerRow (width * 4, aligned to 16 bytes as required by Metal on iOS)
+            let bpr_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfaceBytesPerRow");
+            let bytes_per_row = ((alloc.width * 4 + 15) & !15) as u64;
+            let bpr_val: ObjcId =
+                msg_send![class!(NSNumber), numberWithUnsignedInteger: bytes_per_row];
+            let _: () = msg_send![dict, setObject: bpr_val forKey: bpr_key];
+
             // IOSurfacePixelFormat (BGRA = 'BGRA' = 0x42475241)
             let pf_key = crate::os::apple::apple_util::str_to_nsstring("IOSurfacePixelFormat");
             let pf_val: ObjcId =
                 msg_send![class!(NSNumber), numberWithUnsignedInteger: 0x42475241u64];
             let _: () = msg_send![dict, setObject: pf_val forKey: pf_key];
+
+            // Required for CoreVideo + OpenGLES texture cache interop on iOS.
+            let gl_tex_compat_key =
+                crate::os::apple::apple_util::str_to_nsstring("IOSurfaceOpenGLESTextureCompatibility");
+            let gl_tex_compat_val: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
+            let _: () = msg_send![dict, setObject: gl_tex_compat_val forKey: gl_tex_compat_key];
+
+            let gl_fbo_compat_key =
+                crate::os::apple::apple_util::str_to_nsstring("IOSurfaceOpenGLESFBOCompatibility");
+            let gl_fbo_compat_val: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
+            let _: () = msg_send![dict, setObject: gl_fbo_compat_val forKey: gl_fbo_compat_key];
 
             // IOSurfaceIsGlobal is deprecated since iOS 11 and may cause
             // texImageIOSurface failures on some devices. Only set on macOS.
@@ -2001,6 +2047,10 @@ impl CxTexture {
         let _: () = unsafe { msg_send![descriptor.as_id(), setWidth: alloc.width as u64] };
         let _: () = unsafe { msg_send![descriptor.as_id(), setHeight: alloc.height as u64] };
         let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
+        #[cfg(target_os = "ios")]
+        let _: () =
+            unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared] };
+        #[cfg(not(target_os = "ios"))]
         let _: () =
             unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
         let _: () = unsafe {
@@ -2059,6 +2109,10 @@ impl CxTexture {
         let _: () = unsafe { msg_send![descriptor.as_id(), setWidth: alloc.width as u64] };
         let _: () = unsafe { msg_send![descriptor.as_id(), setHeight: alloc.height as u64] };
         let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
+        #[cfg(target_os = "ios")]
+        let _: () =
+            unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared] };
+        #[cfg(not(target_os = "ios"))]
         let _: () =
             unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
         let _: () = unsafe {
@@ -2428,14 +2482,33 @@ impl EaglRenderBridge {
         crate::gl_render_bridge::GlApi::GLES
     }
 
-    /// Bind an IOSurface to a GLES texture (TEXTURE_2D).
-    /// Returns the GL texture ID.
-    pub fn bind_iosurface_to_gl_texture(
+    /// Create a CVPixelBuffer and derive both a GLES texture and a Metal
+    /// texture from it.  This is the standard iOS zero-copy path:
+    /// CVPixelBuffer → CVOpenGLESTextureCache (GL side)
+    /// CVPixelBuffer → CVMetalTextureCache   (Metal side)
+    ///
+    /// Returns `(gl_texture_id, metal_texture_objc_id)`.
+    /// The caller must keep the returned Metal ObjcId alive (retained).
+    pub fn create_shared_texture(
         &self,
-        iosurface_ref: *mut std::ffi::c_void,
+        metal_device: ObjcId,
         width: usize,
         height: usize,
-    ) -> u32 {
+    ) -> (u32, ObjcId) {
+        use crate::os::apple::apple_sys::{
+            kCVPixelBufferOpenGLESCompatibilityKey,
+            kCVPixelBufferMetalCompatibilityKey,
+            kCVPixelBufferIOSurfacePropertiesKey,
+            kCVPixelFormatType_32BGRA,
+            CVPixelBufferCreate,
+            CVPixelBufferRef,
+            CVMetalTextureCacheCreate,
+            CVMetalTextureCacheRef,
+            CVMetalTextureRef,
+            CVMetalTextureCacheCreateTextureFromImage,
+            CVMetalTextureGetTexture,
+        };
+
         const GL_TEXTURE_2D: u32 = 0x0DE1;
         const GL_RGBA: u32 = 0x1908;
         const GL_BGRA: u32 = 0x80E1;
@@ -2443,10 +2516,6 @@ impl EaglRenderBridge {
 
         type GlBindTextureFn = unsafe extern "C" fn(u32, u32);
 
-        // Bind IOSurface to GL texture via CVOpenGLESTextureCache.
-        // EAGLContext's texImageIOSurface: is a private API that fails on
-        // some devices (e.g. iPad mini 4 / A8). CVOpenGLESTextureCache is
-        // the public CoreVideo API that works on all iOS Metal devices.
         extern "C" {
             fn CVOpenGLESTextureCacheCreate(
                 allocator: *const std::ffi::c_void,
@@ -2470,45 +2539,69 @@ impl EaglRenderBridge {
                 texture_out: *mut *mut std::ffi::c_void,
             ) -> i32;
             fn CVOpenGLESTextureGetName(texture: *mut std::ffi::c_void) -> u32;
-            fn CVPixelBufferCreateWithIOSurface(
-                allocator: *const std::ffi::c_void,
-                surface: *mut std::ffi::c_void,
-                pixel_buffer_attrs: *const std::ffi::c_void,
-                pixel_buffer_out: *mut *mut std::ffi::c_void,
-            ) -> i32;
-            fn CFRelease(cf: *mut std::ffi::c_void);
         }
 
         unsafe {
-            let gl_bind_texture: GlBindTextureFn =
-                std::mem::transmute(self.get_proc_address("glBindTexture"));
+            // -- 1. Create CVPixelBuffer with Metal + GLES compatibility ------
+            let pb_attrs: ObjcId = {
+                let dict: ObjcId = msg_send![class!(NSMutableDictionary), new];
 
-            let mut pixel_buffer: *mut std::ffi::c_void = std::ptr::null_mut();
-            let status = CVPixelBufferCreateWithIOSurface(
+                let yes_val: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
+                let _: () = msg_send![
+                    dict, setObject: yes_val
+                    forKey: kCVPixelBufferOpenGLESCompatibilityKey as ObjcId
+                ];
+
+                let yes_val2: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
+                let _: () = msg_send![
+                    dict, setObject: yes_val2
+                    forKey: kCVPixelBufferMetalCompatibilityKey as ObjcId
+                ];
+
+                // IOSurface backing is required for cross-API sharing.
+                let io_props: ObjcId = msg_send![class!(NSDictionary), dictionary];
+                let _: () = msg_send![
+                    dict, setObject: io_props
+                    forKey: kCVPixelBufferIOSurfacePropertiesKey as ObjcId
+                ];
+
+                dict
+            };
+
+            let mut pixel_buffer: CVPixelBufferRef = std::ptr::null_mut();
+            let status = CVPixelBufferCreate(
                 std::ptr::null(),
-                iosurface_ref,
-                std::ptr::null(),
+                width,
+                height,
+                kCVPixelFormatType_32BGRA,
+                pb_attrs as *const std::ffi::c_void,
                 &mut pixel_buffer,
             );
-            assert!(status == 0 && !pixel_buffer.is_null(),
-                "CVPixelBufferCreateWithIOSurface failed: {}", status);
+            let _: () = msg_send![pb_attrs, release];
+            assert!(
+                status == 0 && !pixel_buffer.is_null(),
+                "CVPixelBufferCreate failed: {} ({}x{})", status, width, height,
+            );
 
-            let mut texture_cache: *mut std::ffi::c_void = std::ptr::null_mut();
+            // -- 2. GL texture from CVPixelBuffer -----------------------------
+            let mut gl_cache: *mut std::ffi::c_void = std::ptr::null_mut();
             let status = CVOpenGLESTextureCacheCreate(
                 std::ptr::null(),
                 std::ptr::null(),
                 self.eagl_context,
                 std::ptr::null(),
-                &mut texture_cache,
+                &mut gl_cache,
             );
-            assert!(status == 0 && !texture_cache.is_null(),
-                "CVOpenGLESTextureCacheCreate failed: {}", status);
+            assert!(
+                status == 0 && !gl_cache.is_null(),
+                "CVOpenGLESTextureCacheCreate failed: {}", status,
+            );
 
-            let mut cv_texture: *mut std::ffi::c_void = std::ptr::null_mut();
+            let mut cv_gl_tex: *mut std::ffi::c_void = std::ptr::null_mut();
             let status = CVOpenGLESTextureCacheCreateTextureFromImage(
                 std::ptr::null(),
-                texture_cache,
-                pixel_buffer,
+                gl_cache,
+                pixel_buffer as *mut std::ffi::c_void,
                 std::ptr::null(),
                 GL_TEXTURE_2D,
                 GL_RGBA as i32,
@@ -2517,22 +2610,63 @@ impl EaglRenderBridge {
                 GL_BGRA,
                 GL_UNSIGNED_BYTE,
                 0,
-                &mut cv_texture,
+                &mut cv_gl_tex,
             );
-            assert!(status == 0 && !cv_texture.is_null(),
-                "CVOpenGLESTextureCacheCreateTextureFromImage failed: {}", status);
+            assert!(
+                status == 0 && !cv_gl_tex.is_null(),
+                "CVOpenGLESTextureCacheCreateTextureFromImage failed: {} ({}x{})",
+                status, width, height,
+            );
 
-            let gl_texture = CVOpenGLESTextureGetName(cv_texture);
-            gl_bind_texture(GL_TEXTURE_2D, gl_texture);
+            let gl_texture_id = CVOpenGLESTextureGetName(cv_gl_tex);
 
-            // cv_texture and texture_cache must stay alive while the GL texture
-            // is in use. Leak intentionally — a proper implementation would
-            // store them alongside the texture for cleanup.
-            CFRelease(pixel_buffer);
-
+            let gl_bind_texture: GlBindTextureFn =
+                std::mem::transmute(self.get_proc_address("glBindTexture"));
+            gl_bind_texture(GL_TEXTURE_2D, gl_texture_id);
             gl_bind_texture(GL_TEXTURE_2D, 0);
 
-            gl_texture
+            // -- 3. Metal texture from CVPixelBuffer --------------------------
+            let mut mtl_cache: CVMetalTextureCacheRef = std::ptr::null_mut();
+            let status = CVMetalTextureCacheCreate(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                metal_device,
+                std::ptr::null_mut(),
+                &mut mtl_cache,
+            );
+            assert!(
+                status == 0 && !mtl_cache.is_null(),
+                "CVMetalTextureCacheCreate failed: {}", status,
+            );
+
+            let mut cv_mtl_tex: CVMetalTextureRef = std::ptr::null_mut();
+            let status = CVMetalTextureCacheCreateTextureFromImage(
+                std::ptr::null_mut(),
+                mtl_cache,
+                pixel_buffer,
+                std::ptr::null_mut(),
+                MTLPixelFormat::BGRA8Unorm as u64,
+                width,
+                height,
+                0,
+                &mut cv_mtl_tex,
+            );
+            assert!(
+                status == 0 && !cv_mtl_tex.is_null(),
+                "CVMetalTextureCacheCreateTextureFromImage failed: {} ({}x{})",
+                status, width, height,
+            );
+
+            let metal_texture: ObjcId = CVMetalTextureGetTexture(cv_mtl_tex);
+            assert!(!metal_texture.is_null(), "CVMetalTextureGetTexture returned null");
+            // Retain — CVMetalTextureGetTexture returns unretained reference.
+            let _: () = msg_send![metal_texture, retain];
+
+            // Keep CV wrappers alive: gl_cache, cv_gl_tex, mtl_cache,
+            // cv_mtl_tex, pixel_buffer all must outlive the textures.
+            // Intentional leak — cleanup belongs with the texture lifecycle.
+
+            (gl_texture_id, metal_texture)
         }
     }
 }

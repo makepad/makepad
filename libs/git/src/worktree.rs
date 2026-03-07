@@ -47,6 +47,7 @@ pub struct Status {
 pub struct StatusOptions {
     pub skip_hidden: bool,
     pub skip_target_dirs: bool,
+    pub skip_worktree_content_compare: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +137,9 @@ pub fn compute_status_with_options(
                 status: FileStatus::Deleted,
             });
         } else {
+            if options.skip_worktree_content_compare {
+                continue;
+            }
             // Quick stat check: if mtime/size match the index, skip content hashing
             let metadata = fs::metadata(&file_path)?;
             let stat_matches = metadata_mtime_sec(&metadata) == idx_entry.mtime_sec
@@ -213,6 +217,10 @@ pub fn compute_status_worktree_only_with_options(
             continue;
         }
 
+        if options.skip_worktree_content_compare {
+            continue;
+        }
+
         // Quick stat check: if mtime/size match the index, skip content hashing
         let metadata = fs::metadata(&file_path)?;
         let stat_matches = metadata_mtime_sec(&metadata) == idx_entry.mtime_sec
@@ -243,6 +251,187 @@ pub fn compute_status_worktree_only_with_options(
 
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(Status { entries })
+}
+
+/// Compute status for a single relative path.
+///
+/// This avoids scanning the full worktree and is intended for event-driven UIs.
+pub fn compute_status_for_path_with_options(
+    head_oid: Option<ObjectId>,
+    index: &Index,
+    workdir: &Path,
+    path: &str,
+    options: StatusOptions,
+) -> Result<Option<FileStatus>, GitError> {
+    let path = normalize_status_path(path);
+    if path.is_empty() {
+        return Ok(None);
+    }
+
+    let idx_entry = index
+        .entries
+        .iter()
+        .find(|entry| entry.stage() == 0 && entry.path == path);
+
+    let mut status = if let Some(idx_entry) = idx_entry {
+        let staged = match head_oid {
+            Some(oid) if idx_entry.oid != oid => Some(FileStatus::Staged),
+            None => Some(FileStatus::StagedNew),
+            _ => None,
+        };
+        let unstaged = worktree_vs_index_status_for_path(idx_entry, workdir, &path, options)?;
+        // Keep staged state when both staged + unstaged are present.
+        staged.or(unstaged)
+    } else if head_oid.is_some() {
+        Some(FileStatus::StagedDeleted)
+    } else {
+        None
+    };
+
+    if status.is_none() {
+        status = compute_untracked_status_for_path(index, workdir, &path, options)?;
+    }
+
+    Ok(status)
+}
+
+/// Compute worktree-only status for a single relative path.
+///
+/// Unlike `compute_status_for_path_with_options`, this omits staged states.
+pub fn compute_status_for_path_worktree_only_with_options(
+    index: &Index,
+    workdir: &Path,
+    path: &str,
+    options: StatusOptions,
+) -> Result<Option<FileStatus>, GitError> {
+    let path = normalize_status_path(path);
+    if path.is_empty() {
+        return Ok(None);
+    }
+
+    let idx_entry = index
+        .entries
+        .iter()
+        .find(|entry| entry.stage() == 0 && entry.path == path);
+    let mut status = None;
+    if let Some(idx_entry) = idx_entry {
+        status = worktree_vs_index_status_for_path(idx_entry, workdir, &path, options)?;
+    }
+    if status.is_none() {
+        status = compute_untracked_status_for_path(index, workdir, &path, options)?;
+    }
+    Ok(status)
+}
+
+fn normalize_status_path(path: &str) -> String {
+    let mut path = path.replace('\\', "/");
+    while let Some(stripped) = path.strip_prefix("./") {
+        path = stripped.to_string();
+    }
+    path.trim_start_matches('/')
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn worktree_vs_index_status_for_path(
+    idx_entry: &IndexEntry,
+    workdir: &Path,
+    path: &str,
+    options: StatusOptions,
+) -> Result<Option<FileStatus>, GitError> {
+    let file_path = workdir.join(path);
+    if !file_path.exists() {
+        return Ok(Some(FileStatus::Deleted));
+    }
+    if options.skip_worktree_content_compare {
+        return Ok(None);
+    }
+
+    let metadata = fs::metadata(&file_path)?;
+    let stat_matches = metadata_mtime_sec(&metadata) == idx_entry.mtime_sec
+        && metadata.len() as u32 == idx_entry.file_size;
+    if stat_matches {
+        return Ok(None);
+    }
+
+    let content = fs::read(&file_path)?;
+    let worktree_oid = hash_object("blob", &content);
+    if worktree_oid != idx_entry.oid {
+        Ok(Some(FileStatus::Modified))
+    } else {
+        Ok(None)
+    }
+}
+
+fn compute_untracked_status_for_path(
+    index: &Index,
+    workdir: &Path,
+    path: &str,
+    options: StatusOptions,
+) -> Result<Option<FileStatus>, GitError> {
+    let file_path = workdir.join(path);
+    let metadata = match fs::symlink_metadata(&file_path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(GitError::Io(err)),
+    };
+    let file_type = metadata.file_type();
+    let is_dir = file_type.is_dir();
+    let is_file_like = file_type.is_file() || file_type.is_symlink();
+    if !is_dir && !is_file_like {
+        return Ok(None);
+    }
+
+    if options.skip_hidden && path.split('/').any(|segment| segment.starts_with('.')) {
+        return Ok(None);
+    }
+    if options.skip_target_dirs && path.split('/').any(|segment| segment == "target") {
+        return Ok(None);
+    }
+
+    if is_dir {
+        let prefix = format!("{}/", path);
+        if index
+            .entries
+            .iter()
+            .any(|entry| entry.stage() == 0 && entry.path.starts_with(&prefix))
+        {
+            return Ok(None);
+        }
+    } else if index
+        .entries
+        .iter()
+        .any(|entry| entry.stage() == 0 && entry.path == path)
+    {
+        return Ok(None);
+    }
+
+    if is_ignored_path(workdir, path, is_dir)? {
+        return Ok(None);
+    }
+
+    Ok(Some(FileStatus::Untracked))
+}
+
+fn is_ignored_path(root: &Path, rel_path: &str, is_dir: bool) -> Result<bool, GitError> {
+    let mut ignore_stack = IgnoreStack::default();
+    ignore_stack.ensure_repo_exclude_loaded(root)?;
+
+    let mut base_dir = root.to_path_buf();
+    ignore_stack.push_ignore_file(root, &base_dir, &base_dir.join(".gitignore"))?;
+    let mut components = rel_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            break;
+        }
+        base_dir.push(component);
+        ignore_stack.push_ignore_file(root, &base_dir, &base_dir.join(".gitignore"))?;
+    }
+
+    Ok(ignore_stack.is_ignored(rel_path, is_dir))
 }
 
 fn path_to_rel_slash(root: &Path, path: &Path) -> Result<String, GitError> {
@@ -537,16 +726,19 @@ fn collect_untracked(
     }
     ignore_stack.push_ignore_file(root, dir, &dir.join(".gitignore"))?;
 
+    let mut dir_entries: Vec<(std::ffi::OsString, std::path::PathBuf)> = Vec::new();
     let read_dir = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(GitError::Io(e)),
     };
-
     for entry in read_dir {
         let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name();
+        dir_entries.push((entry.file_name(), entry.path()));
+    }
+
+    // Iterate over plain paths so read_dir handles are dropped before recursion.
+    for (name, path) in dir_entries {
         let name_str = name.to_string_lossy();
 
         // Skip .git directory
@@ -920,6 +1112,97 @@ mod tests {
         assert_eq!(status.entries.len(), 1);
         assert_eq!(status.entries[0].path, "new_file.txt");
         assert_eq!(status.entries[0].status, FileStatus::Untracked);
+    }
+
+    #[test]
+    fn test_compute_status_for_path_reports_untracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path();
+        fs::write(workdir.join("new_file.txt"), "untracked\n").unwrap();
+
+        let index = Index {
+            version: 2,
+            entries: vec![],
+        };
+        let status = compute_status_for_path_with_options(
+            None,
+            &index,
+            workdir,
+            "new_file.txt",
+            StatusOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(status, Some(FileStatus::Untracked));
+    }
+
+    #[test]
+    fn test_compute_status_for_path_reports_staged_before_unstaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path();
+        fs::write(workdir.join("tracked.txt"), "worktree\n").unwrap();
+
+        let index = Index {
+            version: 2,
+            entries: vec![IndexEntry {
+                ctime_sec: 0,
+                ctime_nsec: 0,
+                mtime_sec: 0,
+                mtime_nsec: 0,
+                dev: 0,
+                ino: 0,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                oid: hash_object("blob", b"index\n"),
+                flags: "tracked.txt".len() as u16,
+                path: "tracked.txt".to_string(),
+            }],
+        };
+
+        let status = compute_status_for_path_with_options(
+            Some(hash_object("blob", b"head\n")),
+            &index,
+            workdir,
+            "tracked.txt",
+            StatusOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(status, Some(FileStatus::Staged));
+    }
+
+    #[test]
+    fn test_compute_status_for_path_worktree_only_reports_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path();
+
+        let index = Index {
+            version: 2,
+            entries: vec![IndexEntry {
+                ctime_sec: 0,
+                ctime_nsec: 0,
+                mtime_sec: 0,
+                mtime_nsec: 0,
+                dev: 0,
+                ino: 0,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                oid: hash_object("blob", b"index\n"),
+                flags: "deleted.txt".len() as u16,
+                path: "deleted.txt".to_string(),
+            }],
+        };
+
+        let status = compute_status_for_path_worktree_only_with_options(
+            &index,
+            workdir,
+            "deleted.txt",
+            StatusOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(status, Some(FileStatus::Deleted));
     }
 
     #[test]

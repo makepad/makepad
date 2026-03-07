@@ -13,6 +13,7 @@ use crate::{
     makepad_script::*,
     script::vm::*,
     texture::Texture,
+    uniform_buffer::UniformBuffer,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -23,6 +24,7 @@ use crate::makepad_script::{
 
 pub const DRAW_CALL_DYN_UNIFORMS: usize = 256;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 8;
+pub const DRAW_CALL_UNIFORM_BUFFER_SLOTS: usize = 2;
 pub const DRAW_CALL_DYN_INSTANCES: usize = 32;
 
 #[derive(Clone, Script, Debug)]
@@ -46,6 +48,8 @@ pub struct DrawVars {
     pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS],
     #[rust]
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
+    #[rust]
+    pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
     #[rust([0f32; DRAW_CALL_DYN_INSTANCES])]
     pub dyn_instances: [f32; DRAW_CALL_DYN_INSTANCES],
 }
@@ -58,9 +62,12 @@ impl ScriptHook for DrawVars {
         _scope: &mut Scope,
         value: ScriptValue,
     ) {
+        DrawVars::prune_stale_object_shader_cache(vm);
+
         if !apply.is_default() && !apply.is_animate() {
             self.compile_shader(vm, apply, value);
         }
+
         // Read draw-call level options from the shader object.
         if let Some(io_self) = value.as_object() {
             let group_value = vm
@@ -79,6 +86,7 @@ impl ScriptHook for DrawVars {
             } else if let Some(v) = depth_write_value.as_f64() {
                 self.options.depth_write = v != 0.0;
             }
+
         }
         // lets fill our values
         if self.draw_shader_id.is_some() {
@@ -103,12 +111,29 @@ impl ScriptHook for DrawVars {
 }
 
 impl DrawVars {
+    fn prune_stale_object_shader_cache(vm: &mut ScriptVm) {
+        let object_reuse_epoch = vm.bx.heap.object_reuse_epoch();
+        let cx = vm.host.cx_mut();
+        if cx.draw_shaders.cache_object_reuse_epoch_seen != object_reuse_epoch {
+            cx.draw_shaders.cache_object_id_to_shader.clear();
+            cx.draw_shaders.cache_object_reuse_epoch_seen = object_reuse_epoch;
+        }
+    }
+
     pub fn set_texture(&mut self, slot: usize, texture: &Texture) {
         self.texture_slots[slot] = Some(texture.clone());
     }
 
     pub fn empty_texture(&mut self, slot: usize) {
         self.texture_slots[slot] = None;
+    }
+
+    pub fn set_uniform_buffer(&mut self, slot: usize, uniform_buffer: &UniformBuffer) {
+        self.uniform_buffer_slots[slot] = Some(uniform_buffer.clone());
+    }
+
+    pub fn empty_uniform_buffer(&mut self, slot: usize) {
+        self.uniform_buffer_slots[slot] = None;
     }
 
     pub fn redraw(&self, cx: &mut Cx) {
@@ -157,13 +182,6 @@ impl DrawVars {
                 for input in &sh.mapping.instances.inputs {
                     let key: ScriptValue = input.id.into();
                     if obj_map.contains_key(&key) {
-                        // Debug trace for 'active' instance
-                        if cx.debug_trace_active && input.id == live_id!(active) {
-                            crate::log!(
-                                "DEBUG update_instance_areas: active = {} (from inst_slice)",
-                                inst_slice[input.offset]
-                            );
-                        }
                         for j in 0..repeat {
                             for i in 0..input.slots {
                                 instances[input.offset + i + j * stride] =
@@ -292,6 +310,47 @@ impl DrawVars {
                 }
             }
         }
+    }
+
+    /// Read an instance value from the currently bound draw area (first instance).
+    /// Returns `true` when the instance input exists and a value was read.
+    pub fn get_instance_on_area(&self, cx: &Cx, inst: LiveId, value: &mut [f32]) -> bool {
+        let Some(draw_shader_id) = self.draw_shader_id else {
+            return false;
+        };
+        let Some(area) = self.area.valid_instance(cx) else {
+            return false;
+        };
+
+        let sh = &cx.draw_shaders[draw_shader_id.index];
+        let Some(input) = sh.mapping.instances.inputs.iter().find(|input| input.id == inst) else {
+            return false;
+        };
+        let Some(draw_list) = cx.draw_lists.checked_index(area.draw_list_id) else {
+            return false;
+        };
+        let Some(draw_item) = draw_list.draw_items.buffer.get(area.draw_item_id) else {
+            return false;
+        };
+        let Some(instances) = draw_item.instances.as_ref() else {
+            return false;
+        };
+
+        let stride = sh.mapping.instances.total_slots;
+        let available = instances.len().saturating_sub(area.instance_offset);
+        let max_count = if stride == 0 { 0 } else { available / stride };
+        if area.instance_count == 0 || area.instance_count > max_count {
+            return false;
+        }
+
+        let base = area.instance_offset + input.offset;
+        if base + input.slots > instances.len() {
+            return false;
+        }
+        for i in 0..value.len().min(input.slots) {
+            value[i] = instances[base + i];
+        }
+        true
     }
 
     pub fn set_dyn_instance(&mut self, cx: &Cx, instance: LiveId, value: &[f32]) {
@@ -430,6 +489,7 @@ impl DrawVars {
             let base_offset = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
 
             for input in &mapping.dyn_instances.inputs {
+                let slot_offset = base_offset + input.offset;
                 let value = Self::extract_shader_io_value(
                     heap,
                     io_self,
@@ -437,27 +497,13 @@ impl DrawVars {
                     SHADER_IO_DYN_INSTANCE,
                     shallow,
                 );
-                if !value.is_nil() && !value.is_err() {
-                    // Debug trace for 'active' instance
-                    if cx.debug_trace_active && input.id == live_id!(active) {
-                        if let Some(v) = value.as_f64() {
-                            // Print all keys in the object's direct map
-                            let map = heap.map_ref(io_self);
-                            let keys: Vec<_> =
-                                map.iter().map(|(k, _)| format!("{:?}", k)).collect();
-                            crate::log!(
-                                "DEBUG fill_dyn_instances: active = {} (shallow={}) obj_keys={:?}",
-                                v,
-                                shallow,
-                                keys
-                            );
-                        }
-                    }
+                let wrote_slot = !value.is_nil() && !value.is_err();
+                if wrote_slot {
                     Self::write_value_to_f32_slots(
                         heap,
                         value,
                         &mut self.dyn_instances,
-                        base_offset + input.offset,
+                        slot_offset,
                         input.slots,
                         input.attr_format,
                     );

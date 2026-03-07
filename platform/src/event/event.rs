@@ -194,10 +194,15 @@ pub enum Event {
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
     ImeAction(ImeActionEvent),
+    SelectionHandleDrag(SelectionHandleDragEvent),
 
     Drag(DragEvent),
     Drop(DropEvent),
     DragEnd,
+
+    /// Application-defined event sent via the studio/debug control protocol.
+    /// Respond with `Cx::send_studio_message(AppToStudio::Custom(..))`.
+    Custom(String),
 
     Actions(ActionsBuf),
     AudioDevices(AudioDevicesEvent),
@@ -308,6 +313,8 @@ impl Event {
 
             57 => "XrLocal",
             58 => "ImeAction",
+            60 => "Custom",
+            62 => "SelectionHandleDrag",
             _ => panic!(),
         }
     }
@@ -360,6 +367,7 @@ impl Event {
             Self::TextCopy(_) => 36,
             Self::TextCut(_) => 37,
             Self::ImeAction(_) => 58,
+            Self::SelectionHandleDrag(_) => 62,
 
             Self::Drag(_) => 38,
             Self::Drop(_) => 39,
@@ -385,6 +393,7 @@ impl Event {
             Self::ToWasmMsg(_) => 55,
 
             Self::XrLocal(_) => 57,
+            Self::Custom(_) => 60,
         }
     }
 
@@ -424,6 +433,7 @@ pub enum Hit {
     FingerHoverOut(FingerHoverEvent),
     FingerUp(FingerUpEvent),
     FingerLongPress(FingerLongPressEvent),
+    SelectionHandleDrag(SelectionHandleDragEvent),
 
     Nothing,
 }
@@ -1024,6 +1034,31 @@ use crate::makepad_wasm_bridge::ToWasmMsg;
 
 #[cfg(target_arch = "wasm32")]
 use crate::makepad_wasm_bridge::ToWasmMsgRef;
+
+// ---------------------------------------------------------------------------
+// Selection handle drag (mobile)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionHandleKind {
+    Start,
+    End,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionHandlePhase {
+    Begin,
+    Move,
+    End,
+}
+
+#[derive(Clone, Debug)]
+pub struct SelectionHandleDragEvent {
+    pub handle: SelectionHandleKind,
+    pub phase: SelectionHandlePhase,
+    pub abs: crate::makepad_math::Vec2d,
+    pub time: f64,
+}
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug)]

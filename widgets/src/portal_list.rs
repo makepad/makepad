@@ -1050,7 +1050,19 @@ impl PortalList {
                             .iter()
                             .position(|v| v.template == template)
                         {
-                            self.reusable_items.remove(pos).widget
+                            let widget_ref = self.reusable_items.remove(pos).widget;
+                            // Reused items must be reset to template defaults, otherwise
+                            // stale instance/animator state (e.g. selected) can leak to a new entry.
+                            cx.with_vm(|vm| {
+                                let mut widget_ref = widget_ref.clone();
+                                widget_ref.script_apply(
+                                    vm,
+                                    &Apply::Reload,
+                                    &mut Scope::empty(),
+                                    template_value,
+                                );
+                            });
+                            widget_ref
                         } else {
                             cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value))
                         };
@@ -1072,7 +1084,19 @@ impl PortalList {
                         .iter()
                         .position(|v| v.template == template)
                     {
-                        self.reusable_items.remove(pos).widget
+                        let widget_ref = self.reusable_items.remove(pos).widget;
+                        // Reused items must be reset to template defaults, otherwise
+                        // stale instance/animator state (e.g. selected) can leak to a new entry.
+                        cx.with_vm(|vm| {
+                            let mut widget_ref = widget_ref.clone();
+                            widget_ref.script_apply(
+                                vm,
+                                &Apply::Reload,
+                                &mut Scope::empty(),
+                                template_value,
+                            );
+                        });
+                        widget_ref
                     } else {
                         cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value))
                     };
@@ -1824,9 +1848,16 @@ impl Widget for PortalList {
                     self.detect_tail_in_draw = true;
                     self.was_scrolling = false;
                     self.scroll_state = ScrollState::Stopped;
+                    let prev_first_id = self.first_id;
+                    let prev_first_scroll = self.first_scroll;
                     // For mouse wheel: clip to top and don't transition to pulldown
                     // (pulldown/overscroll is only for touch drag/flick)
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true, false);
+                    if self.first_id != prev_first_id
+                        || (self.first_scroll - prev_first_scroll).abs() > f64::EPSILON
+                    {
+                        self.at_end = false;
+                    }
                     cx.widget_action(uid, PortalListAction::Scroll);
                     self.area.redraw(cx);
                 }

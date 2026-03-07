@@ -465,13 +465,116 @@ fn generate_app_icon_xcassets(app_dir: &Path, build_crate: &str) -> Result<bool,
         }
     }
 
-    // Contents.json — iOS 12+ only needs a single 1024×1024 icon
+    // Contents.json — universal+platform entry for iOS 16+, classic
+    // idiom entries for iOS 15 and earlier (actool scales from 1024px).
     let contents_json = r#"{
   "images": [
     {
       "filename": "icon_1024.png",
       "idiom": "universal",
       "platform": "ios",
+      "size": "1024x1024"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "2x",
+      "size": "20x20"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "3x",
+      "size": "20x20"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "2x",
+      "size": "29x29"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "3x",
+      "size": "29x29"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "2x",
+      "size": "40x40"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "3x",
+      "size": "40x40"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "2x",
+      "size": "60x60"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "3x",
+      "size": "60x60"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "1x",
+      "size": "20x20"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "2x",
+      "size": "20x20"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "1x",
+      "size": "29x29"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "2x",
+      "size": "29x29"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "1x",
+      "size": "40x40"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "2x",
+      "size": "40x40"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "2x",
+      "size": "76x76"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "2x",
+      "size": "83.5x83.5"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ios-marketing",
+      "scale": "1x",
       "size": "1024x1024"
     }
   ],
@@ -509,6 +612,24 @@ fn generate_app_icon_xcassets(app_dir: &Path, build_crate: &str) -> Result<bool,
             &app_dir.join("actool-Info.plist").to_string_lossy(),
         ],
     )?;
+
+    // Merge actool's partial Info.plist (contains CFBundleIcons for iOS 15)
+    // into the main Info.plist.
+    let actool_plist = app_dir.join("actool-Info.plist");
+    if actool_plist.is_file() {
+        let main_plist = app_dir.join("Info.plist");
+        // PlistBuddy Merge copies all keys from source into destination
+        shell_env_cap(
+            &[],
+            &cwd,
+            "/usr/libexec/PlistBuddy",
+            &[
+                "-c",
+                &format!("Merge {}", actool_plist.to_string_lossy()),
+                &main_plist.to_string_lossy(),
+            ],
+        )?;
+    }
 
     Ok(true)
 }

@@ -282,8 +282,10 @@ impl AdaptiveView {
             let widget_variant = self.previously_active_widgets.remove(&template_id).unwrap();
 
             self.walk = widget_variant.widget_ref.walk(cx);
+            let widget = widget_variant.widget_ref.clone();
+            let tid = widget_variant.template_id;
             self.active_widget = Some(widget_variant);
-            cx.widget_tree_mark_dirty(self.uid);
+            cx.widget_tree_insert_child_deep(self.uid, tid, widget);
             return;
         }
 
@@ -311,9 +313,9 @@ impl AdaptiveView {
 
         self.active_widget = Some(WidgetVariant {
             template_id,
-            widget_ref,
+            widget_ref: widget_ref.clone(),
         });
-        cx.widget_tree_mark_dirty(self.uid);
+        cx.widget_tree_insert_child_deep(self.uid, template_id, widget_ref);
     }
 
     /// Set a variant selector for this widget.
