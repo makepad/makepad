@@ -9,10 +9,13 @@ struct Options {
     output_path: String,
     scale: f64,
     adaptive_ao: bool,
+    antialiasing: render::AntialiasingMode,
 }
 
 fn usage(program: &str) -> String {
-    format!("Usage: {program} [--scale <factor>] [--no-adaptive-ao] [input.m3p] [output.png]")
+    format!(
+        "Usage: {program} [--scale <factor>] [--no-adaptive-ao] [--aa <none|2x2>] [input.m3p] [output.png]"
+    )
 }
 
 fn parse_args() -> Result<Option<Options>, String> {
@@ -20,6 +23,7 @@ fn parse_args() -> Result<Option<Options>, String> {
     let program = args.next().unwrap_or_else(|| "makepad-mb3d-render".to_string());
     let mut scale = 1.0f64;
     let mut adaptive_ao = true;
+    let mut antialiasing = render::AntialiasingMode::None;
     let mut positional = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -34,6 +38,21 @@ fn parse_args() -> Result<Option<Options>, String> {
                 if !scale.is_finite() || scale <= 0.0 {
                     return Err(format!("--scale must be a positive finite number\n{}", usage(&program)));
                 }
+            }
+            "--aa" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("missing value for --aa\n{}", usage(&program)))?;
+                antialiasing = match value.as_str() {
+                    "none" => render::AntialiasingMode::None,
+                    "2x2" => render::AntialiasingMode::X2,
+                    _ => {
+                        return Err(format!(
+                            "invalid --aa value '{value}' (expected 'none' or '2x2')\n{}",
+                            usage(&program)
+                        ))
+                    }
+                };
             }
             "--no-adaptive-ao" => adaptive_ao = false,
             "-h" | "--help" => {
@@ -59,6 +78,7 @@ fn parse_args() -> Result<Option<Options>, String> {
             .unwrap_or_else(|| "cathedral_test.png".to_string()),
         scale,
         adaptive_ao,
+        antialiasing,
     }))
 }
 
@@ -90,6 +110,7 @@ fn main() {
 
     let mut params = render::RenderParams::from_m3p(&m3p_file);
     params.adaptive_ao_subsampling = options.adaptive_ao;
+    params.antialiasing = options.antialiasing;
     params.apply_image_scale(options.scale);
 
     let pixels = render::render(&formula_slots, &params, &m3p_file.lighting, &m3p_file.ssao);
