@@ -12,29 +12,47 @@ metadata.makepad-auto-version = "N0YGjn7dnhc4DEHmww9lwuYwMVI="
 [dependencies]
 makepad-draw = { path = "../draw", version = "2.0.0", default-features = false }
 
-makepad-derive-widget = {path = "./derive_widget", version="2.0.0"}
+makepad-derive-widget = { path = "./derive_widget", version = "2.0.0" }
 makepad-mbtile-reader = { path = "../libs/mbtile_reader", version = "1.0.0", optional = true }
 makepad-fast-inflate = { path = "../libs/fast_inflate", optional = true }
 makepad-voice = { path = "../libs/voice", version = "0.1.0", optional = true }
 makepad-splat = { path = "../libs/splat", version = "1.0.0" }
 
-makepad-html = { path = "../libs/html", version = "1.0.0" }
+makepad-html = { path = "../libs/html", version = "1.0.0", optional = true }
 unicode-segmentation = { version = "1.12.0", path = "../libs/unicode/unicode-segmentation" }
-pulldown-cmark = { version = "0.12.2", path = "../libs/pulldown-cmark", default-features = false, features = ["simd"] }
-makepad-latex-math = { path = "../libs/latex_math", version = "0.1.0" }
+pulldown-cmark = { version = "0.12.2", path = "../libs/pulldown-cmark", default-features = false, features = [
+    "simd",
+], optional = true }
+makepad-latex-math = { path = "../libs/latex_math", version = "0.1.0", optional = true }
 makepad-pdf-parse = { path = "../libs/pdf_parse", version = "1.0.0", optional = true }
 ttf-parser = { path = "../libs/ttf-parser" }
 
 serde = { version = "1.0", optional = true, features = ["derive"] }
 
 [features]
-default = ["bundled-fonts"]
+default = [
+    "bundled-fonts",
+    "markdown",
+    "html",
+    "svg",
+    "charts",
+    "video",
+    "math",
+]
 bundled-fonts = ["makepad-draw/bundled-fonts"]
 system-fonts = ["makepad-draw/system-fonts"]
 
 voice = ["dep:makepad-voice"]
 maps = ["dep:makepad-mbtile-reader", "dep:makepad-fast-inflate"]
 pdf = ["dep:makepad-pdf-parse"]
+
+## Optional widgets for tree-shaking; disable via default-features = false
+markdown = ["dep:pulldown-cmark"]
+html = ["dep:makepad-html"]
+svg = []
+charts = []
+video = []
+math = ["dep:makepad-latex-math"]
 
 ## Enables certain public-facing types to derive serde serialization traits.
 serde = ["dep:serde", "makepad-draw/serde", "makepad-derive-widget/serde"]

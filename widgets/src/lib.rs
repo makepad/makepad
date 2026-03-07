@@ -8,6 +8,7 @@ pub use makepad_platform::makepad_script;
 pub use makepad_script::script_eval;
 pub use makepad_script::{ScriptValue, ScriptVm};
 
+#[cfg(feature = "html")]
 pub use makepad_html;
 #[cfg(feature = "pdf")]
 pub use makepad_pdf_parse;
@@ -79,15 +80,19 @@ pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
 
+#[cfg(feature = "html")]
 pub mod html;
+#[cfg(feature = "markdown")]
 pub mod markdown;
 
 #[cfg(feature = "maps")]
 pub mod map;
+#[cfg(feature = "math")]
 pub mod math_view;
 #[cfg(feature = "pdf")]
 pub mod pdf_view;
 pub mod splash;
+#[cfg(feature = "svg")]
 pub mod svg;
 pub mod vector;
 #[path = "3d/mod.rs"]
@@ -101,13 +106,14 @@ pub mod expandable_panel;
 pub mod scroll_shadow;
 pub mod stack_navigation;
 
+pub mod callout_tooltip;
 pub mod file_tree;
 pub mod modal;
 pub mod page_flip;
 pub mod popup_notification;
 pub mod slides_view;
 pub mod tooltip;
-pub mod callout_tooltip;
+#[cfg(feature = "video")]
 pub mod video;
 
 pub mod command_text_input;
@@ -116,6 +122,7 @@ pub mod slide_panel;
 
 pub mod flat_list;
 
+#[cfg(feature = "charts")]
 pub mod chart;
 
 // Commented out modules (not yet converted)
@@ -136,6 +143,7 @@ pub use crate::{
     bare_step::*,
     button::*,
     cached_widget::*,
+    callout_tooltip::*,
     check_box::*,
     desktop_button::*,
     dock::*,
@@ -185,7 +193,6 @@ pub use crate::{
 
     text_input::*,
     tooltip::*,
-    callout_tooltip::*,
     // Navigation and panels
     touch_gesture::*,
     turtle_step::*,
@@ -198,11 +205,11 @@ pub use crate::{
         WidgetSet, WidgetSetIterator, WidgetUid,
     },
     widget_async::{
-        set_widget_async_trace, CxWidgetToScriptCallExt, ScriptAsyncCalls, ScriptAsyncId,
-        ScriptAsyncResult,
+        CxWidgetToScriptCallExt, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult,
+        set_widget_async_trace,
     },
     widget_match_event::WidgetMatchEvent,
-    widget_tree::{set_ui_root, CxWidgetExt},
+    widget_tree::{CxWidgetExt, set_ui_root},
 
     window::*,
 
@@ -212,25 +219,31 @@ pub use crate::{
 #[cfg(feature = "voice")]
 pub use crate::voice_wave::*;
 
+#[cfg(feature = "html")]
 pub use crate::html::*;
 
+#[cfg(feature = "markdown")]
 pub use crate::markdown::*;
 
 #[cfg(feature = "maps")]
 pub use crate::map::view::*;
 
+#[cfg(feature = "math")]
 pub use crate::math_view::*;
 
 pub use crate::splash::*;
 
 #[cfg(feature = "pdf")]
 pub use crate::pdf_view::*;
+#[cfg(feature = "svg")]
 pub use crate::svg::*;
 pub use crate::vector::*;
 pub use crate::widgets_3d::*;
 
+#[cfg(feature = "charts")]
 pub use crate::chart::*;
 
+#[cfg(feature = "video")]
 pub use crate::video::*;
 
 pub fn theme_mod(vm: &mut ScriptVm) {
@@ -253,7 +266,7 @@ pub fn theme_mod(vm: &mut ScriptVm) {
                 v
             }
         }
-        
+
         mod.prelude.widgets_header = {
             ..mod.res,
             ..mod.helper,
@@ -349,28 +362,67 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::tooltip::script_mod(vm);
     crate::callout_tooltip::script_mod(vm);
     crate::popup_notification::script_mod(vm);
+    #[cfg(feature = "video")]
     crate::video::script_mod(vm);
+    #[cfg(not(feature = "video"))]
+    script_eval!(vm, {
+        use mod.widgets.View
+        mod.widgets.Video = mod.widgets.View { visible: false }
+    });
     crate::page_flip::script_mod(vm);
     crate::file_tree::script_mod(vm);
     crate::flat_list::script_mod(vm);
     crate::slides_view::script_mod(vm);
     crate::slide_panel::script_mod(vm);
 
+    #[cfg(feature = "html")]
     crate::html::script_mod(vm);
+    #[cfg(not(feature = "html"))]
+    script_eval!(vm, {
+        use mod.widgets.View
+        mod.widgets.HtmlLink = mod.widgets.View { visible: false }
+        mod.widgets.Html = mod.widgets.View { visible: false }
+    });
+    #[cfg(feature = "markdown")]
     crate::markdown::script_mod(vm);
+    #[cfg(not(feature = "markdown"))]
+    script_eval!(vm, {
+        use mod.widgets.View
+        mod.widgets.MarkdownLink = mod.widgets.View { visible: false }
+        mod.widgets.Markdown = mod.widgets.View { visible: false }
+    });
 
     crate::splash::script_mod(vm);
     #[cfg(feature = "pdf")]
     crate::pdf_view::script_mod(vm);
+    #[cfg(feature = "svg")]
     crate::svg::script_mod(vm);
+    #[cfg(not(feature = "svg"))]
+    script_eval!(vm, {
+        use mod.widgets.View
+        mod.widgets.Svg = mod.widgets.View { visible: false }
+    });
     crate::vector::script_mod(vm);
+    #[cfg(feature = "charts")]
     crate::chart::script_mod(vm);
+    #[cfg(not(feature = "charts"))]
+    script_eval!(vm, {
+        use mod.widgets.View
+        mod.widgets.ChartView = mod.widgets.View { visible: false }
+    });
+    #[cfg(feature = "3d")]
     crate::widgets_3d::script_mod(vm);
     #[cfg(feature = "maps")]
     crate::map::style::script_mod(vm);
     #[cfg(feature = "maps")]
     crate::map::view::script_mod(vm);
+    #[cfg(feature = "math")]
     crate::math_view::script_mod(vm);
+    #[cfg(not(feature = "math"))]
+    script_eval!(vm, {
+        use mod.widgets.View
+        mod.widgets.MathView = mod.widgets.View { visible: false }
+    });
 
     script_eval!(vm, {
         mod.prelude.widgets = {
