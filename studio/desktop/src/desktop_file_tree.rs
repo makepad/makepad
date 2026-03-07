@@ -131,6 +131,8 @@ impl ActionDefaultRef for FilteredFileRowData {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct DesktopFileTree {
+    #[uid]
+    uid: WidgetUid,
     #[deref]
     view: View,
     #[rust]

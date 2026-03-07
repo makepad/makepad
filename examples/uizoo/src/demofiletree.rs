@@ -64,6 +64,8 @@ impl FileNode {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct DemoFileTree {
+    #[uid]
+    uid: WidgetUid,
     #[redraw]
     #[live]
     pub file_tree: FileTree,

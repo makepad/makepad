@@ -143,6 +143,8 @@ pub enum StackNavigationTransitionAction {
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct StackNavigationView {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 

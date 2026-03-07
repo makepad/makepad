@@ -215,6 +215,8 @@ script_mod! {
 /// This is a wrapper around (and derefs to) a [`Button`] widget.
 #[derive(Script, ScriptHook, Widget)]
 pub struct LinkLabel {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]

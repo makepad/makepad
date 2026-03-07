@@ -1028,6 +1028,8 @@ impl Widget for DesktopProfilerEventChart {
 
 #[derive(Script, Widget)]
 pub struct DesktopProfilerView {
+    #[uid]
+    uid: WidgetUid,
     #[deref]
     view: View,
     #[rust]

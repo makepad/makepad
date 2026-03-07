@@ -71,6 +71,10 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 uid_field = Some(field.name.clone());
             }
         }
+        if uid_field.is_none() {
+            return error("Widget derive requires an explicit #[uid] WidgetUid field");
+        }
+
         tb.add("impl").stream(generic.clone());
         tb.add("WidgetNode for")
             .ident(&struct_name)

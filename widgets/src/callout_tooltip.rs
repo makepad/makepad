@@ -153,6 +153,8 @@ pub enum TooltipPosition {
 /// A tooltip widget that a callout pointing towards the referenced widget.
 #[derive(Script, ScriptHook, Widget)]
 pub struct CalloutTooltip {
+    #[uid]
+    uid: WidgetUid,
     #[source] source: ScriptObjectRef,
     #[deref] view: View,
 
