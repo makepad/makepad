@@ -288,23 +288,41 @@ fn hybrid_de_vec2_uploads(scene: &GpuDsUploads, px: Vec2f, py: Vec2f, pz: Vec2f)
             }
 
             let nx = ds_add(
-                ds_add(ds_mul(x, ds_from_split(scene.rot0.x)), ds_mul(y, ds_from_split(scene.rot0.y))),
+                ds_add(
+                    ds_mul(x, ds_from_split(scene.rot0.x)),
+                    ds_mul(y, ds_from_split(scene.rot0.y)),
+                ),
                 ds_mul(z, ds_from_split(scene.rot0.z)),
             );
             let ny = ds_add(
-                ds_add(ds_mul(x, ds_from_split(scene.rot1.x)), ds_mul(y, ds_from_split(scene.rot1.y))),
+                ds_add(
+                    ds_mul(x, ds_from_split(scene.rot1.x)),
+                    ds_mul(y, ds_from_split(scene.rot1.y)),
+                ),
                 ds_mul(z, ds_from_split(scene.rot1.z)),
             );
             let nz = ds_add(
-                ds_add(ds_mul(x, ds_from_split(scene.rot2.x)), ds_mul(y, ds_from_split(scene.rot2.y))),
+                ds_add(
+                    ds_mul(x, ds_from_split(scene.rot2.x)),
+                    ds_mul(y, ds_from_split(scene.rot2.y)),
+                ),
                 ds_mul(z, ds_from_split(scene.rot2.z)),
             );
 
             let sf = ds_sub(ds_from_split(scene.menger_scale), ds_new(1.0));
-            x = ds_sub(ds_mul(nx, ds_from_split(scene.menger_scale)), ds_mul(ds_from_split(scene.menger_cx), sf));
-            y = ds_sub(ds_mul(ny, ds_from_split(scene.menger_scale)), ds_mul(ds_from_split(scene.menger_cy), sf));
+            x = ds_sub(
+                ds_mul(nx, ds_from_split(scene.menger_scale)),
+                ds_mul(ds_from_split(scene.menger_cx), sf),
+            );
+            y = ds_sub(
+                ds_mul(ny, ds_from_split(scene.menger_scale)),
+                ds_mul(ds_from_split(scene.menger_cy), sf),
+            );
             let c = ds_mul(ds_from_split(scene.menger_cz), sf);
-            z = ds_sub(c, ds_abs(ds_sub(ds_mul(nz, ds_from_split(scene.menger_scale)), c)));
+            z = ds_sub(
+                c,
+                ds_abs(ds_sub(ds_mul(nz, ds_from_split(scene.menger_scale)), c)),
+            );
             w = ds_mul(w, ds_from_split(scene.menger_scale));
         }
 
@@ -375,7 +393,10 @@ fn shaderlike_ray_for_pixel_vec2(
 
     let origin = vec2_num3_add(
         vec2_num3_add(
-            vec2_num3_add(mid, vec2_num3_scale(cam_forward, ds_from_split(scene.z_start_delta))),
+            vec2_num3_add(
+                mid,
+                vec2_num3_scale(cam_forward, ds_from_split(scene.z_start_delta)),
+            ),
             vec2_num3_scale(cam_right, x_offset),
         ),
         vec2_num3_scale(cam_up, y_offset),
@@ -387,7 +408,10 @@ fn shaderlike_ray_for_pixel_vec2(
 fn scene_destop_at_steps_vec2(scene: &GpuDsUploads, depth_steps: Vec2f) -> Vec2f {
     ds_mul(
         ds_from_split(scene.de_stop),
-        ds_add(ds_new(1.0), ds_mul(ds_abs(depth_steps), ds_from_split(scene.de_stop_factor))),
+        ds_add(
+            ds_new(1.0),
+            ds_mul(ds_abs(depth_steps), ds_from_split(scene.de_stop_factor)),
+        ),
     )
 }
 
@@ -407,7 +431,8 @@ fn ray_march_vec2_uploads(
 
     let pos = vec2_num3_add(origin, vec2_num3_scale(dir, t));
     let (iters, de) = calc_de_vec2_uploads(scene, pos.x, pos.y, pos.z);
-    let current_destop = scene_destop_at_steps_vec2(scene, ds_div(t, ds_from_split(scene.step_width)));
+    let current_destop =
+        scene_destop_at_steps_vec2(scene, ds_div(t, ds_from_split(scene.step_width)));
     if iters >= scene.max_iters || ds_lt(de, current_destop) {
         return Vec2MarchHit {
             depth: t,
@@ -424,7 +449,8 @@ fn ray_march_vec2_uploads(
     last_de = de;
 
     for _ in 0..2_000_000 {
-        let current_destop = scene_destop_at_steps_vec2(scene, ds_div(t, ds_from_split(scene.step_width)));
+        let current_destop =
+            scene_destop_at_steps_vec2(scene, ds_div(t, ds_from_split(scene.step_width)));
         let pos = vec2_num3_add(origin, vec2_num3_scale(dir, t));
         let (iters, mut de) = calc_de_vec2_uploads(scene, pos.x, pos.y, pos.z);
 
@@ -436,13 +462,19 @@ fn ray_march_vec2_uploads(
         if iters < scene.max_iters && !ds_lt(de, current_destop) {
             let mut step = ds_max(
                 ds_mul(
-                    ds_mul(ds_sub(de, ds_mul(ds_from_split(scene.ms_de_sub), current_destop)), ds_from_split(scene.s_z_step_div)),
+                    ds_mul(
+                        ds_sub(de, ds_mul(ds_from_split(scene.ms_de_sub), current_destop)),
+                        ds_from_split(scene.s_z_step_div),
+                    ),
                     rsfmul,
                 ),
                 ds_mul(ds_from_split(scene.step_width), ds_new(0.11)),
             );
             let max_step_here = ds_mul(
-                ds_max(current_destop, ds_mul(ds_from_split(scene.step_width), ds_new(0.4))),
+                ds_max(
+                    current_destop,
+                    ds_mul(ds_from_split(scene.step_width), ds_new(0.4)),
+                ),
                 ds_from_split(scene.mct_mh04_zsd),
             );
 
@@ -492,7 +524,8 @@ fn ray_march_vec2_uploads(
             for _ in 0..scene.bin_search_steps {
                 t = ds_add(t, refine_step);
                 let rpos = vec2_num3_add(origin, vec2_num3_scale(dir, t));
-                let destop_here = scene_destop_at_steps_vec2(scene, ds_div(t, ds_from_split(scene.step_width)));
+                let destop_here =
+                    scene_destop_at_steps_vec2(scene, ds_div(t, ds_from_split(scene.step_width)));
                 let (ri, rd) = calc_de_vec2_uploads(scene, rpos.x, rpos.y, rpos.z);
                 if ds_lt(rd, destop_here) || ri >= scene.max_iters {
                     refine_step = ds_mul(ds_abs(refine_step), ds_new(-0.55));
@@ -555,7 +588,8 @@ fn surface_sample_vec2_uploads(
     let up = split_vec3_to_f3(scene.cam_up).normalize();
 
     let m_zz = ds_to_f(depth) / step_width;
-    let n_offset = de_stop_header.min(1.0) * (1.0 + m_zz.abs() * de_stop_factor) * 0.15 * step_width;
+    let n_offset =
+        de_stop_header.min(1.0) * (1.0 + m_zz.abs() * de_stop_factor) * 0.15 * step_width;
 
     let fwd = forward.scale(n_offset);
     let rt = right.scale(n_offset);
@@ -568,7 +602,11 @@ fn surface_sample_vec2_uploads(
     let dy = calc_de_vec2_at_pos(scene, offset_vec2_pos(hit_pos, up, n_offset))
         - calc_de_vec2_at_pos(scene, offset_vec2_pos(hit_pos, up, -n_offset));
 
-    let normal_basis = F3 { x: dx, y: dy, z: dz };
+    let normal_basis = F3 {
+        x: dx,
+        y: dy,
+        z: dz,
+    };
     let normal_coarse = rt
         .normalize()
         .scale(dx)
@@ -597,8 +635,16 @@ fn surface_sample_vec2_uploads(
         let d = n.y * n.y + n.x * n.x;
         if d < 1.0e-25 {
             return (
-                F3 { x: 1.0, y: 0.0, z: 0.0 },
-                F3 { x: 0.0, y: 1.0, z: 0.0 },
+                F3 {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                F3 {
+                    x: 0.0,
+                    y: 1.0,
+                    z: 0.0,
+                },
             );
         }
         let denom = (d + n.z * n.z + 1.0e-30).sqrt();
@@ -620,22 +666,17 @@ fn surface_sample_vec2_uploads(
         (vx, vy)
     };
 
-    let rotate_vector_reverse_basis = |v: F3| {
-        right
-            .scale(v.x)
-            .add(up.scale(v.y))
-            .add(forward.scale(v.z))
-    };
+    let rotate_vector_reverse_basis =
+        |v: F3| right.scale(v.x).add(up.scale(v.y)).add(forward.scale(v.z));
 
     let mut dnn = calc_de_vec2_at_pos(scene, hit_pos);
     if smooth_n < 8 {
-        dnn = (
-            dnn
-                + calc_de_vec2_at_pos(scene, offset_vec2_pos(hit_pos, right, -noffset2))
-                + calc_de_vec2_at_pos(scene, offset_vec2_pos(hit_pos, right, noffset2))
-                + calc_de_vec2_at_pos(scene, offset_vec2_pos(hit_pos, up, -noffset2))
-                + calc_de_vec2_at_pos(scene, offset_vec2_pos(hit_pos, up, noffset2))
-        ) * 0.2;
+        dnn = (dnn
+            + calc_de_vec2_at_pos(scene, offset_vec2_pos(hit_pos, right, -noffset2))
+            + calc_de_vec2_at_pos(scene, offset_vec2_pos(hit_pos, right, noffset2))
+            + calc_de_vec2_at_pos(scene, offset_vec2_pos(hit_pos, up, -noffset2))
+            + calc_de_vec2_at_pos(scene, offset_vec2_pos(hit_pos, up, noffset2)))
+            * 0.2;
     }
 
     let (vx_basis, vy_basis) = create_xy_vecs_from_normals_mb3d(normal_basis);
@@ -704,7 +745,8 @@ fn soft_hs_bits_vec2_uploads(
     let step_width = ds_to_f(ds_from_split(scene.step_width)).max(1.0e-30);
     let max_ray_length = ds_to_f(ds_from_split(scene.max_ray_length));
     let fov_y = scene.fov_y;
-    let hs_max_length_multiplier = ds_to_f(ds_from_split(scene.hs_max_length_multiplier)).max(1.0e-30);
+    let hs_max_length_multiplier =
+        ds_to_f(ds_from_split(scene.hs_max_length_multiplier)).max(1.0e-30);
     let soft_shadow_radius = ds_to_f(ds_from_split(scene.soft_shadow_radius)).max(1.0e-30);
     let s_z_step_div_raw = ds_to_f(ds_from_split(scene.s_z_step_div_raw));
     let de_stop = ds_to_f(ds_from_split(scene.de_stop));
@@ -772,11 +814,10 @@ fn soft_hs_bits_vec2_uploads(
     loop {
         let r_last_de_world = de_world;
         let max_step_world = (ms_de_stop_world.max(0.4 * step_width)) * mct_mh04_zsd;
-        let r_last_step_world = ((de_world - ms_de_sub * ms_de_stop_world)
-            * s_z_step_div_raw
-            * step_factor_diff)
-            .max(0.11 * step_width)
-            .min(max_step_world);
+        let r_last_step_world =
+            ((de_world - ms_de_sub * ms_de_stop_world) * s_z_step_div_raw * step_factor_diff)
+                .max(0.11 * step_width)
+                .min(max_step_world);
         if r_last_step_world <= 0.0 {
             break;
         }
@@ -789,9 +830,8 @@ fn soft_hs_bits_vec2_uploads(
 
         de_world = calc_de_vec2_at_pos(scene, pos);
         let traveled = (max_l_hs - d_t1).max(0.0);
-        let soft_term =
-            ((de_world - ms_de_stop_world) / step_width) * zr_s_mul / (traveled + 0.11)
-                + (traveled / max_l_hs.max(1.0e-30)).powi(8);
+        let soft_term = ((de_world - ms_de_stop_world) / step_width) * zr_s_mul / (traveled + 0.11)
+            + (traveled / max_l_hs.max(1.0e-30)).powi(8);
         zr_soft = zr_soft.min(soft_term);
 
         if de_world <= ms_de_stop_world {
@@ -815,9 +855,7 @@ fn soft_hs_bits_vec2_uploads(
         }
     }
 
-    (zr_soft.clamp(0.0, 1.0) * 63.4)
-        .round()
-        .clamp(0.0, 63.0) as i32
+    (zr_soft.clamp(0.0, 1.0) * 63.4).round().clamp(0.0, 63.0) as i32
 }
 
 fn ao_step_jitter_vec2(pixel_x: i32, pixel_y: i32, ray_idx: usize) -> f32 {
@@ -852,9 +890,17 @@ fn deao_vec2_uploads(
 
     let normal_basis_w = normal.normalize();
     let axis = if normal_basis_w.x.abs() > 0.1 {
-        F3 { x: 0.0, y: 1.0, z: 0.0 }
+        F3 {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        }
     } else {
-        F3 { x: 1.0, y: 0.0, z: 0.0 }
+        F3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        }
     };
     let normal_basis_u = f3_cross(axis, normal_basis_w).normalize();
     let normal_basis_v = f3_cross(normal_basis_w, normal_basis_u);
@@ -907,7 +953,8 @@ fn deao_vec2_uploads(
                 .max(1.0) as i32;
             let polar = row_abr * (iy as f32 + dither_y - 0.25);
             for ix in 0..row_count {
-                let azimuth = (ix as f32 + dither_x) * std::f32::consts::PI * 2.0 / row_count as f32;
+                let azimuth =
+                    (ix as f32 + dither_x) * std::f32::consts::PI * 2.0 / row_count as f32;
                 rot_m.push(make_world_dir(polar, azimuth));
             }
         }
@@ -940,9 +987,7 @@ fn deao_vec2_uploads(
     let de_mul = ((ray_count as f32) * 0.5).sqrt();
     let overlap_abr = 1.2 / (1.0 / de_mul).asin();
     let step_ao = 1.0 + m_zz.abs() * de_stop_factor;
-    let s_max_d = ssao.deao_max_l as f32
-        * 0.5
-        * ((width * width + height * height) as f32).sqrt();
+    let s_max_d = ssao.deao_max_l as f32 * 0.5 * ((width * width + height * height) as f32).sqrt();
 
     let mut ms_de_stop_steps = de_stop_header * step_ao;
     if ms_de_stop_steps > 10000.0 {
@@ -1052,7 +1097,8 @@ fn render_vec2_ported_pixels(
     let height = params.camera.height as usize;
 
     let uploads = build_ds_uploads(scene, width);
-    let lighting_state = build_standalone_lighting_state(&scene.m3p.lighting, &params.camera, &params);
+    let lighting_state =
+        build_standalone_lighting_state(&scene.m3p.lighting, &params.camera, &params);
     let soft_hs_light = standalone_soft_hs_light_dir(&scene.m3p.lighting, &params.camera, &params);
 
     let mut pixels = vec![0u8; width * height * 4];
@@ -1122,11 +1168,7 @@ fn render_vec2_ported_pixels(
                     surface.normal.z as f64,
                 ),
                 surface.roughness as f64,
-                render::Vec3::new(
-                    -view_dir.x as f64,
-                    -view_dir.y as f64,
-                    -view_dir.z as f64,
-                ),
+                render::Vec3::new(-view_dir.x as f64, -view_dir.y as f64, -view_dir.z as f64),
                 hit.iters,
                 shadow_word,
                 final_ao as f64,
@@ -1147,7 +1189,10 @@ fn render_vec2_ported_pixels(
 #[test]
 #[ignore = "manual render of ported vec2 cpu path at 480x270"]
 fn render_ported_vec2_25pct() {
-    let path = format!("{}/../../local/mb3d/cathedral.m3p", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../local/mb3d/cathedral.m3p",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let scene = load_cathedral_scene(&path).expect("cathedral scene should load");
     let width = 480usize;
     let (pixels, out_w, out_h, hits) =
@@ -1163,7 +1208,10 @@ fn render_ported_vec2_25pct() {
 #[test]
 #[ignore = "manual debug of vec2 center primary march progress"]
 fn debug_vec2_center_primary_progress() {
-    let path = format!("{}/../../local/mb3d/cathedral.m3p", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../local/mb3d/cathedral.m3p",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let scene = load_cathedral_scene(&path).expect("cathedral scene should load");
     let width = 960usize;
     let scale = (width as f64 / scene.base_width).max(0.001);
@@ -1210,7 +1258,13 @@ fn debug_vec2_center_primary_progress() {
         ds_to_f(de0) / ds_to_f(stop0).max(1.0e-30),
     );
 
-    let limits = [16384usize, 65536usize, 262144usize, 1048576usize, 2000000usize];
+    let limits = [
+        16384usize,
+        65536usize,
+        262144usize,
+        1048576usize,
+        2000000usize,
+    ];
     for limit in limits {
         let mut t = ds_new(0.0);
         let mut last_step;
@@ -1218,7 +1272,8 @@ fn debug_vec2_center_primary_progress() {
         let mut rsfmul = ds_new(1.0);
         let pos = vec2_num3_add(origin, vec2_num3_scale(dir, t));
         let (iters, de) = calc_de_vec2_uploads(&uploads, pos.x, pos.y, pos.z);
-        let current_destop = scene_destop_at_steps_vec2(&uploads, ds_div(t, ds_from_split(uploads.step_width)));
+        let current_destop =
+            scene_destop_at_steps_vec2(&uploads, ds_div(t, ds_from_split(uploads.step_width)));
         if iters >= uploads.max_iters || ds_lt(de, current_destop) {
             println!("limit={} hit immediately", limit);
             continue;
@@ -1254,7 +1309,10 @@ fn debug_vec2_center_primary_progress() {
                     ds_mul(ds_from_split(uploads.step_width), ds_new(0.11)),
                 );
                 let max_step_here = ds_mul(
-                    ds_max(current_destop, ds_mul(ds_from_split(uploads.step_width), ds_new(0.4))),
+                    ds_max(
+                        current_destop,
+                        ds_mul(ds_from_split(uploads.step_width), ds_new(0.4)),
+                    ),
                     ds_from_split(uploads.mct_mh04_zsd),
                 );
                 if ds_lt(max_step_here, step) {
@@ -1312,7 +1370,10 @@ fn debug_vec2_center_primary_progress() {
 #[test]
 #[ignore = "manual compare of direct vec2 primary marcher against working self-contained ds primary"]
 fn compare_direct_vec2_primary_to_selfcontained_ds_tiny() {
-    let path = format!("{}/../../local/mb3d/cathedral.m3p", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../local/mb3d/cathedral.m3p",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let scene = load_cathedral_scene(&path).expect("cathedral scene should load");
     let width = 96usize;
     let scale = (width as f64 / scene.base_width).max(0.001);
@@ -1334,10 +1395,12 @@ fn compare_direct_vec2_primary_to_selfcontained_ds_tiny() {
     for y in 0..out_h {
         for x in 0..out_w {
             let (origin_v2, dir_v2) = shaderlike_ray_for_pixel_vec2(&uploads, out_w, out_h, x, y);
-            let vec2_hit = ray_march_vec2_uploads(&uploads, origin_v2, dir_v2, seed_for_pixel(x, y));
+            let vec2_hit =
+                ray_march_vec2_uploads(&uploads, origin_v2, dir_v2, seed_for_pixel(x, y));
 
             let seed = seed_for_pixel(x, y);
-            let (origin_ds, dir_ds) = shaderlike_ray_for_pixel_num::<Ds>(&uploads, out_w, out_h, x, y);
+            let (origin_ds, dir_ds) =
+                shaderlike_ray_for_pixel_num::<Ds>(&uploads, out_w, out_h, x, y);
             let ds_hit = ray_march_scene_num(&orbit_ds, &march_ds, origin_ds, dir_ds, seed);
 
             match (ds_hit, vec2_hit.hit) {
@@ -1379,7 +1442,10 @@ fn compare_direct_vec2_primary_to_selfcontained_ds_tiny() {
 #[test]
 #[ignore = "manual compare of ported vec2 surface pass against self-contained ds surface pass"]
 fn compare_direct_vec2_surface_to_selfcontained_ds_tiny() {
-    let path = format!("{}/../../local/mb3d/cathedral.m3p", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../local/mb3d/cathedral.m3p",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let scene = load_cathedral_scene(&path).expect("cathedral scene should load");
     let width = 96usize;
     let scale = (width as f64 / scene.base_width).max(0.001);
@@ -1404,7 +1470,8 @@ fn compare_direct_vec2_surface_to_selfcontained_ds_tiny() {
             let seed = seed_for_pixel(x, y);
             let (origin_v2, dir_v2) = shaderlike_ray_for_pixel_vec2(&uploads, out_w, out_h, x, y);
             let vec2_hit = ray_march_vec2_uploads(&uploads, origin_v2, dir_v2, seed);
-            let (origin_ds, dir_ds) = shaderlike_ray_for_pixel_num::<Ds>(&uploads, out_w, out_h, x, y);
+            let (origin_ds, dir_ds) =
+                shaderlike_ray_for_pixel_num::<Ds>(&uploads, out_w, out_h, x, y);
             let ds_hit = ray_march_scene_num(&orbit_ds, &march_ds, origin_ds, dir_ds, seed);
 
             match (ds_hit, vec2_hit.hit) {
@@ -1414,13 +1481,13 @@ fn compare_direct_vec2_surface_to_selfcontained_ds_tiny() {
                 }
                 (
                     MarchResult::Hit {
-                        depth: ds_depth,
-                        ..
+                        depth: ds_depth, ..
                     },
                     true,
                 ) => {
                     hit_count += 1;
-                    let hit_pos_v2 = vec2_num3_add(origin_v2, vec2_num3_scale(dir_v2, vec2_hit.depth));
+                    let hit_pos_v2 =
+                        vec2_num3_add(origin_v2, vec2_num3_scale(dir_v2, vec2_hit.depth));
                     let hit_pos_ds = origin_ds.add(dir_ds.scale(ds_depth));
                     let ds_surface = standalone_surface_sample_num(
                         &uploads,
@@ -1429,7 +1496,8 @@ fn compare_direct_vec2_surface_to_selfcontained_ds_tiny() {
                         hit_pos_ds,
                         ds_depth.to_f64(),
                     );
-                    let v2_surface = surface_sample_vec2_uploads(&uploads, hit_pos_v2, vec2_hit.depth);
+                    let v2_surface =
+                        surface_sample_vec2_uploads(&uploads, hit_pos_v2, vec2_hit.depth);
                     let dot = ds_surface
                         .normal
                         .normalize()
@@ -1469,7 +1537,10 @@ fn compare_direct_vec2_surface_to_selfcontained_ds_tiny() {
 #[test]
 #[ignore = "manual compare of ported vec2 soft shadow pass against self-contained ds soft shadow pass"]
 fn compare_direct_vec2_soft_hs_to_selfcontained_ds_tiny() {
-    let path = format!("{}/../../local/mb3d/cathedral.m3p", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../local/mb3d/cathedral.m3p",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let scene = load_cathedral_scene(&path).expect("cathedral scene should load");
     let width = 96usize;
     let scale = (width as f64 / scene.base_width).max(0.001);
@@ -1500,7 +1571,8 @@ fn compare_direct_vec2_soft_hs_to_selfcontained_ds_tiny() {
             let seed = seed_for_pixel(x, y);
             let (origin_v2, dir_v2) = shaderlike_ray_for_pixel_vec2(&uploads, out_w, out_h, x, y);
             let vec2_hit = ray_march_vec2_uploads(&uploads, origin_v2, dir_v2, seed);
-            let (origin_ds, dir_ds) = shaderlike_ray_for_pixel_num::<Ds>(&uploads, out_w, out_h, x, y);
+            let (origin_ds, dir_ds) =
+                shaderlike_ray_for_pixel_num::<Ds>(&uploads, out_w, out_h, x, y);
             let ds_hit = ray_march_scene_num(&orbit_ds, &march_ds, origin_ds, dir_ds, seed);
 
             match (ds_hit, vec2_hit.hit) {
@@ -1510,13 +1582,13 @@ fn compare_direct_vec2_soft_hs_to_selfcontained_ds_tiny() {
                 }
                 (
                     MarchResult::Hit {
-                        depth: ds_depth,
-                        ..
+                        depth: ds_depth, ..
                     },
                     true,
                 ) => {
                     hit_count += 1;
-                    let hit_pos_v2 = vec2_num3_add(origin_v2, vec2_num3_scale(dir_v2, vec2_hit.depth));
+                    let hit_pos_v2 =
+                        vec2_num3_add(origin_v2, vec2_num3_scale(dir_v2, vec2_hit.depth));
                     let hit_pos_ds = origin_ds.add(dir_ds.scale(ds_depth));
                     let ds_surface = standalone_surface_sample_num(
                         &uploads,
@@ -1577,7 +1649,10 @@ fn compare_direct_vec2_soft_hs_to_selfcontained_ds_tiny() {
 #[test]
 #[ignore = "manual compare of ported vec2 deao pass against self-contained ds deao pass"]
 fn compare_direct_vec2_deao_to_selfcontained_ds_tiny() {
-    let path = format!("{}/../../local/mb3d/cathedral.m3p", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../local/mb3d/cathedral.m3p",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let scene = load_cathedral_scene(&path).expect("cathedral scene should load");
     let width = 96usize;
     let scale = (width as f64 / scene.base_width).max(0.001);
@@ -1600,7 +1675,8 @@ fn compare_direct_vec2_deao_to_selfcontained_ds_tiny() {
             let seed = seed_for_pixel(x, y);
             let (origin_v2, dir_v2) = shaderlike_ray_for_pixel_vec2(&uploads, out_w, out_h, x, y);
             let vec2_hit = ray_march_vec2_uploads(&uploads, origin_v2, dir_v2, seed);
-            let (origin_ds, dir_ds) = shaderlike_ray_for_pixel_num::<Ds>(&uploads, out_w, out_h, x, y);
+            let (origin_ds, dir_ds) =
+                shaderlike_ray_for_pixel_num::<Ds>(&uploads, out_w, out_h, x, y);
             let ds_hit = ray_march_scene_num(&orbit_ds, &march_ds, origin_ds, dir_ds, seed);
 
             match (ds_hit, vec2_hit.hit) {
@@ -1610,13 +1686,13 @@ fn compare_direct_vec2_deao_to_selfcontained_ds_tiny() {
                 }
                 (
                     MarchResult::Hit {
-                        depth: ds_depth,
-                        ..
+                        depth: ds_depth, ..
                     },
                     true,
                 ) => {
                     hit_count += 1;
-                    let hit_pos_v2 = vec2_num3_add(origin_v2, vec2_num3_scale(dir_v2, vec2_hit.depth));
+                    let hit_pos_v2 =
+                        vec2_num3_add(origin_v2, vec2_num3_scale(dir_v2, vec2_hit.depth));
                     let hit_pos_ds = origin_ds.add(dir_ds.scale(ds_depth));
                     let ds_surface = standalone_surface_sample_num(
                         &uploads,

@@ -67,6 +67,7 @@ script_mod! {
 
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
+        println!("{}", std::mem::size_of::<Button>());
         crate::makepad_widgets::script_mod(vm);
         App::from_script_mod(vm, self::script_mod)
     }

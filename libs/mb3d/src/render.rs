@@ -14,16 +14,32 @@ pub struct Vec3 {
 }
 
 impl Vec3 {
-    pub fn new(x: f64, y: f64, z: f64) -> Self { Vec3 { x, y, z } }
-    pub fn dot(self, o: Self) -> f64 { self.x*o.x + self.y*o.y + self.z*o.z }
-    pub fn len(self) -> f64 { self.dot(self).sqrt() }
+    pub fn new(x: f64, y: f64, z: f64) -> Self {
+        Vec3 { x, y, z }
+    }
+    pub fn dot(self, o: Self) -> f64 {
+        self.x * o.x + self.y * o.y + self.z * o.z
+    }
+    pub fn len(self) -> f64 {
+        self.dot(self).sqrt()
+    }
     pub fn normalize(self) -> Self {
         let l = self.len();
-        if l > 1e-30 { Vec3::new(self.x/l, self.y/l, self.z/l) } else { self }
+        if l > 1e-30 {
+            Vec3::new(self.x / l, self.y / l, self.z / l)
+        } else {
+            self
+        }
     }
-    pub fn scale(self, s: f64) -> Self { Vec3::new(self.x*s, self.y*s, self.z*s) }
-    pub fn add(self, o: Self) -> Self { Vec3::new(self.x+o.x, self.y+o.y, self.z+o.z) }
-    pub fn sub(self, o: Self) -> Self { Vec3::new(self.x-o.x, self.y-o.y, self.z-o.z) }
+    pub fn scale(self, s: f64) -> Self {
+        Vec3::new(self.x * s, self.y * s, self.z * s)
+    }
+    pub fn add(self, o: Self) -> Self {
+        Vec3::new(self.x + o.x, self.y + o.y, self.z + o.z)
+    }
+    pub fn sub(self, o: Self) -> Self {
+        Vec3::new(self.x - o.x, self.y - o.y, self.z - o.z)
+    }
     pub fn cross(self, o: Self) -> Self {
         Vec3::new(
             self.y * o.z - self.z * o.y,
@@ -43,11 +59,11 @@ impl Vec3 {
 /// and z1 = (z_start - z_mid) / StepWidth
 #[derive(Clone, Copy)]
 pub struct Camera {
-    pub mid: Vec3,        // Xmid, Ymid, Zmid
-    pub right: Vec3,      // Vgrads[0]: magnitude = StepWidth
-    pub up: Vec3,         // Vgrads[1]: magnitude = StepWidth
-    pub forward: Vec3,    // Vgrads[2]: magnitude = StepWidth (march direction per step)
-    pub step_width: f64,  // StepWidth from header (world units per step)
+    pub mid: Vec3,       // Xmid, Ymid, Zmid
+    pub right: Vec3,     // Vgrads[0]: magnitude = StepWidth
+    pub up: Vec3,        // Vgrads[1]: magnitude = StepWidth
+    pub forward: Vec3,   // Vgrads[2]: magnitude = StepWidth (march direction per step)
+    pub step_width: f64, // StepWidth from header (world units per step)
     pub z_start: f64,
     pub z_end: f64,
     pub width: i32,
@@ -61,9 +77,21 @@ impl Camera {
 
         // Use the view matrix directly from the file, as Euler angles might be zero
         // if the user navigated using the 3D navigator without updating them.
-        let mut right   = Vec3::new(m3p.view_matrix[0][0], m3p.view_matrix[0][1], m3p.view_matrix[0][2]);
-        let mut up      = Vec3::new(m3p.view_matrix[1][0], m3p.view_matrix[1][1], m3p.view_matrix[1][2]);
-        let mut forward = Vec3::new(m3p.view_matrix[2][0], m3p.view_matrix[2][1], m3p.view_matrix[2][2]);
+        let mut right = Vec3::new(
+            m3p.view_matrix[0][0],
+            m3p.view_matrix[0][1],
+            m3p.view_matrix[0][2],
+        );
+        let mut up = Vec3::new(
+            m3p.view_matrix[1][0],
+            m3p.view_matrix[1][1],
+            m3p.view_matrix[1][2],
+        );
+        let mut forward = Vec3::new(
+            m3p.view_matrix[2][0],
+            m3p.view_matrix[2][1],
+            m3p.view_matrix[2][2],
+        );
 
         // MB3D's NormVGrads: normalizes the matrix to StepWidth
         right = right.normalize().scale(step_width);
@@ -86,7 +114,6 @@ impl Camera {
             fov_y: m3p.fov_y,
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,15 +122,265 @@ pub enum AntialiasingMode {
     X2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExrLayerKind {
+    AmbientOcclusion,
+    Branches,
+    Beauty,
+    Depth,
+    Estimator,
+    Folds,
+    Gradient,
+    Iterations,
+    MarchSteps,
+    Normal,
+    Orbit,
+    Position,
+    Roughness,
+    Traps,
+    Uncertainty,
+    SignFlips,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExrLayerCompression {
+    Lossless,
+    Lossy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExrLayerSpec {
+    pub kind: ExrLayerKind,
+    pub compression: ExrLayerCompression,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExrLayerChannel {
+    pub name: &'static str,
+    pub samples: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExrLayerPart {
+    pub spec: ExrLayerSpec,
+    pub name: &'static str,
+    pub channels: Vec<ExrLayerChannel>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExrLayerImage {
+    pub width: usize,
+    pub height: usize,
+    pub parts: Vec<ExrLayerPart>,
+}
+
+impl ExrLayerKind {
+    fn ordinal(self) -> usize {
+        match self {
+            Self::AmbientOcclusion => 0,
+            Self::Branches => 1,
+            Self::Beauty => 2,
+            Self::Depth => 3,
+            Self::Estimator => 4,
+            Self::Folds => 5,
+            Self::Gradient => 6,
+            Self::Iterations => 7,
+            Self::MarchSteps => 8,
+            Self::Normal => 9,
+            Self::Orbit => 10,
+            Self::Position => 11,
+            Self::Roughness => 12,
+            Self::Traps => 13,
+            Self::Uncertainty => 14,
+            Self::SignFlips => 15,
+        }
+    }
+
+    pub fn code(self) -> char {
+        match self {
+            Self::AmbientOcclusion => 'a',
+            Self::Branches => 'b',
+            Self::Beauty => 'c',
+            Self::Depth => 'd',
+            Self::Estimator => 'e',
+            Self::Folds => 'f',
+            Self::Gradient => 'g',
+            Self::Iterations => 'i',
+            Self::MarchSteps => 'm',
+            Self::Normal => 'n',
+            Self::Orbit => 'o',
+            Self::Position => 'p',
+            Self::Roughness => 'r',
+            Self::Traps => 't',
+            Self::Uncertainty => 'u',
+            Self::SignFlips => 'x',
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AmbientOcclusion => "ambient_occlusion",
+            Self::Branches => "branches",
+            Self::Beauty => "beauty",
+            Self::Depth => "depth",
+            Self::Estimator => "estimator",
+            Self::Folds => "folds",
+            Self::Gradient => "gradient",
+            Self::Iterations => "iterations",
+            Self::MarchSteps => "march_steps",
+            Self::Normal => "normal",
+            Self::Orbit => "orbit",
+            Self::Position => "position",
+            Self::Roughness => "roughness",
+            Self::Traps => "traps",
+            Self::Uncertainty => "uncertainty",
+            Self::SignFlips => "sign_flips",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::AmbientOcclusion => "final DEAO ambient occlusion factor",
+            Self::Branches => "AmazingBox branch occupancy history: inner, reciprocal, outer",
+            Self::Beauty => "final beauty RGB image",
+            Self::Depth => "linear hit depth in world units",
+            Self::Estimator => "distance estimator at the refined surface hit",
+            Self::Folds => "cumulative AmazingBox fold displacement history",
+            Self::Gradient => "normalized MB3D palette/gradient phase",
+            Self::Iterations => "final iteration count at the refined surface hit",
+            Self::MarchSteps => "primary march step count used for fog/shadow accumulation",
+            Self::Normal => "world-space surface normal XYZ",
+            Self::Orbit => "terminal orbit state X/Y/Z/W/R2",
+            Self::Position => "world-space hit position XYZ",
+            Self::Roughness => "MB3D roughness estimate from normal smoothing",
+            Self::Traps => "minimum orbit-trap distances to X/Y/Z planes and radius",
+            Self::Uncertainty => "march history: clamp count, overshoots, min RSF, refine flips",
+            Self::SignFlips => "orbit sign-change counts across X/Y/Z",
+        }
+    }
+
+    pub fn channel_names(self) -> &'static [&'static str] {
+        match self {
+            Self::AmbientOcclusion => &["AO"],
+            Self::Branches => &["Reciprocal", "Outer"],
+            Self::Beauty => &["R", "G", "B"],
+            Self::Depth => &["Depth"],
+            Self::Estimator => &["DE"],
+            Self::Folds => &["X", "Y", "Z", "Any"],
+            Self::Gradient => &["Phase"],
+            Self::Iterations => &["Iterations"],
+            Self::MarchSteps => &["Steps"],
+            Self::Normal => &["X", "Y", "Z"],
+            Self::Orbit => &["X", "Y", "Z", "W", "R2"],
+            Self::Position => &["X", "Y", "Z"],
+            Self::Roughness => &["Roughness"],
+            Self::Traps => &["X", "Y", "Z", "R"],
+            Self::Uncertainty => &["Clamp", "Overshoot", "RSFMin", "Refine"],
+            Self::SignFlips => &["X", "Y", "Z"],
+        }
+    }
+
+    fn from_code(code: char) -> Option<Self> {
+        Some(match code.to_ascii_lowercase() {
+            'a' => Self::AmbientOcclusion,
+            'b' => Self::Branches,
+            'c' => Self::Beauty,
+            'd' => Self::Depth,
+            'e' => Self::Estimator,
+            'f' => Self::Folds,
+            'g' => Self::Gradient,
+            'i' => Self::Iterations,
+            'm' => Self::MarchSteps,
+            'n' => Self::Normal,
+            'o' => Self::Orbit,
+            'p' => Self::Position,
+            'r' => Self::Roughness,
+            't' => Self::Traps,
+            'u' => Self::Uncertainty,
+            'x' => Self::SignFlips,
+            _ => return None,
+        })
+    }
+}
+
+impl ExrLayerSpec {
+    pub fn code_char(self) -> char {
+        match self.compression {
+            ExrLayerCompression::Lossless => self.kind.code().to_ascii_uppercase(),
+            ExrLayerCompression::Lossy => self.kind.code(),
+        }
+    }
+}
+
+pub fn all_exr_layer_codes() -> &'static str {
+    "abcdefgimnoprtux"
+}
+
+pub fn exr_layer_legend() -> &'static str {
+    "a=AO b=branches c=beauty d=depth e=estimator f=folds g=gradient i=iters m=march n=normal o=orbit p=position r=roughness t=traps u=uncertainty x=sign_flips; uppercase=Zip lossless/raw values, lowercase=Pxr24 lossy/display values"
+}
+
+pub fn parse_exr_layer_specs(spec: &str) -> Result<Vec<ExrLayerSpec>, String> {
+    let all_codes_upper = all_exr_layer_codes().to_ascii_uppercase();
+    let spec_buf;
+    let spec = if spec.eq_ignore_ascii_case("all") {
+        if spec
+            .chars()
+            .all(|ch| !ch.is_ascii_alphabetic() || ch.is_ascii_uppercase())
+        {
+            spec_buf = all_codes_upper;
+            spec_buf.as_str()
+        } else {
+            all_exr_layer_codes()
+        }
+    } else {
+        spec
+    };
+
+    let mut out = Vec::new();
+    let mut seen = [false; 16];
+
+    for code in spec.chars() {
+        if code.is_ascii_whitespace() || code == ',' {
+            continue;
+        }
+
+        let kind = ExrLayerKind::from_code(code)
+            .ok_or_else(|| format!("unknown EXR layer code '{code}' ({})", exr_layer_legend()))?;
+        let idx = kind.ordinal();
+        if seen[idx] {
+            return Err(format!(
+                "duplicate EXR layer code '{}' (duplicates are case-insensitive)",
+                kind.code()
+            ));
+        }
+        seen[idx] = true;
+        out.push(ExrLayerSpec {
+            kind,
+            compression: if code.is_ascii_uppercase() {
+                ExrLayerCompression::Lossless
+            } else {
+                ExrLayerCompression::Lossy
+            },
+        });
+    }
+
+    if out.is_empty() {
+        return Err("expected at least one EXR layer code".to_string());
+    }
+
+    Ok(out)
+}
+
 #[derive(Clone)]
 pub struct RenderParams {
     pub camera: Camera,
     pub iter_params: IterParams,
     pub adaptive_ao_subsampling: bool,
     pub antialiasing: AntialiasingMode,
-    pub max_ray_length: f64,   // maximum ray length in world units
-    pub de_stop: f64,          // DE threshold for surface hit (world units, adjusted by de_scale)
-    pub s_z_step_div: f64,     // effective step multiplier: sZstepDiv * de_scale
+    pub max_ray_length: f64, // maximum ray length in world units
+    pub de_stop: f64,        // DE threshold for surface hit (world units, adjusted by de_scale)
+    pub s_z_step_div: f64,   // effective step multiplier: sZstepDiv * de_scale
     pub s_z_step_div_raw: f64,
     pub b_dfog_it: u8,
     pub d_fog_on_it: u16,
@@ -114,12 +391,12 @@ pub struct RenderParams {
     pub b_calc1_hs_soft: u8,
     pub soft_shadow_radius: f64,
     pub hs_max_length_multiplier: f64,
-    pub ms_de_sub: f64,        // MCTparas.msDEsub
-    pub step_width: f64,       // StepWidth from header
-    pub de_stop_factor: f64,   // mctDEstopFactor: how DEstop scales with distance
-    pub mct_mh04_zsd: f64,     // Max(iMandWidth, iMandHeight) ray-step limiter
-    pub de_floor: f64,         // minimum DE value (0.25 * de_stop)
-    pub de_scale: f64,         // dDEscale_computed: formula-specific DE scaling factor
+    pub ms_de_sub: f64,      // MCTparas.msDEsub
+    pub step_width: f64,     // StepWidth from header
+    pub de_stop_factor: f64, // mctDEstopFactor: how DEstop scales with distance
+    pub mct_mh04_zsd: f64,   // Max(iMandWidth, iMandHeight) ray-step limiter
+    pub de_floor: f64,       // minimum DE value (0.25 * de_stop)
+    pub de_scale: f64,       // dDEscale_computed: formula-specific DE scaling factor
     pub s_raystep_limiter: f64,
     pub bin_search_steps: i32, // iDEAddSteps for binary search refinement
     pub z_corr: f64,
@@ -218,7 +495,8 @@ impl RenderParams {
 
         let fov_y_rad_for_z = m3p.fov_y.max(1.0) * std::f64::consts::PI / 180.0;
         let z_corr = (fov_y_rad_for_z / m3p.height as f64).sin();
-        let z_cmul = 32767.0 * 256.0 / ((((m3p.z_end - m3p.z_start) / m3p.step_width) * z_corr + 1.0).sqrt() - 0.999999999);
+        let z_cmul = 32767.0 * 256.0
+            / ((((m3p.z_end - m3p.z_start) / m3p.step_width) * z_corr + 1.0).sqrt() - 0.999999999);
 
         // MB3D: mctMH04ZSD = max(width,height) * 0.5 * sqrt(sZstepDiv + 0.0001) * max(0.001, sRaystepLimiter)
         let s_raystep_limiter = (m3p.s_raystep_limiter as f64).max(0.001);
@@ -290,7 +568,9 @@ impl RenderParams {
 
         let old_width = self.camera.width.max(1) as f64;
         let new_width = (old_width * scale).round().max(1.0) as i32;
-        let new_height = ((self.camera.height.max(1) as f64) * scale).round().max(1.0) as i32;
+        let new_height = ((self.camera.height.max(1) as f64) * scale)
+            .round()
+            .max(1.0) as i32;
         let width_scale = new_width as f64 / old_width;
 
         self.camera.width = new_width;
@@ -309,7 +589,8 @@ impl RenderParams {
         let fov_y_rad_for_z = self.camera.fov_y.max(1.0) * std::f64::consts::PI / 180.0;
         self.z_corr = (fov_y_rad_for_z / height).sin();
         self.z_cmul = 32767.0 * 256.0
-            / ((((self.camera.z_end - self.camera.z_start) / self.step_width) * self.z_corr + 1.0).sqrt()
+            / ((((self.camera.z_end - self.camera.z_start) / self.step_width) * self.z_corr + 1.0)
+                .sqrt()
                 - 0.999999999);
 
         self.mct_mh04_zsd = self.camera.width.max(self.camera.height) as f64
@@ -325,8 +606,17 @@ pub enum PixelResult {
         depth: f64,
         iters: i32,
         shadow_steps: i32,
+        march_stats: MarchStats,
     },
     Miss,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MarchStats {
+    clamp_count: i32,
+    overshoot_count: i32,
+    min_rsfmul: f64,
+    refine_flips: i32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -345,7 +635,9 @@ unsafe impl<T: Send> Sync for SharedWriteBuf<T> {}
 
 impl<T> SharedWriteBuf<T> {
     fn new(slice: &mut [T]) -> Self {
-        Self { ptr: slice.as_mut_ptr() }
+        Self {
+            ptr: slice.as_mut_ptr(),
+        }
     }
 
     unsafe fn write(&self, idx: usize, value: T) {
@@ -363,7 +655,9 @@ unsafe impl Sync for SharedByteBuf {}
 
 impl SharedByteBuf {
     fn new(slice: &mut [u8]) -> Self {
-        Self { ptr: slice.as_mut_ptr() }
+        Self {
+            ptr: slice.as_mut_ptr(),
+        }
     }
 
     unsafe fn write_rgba(&self, idx: usize, rgba: [u8; 4]) {
@@ -449,6 +743,80 @@ struct PrimaryHit {
     y_pos: f64,
 }
 
+struct PrimaryBuffers {
+    ray_grid: RayGrid,
+    depth_buf: Vec<f64>,
+    iter_buf: Vec<i32>,
+    shadow_buf: Vec<i32>,
+    uncertainty: Option<MarchUncertaintyBuffers>,
+}
+
+struct MarchUncertaintyBuffers {
+    clamp_count: Vec<f32>,
+    overshoot_count: Vec<f32>,
+    min_rsfmul: Vec<f32>,
+    refine_flips: Vec<f32>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct LayerNeeds {
+    ao: bool,
+    branches: bool,
+    beauty: bool,
+    depth: bool,
+    estimator: bool,
+    folds: bool,
+    gradient: bool,
+    iterations: bool,
+    march_steps: bool,
+    normal: bool,
+    orbit: bool,
+    position: bool,
+    roughness: bool,
+    traps: bool,
+    uncertainty: bool,
+    sign_flips: bool,
+}
+
+impl LayerNeeds {
+    fn from_specs(specs: &[ExrLayerSpec]) -> Self {
+        let mut needs = Self::default();
+        for spec in specs {
+            match spec.kind {
+                ExrLayerKind::AmbientOcclusion => needs.ao = true,
+                ExrLayerKind::Branches => needs.branches = true,
+                ExrLayerKind::Beauty => needs.beauty = true,
+                ExrLayerKind::Depth => needs.depth = true,
+                ExrLayerKind::Estimator => needs.estimator = true,
+                ExrLayerKind::Folds => needs.folds = true,
+                ExrLayerKind::Gradient => needs.gradient = true,
+                ExrLayerKind::Iterations => needs.iterations = true,
+                ExrLayerKind::MarchSteps => needs.march_steps = true,
+                ExrLayerKind::Normal => needs.normal = true,
+                ExrLayerKind::Orbit => needs.orbit = true,
+                ExrLayerKind::Position => needs.position = true,
+                ExrLayerKind::Roughness => needs.roughness = true,
+                ExrLayerKind::Traps => needs.traps = true,
+                ExrLayerKind::Uncertainty => needs.uncertainty = true,
+                ExrLayerKind::SignFlips => needs.sign_flips = true,
+            }
+        }
+        needs
+    }
+
+    fn needs_surface(self) -> bool {
+        self.ao || self.beauty || self.normal || self.roughness
+    }
+
+    fn needs_orbit(self) -> bool {
+        self.estimator || self.orbit || self.branches || self.folds || self.traps || self.sign_flips
+    }
+
+    fn needs_uncertainty(self) -> bool {
+        self.uncertainty
+    }
+}
+
 fn available_thread_count(total_jobs: usize) -> usize {
     thread::available_parallelism()
         .map(|n| n.get())
@@ -456,8 +824,53 @@ fn available_thread_count(total_jobs: usize) -> usize {
         .min(total_jobs.max(1))
 }
 
+fn progress_granularity(total_jobs: usize) -> usize {
+    (total_jobs / 20).max(1)
+}
+
+fn flush_progress(
+    label: &str,
+    total_jobs: usize,
+    completed: &AtomicUsize,
+    next_report: &AtomicUsize,
+    local_completed: &mut usize,
+) {
+    if *local_completed == 0 {
+        return;
+    }
+
+    let done = completed.fetch_add(*local_completed, Ordering::Relaxed) + *local_completed;
+    *local_completed = 0;
+
+    loop {
+        let next = next_report.load(Ordering::Relaxed);
+        if next > total_jobs || done < next {
+            break;
+        }
+        let next_step = next
+            .saturating_add(progress_granularity(total_jobs))
+            .min(total_jobs + 1);
+        if next_report
+            .compare_exchange(next, next_step, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let pct = (done as f64 * 100.0 / total_jobs.max(1) as f64).min(100.0);
+            eprintln!("{label} {:.1}%", pct);
+            break;
+        }
+    }
+}
+
 fn background_rgba() -> [u8; 4] {
     BACKGROUND_RGBA
+}
+
+fn background_rgb_f32() -> [f32; 3] {
+    [
+        BACKGROUND_RGBA[0] as f32 / 255.0,
+        BACKGROUND_RGBA[1] as f32 / 255.0,
+        BACKGROUND_RGBA[2] as f32 / 255.0,
+    ]
 }
 
 fn pixel_seed(x: usize, y: usize, salt: u32) -> u32 {
@@ -507,11 +920,7 @@ fn build_ray_grid(camera: &Camera, num_threads: usize, rows_per_thread: usize) -
 
     let mut row_origins = Vec::with_capacity(h);
     for y in 0..h {
-        row_origins.push(
-            sampler
-                .base_origin
-                .add(sampler.up_step.scale(y as f64)),
-        );
+        row_origins.push(sampler.base_origin.add(sampler.up_step.scale(y as f64)));
     }
 
     let mut x_offsets = Vec::with_capacity(w);
@@ -539,9 +948,13 @@ fn build_ray_grid(camera: &Camera, num_threads: usize, rows_per_thread: usize) -
                     let y = y_start + local_y;
                     let row_offset = local_y * w;
                     for x in 0..w {
-                        let v_local = Vec3::new(-sin_x[x], sin_y[y], cos_x[x] * cos_y[y]).normalize();
-                        dir_chunk[row_offset + x] =
-                            r.scale(v_local.x).add(u.scale(v_local.y)).add(f.scale(v_local.z)).normalize();
+                        let v_local =
+                            Vec3::new(-sin_x[x], sin_y[y], cos_x[x] * cos_y[y]).normalize();
+                        dir_chunk[row_offset + x] = r
+                            .scale(v_local.x)
+                            .add(u.scale(v_local.y))
+                            .add(f.scale(v_local.z))
+                            .normalize();
                     }
                 }
             }));
@@ -583,14 +996,15 @@ fn estimate_normal_grad(
     let upv = up.normalize().scale(eps);
 
     let dz = calc_de(pos.add(fwd), formulas, params, de_floor).1
-           - calc_de(pos.sub(fwd), formulas, params, de_floor).1;
+        - calc_de(pos.sub(fwd), formulas, params, de_floor).1;
     let dx = calc_de(pos.add(rt), formulas, params, de_floor).1
-           - calc_de(pos.sub(rt), formulas, params, de_floor).1;
+        - calc_de(pos.sub(rt), formulas, params, de_floor).1;
     let dy = calc_de(pos.add(upv), formulas, params, de_floor).1
-           - calc_de(pos.sub(upv), formulas, params, de_floor).1;
+        - calc_de(pos.sub(upv), formulas, params, de_floor).1;
 
     let basis_grad = Vec3::new(dx, dy, dz);
-    let world_grad = rt.normalize()
+    let world_grad = rt
+        .normalize()
         .scale(dx)
         .add(upv.normalize().scale(dy))
         .add(fwd.normalize().scale(dz));
@@ -612,7 +1026,8 @@ fn destop_at_steps(params: &RenderParams, depth_steps: f64) -> f64 {
 }
 
 fn rotate_vector_reverse_basis(v: Vec3, right: Vec3, up: Vec3, forward: Vec3) -> Vec3 {
-    right.normalize()
+    right
+        .normalize()
         .scale(v.x)
         .add(up.normalize().scale(v.y))
         .add(forward.normalize().scale(v.z))
@@ -631,16 +1046,8 @@ fn create_xy_vecs_from_normals_mb3d(n: Vec3) -> (Vec3, Vec3) {
     let d0 = -n.y * sin_a;
     let d1 = n.x * sin_a;
 
-    let vx = Vec3::new(
-        1.0 - 2.0 * d1 * d1,
-        2.0 * d0 * d1,
-        2.0 * d1 * cos_a,
-    );
-    let vy = Vec3::new(
-        vx.y,
-        1.0 - 2.0 * d0 * d0,
-        -2.0 * d0 * cos_a,
-    );
+    let vx = Vec3::new(1.0 - 2.0 * d1 * d1, 2.0 * d0 * d1, 2.0 * d1 * cos_a);
+    let vy = Vec3::new(vx.y, 1.0 - 2.0 * d0 * d0, -2.0 * d0 * cos_a);
     (vx, vy)
 }
 
@@ -670,13 +1077,32 @@ fn smooth_normal_mb3d(
 
     let mut dnn = calc_de(pos, formulas, params, de_floor).1;
     if smooth_n < 8 {
-        dnn = (
-            dnn
-            + calc_de(pos.add(right.normalize().scale(-noffset2)), formulas, params, de_floor).1
-            + calc_de(pos.add(right.normalize().scale(noffset2)), formulas, params, de_floor).1
-            + calc_de(pos.add(up.normalize().scale(-noffset2)), formulas, params, de_floor).1
-            + calc_de(pos.add(up.normalize().scale(noffset2)), formulas, params, de_floor).1
-        ) * 0.2;
+        dnn =
+            (dnn + calc_de(
+                pos.add(right.normalize().scale(-noffset2)),
+                formulas,
+                params,
+                de_floor,
+            )
+            .1 + calc_de(
+                pos.add(right.normalize().scale(noffset2)),
+                formulas,
+                params,
+                de_floor,
+            )
+            .1 + calc_de(
+                pos.add(up.normalize().scale(-noffset2)),
+                formulas,
+                params,
+                de_floor,
+            )
+            .1 + calc_de(
+                pos.add(up.normalize().scale(noffset2)),
+                formulas,
+                params,
+                de_floor,
+            )
+            .1) * 0.2;
     }
 
     let (vx_basis, vy_basis) = create_xy_vecs_from_normals_mb3d(normal_grad_basis);
@@ -815,6 +1241,7 @@ fn march_primary_hit(
             depth,
             iters,
             shadow_steps,
+            ..
         } => Some(PrimaryHit {
             hit_pos: origin.add(ray_dir.scale(depth)),
             ray_dir,
@@ -890,13 +1317,42 @@ fn shade_primary_hit(
     )
 }
 
+fn shade_primary_hit_with_final_ao(
+    hit: PrimaryHit,
+    normal: Vec3,
+    roughness: f64,
+    shadow_word: i32,
+    final_ao: f64,
+    lighting_cache: &crate::lighting::LightingCache,
+    ssao: &crate::m3p::M3PSSAO,
+    params: &RenderParams,
+) -> [u8; 3] {
+    crate::lighting::shade_with_final_ao_mb3d(
+        normal,
+        roughness,
+        hit.ray_dir.scale(-1.0),
+        hit.iters,
+        shadow_word,
+        params.iter_params.max_iters,
+        params.iter_params.min_iters,
+        hit.hit_pos,
+        final_ao,
+        hit.depth,
+        hit.y_pos,
+        params.max_ray_length,
+        lighting_cache,
+        ssao,
+        params,
+    )
+}
+
 /// CalcHSsoft port for directional lights, matching MB3D's packed soft-HS high bits.
 fn calc_hs_soft_bits_mb3d(
     hit_pos: Vec3,
     depth_world: f64,
-    ray_dir: Vec3,      // camera -> object direction
-    normal: Vec3,       // world-space hit normal
-    light_dir: Vec3,    // object -> light direction
+    ray_dir: Vec3,   // camera -> object direction
+    normal: Vec3,    // world-space hit normal
+    light_dir: Vec3, // object -> light direction
     i_light_pos: u8,
     y: usize,
     formulas: &HybridProgram,
@@ -935,9 +1391,7 @@ fn calc_hs_soft_bits_mb3d(
     let max_l_hs = (params.camera.width as f64 + y as f64)
         * 0.6
         * (1.0
-            + 0.5
-                * zz.min(zend_steps * 0.4)
-                * fov_y_rad.max(0.0)
+            + 0.5 * zz.min(zend_steps * 0.4) * fov_y_rad.max(0.0)
                 / (params.camera.height as f64).max(1.0))
         * params.hs_max_length_multiplier.max(1.0e-30);
     if max_l_hs <= 0.0 {
@@ -1002,7 +1456,8 @@ fn calc_hs_soft_bits_mb3d(
         de_world = next_de_world;
 
         let traveled = (max_l_hs - d_t1).max(0.0);
-        let soft_term = ((de_world - ms_de_stop_world) / params.step_width) * zr_s_mul / (traveled + MB3D_MIN_STEP_UNITS)
+        let soft_term = ((de_world - ms_de_stop_world) / params.step_width) * zr_s_mul
+            / (traveled + MB3D_MIN_STEP_UNITS)
             + (traveled / max_l_hs.max(1.0e-30)).powi(8);
         zr_soft = zr_soft.min(soft_term);
 
@@ -1027,9 +1482,7 @@ fn calc_hs_soft_bits_mb3d(
         }
     }
 
-    (zr_soft.clamp(0.0, 1.0) * 63.4)
-        .round()
-        .clamp(0.0, 63.0) as i32
+    (zr_soft.clamp(0.0, 1.0) * 63.4).round().clamp(0.0, 63.0) as i32
 }
 
 /// Ray march a single pixel, matching MB3D's RayMarch procedure.
@@ -1047,6 +1500,10 @@ pub fn ray_march(
     let mut step_count = 0.0f64;
     let mut seed = seed0;
     let mut first_step = params.first_step_random;
+    let mut clamp_count = 0i32;
+    let mut overshoot_count = 0i32;
+    let mut min_rsfmul = 1.0f64;
+    let mut refine_flips = 0i32;
     let de_floor = params.de_floor;
     let dfog_on_it = params.d_fog_on_it;
 
@@ -1061,6 +1518,12 @@ pub fn ray_march(
             depth: t,
             iters,
             shadow_steps: step_count.round().clamp(0.0, 1023.0) as i32,
+            march_stats: MarchStats {
+                clamp_count,
+                overshoot_count,
+                min_rsfmul,
+                refine_flips,
+            },
         };
     }
 
@@ -1084,11 +1547,13 @@ pub fn ray_march(
         // Check if not hit — take next step
         if iters < params.iter_params.max_iters && de >= current_destop {
             // Source path: step from (DE - msDEsub*msDEstop), min floor, then clamp by dynamic max-step.
-            let mut step = ((de - params.ms_de_sub * current_destop) * params.s_z_step_div * rsfmul)
-                .max(MB3D_MIN_STEP_UNITS * params.step_width);
+            let mut step =
+                ((de - params.ms_de_sub * current_destop) * params.s_z_step_div * rsfmul)
+                    .max(MB3D_MIN_STEP_UNITS * params.step_width);
             let max_step_here = (current_destop.max(0.4 * params.step_width)) * params.mct_mh04_zsd;
 
             if max_step_here < step {
+                clamp_count += 1;
                 if dfog_on_it == 0 || iters == dfog_on_it as i32 {
                     step_count += max_step_here / step;
                 }
@@ -1108,6 +1573,7 @@ pub fn ray_march(
             if last_de > de + 1e-30 {
                 let ratio = last_step / (last_de - de);
                 if ratio < 1.0 {
+                    overshoot_count += 1;
                     rsfmul = ratio.max(0.5);
                 } else {
                     rsfmul = 1.0;
@@ -1115,6 +1581,7 @@ pub fn ray_march(
             } else {
                 rsfmul = 1.0;
             }
+            min_rsfmul = min_rsfmul.min(rsfmul);
 
             last_de = de;
             last_step = step;
@@ -1127,16 +1594,23 @@ pub fn ray_march(
             // ##### Surface found #####
             // Binary search refinement (MB3D's RMdoBinSearch)
             let mut refine_step = last_step * -0.5;
+            let mut refine_sign = -1i8;
             for _ in 0..params.bin_search_steps {
                 t += refine_step;
                 let rpos = origin.add(dir.scale(t));
                 let destop_here = destop_at_steps(params, t / params.step_width);
                 let (ri, rd) = calc_de(rpos, formulas, &params.iter_params, de_floor);
-                if rd < destop_here || ri >= params.iter_params.max_iters {
-                    refine_step = -(refine_step.abs() * 0.55); // back up
+                let next_refine_step = if rd < destop_here || ri >= params.iter_params.max_iters {
+                    -(refine_step.abs() * 0.55) // back up
                 } else {
-                    refine_step = refine_step.abs() * 0.55; // forward
+                    refine_step.abs() * 0.55 // forward
+                };
+                let next_sign = if next_refine_step < 0.0 { -1 } else { 1 };
+                if next_sign != refine_sign {
+                    refine_flips += 1;
                 }
+                refine_step = next_refine_step;
+                refine_sign = next_sign;
             }
 
             let hit_pos = origin.add(dir.scale(t));
@@ -1146,11 +1620,169 @@ pub fn ray_march(
                 depth: t,
                 iters: final_iters,
                 shadow_steps: step_count.round().clamp(0.0, 1023.0) as i32,
+                march_stats: MarchStats {
+                    clamp_count,
+                    overshoot_count,
+                    min_rsfmul,
+                    refine_flips,
+                },
             };
         }
     }
 
     PixelResult::Miss
+}
+
+fn render_primary_buffers(
+    formulas: &HybridProgram,
+    params: &RenderParams,
+    collect_uncertainty: bool,
+) -> PrimaryBuffers {
+    let w = params.camera.width as usize;
+    let h = params.camera.height as usize;
+
+    let mut depth_buf = vec![f64::MAX; w * h];
+    let mut iter_buf = vec![0i32; w * h];
+    let mut shadow_buf = vec![0i32; w * h];
+    let mut uncertainty = collect_uncertainty.then(|| MarchUncertaintyBuffers {
+        clamp_count: vec![0.0; w * h],
+        overshoot_count: vec![0.0; w * h],
+        min_rsfmul: vec![1.0; w * h],
+        refine_flips: vec![0.0; w * h],
+    });
+
+    eprintln!("Rendering {}x{} ...", w, h);
+    let start = std::time::Instant::now();
+
+    let num_threads = available_thread_count(w * h);
+    let rows_per_thread = h.div_ceil(num_threads);
+    let ray_grid = build_ray_grid(&params.camera, num_threads, rows_per_thread);
+    let depth_writer = SharedWriteBuf::new(&mut depth_buf);
+    let iter_writer = SharedWriteBuf::new(&mut iter_buf);
+    let shadow_writer = SharedWriteBuf::new(&mut shadow_buf);
+    let clamp_writer = uncertainty
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(&mut buf.clamp_count));
+    let overshoot_writer = uncertainty
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(&mut buf.overshoot_count));
+    let rsf_writer = uncertainty
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(&mut buf.min_rsfmul));
+    let refine_writer = uncertainty
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(&mut buf.refine_flips));
+    let next_pixel = AtomicUsize::new(0);
+    let completed_pixels = AtomicUsize::new(0);
+    let next_report = AtomicUsize::new(progress_granularity(w * h));
+    eprintln!("Using {} threads", num_threads);
+
+    let total_hits = thread::scope(|s| {
+        let mut workers = Vec::new();
+        let ray_grid = &ray_grid;
+        for _worker_idx in 0..num_threads {
+            let formulas = formulas;
+            let params = params;
+            let depth_writer = depth_writer;
+            let iter_writer = iter_writer;
+            let shadow_writer = shadow_writer;
+            let clamp_writer = clamp_writer;
+            let overshoot_writer = overshoot_writer;
+            let rsf_writer = rsf_writer;
+            let refine_writer = refine_writer;
+            let next_pixel = &next_pixel;
+            let completed_pixels = &completed_pixels;
+            let next_report = &next_report;
+            workers.push(s.spawn(move || {
+                let mut local_hits = 0u64;
+                let mut local_completed = 0usize;
+                loop {
+                    let idx = next_pixel.fetch_add(1, Ordering::Relaxed);
+                    if idx >= w * h {
+                        break;
+                    }
+
+                    let x = idx % w;
+                    let y = idx / w;
+                    let origin = ray_grid.row_origins[y].add(ray_grid.x_offsets[x]);
+                    let dir = ray_grid.dirs[idx];
+                    let seed = pixel_seed(x, y, 0);
+
+                    if let PixelResult::Hit {
+                        depth,
+                        iters,
+                        shadow_steps,
+                        march_stats,
+                    } = ray_march(origin, dir, formulas, params, seed)
+                    {
+                        local_hits += 1;
+                        unsafe {
+                            depth_writer.write(idx, depth);
+                            iter_writer.write(idx, iters);
+                            shadow_writer.write(idx, shadow_steps);
+                            if let Some(writer) = clamp_writer {
+                                writer.write(idx, march_stats.clamp_count as f32);
+                            }
+                            if let Some(writer) = overshoot_writer {
+                                writer.write(idx, march_stats.overshoot_count as f32);
+                            }
+                            if let Some(writer) = rsf_writer {
+                                writer.write(idx, march_stats.min_rsfmul as f32);
+                            }
+                            if let Some(writer) = refine_writer {
+                                writer.write(idx, march_stats.refine_flips as f32);
+                            }
+                        }
+                    }
+
+                    local_completed += 1;
+                    if local_completed >= 64 {
+                        flush_progress(
+                            "Primary pass",
+                            w * h,
+                            completed_pixels,
+                            next_report,
+                            &mut local_completed,
+                        );
+                    }
+                }
+
+                flush_progress(
+                    "Primary pass",
+                    w * h,
+                    completed_pixels,
+                    next_report,
+                    &mut local_completed,
+                );
+
+                local_hits
+            }));
+        }
+
+        let mut total_hits = 0u64;
+        for worker in workers {
+            total_hits += worker.join().unwrap();
+        }
+        total_hits
+    });
+
+    eprintln!(
+        "Ray march complete in {:.1}s ({} hits / {} pixels)",
+        start.elapsed().as_secs_f64(),
+        total_hits,
+        w * h
+    );
+    if next_report.load(Ordering::Relaxed) <= w * h {
+        eprintln!("Primary pass 100.0%");
+    }
+
+    PrimaryBuffers {
+        ray_grid,
+        depth_buf,
+        iter_buf,
+        shadow_buf,
+        uncertainty,
+    }
 }
 
 pub(crate) fn shade_from_primary_buffers(
@@ -1221,9 +1853,16 @@ pub(crate) fn shade_from_primary_buffers(
                         shadow_steps: shadow_buf[idx],
                         y_pos: (y as f64 + 0.5) / h as f64,
                     };
-                    let surface = compute_surface_sample_mb3d(hit.hit_pos, hit.depth, formulas, params);
-                    let shadow_word =
-                        compute_shadow_word_mb3d(hit, surface.normal, y, soft_hs_light, formulas, params);
+                    let surface =
+                        compute_surface_sample_mb3d(hit.hit_pos, hit.depth, formulas, params);
+                    let shadow_word = compute_shadow_word_mb3d(
+                        hit,
+                        surface.normal,
+                        y,
+                        soft_hs_light,
+                        formulas,
+                        params,
+                    );
                     let color = shade_primary_hit(
                         hit,
                         surface.normal,
@@ -1271,9 +1910,9 @@ fn render_2x2_antialias(
     let aa_h = aa_params.camera.height as usize;
     let num_threads = available_thread_count(out_w * out_h);
     let ray_sampler = RaySampler::new(&aa_params.camera);
-    let soft_hs_light =
-        crate::lighting::soft_hs_light_dir(lighting, &aa_params.camera, &aa_params);
-    let lighting_cache = crate::lighting::LightingCache::new(lighting, &aa_params.camera, &aa_params);
+    let soft_hs_light = crate::lighting::soft_hs_light_dir(lighting, &aa_params.camera, &aa_params);
+    let lighting_cache =
+        crate::lighting::LightingCache::new(lighting, &aa_params.camera, &aa_params);
     let mut pixels = vec![0u8; out_w * out_h * 4];
     let pixel_buf = SharedByteBuf::new(&mut pixels);
     let next_pixel = AtomicUsize::new(0);
@@ -1317,8 +1956,12 @@ fn render_2x2_antialias(
                             aa_params,
                             pixel_seed(hx, hy, sample_idx as u32),
                         ) {
-                            let surface =
-                                compute_surface_sample_mb3d(hit.hit_pos, hit.depth, formulas, aa_params);
+                            let surface = compute_surface_sample_mb3d(
+                                hit.hit_pos,
+                                hit.depth,
+                                formulas,
+                                aa_params,
+                            );
                             let shadow_word = compute_shadow_word_mb3d(
                                 hit,
                                 surface.normal,
@@ -1340,7 +1983,11 @@ fn render_2x2_antialias(
                                 aa_params,
                                 &mut shade_scratch,
                             );
-                            accumulate_rgba(&mut color_acc, [color[0], color[1], color[2], 255], 0.25);
+                            accumulate_rgba(
+                                &mut color_acc,
+                                [color[0], color[1], color[2], 255],
+                                0.25,
+                            );
                         } else {
                             accumulate_rgba(&mut color_acc, background_rgba(), 0.25);
                         }
@@ -1371,7 +2018,593 @@ fn render_2x2_antialias(
 /// Render the full image using two passes:
 /// 1. Ray march to build depth + iteration buffers
 /// 2. Compute normals and shade
-pub fn render(formulas: &HybridProgram, params: &RenderParams, lighting: &crate::m3p::M3PLighting, ssao: &crate::m3p::M3PSSAO) -> Vec<u8> {
+pub fn render_exr_layers(
+    formulas: &HybridProgram,
+    params: &RenderParams,
+    lighting: &crate::m3p::M3PLighting,
+    ssao: &crate::m3p::M3PSSAO,
+    specs: &[ExrLayerSpec],
+) -> Result<ExrLayerImage, String> {
+    let w = params.camera.width as usize;
+    let h = params.camera.height as usize;
+    if w == 0 || h == 0 {
+        return Ok(ExrLayerImage {
+            width: w,
+            height: h,
+            parts: Vec::new(),
+        });
+    }
+    if specs.is_empty() {
+        return Err("no EXR layers selected".to_string());
+    }
+    if params.antialiasing != AntialiasingMode::None {
+        return Err("EXR layer output currently requires --aa none".to_string());
+    }
+
+    let start = std::time::Instant::now();
+    let needs = LayerNeeds::from_specs(specs);
+    let PrimaryBuffers {
+        ray_grid,
+        depth_buf,
+        iter_buf,
+        shadow_buf,
+        mut uncertainty,
+    } = render_primary_buffers(formulas, params, needs.needs_uncertainty());
+
+    let len = w * h;
+    let bg = background_rgb_f32();
+
+    let mut ao = needs.ao.then(|| vec![0.0f32; len]);
+    let mut branch_reciprocal = needs.branches.then(|| vec![0.0f32; len]);
+    let mut branch_outer = needs.branches.then(|| vec![0.0f32; len]);
+    let mut beauty_r = needs.beauty.then(|| vec![bg[0]; len]);
+    let mut beauty_g = needs.beauty.then(|| vec![bg[1]; len]);
+    let mut beauty_b = needs.beauty.then(|| vec![bg[2]; len]);
+    let mut depth = needs.depth.then(|| vec![f32::INFINITY; len]);
+    let mut estimator = needs.estimator.then(|| vec![f32::INFINITY; len]);
+    let mut fold_x = needs.folds.then(|| vec![0.0f32; len]);
+    let mut fold_y = needs.folds.then(|| vec![0.0f32; len]);
+    let mut fold_z = needs.folds.then(|| vec![0.0f32; len]);
+    let mut fold_any = needs.folds.then(|| vec![0.0f32; len]);
+    let mut gradient = needs.gradient.then(|| vec![0.0f32; len]);
+    let mut iterations = needs.iterations.then(|| vec![0.0f32; len]);
+    let mut march_steps = needs.march_steps.then(|| vec![0.0f32; len]);
+    let mut normal_x = needs.normal.then(|| vec![0.0f32; len]);
+    let mut normal_y = needs.normal.then(|| vec![0.0f32; len]);
+    let mut normal_z = needs.normal.then(|| vec![0.0f32; len]);
+    let mut orbit_x = needs.orbit.then(|| vec![0.0f32; len]);
+    let mut orbit_y = needs.orbit.then(|| vec![0.0f32; len]);
+    let mut orbit_z = needs.orbit.then(|| vec![0.0f32; len]);
+    let mut orbit_w = needs.orbit.then(|| vec![0.0f32; len]);
+    let mut orbit_r2 = needs.orbit.then(|| vec![0.0f32; len]);
+    let mut position_x = needs.position.then(|| vec![0.0f32; len]);
+    let mut position_y = needs.position.then(|| vec![0.0f32; len]);
+    let mut position_z = needs.position.then(|| vec![0.0f32; len]);
+    let mut roughness = needs.roughness.then(|| vec![0.0f32; len]);
+    let mut sign_flip_x = needs.sign_flips.then(|| vec![0.0f32; len]);
+    let mut sign_flip_y = needs.sign_flips.then(|| vec![0.0f32; len]);
+    let mut sign_flip_z = needs.sign_flips.then(|| vec![0.0f32; len]);
+    let mut trap_x = needs.traps.then(|| vec![0.0f32; len]);
+    let mut trap_y = needs.traps.then(|| vec![0.0f32; len]);
+    let mut trap_z = needs.traps.then(|| vec![0.0f32; len]);
+    let mut trap_r = needs.traps.then(|| vec![0.0f32; len]);
+
+    let ao_writer = ao.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let branch_reciprocal_writer = branch_reciprocal
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let branch_outer_writer = branch_outer.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let beauty_r_writer = beauty_r.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let beauty_g_writer = beauty_g.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let beauty_b_writer = beauty_b.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let depth_writer = depth.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let estimator_writer = estimator.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let fold_x_writer = fold_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let fold_y_writer = fold_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let fold_z_writer = fold_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let fold_any_writer = fold_any.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let gradient_writer = gradient.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let iterations_writer = iterations.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let march_steps_writer = march_steps.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let normal_x_writer = normal_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let normal_y_writer = normal_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let normal_z_writer = normal_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let orbit_x_writer = orbit_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let orbit_y_writer = orbit_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let orbit_z_writer = orbit_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let orbit_w_writer = orbit_w.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let orbit_r2_writer = orbit_r2.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let position_x_writer = position_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let position_y_writer = position_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let position_z_writer = position_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let roughness_writer = roughness.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let sign_flip_x_writer = sign_flip_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let sign_flip_y_writer = sign_flip_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let sign_flip_z_writer = sign_flip_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let trap_x_writer = trap_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let trap_y_writer = trap_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let trap_z_writer = trap_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let trap_r_writer = trap_r.as_mut().map(|buf| SharedWriteBuf::new(buf));
+
+    let lighting_cache = crate::lighting::LightingCache::new(lighting, &params.camera, params);
+    let soft_hs_light = if needs.beauty {
+        crate::lighting::soft_hs_light_dir(lighting, &params.camera, params)
+    } else {
+        None
+    };
+    let num_threads = available_thread_count(len);
+    let next_pixel = AtomicUsize::new(0);
+    let completed_pixels = AtomicUsize::new(0);
+    let next_report = AtomicUsize::new(progress_granularity(len));
+
+    thread::scope(|s| {
+        let mut workers = Vec::new();
+        for _worker_idx in 0..num_threads {
+            let formulas = formulas;
+            let params = params;
+            let ssao = ssao;
+            let lighting_cache = &lighting_cache;
+            let depth_buf = &depth_buf;
+            let iter_buf = &iter_buf;
+            let shadow_buf = &shadow_buf;
+            let ray_grid = &ray_grid;
+            let next_pixel = &next_pixel;
+            let completed_pixels = &completed_pixels;
+            let next_report = &next_report;
+            let needs = needs;
+
+            workers.push(s.spawn(move || {
+                let mut shade_scratch = crate::lighting::ShadeScratch::default();
+                let mut local_completed = 0usize;
+                loop {
+                    let idx = next_pixel.fetch_add(1, Ordering::Relaxed);
+                    if idx >= len {
+                        break;
+                    }
+
+                    let x = idx % w;
+                    let y = idx / w;
+                    let depth_value = depth_buf[idx];
+                    local_completed += 1;
+                    if local_completed >= 64 {
+                        flush_progress(
+                            "EXR layers",
+                            len,
+                            completed_pixels,
+                            next_report,
+                            &mut local_completed,
+                        );
+                    }
+                    if depth_value == f64::MAX {
+                        continue;
+                    }
+
+                    let hit_pos = ray_grid.row_origins[y]
+                        .add(ray_grid.x_offsets[x])
+                        .add(ray_grid.dirs[idx].scale(depth_value));
+                    let hit = PrimaryHit {
+                        hit_pos,
+                        ray_dir: ray_grid.dirs[idx],
+                        depth: depth_value,
+                        iters: iter_buf[idx],
+                        shadow_steps: shadow_buf[idx],
+                        y_pos: (y as f64 + 0.5) / h as f64,
+                    };
+
+                    unsafe {
+                        if let Some(writer) = depth_writer {
+                            writer.write(idx, hit.depth as f32);
+                        }
+                        if let Some(writer) = iterations_writer {
+                            writer.write(idx, hit.iters as f32);
+                        }
+                        if let Some(writer) = march_steps_writer {
+                            writer.write(idx, hit.shadow_steps as f32);
+                        }
+                        if let Some(writer) = position_x_writer {
+                            writer.write(idx, hit.hit_pos.x as f32);
+                        }
+                        if let Some(writer) = position_y_writer {
+                            writer.write(idx, hit.hit_pos.y as f32);
+                        }
+                        if let Some(writer) = position_z_writer {
+                            writer.write(idx, hit.hit_pos.z as f32);
+                        }
+                        if let Some(writer) = gradient_writer {
+                            writer.write(
+                                idx,
+                                crate::lighting::palette_phase_mb3d(
+                                    hit.iters,
+                                    params.iter_params.max_iters,
+                                    params.iter_params.min_iters,
+                                    hit.depth,
+                                    lighting_cache,
+                                ),
+                            );
+                        }
+                    }
+
+                    let surface = if needs.needs_surface() {
+                        Some(compute_surface_sample_mb3d(
+                            hit.hit_pos,
+                            hit.depth,
+                            formulas,
+                            params,
+                        ))
+                    } else {
+                        None
+                    };
+
+                    let orbit = if needs.needs_orbit() {
+                        Some(crate::formulas::hybrid_orbit_history(
+                            (hit.hit_pos.x, hit.hit_pos.y, hit.hit_pos.z),
+                            formulas,
+                            &params.iter_params,
+                        ))
+                    } else {
+                        None
+                    };
+
+                    unsafe {
+                        if let Some(surface) = surface {
+                            if let Some(writer) = normal_x_writer {
+                                writer.write(idx, surface.normal.x as f32);
+                            }
+                            if let Some(writer) = normal_y_writer {
+                                writer.write(idx, surface.normal.y as f32);
+                            }
+                            if let Some(writer) = normal_z_writer {
+                                writer.write(idx, surface.normal.z as f32);
+                            }
+                            if let Some(writer) = roughness_writer {
+                                writer.write(idx, surface.roughness as f32);
+                            }
+                        }
+                        if let Some(orbit) = orbit {
+                            if let Some(writer) = estimator_writer {
+                                writer.write(idx, orbit.state.de as f32);
+                            }
+                            if let Some(writer) = orbit_x_writer {
+                                writer.write(idx, orbit.state.x as f32);
+                            }
+                            if let Some(writer) = orbit_y_writer {
+                                writer.write(idx, orbit.state.y as f32);
+                            }
+                            if let Some(writer) = orbit_z_writer {
+                                writer.write(idx, orbit.state.z as f32);
+                            }
+                            if let Some(writer) = orbit_w_writer {
+                                writer.write(idx, orbit.state.w as f32);
+                            }
+                            if let Some(writer) = orbit_r2_writer {
+                                writer.write(idx, orbit.state.r2 as f32);
+                            }
+                            if let Some(writer) = branch_reciprocal_writer {
+                                let total = orbit.state.iters.max(1) as f32;
+                                writer.write(idx, orbit.branch_reciprocal as f32 / total);
+                            }
+                            if let Some(writer) = branch_outer_writer {
+                                let total = orbit.state.iters.max(1) as f32;
+                                writer.write(idx, orbit.branch_outer as f32 / total);
+                            }
+                            if let Some(writer) = fold_x_writer {
+                                writer.write(idx, orbit.fold_x as f32);
+                            }
+                            if let Some(writer) = fold_y_writer {
+                                writer.write(idx, orbit.fold_y as f32);
+                            }
+                            if let Some(writer) = fold_z_writer {
+                                writer.write(idx, orbit.fold_z as f32);
+                            }
+                            if let Some(writer) = fold_any_writer {
+                                writer.write(idx, orbit.fold_any as f32);
+                            }
+                            if let Some(writer) = sign_flip_x_writer {
+                                writer.write(idx, orbit.sign_flip_x as f32);
+                            }
+                            if let Some(writer) = sign_flip_y_writer {
+                                writer.write(idx, orbit.sign_flip_y as f32);
+                            }
+                            if let Some(writer) = sign_flip_z_writer {
+                                writer.write(idx, orbit.sign_flip_z as f32);
+                            }
+                            if let Some(writer) = trap_x_writer {
+                                writer.write(idx, orbit.trap_min_x as f32);
+                            }
+                            if let Some(writer) = trap_y_writer {
+                                writer.write(idx, orbit.trap_min_y as f32);
+                            }
+                            if let Some(writer) = trap_z_writer {
+                                writer.write(idx, orbit.trap_min_z as f32);
+                            }
+                            if let Some(writer) = trap_r_writer {
+                                writer.write(idx, orbit.trap_min_r as f32);
+                            }
+                        }
+                    }
+
+                    let mut final_ao = None;
+                    if needs.ao || needs.beauty {
+                        let surface = surface.expect("surface sample required for AO/beauty");
+                        let ao_value = crate::lighting::compute_final_ao_mb3d(
+                            1.0,
+                            surface.normal,
+                            hit.hit_pos,
+                            hit.depth,
+                            x as i32,
+                            y as i32,
+                            ssao,
+                            formulas,
+                            params,
+                            &mut shade_scratch,
+                        );
+                        final_ao = Some(ao_value);
+                        unsafe {
+                            if let Some(writer) = ao_writer {
+                                writer.write(idx, ao_value as f32);
+                            }
+                        }
+                    }
+
+                    if needs.beauty {
+                        let surface = surface.expect("surface sample required for beauty");
+                        let shadow_word = compute_shadow_word_mb3d(
+                            hit,
+                            surface.normal,
+                            y,
+                            soft_hs_light,
+                            formulas,
+                            params,
+                        );
+                        let beauty = shade_primary_hit_with_final_ao(
+                            hit,
+                            surface.normal,
+                            surface.roughness,
+                            shadow_word,
+                            final_ao.expect("final AO required for beauty"),
+                            lighting_cache,
+                            ssao,
+                            params,
+                        );
+                        unsafe {
+                            if let Some(writer) = beauty_r_writer {
+                                writer.write(idx, beauty[0] as f32 / 255.0);
+                            }
+                            if let Some(writer) = beauty_g_writer {
+                                writer.write(idx, beauty[1] as f32 / 255.0);
+                            }
+                            if let Some(writer) = beauty_b_writer {
+                                writer.write(idx, beauty[2] as f32 / 255.0);
+                            }
+                        }
+                    }
+                }
+
+                flush_progress(
+                    "EXR layers",
+                    len,
+                    completed_pixels,
+                    next_report,
+                    &mut local_completed,
+                );
+            }));
+        }
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+
+    let mut parts = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let channels = match spec.kind {
+            ExrLayerKind::AmbientOcclusion => vec![ExrLayerChannel {
+                name: "AO",
+                samples: ao.take().expect("AO layer buffer missing"),
+            }],
+            ExrLayerKind::Branches => vec![
+                ExrLayerChannel {
+                    name: "Reciprocal",
+                    samples: branch_reciprocal
+                        .take()
+                        .expect("branch reciprocal buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Outer",
+                    samples: branch_outer.take().expect("branch outer buffer missing"),
+                },
+            ],
+            ExrLayerKind::Beauty => vec![
+                ExrLayerChannel {
+                    name: "R",
+                    samples: beauty_r.take().expect("beauty R buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "G",
+                    samples: beauty_g.take().expect("beauty G buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "B",
+                    samples: beauty_b.take().expect("beauty B buffer missing"),
+                },
+            ],
+            ExrLayerKind::Depth => vec![ExrLayerChannel {
+                name: "Depth",
+                samples: depth.take().expect("depth layer buffer missing"),
+            }],
+            ExrLayerKind::Estimator => vec![ExrLayerChannel {
+                name: "DE",
+                samples: estimator.take().expect("estimator layer buffer missing"),
+            }],
+            ExrLayerKind::Folds => vec![
+                ExrLayerChannel {
+                    name: "X",
+                    samples: fold_x.take().expect("fold X buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Y",
+                    samples: fold_y.take().expect("fold Y buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Z",
+                    samples: fold_z.take().expect("fold Z buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Any",
+                    samples: fold_any.take().expect("fold Any buffer missing"),
+                },
+            ],
+            ExrLayerKind::Gradient => vec![ExrLayerChannel {
+                name: "Phase",
+                samples: gradient.take().expect("gradient layer buffer missing"),
+            }],
+            ExrLayerKind::Iterations => vec![ExrLayerChannel {
+                name: "Iterations",
+                samples: iterations.take().expect("iterations layer buffer missing"),
+            }],
+            ExrLayerKind::MarchSteps => vec![ExrLayerChannel {
+                name: "Steps",
+                samples: march_steps.take().expect("march steps buffer missing"),
+            }],
+            ExrLayerKind::Normal => vec![
+                ExrLayerChannel {
+                    name: "X",
+                    samples: normal_x.take().expect("normal X buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Y",
+                    samples: normal_y.take().expect("normal Y buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Z",
+                    samples: normal_z.take().expect("normal Z buffer missing"),
+                },
+            ],
+            ExrLayerKind::Orbit => vec![
+                ExrLayerChannel {
+                    name: "X",
+                    samples: orbit_x.take().expect("orbit X buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Y",
+                    samples: orbit_y.take().expect("orbit Y buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Z",
+                    samples: orbit_z.take().expect("orbit Z buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "W",
+                    samples: orbit_w.take().expect("orbit W buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "R2",
+                    samples: orbit_r2.take().expect("orbit R2 buffer missing"),
+                },
+            ],
+            ExrLayerKind::Position => vec![
+                ExrLayerChannel {
+                    name: "X",
+                    samples: position_x.take().expect("position X buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Y",
+                    samples: position_y.take().expect("position Y buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Z",
+                    samples: position_z.take().expect("position Z buffer missing"),
+                },
+            ],
+            ExrLayerKind::Roughness => vec![ExrLayerChannel {
+                name: "Roughness",
+                samples: roughness.take().expect("roughness layer buffer missing"),
+            }],
+            ExrLayerKind::Traps => vec![
+                ExrLayerChannel {
+                    name: "X",
+                    samples: trap_x.take().expect("trap X buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Y",
+                    samples: trap_y.take().expect("trap Y buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Z",
+                    samples: trap_z.take().expect("trap Z buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "R",
+                    samples: trap_r.take().expect("trap R buffer missing"),
+                },
+            ],
+            ExrLayerKind::Uncertainty => {
+                let uncertainty = uncertainty
+                    .take()
+                    .expect("uncertainty buffers missing for uncertainty layer");
+                vec![
+                    ExrLayerChannel {
+                        name: "Clamp",
+                        samples: uncertainty.clamp_count,
+                    },
+                    ExrLayerChannel {
+                        name: "Overshoot",
+                        samples: uncertainty.overshoot_count,
+                    },
+                    ExrLayerChannel {
+                        name: "RSFMin",
+                        samples: uncertainty.min_rsfmul,
+                    },
+                    ExrLayerChannel {
+                        name: "Refine",
+                        samples: uncertainty.refine_flips,
+                    },
+                ]
+            }
+            ExrLayerKind::SignFlips => vec![
+                ExrLayerChannel {
+                    name: "X",
+                    samples: sign_flip_x.take().expect("sign flip X buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Y",
+                    samples: sign_flip_y.take().expect("sign flip Y buffer missing"),
+                },
+                ExrLayerChannel {
+                    name: "Z",
+                    samples: sign_flip_z.take().expect("sign flip Z buffer missing"),
+                },
+            ],
+        };
+
+        parts.push(ExrLayerPart {
+            spec: *spec,
+            name: spec.kind.name(),
+            channels,
+        });
+    }
+
+    eprintln!(
+        "EXR layer collection complete in {:.1}s",
+        start.elapsed().as_secs_f64()
+    );
+    if next_report.load(Ordering::Relaxed) <= len {
+        eprintln!("EXR layers 100.0%");
+    }
+
+    Ok(ExrLayerImage {
+        width: w,
+        height: h,
+        parts,
+    })
+}
+
+pub fn render(
+    formulas: &HybridProgram,
+    params: &RenderParams,
+    lighting: &crate::m3p::M3PLighting,
+    ssao: &crate::m3p::M3PSSAO,
+) -> Vec<u8> {
     let w = params.camera.width as usize;
     let h = params.camera.height as usize;
     if w == 0 || h == 0 {
@@ -1385,87 +2618,61 @@ pub fn render(formulas: &HybridProgram, params: &RenderParams, lighting: &crate:
         eprintln!("Render complete in {:.1}s", start.elapsed().as_secs_f64());
         return pixels;
     }
-
-    // Pass 1: build depth and iteration buffers
-    let mut depth_buf = vec![f64::MAX; w * h];
-    let mut iter_buf = vec![0i32; w * h];
-    let mut shadow_buf = vec![0i32; w * h];
-
-    eprintln!("Rendering {}x{} ...", w, h);
     let start = std::time::Instant::now();
-    
-    let num_threads = available_thread_count(w * h);
-    let rows_per_thread = h.div_ceil(num_threads);
-    let ray_grid = build_ray_grid(&params.camera, num_threads, rows_per_thread);
-    let depth_writer = SharedWriteBuf::new(&mut depth_buf);
-    let iter_writer = SharedWriteBuf::new(&mut iter_buf);
-    let shadow_writer = SharedWriteBuf::new(&mut shadow_buf);
-    let next_pixel = AtomicUsize::new(0);
-    eprintln!("Using {} threads", num_threads);
-    
-    let total_hits = thread::scope(|s| {
-        let mut workers = Vec::new();
-        let ray_grid = &ray_grid;
-        for _worker_idx in 0..num_threads {
-            let formulas = formulas;
-            let params = params;
-            let depth_writer = depth_writer;
-            let iter_writer = iter_writer;
-            let shadow_writer = shadow_writer;
-            let next_pixel = &next_pixel;
-            workers.push(s.spawn(move || {
-                let mut local_hits = 0u64;
-                loop {
-                    let idx = next_pixel.fetch_add(1, Ordering::Relaxed);
-                    if idx >= w * h {
-                        break;
-                    }
-
-                    let x = idx % w;
-                    let y = idx / w;
-                    let origin = ray_grid.row_origins[y].add(ray_grid.x_offsets[x]);
-                    let dir = ray_grid.dirs[idx];
-                    let seed = pixel_seed(x, y, 0);
-
-                    if let PixelResult::Hit {
-                        depth,
-                        iters,
-                        shadow_steps,
-                    } = ray_march(origin, dir, formulas, params, seed)
-                    {
-                        local_hits += 1;
-                        unsafe {
-                            depth_writer.write(idx, depth);
-                            iter_writer.write(idx, iters);
-                            shadow_writer.write(idx, shadow_steps);
-                        }
-                    }
-                }
-
-                local_hits
-            }));
-        }
-
-        let mut total_hits = 0u64;
-        for worker in workers {
-            total_hits += worker.join().unwrap();
-        }
-        total_hits
-    });
-
-    eprintln!("Ray march complete in {:.1}s ({} hits / {} pixels)",
-        start.elapsed().as_secs_f64(), total_hits, w * h);
-
+    let primary = render_primary_buffers(formulas, params, false);
     let pixels = shade_from_primary_buffers(
         formulas,
         params,
         lighting,
         ssao,
-        &depth_buf,
-        &iter_buf,
-        &shadow_buf,
+        &primary.depth_buf,
+        &primary.iter_buf,
+        &primary.shadow_buf,
     );
 
     eprintln!("Render complete in {:.1}s", start.elapsed().as_secs_f64());
     pixels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{all_exr_layer_codes, parse_exr_layer_specs, ExrLayerCompression, ExrLayerKind};
+
+    #[test]
+    fn parse_exr_layers_preserves_order_and_compression() {
+        let specs = parse_exr_layer_specs("cDn").unwrap();
+        assert_eq!(specs.len(), 3);
+        assert_eq!(specs[0].kind, ExrLayerKind::Beauty);
+        assert_eq!(specs[0].compression, ExrLayerCompression::Lossy);
+        assert_eq!(specs[1].kind, ExrLayerKind::Depth);
+        assert_eq!(specs[1].compression, ExrLayerCompression::Lossless);
+        assert_eq!(specs[2].kind, ExrLayerKind::Normal);
+        assert_eq!(specs[2].compression, ExrLayerCompression::Lossy);
+    }
+
+    #[test]
+    fn parse_exr_layers_accepts_all_alias() {
+        let specs = parse_exr_layer_specs("all").unwrap();
+        let codes: String = specs.iter().map(|spec| spec.code_char()).collect();
+        assert_eq!(codes, all_exr_layer_codes());
+    }
+
+    #[test]
+    fn parse_exr_layers_accepts_uppercase_all_alias() {
+        let specs = parse_exr_layer_specs("ALL").unwrap();
+        let codes: String = specs.iter().map(|spec| spec.code_char()).collect();
+        assert_eq!(codes, all_exr_layer_codes().to_ascii_uppercase());
+    }
+
+    #[test]
+    fn parse_exr_layers_rejects_case_insensitive_duplicates() {
+        let err = parse_exr_layer_specs("cC").unwrap_err();
+        assert!(err.contains("duplicate EXR layer code 'c'"));
+    }
+
+    #[test]
+    fn parse_exr_layers_rejects_unknown_codes() {
+        let err = parse_exr_layer_specs("cz").unwrap_err();
+        assert!(err.contains("unknown EXR layer code 'z'"));
+    }
 }

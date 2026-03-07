@@ -38,6 +38,7 @@ workspace.members = [
     "tools/cargo_makepad",
     "tools/tui_test",
     "libs/mb3d",
+    "libs/openexr",
     "libs/git",
     "libs/fast_inflate",
 ]
