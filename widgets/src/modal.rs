@@ -53,6 +53,8 @@ pub enum ModalAction {
 
 #[derive(Script, Widget)]
 pub struct Modal {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 

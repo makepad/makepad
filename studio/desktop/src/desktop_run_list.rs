@@ -162,6 +162,8 @@ impl ActionDefaultRef for RunListRowData {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct DesktopRunList {
+    #[uid]
+    uid: WidgetUid,
     #[deref]
     view: View,
     #[rust]

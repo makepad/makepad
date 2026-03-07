@@ -1838,6 +1838,8 @@ impl Widget for TestDraw {
 // NewsListTest widget demonstrating PortalList usage
 #[derive(Script, ScriptHook, Widget)]
 pub struct NewsListTest {
+    #[uid]
+    uid: WidgetUid,
     #[deref]
     view: View,
 }
@@ -1887,6 +1889,8 @@ impl Widget for NewsListTest {
 // SelectionTestList widget demonstrating cross-boundary text selection in PortalList
 #[derive(Script, ScriptHook, Widget)]
 pub struct SelectionTestList {
+    #[uid]
+    uid: WidgetUid,
     #[deref]
     view: View,
 }
@@ -1935,6 +1939,8 @@ impl Widget for SelectionTestList {
 // ScrollbarTestList widget demonstrating variable height items in PortalList
 #[derive(Script, ScriptHook, Widget)]
 pub struct ScrollbarTestList {
+    #[uid]
+    uid: WidgetUid,
     #[deref]
     view: View,
 }

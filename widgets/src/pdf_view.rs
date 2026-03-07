@@ -984,6 +984,8 @@ impl PdfPageView {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct PdfView {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]
