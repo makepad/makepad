@@ -428,6 +428,11 @@ impl CxFingers {
             && pos.distance(&self.tap.last_pos) < TAP_COUNT_DISTANCE
         {
             self.tap.count += 1;
+            // Cycle back after triple-click so fast repeated
+            // double-clicks keep working (1→2→3→1→2→3…).
+            if self.tap.count > 3 {
+                self.tap.count = 1;
+            }
         } else {
             self.tap.count = 1;
         }
