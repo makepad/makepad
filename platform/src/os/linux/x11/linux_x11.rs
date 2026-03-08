@@ -391,10 +391,7 @@ impl X11Cx {
                     cx.call_event_handler(&Event::Timer(e))
                 }
 
-                if cx.handle_live_edit() {
-                    cx.call_event_handler(&Event::LiveEdit);
-                    cx.redraw_all();
-                }
+                cx.run_live_edit_if_needed("linux-x11");
                 return EventFlow::Wait;
             }
         }

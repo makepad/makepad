@@ -120,7 +120,19 @@ macro_rules! app_main {
                         }));
                     }
                     if let Event::LiveEdit = event {
-                        //app.borrow_mut().update_main(cx);
+                        let mut app_ref = app.borrow_mut();
+                        if let Some(app) = app_ref.as_mut() {
+                            cx.with_vm(|vm| {
+                                let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                                <$app as $crate::ScriptApply>::script_apply(
+                                    app,
+                                    vm,
+                                    &$crate::Apply::Reload,
+                                    &mut $crate::Scope::empty(),
+                                    value,
+                                );
+                            });
+                        }
                     }
                     if let Some(app) = &mut *app.borrow_mut() {
                         <dyn AppMain>::handle_event(app, cx, event);
@@ -178,7 +190,19 @@ macro_rules! app_main {
                         }));
                     }
                     if let Event::LiveEdit = event {
-                        //app.borrow_mut().update_main(cx);
+                        let mut app_ref = app.borrow_mut();
+                        if let Some(app) = app_ref.as_mut() {
+                            cx.with_vm(|vm| {
+                                let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                                <$app as $crate::ScriptApply>::script_apply(
+                                    app,
+                                    vm,
+                                    &$crate::Apply::Reload,
+                                    &mut $crate::Scope::empty(),
+                                    value,
+                                );
+                            });
+                        }
                     }
                     if let Some(app) = &mut *app.borrow_mut() {
                         <dyn AppMain>::handle_event(app, cx, event);
@@ -210,7 +234,19 @@ macro_rules! app_main {
                         }));
                     }
                     if let Event::LiveEdit = event {
-                        //app.borrow_mut().update_main(cx);
+                        let mut app_ref = app.borrow_mut();
+                        if let Some(app) = app_ref.as_mut() {
+                            cx.with_vm(|vm| {
+                                let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                                <$app as $crate::ScriptApply>::script_apply(
+                                    app,
+                                    vm,
+                                    &$crate::Apply::Reload,
+                                    &mut $crate::Scope::empty(),
+                                    value,
+                                );
+                            });
+                        }
                     }
                     if let Some(app) = &mut *app.borrow_mut() {
                         <dyn AppMain>::handle_event(app, cx, event);
@@ -241,6 +277,21 @@ macro_rules! app_main {
                         <$app as AppMain>::after_new_from_script(vm, &mut app);
                         app
                     }));
+                }
+                if let Event::LiveEdit = event {
+                    let mut app_ref = app.borrow_mut();
+                    if let Some(app) = app_ref.as_mut() {
+                        cx.with_vm(|vm| {
+                            let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                            <$app as $crate::ScriptApply>::script_apply(
+                                app,
+                                vm,
+                                &$crate::Apply::Reload,
+                                &mut $crate::Scope::empty(),
+                                value,
+                            );
+                        });
+                    }
                 }
                 if let Some(app) = &mut *app.borrow_mut() {
                     <dyn AppMain>::handle_event(app, cx, event);

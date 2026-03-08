@@ -421,10 +421,7 @@ impl Cx {
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
 
-        if self.handle_live_edit() {
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-        }
+        self.run_live_edit_if_needed("web");
 
         self.handle_platform_ops();
         self.handle_media_signals();

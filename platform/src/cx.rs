@@ -420,15 +420,13 @@ impl Cx {
 
             script_data: CxScriptData {
                 crate_manifests: vm.bx.code.crate_manifests.clone(),
+                live_reload: crate::live_reload::CxLiveReloadState {
+                    script_mod_overrides: vm.bx.code.script_mod_overrides.clone(),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             script_vm: Some(vm.bx),
         }
-    }
-}
-
-impl Cx {
-    pub fn handle_live_edit(&mut self) -> bool {
-        false
     }
 }

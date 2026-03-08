@@ -977,10 +977,7 @@ impl Cx {
         self.poll_software_video_players();
 
         // Live edits
-        if self.handle_live_edit() {
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-        }
+        self.run_live_edit_if_needed("android");
 
         // Platform operations
         self.handle_platform_ops();

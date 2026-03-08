@@ -704,6 +704,18 @@ impl HubCore {
                     },
                 );
                 if save_ok {
+                    if path.ends_with(".rs") {
+                        if let Ok(disk_path) = self.vfs.resolve_path(&path) {
+                            let disk_path =
+                                disk_path.canonicalize().unwrap_or_else(|_| disk_path.clone());
+                            self.forward_live_change_to_builds(
+                                "save",
+                                &path,
+                                disk_path.to_string_lossy().replace('\\', "/"),
+                                content.clone(),
+                            );
+                        }
+                    }
                     self.self_save_suppress_until_by_path
                         .insert(path.clone(), Instant::now() + FS_SELF_SAVE_SUPPRESS);
                     self.broadcast_ui_message_except(
@@ -1510,6 +1522,17 @@ impl HubCore {
             self.broadcast_ui_message(HubToClient::FileChanged {
                 path: virtual_path.clone(),
             });
+            if virtual_path.ends_with(".rs") {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    let file_name = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    self.forward_live_change_to_builds(
+                        "watch",
+                        &virtual_path,
+                        file_name.to_string_lossy().replace('\\', "/"),
+                        content,
+                    );
+                }
+            }
         }
         if path_is_dir {
             self.reload_mount_file_tree_broadcast(&mount);
@@ -1934,6 +1957,67 @@ impl HubCore {
 
     fn send_to_app(&self, build_id: QueryId, msg_bin: Vec<u8>) -> Result<(), String> {
         self.send_to_app_with_socket(build_id, msg_bin).map(|_| ())
+    }
+
+    fn build_ids_for_virtual_path(&self, virtual_path: &str) -> Vec<QueryId> {
+        let mut build_ids = HashSet::new();
+        for (build_id, mount) in &self.build_mount_by_id {
+            if Self::virtual_path_matches_build_mount(virtual_path, mount) {
+                build_ids.insert(*build_id);
+            }
+        }
+        let mut build_ids: Vec<QueryId> = build_ids.into_iter().collect();
+        build_ids.sort_by_key(|build_id| build_id.0);
+        build_ids
+    }
+
+    fn virtual_path_matches_build_mount(virtual_path: &str, build_mount: &str) -> bool {
+        if virtual_path == build_mount {
+            return true;
+        }
+        let Some(rest) = virtual_path.strip_prefix(build_mount) else {
+            return false;
+        };
+        let Some(rest) = rest.strip_prefix('/') else {
+            return false;
+        };
+        let build_is_branch = build_mount
+            .split('/')
+            .nth(1)
+            .is_some_and(|segment| segment.starts_with('@'));
+        if !build_is_branch && rest.starts_with('@') {
+            return false;
+        }
+        true
+    }
+
+    fn forward_live_change_to_builds(
+        &self,
+        _source: &str,
+        virtual_path: &str,
+        file_name: String,
+        content: String,
+    ) {
+        let build_ids = self.build_ids_for_virtual_path(virtual_path);
+        if build_ids.is_empty() {
+            return;
+        }
+        for build_id in build_ids {
+            if let Err(err) = self.send_app_msg(
+                build_id,
+                StudioToApp::LiveChange {
+                    file_name: file_name.clone(),
+                    content: content.clone(),
+                },
+            ) {
+                eprintln!(
+                    "[studio-hotreload] failed build={} virtual_path={} error={}",
+                    build_id.0,
+                    virtual_path,
+                    err
+                );
+            }
+        }
     }
 
     fn send_app_msg(&self, build_id: QueryId, msg: StudioToApp) -> Result<(), String> {

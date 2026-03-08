@@ -178,10 +178,7 @@ impl Cx {
                     self.call_event_handler(&Event::Timer(e))
                 }
 
-                if self.handle_live_edit() {
-                    self.call_event_handler(&Event::LiveEdit);
-                    self.redraw_all();
-                }
+                self.run_live_edit_if_needed("linux-direct");
             }
         }
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {

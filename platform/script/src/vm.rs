@@ -20,8 +20,25 @@ use crate::value::*;
 use crate::*;
 use std::any::Any;
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub struct ScriptModKey {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl ScriptModKey {
+    pub fn from_script_mod(script_mod: &ScriptMod) -> Self {
+        Self {
+            file: script_mod.file.clone(),
+            line: script_mod.line,
+            column: script_mod.column,
+        }
+    }
+}
 
 #[derive(Default, Debug)]
 pub struct ScriptMod {
@@ -41,6 +58,7 @@ pub enum ScriptSource {
 
 pub struct ScriptBody {
     pub source: ScriptSource,
+    pub effective_code: String,
     pub tokenizer: ScriptTokenizer,
     pub parser: ScriptParser,
     pub scope: ScriptObjectRef,
@@ -73,6 +91,7 @@ pub struct ScriptCode {
     pub native: RefCell<ScriptNative>,
     pub bodies: RefCell<Vec<ScriptBody>>,
     pub crate_manifests: Rc<RefCell<HashMap<String, String>>>,
+    pub script_mod_overrides: Rc<RefCell<HashMap<ScriptModKey, String>>>,
 }
 
 pub struct ScriptLoc {
@@ -229,6 +248,17 @@ impl<'a> ScriptVm<'a> {
 
     pub fn with_vm<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
         f(self)
+    }
+
+    pub fn is_reload(&self) -> bool {
+        self.bx.is_reload
+    }
+
+    pub fn with_reload<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
+        let was_reload = std::mem::replace(&mut self.bx.is_reload, true);
+        let out = f(self);
+        self.bx.is_reload = was_reload;
+        out
     }
 
     fn script_me_from_value(&mut self, me: ScriptValue) -> Option<ScriptMe> {
@@ -866,9 +896,21 @@ impl<'a> ScriptVm<'a> {
         let scope = self.bx.heap.new_object_ref(scope_obj);
         let me_obj = self.bx.heap.new_with_proto(id!(root_me).into());
         let me = self.bx.heap.new_object_ref(me_obj);
+        let key = ScriptModKey::from_script_mod(&new_mod);
+        let override_code = self
+            .bx
+            .code
+            .script_mod_overrides
+            .borrow()
+            .get(&key)
+            .cloned();
+        let effective_code = override_code
+            .clone()
+            .unwrap_or_else(|| new_mod.code.clone());
 
         let new_body = ScriptBody {
             source: ScriptSource::Mod(new_mod),
+            effective_code,
             tokenizer: ScriptTokenizer::default(),
             parser: ScriptParser::default(),
             scope,
@@ -884,7 +926,15 @@ impl<'a> ScriptVm<'a> {
                         && script_mod.line == new_mod.line
                         && script_mod.column == new_mod.column
                     {
-                        *body = new_body;
+                        body.scope = new_body.scope;
+                        body.me = new_body.me;
+                        if body.effective_code != new_body.effective_code {
+                            body.effective_code = new_body.effective_code;
+                            body.tokenizer = ScriptTokenizer::default();
+                            body.parser = ScriptParser::default();
+                            body.checkpoint = None;
+                            body.source_len = 0;
+                        }
                         return i as u16;
                     }
                 }
@@ -925,14 +975,18 @@ impl<'a> ScriptVm<'a> {
         let body = &mut bodies[body_id as usize];
 
         if let ScriptSource::Mod(script_mod) = &body.source {
-            // Only log short scripts (likely test scripts)
-            body.tokenizer.tokenize(&script_mod.code, &mut self.bx.heap);
-            body.parser.parse(
-                &body.tokenizer,
-                &script_mod.file,
-                (script_mod.line, script_mod.column),
-                &script_mod.values,
-            );
+            if body.source_len == 0 {
+                body.tokenizer.clear();
+                body.parser = ScriptParser::default();
+                body.tokenizer.tokenize(&body.effective_code, &mut self.bx.heap);
+                body.parser.parse(
+                    &body.tokenizer,
+                    &script_mod.file,
+                    (script_mod.line, script_mod.column),
+                    &script_mod.values,
+                );
+                body.source_len = body.effective_code.len();
+            }
             drop(bodies);
             // lets point our thread to it
             let result = self.run_root(body_id);
@@ -1069,6 +1123,7 @@ pub struct ScriptVmBase {
     pub heap: ScriptHeap,
     pub threads: ScriptThreads,
     pub injected_globals: std::collections::HashMap<LiveId, ScriptValue>,
+    pub is_reload: bool,
     pub debug_trace: bool,
     pub silence_errors: bool,
 }
@@ -1081,6 +1136,7 @@ impl ScriptVmBase {
             threads: ScriptThreads::empty(),
             heap: ScriptHeap::empty(),
             injected_globals: Default::default(),
+            is_reload: false,
             debug_trace: false,
             silence_errors: false,
         }
@@ -1106,10 +1162,12 @@ impl ScriptVmBase {
                 native: RefCell::new(native),
                 bodies: Default::default(),
                 crate_manifests: Default::default(),
+                script_mod_overrides: Default::default(),
             },
             threads: ScriptThreads::new(),
             heap: heap,
             injected_globals: Default::default(),
+            is_reload: false,
             debug_trace: false,
             silence_errors: false,
         }
