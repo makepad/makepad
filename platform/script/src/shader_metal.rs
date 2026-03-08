@@ -1,4 +1,4 @@
-use crate::pod::{ScriptPodMat, ScriptPodTy};
+use crate::pod::{ScriptPodMat, ScriptPodTy, ScriptPodVec};
 use crate::shader::{ShaderIoKind, ShaderOutput, TextureType};
 use crate::vm::ScriptVm;
 use makepad_live_id::{id, LiveId};
@@ -84,41 +84,84 @@ impl ShaderOutput {
         writeln!(out, "}};").ok();
     }
 
+    /// Returns true for integer/boolean pod types that require vec4 alignment in the
+    /// instance buffer (matching the logic in DrawShaderInputs::push for Attribute packing).
+    fn metal_instance_is_non_float(vm: &ScriptVm, ty: crate::ScriptPodType) -> bool {
+        let pod_ty = vm.bx.heap.pod_type_ref(ty);
+        match &pod_ty.ty {
+            ScriptPodTy::U32
+            | ScriptPodTy::AtomicU32
+            | ScriptPodTy::Bool
+            | ScriptPodTy::I32
+            | ScriptPodTy::AtomicI32 => true,
+            ScriptPodTy::Vec(v) => matches!(
+                v,
+                ScriptPodVec::Vec2u
+                    | ScriptPodVec::Vec3u
+                    | ScriptPodVec::Vec4u
+                    | ScriptPodVec::Vec2b
+                    | ScriptPodVec::Vec3b
+                    | ScriptPodVec::Vec4b
+                    | ScriptPodVec::Vec2i
+                    | ScriptPodVec::Vec3i
+                    | ScriptPodVec::Vec4i
+            ),
+            _ => false,
+        }
+    }
+
     pub fn metal_create_instance_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct IoInstanceRaw {{").ok();
 
-        // 1. Output Dyn instance fields first (order doesn't matter, just output as encountered)
-        // Use packed types to match CPU-side repr(C) struct alignment
-        for io in &self.io {
-            if let ShaderIoKind::DynInstance = io.kind {
-                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
-                    for col in 0..4 {
-                        writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
-                    }
-                } else {
-                    write!(out, "    ").ok();
-                    self.backend
-                        .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
-                    writeln!(out, " {};", io.name).ok();
+        // Emit DynInstance fields then RustInstance fields, inserting float padding before
+        // and after non-float fields to match the vec4-aligned layout produced by
+        // DrawShaderInputs::push(DrawShaderInputPacking::Attribute) on the CPU side.
+        let mut current_slot = 0usize;
+        let mut pad_idx = 0usize;
+        for io in self
+            .io
+            .iter()
+            .filter(|io| matches!(io.kind, ShaderIoKind::DynInstance))
+            .chain(
+                self.io
+                    .iter()
+                    .filter(|io| matches!(io.kind, ShaderIoKind::RustInstance)),
+            )
+        {
+            let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+            let slots = pod_ty.ty.slots();
+            let is_non_float = Self::metal_instance_is_non_float(vm, io.ty);
+
+            // Pre-alignment: pad to vec4 boundary before a non-float field.
+            if is_non_float && (current_slot & 3) != 0 {
+                let pad = 4 - (current_slot & 3);
+                for _ in 0..pad {
+                    writeln!(out, "    float _instance_pad_{};", pad_idx).ok();
+                    pad_idx += 1;
+                    current_slot += 1;
                 }
             }
-        }
 
-        // 2. Output Rust instance fields last (already in correct order from pre_collect_rust_instance_io)
-        // Use packed types to match CPU-side repr(C) struct alignment
-        for io in &self.io {
-            if let ShaderIoKind::RustInstance = io.kind {
-                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
-                    for col in 0..4 {
-                        writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
-                    }
-                } else {
-                    write!(out, "    ").ok();
-                    self.backend
-                        .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
-                    writeln!(out, " {};", io.name).ok();
+            // Emit the field using packed types (no implicit Metal alignment padding).
+            if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
+                for col in 0..4 {
+                    writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
+                }
+            } else {
+                write!(out, "    ").ok();
+                self.backend
+                    .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
+                writeln!(out, " {};", io.name).ok();
+            }
+            current_slot += slots;
+
+            // Post-alignment: pad to vec4 boundary after a non-float field.
+            if is_non_float && (current_slot & 3) != 0 {
+                let pad = 4 - (current_slot & 3);
+                for _ in 0..pad {
+                    writeln!(out, "    float _instance_pad_{};", pad_idx).ok();
+                    pad_idx += 1;
+                    current_slot += 1;
                 }
             }
         }
