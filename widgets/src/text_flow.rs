@@ -929,6 +929,9 @@ impl Widget for TextFlow {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Text);
             }
+            Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Default);
+            }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.set_key_focus(self.area);
                 if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
