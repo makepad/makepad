@@ -101,9 +101,24 @@ impl Cx {
             self.passes[*draw_pass_id].set_time(with_ios_app(|app| app.time_now() as f32));
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
-                CxDrawPassParent::Window(_window_id) => {
+                CxDrawPassParent::Window(window_id) => {
+                    // Skip popup window passes — drawn as overlays after parent.
+                    if self.windows[window_id].is_popup {
+                        continue;
+                    }
                     let mtk_view = with_ios_app(|app| app.mtk_view.unwrap());
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
+
+                    // Draw popup window passes as overlays on the same MTKView
+                    for popup_pass_id in &passes_todo.clone() {
+                        if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent {
+                            let pw = &self.windows[pw_id];
+                            if pw.is_popup && pw.popup_parent == Some(window_id) {
+                                let mtk_view = with_ios_app(|app| app.mtk_view.unwrap());
+                                self.draw_pass(*popup_pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
+                            }
+                        }
+                    }
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
@@ -265,6 +280,12 @@ impl Cx {
                 self.handle_repaint(metal_cx);
             }
             IosEvent::TouchUpdate(e) => {
+                // Check for outside-click popup dismiss on touch start
+                if e.touches.iter().any(|t| t.state == crate::event::TouchState::Start) {
+                    if let Some(popup_window_id) = self.find_popup_to_dismiss_on_touch(&e.touches) {
+                        self.dismiss_popup_window(popup_window_id, crate::event::PopupDismissReason::OutsideClick);
+                    }
+                }
                 self.fingers.process_touch_update_start(e.time, &e.touches);
                 let e = Event::TouchUpdate(e);
                 self.call_event_handler(&e);
@@ -279,6 +300,10 @@ impl Cx {
                 self.call_event_handler(&Event::LongPress(e.into()));
             }
             IosEvent::MouseDown(e) => {
+                // Check for outside-click popup dismiss
+                if let Some(popup_window_id) = self.find_popup_to_dismiss_on_mouse(e.abs) {
+                    self.dismiss_popup_window(popup_window_id, crate::event::PopupDismissReason::OutsideClick);
+                }
                 self.fingers.process_tap_count(e.abs, e.time);
                 self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()))
@@ -297,6 +322,9 @@ impl Cx {
             IosEvent::Scroll(e) => self.call_event_handler(&Event::Scroll(e.into())),
             IosEvent::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
             IosEvent::TextRangeReplace(e) => self.call_event_handler(&Event::TextRangeReplace(e)),
+            IosEvent::SelectionHandleDrag(e) => {
+                self.call_event_handler(&Event::SelectionHandleDrag(e))
+            }
 
             IosEvent::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
@@ -338,6 +366,26 @@ impl Cx {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
                     window.window_geom = with_ios_app(|app| app.last_window_geom.clone());
+                    window.is_created = true;
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let mut geom = with_ios_app(|app| app.last_window_geom.clone());
+                    geom.position = position;
+                    geom.inner_size = size;
+                    geom.outer_size = size;
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = geom;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
                     window.is_created = true;
                 }
                 CxOsOp::ShowTextIME(_area, pos, config) => {
@@ -400,9 +448,15 @@ impl Cx {
                     with_ios_app(|app| app.copy_to_clipboard(&content));
                 }
                 CxOsOp::SetPrimarySelection(_) => {}
-                CxOsOp::ShowSelectionHandles { .. } => {}
-                CxOsOp::UpdateSelectionHandles { .. } => {}
-                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::ShowSelectionHandles { start, end } => {
+                    IosApp::show_selection_handles(start, end);
+                }
+                CxOsOp::UpdateSelectionHandles { start, end } => {
+                    IosApp::update_selection_handles(start, end);
+                }
+                CxOsOp::HideSelectionHandles => {
+                    IosApp::hide_selection_handles();
+                }
                 CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::FullscreenWindow(_window_id) => {
                     with_ios_app(|app| app.set_fullscreen(true));
@@ -467,6 +521,16 @@ impl Cx {
                 CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
                     if let Some(player) = self.os.video_players.get(&video_id) {
                         player.seek_to(position_ms);
+                    }
+                }
+                CxOsOp::CloseWindow(window_id) => {
+                    let window = &mut self.windows[window_id];
+                    if window.is_popup {
+                        window.is_created = false;
+                        window.is_popup = false;
+                        window.popup_parent = None;
+                        window.popup_position = None;
+                        window.popup_size = None;
                     }
                 }
                 e => {
@@ -586,6 +650,71 @@ impl Cx {
 
             let () = msg_send![av_audio_session, requestRecordPermission: &completion_handler];
         }
+    }
+}
+
+impl Cx {
+    fn find_popup_to_dismiss_on_touch(&self, touches: &[crate::event::TouchPoint]) -> Option<crate::window::WindowId> {
+        use crate::window::CxWindowPool;
+        for i in (0..self.windows.len()).rev() {
+            let window_id = CxWindowPool::from_usize(i);
+            let window = &self.windows[window_id];
+            if !window.is_created || !window.is_popup {
+                continue;
+            }
+            if let (Some(pos), Some(size)) = (window.popup_position, window.popup_size) {
+                let rect = Rect { pos, size };
+                for touch in touches {
+                    if touch.state == crate::event::TouchState::Start && !rect.contains(touch.abs) {
+                        return Some(window_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn find_popup_to_dismiss_on_mouse(&self, abs: DVec2) -> Option<crate::window::WindowId> {
+        use crate::window::CxWindowPool;
+        for i in (0..self.windows.len()).rev() {
+            let window_id = CxWindowPool::from_usize(i);
+            let window = &self.windows[window_id];
+            if !window.is_created || !window.is_popup {
+                continue;
+            }
+            if let (Some(pos), Some(size)) = (window.popup_position, window.popup_size) {
+                let rect = Rect { pos, size };
+                if !rect.contains(abs) {
+                    return Some(window_id);
+                }
+            }
+        }
+        None
+    }
+
+    fn dismiss_popup_window(&mut self, window_id: crate::window::WindowId, reason: crate::event::PopupDismissReason) {
+        use crate::window::CxWindowPool;
+        // First dismiss any child popups
+        let children: Vec<crate::window::WindowId> = (0..self.windows.len())
+            .filter_map(|i| {
+                let child_id = CxWindowPool::from_usize(i);
+                let w = &self.windows[child_id];
+                if w.is_created && w.is_popup && w.popup_parent == Some(window_id) {
+                    Some(child_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for child_id in children {
+            self.dismiss_popup_window(child_id, crate::event::PopupDismissReason::ParentClosed);
+        }
+        self.call_event_handler(&Event::PopupDismissed(crate::event::PopupDismissedEvent {
+            window_id,
+            reason,
+        }));
+        self.call_event_handler(&Event::WindowClosed(crate::event::WindowClosedEvent { window_id }));
+        self.windows[window_id].is_created = false;
     }
 }
 

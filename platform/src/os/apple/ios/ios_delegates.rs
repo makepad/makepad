@@ -1,5 +1,5 @@
 use crate::{
-    event::{Ease, TouchState, VirtualKeyboardEvent},
+    event::{Ease, SelectionHandleKind, SelectionHandlePhase, TouchState, VirtualKeyboardEvent},
     makepad_math::*,
     os::{
         apple::apple_sys::*,
@@ -275,8 +275,8 @@ pub fn define_mtk_view_delegate() -> *const Class {
         IosApp::draw_in_rect();
     }
 
-    extern "C" fn draw_size_will_change(_this: &Object, _: Sel, _: ObjcId, _: ObjcId) {
-        IosApp::draw_size_will_change();
+    extern "C" fn draw_size_will_change(_this: &Object, _: Sel, view: ObjcId, size: NSSize) {
+        IosApp::draw_size_will_change(view, size);
     }
     unsafe {
         decl.add_method(
@@ -285,7 +285,7 @@ pub fn define_mtk_view_delegate() -> *const Class {
         );
         decl.add_method(
             sel!(mtkView: drawableSizeWillChange:),
-            draw_size_will_change as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+            draw_size_will_change as extern "C" fn(&Object, Sel, ObjcId, NSSize),
         );
     }
 
@@ -336,6 +336,64 @@ pub fn define_gesture_recognizer_handler() -> *const Class {
     }
 
     return decl.register();
+}
+
+pub fn define_selection_handle_gesture_handler() -> *const Class {
+    let mut decl =
+        ClassDecl::new("SelectionHandlePanRecognizerHandler", class!(NSObject)).unwrap();
+
+    decl.add_ivar::<i64>("handle_kind");
+
+    extern "C" fn handle_selection_handle_pan(
+        this: &Object,
+        _: Sel,
+        gesture_recognizer: ObjcId,
+    ) {
+        unsafe {
+            let state: i64 = msg_send![gesture_recognizer, state];
+            let phase = match state {
+                1 => Some(SelectionHandlePhase::Begin),  // UIGestureRecognizerStateBegan
+                2 => Some(SelectionHandlePhase::Move),   // UIGestureRecognizerStateChanged
+                3 | 4 | 5 => Some(SelectionHandlePhase::End), // ended/cancelled/failed
+                _ => None,
+            };
+            let Some(phase) = phase else {
+                return;
+            };
+
+            let handle_kind_raw: i64 = *this.get_ivar("handle_kind");
+            let handle = if handle_kind_raw == 0 {
+                SelectionHandleKind::Start
+            } else {
+                SelectionHandleKind::End
+            };
+
+            let handle_view: ObjcId = msg_send![gesture_recognizer, view];
+            if handle_view == nil {
+                return;
+            }
+            let host_view: ObjcId = msg_send![handle_view, superview];
+            if host_view == nil {
+                return;
+            }
+            let location: NSPoint = msg_send![gesture_recognizer, locationInView: host_view];
+
+            // Keep the dragged handle visually under the finger; Rust will send authoritative
+            // positions back through update_selection_handles.
+            let () = msg_send![handle_view, setCenter: location];
+
+            IosApp::send_selection_handle_drag(handle, phase, dvec2(location.x, location.y));
+        }
+    }
+
+    unsafe {
+        decl.add_method(
+            sel!(handleSelectionHandlePan:),
+            handle_selection_handle_pan as extern "C" fn(&Object, Sel, ObjcId),
+        );
+    }
+
+    decl.register()
 }
 
 pub fn define_ios_timer_delegate() -> *const Class {

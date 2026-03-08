@@ -136,6 +136,7 @@ pub enum Event {
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
+    PopupDismissed(PopupDismissedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
     VirtualKeyboard(VirtualKeyboardEvent),
     ClearAtlasses,
@@ -314,6 +315,7 @@ impl Event {
             57 => "XrLocal",
             58 => "ImeAction",
             60 => "Custom",
+            61 => "PopupDismissed",
             62 => "SelectionHandleDrag",
             _ => panic!(),
         }
@@ -344,6 +346,7 @@ impl Event {
             Self::WindowGeomChange(_) => 17,
             Self::VirtualKeyboard(_) => 18,
             Self::ClearAtlasses => 19,
+            Self::PopupDismissed(_) => 61,
 
             Self::MouseDown(_) => 20,
             Self::MouseMove(_) => 21,
