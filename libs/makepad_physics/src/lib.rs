@@ -377,6 +377,813 @@ mod tests {
         ke
     }
 
+    #[test]
+    #[ignore]
+    fn debug_kicked_tower_profile() {
+        let mut world = PhysicsWorld::new(vec3f(0.0, -9.81, 0.0), 1.0 / 60.0);
+        let mut ops = Vec::new();
+        let grid = 4usize;
+        let height = 8usize;
+        let spacing = 1.1f32;
+        let half = 0.5f32;
+        let mut kick_body = 0usize;
+        let mut body_index = 0usize;
+
+        for y in 0..height {
+            for x in 0..grid {
+                for z in 0..grid {
+                    if x == grid - 1 && y == height / 2 && z == grid / 2 {
+                        kick_body = body_index;
+                    }
+                    ops.push(PhysicsOp::SpawnDynamic {
+                        position: vec3f(
+                            (x as f32 - grid as f32 / 2.0 + 0.5) * spacing,
+                            2.0 + y as f32 * spacing,
+                            (z as f32 - grid as f32 / 2.0 + 0.5) * spacing,
+                        ),
+                        half_extents: vec3f(half, half, half),
+                        velocity: Vec3f::default(),
+                        density: 1.0,
+                    });
+                    body_index += 1;
+                }
+            }
+        }
+
+        world.step(&ops);
+        for _ in 0..90 {
+            world.step(&[]);
+        }
+        world.step(&[PhysicsOp::ApplyImpulse {
+            body: kick_body,
+            impulse: vec3f(9.0, 5.5, 2.0),
+        }]);
+
+        for frame in 0..1200 {
+            world.step(&[]);
+            if frame % 120 == 119 {
+                let max_speed = world
+                    .bodies
+                    .iter()
+                    .map(|body| body.linear_velocity.length())
+                    .fold(0.0f32, f32::max);
+                println!("frame={} max_speed={}", frame + 1, max_speed);
+            }
+        }
+
+        let mut ranked: Vec<_> = world
+            .bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                (
+                    i,
+                    body.pose.position,
+                    body.pose.orientation,
+                    body.linear_velocity.length(),
+                    body.angular_velocity.length(),
+                )
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
+
+        for (i, position, orientation, lin, ang) in ranked.into_iter().take(12) {
+            println!(
+                "body={} pos=({:.3},{:.3},{:.3}) rot=({:.4},{:.4},{:.4},{:.4}) lin={:.4} ang={:.4}",
+                i,
+                position.x,
+                position.y,
+                position.z,
+                orientation.x,
+                orientation.y,
+                orientation.z,
+                orientation.w,
+                lin,
+                ang
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn debug_single_escape_cube() {
+        let mut world = PhysicsWorld::new(vec3f(0.0, -9.81, 0.0), 1.0 / 60.0);
+        world.step(&[PhysicsOp::SpawnDynamic {
+            position: vec3f(18.092, 0.996, -76.012),
+            half_extents: vec3f(0.5, 0.5, 0.5),
+            velocity: Vec3f::default(),
+            density: 1.0,
+        }]);
+
+        let body = &mut world.bodies[0];
+        body.pose.orientation = Quat {
+            x: -0.4656,
+            y: 0.1799,
+            z: 0.8665,
+            w: 0.0089,
+        };
+        body.linear_velocity = vec3f(4.5503, 0.0, 0.0);
+        body.angular_velocity = vec3f(0.0, 0.0, 6.0433);
+        body.wake_up();
+
+        for frame in 0..600 {
+            world.step(&[]);
+            if frame % 60 == 59 {
+                let body = &world.bodies[0];
+                println!(
+                    "frame={} pos=({:.3},{:.3},{:.3}) lin={:.4} ang={:.4}",
+                    frame + 1,
+                    body.pose.position.x,
+                    body.pose.position.y,
+                    body.pose.position.z,
+                    body.linear_velocity.length(),
+                    body.angular_velocity.length()
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn debug_single_escape_cube_vs_rapier() {
+        use rapier3d::prelude::*;
+
+        fn rvec(x: f32, y: f32, z: f32) -> rapier3d::math::Vector {
+            rapier3d::math::Vector::new(x, y, z)
+        }
+
+        let mut our_world = PhysicsWorld::new(vec3f(0.0, -9.81, 0.0), 1.0 / 60.0);
+        our_world.step(&[PhysicsOp::SpawnDynamic {
+            position: vec3f(18.092, 0.996, -76.012),
+            half_extents: vec3f(0.5, 0.5, 0.5),
+            velocity: Vec3f::default(),
+            density: 1.0,
+        }]);
+        {
+            let body = &mut our_world.bodies[0];
+            body.pose.orientation = Quat {
+                x: -0.4656,
+                y: 0.1799,
+                z: 0.8665,
+                w: 0.0089,
+            };
+            body.linear_velocity = vec3f(4.5503, 0.0, 0.0);
+            body.angular_velocity = vec3f(0.0, 0.0, 6.0433);
+            body.wake_up();
+        }
+
+        let mut bodies = RigidBodySet::new();
+        let mut colliders = ColliderSet::new();
+        let mut impulse_joints = ImpulseJointSet::new();
+        let mut multibody_joints = MultibodyJointSet::new();
+        let mut islands = IslandManager::new();
+        let mut broad_phase = BroadPhaseBvh::new();
+        let mut narrow_phase = NarrowPhase::new();
+        let mut ccd_solver = CCDSolver::new();
+        let mut pipeline = PhysicsPipeline::new();
+        let gravity = rvec(0.0, -9.81, 0.0);
+        let integration_parameters = IntegrationParameters {
+            dt: 1.0 / 60.0,
+            ..IntegrationParameters::default()
+        };
+
+        let ground = bodies.insert(RigidBodyBuilder::fixed().build());
+        let ground_collider = ColliderBuilder::new(SharedShape::halfspace(rvec(0.0, 1.0, 0.0)))
+            .friction(0.5)
+            .restitution(0.0);
+        let ground_collider = colliders.insert_with_parent(ground_collider, ground, &mut bodies);
+
+        let cube = bodies.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(rvec(18.092, 0.996, -76.012))
+                .can_sleep(false)
+                .build(),
+        );
+        let cube_collider = ColliderBuilder::cuboid(0.5, 0.5, 0.5)
+            .density(1.0)
+            .friction(0.5)
+            .restitution(0.0);
+        let cube_collider = colliders.insert_with_parent(cube_collider, cube, &mut bodies);
+        {
+            let body = bodies.get_mut(cube).unwrap();
+            body.set_rotation(
+                Rotation::from_xyzw(-0.4656, 0.1799, 0.8665, 0.0089).normalize(),
+                true,
+            );
+            body.set_linvel(rvec(4.5503, 0.0, 0.0), true);
+            body.set_angvel(rvec(0.0, 0.0, 6.0433), true);
+        }
+
+        let mut our_aabbs = Vec::new();
+        let mut our_pairs = Vec::new();
+        let mut our_manifolds = Vec::new();
+        let mut our_solver_contacts = Vec::new();
+        let mut our_solver_frictions = Vec::new();
+        crate::broad_phase::broad_phase(&our_world.bodies, &mut our_aabbs, &mut our_pairs);
+        crate::narrow_phase::narrow_phase(
+            &our_world.bodies,
+            &our_pairs,
+            our_world.ground_y,
+            &[],
+            &mut our_manifolds,
+        );
+        crate::solver::prepare_contacts(
+            &our_world.bodies,
+            &our_manifolds,
+            (1.0 / 60.0) / 4.0,
+            &mut our_solver_contacts,
+            &mut our_solver_frictions,
+        );
+        fn step_our_from_state(
+            position: Vec3f,
+            orientation: Quat,
+            linear_velocity: Vec3f,
+            angular_velocity: Vec3f,
+        ) -> (Vec3f, f32, f32) {
+            let mut world = PhysicsWorld::new(vec3f(0.0, -9.81, 0.0), 1.0 / 60.0);
+            let mut body =
+                crate::rigid_body::RigidBody::new_dynamic(position, vec3f(0.5, 0.5, 0.5), 1.0);
+            body.pose.orientation = orientation;
+            body.linear_velocity = linear_velocity;
+            body.angular_velocity = angular_velocity;
+            body.wake_up();
+            world.bodies.push(body);
+            world.step(&[]);
+            let body = &world.bodies[0];
+            (
+                body.pose.position,
+                body.linear_velocity.length(),
+                body.angular_velocity.length(),
+            )
+        }
+        fn step_our_with_history(
+            world: &mut PhysicsWorld,
+            position: Vec3f,
+            orientation: Quat,
+            linear_velocity: Vec3f,
+            angular_velocity: Vec3f,
+        ) -> (Vec3f, f32, f32) {
+            if world.bodies.is_empty() {
+                let mut body = crate::rigid_body::RigidBody::new_dynamic(
+                    position,
+                    vec3f(0.5, 0.5, 0.5),
+                    1.0,
+                );
+                body.pose.orientation = orientation;
+                body.linear_velocity = linear_velocity;
+                body.angular_velocity = angular_velocity;
+                body.wake_up();
+                world.bodies.push(body);
+            } else {
+                let body = &mut world.bodies[0];
+                body.pose.position = position;
+                body.pose.orientation = orientation;
+                body.linear_velocity = linear_velocity;
+                body.angular_velocity = angular_velocity;
+                body.sleeping = false;
+                body.sleep_time = 0.0;
+            }
+
+            world.step(&[]);
+            let body = &world.bodies[0];
+            (
+                body.pose.position,
+                body.linear_velocity.length(),
+                body.angular_velocity.length(),
+            )
+        }
+        println!(
+            "initial ours manifolds={} points={} solver_contacts={} friction_contacts={}",
+            our_manifolds.len(),
+            our_manifolds.first().map(|m| m.num_points).unwrap_or(0),
+            our_solver_contacts.len(),
+            our_solver_frictions
+                .first()
+                .map(|f| f.num_contacts)
+                .unwrap_or(0)
+        );
+        if let Some(manifold) = our_manifolds.first() {
+            for i in 0..manifold.num_points {
+                let point = &manifold.points[i];
+                println!(
+                    "  ours_contact[{}] p_a=({:.3},{:.3},{:.3}) p_b=({:.3},{:.3},{:.3}) pen={:.5}",
+                    i,
+                    point.world_point_a.x,
+                    point.world_point_a.y,
+                    point.world_point_a.z,
+                    point.world_point_b.x,
+                    point.world_point_b.y,
+                    point.world_point_b.z,
+                    point.penetration,
+                );
+            }
+        }
+
+        let mut rapier_frame15: Option<(Vec3f, Quat, Vec3f, Vec3f)> = None;
+        let mut rapier_frame19: Option<(Vec3f, Quat, Vec3f, Vec3f)> = None;
+        let mut rapier_frame42: Option<(Vec3f, Quat, Vec3f, Vec3f)> = None;
+        let mut rapier_frame49: Option<(Vec3f, Quat, Vec3f, Vec3f)> = None;
+        let mut our_history_probe = PhysicsWorld::new(vec3f(0.0, -9.81, 0.0), 1.0 / 60.0);
+        let mut max_history_pos_err = 0.0f32;
+        let mut max_history_lin_err = 0.0f32;
+        let mut max_history_ang_err = 0.0f32;
+        let mut max_history_frame = 0usize;
+
+        for frame in 0..600 {
+            let rapier_body_before = bodies.get(cube).unwrap();
+            let contact_pair_before = narrow_phase.contact_pair(ground_collider, cube_collider);
+            let rapier_rotation_before = rapier_body_before.rotation();
+            let rapier_state_before = (
+                vec3f(
+                    rapier_body_before.translation().x,
+                    rapier_body_before.translation().y,
+                    rapier_body_before.translation().z,
+                ),
+                Quat {
+                    x: rapier_rotation_before.x,
+                    y: rapier_rotation_before.y,
+                    z: rapier_rotation_before.z,
+                    w: rapier_rotation_before.w,
+                },
+                vec3f(
+                    rapier_body_before.linvel().x,
+                    rapier_body_before.linvel().y,
+                    rapier_body_before.linvel().z,
+                ),
+                vec3f(
+                    rapier_body_before.angvel().x,
+                    rapier_body_before.angvel().y,
+                    rapier_body_before.angvel().z,
+                ),
+            );
+            if frame == 19 || frame == 42 {
+                let mut probe_body = crate::rigid_body::RigidBody::new_dynamic(
+                    rapier_state_before.0,
+                    vec3f(0.5, 0.5, 0.5),
+                    1.0,
+                );
+                probe_body.pose.orientation = rapier_state_before.1;
+                probe_body.linear_velocity = rapier_state_before.2;
+                probe_body.angular_velocity = rapier_state_before.3;
+                let probe_bodies = [probe_body];
+                let mut probe_aabbs = Vec::new();
+                let mut probe_pairs = Vec::new();
+                let mut probe_manifolds = Vec::new();
+                let mut probe_solver_contacts = Vec::new();
+                let mut probe_solver_frictions = Vec::new();
+                crate::broad_phase::broad_phase(&probe_bodies, &mut probe_aabbs, &mut probe_pairs);
+                crate::narrow_phase::narrow_phase(
+                    &probe_bodies,
+                    &probe_pairs,
+                    0.0,
+                    &[],
+                    &mut probe_manifolds,
+                );
+                crate::solver::prepare_contacts(
+                    &probe_bodies,
+                    &probe_manifolds,
+                    (1.0 / 60.0) / 4.0,
+                    &mut probe_solver_contacts,
+                    &mut probe_solver_frictions,
+                );
+                println!(
+                    "prestep_frame={} rapier_points={} rapier_solver_contacts={} probe_points={} probe_solver_contacts={}",
+                    frame,
+                    contact_pair_before
+                        .and_then(|pair| pair.manifolds.first())
+                        .map(|m| m.points.len())
+                        .unwrap_or(0),
+                    contact_pair_before
+                        .and_then(|pair| pair.manifolds.first())
+                        .map(|m| m.data.solver_contacts.len())
+                        .unwrap_or(0),
+                    probe_manifolds.first().map(|m| m.num_points).unwrap_or(0),
+                    probe_solver_contacts.len(),
+                );
+                if let Some(manifold) = contact_pair_before.and_then(|pair| pair.manifolds.first()) {
+                    for (i, point) in manifold.points.iter().enumerate() {
+                        println!(
+                            "  rapier_pre_contact[{}] p1=({:.6},{:.6},{:.6}) p2=({:.6},{:.6},{:.6}) dist={:.6}",
+                            i,
+                            point.local_p1.x,
+                            point.local_p1.y,
+                            point.local_p1.z,
+                            point.local_p2.x,
+                            point.local_p2.y,
+                            point.local_p2.z,
+                            point.dist,
+                        );
+                    }
+                    for (i, contact) in manifold.data.solver_contacts.iter().enumerate() {
+                        println!(
+                            "  rapier_pre_solver[{}] point=({:.6},{:.6},{:.6}) dist={:.6} warm_n={:.6}",
+                            i,
+                            contact.point.x,
+                            contact.point.y,
+                            contact.point.z,
+                            contact.dist,
+                            contact.warmstart_impulse,
+                        );
+                    }
+                }
+                if let Some(manifold) = probe_manifolds.first() {
+                    for i in 0..manifold.num_points {
+                        let point = &manifold.points[i];
+                        println!(
+                            "  probe_pre_contact[{}] pa=({:.6},{:.6},{:.6}) pb=({:.6},{:.6},{:.6}) pen={:.6}",
+                            i,
+                            point.local_point_a.x,
+                            point.local_point_a.y,
+                            point.local_point_a.z,
+                            point.local_point_b.x,
+                            point.local_point_b.y,
+                            point.local_point_b.z,
+                            point.penetration,
+                        );
+                    }
+                }
+                for (i, contact) in probe_solver_contacts.iter().enumerate() {
+                    println!(
+                        "  probe_pre_solver[{}] point_index={} dist={:.6} local_p1=({:.6},{:.6},{:.6}) local_p2=({:.6},{:.6},{:.6}) r={:.6}",
+                        i,
+                        contact.point_index,
+                        contact.dist,
+                        contact.local_p1.x,
+                        contact.local_p1.y,
+                        contact.local_p1.z,
+                        contact.local_p2.x,
+                        contact.local_p2.y,
+                        contact.local_p2.z,
+                        contact.r_normal,
+                    );
+                }
+            }
+
+            our_world.step(&[]);
+            let (history_probe_pos, history_probe_lin, history_probe_ang) = step_our_with_history(
+                &mut our_history_probe,
+                rapier_state_before.0,
+                rapier_state_before.1,
+                rapier_state_before.2,
+                rapier_state_before.3,
+            );
+            pipeline.step(
+                gravity,
+                &integration_parameters,
+                &mut islands,
+                &mut broad_phase,
+                &mut narrow_phase,
+                &mut bodies,
+                &mut colliders,
+                &mut impulse_joints,
+                &mut multibody_joints,
+                &mut ccd_solver,
+                &(),
+                &(),
+            );
+
+            let mut our_aabbs = Vec::new();
+            let mut our_pairs = Vec::new();
+            let mut our_manifolds = Vec::new();
+            let mut our_solver_contacts = Vec::new();
+            let mut our_solver_frictions = Vec::new();
+            crate::broad_phase::broad_phase(&our_world.bodies, &mut our_aabbs, &mut our_pairs);
+            crate::narrow_phase::narrow_phase(
+                &our_world.bodies,
+                &our_pairs,
+                our_world.ground_y,
+                &[],
+                &mut our_manifolds,
+            );
+            crate::solver::prepare_contacts(
+                &our_world.bodies,
+                &our_manifolds,
+                (1.0 / 60.0) / 4.0,
+                &mut our_solver_contacts,
+                &mut our_solver_frictions,
+            );
+
+            let contact_pair = narrow_phase.contact_pair(ground_collider, cube_collider).unwrap();
+
+            if frame == 0 {
+                let contact_pair = narrow_phase.contact_pair(ground_collider, cube_collider).unwrap();
+                println!(
+                    "frame=1 rapier manifolds={} points={} solver_contacts={}",
+                    contact_pair.manifolds.len(),
+                    contact_pair.manifolds.first().map(|m| m.points.len()).unwrap_or(0),
+                    contact_pair
+                        .manifolds
+                        .first()
+                        .map(|m| m.data.solver_contacts.len())
+                        .unwrap_or(0),
+                );
+                if let Some(manifold) = contact_pair.manifolds.first() {
+                    for (i, point) in manifold.points.iter().enumerate() {
+                        let p1 = point.local_p1;
+                        let p2 = point.local_p2;
+                        println!(
+                            "  rapier_contact[{}] p1=({:.3},{:.3},{:.3}) p2=({:.3},{:.3},{:.3}) dist={:.5}",
+                            i, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, point.dist
+                        );
+                    }
+                }
+            }
+
+            if frame < 60 && ((frame + 1) % 10 == 0 || !our_solver_contacts.is_empty()) {
+                let rapier_body = bodies.get(cube).unwrap();
+                let rapier_rot = rapier_body.rotation();
+                let rapier_linvel = rapier_body.linvel();
+                let rapier_angvel = rapier_body.angvel();
+                let mut probe_body = crate::rigid_body::RigidBody::new_dynamic(
+                    vec3f(0.0, 0.0, 0.0),
+                    vec3f(0.5, 0.5, 0.5),
+                    1.0,
+                );
+                probe_body.pose.position = vec3f(
+                    rapier_body.translation().x,
+                    rapier_body.translation().y,
+                    rapier_body.translation().z,
+                );
+                probe_body.pose.orientation = Quat {
+                    x: rapier_rot.x,
+                    y: rapier_rot.y,
+                    z: rapier_rot.z,
+                    w: rapier_rot.w,
+                };
+                probe_body.linear_velocity = vec3f(rapier_linvel.x, rapier_linvel.y, rapier_linvel.z);
+                probe_body.angular_velocity =
+                    vec3f(rapier_angvel.x, rapier_angvel.y, rapier_angvel.z);
+                let probe_bodies = [probe_body];
+
+                let mut probe_aabbs = Vec::new();
+                let mut probe_pairs = Vec::new();
+                let mut probe_manifolds = Vec::new();
+                let mut probe_solver_contacts = Vec::new();
+                let mut probe_solver_frictions = Vec::new();
+                crate::broad_phase::broad_phase(&probe_bodies, &mut probe_aabbs, &mut probe_pairs);
+                crate::narrow_phase::narrow_phase(
+                    &probe_bodies,
+                    &probe_pairs,
+                    0.0,
+                    &[],
+                    &mut probe_manifolds,
+                );
+                crate::solver::prepare_contacts(
+                    &probe_bodies,
+                    &probe_manifolds,
+                    (1.0 / 60.0) / 4.0,
+                    &mut probe_solver_contacts,
+                    &mut probe_solver_frictions,
+                );
+                println!(
+                    "contact_frame={} ours_points={} ours_solver_contacts={} rapier_points={} rapier_solver_contacts={} probe_points={} probe_solver_contacts={}",
+                    frame + 1,
+                    our_manifolds.first().map(|m| m.num_points).unwrap_or(0),
+                    our_solver_contacts.len(),
+                    contact_pair.manifolds.first().map(|m| m.points.len()).unwrap_or(0),
+                    contact_pair
+                        .manifolds
+                        .first()
+                        .map(|m| m.data.solver_contacts.len())
+                        .unwrap_or(0),
+                    probe_manifolds.first().map(|m| m.num_points).unwrap_or(0),
+                    probe_solver_contacts.len(),
+                );
+            }
+
+            let rapier_body = bodies.get(cube).unwrap();
+            let rapier_rotation = rapier_body.rotation();
+            let rapier_state = (
+                vec3f(
+                    rapier_body.translation().x,
+                    rapier_body.translation().y,
+                    rapier_body.translation().z,
+                ),
+                Quat {
+                    x: rapier_rotation.x,
+                    y: rapier_rotation.y,
+                    z: rapier_rotation.z,
+                    w: rapier_rotation.w,
+                },
+                vec3f(
+                    rapier_body.linvel().x,
+                    rapier_body.linvel().y,
+                    rapier_body.linvel().z,
+                ),
+                vec3f(
+                    rapier_body.angvel().x,
+                    rapier_body.angvel().y,
+                    rapier_body.angvel().z,
+                ),
+            );
+            if frame + 1 == 15 {
+                rapier_frame15 = Some(rapier_state);
+            }
+            if frame + 1 == 19 {
+                rapier_frame19 = Some(rapier_state);
+            }
+            if frame + 1 == 16 {
+                if let Some((position, orientation, linvel, angvel)) = rapier_frame15 {
+                    let (our_pos, our_lin, our_ang) =
+                        step_our_from_state(position, orientation, linvel, angvel);
+                    println!(
+                        "single_step_15_to_16 our_pos=({:.3},{:.3},{:.3}) our_lin={:.4} our_ang={:.4} rapier_pos=({:.3},{:.3},{:.3}) rapier_lin={:.4} rapier_ang={:.4}",
+                        our_pos.x,
+                        our_pos.y,
+                        our_pos.z,
+                        our_lin,
+                        our_ang,
+                        rapier_state.0.x,
+                        rapier_state.0.y,
+                        rapier_state.0.z,
+                        rapier_state.2.length(),
+                        rapier_state.3.length(),
+                    );
+                    println!(
+                        "history_step_15_to_16 our_pos=({:.3},{:.3},{:.3}) our_lin={:.4} our_ang={:.4} rapier_pos=({:.3},{:.3},{:.3}) rapier_lin={:.4} rapier_ang={:.4}",
+                        history_probe_pos.x,
+                        history_probe_pos.y,
+                        history_probe_pos.z,
+                        history_probe_lin,
+                        history_probe_ang,
+                        rapier_state.0.x,
+                        rapier_state.0.y,
+                        rapier_state.0.z,
+                        rapier_state.2.length(),
+                        rapier_state.3.length(),
+                    );
+                }
+            }
+            if frame + 1 == 20 {
+                if let Some((position, orientation, linvel, angvel)) = rapier_frame19 {
+                    let (our_pos, our_lin, our_ang) =
+                        step_our_from_state(position, orientation, linvel, angvel);
+                    println!(
+                        "single_step_19_to_20 our_pos=({:.3},{:.3},{:.3}) our_lin={:.4} our_ang={:.4} rapier_pos=({:.3},{:.3},{:.3}) rapier_lin={:.4} rapier_ang={:.4}",
+                        our_pos.x,
+                        our_pos.y,
+                        our_pos.z,
+                        our_lin,
+                        our_ang,
+                        rapier_state.0.x,
+                        rapier_state.0.y,
+                        rapier_state.0.z,
+                        rapier_state.2.length(),
+                        rapier_state.3.length(),
+                    );
+                    println!(
+                        "history_step_19_to_20 our_pos=({:.3},{:.3},{:.3}) our_lin={:.4} our_ang={:.4} rapier_pos=({:.3},{:.3},{:.3}) rapier_lin={:.4} rapier_ang={:.4}",
+                        history_probe_pos.x,
+                        history_probe_pos.y,
+                        history_probe_pos.z,
+                        history_probe_lin,
+                        history_probe_ang,
+                        rapier_state.0.x,
+                        rapier_state.0.y,
+                        rapier_state.0.z,
+                        rapier_state.2.length(),
+                        rapier_state.3.length(),
+                    );
+                }
+            }
+            if frame + 1 == 42 {
+                rapier_frame42 = Some(rapier_state);
+            }
+            if frame + 1 == 49 {
+                rapier_frame49 = Some(rapier_state);
+            }
+            if let Some(history_body) = our_history_probe.bodies.first() {
+                let pos_err = (history_body.pose.position - rapier_state.0).length();
+                let lin_err = (history_body.linear_velocity - rapier_state.2).length();
+                let ang_err = (history_body.angular_velocity - rapier_state.3).length();
+                if pos_err > max_history_pos_err
+                    || lin_err > max_history_lin_err
+                    || ang_err > max_history_ang_err
+                {
+                    max_history_pos_err = max_history_pos_err.max(pos_err);
+                    max_history_lin_err = max_history_lin_err.max(lin_err);
+                    max_history_ang_err = max_history_ang_err.max(ang_err);
+                    max_history_frame = frame + 1;
+                    println!(
+                        "history_probe_error frame={} pos_err={:.6} lin_err={:.6} ang_err={:.6} our_pos=({:.6},{:.6},{:.6}) our_lin=({:.6},{:.6},{:.6}) our_ang=({:.6},{:.6},{:.6}) rapier_pos=({:.6},{:.6},{:.6}) rapier_lin=({:.6},{:.6},{:.6}) rapier_ang=({:.6},{:.6},{:.6})",
+                        frame + 1,
+                        pos_err,
+                        lin_err,
+                        ang_err,
+                        history_body.pose.position.x,
+                        history_body.pose.position.y,
+                        history_body.pose.position.z,
+                        history_body.linear_velocity.x,
+                        history_body.linear_velocity.y,
+                        history_body.linear_velocity.z,
+                        history_body.angular_velocity.x,
+                        history_body.angular_velocity.y,
+                        history_body.angular_velocity.z,
+                        rapier_state.0.x,
+                        rapier_state.0.y,
+                        rapier_state.0.z,
+                        rapier_state.2.x,
+                        rapier_state.2.y,
+                        rapier_state.2.z,
+                        rapier_state.3.x,
+                        rapier_state.3.y,
+                        rapier_state.3.z,
+                    );
+                }
+            }
+            if frame + 1 == 50 {
+                if let Some((position, orientation, linvel, angvel)) = rapier_frame49 {
+                    let (our_pos, our_lin, our_ang) =
+                        step_our_from_state(position, orientation, linvel, angvel);
+                    println!(
+                        "single_step_49_to_50 our_pos=({:.3},{:.3},{:.3}) our_lin={:.4} our_ang={:.4} rapier_pos=({:.3},{:.3},{:.3}) rapier_lin={:.4} rapier_ang={:.4}",
+                        our_pos.x,
+                        our_pos.y,
+                        our_pos.z,
+                        our_lin,
+                        our_ang,
+                        rapier_state.0.x,
+                        rapier_state.0.y,
+                        rapier_state.0.z,
+                        rapier_state.2.length(),
+                        rapier_state.3.length(),
+                    );
+                    println!(
+                        "history_step_49_to_50 our_pos=({:.3},{:.3},{:.3}) our_lin={:.4} our_ang={:.4} rapier_pos=({:.3},{:.3},{:.3}) rapier_lin={:.4} rapier_ang={:.4}",
+                        history_probe_pos.x,
+                        history_probe_pos.y,
+                        history_probe_pos.z,
+                        history_probe_lin,
+                        history_probe_ang,
+                        rapier_state.0.x,
+                        rapier_state.0.y,
+                        rapier_state.0.z,
+                        rapier_state.2.length(),
+                        rapier_state.3.length(),
+                    );
+                }
+            }
+            if frame + 1 == 43 {
+                if let Some((position, orientation, linvel, angvel)) = rapier_frame42 {
+                    let (our_pos, our_lin, our_ang) =
+                        step_our_from_state(position, orientation, linvel, angvel);
+                    println!(
+                        "single_step_42_to_43 our_pos=({:.3},{:.3},{:.3}) our_lin={:.4} our_ang={:.4} rapier_pos=({:.3},{:.3},{:.3}) rapier_lin={:.4} rapier_ang={:.4}",
+                        our_pos.x,
+                        our_pos.y,
+                        our_pos.z,
+                        our_lin,
+                        our_ang,
+                        rapier_state.0.x,
+                        rapier_state.0.y,
+                        rapier_state.0.z,
+                        rapier_state.2.length(),
+                        rapier_state.3.length(),
+                    );
+                    println!(
+                        "history_step_42_to_43 our_pos=({:.3},{:.3},{:.3}) our_lin={:.4} our_ang={:.4} rapier_pos=({:.3},{:.3},{:.3}) rapier_lin={:.4} rapier_ang={:.4}",
+                        history_probe_pos.x,
+                        history_probe_pos.y,
+                        history_probe_pos.z,
+                        history_probe_lin,
+                        history_probe_ang,
+                        rapier_state.0.x,
+                        rapier_state.0.y,
+                        rapier_state.0.z,
+                        rapier_state.2.length(),
+                        rapier_state.3.length(),
+                    );
+                }
+            }
+
+            if frame % 60 == 59 {
+                let our_body = &our_world.bodies[0];
+                let rapier_body = bodies.get(cube).unwrap();
+                println!(
+                    "frame={} ours_pos=({:.3},{:.3},{:.3}) ours_lin={:.4} ours_ang={:.4} rapier_pos=({:.3},{:.3},{:.3}) rapier_lin={:.4} rapier_ang={:.4}",
+                    frame + 1,
+                    our_body.pose.position.x,
+                    our_body.pose.position.y,
+                    our_body.pose.position.z,
+                    our_body.linear_velocity.length(),
+                    our_body.angular_velocity.length(),
+                    rapier_body.translation().x,
+                    rapier_body.translation().y,
+                    rapier_body.translation().z,
+                    rapier_body.linvel().length(),
+                    rapier_body.angvel().length(),
+                );
+            }
+        }
+        println!(
+            "history_probe_max_error frame={} pos_err={:.6} lin_err={:.6} ang_err={:.6}",
+            max_history_frame,
+            max_history_pos_err,
+            max_history_lin_err,
+            max_history_ang_err,
+        );
+    }
+
     // ---- Determinism tests ----
 
     fn run_simulation(num_cubes_per_axis: usize, frames: usize) -> Vec<u64> {
