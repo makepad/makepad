@@ -13,13 +13,18 @@ enum GlslPackedFormat {
     SInt,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GlslPackedSource {
+    NumericFloat,
+    BitPackedFloat,
+}
+
 #[derive(Clone)]
 struct GlslPackedField {
     name: String,
     ty: ScriptPodType,
     slots: usize,
     offset: usize,
-    attr_format: GlslPackedFormat,
 }
 
 impl ShaderOutput {
@@ -175,29 +180,19 @@ impl ShaderOutput {
         instance_fields: &[GlslPackedField],
         out: &mut String,
     ) {
-        for (idx, format) in Self::glsl_collect_chunk_formats(geometry_fields)
-            .iter()
-            .enumerate()
-        {
-            writeln!(
-                out,
-                "in {} packed_geometry_{};",
-                Self::glsl_vertex_attr_vec_type(*format),
-                idx
-            )
-            .ok();
+        let geometry_slots = geometry_fields
+            .last()
+            .map(|field| field.offset + field.slots)
+            .unwrap_or(0);
+        let instance_slots = instance_fields
+            .last()
+            .map(|field| field.offset + field.slots)
+            .unwrap_or(0);
+        for idx in 0..Self::glsl_num_packed_vec4s(geometry_slots) {
+            writeln!(out, "in vec4 packed_geometry_{};", idx).ok();
         }
-        for (idx, format) in Self::glsl_collect_chunk_formats(instance_fields)
-            .iter()
-            .enumerate()
-        {
-            writeln!(
-                out,
-                "in {} packed_instance_{};",
-                Self::glsl_vertex_attr_vec_type(*format),
-                idx
-            )
-            .ok();
+        for idx in 0..Self::glsl_num_packed_vec4s(instance_slots) {
+            writeln!(out, "in vec4 packed_instance_{};", idx).ok();
         }
     }
 
@@ -237,10 +232,22 @@ impl ShaderOutput {
     ) {
         writeln!(out, "void main() {{").ok();
         for field in geometry_fields {
-            self.glsl_unpack_field_to_statements(vm, field, "packed_geometry_", out);
+            self.glsl_unpack_field_to_statements(
+                vm,
+                field,
+                "packed_geometry_",
+                GlslPackedSource::BitPackedFloat,
+                out,
+            );
         }
         for field in instance_fields {
-            self.glsl_unpack_field_to_statements(vm, field, "packed_instance_", out);
+            self.glsl_unpack_field_to_statements(
+                vm,
+                field,
+                "packed_instance_",
+                GlslPackedSource::BitPackedFloat,
+                out,
+            );
         }
         writeln!(out, "    vtx_pos = vec4(0.0, 0.0, 0.0, 1.0);").ok();
 
@@ -282,7 +289,13 @@ impl ShaderOutput {
     ) {
         writeln!(out, "void main() {{").ok();
         for field in varying_fields {
-            self.glsl_unpack_field_to_statements(vm, field, "packed_varying_", out);
+            self.glsl_unpack_field_to_statements(
+                vm,
+                field,
+                "packed_varying_",
+                GlslPackedSource::NumericFloat,
+                out,
+            );
         }
         let fragment_fn_name = self.backend.map_function_name("io_fragment");
         writeln!(out, "    {}();", fragment_fn_name).ok();
@@ -434,7 +447,7 @@ impl ShaderOutput {
             GlslPackedFormat::Float
         };
 
-        if attribute_packing && attr_format != GlslPackedFormat::Float && (*offset & 3) != 0 {
+        if attribute_packing && attr_format != GlslPackedFormat::Float && slots > 1 && (*offset & 3) != 0 {
             *offset += 4 - (*offset & 3);
         }
         out.push(GlslPackedField {
@@ -442,10 +455,9 @@ impl ShaderOutput {
             ty: io.ty,
             slots,
             offset: *offset,
-            attr_format,
         });
         *offset += slots;
-        if attribute_packing && attr_format != GlslPackedFormat::Float && (*offset & 3) != 0 {
+        if attribute_packing && attr_format != GlslPackedFormat::Float && slots > 1 && (*offset & 3) != 0 {
             *offset += 4 - (*offset & 3);
         }
     }
@@ -455,6 +467,7 @@ impl ShaderOutput {
         vm: &ScriptVm,
         field: &GlslPackedField,
         prefix: &str,
+        source: GlslPackedSource,
     ) -> String {
         let scalars = (0..field.slots)
             .map(|slot| Self::glsl_packed_component(prefix, field.offset + slot))
@@ -463,7 +476,7 @@ impl ShaderOutput {
         self.glsl_reconstruct_from_scalars(
             vm,
             field.ty,
-            field.attr_format,
+            source,
             &scalars,
             &mut scalar_index,
         )
@@ -482,6 +495,7 @@ impl ShaderOutput {
         vm: &ScriptVm,
         field: &GlslPackedField,
         prefix: &str,
+        source: GlslPackedSource,
         out: &mut String,
     ) {
         let pod_ty = vm.bx.heap.pod_type_ref(field.ty);
@@ -498,7 +512,7 @@ impl ShaderOutput {
                 let value_expr = self.glsl_reconstruct_inline(
                     vm,
                     &sub_field.ty,
-                    field.attr_format,
+                    source,
                     &scalars,
                     &mut scalar_index,
                 );
@@ -510,7 +524,7 @@ impl ShaderOutput {
                 .ok();
             }
         } else {
-            let value_expr = self.glsl_unpack_expr_for_field(vm, field, prefix);
+            let value_expr = self.glsl_unpack_expr_for_field(vm, field, prefix, source);
             writeln!(out, "    {} = {};", field.name, value_expr).ok();
         }
     }
@@ -519,7 +533,7 @@ impl ShaderOutput {
         &self,
         vm: &ScriptVm,
         ty: ScriptPodType,
-        source_format: GlslPackedFormat,
+        source: GlslPackedSource,
         scalars: &[String],
         scalar_index: &mut usize,
     ) -> String {
@@ -528,14 +542,14 @@ impl ShaderOutput {
             self_ref: ty,
             data: pod_ty.clone(),
         };
-        self.glsl_reconstruct_inline(vm, &inline, source_format, scalars, scalar_index)
+        self.glsl_reconstruct_inline(vm, &inline, source, scalars, scalar_index)
     }
 
     fn glsl_reconstruct_inline(
         &self,
         vm: &ScriptVm,
         ty: &ScriptPodTypeInline,
-        source_format: GlslPackedFormat,
+        source: GlslPackedSource,
         scalars: &[String],
         scalar_index: &mut usize,
     ) -> String {
@@ -546,7 +560,7 @@ impl ShaderOutput {
                     field_exprs.push(self.glsl_reconstruct_inline(
                         vm,
                         &field.ty,
-                        source_format,
+                        source,
                         scalars,
                         scalar_index,
                     ));
@@ -562,49 +576,31 @@ impl ShaderOutput {
                 let mut comps = Vec::with_capacity(dims);
                 let elem_ty = vec_ty.elem_ty();
                 for _ in 0..dims {
-                    let scalar =
-                        Self::glsl_take_scalar_or_zero(scalars, scalar_index, source_format);
-                    comps.push(Self::glsl_convert_scalar_expr(
-                        source_format,
-                        &elem_ty,
-                        &scalar,
-                    ));
+                    let scalar = Self::glsl_take_scalar_or_zero(scalars, scalar_index);
+                    comps.push(Self::glsl_convert_scalar_expr(source, &elem_ty, &scalar));
                 }
                 format!("{}({})", self.glsl_type_name_inline(ty), comps.join(", "))
             }
             ScriptPodTy::Mat(mat_ty) => {
                 let mut comps = Vec::new();
                 for _ in 0..mat_ty.dim() {
-                    let scalar =
-                        Self::glsl_take_scalar_or_zero(scalars, scalar_index, source_format);
-                    comps.push(Self::glsl_convert_scalar_expr(
-                        source_format,
-                        &ScriptPodTy::F32,
-                        &scalar,
-                    ));
+                    let scalar = Self::glsl_take_scalar_or_zero(scalars, scalar_index);
+                    comps.push(Self::glsl_convert_scalar_expr(source, &ScriptPodTy::F32, &scalar));
                 }
                 format!("{}({})", self.glsl_type_name_inline(ty), comps.join(", "))
             }
             scalar_ty => {
-                let scalar = Self::glsl_take_scalar_or_zero(scalars, scalar_index, source_format);
-                Self::glsl_convert_scalar_expr(source_format, scalar_ty, &scalar)
+                let scalar = Self::glsl_take_scalar_or_zero(scalars, scalar_index);
+                Self::glsl_convert_scalar_expr(source, scalar_ty, &scalar)
             }
         }
     }
 
-    fn glsl_take_scalar_or_zero(
-        scalars: &[String],
-        scalar_index: &mut usize,
-        source_format: GlslPackedFormat,
-    ) -> String {
+    fn glsl_take_scalar_or_zero(scalars: &[String], scalar_index: &mut usize) -> String {
         let value = scalars
             .get(*scalar_index)
             .cloned()
-            .unwrap_or_else(|| match source_format {
-                GlslPackedFormat::Float => "0.0".to_string(),
-                GlslPackedFormat::UInt => "0u".to_string(),
-                GlslPackedFormat::SInt => "0".to_string(),
-            });
+            .unwrap_or_else(|| "0.0".to_string());
         *scalar_index += 1;
         value
     }
@@ -667,32 +663,21 @@ impl ShaderOutput {
         }
     }
 
-    fn glsl_convert_scalar_expr(
-        source: GlslPackedFormat,
-        target: &ScriptPodTy,
-        expr: &str,
-    ) -> String {
+    fn glsl_convert_scalar_expr(source: GlslPackedSource, target: &ScriptPodTy, expr: &str) -> String {
         match source {
-            GlslPackedFormat::Float => match target {
+            GlslPackedSource::NumericFloat => match target {
                 ScriptPodTy::F32 | ScriptPodTy::F16 => expr.to_string(),
                 ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => format!("uint({})", expr),
                 ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => format!("int({})", expr),
                 ScriptPodTy::Bool => format!("({} != 0.0)", expr),
                 _ => format!("float({})", expr),
             },
-            GlslPackedFormat::UInt => match target {
-                ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => expr.to_string(),
-                ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => format!("int({})", expr),
-                ScriptPodTy::F32 | ScriptPodTy::F16 => format!("float({})", expr),
-                ScriptPodTy::Bool => format!("({} != 0u)", expr),
-                _ => format!("float({})", expr),
-            },
-            GlslPackedFormat::SInt => match target {
-                ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => expr.to_string(),
-                ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => format!("uint({})", expr),
-                ScriptPodTy::F32 | ScriptPodTy::F16 => format!("float({})", expr),
-                ScriptPodTy::Bool => format!("({} != 0)", expr),
-                _ => format!("float({})", expr),
+            GlslPackedSource::BitPackedFloat => match target {
+                ScriptPodTy::F32 | ScriptPodTy::F16 => expr.to_string(),
+                ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => format!("floatBitsToUint({})", expr),
+                ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => format!("floatBitsToInt({})", expr),
+                ScriptPodTy::Bool => format!("(floatBitsToUint({}) != 0u)", expr),
+                _ => expr.to_string(),
             },
         }
     }
@@ -714,31 +699,6 @@ impl ShaderOutput {
                 _ => GlslPackedFormat::Float,
             },
             _ => GlslPackedFormat::Float,
-        }
-    }
-
-    fn glsl_collect_chunk_formats(fields: &[GlslPackedField]) -> Vec<GlslPackedFormat> {
-        let slots = fields
-            .last()
-            .map(|field| field.offset + field.slots)
-            .unwrap_or(0);
-        let mut out = vec![GlslPackedFormat::Float; Self::glsl_num_packed_vec4s(slots)];
-        for field in fields {
-            if field.attr_format == GlslPackedFormat::Float {
-                continue;
-            }
-            for slot in field.offset..field.offset + field.slots {
-                out[slot / 4] = field.attr_format;
-            }
-        }
-        out
-    }
-
-    fn glsl_vertex_attr_vec_type(format: GlslPackedFormat) -> &'static str {
-        match format {
-            GlslPackedFormat::Float => "vec4",
-            GlslPackedFormat::UInt => "uvec4",
-            GlslPackedFormat::SInt => "ivec4",
         }
     }
 

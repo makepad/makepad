@@ -2356,20 +2356,8 @@ impl CxVulkan {
         Ok(())
     }
 
-    fn collect_attribute_chunk_formats(
-        total_slots: usize,
-        inputs: &[crate::draw_shader::DrawShaderInput],
-    ) -> Vec<DrawShaderAttrFormat> {
-        let mut out = vec![DrawShaderAttrFormat::Float; (total_slots + 3) / 4];
-        for input in inputs {
-            if input.attr_format == DrawShaderAttrFormat::Float {
-                continue;
-            }
-            for slot in input.offset..(input.offset + input.slots) {
-                out[slot / 4] = input.attr_format;
-            }
-        }
-        out
+    fn collect_attribute_chunk_formats(total_slots: usize) -> Vec<DrawShaderAttrFormat> {
+        vec![DrawShaderAttrFormat::Float; (total_slots + 3) / 4]
     }
 
     fn vk_vertex_format(attr_format: DrawShaderAttrFormat, components: usize) -> vk::Format {

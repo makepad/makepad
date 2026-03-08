@@ -220,7 +220,7 @@ impl DrawShaderInputs {
     pub fn push(&mut self, id: LiveId, slots: usize, attr_format: DrawShaderAttrFormat) {
         match self.packing_method {
             DrawShaderInputPacking::Attribute => {
-                let needs_int_align = attr_format != DrawShaderAttrFormat::Float;
+                let needs_int_align = attr_format != DrawShaderAttrFormat::Float && slots > 1;
                 if needs_int_align && (self.total_slots & 3) != 0 {
                     self.total_slots += 4 - (self.total_slots & 3);
                 }
