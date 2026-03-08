@@ -482,13 +482,18 @@ impl Cx {
                     while window_id.id() >= stdin_windows.len() {
                         stdin_windows.push(StdinWindow::default());
                     }
-                    //let stdin_window = &mut stdin_windows[window_id.id()];
                     let window = &mut self.windows[window_id];
                     window.is_created = true;
                     Self::stdin_send_to_host(AppToStudio::CreateWindow {
                         window_id: window_id.id(),
                         kind_id: window.kind_id,
                     });
+                }
+                CxOsOp::CreatePopupWindow { window_id, .. } => {
+                    while window_id.id() >= stdin_windows.len() {
+                        stdin_windows.push(StdinWindow::default());
+                    }
+                    self.windows[window_id].is_created = true;
                 }
                 CxOsOp::SetCursor(cursor) => {
                     Self::stdin_send_to_host(AppToStudio::SetCursor(cursor.into()));

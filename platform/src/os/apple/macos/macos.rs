@@ -90,6 +90,47 @@ impl MetalWindow {
         }
     }
 
+    pub(crate) fn new_popup(
+        window_id: WindowId,
+        metal_cx: &MetalCx,
+        size: Vec2d,
+        position: Vec2d,
+        parent_window: ObjcId,
+    ) -> MetalWindow {
+        let ca_layer: ObjcId = unsafe { msg_send![class!(CAMetalLayer), new] };
+
+        let mut cocoa_window = Box::new(MacosWindow::new(window_id));
+
+        cocoa_window.init_popup(size, position, parent_window);
+        unsafe {
+            let () = msg_send![ca_layer, setDevice: metal_cx.device];
+            let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+            let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
+            let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
+            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
+            let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
+            let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
+            let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
+            let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
+            let () = msg_send![ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, 1.0)];
+
+            let view = cocoa_window.view;
+            let () = msg_send![view, setWantsBestResolutionOpenGLSurface: YES];
+            let () = msg_send![view, setWantsLayer: YES];
+            let () = msg_send![view, setLayerContentsPlacement: 11];
+            let () = msg_send![view, setLayer: ca_layer];
+        }
+
+        MetalWindow {
+            is_resizing: false,
+            window_id,
+            cal_size: Vec2d::default(),
+            ca_layer,
+            window_geom: cocoa_window.get_window_geom(),
+            cocoa_window,
+        }
+    }
+
     pub(crate) fn start_resize(&mut self) {
         self.is_resizing = true;
         let () = unsafe { msg_send![self.ca_layer, setPresentsWithTransaction: YES] };
@@ -368,6 +409,9 @@ impl Cx {
             MacosEvent::WindowLostFocus(window_id) => {
                 self.call_event_handler(&Event::WindowLostFocus(window_id));
             }
+            MacosEvent::PopupDismissed(event) => {
+                self.call_event_handler(&Event::PopupDismissed(event));
+            }
             MacosEvent::WindowResizeLoopStart(window_id) => {
                 if let Some(window) = metal_windows.iter_mut().find(|w| w.window_id == window_id) {
                     window.start_resize();
@@ -592,6 +636,31 @@ impl Cx {
                         &window.create_title,
                         window.is_fullscreen,
                     );
+                    window.window_geom = metal_window.window_geom.clone();
+                    metal_windows.push(metal_window);
+                    window.is_created = true;
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let window = &mut self.windows[window_id];
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    // Find the parent NSWindow handle for coordinate conversion
+                    let parent_ns_window = metal_windows
+                        .iter()
+                        .find(|w| w.window_id == parent_window_id)
+                        .map(|w| w.cocoa_window.window)
+                        .unwrap_or(nil);
+                    let metal_window =
+                        MetalWindow::new_popup(window_id, &metal_cx, size, position, parent_ns_window);
                     window.window_geom = metal_window.window_geom.clone();
                     metal_windows.push(metal_window);
                     window.is_created = true;

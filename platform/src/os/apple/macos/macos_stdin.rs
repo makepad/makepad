@@ -370,6 +370,12 @@ impl Cx {
                         kind_id: window.kind_id,
                     });
                 }
+                CxOsOp::CreatePopupWindow { window_id, .. } => {
+                    while window_id.id() >= stdin_windows.len() {
+                        stdin_windows.push(StdinWindow::new());
+                    }
+                    self.windows[window_id].is_created = true;
+                }
                 CxOsOp::SetCursor(cursor) => {
                     Self::stdin_send_to_host(AppToStudio::SetCursor(cursor.into()));
                 }

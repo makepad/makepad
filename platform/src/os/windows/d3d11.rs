@@ -695,6 +695,61 @@ impl D3d11Window {
         }
     }
 
+    pub fn new_popup(
+        window_id: WindowId,
+        d3d11_cx: &D3d11Cx,
+        size: Vec2d,
+        position: Vec2d,
+    ) -> D3d11Window {
+        let mut win32_window = Box::new(Win32Window::new_popup(window_id, position, size));
+        win32_window.init(size);
+
+        let wg = win32_window.get_window_geom();
+
+        let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            BufferCount: 2,
+            Width: (wg.inner_size.x * wg.dpi_factor) as u32,
+            Height: (wg.inner_size.y * wg.dpi_factor) as u32,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Flags: 0,
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Scaling: DXGI_SCALING_NONE,
+            Stereo: FALSE,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        };
+
+        unsafe {
+            let swap_chain = d3d11_cx
+                .factory
+                .CreateSwapChainForHwnd(&d3d11_cx.device, win32_window.hwnd, &sc_desc, None, None)
+                .unwrap();
+
+            let swap_texture = swap_chain.GetBuffer(0).unwrap();
+            let mut render_target_view = None;
+            d3d11_cx
+                .device
+                .CreateRenderTargetView(&swap_texture, None, Some(&mut render_target_view))
+                .unwrap();
+
+            D3d11Window {
+                first_draw: true,
+                is_in_resize: false,
+                window_id,
+                alloc_size: wg.inner_size,
+                window_geom: wg,
+                win32_window,
+                swap_texture: Some(swap_texture),
+                render_target_view,
+                swap_chain,
+            }
+        }
+    }
+
     pub fn start_resize(&mut self) {
         self.is_in_resize = true;
     }

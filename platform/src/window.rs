@@ -35,6 +35,10 @@ impl CxWindowPool {
         WindowHandle(self.0.alloc())
     }
 
+    pub fn len(&self) -> usize {
+        self.0.pool.len()
+    }
+
     pub fn window_id_contains(&self, pos: Vec2d) -> (WindowId, Vec2d) {
         for (index, item) in self.0.pool.iter().enumerate() {
             let window = &item.item;
@@ -146,8 +150,46 @@ impl WindowHandle {
         cxwindow.create_inner_size = None;
         cxwindow.create_position = None;
         cxwindow.create_app_id = "Makepad".to_string();
+        cxwindow.is_popup = false;
+        cxwindow.popup_parent = None;
+        cxwindow.popup_position = None;
+        cxwindow.popup_size = None;
+        cxwindow.popup_grab_keyboard = true;
         cx.platform_ops
             .push(CxOsOp::CreateWindow(window.window_id()));
+        window
+    }
+
+    /// Creates a popup window that must be explicitly closed by the app.
+    ///
+    /// The framework sends `Event::PopupDismissed` when the popup should be
+    /// dismissed (outside click, focus loss, Escape). The app must handle that
+    /// event and call `close()` on the window handle. The popup is **not**
+    /// auto-closed by the framework.
+    pub fn new_popup(cx: &mut Cx, parent: WindowId, position: Vec2d, size: Vec2d) -> Self {
+        let window = cx.windows.alloc();
+        let window_id = window.window_id();
+        let grab_keyboard = {
+            let cxwindow = &mut cx.windows[window_id];
+            cxwindow.is_created = false;
+            cxwindow.create_title = "Makepad Popup".to_string();
+            cxwindow.create_inner_size = Some(size);
+            cxwindow.create_position = Some(position);
+            cxwindow.create_app_id = "Makepad".to_string();
+            cxwindow.is_popup = true;
+            cxwindow.popup_parent = Some(parent);
+            cxwindow.popup_position = Some(position);
+            cxwindow.popup_size = Some(size);
+            cxwindow.popup_grab_keyboard = true;
+            cxwindow.popup_grab_keyboard
+        };
+        cx.platform_ops.push(CxOsOp::CreatePopupWindow {
+            window_id,
+            parent_window_id: parent,
+            position,
+            size,
+            grab_keyboard,
+        });
         window
     }
 }
@@ -233,6 +275,10 @@ impl WindowHandle {
         cx.windows[self.window_id()].get_position()
     }
 
+    pub fn is_popup(&self, cx: &Cx) -> bool {
+        cx.windows[self.window_id()].is_popup
+    }
+
     pub fn set_kind_id(&mut self, cx: &mut Cx, kind_id: usize) {
         cx.windows[self.window_id()].kind_id = kind_id;
     }
@@ -309,7 +355,7 @@ pub struct WindowIcon {
     pub buffers: Vec<WindowIconBuffer>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CxWindow {
     pub create_title: String,
     pub create_position: Option<Vec2d>,
@@ -323,6 +369,35 @@ pub struct CxWindow {
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<DrawPassId>,
     pub is_fullscreen: bool,
+    pub is_popup: bool,
+    pub popup_parent: Option<WindowId>,
+    pub popup_position: Option<Vec2d>,
+    pub popup_size: Option<Vec2d>,
+    pub popup_grab_keyboard: bool,
+}
+
+impl Default for CxWindow {
+    fn default() -> Self {
+        Self {
+            create_title: String::default(),
+            create_position: None,
+            create_inner_size: None,
+            create_icon: None,
+            create_app_id: String::default(),
+            kind_id: 0,
+            dpi_override: None,
+            os_dpi_factor: None,
+            is_created: false,
+            window_geom: WindowGeom::default(),
+            main_pass_id: None,
+            is_fullscreen: false,
+            is_popup: false,
+            popup_parent: None,
+            popup_position: None,
+            popup_size: None,
+            popup_grab_keyboard: true,
+        }
+    }
 }
 
 impl CxWindow {

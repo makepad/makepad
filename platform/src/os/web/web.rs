@@ -487,6 +487,26 @@ impl Cx {
                     self.windows[window_id].is_created = true;
                     self.redraw_all();
                 }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let mut geom = self.os.window_geom.clone();
+                    geom.position = position;
+                    geom.inner_size = size;
+                    geom.outer_size = size;
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = geom;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    window.is_created = true;
+                }
                 CxOsOp::FullscreenWindow(_window_id) => {
                     self.os.from_wasm(FromWasmFullScreen {});
                 }

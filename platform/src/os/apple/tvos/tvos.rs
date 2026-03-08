@@ -209,6 +209,26 @@ impl Cx {
                     window.window_geom = get_tvos_app_global().last_window_geom.clone();
                     window.is_created = true;
                 }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let mut geom = get_tvos_app_global().last_window_geom.clone();
+                    geom.position = position;
+                    geom.inner_size = size;
+                    geom.outer_size = size;
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = geom;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    window.is_created = true;
+                }
                 CxOsOp::StartTimer {
                     timer_id,
                     interval,

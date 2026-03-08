@@ -44,6 +44,7 @@ use {
             VideoPlaybackResourcesReleasedEvent,
             //HttpRequest,
             //HttpMethod,
+            SelectionHandleDragEvent,
             VideoTextureUpdatedEvent,
             VirtualKeyboardEvent,
             WindowGeom,
@@ -312,13 +313,17 @@ impl Cx {
                 let window = &mut self.windows[CxWindowPool::id_zero()];
                 let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
                 for touch in &mut touches {
-                    // When the software keyboard shifted the UI in the vertical axis,
-                    //we need to make the math here to keep touch events positions synchronized.
-                    //if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
-                    //crate::log!("{} {:?} {} {}", time, touch.state, touch.uid, touch.abs);
                     touch.abs /= dpi_factor;
                     touch.radius /= dpi_factor;
                 }
+
+                // Check for outside-click popup dismiss on touch start
+                if touches.iter().any(|t| t.state == crate::event::finger::TouchState::Start) {
+                    if let Some(popup_window_id) = self.find_popup_to_dismiss_on_touch(&touches) {
+                        self.dismiss_popup_window(popup_window_id, crate::event::PopupDismissReason::OutsideClick);
+                    }
+                }
+
                 self.fingers.process_touch_update_start(time, &touches);
                 let e = Event::TouchUpdate(TouchUpdateEvent {
                     time,
@@ -725,6 +730,21 @@ impl Cx {
             FromJavaMessage::ImeEditorAction { action_code } => {
                 let action = ImeAction::from_android_action_code(action_code);
                 let e = Event::ImeAction(ImeActionEvent { action });
+                self.call_event_handler(&e);
+            }
+            FromJavaMessage::SelectionHandleDrag {
+                handle,
+                phase,
+                abs,
+                time,
+            } => {
+                let dpi_factor = self.last_window_geom.dpi_factor;
+                let e = Event::SelectionHandleDrag(SelectionHandleDragEvent {
+                    handle,
+                    phase,
+                    abs: abs / dpi_factor,
+                    time,
+                });
                 self.call_event_handler(&e);
             }
             FromJavaMessage::Init(_) => {}
@@ -1215,11 +1235,29 @@ impl Cx {
                 CxDrawPassParent::Xr => {
                     // cant happen
                 }
-                CxDrawPassParent::Window(_) => {
-                    //let window = &self.windows[window_id];
+                CxDrawPassParent::Window(window_id) => {
+                    // Skip popup window passes — they are drawn as overlays
+                    // after their parent window pass below.
+                    if self.windows[window_id].is_popup {
+                        continue;
+                    }
                     let start = self.seconds_since_app_start();
                     let metrics = self.collect_gpu_pass_metrics(*draw_pass_id);
                     self.draw_pass_to_window_for_active_backend(*draw_pass_id);
+
+                    // Draw popup window passes as overlays on the same surface
+                    for popup_pass_id in &passes_todo.clone() {
+                        if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent {
+                            let pw = &self.windows[pw_id];
+                            if pw.is_popup && pw.popup_parent == Some(window_id) {
+                                let saved = self.passes[*popup_pass_id].dont_clear;
+                                self.passes[*popup_pass_id].dont_clear = true;
+                                self.draw_pass_to_fullscreen(*popup_pass_id);
+                                self.passes[*popup_pass_id].dont_clear = saved;
+                            }
+                        }
+                    }
+
                     let end = self.seconds_since_app_start();
                     Cx::send_studio_message(AppToStudio::GPUSample(GPUSample {
                         start,
@@ -1273,6 +1311,44 @@ impl Cx {
                         old_geom,
                     }));
                 }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let dpi_factor = self.windows[parent_window_id]
+                        .dpi_override
+                        .unwrap_or(self.os.dpi_factor);
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = WindowGeom {
+                        dpi_factor,
+                        can_fullscreen: false,
+                        xr_is_presenting: false,
+                        is_fullscreen: false,
+                        is_topmost: true,
+                        position,
+                        inner_size: size,
+                        outer_size: size,
+                    };
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    window.is_created = true;
+                }
+                CxOsOp::CloseWindow(window_id) => {
+                    let window = &mut self.windows[window_id];
+                    if window.is_popup {
+                        window.is_created = false;
+                        window.is_popup = false;
+                        window.popup_parent = None;
+                        window.popup_position = None;
+                        window.popup_size = None;
+                    }
+                }
                 CxOsOp::StartTimer {
                     timer_id,
                     interval,
@@ -1312,9 +1388,20 @@ impl Cx {
                     android_jni::to_java_copy_to_clipboard(content);
                 },
                 CxOsOp::SetPrimarySelection(_) => {}
-                CxOsOp::ShowSelectionHandles { .. } => {}
-                CxOsOp::UpdateSelectionHandles { .. } => {}
-                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::ShowSelectionHandles { start, end } => unsafe {
+                    let dpi_factor = self.last_window_geom.dpi_factor;
+                    android_jni::to_java_show_selection_handles(start * dpi_factor, end * dpi_factor);
+                }
+                CxOsOp::UpdateSelectionHandles { start, end } => unsafe {
+                    let dpi_factor = self.last_window_geom.dpi_factor;
+                    android_jni::to_java_update_selection_handles(
+                        start * dpi_factor,
+                        end * dpi_factor,
+                    );
+                }
+                CxOsOp::HideSelectionHandles => unsafe {
+                    android_jni::to_java_hide_selection_handles();
+                }
                 CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::ShowClipboardActions {
                     has_selection,
@@ -1493,6 +1580,49 @@ fn to_android_permission(permission: crate::permission::Permission) -> &'static 
 }
 
 impl Cx {
+    fn find_popup_to_dismiss_on_touch(&self, touches: &[crate::event::finger::TouchPoint]) -> Option<crate::window::WindowId> {
+        for i in (0..self.windows.len()).rev() {
+            let window_id = CxWindowPool::from_usize(i);
+            let window = &self.windows[window_id];
+            if !window.is_created || !window.is_popup {
+                continue;
+            }
+            if let (Some(pos), Some(size)) = (window.popup_position, window.popup_size) {
+                let rect = Rect { pos: pos, size: size };
+                for touch in touches {
+                    if touch.state == crate::event::finger::TouchState::Start && !rect.contains(touch.abs) {
+                        return Some(window_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn dismiss_popup_window(&mut self, window_id: crate::window::WindowId, reason: crate::event::PopupDismissReason) {
+        // First dismiss any child popups
+        let children: Vec<crate::window::WindowId> = (0..self.windows.len())
+            .filter_map(|i| {
+                let child_id = CxWindowPool::from_usize(i);
+                let w = &self.windows[child_id];
+                if w.is_created && w.is_popup && w.popup_parent == Some(window_id) {
+                    Some(child_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for child_id in children {
+            self.dismiss_popup_window(child_id, crate::event::PopupDismissReason::ParentClosed);
+        }
+        self.call_event_handler(&Event::PopupDismissed(crate::event::PopupDismissedEvent {
+            window_id,
+            reason,
+        }));
+        self.call_event_handler(&Event::WindowClosed(crate::event::WindowClosedEvent { window_id }));
+        self.windows[window_id].is_created = false;
+    }
+
     fn check_audio_permission_status(&self) -> crate::permission::PermissionStatus {
         unsafe {
             let status = android_jni::to_java_check_permission("android.permission.RECORD_AUDIO");

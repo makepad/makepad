@@ -4,7 +4,7 @@ use {
     crate::{
         area::Area,
         cursor::MouseCursor,
-        event::*,
+        event::{PopupDismissReason, PopupDismissedEvent, *},
         makepad_math::*,
         os::windows::{
             droptarget::*,
@@ -75,8 +75,9 @@ use {
                         WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST,
                         WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
                         WM_XBUTTONDOWN, WM_XBUTTONUP, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-                        WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE,
-                        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX, WS_SYSMENU,
+                        WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                        WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX,
+                        WS_SYSMENU,
                     },
                 },
             },
@@ -118,7 +119,7 @@ pub struct Win32Window {
     pub hwnd: HWND,
     pub track_mouse_event: bool,
     pub is_fullscreen: bool,
-
+    pub is_popup: bool,
     ime_saved_himc: HIMC,
 }
 
@@ -188,6 +189,58 @@ impl Win32Window {
             hwnd,
             track_mouse_event: false,
             is_fullscreen,
+            is_popup: false,
+            ime_saved_himc: HIMC::default(),
+        }
+    }
+
+    pub fn new_popup(
+        window_id: WindowId,
+        position: Vec2d,
+        size: Vec2d,
+    ) -> Win32Window {
+        let title = encode_wide("Makepad Popup");
+
+        let style = WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+        let style_ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+
+        let dpi = with_win32_app(|app| app.dpi_functions.system_dpi_factor() as f64);
+        let x = (position.x * dpi) as i32;
+        let y = (position.y * dpi) as i32;
+        let w = (size.x * dpi) as i32;
+        let h = (size.y * dpi) as i32;
+
+        let hwnd = unsafe {
+            CreateWindowExW(
+                style_ex,
+                PCWSTR(with_win32_app(|app| app.window_class_name.as_ptr())),
+                PCWSTR(title.as_ptr()),
+                style,
+                x,
+                y,
+                w,
+                h,
+                None,
+                None,
+                Some(GetModuleHandleW(None).unwrap().into()),
+                None,
+            )
+            .unwrap()
+        };
+
+        Win32Window {
+            window_id,
+            mouse_buttons_down: 0,
+            last_window_geom: WindowGeom::default(),
+            last_key_mod: KeyModifiers::default(),
+            ime_spot: Vec2d::default(),
+            current_cursor: MouseCursor::Default,
+            last_mouse_pos: Vec2d::default(),
+            ignore_wmsize: 0,
+            hwnd,
+            track_mouse_event: false,
+            is_fullscreen: false,
+            is_popup: true,
             ime_saved_himc: HIMC::default(),
         }
     }
@@ -221,7 +274,14 @@ impl Win32Window {
                 if wparam.0 & 0xffff == WA_ACTIVE as usize {
                     window.do_callback(Win32Event::WindowGotFocus(window.window_id));
                 } else {
-                    window.do_callback(Win32Event::WindowLostFocus(window.window_id));
+                    if window.is_popup {
+                        window.do_callback(Win32Event::PopupDismissed(PopupDismissedEvent {
+                            window_id: window.window_id,
+                            reason: PopupDismissReason::FocusLost,
+                        }));
+                    } else {
+                        window.do_callback(Win32Event::WindowLostFocus(window.window_id));
+                    }
                 }
             }
             WM_NCCALCSIZE => {
@@ -384,6 +444,13 @@ impl Win32Window {
                 // detect control/cmd - c / v / x
                 let modifiers = Self::get_key_modifiers();
                 let key_code = Self::virtual_key_to_key_code(wparam);
+                if window.is_popup && key_code == KeyCode::Escape {
+                    window.do_callback(Win32Event::PopupDismissed(PopupDismissedEvent {
+                        window_id: window.window_id,
+                        reason: PopupDismissReason::Escape,
+                    }));
+                    return LRESULT(0);
+                }
                 if modifiers.alt && key_code == KeyCode::F4 {
                     PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap();
                 }

@@ -462,6 +462,34 @@ impl Cx {
                     }
                     self.redraw_all();
                 }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    while window_id.id() >= windows.len() {
+                        windows.push(Default::default());
+                    }
+                    let state = &mut windows[window_id.id()];
+                    state.created = true;
+                    state.width = size.x.max(1.0) as u32;
+                    state.height = size.y.max(1.0) as u32;
+                    state.ensure_size_defaults();
+
+                    let window = &mut self.windows[window_id];
+                    window.is_created = true;
+                    window.window_geom.position = position;
+                    window.window_geom.inner_size = size;
+                    window.window_geom.outer_size = size;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    self.redraw_all();
+                }
                 CxOsOp::ResizeWindow(window_id, size) => {
                     if self.windows.is_valid(window_id) {
                         self.windows[window_id].window_geom.inner_size = size;

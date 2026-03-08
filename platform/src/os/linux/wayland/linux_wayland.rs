@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use super::opengl_wayland::WaylandWindow;
+use super::opengl_wayland::{WaylandPopupWindow, WaylandWindow};
 use super::wayland_state::WaylandState;
 use crate::cx_native::EventFlow;
 use crate::egl_sys::NativeDisplayType;
@@ -20,9 +20,12 @@ use crate::WindowId;
 use crate::{
     cx::{LinuxWindowParams, OsType},
     egl_sys,
-    event::video_playback::{
-        VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
-        VideoPlaybackResourcesReleasedEvent, VideoTextureUpdatedEvent,
+    event::{
+        video_playback::{
+            VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
+            VideoPlaybackResourcesReleasedEvent, VideoTextureUpdatedEvent,
+        },
+        PopupDismissReason, PopupDismissedEvent,
     },
     gpu_info::GpuPerformance,
     Area, Cx, CxDrawPassParent, CxOsOp, CxWindowPool, Event, KeyModifiers, MouseButton,
@@ -138,6 +141,11 @@ impl WaylandCx {
                         cx.repaint_pass(main_pass_id);
                     }
                 }
+                for popup in state.popups.iter_mut() {
+                    if let Some(main_pass_id) = cx.windows[popup.window_id].main_pass_id {
+                        cx.repaint_pass(main_pass_id);
+                    }
+                }
                 //paint_dirty = true;
                 cx.call_event_handler(&Event::WindowGotFocus(window_id));
             }
@@ -166,23 +174,50 @@ impl WaylandCx {
                             cx.redraw_pass_and_child_passes(main_pass_id);
                         }
                     }
+                } else if let Some(window) = state
+                    .popups
+                    .iter_mut()
+                    .find(|w| w.window_id == re.window_id)
+                {
+                    window.window_geom = re.new_geom.clone();
+                    cx.windows[re.window_id].window_geom = re.new_geom.clone();
+                    if re.old_geom.inner_size != re.new_geom.inner_size {
+                        if let Some(main_pass_id) = cx.windows[re.window_id].main_pass_id {
+                            cx.redraw_pass_and_child_passes(main_pass_id);
+                        }
+                    }
                 }
                 // ok lets not redraw all, just this window
                 cx.call_event_handler(&Event::WindowGeomChange(re));
             }
             XlibEvent::WindowClosed(wc) => {
-                let mut cx = self.cx.borrow_mut();
                 let window_id = wc.window_id;
+                self.close_popup_children(state, window_id);
+
+                let mut cx = self.cx.borrow_mut();
                 cx.call_event_handler(&Event::WindowClosed(wc));
                 // lets remove the window from the set
                 cx.windows[window_id].is_created = false;
+                if state.pointer_window == Some(window_id) {
+                    state.pointer_window = None;
+                }
+                if state.keyboard_window == Some(window_id) {
+                    state.keyboard_window = None;
+                }
                 if let Some(index) = state.windows.iter().position(|w| w.window_id == window_id) {
                     state.windows.remove(index);
                     if state.windows.len() == 0 {
                         cx.call_event_handler(&Event::Shutdown);
                         return EventFlow::Exit;
                     }
+                } else if let Some(index) = state.popups.iter().position(|w| w.window_id == window_id)
+                {
+                    state.popups.remove(index);
                 }
+            }
+            XlibEvent::PopupDismissed(event) => {
+                let mut cx = self.cx.borrow_mut();
+                cx.call_event_handler(&Event::PopupDismissed(event));
             }
             XlibEvent::Paint => {
                 {
@@ -356,6 +391,52 @@ impl WaylandCx {
         event_flow
     }
 
+    fn close_popup_window(
+        &self,
+        state: &mut WaylandState,
+        window_id: WindowId,
+        reason: Option<PopupDismissReason>,
+    ) {
+        let mut cx = self.cx.borrow_mut();
+        if let Some(reason) = reason {
+            cx.call_event_handler(&Event::PopupDismissed(PopupDismissedEvent {
+                window_id,
+                reason,
+            }));
+        }
+        cx.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
+        cx.windows[window_id].is_created = false;
+        if state.pointer_window == Some(window_id) {
+            state.pointer_window = None;
+        }
+        if state.keyboard_window == Some(window_id) {
+            state.keyboard_window = None;
+        }
+        if let Some(index) = state.popups.iter().position(|w| w.window_id == window_id) {
+            state.popups.remove(index);
+        }
+    }
+
+    fn close_popup_children(&self, state: &mut WaylandState, parent_window_id: WindowId) {
+        loop {
+            let child = state
+                .popups
+                .iter()
+                .find(|p| p.parent_window_id == parent_window_id)
+                .map(|p| p.window_id);
+            if let Some(child_window_id) = child {
+                self.close_popup_children(state, child_window_id);
+                self.close_popup_window(
+                    state,
+                    child_window_id,
+                    Some(PopupDismissReason::ParentClosed),
+                );
+            } else {
+                break;
+            }
+        }
+    }
+
     fn handle_platform_ops(&self, state: &mut WaylandState) -> EventFlow {
         let mut ret = EventFlow::Poll;
         let mut cx = self.cx.borrow_mut();
@@ -399,12 +480,59 @@ impl WaylandCx {
                     );
                     state.windows.push(window);
                 }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
+                    let compositor = state.compositor.as_ref().unwrap();
+                    let wm_base = state.wm_base.as_ref().unwrap();
+                    if let Some(parent_xdg_surface) = state.xdg_surface_for_window(parent_window_id)
+                    {
+                        let popup = WaylandPopupWindow::new(
+                            window_id,
+                            parent_window_id,
+                            compositor,
+                            wm_base,
+                            &parent_xdg_surface,
+                            state.seat.as_ref(),
+                            state.pointer_serial,
+                            state.keyboard_serial,
+                            state.scale_manager.as_ref(),
+                            state.viewporter.as_ref(),
+                            self.qhandle.as_ref().unwrap(),
+                            gl_cx,
+                            size,
+                            position,
+                            grab_keyboard,
+                        );
+                        cx.windows[window_id].is_popup = true;
+                        cx.windows[window_id].popup_parent = Some(parent_window_id);
+                        cx.windows[window_id].popup_position = Some(position);
+                        cx.windows[window_id].popup_size = Some(size);
+                        cx.windows[window_id].popup_grab_keyboard = grab_keyboard;
+                        state.popups.push(popup);
+                    }
+                }
                 CxOsOp::CloseWindow(window_id) => {
+                    self.close_popup_children(state, window_id);
+                    if state.popups.iter().any(|w| w.window_id == window_id) {
+                        drop(cx);
+                        self.close_popup_window(state, window_id, None);
+                        cx = self.cx.borrow_mut();
+                        if state.windows.is_empty() {
+                            ret = EventFlow::Exit;
+                        }
+                        continue;
+                    }
+
                     cx.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
                     let windows = &mut state.windows;
                     if let Some(index) = windows.iter().position(|w| w.window_id == window_id) {
                         cx.windows[window_id].is_created = false;
-                        windows[index].close_window();
                         windows.remove(index);
                         if windows.len() == 0 {
                             ret = EventFlow::Exit
@@ -494,7 +622,7 @@ impl WaylandCx {
                     let _ = cx.net.http_cancel(request_id);
                 }
                 CxOsOp::ShowTextIME(area, pos, _config) => {
-                    if let Some(window) = state.current_window {
+                    if let Some(_window) = state.keyboard_window.or(state.pointer_window) {
                         if let Some(text_input) = state.text_input.as_ref() {
                             text_input.enable();
 
@@ -624,13 +752,13 @@ impl WaylandCx {
         cx.repaint_id += 1;
         for draw_pass_id in &passes_todo {
             let now = state.time_now();
-            let windows = &mut state.windows;
             cx.passes[*draw_pass_id].set_time(now as f32);
             let parent = cx.passes[*draw_pass_id].parent.clone();
             match parent {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
-                    if let Some(window) = windows.iter_mut().find(|w| w.window_id == window_id) {
+                    if let Some(window) = state.windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
                         if !window.configured {
                             continue;
                         }
@@ -658,6 +786,30 @@ impl WaylandCx {
                         let pix_height =
                             window.window_geom.inner_size.y * window.window_geom.dpi_factor;
 
+                        cx.draw_pass_to_window(
+                            *draw_pass_id,
+                            window.egl_surface,
+                            pix_width,
+                            pix_height,
+                        );
+                    } else if let Some(window) =
+                        state.popups.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        if !window.configured {
+                            continue;
+                        }
+                        window.resize_buffers();
+                        if let Some(viewport) = window.viewport.as_ref() {
+                            viewport.set_source(-1., -1., -1., -1.);
+                            viewport.set_destination(
+                                window.window_geom.inner_size.x as i32,
+                                window.window_geom.inner_size.y as i32,
+                            );
+                        }
+                        let pix_width =
+                            window.window_geom.inner_size.x * window.window_geom.dpi_factor;
+                        let pix_height =
+                            window.window_geom.inner_size.y * window.window_geom.dpi_factor;
                         cx.draw_pass_to_window(
                             *draw_pass_id,
                             window.egl_surface,
