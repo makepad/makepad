@@ -2,9 +2,6 @@ use crate::contact::{ContactManifold, ContactPoint};
 use crate::rigid_body::RigidBody;
 use makepad_math::*;
 
-/// Max vertices during polygon clipping (4 input + up to 4 clip intersections).
-const MAX_CLIP_VERTS: usize = 16;
-
 /// Prediction distance: generate contacts when bodies are within this distance
 /// of touching, even if not yet penetrating. Matches rapier's default (0.002).
 pub const PREDICTION_DISTANCE: f32 = 0.002;
@@ -276,21 +273,21 @@ fn cuboid_cuboid_contacts(
     let he_b = [b.half_extents.x, b.half_extents.y, b.half_extents.z];
 
     // Pass 1: face normals of A
-    let (sep1, axis1, face_idx1) =
+    let (sep1, axis1, _face_idx1) =
         find_face_separating_normal_oneway(a, b, &he_a, &he_b, &axes_a, &axes_b);
     if sep1 > PREDICTION_DISTANCE {
         return false;
     }
 
     // Pass 2: face normals of B
-    let (sep2, axis2_local, face_idx2) =
+    let (sep2, axis2_local, _face_idx2) =
         find_face_separating_normal_oneway(b, a, &he_b, &he_a, &axes_b, &axes_a);
     if sep2 > PREDICTION_DISTANCE {
         return false;
     }
 
     // Pass 3: edge-edge axes
-    let (sep3, axis3, edge_idx) =
+    let (sep3, axis3, _edge_idx) =
         find_edge_separating_axis_twoway(a, b, &he_a, &he_b, &axes_a, &axes_b);
     if sep3 > PREDICTION_DISTANCE {
         return false;

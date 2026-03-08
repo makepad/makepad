@@ -778,7 +778,8 @@ impl Quat {
         }
     }
 
-    /// First-order quaternion integration: q' = normalize(q + 0.5 * dt * omega_quat * q)
+    /// First-order quaternion integration for world-space angular velocity:
+    /// q' = normalize(q + 0.5 * dt * omega_quat * q)
     /// where omega_quat = Quat(wx, wy, wz, 0). No transcendentals needed.
     pub fn integrate(&self, angular_velocity: Vec3f, dt: f32) -> Quat {
         let omega = Quat {
@@ -787,7 +788,7 @@ impl Quat {
             z: angular_velocity.z,
             w: 0.0,
         };
-        let omega_q = Quat::multiply(&omega, self);
+        let omega_q = Quat::multiply(self, &omega);
         let half_dt = 0.5 * dt;
         let mut result = Quat {
             x: self.x + half_dt * omega_q.x,
