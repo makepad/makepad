@@ -593,7 +593,9 @@ script_mod! {
                 draw_bg.radius: vec4(0.0 8.0 8.0 0.0)
                 padding: 15 flow: Down spacing: 10
 
+                View{width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}}
                 Label{text: "Left Panel" draw_text.color: #fff draw_text.text_style.font_size: 12}
+                close_left_panel_btn := ButtonFlat{text: "Close"}
                 Label{text: "This panel slides in from the left side." draw_text.color: #aaa draw_text.text_style.font_size: 10}
                 Hr{}
                 CheckBox{text: "Option 1"}
@@ -614,7 +616,9 @@ script_mod! {
                 draw_bg.radius: vec4(0.0 0.0 8.0 8.0)
                 padding: 15 flow: Down spacing: 8
 
+                View{width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}}
                 Label{text: "Top Panel" draw_text.color: #fff draw_text.text_style.font_size: 12}
+                close_top_panel_btn := ButtonFlat{text: "Close"}
                 Label{text: "This panel slides in from the top." draw_text.color: #aaa draw_text.text_style.font_size: 10}
                 View{width: Fill height: Fit flow: Right spacing: 10}
                 Button{text: "Action 1"}
@@ -634,7 +638,9 @@ script_mod! {
                 draw_bg.radius: vec4(8.0 0.0 0.0 8.0)
                 padding: 15 flow: Down spacing: 10
 
+                View{width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}}
                 Label{text: "Right Panel" draw_text.color: #fff draw_text.text_style.font_size: 12}
+                close_right_panel_btn := ButtonFlat{text: "Close"}
                 Label{text: "This panel slides in from the right side." draw_text.color: #aaa draw_text.text_style.font_size: 10}
                 Hr{}
                 Toggle{text: "Setting A"}
@@ -1770,16 +1776,22 @@ impl MatchEvent for App {
 
         // SlidePanel tests
         if self.ui.button(cx, ids!(slide_left_btn)).clicked(actions) {
-            log!("Toggling left slide panel");
             self.ui.slide_panel(cx, ids!(left_panel)).toggle(cx);
         }
         if self.ui.button(cx, ids!(slide_top_btn)).clicked(actions) {
-            log!("Toggling top slide panel");
             self.ui.slide_panel(cx, ids!(top_panel)).toggle(cx);
         }
         if self.ui.button(cx, ids!(slide_right_btn)).clicked(actions) {
-            log!("Toggling right slide panel");
             self.ui.slide_panel(cx, ids!(right_panel)).toggle(cx);
+        }
+        if self.ui.button(cx, ids!(close_left_panel_btn)).clicked(actions) {
+            self.ui.slide_panel(cx, ids!(left_panel)).close(cx);
+        }
+        if self.ui.button(cx, ids!(close_top_panel_btn)).clicked(actions) {
+            self.ui.slide_panel(cx, ids!(top_panel)).close(cx);
+        }
+        if self.ui.button(cx, ids!(close_right_panel_btn)).clicked(actions) {
+            self.ui.slide_panel(cx, ids!(right_panel)).close(cx);
         }
     }
 }

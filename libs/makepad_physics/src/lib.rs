@@ -294,6 +294,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_kicked_tower_settles() {
+        let mut world = PhysicsWorld::new(vec3f(0.0, -9.81, 0.0), 1.0 / 60.0);
+        let mut ops = Vec::new();
+        let grid = 4usize;
+        let height = 8usize;
+        let spacing = 1.1f32;
+        let half = 0.5f32;
+        let mut kick_body = 0usize;
+        let mut body_index = 0usize;
+
+        for y in 0..height {
+            for x in 0..grid {
+                for z in 0..grid {
+                    if x == grid - 1 && y == height / 2 && z == grid / 2 {
+                        kick_body = body_index;
+                    }
+                    ops.push(PhysicsOp::SpawnDynamic {
+                        position: vec3f(
+                            (x as f32 - grid as f32 / 2.0 + 0.5) * spacing,
+                            2.0 + y as f32 * spacing,
+                            (z as f32 - grid as f32 / 2.0 + 0.5) * spacing,
+                        ),
+                        half_extents: vec3f(half, half, half),
+                        velocity: Vec3f::default(),
+                        density: 1.0,
+                    });
+                    body_index += 1;
+                }
+            }
+        }
+
+        world.step(&ops);
+        for _ in 0..90 {
+            world.step(&[]);
+        }
+
+        world.step(&[PhysicsOp::ApplyImpulse {
+            body: kick_body,
+            impulse: vec3f(9.0, 5.5, 2.0),
+        }]);
+
+        let mut max_linear_after_settle = 0.0f32;
+        let mut max_angular_after_settle = 0.0f32;
+        for frame in 0..1200 {
+            world.step(&[]);
+            if frame >= 900 {
+                for body in &world.bodies {
+                    max_linear_after_settle =
+                        max_linear_after_settle.max(body.linear_velocity.length());
+                    max_angular_after_settle =
+                        max_angular_after_settle.max(body.angular_velocity.length());
+                }
+            }
+        }
+
+        assert!(
+            max_linear_after_settle < 0.4,
+            "Kicked tower kept sliding too fast after settling: max_linear_speed={}",
+            max_linear_after_settle
+        );
+        assert!(
+            max_angular_after_settle < 0.8,
+            "Kicked tower kept rotating too fast after settling: max_angular_speed={}",
+            max_angular_after_settle
+        );
+    }
+
     fn kinetic_energy(world: &PhysicsWorld) -> f32 {
         let mut ke = 0.0f32;
         for body in &world.bodies {
