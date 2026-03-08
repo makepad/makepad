@@ -201,8 +201,6 @@ pub enum TrimWhitespaceInText {
 
 #[derive(Script, Widget)]
 pub struct Html {
-    #[uid]
-    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]

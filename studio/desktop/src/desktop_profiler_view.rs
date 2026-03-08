@@ -193,10 +193,11 @@ struct DesktopProfilerEventChart {
 impl DesktopProfilerEventChart {
     fn profiler_build_id_from_context(&self, cx: &Cx, data: &AppData) -> Option<QueryId> {
         let path = cx.widget_tree().path_to(self.widget_uid());
-        path.iter()
-            .rev()
-            .copied()
-            .find_map(|tab_id| data.profiler_tab_state.get(&tab_id).map(|state| state.build_id))
+        path.iter().rev().copied().find_map(|tab_id| {
+            data.profiler_tab_state
+                .get(&tab_id)
+                .map(|state| state.build_id)
+        })
     }
 
     fn set_follow_live(&mut self, cx: &mut Cx, follow_live: bool) {
@@ -1028,8 +1029,6 @@ impl Widget for DesktopProfilerEventChart {
 
 #[derive(Script, Widget)]
 pub struct DesktopProfilerView {
-    #[uid]
-    uid: WidgetUid,
     #[deref]
     view: View,
     #[rust]
@@ -1043,11 +1042,11 @@ impl ScriptHook for DesktopProfilerView {}
 impl DesktopProfilerView {
     fn profiler_build_id_from_context(&self, cx: &Cx, data: &AppData) -> Option<QueryId> {
         let view_path = cx.widget_tree().path_to(self.view.widget_uid());
-        view_path
-            .iter()
-            .rev()
-            .copied()
-            .find_map(|tab_id| data.profiler_tab_state.get(&tab_id).map(|state| state.build_id))
+        view_path.iter().rev().copied().find_map(|tab_id| {
+            data.profiler_tab_state
+                .get(&tab_id)
+                .map(|state| state.build_id)
+        })
     }
 }
 
@@ -1064,10 +1063,17 @@ impl WidgetMatchEvent for DesktopProfilerView {
         };
 
         if self.view.button(cx, ids!(clear_button)).clicked(&actions) {
-            cx.widget_action(self.widget_uid(), DesktopProfilerViewAction::Clear { build_id });
+            cx.widget_action(
+                self.widget_uid(),
+                DesktopProfilerViewAction::Clear { build_id },
+            );
         }
 
-        if let Some(running) = self.view.check_box(cx, ids!(running_button)).changed(actions) {
+        if let Some(running) = self
+            .view
+            .check_box(cx, ids!(running_button))
+            .changed(actions)
+        {
             if let Some(mut chart) = self
                 .view
                 .widget(cx, ids!(chart))
@@ -1144,10 +1150,12 @@ impl Widget for DesktopProfilerView {
             v.clear();
             v.push_str(&self.tmp_status_label);
         });
-        self.view.label(cx, ids!(sample_count_label)).set_text_with(|v| {
-            v.clear();
-            v.push_str(&self.tmp_sample_count_label);
-        });
+        self.view
+            .label(cx, ids!(sample_count_label))
+            .set_text_with(|v| {
+                v.clear();
+                v.push_str(&self.tmp_sample_count_label);
+            });
         self.view.label(cx, ids!(window_label)).set_text_with(|v| {
             v.clear();
             v.push_str(if running { "Live" } else { "Paused" });

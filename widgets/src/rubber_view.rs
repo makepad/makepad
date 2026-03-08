@@ -23,8 +23,6 @@ enum DrawState {
 /// When the child size is static, the animation stops (no more nextframe/redraw calls).
 #[derive(Script, ScriptHook, Widget)]
 pub struct RubberView {
-    #[uid]
-    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]

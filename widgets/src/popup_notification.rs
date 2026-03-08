@@ -31,8 +31,6 @@ script_mod! {
 
 #[derive(Script, Widget)]
 pub struct PopupNotification {
-    #[uid]
-    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 

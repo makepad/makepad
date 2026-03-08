@@ -337,8 +337,6 @@ impl ChatData {
 // ChatList widget wrapping PortalList for chat message display
 #[derive(Script, ScriptHook, Widget)]
 pub struct ChatList {
-    #[uid]
-    uid: WidgetUid,
     #[deref]
     view: View,
     #[rust]

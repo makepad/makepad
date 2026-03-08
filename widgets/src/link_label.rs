@@ -2,8 +2,8 @@ use crate::{
     button::{Button, ButtonAction},
     makepad_derive_widget::*,
     makepad_draw::*,
-    widget_async::ScriptAsyncResult,
     widget::*,
+    widget_async::ScriptAsyncResult,
 };
 
 script_mod! {
@@ -215,8 +215,6 @@ script_mod! {
 /// This is a wrapper around (and derefs to) a [`Button`] widget.
 #[derive(Script, ScriptHook, Widget)]
 pub struct LinkLabel {
-    #[uid]
-    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]
