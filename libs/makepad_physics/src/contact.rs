@@ -6,19 +6,23 @@ pub const MAX_CONTACTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ContactPoint {
-    /// World-space contact position.
+    /// World-space midpoint used by the solver.
     pub world_point: Vec3f,
-    /// Offset from body A center to contact point (world space).
-    pub offset_a: Vec3f,
-    /// Offset from body B center to contact point (world space).
-    pub offset_b: Vec3f,
+    /// World-space contact point on body A.
+    pub world_point_a: Vec3f,
+    /// World-space contact point on body B.
+    pub world_point_b: Vec3f,
+    /// Body-A-local contact point. For ground, this stays in world space.
+    pub local_point_a: Vec3f,
+    /// Body-B-local contact point. For ground, this stays in world space.
+    pub local_point_b: Vec3f,
     /// Contact normal pointing from A toward B (world space, unit length).
     pub normal: Vec3f,
     /// Penetration depth (positive = overlapping).
     pub penetration: f32,
-    /// Accumulated normal impulse (for warmstarting, future use).
+    /// Accumulated normal impulse retained for cross-frame warmstarting.
     pub normal_impulse: f32,
-    /// Accumulated tangent impulses [tangent1, tangent2] (for warmstarting, future use).
+    /// Accumulated tangent impulses [tangent1, tangent2] retained for cross-frame warmstarting.
     pub tangent_impulse: [f32; 2],
 }
 

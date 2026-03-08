@@ -21,6 +21,7 @@ script_mod! {
             active: {
                 default: @off
                 on: AnimatorState{
+                    redraw: true
                     from: {all: Forward {duration: 0.5}}
                     ease: InQuad
                     apply: {
@@ -28,6 +29,7 @@ script_mod! {
                     }
                 }
                 off: AnimatorState{
+                    redraw: true
                     from: {all: Forward {duration: 0.5}}
                     ease: OutQuad
                     apply: {
@@ -60,10 +62,6 @@ pub struct SlidePanel {
     active: f64,
     #[live]
     side: SlideSide,
-    #[rust]
-    screen_width: f64,
-    #[rust]
-    next_frame: NextFrame,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -80,40 +78,35 @@ impl Widget for SlidePanel {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.frame.redraw(cx);
         }
-
-        match event {
-            Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
-                self.frame.redraw(cx);
-            }
-            _ => (),
-        }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, mut walk: Walk) -> DrawStep {
-        let rect = cx.peek_walk_turtle(walk);
-        match self.side {
-            SlideSide::Top => {
-                walk.abs_pos = Some(dvec2(0.0, -rect.size.y * self.active));
-            }
-            SlideSide::Left => {
-                walk.abs_pos = Some(dvec2(-rect.size.x * self.active, 0.0));
-            }
-            SlideSide::Right => {
-                walk.abs_pos = Some(dvec2(
-                    self.screen_width - rect.size.x + rect.size.x * self.active,
-                    0.0,
-                ));
-            }
-        }
-        self.frame.draw_walk(cx, scope, walk)
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let panel_rect = cx.peek_walk_turtle(walk);
+        let parent_rect = cx.turtle().rect();
+        let abs_pos = match self.side {
+            SlideSide::Top => dvec2(
+                parent_rect.pos.x,
+                parent_rect.pos.y - panel_rect.size.y * self.active,
+            ),
+            SlideSide::Left => dvec2(
+                parent_rect.pos.x - panel_rect.size.x * self.active,
+                parent_rect.pos.y,
+            ),
+            SlideSide::Right => dvec2(
+                parent_rect.pos.x + parent_rect.size.x - panel_rect.size.x
+                    + panel_rect.size.x * self.active,
+                parent_rect.pos.y,
+            ),
+        };
+
+        self.frame.draw_walk(cx, scope, walk.with_abs_pos(abs_pos))
     }
 }
 
 impl WidgetMatchEvent for SlidePanel {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         for action in actions {
-            if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
-                self.screen_width = ce.new_geom.inner_size.x;
+            if let WindowAction::WindowGeomChange(_ce) = action.as_widget_action().cast() {
                 self.redraw(cx);
             }
         }
