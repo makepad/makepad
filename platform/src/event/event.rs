@@ -217,6 +217,9 @@ pub enum Event {
     VideoPlaybackResourcesReleased(VideoPlaybackResourcesReleasedEvent),
     VideoDecodingError(VideoDecodingErrorEvent),
     TextureHandleReady(TextureHandleReadyEvent),
+    VideoYuvTexturesReady(VideoYuvTexturesReady),
+    VideoSeekableRanges(VideoSeekableRangesEvent),
+    VideoBufferedRanges(VideoBufferedRangesEvent),
 
     /// The "go back" navigational button or gesture was performed.
     ///
@@ -304,6 +307,9 @@ impl Event {
             48 => "VideoDecodingError",
             49 => "VideoPlaybackResourcesReleased",
             50 => "TextureHandleReady",
+            63 => "VideoSeekableRanges",
+            64 => "VideoBufferedRanges",
+            65 => "VideoYuvTexturesReady",
             51 => "MouseLeave",
             52 => "Actions",
             53 => "BackPressed",
@@ -387,6 +393,9 @@ impl Event {
             Self::VideoDecodingError(_) => 48,
             Self::VideoPlaybackResourcesReleased(_) => 49,
             Self::TextureHandleReady(_) => 50,
+            Self::VideoSeekableRanges(_) => 63,
+            Self::VideoBufferedRanges(_) => 64,
+            Self::VideoYuvTexturesReady(_) => 65,
             Self::MouseLeave(_) => 51,
             Self::Actions(_) => 52,
             Self::BackPressed { .. } => 53,

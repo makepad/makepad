@@ -1,10 +1,10 @@
 use crate::{
+    event::window::PopupDismissedEvent,
     event::{
         DragEvent, DropEvent, GameInputConnectedEvent, KeyEvent, MouseDownEvent, MouseMoveEvent,
         MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
         WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
     },
-    event::window::PopupDismissedEvent,
     makepad_live_id::*,
     permission::PermissionResult,
     window::WindowId,

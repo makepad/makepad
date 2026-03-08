@@ -119,6 +119,15 @@ pub enum FromJavaMessage {
         video_id: u64,
         error: String,
     },
+    CameraPreviewSurfaceReady {
+        video_id: u64,
+        window: *mut ndk_sys::ANativeWindow,
+        width: i32,
+        height: i32,
+    },
+    CameraPreviewSurfaceDestroyed {
+        video_id: u64,
+    },
     Pause,
     Resume,
     Start,
@@ -133,6 +142,12 @@ pub enum FromJavaMessage {
     ClipboardPaste {
         content: String,
     },
+    SelectionHandleDrag {
+        handle: SelectionHandleKind,
+        phase: SelectionHandlePhase,
+        abs: Vec2d,
+        time: f64,
+    },
     ImeTextStateChanged {
         full_text: String,
         selection_start: i32,
@@ -142,12 +157,6 @@ pub enum FromJavaMessage {
     },
     ImeEditorAction {
         action_code: i32,
-    },
-    SelectionHandleDrag {
-        handle: SelectionHandleKind,
-        phase: SelectionHandlePhase,
-        abs: DVec2,
-        time: f64,
     },
 }
 unsafe impl Send for FromJavaMessage {}
@@ -775,6 +784,64 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onVideoDecodingE
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onH264EncoderPacket(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    encoder_id: jni_sys::jlong,
+    pts_us: jni_sys::jlong,
+    flags: jni_sys::jint,
+    data: jni_sys::jobject,
+) {
+    let bytes = java_byte_array_to_vec(env, data);
+    crate::video_encode::camera_video_encoder::on_android_h264_packet(
+        encoder_id as u64,
+        pts_us as i64,
+        flags as i32,
+        bytes,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onH264EncoderError(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    encoder_id: jni_sys::jlong,
+    error: jni_sys::jstring,
+) {
+    let message = jstring_to_string(env, error);
+    crate::video_encode::camera_video_encoder::on_android_h264_error(encoder_id as u64, message);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onCameraPreviewSurfaceReady(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    video_id: jni_sys::jlong,
+    surface: jni_sys::jobject,
+    width: jni_sys::jint,
+    height: jni_sys::jint,
+) {
+    let window = create_native_window(surface);
+    send_from_java_message(FromJavaMessage::CameraPreviewSurfaceReady {
+        video_id: video_id as u64,
+        window,
+        width: width as i32,
+        height: height as i32,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onCameraPreviewSurfaceDestroyed(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    video_id: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::CameraPreviewSurfaceDestroyed {
+        video_id: video_id as u64,
+    });
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onMidiDeviceOpened(
     env: *mut jni_sys::JNIEnv,
     _: jni_sys::jclass,
@@ -837,6 +904,41 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onClipboardPaste
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onSelectionHandleDrag(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    handle: jni_sys::jint,
+    phase: jni_sys::jint,
+    x: jni_sys::jfloat,
+    y: jni_sys::jfloat,
+    time_millis: jni_sys::jlong,
+) {
+    let Some(handle) = (match handle {
+        0 => Some(SelectionHandleKind::Start),
+        1 => Some(SelectionHandleKind::End),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    let Some(phase) = (match phase {
+        0 => Some(SelectionHandlePhase::Begin),
+        1 => Some(SelectionHandlePhase::Move),
+        2 => Some(SelectionHandlePhase::End),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    send_from_java_message(FromJavaMessage::SelectionHandleDrag {
+        handle,
+        phase,
+        abs: dvec2(x as f64, y as f64),
+        time: time_millis as f64 / 1000.0,
+    });
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeTextStateChanged(
     env: *mut jni_sys::JNIEnv,
     _: jni_sys::jclass,
@@ -865,37 +967,6 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeEditorActio
     send_from_java_message(FromJavaMessage::ImeEditorAction {
         action_code: action_code as i32,
     });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onSelectionHandleDrag(
-    _: *mut jni_sys::JNIEnv,
-    _: jni_sys::jclass,
-    handle: jni_sys::jint,
-    phase: jni_sys::jint,
-    x: jni_sys::jfloat,
-    y: jni_sys::jfloat,
-    time_millis: jni_sys::jlong,
-) {
-    let handle = match handle {
-        0 => Some(SelectionHandleKind::Start),
-        1 => Some(SelectionHandleKind::End),
-        _ => None,
-    };
-    let phase = match phase {
-        0 => Some(SelectionHandlePhase::Begin),
-        1 => Some(SelectionHandlePhase::Move),
-        2 => Some(SelectionHandlePhase::End),
-        _ => None,
-    };
-    if let (Some(handle), Some(phase)) = (handle, phase) {
-        send_from_java_message(FromJavaMessage::SelectionHandleDrag {
-            handle,
-            phase,
-            abs: dvec2(x as f64, y as f64),
-            time: time_millis as f64 / 1000.0,
-        });
-    }
 }
 
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
@@ -1045,6 +1116,39 @@ pub unsafe fn to_java_show_clipboard_actions(
 pub unsafe fn to_java_dismiss_clipboard_actions() {
     let env = attach_jni_env();
     ndk_utils::call_void_method!(env, get_activity(), "dismissClipboardActions", "()V");
+}
+
+pub unsafe fn to_java_show_selection_handles(start: Vec2d, end: Vec2d) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "showSelectionHandles",
+        "(FFFF)V",
+        start.x as jni_sys::jdouble,
+        start.y as jni_sys::jdouble,
+        end.x as jni_sys::jdouble,
+        end.y as jni_sys::jdouble
+    );
+}
+
+pub unsafe fn to_java_update_selection_handles(start: Vec2d, end: Vec2d) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "updateSelectionHandles",
+        "(FFFF)V",
+        start.x as jni_sys::jdouble,
+        start.y as jni_sys::jdouble,
+        end.x as jni_sys::jdouble,
+        end.y as jni_sys::jdouble
+    );
+}
+
+pub unsafe fn to_java_hide_selection_handles() {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(env, get_activity(), "hideSelectionHandles", "()V");
 }
 
 pub unsafe fn to_java_http_request(request_id: LiveId, request: HttpRequest) {
@@ -1267,6 +1371,118 @@ pub fn to_java_open_all_midi_devices(delay: jni_sys::jlong) {
     }
 }
 
+pub unsafe fn to_java_attach_camera_preview(
+    video_id: LiveId,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "attachCameraNativePreview",
+        "(JIIII)V",
+        video_id.get_value() as jni_sys::jlong,
+        left,
+        top,
+        right,
+        bottom
+    );
+}
+
+pub unsafe fn to_java_update_camera_preview(
+    video_id: LiveId,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    visible: bool,
+) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "updateCameraNativePreview",
+        "(JIIIIZ)V",
+        video_id.get_value() as jni_sys::jlong,
+        left,
+        top,
+        right,
+        bottom,
+        visible as jni_sys::jboolean as std::ffi::c_uint
+    );
+}
+
+pub unsafe fn to_java_detach_camera_preview(video_id: LiveId) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "detachCameraNativePreview",
+        "(J)V",
+        video_id.get_value() as jni_sys::jlong
+    );
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AndroidH264CodecProbe {
+    pub encode_hardware: bool,
+    pub encode_software: bool,
+    pub decode_hardware: bool,
+    pub decode_software: bool,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_fps: u32,
+    pub max_bitrate: u32,
+    pub width_alignment: u32,
+    pub height_alignment: u32,
+}
+
+pub unsafe fn to_java_query_h264_codec_support() -> Option<AndroidH264CodecProbe> {
+    let env = attach_jni_env();
+    let result = ndk_utils::call_object_method!(
+        env,
+        get_activity(),
+        "queryH264CodecSupport",
+        "()[I"
+    );
+    if result.is_null() {
+        return None;
+    }
+
+    let length = (**env).GetArrayLength.unwrap()(env, result);
+    if length < 10 {
+        (**env).DeleteLocalRef.unwrap()(env, result);
+        return None;
+    }
+
+    let elems = (**env).GetIntArrayElements.unwrap()(env, result, std::ptr::null_mut());
+    if elems.is_null() {
+        (**env).DeleteLocalRef.unwrap()(env, result);
+        return None;
+    }
+
+    let vals = std::slice::from_raw_parts(elems as *const i32, length as usize);
+    let probe = AndroidH264CodecProbe {
+        encode_hardware: vals[0] != 0,
+        encode_software: vals[1] != 0,
+        decode_hardware: vals[2] != 0,
+        decode_software: vals[3] != 0,
+        max_width: vals[4].max(0) as u32,
+        max_height: vals[5].max(0) as u32,
+        max_fps: vals[6].max(0) as u32,
+        max_bitrate: vals[7].max(0) as u32,
+        width_alignment: vals[8].max(0) as u32,
+        height_alignment: vals[9].max(0) as u32,
+    };
+
+    (**env).ReleaseIntArrayElements.unwrap()(env, result, elems, jni_sys::JNI_ABORT);
+    (**env).DeleteLocalRef.unwrap()(env, result);
+    Some(probe)
+}
+
 pub unsafe fn to_java_prepare_video_playback(
     env: *mut jni_sys::JNIEnv,
     video_id: LiveId,
@@ -1294,6 +1510,10 @@ pub unsafe fn to_java_prepare_video_playback(
             let url = CString::new(url.clone()).unwrap();
             let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
             url
+        }
+        VideoSource::Camera(..) => {
+            crate::error!("VIDEO: Camera source not supported on Android");
+            return;
         }
     };
 
@@ -1502,37 +1722,4 @@ pub unsafe fn to_java_update_ime_text_state(
     );
 
     (**env).DeleteLocalRef.unwrap()(env, text_jstr);
-}
-
-pub unsafe fn to_java_show_selection_handles(start: Vec2d, end: Vec2d) {
-    let env = attach_jni_env();
-    ndk_utils::call_void_method!(
-        env,
-        get_activity(),
-        "showSelectionHandles",
-        "(FFFF)V",
-        start.x as jni_sys::jfloat,
-        start.y as jni_sys::jfloat,
-        end.x as jni_sys::jfloat,
-        end.y as jni_sys::jfloat
-    );
-}
-
-pub unsafe fn to_java_update_selection_handles(start: Vec2d, end: Vec2d) {
-    let env = attach_jni_env();
-    ndk_utils::call_void_method!(
-        env,
-        get_activity(),
-        "updateSelectionHandles",
-        "(FFFF)V",
-        start.x as jni_sys::jfloat,
-        start.y as jni_sys::jfloat,
-        end.x as jni_sys::jfloat,
-        end.y as jni_sys::jfloat
-    );
-}
-
-pub unsafe fn to_java_hide_selection_handles() {
-    let env = attach_jni_env();
-    ndk_utils::call_void_method!(env, get_activity(), "hideSelectionHandles", "()V");
 }

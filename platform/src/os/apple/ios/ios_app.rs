@@ -1154,6 +1154,82 @@ impl IosApp {
         }));
     }
 
+    pub fn attach_camera_preview(video_id: u64, session: ObjcId) {
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
+                    let Some(mtk_view) = app.mtk_view else {
+                        return;
+                    };
+                    unsafe {
+                        if app.camera_preview_layers.contains_key(&video_id) {
+                            return;
+                        }
+
+                        let preview_layer: ObjcId = msg_send![class!(AVCaptureVideoPreviewLayer), layerWithSession: session];
+                        if preview_layer == nil {
+                            return;
+                        }
+
+                        let gravity = str_to_nsstring("AVLayerVideoGravityResizeAspectFill");
+                        let () = msg_send![preview_layer, setVideoGravity: gravity];
+
+                        let host_view: ObjcId = msg_send![mtk_view, superview];
+                        if host_view == nil {
+                            return;
+                        }
+
+                        let host_layer: ObjcId = msg_send![host_view, layer];
+                        if host_layer != nil {
+                            let () = msg_send![host_layer, addSublayer: preview_layer];
+                            app.camera_preview_layers.insert(video_id, preview_layer);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn update_camera_preview(video_id: u64, rect: Rect, visible: bool) {
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
+                    let Some(layer) = app.camera_preview_layers.get(&video_id).copied() else {
+                        return;
+                    };
+                    unsafe {
+                        let frame = NSRect {
+                            origin: NSPoint {
+                                x: rect.pos.x,
+                                y: rect.pos.y,
+                            },
+                            size: NSSize {
+                                width: rect.size.x.max(0.0),
+                                height: rect.size.y.max(0.0),
+                            },
+                        };
+                        let () = msg_send![layer, setFrame: frame];
+                        let () = msg_send![layer, setHidden: if visible { NO } else { YES }];
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn detach_camera_preview(video_id: u64) {
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(mut app_ref) = app.try_borrow_mut() {
+                if let Some(ref mut app) = *app_ref {
+                    if let Some(layer) = app.camera_preview_layers.remove(&video_id) {
+                        unsafe {
+                            let () = msg_send![layer, removeFromSuperlayer];
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Action dispatch methods called from MakepadView's action handlers
     pub fn send_clipboard_action(action: &str) {
         match action {

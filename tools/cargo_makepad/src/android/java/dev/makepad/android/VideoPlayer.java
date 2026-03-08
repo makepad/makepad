@@ -50,20 +50,34 @@ public class VideoPlayer {
             mMediaPlayer.setSurface(surface);
 
             if (mSource instanceof byte[]) {
-                ByteArrayMediaDataSource dataSource = new ByteArrayMediaDataSource((byte[]) mSource);
+                byte[] bytes = (byte[]) mSource;
+                Log.i("MakepadVideoPlayer", "videoId=" + mVideoId + " source=in-memory bytes=" + bytes.length);
+                ByteArrayMediaDataSource dataSource = new ByteArrayMediaDataSource(bytes);
                 mMediaPlayer.setDataSource(dataSource);
             } else if (mSource instanceof String) {
                 String dataString = (String) mSource;
                 if (dataString.startsWith("http://") || dataString.startsWith("https://")) {
                     // Source is a network URL
+                    Log.i("MakepadVideoPlayer", "videoId=" + mVideoId + " source=network");
                     mMediaPlayer.setDataSource(dataString);
                 } else {
                     // Source is a url pointing to the local filesystem
+                    Log.i("MakepadVideoPlayer", "videoId=" + mVideoId + " source=file path=" + dataString);
                     mMediaPlayer.setDataSource(new FileInputStream(new File(dataString)).getFD());
                 }
             }
             
             mMediaPlayer.setLooping(mShouldLoop);
+
+            mMediaPlayer.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                @Override
+                public boolean onError(MediaPlayer mp, int what, int extra) {
+                    String message = "MediaPlayer error what=" + what + " extra=" + extra;
+                    Log.e("MakepadVideoPlayer", "videoId=" + mVideoId + " " + message);
+                    MakepadNative.onVideoDecodingError(mVideoId, message);
+                    return true;
+                }
+            });
 
             mMediaPlayer.prepareAsync();
             mMediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {

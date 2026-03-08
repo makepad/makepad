@@ -194,11 +194,7 @@ impl Win32Window {
         }
     }
 
-    pub fn new_popup(
-        window_id: WindowId,
-        position: Vec2d,
-        size: Vec2d,
-    ) -> Win32Window {
+    pub fn new_popup(window_id: WindowId, position: Vec2d, size: Vec2d) -> Win32Window {
         let title = encode_wide("Makepad Popup");
 
         let style = WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;

@@ -238,6 +238,7 @@ impl Cx {
                     let tw = ToWasmPermissionResult::read_to_wasm(&mut to_wasm);
                     let permission = match tw.permission.as_str() {
                         "microphone" => Permission::AudioInput,
+                        "camera" => Permission::Camera,
                         _ => {
                             crate::log!("Unknown web permission: {}", tw.permission);
                             continue;
@@ -318,6 +319,9 @@ impl Cx {
                             video_width: tw.video_width,
                             video_height: tw.video_height,
                             duration,
+                            is_seekable: duration > 0,
+                            video_tracks: if tw.video_width > 0 && tw.video_height > 0 { vec!["video".to_string()] } else { vec![] },
+                            audio_tracks: vec!["audio".to_string()],
                         },
                     ));
                 }
@@ -331,6 +335,12 @@ impl Cx {
                         VideoTextureUpdatedEvent {
                             video_id,
                             current_position_ms,
+                            yuv: crate::event::video_playback::VideoYuvMetadata {
+                                enabled: false,
+                                matrix: 0.0,
+                                biplanar: false,
+                                rotation_steps: 0.0,
+                            },
                         },
                     ));
                     self.redraw_all();
@@ -582,6 +592,7 @@ impl Cx {
                 } => {
                     let permission_str = match permission {
                         Permission::AudioInput => "microphone",
+                        Permission::Camera => "camera",
                     };
                     self.os.from_wasm(FromWasmCheckPermission {
                         permission: permission_str.to_string(),
@@ -594,13 +605,22 @@ impl Cx {
                 } => {
                     let permission_str = match permission {
                         Permission::AudioInput => "microphone",
+                        Permission::Camera => "camera",
                     };
                     self.os.from_wasm(FromWasmRequestPermission {
                         permission: permission_str.to_string(),
                         request_id: request_id as u32,
                     });
                 }
-                CxOsOp::PrepareVideoPlayback(video_id, source, _external_texture_id, texture_id, autoplay, should_loop) => {
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _camera_preview_mode,
+                    _external_texture_id,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                ) => {
                     match source {
                         VideoSource::Network(url) => {
                             self.os.from_wasm(FromWasmPrepareVideoPlayback {
@@ -621,6 +641,13 @@ impl Cx {
                         }
                         VideoSource::Filesystem(_) => {
                             let error = "VideoSource::Filesystem is not supported on web".to_string();
+                            crate::error!("{}", error);
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
+                        }
+                        VideoSource::Camera(..) => {
+                            let error = "VideoSource::Camera is not supported on web".to_string();
                             crate::error!("{}", error);
                             self.call_event_handler(&Event::VideoDecodingError(
                                 VideoDecodingErrorEvent { video_id, error },
@@ -675,6 +702,13 @@ impl Cx {
                 CxOsOp::UpdateVideoSurfaceTexture(_) => {
                     // On web, texture updates happen in the JS animation frame loop
                 }
+                // New ops — no-op on Web (not yet wired to JS)
+                CxOsOp::AttachCameraNativePreview { .. }
+                | CxOsOp::UpdateCameraNativePreview { .. }
+                | CxOsOp::DetachCameraNativePreview { .. } => {}
+                CxOsOp::SetVideoVolume(_, _) => {}
+                CxOsOp::SetVideoPlaybackRate(_, _) => {}
+                CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*

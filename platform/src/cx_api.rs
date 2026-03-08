@@ -10,7 +10,9 @@ use {
         dvec2,
         event::keyboard::CharOffset,
         event::xr::XrAnchor,
-        event::{DragItem, NextFrame, Timer, Trigger, VideoSource},
+        event::{
+            video_playback::CameraPreviewMode, DragItem, NextFrame, Timer, Trigger, VideoSource,
+        },
         gpu_info::GpuInfo,
         ime::TextInputConfig,
         macos_menu::MacosMenu,
@@ -136,8 +138,14 @@ pub enum CxOsOp {
     HideClipboardActions,
     CopyToClipboard(String),
     SetPrimarySelection(String),
-    ShowSelectionHandles { start: Vec2d, end: Vec2d },
-    UpdateSelectionHandles { start: Vec2d, end: Vec2d },
+    ShowSelectionHandles {
+        start: Vec2d,
+        end: Vec2d,
+    },
+    UpdateSelectionHandles {
+        start: Vec2d,
+        end: Vec2d,
+    },
     HideSelectionHandles,
     AccessibilityUpdate(AccessibilityUpdatePayload),
 
@@ -158,7 +166,28 @@ pub enum CxOsOp {
         request_id: LiveId,
     },
 
-    PrepareVideoPlayback(LiveId, VideoSource, u32, TextureId, bool, bool),
+    PrepareVideoPlayback(
+        LiveId,
+        VideoSource,
+        CameraPreviewMode,
+        u32,
+        TextureId,
+        bool,
+        bool,
+    ),
+    AttachCameraNativePreview {
+        video_id: LiveId,
+        area: Area,
+    },
+    UpdateCameraNativePreview {
+        video_id: LiveId,
+        area: Area,
+        visible: bool,
+    },
+    DetachCameraNativePreview {
+        video_id: LiveId,
+    },
+    PrepareAudioPlayback(LiveId, VideoSource, bool, bool),
     BeginVideoPlayback(LiveId),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
@@ -166,6 +195,8 @@ pub enum CxOsOp {
     UnmuteVideoPlayback(LiveId),
     CleanupVideoPlaybackResources(LiveId),
     SeekVideoPlayback(LiveId, u64),
+    SetVideoVolume(LiveId, f64),
+    SetVideoPlaybackRate(LiveId, f64),
     UpdateVideoSurfaceTexture(LiveId),
 
     CreateWebView {
@@ -237,6 +268,10 @@ impl std::fmt::Debug for CxOsOp {
             Self::CancelHttpRequest { .. } => write!(f, "CancelHttpRequest"),
 
             Self::PrepareVideoPlayback(..) => write!(f, "PrepareVideoPlayback"),
+            Self::AttachCameraNativePreview { .. } => write!(f, "AttachCameraNativePreview"),
+            Self::UpdateCameraNativePreview { .. } => write!(f, "UpdateCameraNativePreview"),
+            Self::DetachCameraNativePreview { .. } => write!(f, "DetachCameraNativePreview"),
+            Self::PrepareAudioPlayback(..) => write!(f, "PrepareAudioPlayback"),
             Self::BeginVideoPlayback(..) => write!(f, "BeginVideoPlayback"),
             Self::PauseVideoPlayback(..) => write!(f, "PauseVideoPlayback"),
             Self::ResumeVideoPlayback(..) => write!(f, "ResumeVideoPlayback"),
@@ -244,6 +279,8 @@ impl std::fmt::Debug for CxOsOp {
             Self::UnmuteVideoPlayback(..) => write!(f, "UnmuteVideoPlayback"),
             Self::CleanupVideoPlaybackResources(..) => write!(f, "CleanupVideoPlaybackResources"),
             Self::SeekVideoPlayback(..) => write!(f, "SeekVideoPlayback"),
+            Self::SetVideoVolume(..) => write!(f, "SetVideoVolume"),
+            Self::SetVideoPlaybackRate(..) => write!(f, "SetVideoPlaybackRate"),
             Self::UpdateVideoSurfaceTexture(..) => write!(f, "UpdateVideoSurfaceTexture"),
             Self::CreateWebView { .. } => write!(f, "CreateWebView"),
             Self::UpdateWebView { .. } => write!(f, "UpdateWebView"),
@@ -526,7 +563,10 @@ impl Cx {
     /// The `update` is a type-erased `accesskit::TreeUpdate`. Platform backends
     /// downcast it when an accessibility adapter is active.
     pub fn update_accessibility_tree(&mut self, update: Box<dyn std::any::Any + Send>) {
-        self.platform_ops.push(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(update)));
+        self.platform_ops
+            .push(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(
+                update,
+            )));
     }
 
     /// Show native selection handles at the given start and end positions (mobile).
@@ -941,19 +981,83 @@ impl Cx {
         &mut self,
         video_id: LiveId,
         source: VideoSource,
+        camera_preview_mode: CameraPreviewMode,
         external_texture_id: u32,
         texture_id: TextureId,
         autoplay: bool,
         should_loop: bool,
     ) {
+        if let VideoSource::Camera(..) = &source {
+            // Auto-request camera permission before opening device
+            let _request_id = self.request_permission(crate::permission::Permission::Camera);
+            self.pending_camera_playbacks.push(crate::cx::PendingCameraPlayback {
+                video_id,
+                source,
+                camera_preview_mode,
+                external_texture_id,
+                texture_id,
+                autoplay,
+                should_loop,
+            });
+            return;
+        }
         self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
             video_id,
             source,
+            camera_preview_mode,
             external_texture_id,
             texture_id,
             autoplay,
             should_loop,
         ));
+    }
+
+    pub fn handle_camera_permission_result(&mut self, result: &crate::permission::PermissionResult) {
+        if result.permission != crate::permission::Permission::Camera {
+            return;
+        }
+        let pending: Vec<_> = self.pending_camera_playbacks.drain(..).collect();
+        for p in pending {
+            match result.status {
+                crate::permission::PermissionStatus::Granted => {
+                    self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
+                        p.video_id,
+                        p.source,
+                        p.camera_preview_mode,
+                        p.external_texture_id,
+                        p.texture_id,
+                        p.autoplay,
+                        p.should_loop,
+                    ));
+                }
+                _ => {
+                    self.call_event_handler(&crate::event::Event::VideoDecodingError(
+                        crate::event::VideoDecodingErrorEvent {
+                            video_id: p.video_id,
+                            error: "Camera permission denied".to_string(),
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    pub fn attach_camera_native_preview(&mut self, video_id: LiveId, area: Area) {
+        self.platform_ops
+            .push(CxOsOp::AttachCameraNativePreview { video_id, area });
+    }
+
+    pub fn update_camera_native_preview(&mut self, video_id: LiveId, area: Area, visible: bool) {
+        self.platform_ops.push(CxOsOp::UpdateCameraNativePreview {
+            video_id,
+            area,
+            visible,
+        });
+    }
+
+    pub fn detach_camera_native_preview(&mut self, video_id: LiveId) {
+        self.platform_ops
+            .push(CxOsOp::DetachCameraNativePreview { video_id });
     }
 
     pub fn begin_video_playback(&mut self, video_id: LiveId) {
@@ -988,6 +1092,31 @@ impl Cx {
             .push(CxOsOp::SeekVideoPlayback(video_id, position_ms));
     }
 
+    pub fn set_video_volume(&mut self, video_id: LiveId, volume: f64) {
+        self.platform_ops
+            .push(CxOsOp::SetVideoVolume(video_id, volume));
+    }
+
+    pub fn set_video_playback_rate(&mut self, video_id: LiveId, rate: f64) {
+        self.platform_ops
+            .push(CxOsOp::SetVideoPlaybackRate(video_id, rate));
+    }
+
+    pub fn prepare_audio_playback(
+        &mut self,
+        video_id: LiveId,
+        source: VideoSource,
+        autoplay: bool,
+        should_loop: bool,
+    ) {
+        self.platform_ops.push(CxOsOp::PrepareAudioPlayback(
+            video_id,
+            source,
+            autoplay,
+            should_loop,
+        ));
+    }
+
     pub fn println_resources(&self) {
         println!("Num textures: {}", self.textures.0.pool.len());
     }
@@ -1015,6 +1144,44 @@ impl Cx {
     pub fn event_id(&self) -> u64 {
         self.event_id
     }
+}
+
+/// Returns the canPlayType string for the given MIME type on the current platform.
+/// Possible values: `""` (cannot play), `"maybe"`, `"probably"`.
+pub fn can_play_type(mime: &str) -> &'static str {
+    can_play_type_impl(mime)
+}
+
+#[cfg(all(target_os = "linux", not(target_os = "android")))]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::linux::linux_video_playback::can_play_type(mime)
+}
+
+#[cfg(target_os = "android")]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::linux::android::android_video_playback::can_play_type(mime)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::apple::apple_video_playback::can_play_type(mime)
+}
+
+#[cfg(target_os = "windows")]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::windows::windows_video_playback::WindowsVideoPlayer::can_play_type(mime)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "windows",
+)))]
+fn can_play_type_impl(_mime: &str) -> &'static str {
+    ""
 }
 
 #[macro_export]

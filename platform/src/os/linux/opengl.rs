@@ -578,7 +578,7 @@ impl Cx {
 
                         if cxtexture.format.is_vec() {
                             cxtexture.update_vec_texture(gl, &self.os_type);
-                        } else if cxtexture.format.is_video() {
+                        } else if cxtexture.format.is_video_external() {
                             let is_initial_setup = cxtexture.setup_video_texture(gl);
                             if is_initial_setup {
                                 let e = Event::TextureHandleReady(TextureHandleReadyEvent {
@@ -588,6 +588,8 @@ impl Cx {
                                 to_dispatch.push(e);
                             }
                         }
+                        // VideoYuvPlane textures are uploaded externally via
+                        // upload_r8_plane_to_gl and need no setup here.
                     }
                     for i in 0..sh.mapping.textures.len() {
                         let gl = self.os.gl();
@@ -607,9 +609,7 @@ impl Cx {
                             let cxtexture = &mut self.textures[texture_id];
                             let bind_target = match cxtexture.format {
                                 #[cfg(target_os = "android")]
-                                TextureFormat::VideoRGB => gl_sys::TEXTURE_EXTERNAL_OES,
-                                #[cfg(not(target_os = "android"))]
-                                TextureFormat::VideoRGB => gl_sys::TEXTURE_2D,
+                                TextureFormat::VideoExternal => gl_sys::TEXTURE_EXTERNAL_OES,
                                 TextureFormat::VecCubeBGRAu8_32 { .. } => gl_sys::TEXTURE_CUBE_MAP,
                                 _ => gl_sys::TEXTURE_2D,
                             };
@@ -1845,10 +1845,22 @@ pub struct CxOsUniformBuffer {
     pub buffer: OpenglBuffer,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CxOsTexture {
     pub gl_texture: Option<u32>,
+    /// True when Makepad owns the GL texture object and must delete it.
+    pub gl_texture_owned: bool,
     pub gl_renderbuffer: Option<u32>,
+}
+
+impl Default for CxOsTexture {
+    fn default() -> Self {
+        Self {
+            gl_texture: None,
+            gl_texture_owned: true,
+            gl_renderbuffer: None,
+        }
+    }
 }
 
 impl CxTexture {
@@ -1878,6 +1890,7 @@ impl CxTexture {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
                     (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                     self.os.gl_texture = Some(gl_texture.assume_init());
+                    self.os.gl_texture_owned = true;
                 }
             }
             needs_realloc = true;
@@ -2195,6 +2208,7 @@ impl CxTexture {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
                     (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                     self.os.gl_texture = Some(gl_texture.assume_init());
+                    self.os.gl_texture_owned = true;
                 }
             }
 
@@ -2290,6 +2304,7 @@ impl CxTexture {
                 unsafe {
                     (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                     self.os.gl_texture = Some(gl_texture.assume_init());
+                    self.os.gl_texture_owned = true;
                 }
             }
             unsafe { (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap()) };
@@ -2406,8 +2421,10 @@ impl CxTexture {
     pub fn free_previous_resources(&mut self, gl: &LibGl) {
         if let Some(mut old_os) = self.previous_platform_resource.take() {
             if let Some(gl_texture) = old_os.gl_texture.take() {
-                unsafe { (gl.glDeleteTextures)(1, &gl_texture) };
-                crate::log!("Deleted texture: {}", gl_texture);
+                if old_os.gl_texture_owned {
+                    unsafe { (gl.glDeleteTextures)(1, &gl_texture) };
+                    crate::log!("Deleted texture: {}", gl_texture);
+                }
             }
             if let Some(gl_renderbuffer) = old_os.gl_renderbuffer.take() {
                 unsafe { (gl.glDeleteRenderbuffers)(1, &gl_renderbuffer) };
