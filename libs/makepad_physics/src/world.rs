@@ -3,7 +3,7 @@ use crate::contact::ContactManifold;
 use crate::hash;
 use crate::narrow_phase;
 use crate::rigid_body::{BodyType, RigidBody};
-use crate::solver::{self, SolverContact};
+use crate::solver::{self, SolverContact, SolverFriction};
 use makepad_math::*;
 
 /// The only way to mutate physics state from outside.
@@ -59,6 +59,7 @@ pub struct PhysicsWorld {
     prev_manifolds: Vec<ContactManifold>,
     manifolds: Vec<ContactManifold>,
     solver_contacts: Vec<SolverContact>,
+    solver_frictions: Vec<SolverFriction>,
 }
 
 impl PhysicsWorld {
@@ -74,6 +75,7 @@ impl PhysicsWorld {
             prev_manifolds: Vec::new(),
             manifolds: Vec::new(),
             solver_contacts: Vec::new(),
+            solver_frictions: Vec::new(),
         }
     }
 
@@ -116,6 +118,7 @@ impl PhysicsWorld {
             &self.bodies,
             &self.pairs,
             self.ground_y,
+            &self.prev_manifolds,
             &mut self.manifolds,
         );
         solver::inherit_warmstart_impulses(&self.prev_manifolds, &mut self.manifolds);
@@ -126,6 +129,7 @@ impl PhysicsWorld {
             &self.manifolds,
             substep_dt,
             &mut self.solver_contacts,
+            &mut self.solver_frictions,
         );
 
         for substep in 0..NUM_SOLVER_ITERATIONS {
@@ -137,18 +141,27 @@ impl PhysicsWorld {
             }
 
             // 2. Update constraints from current poses (NOT re-running collision detection).
-            // On the first substep, constraints are already fresh from prepare_contacts.
-            // On subsequent substeps, re-transform contact points and recompute biases
-            // from updated body positions (matching rapier's constraint update).
-            if substep > 0 {
-                solver::update_contacts(&self.bodies, &mut self.solver_contacts, substep_dt);
-            }
+            // This runs on every substep in Rapier because it also advances the
+            // warmstart accumulators used for writeback.
+            solver::update_contacts(
+                &self.bodies,
+                &mut self.solver_contacts,
+                substep_dt,
+                WARMSTART_COEFFICIENT,
+            );
+            solver::update_frictions(
+                &self.bodies,
+                &mut self.solver_frictions,
+                substep_dt,
+                WARMSTART_COEFFICIENT,
+            );
 
             // 3. Warmstart: apply cached impulses (every substep, matching rapier)
             if WARMSTART_COEFFICIENT != 0.0 {
                 solver::warmstart(
                     &mut self.bodies,
                     &mut self.solver_contacts,
+                    &mut self.solver_frictions,
                     WARMSTART_COEFFICIENT,
                 );
             }
@@ -157,6 +170,7 @@ impl PhysicsWorld {
             solver::solve_contacts(
                 &mut self.bodies,
                 &mut self.solver_contacts,
+                &mut self.solver_frictions,
                 NUM_INTERNAL_PGS_ITERATIONS,
             );
 
@@ -175,11 +189,16 @@ impl PhysicsWorld {
             solver::solve_contacts_wo_bias(
                 &mut self.bodies,
                 &mut self.solver_contacts,
+                &mut self.solver_frictions,
                 NUM_INTERNAL_STABILIZATION_ITERATIONS,
             );
         }
 
-        solver::writeback_impulses(&self.solver_contacts, &mut self.manifolds);
+        solver::writeback_impulses(
+            &self.solver_contacts,
+            &self.solver_frictions,
+            &mut self.manifolds,
+        );
 
         self.update_sleep_states();
         self.frame += 1;
@@ -208,6 +227,7 @@ impl PhysicsWorld {
         self.prev_manifolds.clear();
         self.manifolds.clear();
         self.solver_contacts.clear();
+        self.solver_frictions.clear();
     }
 
     /// Fast-forward: restore snapshot, then replay ops for each frame.

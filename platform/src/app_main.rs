@@ -82,6 +82,11 @@ pub trait AppMain {
 #[macro_export]
 macro_rules! app_main {
     ( $ app: ident) => {
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        fn main() {
+            app_main();
+        }
+
         #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
         pub fn app_main() {
             Cx::init_log();

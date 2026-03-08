@@ -16,14 +16,24 @@ pub struct ContactPoint {
     pub local_point_a: Vec3f,
     /// Body-B-local contact point. For ground, this stays in world space.
     pub local_point_b: Vec3f,
+    /// Geometric feature id on body A used for persistent matching.
+    pub feature_id_a: u32,
+    /// Geometric feature id on body B used for persistent matching.
+    pub feature_id_b: u32,
     /// Contact normal pointing from A toward B (world space, unit length).
     pub normal: Vec3f,
     /// Penetration depth (positive = overlapping).
     pub penetration: f32,
-    /// Accumulated normal impulse retained for cross-frame warmstarting.
+    /// Total normal impulse applied during the previous frame.
     pub normal_impulse: f32,
-    /// Accumulated tangent impulses [tangent1, tangent2] retained for cross-frame warmstarting.
+    /// Total tangent impulses [tangent1, tangent2] applied during the previous frame.
     pub tangent_impulse: [f32; 2],
+    /// Normal impulse retained for cross-frame warmstarting.
+    pub warmstart_normal_impulse: f32,
+    /// Tangent impulse retained for cross-frame warmstarting.
+    pub warmstart_tangent_impulse: [f32; 2],
+    /// Twist impulse retained for cross-frame warmstarting.
+    pub warmstart_twist_impulse: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +42,10 @@ pub struct ContactManifold {
     pub body_a: usize,
     /// Index of body B in the world's body list (usize::MAX = ground).
     pub body_b: usize,
+    /// Contact normal expressed in body A's local frame.
+    pub local_normal_a: Vec3f,
+    /// Contact normal expressed in body B's local frame.
+    pub local_normal_b: Vec3f,
     /// Number of active contact points.
     pub num_points: usize,
     /// Contact points (fixed-size array, only first num_points are valid).
@@ -43,6 +57,8 @@ impl Default for ContactManifold {
         ContactManifold {
             body_a: 0,
             body_b: 0,
+            local_normal_a: Vec3f::default(),
+            local_normal_b: Vec3f::default(),
             num_points: 0,
             points: [ContactPoint::default(); MAX_CONTACTS],
         }
