@@ -4,6 +4,7 @@ use crate::{
         MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
         WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
     },
+    event::window::PopupDismissedEvent,
     makepad_live_id::*,
     permission::PermissionResult,
     window::WindowId,
@@ -11,6 +12,7 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub enum MacosEvent {
+    PopupDismissed(PopupDismissedEvent),
     WindowGotFocus(WindowId),
     WindowLostFocus(WindowId),
     WindowResizeLoopStart(WindowId),

@@ -30,6 +30,7 @@ pub struct MacosWindow {
     // When ime_active is false, key events are not forward to NSTextInputContext so IME dose not active.
     pub(crate) ime_active: bool,
     pub(crate) is_fullscreen: bool,
+    pub(crate) is_popup: bool,
     pub(crate) last_mouse_pos: Vec2d,
     window_delegate: ObjcId,
     live_resize_timer: ObjcId,
@@ -49,6 +50,7 @@ impl MacosWindow {
             with_macos_app(|app| app.cocoa_windows.push((window, view)));
             MacosWindow {
                 is_fullscreen: false,
+                is_popup: false,
                 live_resize_timer: nil,
                 window_delegate: window_delegate,
                 window: window,
@@ -149,6 +151,97 @@ impl MacosWindow {
 
             // Set application icon from default icon
             Self::set_application_icon();
+
+            let () = msg_send![pool, drain];
+        }
+    }
+
+    /// Initialize as a popup window (borderless NSPanel at popup menu level).
+    /// `position` is in screen coordinates. `parent_window` is the parent NSWindow for coordinate conversion.
+    pub fn init_popup(&mut self, size: Vec2d, position: Vec2d, parent_window: ObjcId) {
+        self.is_popup = true;
+        unsafe {
+            let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+
+            // set the backpointers
+            (*self.window_delegate).set_ivar("macos_window_ptr", self as *mut _ as *mut c_void);
+            let () = msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
+
+            // Convert position from parent-client coordinates to screen coordinates.
+            // The position is relative to the parent window's content view origin (top-left).
+            let parent_frame: NSRect = msg_send![parent_window, frame];
+            let parent_content: NSRect = msg_send![parent_window, contentLayoutRect];
+            // macOS screen coordinates: origin at bottom-left.
+            // Parent content top-left in screen coords:
+            let screen_x = parent_frame.origin.x + parent_content.origin.x + position.x;
+            // Flip Y: parent content top is at frame.origin.y + frame.size.height - titlebar
+            let parent_content_top = parent_frame.origin.y + parent_frame.size.height
+                - parent_content.origin.y;
+            let screen_y = parent_content_top - position.y - size.y;
+
+            let ns_size = NSSize {
+                width: size.x as f64,
+                height: size.y as f64,
+            };
+            let window_frame = NSRect {
+                origin: NSPoint {
+                    x: screen_x,
+                    y: screen_y,
+                },
+                size: ns_size,
+            };
+
+            // NSPanel with borderless style
+            let window_masks = NSWindowStyleMask::NSBorderlessWindowMask as u64
+                | NSWindowStyleMask::NSFullSizeContentViewWindowMask as u64;
+
+            let () = msg_send![
+                self.window,
+                initWithContentRect: window_frame
+                styleMask: window_masks as u64
+                backing: NSBackingStoreType::NSBackingStoreBuffered as u64
+                defer: NO
+            ];
+
+            let () = msg_send![self.window, setDelegate: self.window_delegate];
+            let () = msg_send![self.window, setReleasedWhenClosed: NO];
+
+            // NSPopUpMenuWindowLevel = 101
+            let () = msg_send![self.window, setLevel: 101i64];
+            let () = msg_send![self.window, setHasShadow: YES];
+
+            let () = msg_send![self.window, setAcceptsMouseMovedEvents: YES];
+
+            let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2]; //duringViewResize
+
+            let () = msg_send![self.window, setContentView: self.view];
+            let () = msg_send![self.window, makeFirstResponder: self.view];
+
+            // orderFront instead of makeKeyAndOrderFront to avoid stealing key focus initially
+            // Then makeKey so we get resignKey on focus loss
+            let () = msg_send![self.window, orderFront: nil];
+            let () = msg_send![self.window, makeKeyWindow];
+
+            let rect = NSRect {
+                origin: NSPoint { x: 0., y: 0. },
+                size: ns_size,
+            };
+            let track: ObjcId = msg_send![class!(NSTrackingArea), alloc];
+            let track: ObjcId = msg_send![
+                track,
+                initWithRect: rect
+                options: NSTrackignActiveAlways
+                    | NSTrackingInVisibleRect
+                    | NSTrackingMouseEnteredAndExited
+                    | NSTrackingMouseMoved
+                    | NSTrackingCursorUpdate
+                owner: self.view
+                userInfo: nil
+            ];
+            let () = msg_send![self.view, addTrackingArea: track];
+
+            let input_context: ObjcId = msg_send![self.view, inputContext];
+            let () = msg_send![input_context, invalidateCharacterCoordinates];
 
             let () = msg_send![pool, drain];
         }
@@ -392,6 +485,15 @@ impl MacosWindow {
     }
 
     pub fn send_lost_focus_event(&mut self) {
+        if self.is_popup {
+            self.do_callback(MacosEvent::PopupDismissed(
+                crate::event::window::PopupDismissedEvent {
+                    window_id: self.window_id,
+                    reason: crate::event::window::PopupDismissReason::FocusLost,
+                },
+            ));
+            return;
+        }
         self.do_callback(MacosEvent::WindowLostFocus(self.window_id));
     }
 

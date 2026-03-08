@@ -1326,6 +1326,7 @@ impl PortalList {
         for item in self.items.values() {
             item.widget.selection_clear();
         }
+        cx.hide_clipboard_actions();
         self.area.redraw(cx);
     }
 
@@ -1487,6 +1488,50 @@ impl PortalList {
         }
 
         result
+    }
+
+    fn selection_clipboard_rect(&self, cx: &Cx) -> Rect {
+        let Some((start, end)) = self.get_selection_range() else {
+            return self.area.rect(cx);
+        };
+
+        let mut out: Option<Rect> = None;
+        for item_id in start.0..=end.0 {
+            if let Some(item) = self.items.get(&item_id) {
+                let rect = item.widget.area().rect(cx);
+                if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+                    continue;
+                }
+                out = Some(if let Some(acc) = out {
+                    let x0 = acc.pos.x.min(rect.pos.x);
+                    let y0 = acc.pos.y.min(rect.pos.y);
+                    let x1 = (acc.pos.x + acc.size.x).max(rect.pos.x + rect.size.x);
+                    let y1 = (acc.pos.y + acc.size.y).max(rect.pos.y + rect.size.y);
+                    Rect {
+                        pos: dvec2(x0, y0),
+                        size: dvec2((x1 - x0).max(1.0), (y1 - y0).max(1.0)),
+                    }
+                } else {
+                    rect
+                });
+            }
+        }
+
+        out.unwrap_or_else(|| self.area.rect(cx))
+    }
+
+    fn select_all_visible(&mut self, cx: &mut Cx) {
+        let Some((&first_id, _)) = self.items.iter().min_by_key(|(id, _)| *id) else {
+            return;
+        };
+        let Some((&last_id, last_item)) = self.items.iter().max_by_key(|(id, _)| *id) else {
+            return;
+        };
+
+        self.selection_anchor = Some((first_id, 0));
+        self.selection_cursor = Some((last_id, last_item.widget.selection_text_len()));
+        self.update_item_selections(cx);
+        self.area.redraw(cx);
     }
 
     /// Update selection visuals on TextFlow items based on current selection state
@@ -1917,6 +1962,13 @@ impl Widget for PortalList {
                             self.update_scroll_bar(cx);
                         }
                     }
+                    KeyCode::KeyA => {
+                        if self.selectable && ke.modifiers.is_primary() {
+                            self.select_all_visible(cx);
+                            let selection_rect = self.selection_clipboard_rect(cx);
+                            cx.show_clipboard_actions(true, selection_rect, cx.keyboard_shift);
+                        }
+                    }
                     _ => (),
                 },
                 Hit::FingerDown(fe) => {
@@ -1936,6 +1988,9 @@ impl Widget for PortalList {
                         let hit = self.hit_test_selection(cx, fe.abs);
                         if let Some((item_id, char_idx)) = hit {
                             cx.set_key_focus(self.area);
+                            if fe.device.is_touch() {
+                                cx.hide_clipboard_actions();
+                            }
                             self.selection_anchor = Some((item_id, char_idx));
                             self.selection_cursor = Some((item_id, char_idx));
                             self.is_selecting = true;
@@ -1997,6 +2052,16 @@ impl Widget for PortalList {
                         self.select_scroll_state = None;
                     }
 
+                    if self.selectable && fe.device.is_touch() {
+                        let has_selection = self.has_selection();
+                        if has_selection {
+                            let selection_rect = self.selection_clipboard_rect(cx);
+                            cx.show_clipboard_actions(true, selection_rect, cx.keyboard_shift);
+                        } else {
+                            cx.hide_clipboard_actions();
+                        }
+                    }
+
                     if let ScrollState::Drag { samples } = &mut self.scroll_state {
                         let mut last = None;
                         let mut scaled_delta = 0.0;
@@ -2046,6 +2111,15 @@ impl Widget for PortalList {
                 }
                 Hit::TextCopy(tc) => {
                     // Handle copy when selectable
+                    if self.selectable && self.has_selection() {
+                        let text = self.get_selected_text();
+                        if !text.is_empty() {
+                            *tc.response.borrow_mut() = Some(text);
+                        }
+                    }
+                }
+                Hit::TextCut(tc) => {
+                    // Non-editable text: treat cut as copy.
                     if self.selectable && self.has_selection() {
                         let text = self.get_selected_text();
                         if !text.is_empty() {

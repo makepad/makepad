@@ -103,6 +103,9 @@ impl Cx {
             Win32Event::WindowLostFocus(window_id) => {
                 self.call_event_handler(&Event::WindowLostFocus(window_id));
             }
+            Win32Event::PopupDismissed(event) => {
+                self.call_event_handler(&Event::PopupDismissed(event));
+            }
             Win32Event::WindowResizeLoopStart(window_id) => {
                 if let Some(window) = d3d11_windows.iter_mut().find(|w| w.window_id == window_id) {
                     window.start_resize();
@@ -140,6 +143,30 @@ impl Cx {
             }
             Win32Event::WindowClosed(wc) => {
                 let window_id = wc.window_id;
+                // Cascade-close any popup windows parented to this window
+                let popup_ids: Vec<WindowId> = d3d11_windows
+                    .iter()
+                    .filter(|w| self.windows[w.window_id].popup_parent == Some(window_id))
+                    .map(|w| w.window_id)
+                    .collect();
+                for popup_id in popup_ids {
+                    self.call_event_handler(&Event::PopupDismissed(
+                        crate::event::PopupDismissedEvent {
+                            window_id: popup_id,
+                            reason: crate::event::PopupDismissReason::ParentClosed,
+                        },
+                    ));
+                    self.call_event_handler(&Event::WindowClosed(WindowClosedEvent {
+                        window_id: popup_id,
+                    }));
+                    self.windows[popup_id].is_created = false;
+                    if let Some(idx) =
+                        d3d11_windows.iter().position(|w| w.window_id == popup_id)
+                    {
+                        d3d11_windows[idx].win32_window.close_window();
+                        d3d11_windows.remove(idx);
+                    }
+                }
                 self.call_event_handler(&Event::WindowClosed(wc));
                 // lets remove the window from the set
                 self.windows[window_id].is_created = false;
@@ -377,6 +404,50 @@ impl Cx {
                         window.is_fullscreen,
                     );
 
+                    window.window_geom = d3d11_window.window_geom.clone();
+                    d3d11_windows.push(d3d11_window);
+                    window.is_created = true;
+                    geom_changes.push(WindowGeomChangeEvent {
+                        window_id,
+                        old_geom: window.window_geom.clone(),
+                        new_geom: window.window_geom.clone(),
+                    });
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let window = &mut self.windows[window_id];
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+
+                    // Convert parent-relative position to screen coordinates
+                    let screen_position = if let Some(parent_d3d11) =
+                        d3d11_windows.iter().find(|w| w.window_id == parent_window_id)
+                    {
+                        let parent_pos = parent_d3d11.win32_window.get_position();
+                        let parent_dpi = parent_d3d11.win32_window.get_dpi_factor();
+                        // parent_pos is already in screen pixels / dpi, position is in logical coords
+                        dvec2(
+                            parent_pos.x + position.x * parent_dpi,
+                            parent_pos.y + position.y * parent_dpi,
+                        )
+                    } else {
+                        position
+                    };
+
+                    let d3d11_window = D3d11Window::new_popup(
+                        window_id,
+                        &d3d11_cx,
+                        size,
+                        screen_position,
+                    );
                     window.window_geom = d3d11_window.window_geom.clone();
                     d3d11_windows.push(d3d11_window);
                     window.is_created = true;

@@ -48,6 +48,8 @@ pub struct XlibApp {
     pub atoms: XlibAtoms,
     pub dnd: Dnd,
     pub next_keypress_is_repeat: bool,
+    pub active_popup: Option<c_ulong>,
+    pub active_popup_grabbed_keyboard: bool,
 }
 
 impl XlibApp {
@@ -86,6 +88,8 @@ impl XlibApp {
                 internal_cursor: MouseCursor::Default,
                 dnd: Dnd::new(display),
                 next_keypress_is_repeat: false,
+                active_popup: None,
+                active_popup_grabbed_keyboard: false,
             }
         }
     }
@@ -222,6 +226,9 @@ impl XlibApp {
                     let destroy_window = event.xdestroywindow;
                     if let Some(window_ptr) = self.window_map.get(&destroy_window.window) {
                         let window = &mut (**window_ptr);
+                        if self.active_popup == Some(destroy_window.window) {
+                            self.release_popup_grab(destroy_window.window);
+                        }
                         window.do_callback(XlibEvent::WindowClosed(WindowClosedEvent {
                             window_id: window.window_id,
                         }));
@@ -287,6 +294,12 @@ impl XlibApp {
                             y: y as f64 / window.last_window_geom.dpi_factor,
                         };
 
+                        if window.is_popup {
+                            window.last_nc_mode = None;
+                            window.send_mouse_move(pos, KeyModifiers::default());
+                            continue;
+                        }
+
                         // query window for chrome
                         let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
                         window.do_callback(XlibEvent::WindowDragQuery(WindowDragQueryEvent {
@@ -339,6 +352,20 @@ impl XlibApp {
                     // mouse down
                     let button = event.xbutton;
                     let time_now = self.time_now();
+
+                    if let Some(popup_window) = self.active_popup {
+                        if let Some(window_ptr) = self.window_map.get(&popup_window) {
+                            let popup = &mut (**window_ptr);
+                            if !popup.contains_root_pos(button.x_root, button.y_root) {
+                                self.do_callback(XlibEvent::PopupDismissed(PopupDismissedEvent {
+                                    window_id: popup.window_id,
+                                    reason: PopupDismissReason::OutsideClick,
+                                }));
+                                self.release_popup_grab(popup_window);
+                            }
+                        }
+                    }
+
                     if let Some(window_ptr) = self.window_map.get(&button.window) {
                         let window = &mut (**window_ptr);
                         x11_sys::XSetInputFocus(
@@ -382,50 +409,57 @@ impl XlibApp {
                             }))
                         } else {
                             // do all the 'nonclient' area messaging to the window manager
-                            if let Some(last_nc_mode) = window.last_nc_mode {
-                                if (time_now - self.last_click_time) < 0.35
-                                    && (button.x_root - self.last_click_pos.0).abs() < 5
-                                    && (button.y_root - self.last_click_pos.1).abs() < 5
-                                    && last_nc_mode == _NET_WM_MOVERESIZE_MOVE
-                                {
-                                    if window.get_is_maximized() {
-                                        window.restore();
+                            if !window.is_popup {
+                                if let Some(last_nc_mode) = window.last_nc_mode {
+                                    if (time_now - self.last_click_time) < 0.35
+                                        && (button.x_root - self.last_click_pos.0).abs() < 5
+                                        && (button.y_root - self.last_click_pos.1).abs() < 5
+                                        && last_nc_mode == _NET_WM_MOVERESIZE_MOVE
+                                    {
+                                        if window.get_is_maximized() {
+                                            window.restore();
+                                        } else {
+                                            window.maximize();
+                                        }
                                     } else {
-                                        window.maximize();
+                                        let default_screen = x11_sys::XDefaultScreen(self.display);
+                                        let root_window =
+                                            x11_sys::XRootWindow(self.display, default_screen);
+                                        x11_sys::XUngrabPointer(self.display, 0);
+                                        x11_sys::XFlush(self.display);
+                                        let mut xclient = x11_sys::XClientMessageEvent {
+                                            type_: x11_sys::ClientMessage as i32,
+                                            serial: 0,
+                                            send_event: 0,
+                                            display: self.display,
+                                            window: window.window.unwrap(),
+                                            message_type: self.atoms.net_wm_moveresize,
+                                            format: 32,
+                                            data: {
+                                                let mut msg = mem::zeroed::<
+                                                    x11_sys::XClientMessageEvent__bindgen_ty_1,
+                                                >(
+                                                );
+                                                msg.l[0] = button.x_root as c_long;
+                                                msg.l[1] = button.y_root as c_long;
+                                                msg.l[2] = last_nc_mode;
+                                                msg
+                                            },
+                                        };
+                                        x11_sys::XSendEvent(
+                                            self.display,
+                                            root_window,
+                                            0,
+                                            (x11_sys::SubstructureRedirectMask
+                                                | x11_sys::SubstructureNotifyMask)
+                                                as c_long,
+                                            &mut xclient as *mut _ as *mut x11_sys::XEvent,
+                                        );
                                     }
                                 } else {
-                                    let default_screen = x11_sys::XDefaultScreen(self.display);
-                                    let root_window =
-                                        x11_sys::XRootWindow(self.display, default_screen);
-                                    x11_sys::XUngrabPointer(self.display, 0);
-                                    x11_sys::XFlush(self.display);
-                                    let mut xclient = x11_sys::XClientMessageEvent {
-                                        type_: x11_sys::ClientMessage as i32,
-                                        serial: 0,
-                                        send_event: 0,
-                                        display: self.display,
-                                        window: window.window.unwrap(),
-                                        message_type: self.atoms.net_wm_moveresize,
-                                        format: 32,
-                                        data: {
-                                            let mut msg = mem::zeroed::<
-                                                x11_sys::XClientMessageEvent__bindgen_ty_1,
-                                            >(
-                                            );
-                                            msg.l[0] = button.x_root as c_long;
-                                            msg.l[1] = button.y_root as c_long;
-                                            msg.l[2] = last_nc_mode;
-                                            msg
-                                        },
-                                    };
-                                    x11_sys::XSendEvent(
-                                        self.display,
-                                        root_window,
-                                        0,
-                                        (x11_sys::SubstructureRedirectMask
-                                            | x11_sys::SubstructureNotifyMask)
-                                            as c_long,
-                                        &mut xclient as *mut _ as *mut x11_sys::XEvent,
+                                    window.send_mouse_down(
+                                        self.xbutton_to_mouse_button(button.button),
+                                        self.xkeystate_to_modifiers(button.state),
                                     );
                                 }
                             } else {
@@ -451,10 +485,23 @@ impl XlibApp {
                     }
                 }
                 x11_sys::KeyPress => {
+                    let key_code = self.xkeyevent_to_keycode(&mut event.xkey);
+                    if key_code == KeyCode::Escape {
+                        if let Some(popup_window) = self.active_popup {
+                            if let Some(window_ptr) = self.window_map.get(&popup_window) {
+                                let window = &mut (**window_ptr);
+                                self.do_callback(XlibEvent::PopupDismissed(PopupDismissedEvent {
+                                    window_id: window.window_id,
+                                    reason: PopupDismissReason::Escape,
+                                }));
+                                self.release_popup_grab(popup_window);
+                            }
+                        }
+                    }
+
                     if let Some(window_ptr) = self.window_map.get(&event.xkey.window) {
                         let window = &mut (**window_ptr);
                         let block_text = if event.xkey.keycode != 0 {
-                            let key_code = self.xkeyevent_to_keycode(&mut event.xkey);
                             let modifiers = self.xkeystate_to_modifiers(event.xkey.state);
 
                             if modifiers.control || modifiers.logo {
@@ -630,6 +677,16 @@ impl XlibApp {
                     }
                 }
                 x11_sys::FocusOut => {
+                    if let Some(popup_window) = self.active_popup {
+                        if let Some(window_ptr) = self.window_map.get(&popup_window) {
+                            let window = &mut (**window_ptr);
+                            self.do_callback(XlibEvent::PopupDismissed(PopupDismissedEvent {
+                                window_id: window.window_id,
+                                reason: PopupDismissReason::FocusLost,
+                            }));
+                            self.release_popup_grab(popup_window);
+                        }
+                    }
                     let event = event.xfocus;
                     if let Some(window_ptr) = self.window_map.get(&event.window) {
                         let window = &mut (**window_ptr);
@@ -715,6 +772,46 @@ impl XlibApp {
 
     pub fn time_now(&self) -> f64 {
         self.timers.time_now()
+    }
+
+    pub unsafe fn activate_popup_grab(&mut self, popup_window: c_ulong, grab_keyboard: bool) {
+        self.active_popup = Some(popup_window);
+        self.active_popup_grabbed_keyboard = false;
+        x11_sys::XGrabPointer(
+            self.display,
+            popup_window,
+            0,
+            (x11_sys::ButtonPressMask | x11_sys::ButtonReleaseMask | x11_sys::PointerMotionMask)
+                as u32,
+            x11_sys::GrabModeAsync,
+            x11_sys::GrabModeAsync,
+            0,
+            0,
+            x11_sys::CurrentTime.into(),
+        );
+        if grab_keyboard
+            && x11_sys::XGrabKeyboard(
+                self.display,
+                popup_window,
+                0,
+                x11_sys::GrabModeAsync,
+                x11_sys::GrabModeAsync,
+                x11_sys::CurrentTime.into(),
+            ) == x11_sys::GrabSuccess as i32
+        {
+            self.active_popup_grabbed_keyboard = true;
+        }
+    }
+
+    pub unsafe fn release_popup_grab(&mut self, popup_window: c_ulong) {
+        if self.active_popup == Some(popup_window) {
+            x11_sys::XUngrabPointer(self.display, x11_sys::CurrentTime.into());
+            if self.active_popup_grabbed_keyboard {
+                x11_sys::XUngrabKeyboard(self.display, x11_sys::CurrentTime.into());
+            }
+            self.active_popup = None;
+            self.active_popup_grabbed_keyboard = false;
+        }
     }
 
     pub fn load_first_cursor(&self, names: &[&[u8]]) -> Option<c_ulong> {
@@ -981,6 +1078,8 @@ pub struct XlibAtoms {
     pub primary: x11_sys::Atom,
     pub net_wm_moveresize: x11_sys::Atom,
     pub net_wm_icon: x11_sys::Atom,
+    pub net_wm_window_type: x11_sys::Atom,
+    pub net_wm_window_type_popup_menu: x11_sys::Atom,
     pub cardinal: x11_sys::Atom,
     pub wm_delete_window: x11_sys::Atom,
     pub wm_protocols: x11_sys::Atom,
@@ -1012,6 +1111,16 @@ impl XlibAtoms {
                 net_wm_icon: x11_sys::XInternAtom(
                     display,
                     "_NET_WM_ICON\0".as_ptr() as *const _,
+                    0,
+                ),
+                net_wm_window_type: x11_sys::XInternAtom(
+                    display,
+                    "_NET_WM_WINDOW_TYPE\0".as_ptr() as *const _,
+                    0,
+                ),
+                net_wm_window_type_popup_menu: x11_sys::XInternAtom(
+                    display,
+                    "_NET_WM_WINDOW_TYPE_POPUP_MENU\0".as_ptr() as *const _,
                     0,
                 ),
                 cardinal: x11_sys::XInternAtom(

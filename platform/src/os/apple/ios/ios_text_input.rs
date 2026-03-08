@@ -213,6 +213,101 @@ pub fn define_makepad_text_range() -> *const Class {
     return decl.register();
 }
 
+/// Minimal UITextSelectionRect implementation used by iOS 16+
+/// UITextSelectionDisplayInteraction runtime integration.
+pub fn define_makepad_selection_rect() -> *const Class {
+    let mut decl = ClassDecl::new("MakepadSelectionRect", class!(UITextSelectionRect)).unwrap();
+
+    decl.add_ivar::<f64>("x");
+    decl.add_ivar::<f64>("y");
+    decl.add_ivar::<f64>("w");
+    decl.add_ivar::<f64>("h");
+    decl.add_ivar::<BOOL>("contains_start");
+    decl.add_ivar::<BOOL>("contains_end");
+
+    extern "C" fn rect(this: &Object, _: Sel) -> NSRect {
+        unsafe {
+            NSRect {
+                origin: NSPoint {
+                    x: *this.get_ivar::<f64>("x"),
+                    y: *this.get_ivar::<f64>("y"),
+                },
+                size: NSSize {
+                    width: *this.get_ivar::<f64>("w"),
+                    height: *this.get_ivar::<f64>("h"),
+                },
+            }
+        }
+    }
+
+    extern "C" fn writing_direction(_: &Object, _: Sel) -> i64 {
+        0 // NSWritingDirectionNatural
+    }
+
+    extern "C" fn contains_start(this: &Object, _: Sel) -> BOOL {
+        unsafe { *this.get_ivar::<BOOL>("contains_start") }
+    }
+
+    extern "C" fn contains_end(this: &Object, _: Sel) -> BOOL {
+        unsafe { *this.get_ivar::<BOOL>("contains_end") }
+    }
+
+    extern "C" fn is_vertical(_: &Object, _: Sel) -> BOOL {
+        NO
+    }
+
+    extern "C" fn rect_with_geometry(
+        cls: &Class,
+        _: Sel,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        contains_start: BOOL,
+        contains_end: BOOL,
+    ) -> ObjcId {
+        unsafe {
+            let obj: ObjcId = msg_send![cls, alloc];
+            let obj: ObjcId = msg_send![obj, init];
+            (*obj).set_ivar::<f64>("x", x);
+            (*obj).set_ivar::<f64>("y", y);
+            (*obj).set_ivar::<f64>("w", w);
+            (*obj).set_ivar::<f64>("h", h);
+            (*obj).set_ivar::<BOOL>("contains_start", contains_start);
+            (*obj).set_ivar::<BOOL>("contains_end", contains_end);
+            let obj: ObjcId = msg_send![obj, autorelease];
+            obj
+        }
+    }
+
+    unsafe {
+        decl.add_method(sel!(rect), rect as extern "C" fn(&Object, Sel) -> NSRect);
+        decl.add_method(
+            sel!(writingDirection),
+            writing_direction as extern "C" fn(&Object, Sel) -> i64,
+        );
+        decl.add_method(
+            sel!(containsStart),
+            contains_start as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(containsEnd),
+            contains_end as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(isVertical),
+            is_vertical as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_class_method(
+            sel!(rectWithX:y:w:h:containsStart:containsEnd:),
+            rect_with_geometry
+                as extern "C" fn(&Class, Sel, f64, f64, f64, f64, BOOL, BOOL) -> ObjcId,
+        );
+    }
+
+    decl.register()
+}
+
 /// Defines the main text input view conforming to UITextInput protocol.
 /// This replaces the hidden UITextField and provides full IME support.
 pub fn define_text_input_view() -> *const Class {
@@ -241,6 +336,13 @@ pub fn define_text_input_view() -> *const Class {
     decl.add_ivar::<BOOL>("floating_cursor_active");
     decl.add_ivar::<f64>("floating_cursor_last_x");
     decl.add_ivar::<f64>("floating_cursor_last_y");
+
+    // Selection-handle anchor points for iOS 16+ UITextSelectionDisplayInteraction.
+    decl.add_ivar::<f64>("selection_handle_start_x");
+    decl.add_ivar::<f64>("selection_handle_start_y");
+    decl.add_ivar::<f64>("selection_handle_end_x");
+    decl.add_ivar::<f64>("selection_handle_end_y");
+    decl.add_ivar::<BOOL>("selection_handles_visible");
 
     // ==========================================================================
     // UIResponder methods
@@ -935,14 +1037,35 @@ pub fn define_text_input_view() -> *const Class {
     // ==========================================================================
 
     extern "C" fn first_rect_for_range(this: &Object, _: Sel, _range: ObjcId) -> NSRect {
-        // Return a rect at the IME position for candidate window placement
-        // Read directly from ivars to avoid any re-entrant borrow issues
+        // Return a rect at the IME position for candidate window placement.
+        // When iOS 16+ native selection display is active, return the bounding
+        // rect for the explicit selection handle anchors provided by Rust.
         unsafe {
-            let x: f64 = *this.get_ivar("ime_pos_x");
-            let y: f64 = *this.get_ivar("ime_pos_y");
-
             let view = this as *const _ as ObjcId;
             let view_frame: NSRect = msg_send![view, frame];
+            let selection_visible: BOOL = *this.get_ivar("selection_handles_visible");
+
+            if selection_visible == YES {
+                let sx: f64 = *this.get_ivar("selection_handle_start_x");
+                let sy: f64 = *this.get_ivar("selection_handle_start_y");
+                let ex: f64 = *this.get_ivar("selection_handle_end_x");
+                let ey: f64 = *this.get_ivar("selection_handle_end_y");
+                let y0 = view_frame.size.height - sy;
+                let y1 = view_frame.size.height - ey;
+                return NSRect {
+                    origin: NSPoint {
+                        x: sx.min(ex),
+                        y: y0.min(y1),
+                    },
+                    size: NSSize {
+                        width: (sx - ex).abs().max(1.0),
+                        height: (y0 - y1).abs().max(1.0),
+                    },
+                };
+            }
+
+            let x: f64 = *this.get_ivar("ime_pos_x");
+            let y: f64 = *this.get_ivar("ime_pos_y");
 
             NSRect {
                 origin: NSPoint {
@@ -957,18 +1080,74 @@ pub fn define_text_input_view() -> *const Class {
         }
     }
 
-    extern "C" fn caret_rect_for_position(this: &Object, sel: Sel, _position: ObjcId) -> NSRect {
+    extern "C" fn caret_rect_for_position(this: &Object, sel: Sel, position: ObjcId) -> NSRect {
+        unsafe {
+            let selection_visible: BOOL = *this.get_ivar("selection_handles_visible");
+            if selection_visible == YES {
+                let view = this as *const _ as ObjcId;
+                let view_frame: NSRect = msg_send![view, frame];
+                let offset: i64 = if position != nil {
+                    msg_send![position, offset]
+                } else {
+                    0
+                };
+
+                let (x, y) = if offset <= 0 {
+                    (
+                        *this.get_ivar::<f64>("selection_handle_start_x"),
+                        *this.get_ivar::<f64>("selection_handle_start_y"),
+                    )
+                } else {
+                    (
+                        *this.get_ivar::<f64>("selection_handle_end_x"),
+                        *this.get_ivar::<f64>("selection_handle_end_y"),
+                    )
+                };
+
+                return NSRect {
+                    origin: NSPoint {
+                        x,
+                        y: view_frame.size.height - y,
+                    },
+                    size: NSSize {
+                        width: 1.0,
+                        height: 20.0,
+                    },
+                };
+            }
+        }
+
         first_rect_for_range(this, sel, nil)
     }
 
-    /// Returns an empty array. Proper implementation requires a custom
-    /// UITextSelectionRect subclass and access to per-line text layout info from
-    /// Rust, which is significant work for minimal benefit since our own renderer
-    /// already handles selection highlighting. The consequence is that iOS system
-    /// selection handles won't show exact per-line rects, but firstRectForRange
-    /// is still used for cursor positioning so the input remains functional.
-    extern "C" fn selection_rects_for_range(_: &Object, _: Sel, _range: ObjcId) -> ObjcId {
-        unsafe { msg_send![class!(NSArray), array] }
+    extern "C" fn selection_rects_for_range(this: &Object, _: Sel, _range: ObjcId) -> ObjcId {
+        unsafe {
+            let selection_visible: BOOL = *this.get_ivar("selection_handles_visible");
+            if selection_visible != YES {
+                return msg_send![class!(NSArray), array];
+            }
+
+            let view = this as *const _ as ObjcId;
+            let view_frame: NSRect = msg_send![view, frame];
+            let sx: f64 = *this.get_ivar("selection_handle_start_x");
+            let sy: f64 = *this.get_ivar("selection_handle_start_y");
+            let ex: f64 = *this.get_ivar("selection_handle_end_x");
+            let ey: f64 = *this.get_ivar("selection_handle_end_y");
+            let y0 = view_frame.size.height - sy;
+            let y1 = view_frame.size.height - ey;
+
+            let rect_cls = get_ios_class_global().text_selection_rect;
+            let selection_rect: ObjcId = msg_send![
+                rect_cls,
+                rectWithX: sx.min(ex)
+                y: y0.min(y1)
+                w: (sx - ex).abs().max(1.0)
+                h: (y0 - y1).abs().max(1.0)
+                containsStart: YES
+                containsEnd: YES
+            ];
+            msg_send![class!(NSArray), arrayWithObject: selection_rect]
+        }
     }
 
     /// Returns position 0 (no hit testing). Proper implementation would require

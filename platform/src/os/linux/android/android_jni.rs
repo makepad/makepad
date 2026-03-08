@@ -6,7 +6,9 @@ use {
     crate::{
         area::Area,
         cx::AndroidParams,
-        event::{TouchPoint, TouchState, VideoSource},
+        event::{
+            SelectionHandleKind, SelectionHandlePhase, TouchPoint, TouchState, VideoSource,
+        },
         ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputConfig},
         makepad_live_id::*,
         makepad_math::*,
@@ -140,6 +142,12 @@ pub enum FromJavaMessage {
     },
     ImeEditorAction {
         action_code: i32,
+    },
+    SelectionHandleDrag {
+        handle: SelectionHandleKind,
+        phase: SelectionHandlePhase,
+        abs: DVec2,
+        time: f64,
     },
 }
 unsafe impl Send for FromJavaMessage {}
@@ -859,6 +867,37 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeEditorActio
     });
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onSelectionHandleDrag(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    handle: jni_sys::jint,
+    phase: jni_sys::jint,
+    x: jni_sys::jfloat,
+    y: jni_sys::jfloat,
+    time_millis: jni_sys::jlong,
+) {
+    let handle = match handle {
+        0 => Some(SelectionHandleKind::Start),
+        1 => Some(SelectionHandleKind::End),
+        _ => None,
+    };
+    let phase = match phase {
+        0 => Some(SelectionHandlePhase::Begin),
+        1 => Some(SelectionHandlePhase::Move),
+        2 => Some(SelectionHandlePhase::End),
+        _ => None,
+    };
+    if let (Some(handle), Some(phase)) = (handle, phase) {
+        send_from_java_message(FromJavaMessage::SelectionHandleDrag {
+            handle,
+            phase,
+            abs: dvec2(x as f64, y as f64),
+            time: time_millis as f64 / 1000.0,
+        });
+    }
+}
+
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
     let chars = (**env).GetStringUTFChars.unwrap()(env, java_string, std::ptr::null_mut());
     let rust_string = std::ffi::CStr::from_ptr(chars)
@@ -1463,4 +1502,37 @@ pub unsafe fn to_java_update_ime_text_state(
     );
 
     (**env).DeleteLocalRef.unwrap()(env, text_jstr);
+}
+
+pub unsafe fn to_java_show_selection_handles(start: Vec2d, end: Vec2d) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "showSelectionHandles",
+        "(FFFF)V",
+        start.x as jni_sys::jfloat,
+        start.y as jni_sys::jfloat,
+        end.x as jni_sys::jfloat,
+        end.y as jni_sys::jfloat
+    );
+}
+
+pub unsafe fn to_java_update_selection_handles(start: Vec2d, end: Vec2d) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "updateSelectionHandles",
+        "(FFFF)V",
+        start.x as jni_sys::jfloat,
+        start.y as jni_sys::jfloat,
+        end.x as jni_sys::jfloat,
+        end.y as jni_sys::jfloat
+    );
+}
+
+pub unsafe fn to_java_hide_selection_handles() {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(env, get_activity(), "hideSelectionHandles", "()V");
 }

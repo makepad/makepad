@@ -138,12 +138,19 @@ impl X11Cx {
                 cx.call_event_handler(&Event::WindowGeomChange(re));
             }
             XlibEvent::WindowClosed(wc) => {
-                let mut cx = self.cx.borrow_mut();
                 let window_id = wc.window_id;
+                self.close_popup_children(opengl_windows, xlib_app, window_id);
+
+                let mut cx = self.cx.borrow_mut();
                 cx.call_event_handler(&Event::WindowClosed(wc));
                 // lets remove the window from the set
                 cx.windows[window_id].is_created = false;
                 if let Some(index) = opengl_windows.iter().position(|w| w.window_id == window_id) {
+                    if let Some(xid) = opengl_windows[index].xlib_window.window {
+                        unsafe {
+                            xlib_app.release_popup_grab(xid);
+                        }
+                    }
                     opengl_windows.remove(index);
                     if opengl_windows.len() == 0 {
                         xlib_app.terminate_event_loop();
@@ -151,6 +158,10 @@ impl X11Cx {
                         return EventFlow::Exit;
                     }
                 }
+            }
+            XlibEvent::PopupDismissed(event) => {
+                let mut cx = self.cx.borrow_mut();
+                cx.call_event_handler(&Event::PopupDismissed(event));
             }
             XlibEvent::Paint => {
                 {
@@ -392,6 +403,58 @@ impl X11Cx {
         }
     }
 
+    fn close_popup_window(
+        &mut self,
+        opengl_windows: &mut Vec<OpenglWindow>,
+        xlib_app: &mut XlibApp,
+        window_id: crate::window::WindowId,
+        reason: Option<PopupDismissReason>,
+    ) {
+        if let Some(index) = opengl_windows.iter().position(|w| w.window_id == window_id) {
+            let mut cx = self.cx.borrow_mut();
+            if let Some(reason) = reason {
+                cx.call_event_handler(&Event::PopupDismissed(PopupDismissedEvent {
+                    window_id,
+                    reason,
+                }));
+            }
+            cx.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
+            cx.windows[window_id].is_created = false;
+            if let Some(xid) = opengl_windows[index].xlib_window.window {
+                unsafe {
+                    xlib_app.release_popup_grab(xid);
+                }
+            }
+            opengl_windows[index].xlib_window.close_window();
+            opengl_windows.remove(index);
+        }
+    }
+
+    fn close_popup_children(
+        &mut self,
+        opengl_windows: &mut Vec<OpenglWindow>,
+        xlib_app: &mut XlibApp,
+        parent_window_id: crate::window::WindowId,
+    ) {
+        loop {
+            let child = opengl_windows
+                .iter()
+                .find(|w| w.xlib_window.popup_parent == Some(parent_window_id))
+                .map(|w| w.window_id);
+            if let Some(child_window_id) = child {
+                self.close_popup_children(opengl_windows, xlib_app, child_window_id);
+                self.close_popup_window(
+                    opengl_windows,
+                    xlib_app,
+                    child_window_id,
+                    Some(PopupDismissReason::ParentClosed),
+                );
+            } else {
+                break;
+            }
+        }
+    }
+
     fn handle_platform_ops(
         &mut self,
         opengl_windows: &mut Vec<OpenglWindow>,
@@ -417,14 +480,58 @@ impl X11Cx {
                     opengl_windows.push(opengl_window);
                     window.is_created = true;
                 }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
+                    let opengl_window =
+                        OpenglWindow::new_popup(window_id, parent_window_id, gl_cx, size, position);
+                    let window = &mut cx.windows[window_id];
+                    window.window_geom = opengl_window.window_geom.clone();
+                    window.is_created = true;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    if let Some(xid) = opengl_window.xlib_window.window {
+                        unsafe {
+                            xlib_app.activate_popup_grab(xid, grab_keyboard);
+                        }
+                    }
+                    opengl_windows.push(opengl_window);
+                }
                 CxOsOp::CloseWindow(window_id) => {
-                    cx.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
-                    if let Some(index) =
-                        opengl_windows.iter().position(|w| w.window_id == window_id)
+                    drop(cx);
+                    self.close_popup_children(opengl_windows, xlib_app, window_id);
+                    cx = self.cx.borrow_mut();
+
+                    if let Some(index) = opengl_windows.iter().position(|w| w.window_id == window_id)
                     {
-                        cx.windows[window_id].is_created = false;
-                        opengl_windows[index].xlib_window.close_window();
-                        opengl_windows.remove(index);
+                        if opengl_windows[index].xlib_window.is_popup {
+                            drop(cx);
+                            self.close_popup_window(
+                                opengl_windows,
+                                xlib_app,
+                                window_id,
+                                None,
+                            );
+                            cx = self.cx.borrow_mut();
+                        } else {
+                            cx.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
+                            cx.windows[window_id].is_created = false;
+                            if let Some(xid) = opengl_windows[index].xlib_window.window {
+                                unsafe {
+                                    xlib_app.release_popup_grab(xid);
+                                }
+                            }
+                            opengl_windows[index].xlib_window.close_window();
+                            opengl_windows.remove(index);
+                        }
                         if opengl_windows.len() == 0 {
                             ret = EventFlow::Exit
                         }

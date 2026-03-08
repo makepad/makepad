@@ -417,6 +417,73 @@ impl OpenglWindow {
         }
     }
 
+    pub fn new_popup(
+        window_id: WindowId,
+        parent_window_id: WindowId,
+        opengl_cx: &OpenglCx,
+        size: Vec2d,
+        position: Vec2d,
+    ) -> OpenglWindow {
+        assert_eq!(opengl_cx.egl_platform, egl_sys::EGL_PLATFORM_X11_EXT);
+        let display = opengl_cx.egl_platform_display as *mut x11_sys::Display;
+
+        let mut xlib_window = Box::new(XlibWindow::new(window_id));
+
+        let visual_info = unsafe {
+            let mut native_visual_id = 0;
+            assert!(
+                (opengl_cx.libegl.eglGetConfigAttrib.unwrap())(
+                    opengl_cx.egl_display,
+                    opengl_cx.egl_config,
+                    egl_sys::EGL_NATIVE_VISUAL_ID as _,
+                    &mut native_visual_id,
+                ) != 0,
+                "eglGetConfigAttrib(EGL_NATIVE_VISUAL_ID) failed",
+            );
+
+            let mut visual_template = mem::zeroed::<x11_sys::XVisualInfo>();
+            visual_template.visualid = native_visual_id as _;
+
+            let mut count = 0;
+            let visual_info_ptr = x11_sys::XGetVisualInfo(
+                display,
+                x11_sys::VisualIDMask as c_long,
+                &mut visual_template,
+                &mut count,
+            );
+            assert!(
+                !visual_info_ptr.is_null() && count == 1,
+                "can't get visual from EGL configuration with XGetVisualInfo",
+            );
+
+            let visual_info = *visual_info_ptr;
+            x11_sys::XFree(visual_info_ptr as *mut c_void);
+            visual_info
+        };
+
+        xlib_window.init_popup(parent_window_id, size, position, visual_info);
+
+        let egl_surface = unsafe {
+            (opengl_cx.libegl.eglCreateWindowSurface.unwrap())(
+                opengl_cx.egl_display,
+                opengl_cx.egl_config,
+                xlib_window.window.unwrap(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!egl_surface.is_null(), "eglCreateWindowSurface failed");
+
+        OpenglWindow {
+            first_draw: true,
+            window_id,
+            opening_repaint_count: 0,
+            cal_size: Vec2d::default(),
+            window_geom: xlib_window.get_window_geom(),
+            xlib_window,
+            egl_surface,
+        }
+    }
+
     pub fn resize_buffers(&mut self) -> bool {
         let cal_size = Vec2d {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,

@@ -88,6 +88,13 @@ impl std::fmt::Debug for AccessibilityUpdatePayload {
 #[derive(PartialEq)]
 pub enum CxOsOp {
     CreateWindow(WindowId),
+    CreatePopupWindow {
+        window_id: WindowId,
+        parent_window_id: WindowId,
+        position: Vec2d,
+        size: Vec2d,
+        grab_keyboard: bool,
+    },
     ResizeWindow(WindowId, Vec2d),
     RepositionWindow(WindowId, Vec2d),
     CloseWindow(WindowId),
@@ -190,6 +197,7 @@ impl std::fmt::Debug for CxOsOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CreateWindow(..) => write!(f, "CreateWindow"),
+            Self::CreatePopupWindow { .. } => write!(f, "CreatePopupWindow"),
             Self::CloseWindow(..) => write!(f, "CloseWindow"),
             Self::MinimizeWindow(..) => write!(f, "MinimizeWindow"),
             Self::Deminiaturize(..) => write!(f, "Deminiaturize"),

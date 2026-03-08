@@ -1,8 +1,9 @@
 use crate::{
     event::{
         DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseLeaveEvent, MouseMoveEvent,
-        MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
-        WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
+        MouseUpEvent, PopupDismissedEvent, ScrollEvent, TextClipboardEvent, TextInputEvent,
+        TimerEvent, WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent,
+        WindowGeomChangeEvent,
     },
     window::WindowId,
 };
@@ -15,6 +16,7 @@ pub enum Win32Event {
     WindowResizeLoopStop(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     WindowClosed(WindowClosedEvent),
+    PopupDismissed(PopupDismissedEvent),
     Paint,
 
     MouseDown(MouseDownEvent),
