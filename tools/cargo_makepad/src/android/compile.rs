@@ -50,8 +50,6 @@ struct BuildPaths {
     res_dir: PathBuf,
     manifest_file: PathBuf,
     java_file: PathBuf,
-    java_class: PathBuf,
-    xr_class: PathBuf,
     xr_file: PathBuf,
     dst_unaligned_apk: PathBuf,
     dst_apk: PathBuf,
@@ -485,12 +483,10 @@ fn prepare_build(
     let main_java = main_java(java_url);
     let java_path = java_url.replace('.', "/");
     let java_file = tmp_dir.join(&java_path).join("MakepadApp.java");
-    let java_class = out_dir.join(&java_path).join("MakepadApp.class");
     write_text(&java_file, &main_java)?;
 
     let xr_java = xr_java(java_url);
     let xr_file = tmp_dir.join(&java_path).join("MakepadAppXr.java");
-    let xr_class = out_dir.join(&java_path).join("MakepadAppXr.class");
     write_text(&xr_file, &xr_java)?;
 
     let apk_filename = to_snakecase(app_label);
@@ -506,8 +502,6 @@ fn prepare_build(
         res_dir,
         manifest_file,
         java_file,
-        java_class,
-        xr_class,
         xr_file,
         dst_unaligned_apk,
         dst_apk,
@@ -570,6 +564,11 @@ fn compile_java(
         &cwd,
         java_home.join("bin/javac").to_str().unwrap(),
         &[
+            "-source",
+            "1.8",
+            "-target",
+            "1.8",
+            "-Xlint:-options",
             "-classpath",
             (android_jar_path(sdk_dir, urls).to_str().unwrap()),
             "-Xlint:deprecation",
@@ -616,6 +615,10 @@ fn compile_java(
                 .join("VideoPlayerRunnable.java")
                 .to_str()
                 .unwrap()),
+            (makepad_java_classes_dir
+                .join("H264Encoder.java")
+                .to_str()
+                .unwrap()),
             (build_paths.java_file.to_str().unwrap()),
             (build_paths.xr_file.to_str().unwrap()),
         ],
@@ -629,127 +632,46 @@ fn build_dex(
     build_paths: &BuildPaths,
     urls: &AndroidSDKUrls,
 ) -> Result<(), String> {
-    let makepad_package_path = "dev/makepad/android";
     let java_home = sdk_dir.join("openjdk");
     let cwd = std::env::current_dir().unwrap();
 
-    let compiled_java_classes_dir = build_paths.out_dir.join(makepad_package_path);
+    let mut class_files: Vec<PathBuf> = ls(&build_paths.out_dir)?
+        .into_iter()
+        .filter(|rel| rel.extension().and_then(|ext| ext.to_str()) == Some("class"))
+        .map(|rel| build_paths.out_dir.join(rel))
+        .collect();
+
+    class_files.sort();
+
+    if class_files.is_empty() {
+        return Err(format!(
+            "No compiled Java class files found in {:?}",
+            build_paths.out_dir
+        ));
+    }
+
+    let d8_jar = d8_jar_path(sdk_dir, urls);
+    let android_jar = android_jar_path(sdk_dir, urls);
+
+    let mut args: Vec<&str> = vec![
+        "-cp",
+        d8_jar.to_str().unwrap(),
+        "com.android.tools.r8.D8",
+        "--classpath",
+        android_jar.to_str().unwrap(),
+        "--output",
+        build_paths.out_dir.to_str().unwrap(),
+    ];
+
+    for class_file in &class_files {
+        args.push(class_file.to_str().unwrap());
+    }
 
     shell_env_cap(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
         &cwd,
         java_home.join("bin/java").to_str().unwrap(),
-        &[
-            "-cp",
-            (d8_jar_path(sdk_dir, urls).to_str().unwrap()),
-            "com.android.tools.r8.D8",
-            "--classpath",
-            (android_jar_path(sdk_dir, urls).to_str().unwrap()),
-            "--output",
-            (build_paths.out_dir.to_str().unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadNative.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadSurface.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("ResizingLayout.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadNetwork.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadSocketStream.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadSocketStream$1.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadWebSocket.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadWebSocketReader.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("HttpResponse.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("ByteArrayMediaDataSource.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("VideoPlayer.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("VideoPlayerRunnable.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("VideoPlayer$1.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("VideoPlayer$2.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("VideoPlayer$3.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$1.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$2.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$3.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$4.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$5.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$5$1.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$5$2.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$6.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadInputConnection.class")
-                .to_str()
-                .unwrap()),
-            (build_paths.java_class.to_str().unwrap()),
-            (build_paths.xr_class.to_str().unwrap()),
-        ],
+        &args,
     )?;
 
     Ok(())

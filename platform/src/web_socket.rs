@@ -305,6 +305,7 @@ impl Cx {
         if STUDIO_STDOUT_MODE.load(Ordering::SeqCst) {
             use std::io::Write;
             let _ = std::io::stdout().write_all(msg.to_json().as_bytes());
+            let _ = std::io::stdout().write_all(b"\n");
             let _ = std::io::stdout().flush();
             return;
         }

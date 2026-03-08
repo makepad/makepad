@@ -1,7 +1,5 @@
 package dev.makepad.android;
 
-import android.os.AsyncTask;
-
 import java.io.IOException;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
