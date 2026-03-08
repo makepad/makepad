@@ -45,8 +45,6 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 struct NewsFeed {
-    #[uid]
-    uid: WidgetUid,
     #[deref]
     view: View,
 }

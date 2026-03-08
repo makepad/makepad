@@ -143,8 +143,6 @@ pub enum StackNavigationTransitionAction {
 
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct StackNavigationView {
-    #[uid]
-    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 
@@ -303,8 +301,7 @@ impl StackNavigationViewRef {
 
     pub fn is_showing(&self, cx: &mut Cx) -> bool {
         if let Some(inner) = self.borrow() {
-            inner.animator.in_state(cx, ids!(slide.show))
-                || inner.is_animating()
+            inner.animator.in_state(cx, ids!(slide.show)) || inner.is_animating()
         } else {
             false
         }
@@ -416,7 +413,8 @@ impl ScriptHook for StackNavigation {
         } else if apply.is_reload() {
             // Make sure current stack view is visible when code reloads
             if let Some(current_entry) = self.navigation_stack.current() {
-                let stack_view_ref = self.stack_navigation_view(_vm.cx_mut(), &[current_entry.view_id]);
+                let stack_view_ref =
+                    self.stack_navigation_view(_vm.cx_mut(), &[current_entry.view_id]);
                 if let Some(mut inner) = stack_view_ref.borrow_mut() {
                     inner.view.visible = true;
                     inner.offset = 0.0;

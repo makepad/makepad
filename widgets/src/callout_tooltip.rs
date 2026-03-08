@@ -2,7 +2,10 @@
 //!
 //! By default, the tooltip has a black background color and white text.
 
-use crate::{TooltipRef, TooltipWidgetExt, label::*, makepad_derive_widget::*, makepad_draw::*, view::*, widget::*};
+use crate::{
+    label::*, makepad_derive_widget::*, makepad_draw::*, view::*, widget::*, TooltipRef,
+    TooltipWidgetExt,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -26,7 +29,7 @@ script_mod! {
                 target_pos: instance(vec2(0.0, 0.0)),
                 // Size of the moused over widget
                 target_size: instance(vec2(0.0, 0.0)),
-                // Expected Width of the the tooltip 
+                // Expected Width of the the tooltip
                 expected_dimension_x: instance(0.0),
                 // Determine height of the triangle in the callout pointer
                 triangle_height: instance(7.5),
@@ -65,7 +68,7 @@ script_mod! {
                         vertex2 = vec2(vertex1.x + triangle_height, vertex1.y - triangle_height);
                         vertex3 = vec2(vertex1.x + triangle_height * 2.0, vertex1.y);
                     } else if self.callout_position == 90.0 {
-                        // Point rightwards  
+                        // Point rightwards
                         // Triangle points to the right from the left edge of the tooltip
                         vertex1 = vec2(rect_size.x - 2.0, rect_size.y * 0.5);
                         vertex2 = vec2(vertex1.x - triangle_height, vertex1.y + triangle_height);
@@ -147,26 +150,30 @@ pub enum TooltipPosition {
     /// The tooltip will be drawn to the left of the target widget.
     Left,
     /// (Default) The tooltip will be drawn to the right of the target widget.
-    #[default] Right,
+    #[default]
+    Right,
 }
 
 /// A tooltip widget that a callout pointing towards the referenced widget.
 #[derive(Script, ScriptHook, Widget)]
 pub struct CalloutTooltip {
-    #[uid]
-    uid: WidgetUid,
-    #[source] source: ScriptObjectRef,
-    #[deref] view: View,
+    #[source]
+    source: ScriptObjectRef,
+    #[deref]
+    view: View,
 
     // The below items are a hack to re-populate this tooltip automatically
     // after a certain time interval, because its repositioning code is
     // currently broken and needs to be rewritten entirely.
-    #[rust] timer_redraw: Timer,
-    #[rust] latest_options: Option<(String, Rect, CalloutTooltipOptions)>,
-    #[rust] text_unwrapped_width: Option<f64>,
-    #[rust] previous_height: Option<f64>,
+    #[rust]
+    timer_redraw: Timer,
+    #[rust]
+    latest_options: Option<(String, Rect, CalloutTooltipOptions)>,
+    #[rust]
+    text_unwrapped_width: Option<f64>,
+    #[rust]
+    previous_height: Option<f64>,
 }
-
 
 #[derive(Debug)]
 struct PositionCalculation {
@@ -237,7 +244,8 @@ impl CalloutTooltip {
             }
             TooltipPosition::Right => {
                 tooltip_pos.x = widget_rect.pos.x + widget_rect.size.x;
-                tooltip_pos.y = widget_rect.pos.y + 0.5 * widget_rect.size.y - expected_dimension.y * 0.5;
+                tooltip_pos.y =
+                    widget_rect.pos.y + 0.5 * widget_rect.size.y - expected_dimension.y * 0.5;
                 width_to_be_fixed = max(
                     screen_size.x - (pos.x + widget_rect.size.x + triangle_height * 2.0),
                     expected_dimension.x,
@@ -270,7 +278,7 @@ impl CalloutTooltip {
     fn needs_width_fix(tooltip_x: f64, screen_width: f64, expected_width: f64) -> bool {
         tooltip_x == screen_width - expected_width && tooltip_x < 0.0
     }
-    
+
     /// Apply edge case handling for position and width fixing
     fn apply_edge_case_fix(
         position: &TooltipPosition,
@@ -319,7 +327,10 @@ impl CalloutTooltip {
         text_color: Vec4,
         bg_color: Vec4,
     ) {
-        let tooltip_pos = vec2(position_calc.tooltip_pos.x as f32, position_calc.tooltip_pos.y as f32);
+        let tooltip_pos = vec2(
+            position_calc.tooltip_pos.x as f32,
+            position_calc.tooltip_pos.y as f32,
+        );
         let triangle_height = triangle_height as f32;
         let expected_dimension_x = expected_dimension.x as f32;
         let callout_position = position_calc.callout_position as f32;
@@ -365,7 +376,7 @@ impl CalloutTooltip {
                 // Because parent width is constrained, we MUST Fill so the text wraps line-by-line
                 label.walk.width = Size::fill();
             } else {
-                // Because parent width is Fit, we MUST Fit so the string natural width evaluates properly 
+                // Because parent width is Fit, we MUST Fit so the string natural width evaluates properly
                 label.walk.width = Size::fit();
             }
         };
@@ -388,23 +399,17 @@ impl CalloutTooltip {
         is_internal_redraw: bool,
     ) {
         if !is_internal_redraw {
-            self.latest_options = Some((
-                text.to_owned(),
-                widget_rect.clone(),
-                options.clone(),
-            ));
+            self.latest_options = Some((text.to_owned(), widget_rect.clone(), options.clone()));
             self.text_unwrapped_width = None;
             self.previous_height = None;
         }
 
         let mut tooltip = self.view.tooltip(cx, ids!(tooltip));
-        tooltip.label(cx, ids!(content.tooltip_label)).set_text(cx, &pad_last_line(text));
+        tooltip
+            .label(cx, ids!(content.tooltip_label))
+            .set_text(cx, &pad_last_line(text));
 
-        let mut expected_dimension = tooltip
-            .view(cx, ids!(content))
-            .area()
-            .rect(cx)
-            .size;
+        let mut expected_dimension = tooltip.view(cx, ids!(content)).area().rect(cx).size;
         let screen_size = tooltip.area().rect(cx).size;
 
         if let Some(w) = self.text_unwrapped_width {
@@ -421,14 +426,8 @@ impl CalloutTooltip {
             options.triangle_height,
         );
 
-        let target = vec2(
-            widget_rect.pos.x as f32,
-            widget_rect.pos.y as f32,
-        );
-        let target_size = vec2(
-            widget_rect.size.x as f32,
-            widget_rect.size.y as f32,
-        );
+        let target = vec2(widget_rect.pos.x as f32, widget_rect.pos.y as f32);
+        let target_size = vec2(widget_rect.size.x as f32, widget_rect.size.y as f32);
 
         // A temp hack to hide the tooltip until the size is calculated.
         // Once we can immediately move the tooltip after its first draw,
@@ -471,7 +470,7 @@ impl CalloutTooltip {
             self.previous_height = Some(expected_dimension.y);
             self.timer_redraw = cx.start_timeout(REDRAW_DELAY);
         }
-        
+
         self.view.tooltip(cx, ids!(tooltip)).show(cx);
     }
 

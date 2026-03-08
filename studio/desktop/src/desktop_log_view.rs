@@ -206,8 +206,6 @@ struct LogLocationLink {
 
 #[derive(Script, Widget)]
 pub struct DesktopLogView {
-    #[uid]
-    uid: WidgetUid,
     #[deref]
     view: View,
     #[rust]

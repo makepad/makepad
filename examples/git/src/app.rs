@@ -274,8 +274,6 @@ impl HttpSyncHooks for CheckoutLogHooks {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct GitLogList {
-    #[uid]
-    uid: WidgetUid,
     #[deref]
     view: View,
 }

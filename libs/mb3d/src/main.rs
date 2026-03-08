@@ -67,7 +67,7 @@ fn usage(program: &str) -> String {
          EXR layouts: multipart=one EXR part per layer, channels=single-part named channels for AE/ProEXR style workflows where lowercase utility layers are display-normalized while uppercase layers stay raw.\n\
          EXR layers: {}\n\
          EXR all: {}\n\
-         EXR note: lowercase=Pxr24 lossy, uppercase=Zip lossless, and EXR currently requires --aa none.",
+         EXR note: lowercase=Pxr24 lossy and uppercase=Zip lossless.",
         render::exr_layer_legend(),
         render::all_exr_layer_codes(),
     )
@@ -182,13 +182,6 @@ fn parse_args() -> Result<Option<Options>, String> {
             usage(&program)
         ));
     }
-    if output_format == OutputFormat::Exr && antialiasing != render::AntialiasingMode::None {
-        return Err(format!(
-            "EXR layer output currently requires --aa none\n{}",
-            usage(&program)
-        ));
-    }
-
     let exr_layers = if output_format == OutputFormat::Exr {
         Some(render::parse_exr_layer_specs(
             layer_codes.as_deref().unwrap_or("c"),

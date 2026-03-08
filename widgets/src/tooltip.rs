@@ -46,8 +46,6 @@ script_mod! {
 
 #[derive(Script, Widget)]
 pub struct Tooltip {
-    #[uid]
-    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
 
@@ -143,7 +141,8 @@ impl Widget for Tooltip {
     }
 
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
-        self.label(cx, ids!(content.tooltip_label)).set_text(cx, text);
+        self.label(cx, ids!(content.tooltip_label))
+            .set_text(cx, text);
     }
 }
 
