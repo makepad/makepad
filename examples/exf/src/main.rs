@@ -800,7 +800,6 @@ impl App {
 
         match inner.load_exr_path(cx, &path) {
             Ok(summary) => {
-                self.active_exr_path = Some(path.clone());
                 self.set_file_value(cx, &path.display().to_string());
                 self.set_status_value(
                     cx,
@@ -814,7 +813,6 @@ impl App {
                 );
             }
             Err(err) => {
-                self.active_exr_path = None;
                 self.set_file_value(cx, &path.display().to_string());
                 self.set_status_value(cx, &format!("Load failed: {err}"));
             }
@@ -823,6 +821,7 @@ impl App {
         self.ui.redraw(cx);
         cx.redraw_all();
     }
+
 }
 
 #[derive(Script, ScriptHook)]
@@ -831,8 +830,6 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     pending_exr_path: Option<PathBuf>,
-    #[rust]
-    active_exr_path: Option<PathBuf>,
 }
 
 impl MatchEvent for App {
@@ -943,6 +940,20 @@ pub struct ExfViewport {
     area: Area,
     #[rust]
     drag_last_abs: Option<DVec2>,
+    #[rust(false)]
+    loaded: bool,
+    #[rust(DEFAULT_STYLE_MIX)]
+    style_mix: f32,
+    #[rust(DEFAULT_CONTOUR_GAIN)]
+    contour_gain: f32,
+    #[rust(DEFAULT_GLOW_GAIN)]
+    glow_gain: f32,
+    #[rust(1.0)]
+    zoom: f32,
+    #[rust(vec2(0.0, 0.0))]
+    pan: Vec2f,
+    #[rust(vec2(1.0, 1.0))]
+    image_size: Vec2f,
     #[rust]
     textures: Vec<Texture>,
 }
@@ -955,6 +966,16 @@ struct LoadedExrSummary {
 }
 
 impl ExfViewport {
+    fn sync_draw_state(&mut self) {
+        self.draw_bg.loaded = if self.loaded { 1.0 } else { 0.0 };
+        self.draw_bg.style_mix = self.style_mix;
+        self.draw_bg.contour_gain = self.contour_gain;
+        self.draw_bg.glow_gain = self.glow_gain;
+        self.draw_bg.zoom = self.zoom;
+        self.draw_bg.pan = self.pan;
+        self.draw_bg.image_size = self.image_size;
+    }
+
     fn ensure_fallback_textures(&mut self, cx: &mut Cx) {
         if !self.textures.is_empty() {
             return;
@@ -982,23 +1003,27 @@ impl ExfViewport {
     }
 
     fn set_style_mix(&mut self, cx: &mut Cx, value: f32) {
-        self.draw_bg.style_mix = value.clamp(0.0, 1.0);
+        self.style_mix = value.clamp(0.0, 1.0);
+        self.sync_draw_state();
         self.area.redraw(cx);
     }
 
     fn set_contour_gain(&mut self, cx: &mut Cx, value: f32) {
-        self.draw_bg.contour_gain = value.clamp(0.0, 2.0);
+        self.contour_gain = value.clamp(0.0, 2.0);
+        self.sync_draw_state();
         self.area.redraw(cx);
     }
 
     fn set_glow_gain(&mut self, cx: &mut Cx, value: f32) {
-        self.draw_bg.glow_gain = value.clamp(0.0, 2.0);
+        self.glow_gain = value.clamp(0.0, 2.0);
+        self.sync_draw_state();
         self.area.redraw(cx);
     }
 
     fn reset_view(&mut self, cx: &mut Cx) {
-        self.draw_bg.zoom = 1.0;
-        self.draw_bg.pan = vec2(0.0, 0.0);
+        self.zoom = 1.0;
+        self.pan = vec2(0.0, 0.0);
+        self.sync_draw_state();
         self.area.redraw(cx);
     }
 
@@ -1010,8 +1035,9 @@ impl ExfViewport {
             .max_by_key(|part| part.channels.len())
             .ok_or_else(|| "EXR has no readable parts".to_string())?;
         let summary = load_part_into_texture_bank(part, cx, &mut self.textures)?;
-        self.draw_bg.loaded = 1.0;
-        self.draw_bg.image_size = vec2(summary.width as f32, summary.height as f32);
+        self.loaded = true;
+        self.image_size = vec2(summary.width as f32, summary.height as f32);
+        self.sync_draw_state();
         self.bind_textures();
         self.area.redraw(cx);
         Ok(summary)
@@ -1028,9 +1054,10 @@ impl Widget for ExfViewport {
             Hit::FingerMove(fe) => {
                 if let Some(last_abs) = self.drag_last_abs {
                     let delta = fe.abs - last_abs;
-                    let zoom = self.draw_bg.zoom.max(0.001);
-                    self.draw_bg.pan.x -= delta.x as f32 / fe.rect.size.x.max(1.0) as f32 / zoom;
-                    self.draw_bg.pan.y -= delta.y as f32 / fe.rect.size.y.max(1.0) as f32 / zoom;
+                    let zoom = self.zoom.max(0.001);
+                    self.pan.x -= delta.x as f32 / fe.rect.size.x.max(1.0) as f32 / zoom;
+                    self.pan.y -= delta.y as f32 / fe.rect.size.y.max(1.0) as f32 / zoom;
+                    self.sync_draw_state();
                     self.drag_last_abs = Some(fe.abs);
                     self.area.redraw(cx);
                 }
@@ -1042,7 +1069,8 @@ impl Widget for ExfViewport {
                     fs.scroll.x
                 };
                 let factor = if scroll > 0.0 { 1.12 } else { 1.0 / 1.12 };
-                self.draw_bg.zoom = (self.draw_bg.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+                self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+                self.sync_draw_state();
                 self.area.redraw(cx);
             }
             Hit::FingerUp(fe) => {
@@ -1074,6 +1102,7 @@ impl Widget for ExfViewport {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let _ = self.layout;
         self.ensure_fallback_textures(cx);
+        self.sync_draw_state();
         self.bind_textures();
         let rect = cx.walk_turtle(walk);
         self.draw_bg.draw_abs(cx, rect);

@@ -926,9 +926,11 @@ impl<'a> ScriptVm<'a> {
                         && script_mod.line == new_mod.line
                         && script_mod.column == new_mod.column
                     {
+                        let values_changed = script_mod.values != new_mod.values;
+                        body.source = new_body.source;
                         body.scope = new_body.scope;
                         body.me = new_body.me;
-                        if body.effective_code != new_body.effective_code {
+                        if body.effective_code != new_body.effective_code || values_changed {
                             body.effective_code = new_body.effective_code;
                             body.tokenizer = ScriptTokenizer::default();
                             body.parser = ScriptParser::default();
@@ -1170,6 +1172,44 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Script, ScriptHook, Default)]
+    struct ApplyEvalParityTest {
+        #[source]
+        source: ScriptObjectRef,
+        #[live]
+        is_even: f32,
+    }
+
+    #[test]
+    fn script_apply_eval_refreshes_interpolated_values_on_reused_callsite() {
+        let mut host = ();
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+
+        let mut item = ApplyEvalParityTest::default();
+        let obj = vm.heap_mut().new_object();
+        item.source = vm.heap_mut().new_object_ref(obj);
+
+        for idx in 0..6 {
+            let is_even_f = if idx % 2 == 0 { 1.0f32 } else { 0.0f32 };
+            script_apply_eval!(vm, item, {
+                is_even: #(is_even_f)
+            });
+            assert_eq!(
+                item.is_even, is_even_f,
+                "reused script_apply_eval callsite kept stale value at iteration {}",
+                idx
+            );
         }
     }
 }
