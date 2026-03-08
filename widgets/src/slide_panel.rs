@@ -4,6 +4,7 @@ use crate::{
     makepad_draw::*,
     view::*,
     widget::*,
+    widget_async::ScriptAsyncResult,
     WidgetMatchEvent, WindowAction,
 };
 
@@ -71,6 +72,35 @@ pub enum SlidePanelAction {
 }
 
 impl Widget for SlidePanel {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        _args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(open) {
+            vm.with_cx_mut(|cx| self.open(cx));
+            return ScriptAsyncResult::Return(NIL);
+        }
+        if method == live_id!(close) {
+            vm.with_cx_mut(|cx| self.close(cx));
+            return ScriptAsyncResult::Return(NIL);
+        }
+        if method == live_id!(toggle) {
+            vm.with_cx_mut(|cx| self.toggle(cx));
+            return ScriptAsyncResult::Return(NIL);
+        }
+        if method == live_id!(is_open) {
+            let is_open = vm.with_cx(|cx| self.is_open(cx));
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(is_open));
+        }
+        if method == live_id!(is_animating) {
+            let is_animating = self.animator.is_track_animating(id!(active));
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(is_animating));
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.frame.handle_event(cx, event, scope);
         self.widget_match_event(cx, event, scope);
@@ -115,11 +145,25 @@ impl WidgetMatchEvent for SlidePanel {
 
 impl SlidePanel {
     pub fn open(&mut self, cx: &mut Cx) {
+        self.animator_play(cx, ids!(active.on));
         self.frame.redraw(cx);
     }
 
     pub fn close(&mut self, cx: &mut Cx) {
+        self.animator_play(cx, ids!(active.off));
         self.frame.redraw(cx);
+    }
+
+    pub fn toggle(&mut self, cx: &mut Cx) {
+        if self.animator_in_state(cx, ids!(active.on)) {
+            self.close(cx);
+        } else {
+            self.open(cx);
+        }
+    }
+
+    pub fn is_open(&self, cx: &Cx) -> bool {
+        self.animator_in_state(cx, ids!(active.on))
     }
 
     pub fn redraw(&mut self, cx: &mut Cx) {
@@ -130,23 +174,27 @@ impl SlidePanel {
 impl SlidePanelRef {
     pub fn close(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_play(cx, ids!(active.off));
+            inner.close(cx);
         }
     }
 
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.animator_play(cx, ids!(active.on));
+            inner.open(cx);
         }
     }
 
     pub fn toggle(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
-            if inner.animator_in_state(cx, ids!(active.on)) {
-                inner.animator_play(cx, ids!(active.off));
-            } else {
-                inner.animator_play(cx, ids!(active.on));
-            }
+            inner.toggle(cx);
+        }
+    }
+
+    pub fn is_open(&self, cx: &Cx) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.is_open(cx)
+        } else {
+            false
         }
     }
 
