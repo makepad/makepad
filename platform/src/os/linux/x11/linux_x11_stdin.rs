@@ -227,6 +227,7 @@ impl Cx {
                 WebSocketMessage::Closed => break,
                 WebSocketMessage::Opened => {}
             }
+            self.run_live_edit_if_needed("linux-x11-stdin");
         }
     }
 
@@ -430,10 +431,7 @@ impl Cx {
                     self.call_event_handler(&Event::Timer(event));
                 }
 
-                if self.handle_live_edit() {
-                    self.call_event_handler(&Event::LiveEdit);
-                    self.redraw_all();
-                }
+                self.run_live_edit_if_needed("linux-x11-stdin");
                 self.handle_networking_events();
                 self.stdin_handle_platform_ops(stdin_windows);
 

@@ -13,7 +13,7 @@ script_mod! {
             let uv = self.pos * 2.0 - vec2(1.0, 1.0)
             let aspect = self.rect_size.x / max(self.rect_size.y, 0.0001)
             let p = vec2(uv.x * aspect, uv.y)
-            let t = self.time * 0.35
+            let t = self.time * 1.35
             let angle = atan2(p.y, p.x)
             let radius = length(p)
             let ripple = sin(radius * 12.0 - t * 6.0 + angle * 5.0)

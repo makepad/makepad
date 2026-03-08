@@ -168,8 +168,6 @@ impl ScriptHook for View {
     ) {
         if apply.is_reload() {
             self.live_update_order.clear();
-            // TEST: Clear all children to rebuild from scratch
-            self.children.clear();
         }
     }
 

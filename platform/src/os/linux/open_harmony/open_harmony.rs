@@ -123,10 +123,7 @@ impl Cx {
         // }
 
         // Live edits
-        if self.handle_live_edit() {
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-        }
+        self.run_live_edit_if_needed("open-harmony");
 
         // Platform operations
         self.handle_platform_ops();

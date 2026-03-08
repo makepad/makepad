@@ -161,6 +161,7 @@ impl Cx {
                 WebSocketMessage::Closed => break,
                 WebSocketMessage::Opened => {}
             }
+            self.run_live_edit_if_needed("macos-stdin");
         }
     }
 
@@ -301,6 +302,7 @@ impl Cx {
                     self.call_event_handler(&Event::Timer(event));
                 }
 
+                self.run_live_edit_if_needed("macos-stdin");
                 self.handle_networking_events();
                 self.handle_gamepad_events();
                 self.stdin_handle_platform_ops(metal_cx, stdin_windows);

@@ -536,11 +536,7 @@ impl Cx {
                             self.os.timer0_idle_since = Some(now);
                         }
                     }
-                    /*
-                    if self.handle_live_edit() {
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }*/
+                    self.run_live_edit_if_needed("macos");
                     self.handle_networking_events();
                     self.handle_gamepad_events();
                     self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
