@@ -252,17 +252,6 @@ script_mod! {
 
 // ---- Rust boilerplate ----
 
-impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::theme_mod(vm);
-        script_eval!(vm,{
-            mod.theme = mod.themes.light
-        });
-        crate::makepad_widgets::widgets_mod(vm);
-        App::from_script_mod(vm, self::script_mod)
-    }
-}
-
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -281,6 +270,15 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        crate::makepad_widgets::theme_mod(vm);
+        script_eval!(vm,{
+            mod.theme = mod.themes.light
+        });
+        crate::makepad_widgets::widgets_mod(vm);
+        self::script_mod(vm)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());

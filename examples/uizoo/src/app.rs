@@ -148,43 +148,6 @@ script_mod! {
     }
 }
 
-impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);
-        crate::layout_templates::script_mod(vm);
-        crate::demofiletree::script_mod(vm);
-        crate::tab_button::script_mod(vm);
-        crate::tab_checkbox::script_mod(vm);
-        crate::tab_dropdown::script_mod(vm);
-        crate::tab_filetree::script_mod(vm);
-        crate::tab_spinner::script_mod(vm);
-        crate::tab_html::script_mod(vm);
-        crate::tab_icon::script_mod(vm);
-        crate::tab_iconset::script_mod(vm);
-        crate::tab_image::script_mod(vm);
-        crate::tab_imageblend::script_mod(vm);
-        crate::tab_label::script_mod(vm);
-        crate::tab_layout::script_mod(vm);
-        crate::tab_linklabel::script_mod(vm);
-        crate::tab_markdown::script_mod(vm);
-        crate::tab_pageflip::script_mod(vm);
-        crate::tab_portallist::script_mod(vm);
-        crate::tab_radiobutton::script_mod(vm);
-        crate::tab_rotary::script_mod(vm);
-        crate::tab_rotatedimage::script_mod(vm);
-        crate::tab_scrollbar::script_mod(vm);
-        crate::tab_slider::script_mod(vm);
-        crate::tab_slidesview::script_mod(vm);
-        crate::tab_stacknavigation::script_mod(vm);
-        crate::tab_adaptiveview::script_mod(vm);
-        crate::tab_textinput::script_mod(vm);
-        crate::tab_video::script_mod(vm);
-        crate::tab_view::script_mod(vm);
-        crate::tab_widgetsoverview::script_mod(vm);
-        App::from_script_mod(vm, self::script_mod)
-    }
-}
-
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -367,6 +330,41 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        crate::makepad_widgets::script_mod(vm);
+        crate::layout_templates::script_mod(vm);
+        crate::demofiletree::script_mod(vm);
+        crate::tab_button::script_mod(vm);
+        crate::tab_checkbox::script_mod(vm);
+        crate::tab_dropdown::script_mod(vm);
+        crate::tab_filetree::script_mod(vm);
+        crate::tab_spinner::script_mod(vm);
+        crate::tab_html::script_mod(vm);
+        crate::tab_icon::script_mod(vm);
+        crate::tab_iconset::script_mod(vm);
+        crate::tab_image::script_mod(vm);
+        crate::tab_imageblend::script_mod(vm);
+        crate::tab_label::script_mod(vm);
+        crate::tab_layout::script_mod(vm);
+        crate::tab_linklabel::script_mod(vm);
+        crate::tab_markdown::script_mod(vm);
+        crate::tab_pageflip::script_mod(vm);
+        crate::tab_portallist::script_mod(vm);
+        crate::tab_radiobutton::script_mod(vm);
+        crate::tab_rotary::script_mod(vm);
+        crate::tab_rotatedimage::script_mod(vm);
+        crate::tab_scrollbar::script_mod(vm);
+        crate::tab_slider::script_mod(vm);
+        crate::tab_slidesview::script_mod(vm);
+        crate::tab_stacknavigation::script_mod(vm);
+        crate::tab_adaptiveview::script_mod(vm);
+        crate::tab_textinput::script_mod(vm);
+        crate::tab_video::script_mod(vm);
+        crate::tab_view::script_mod(vm);
+        crate::tab_widgetsoverview::script_mod(vm);
+        self::script_mod(vm)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());

@@ -39,13 +39,6 @@ script_mod! {
     }
 }
 
-impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);
-        App::from_script_mod(vm, self::script_mod)
-    }
-}
-
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -58,6 +51,11 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        crate::makepad_widgets::script_mod(vm);
+        self::script_mod(vm)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         println!("QW:KEJRHQWLE:KJRHQWLEKJRHQWELKJRH {}",self.i);
         self.i+=1;

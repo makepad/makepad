@@ -110,13 +110,6 @@ impl App {
         }
     }
 
-    pub(super) fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);
-        crate::makepad_code_editor::script_mod(vm);
-        crate::register_script_modules(vm);
-        App::from_script_mod(vm, super::script_mod)
-    }
-
     pub(super) fn start_backend(&mut self, cx: &mut Cx) {
         let current_path = match env::current_dir().and_then(|p| p.canonicalize()) {
             Ok(path) => path,

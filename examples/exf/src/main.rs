@@ -756,11 +756,6 @@ script_mod! {
 }
 
 impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);
-        App::from_script_mod(vm, self::script_mod)
-    }
-
     fn viewport_ref(&self, cx: &mut Cx) -> WidgetRef {
         let direct = self.ui.widget(cx, ids!(viewer));
         let flood = self.ui.widget_flood(cx, ids!(viewer));
@@ -898,6 +893,11 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        crate::makepad_widgets::script_mod(vm);
+        self::script_mod(vm)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
