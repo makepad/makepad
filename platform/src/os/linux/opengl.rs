@@ -1403,7 +1403,7 @@ impl GlShader {
         program: u32,
         prefix: &str,
         slots: usize,
-        inputs: &[crate::draw_shader::DrawShaderInput],
+        _inputs: &[crate::draw_shader::DrawShaderInput],
     ) -> Vec<OpenglAttribute> {
         let mut attribs = Vec::new();
 
@@ -1417,15 +1417,6 @@ impl GlShader {
 
         let stride = (slots * mem::size_of::<f32>()) as i32;
         let num_attr = ceil_div4(slots);
-        let mut chunk_formats = vec![DrawShaderAttrFormat::Float; num_attr];
-        for input in inputs {
-            if input.attr_format == DrawShaderAttrFormat::Float {
-                continue;
-            }
-            for slot in input.offset..(input.offset + input.slots) {
-                chunk_formats[slot / 4] = input.attr_format;
-            }
-        }
         let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
         for i in 0..num_attr {
             let mut name0 = prefix.to_string();
@@ -1447,7 +1438,7 @@ impl GlShader {
                         size,
                         stride,
                         (i * 4 * mem::size_of::<f32>()),
-                        chunk_formats[i]
+                        DrawShaderAttrFormat::Float
                     );
                 }
                 attribs.push(OpenglAttribute {
@@ -1456,7 +1447,7 @@ impl GlShader {
                     offset: (i * 4 * mem::size_of::<f32>()) as usize,
                     size: size,
                     stride: stride,
-                    attr_format: chunk_formats[i],
+                    attr_format: DrawShaderAttrFormat::Float,
                 })
             }
         }

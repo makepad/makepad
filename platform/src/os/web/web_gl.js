@@ -246,60 +246,7 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmCompileWebGLShader(args) {
-    function is_integer_attrib_type(gl, ty) {
-      return (
-        ty === gl.INT ||
-        ty === gl.INT_VEC2 ||
-        ty === gl.INT_VEC3 ||
-        ty === gl.INT_VEC4 ||
-        ty === gl.UNSIGNED_INT ||
-        ty === gl.UNSIGNED_INT_VEC2 ||
-        ty === gl.UNSIGNED_INT_VEC3 ||
-        ty === gl.UNSIGNED_INT_VEC4 ||
-        ty === gl.BOOL ||
-        ty === gl.BOOL_VEC2 ||
-        ty === gl.BOOL_VEC3 ||
-        ty === gl.BOOL_VEC4
-      );
-    }
-
-    function attrib_pointer_type(gl, ty) {
-      if (
-        ty === gl.INT ||
-        ty === gl.INT_VEC2 ||
-        ty === gl.INT_VEC3 ||
-        ty === gl.INT_VEC4 ||
-        ty === gl.BOOL ||
-        ty === gl.BOOL_VEC2 ||
-        ty === gl.BOOL_VEC3 ||
-        ty === gl.BOOL_VEC4
-      ) {
-        return gl.INT;
-      }
-      if (
-        ty === gl.UNSIGNED_INT ||
-        ty === gl.UNSIGNED_INT_VEC2 ||
-        ty === gl.UNSIGNED_INT_VEC3 ||
-        ty === gl.UNSIGNED_INT_VEC4
-      ) {
-        return gl.UNSIGNED_INT;
-      }
-      return gl.FLOAT;
-    }
-
-    function get_active_attrib_types(gl, program) {
-      let out = {};
-      let count = gl.getProgramParameter(program, gl.ACTIVE_ATTRIBUTES);
-      for (let i = 0; i < count; i++) {
-        let info = gl.getActiveAttrib(program, i);
-        if (info) {
-          out[info.name] = info.type;
-        }
-      }
-      return out;
-    }
-
-    function get_attrib_locations(gl, program, base, slots, active_attrib_types) {
+    function get_attrib_locations(gl, program, base, slots) {
       let attrib_locs = [];
       let attribs = slots >> 2;
       let stride = slots * 4;
@@ -308,15 +255,13 @@ export class WasmWebGL extends WasmWebBrowser {
         let size = slots - i * 4;
         if (size > 4) size = 4;
         let name = base + i;
-        let gl_type = active_attrib_types[name] ?? active_attrib_types[name + "[0]"] ?? gl.FLOAT;
-        let integer = is_integer_attrib_type(gl, gl_type);
         attrib_locs.push({
           loc: gl.getAttribLocation(program, name),
           offset: i * 16,
           size: size,
           stride: slots * 4,
-          integer: integer,
-          gl_type: attrib_pointer_type(gl, gl_type),
+          integer: false,
+          gl_type: gl.FLOAT,
         });
       }
       return attrib_locs;
@@ -412,8 +357,6 @@ export class WasmWebGL extends WasmWebBrowser {
       program,
       "liveUniforms",
     );
-    let active_attrib_types = get_active_attrib_types(gl, program);
-
     this.draw_shaders[args.shader_id] = {
       vertex: args.vertex,
       pixel: args.pixel,
@@ -422,14 +365,12 @@ export class WasmWebGL extends WasmWebBrowser {
         program,
         "packed_geometry_",
         args.geometry_slots,
-        active_attrib_types,
       ),
       inst_attribs: get_attrib_locations(
         gl,
         program,
         "packed_instance_",
         args.instance_slots,
-        active_attrib_types,
       ),
       pass_uniforms_binding: pass_uniforms_binding,
       draw_list_uniforms_binding: draw_list_uniforms_binding,
