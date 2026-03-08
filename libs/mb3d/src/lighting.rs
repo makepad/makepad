@@ -305,6 +305,60 @@ impl LightingCache {
     }
 }
 
+pub fn build_exr_viewer_lighting_metadata(
+    lighting: &crate::m3p::M3PLighting,
+    camera: &crate::render::Camera,
+) -> crate::exr_meta::ViewerLightingMetadata {
+    let lights = lighting
+        .lights
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, light)| parse_light(idx, light, camera))
+        .map(|parsed| crate::exr_meta::ViewerLight {
+            dir: parsed.dir,
+            color: parsed.color,
+            spec_power: parsed.spec_power,
+        })
+        .collect();
+
+    crate::exr_meta::ViewerLightingMetadata {
+        ambient_bottom: Vec3::new(
+            lighting.ambient_bottom[0] as f64 / 255.0,
+            lighting.ambient_bottom[1] as f64 / 255.0,
+            lighting.ambient_bottom[2] as f64 / 255.0,
+        ),
+        ambient_top: Vec3::new(
+            lighting.ambient_top[0] as f64 / 255.0,
+            lighting.ambient_top[1] as f64 / 255.0,
+            lighting.ambient_top[2] as f64 / 255.0,
+        ),
+        depth_col: Vec3::new(
+            lighting.depth_col[0] as f64 / 255.0,
+            lighting.depth_col[1] as f64 / 255.0,
+            lighting.depth_col[2] as f64 / 255.0,
+        ),
+        depth_col2: Vec3::new(
+            lighting.depth_col2[0] as f64 / 255.0,
+            lighting.depth_col2[1] as f64 / 255.0,
+            lighting.depth_col2[2] as f64 / 255.0,
+        ),
+        dyn_fog_col: Vec3::new(
+            lighting.dyn_fog_col[0] as f64 / 255.0,
+            lighting.dyn_fog_col[1] as f64 / 255.0,
+            lighting.dyn_fog_col[2] as f64 / 255.0,
+        ),
+        dyn_fog_col2: Vec3::new(
+            lighting.dyn_fog_col2[0] as f64 / 255.0,
+            lighting.dyn_fog_col2[1] as f64 / 255.0,
+            lighting.dyn_fog_col2[2] as f64 / 255.0,
+        ),
+        s_diff: (lighting.tbpos_5 as f64 * 0.02).max(0.0),
+        s_spec: (((lighting.tbpos_7 & 0x0FFF) as f64) * 0.02).max(0.004),
+        rough_scale: lighting.roughness_factor as f64 / (255.0 * 255.0),
+        lights,
+    }
+}
+
 fn ao_step_jitter(pixel_x: i32, pixel_y: i32, ray_idx: usize) -> f64 {
     let mut v = (pixel_x as u32).wrapping_mul(73_856_093)
         ^ (pixel_y as u32).wrapping_mul(19_349_663)

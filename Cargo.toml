@@ -17,6 +17,7 @@ workspace.members = [
     "examples/comfyui",
     "examples/aichat",
     "examples/pdf",
+    "examples/exf",
     "examples/text_input",
     "examples/counter",
     "libs/gltf",

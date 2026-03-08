@@ -147,8 +147,6 @@ enum InternalAction {
 /// Limitation: Selectable items are expected to be `View`s.
 #[derive(Script, ScriptHook, Widget)]
 pub struct CommandTextInput {
-    #[uid]
-    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]
@@ -875,8 +873,6 @@ fn is_whitespace(grapheme: &str) -> bool {
 /// Reduced and adapted copy of the `List` widget from Moly.
 #[derive(Script, ScriptHook, Widget)]
 struct List {
-    #[uid]
-    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]

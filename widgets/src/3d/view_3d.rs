@@ -15,8 +15,6 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct View3D {
-    #[uid]
-    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[deref]

@@ -23,7 +23,7 @@ use crate::makepad_script::{
 };
 
 pub const DRAW_CALL_DYN_UNIFORMS: usize = 256;
-pub const DRAW_CALL_TEXTURE_SLOTS: usize = 8;
+pub const DRAW_CALL_TEXTURE_SLOTS: usize = 16;
 pub const DRAW_CALL_UNIFORM_BUFFER_SLOTS: usize = 2;
 pub const DRAW_CALL_DYN_INSTANCES: usize = 32;
 

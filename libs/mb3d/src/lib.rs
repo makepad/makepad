@@ -1,3 +1,4 @@
+pub mod exr_meta;
 pub mod formulas;
 pub mod lighting;
 pub mod m3p;
