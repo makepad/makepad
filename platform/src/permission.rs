@@ -5,7 +5,11 @@ pub enum Permission {
     /// Required on: iOS, Android, macOS, Web
     /// Auto-granted on: Windows, Linux
     AudioInput,
-    // Future permissions to be added here (Camera, Location, etc.)
+    /// Permission to access the camera for video capture.
+    ///
+    /// Required on: iOS, Android, macOS, Web
+    /// Auto-granted on: Windows, Linux
+    Camera,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

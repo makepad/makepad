@@ -12,6 +12,14 @@ pub struct Texture(Rc<PoolId>);
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct TextureId(pub(crate) usize, u64);
 
+impl Default for TextureId {
+    /// Returns a sentinel `TextureId` that does not correspond to any allocated texture.
+    /// Used for audio-only players that carry no video output.
+    fn default() -> Self {
+        TextureId(usize::MAX, 0)
+    }
+}
+
 impl Texture {
     pub fn texture_id(&self) -> TextureId {
         TextureId(self.0.id, self.0.generation)
@@ -175,7 +183,14 @@ pub enum TextureFormat {
         id: crate::shared_framebuf::PresentableImageId,
         initial: bool,
     },
-    VideoRGB,
+    /// A single YUV plane texture (Y, U, or V). Backend-managed — the render
+    /// backend or platform layer creates/uploads the GPU texture directly.
+    /// Used for both I420 (three R8 planes) and NV12 (R8 luma + RG8 chroma).
+    VideoYuvPlane,
+    /// An opaque external video texture whose contents are managed outside the
+    /// normal texture upload path (e.g. Android SurfaceTexture/OES, or
+    /// platform-native composited video output).
+    VideoExternal,
 }
 
 impl std::fmt::Debug for TextureFormat {
@@ -223,7 +238,8 @@ impl std::fmt::Debug for TextureFormat {
                 f,
                 "TextureFormat::SharedBGRAu8(width:{width},height:{height})"
             ),
-            TextureFormat::VideoRGB => write!(f, "TextureFormat::VideoRGB"),
+            TextureFormat::VideoYuvPlane => write!(f, "TextureFormat::VideoYuvPlane"),
+            TextureFormat::VideoExternal => write!(f, "TextureFormat::VideoExternal"),
         }
     }
 }
@@ -346,7 +362,11 @@ pub(crate) enum TexturePixel {
     RGu8,
     Rf32,
     D32,
-    VideoRGB,
+    /// YUV plane pixel type. Individual planes are R8 (luma, I420 chroma) or
+    /// RG8 (NV12 chroma); the actual GPU format is set at upload/wrap time.
+    VideoYuvPlane,
+    /// Opaque external video pixel type (e.g. Android OES, composited RGBA).
+    VideoExternal,
 }
 
 impl CxTexture {
@@ -507,10 +527,11 @@ impl TextureFormat {
     }
 
     pub fn is_video(&self) -> bool {
-        if let Self::VideoRGB = self {
-            return true;
-        }
-        false
+        matches!(self, Self::VideoYuvPlane | Self::VideoExternal)
+    }
+
+    pub fn is_video_external(&self) -> bool {
+        matches!(self, Self::VideoExternal)
     }
 
     pub fn vec_width_height(&self) -> Option<(usize, usize)> {
@@ -627,10 +648,16 @@ impl TextureFormat {
     #[allow(unused)]
     pub(crate) fn as_video_alloc(&self) -> Option<TextureAlloc> {
         match self {
-            Self::VideoRGB => Some(TextureAlloc {
+            Self::VideoYuvPlane => Some(TextureAlloc {
                 width: 0,
                 height: 0,
-                pixel: TexturePixel::VideoRGB,
+                pixel: TexturePixel::VideoYuvPlane,
+                category: TextureCategory::Video,
+            }),
+            Self::VideoExternal => Some(TextureAlloc {
+                width: 0,
+                height: 0,
+                pixel: TexturePixel::VideoExternal,
                 category: TextureCategory::Video,
             }),
             _ => None,

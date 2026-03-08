@@ -820,10 +820,10 @@ export class WasmWebBrowser extends WasmBridge {
 
     async FromWasmCheckPermission(args) {
         try {
-            if (args.permission === 'microphone') {
+            if (args.permission === 'microphone' || args.permission === 'camera') {
                 // Check if Permissions API is available
                 if (navigator.permissions && navigator.permissions.query) {
-                    const result = await navigator.permissions.query({ name: 'microphone' });
+                    const result = await navigator.permissions.query({ name: args.permission });
                     let status;
                     switch (result.state) {
                         case 'granted':
@@ -844,13 +844,14 @@ export class WasmWebBrowser extends WasmBridge {
                     });
                 } else {
                     // Fallback: try to check if we already have a stream
+                    const kind = args.permission === 'microphone' ? 'audioinput' : 'videoinput';
                     try {
                         const devices = await navigator.mediaDevices.enumerateDevices();
-                        const hasAudioInput = devices.some(device => device.kind === 'audioinput' && device.label !== '');
+                        const hasDevice = devices.some(device => device.kind === kind && device.label !== '');
                         this.to_wasm.ToWasmPermissionResult({
                             permission: args.permission,
                             request_id: args.request_id,
-                            status: hasAudioInput ? 1 : 0 // Granted if we see labels, NotDetermined otherwise
+                            status: hasDevice ? 1 : 0 // Granted if we see labels, NotDetermined otherwise
                         });
                     } catch {
                         // Can't determine, assume not determined
@@ -882,10 +883,11 @@ export class WasmWebBrowser extends WasmBridge {
 
     async FromWasmRequestPermission(args) {
         try {
-            if (args.permission === 'microphone') {
+            if (args.permission === 'microphone' || args.permission === 'camera') {
                 try {
-                    // Request microphone access
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    // Request media access
+                    const constraints = args.permission === 'microphone' ? { audio: true } : { video: true };
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
                     // Successfully got permission, close the stream immediately
                     stream.getTracks().forEach(track => track.stop());
                     
@@ -902,7 +904,7 @@ export class WasmWebBrowser extends WasmBridge {
                         // User explicitly denied permission
                         status = 3; // DeniedPermanent (browsers don't re-prompt)
                     } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
-                        // No microphone device found
+                        // No device found
                         status = 3; // DeniedPermanent (can't grant without device)
                     } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
                         // Device is in use or hardware error

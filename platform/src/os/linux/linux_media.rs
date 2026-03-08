@@ -1,5 +1,8 @@
 use {
-    self::super::{alsa_audio::AlsaAudioAccess, alsa_midi::*, pulse_audio::PulseAudioAccess},
+    self::super::{
+        alsa_audio::AlsaAudioAccess, alsa_midi::*, pulse_audio::PulseAudioAccess,
+        v4l2_camera::V4l2CameraAccess,
+    },
     crate::{
         audio::*, cx::Cx, event::Event, media_api::CxMediaApi, midi::*, thread::SignalToUI,
         video::*,
@@ -39,6 +42,19 @@ impl Cx {
                 .get_updated_descs();
             self.call_event_handler(&Event::MidiPorts(MidiPortsEvent { descs }));
         }
+        // Lazily initialize V4L2 camera subsystem on first media signal check.
+        // This starts the /dev watcher which sets v4l2_change on device changes.
+        let v4l2_first = self.os.media.v4l2_camera.is_none();
+        if v4l2_first || self.os.media.v4l2_change.check_and_clear() {
+            let descs = self
+                .os
+                .media
+                .v4l2_camera()
+                .lock()
+                .unwrap()
+                .get_updated_descs();
+            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent { descs }));
+        }
     }
 }
 
@@ -49,6 +65,8 @@ pub struct CxLinuxMedia {
     pub(crate) audio_change: SignalToUI,
     pub(crate) alsa_midi: Option<Arc<Mutex<AlsaMidiAccess>>>,
     pub(crate) alsa_midi_change: SignalToUI,
+    pub(crate) v4l2_camera: Option<Arc<Mutex<V4l2CameraAccess>>>,
+    pub(crate) v4l2_change: SignalToUI,
 }
 
 impl CxLinuxMedia {
@@ -74,6 +92,13 @@ impl CxLinuxMedia {
             self.alsa_midi = Some(AlsaMidiAccess::new(self.alsa_midi_change.clone()));
         }
         self.alsa_midi.as_ref().unwrap().clone()
+    }
+
+    pub fn v4l2_camera(&mut self) -> Arc<Mutex<V4l2CameraAccess>> {
+        if self.v4l2_camera.is_none() {
+            self.v4l2_camera = Some(V4l2CameraAccess::new(self.v4l2_change.clone()));
+        }
+        self.v4l2_camera.as_ref().unwrap().clone()
     }
 }
 
@@ -153,7 +178,66 @@ impl CxMediaApi for Cx {
             .unwrap() = Some(f);
     }
 
-    fn video_input_box(&mut self, _index: usize, _f: VideoInputFn) {}
+    fn video_input_box(&mut self, index: usize, f: VideoInputFn) {
+        *self.os.media.v4l2_camera().lock().unwrap().video_input_cb[index]
+            .lock()
+            .unwrap() = Some(f);
+    }
 
-    fn use_video_input(&mut self, _inputs: &[(VideoInputId, VideoFormatId)]) {}
+    fn camera_frame_input_box(&mut self, index: usize, f: CameraFrameInputFn) {
+        *self
+            .os
+            .media
+            .v4l2_camera()
+            .lock()
+            .unwrap()
+            .camera_frame_input_cb[index]
+            .lock()
+            .unwrap() = Some(f);
+    }
+
+    fn video_encoder_output_box(
+        &mut self,
+        index: usize,
+        config: VideoEncoderConfig,
+        f: VideoOutputFn,
+    ) -> Result<(), VideoEncodeError> {
+        if config.codec != VideoCodec::Av1 {
+            return Err(VideoEncodeError::UnsupportedCodec);
+        }
+
+        match config.source {
+            VideoEncodeSource::Camera { .. } => {
+                let camera = self.os.media.v4l2_camera();
+                let camera = camera.lock().unwrap();
+                *camera.video_encoder_config[index].lock().unwrap() = Some(config);
+                *camera.video_output_cb[index].lock().unwrap() = Some(f);
+                Ok(())
+            }
+            VideoEncodeSource::Texture { .. } => {
+                crate::error!("linux video texture source is not implemented");
+                Err(VideoEncodeError::UnsupportedSource)
+            }
+            VideoEncodeSource::CpuFrames { .. } => {
+                crate::error!("linux video cpu-frame source is not implemented");
+                Err(VideoEncodeError::UnsupportedSource)
+            }
+        }
+    }
+
+    fn video_capabilities(&self) -> VideoCapabilities {
+        crate::merge_video_capabilities(
+            VideoCapabilities::default(),
+            crate::media_video_capabilities(),
+        )
+    }
+
+    fn use_video_input(&mut self, inputs: &[(VideoInputId, VideoFormatId)]) {
+        self.os
+            .media
+            .v4l2_camera()
+            .lock()
+            .unwrap()
+            .use_video_input(inputs);
+    }
 }

@@ -175,8 +175,8 @@ impl MacosWindow {
             // Parent content top-left in screen coords:
             let screen_x = parent_frame.origin.x + parent_content.origin.x + position.x;
             // Flip Y: parent content top is at frame.origin.y + frame.size.height - titlebar
-            let parent_content_top = parent_frame.origin.y + parent_frame.size.height
-                - parent_content.origin.y;
+            let parent_content_top =
+                parent_frame.origin.y + parent_frame.size.height - parent_content.origin.y;
             let screen_y = parent_content_top - position.y - size.y;
 
             let ns_size = NSSize {

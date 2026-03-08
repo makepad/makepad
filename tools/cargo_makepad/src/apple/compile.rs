@@ -322,6 +322,8 @@ impl PlistValues {
                 <false/>
                 <key>NSFaceIDUsageDescription</key>
                 <string>For biometric authentication</string>
+                <key>NSCameraUsageDescription</key>
+                <string>This app needs access to the camera for video capture functionality.</string>
                 <key>NSMicrophoneUsageDescription</key>
                 <string>This app needs access to the microphone for audio recording functionality.</string>
             </dict>

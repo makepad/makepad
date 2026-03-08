@@ -69,4 +69,8 @@ public class MakepadNative {
     public static native void onVideoPlaybackCompleted(long videoId);
     public static native void onVideoPlayerReleased(long videoId);
     public static native void onVideoDecodingError(long videoId, String error);
+    public static native void onH264EncoderPacket(long encoderId, long ptsUs, int flags, byte[] data);
+    public static native void onH264EncoderError(long encoderId, String error);
+    public static native void onCameraPreviewSurfaceReady(long videoId, Surface surface, int width, int height);
+    public static native void onCameraPreviewSurfaceDestroyed(long videoId);
 }

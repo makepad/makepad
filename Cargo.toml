@@ -22,6 +22,8 @@ workspace.members = [
     "examples/text_input",
     "examples/text_selection",
     "examples/counter",
+    "examples/camera",
+#    "examples/matrix",
     "libs/gltf",
     "libs/splat",
     "libs/makepad_physics",

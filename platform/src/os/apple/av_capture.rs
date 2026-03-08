@@ -1,9 +1,19 @@
 use {
     crate::{
-        apple_classes::get_apple_class_global, makepad_live_id::*, makepad_objc_sys::objc_block,
-        os::apple::apple_sys::*, os::apple::apple_util::*, thread::SignalToUI, video::*,
+        apple_classes::get_apple_class_global,
+        makepad_live_id::*,
+        makepad_objc_sys::objc_block,
+        os::apple::apple_sys::*,
+        os::apple::apple_util::*,
+        texture::{CxTexturePool, TexturePixel},
+        thread::SignalToUI,
+        video::*,
+        video_encode::camera_video_encoder::VideoEncoder,
     },
-    std::sync::{Arc, Mutex},
+    std::{
+        collections::{HashMap, HashSet},
+        sync::{Arc, Mutex},
+    },
 };
 
 struct AvFormatObj {
@@ -18,25 +28,67 @@ struct AvVideoInput {
     av_formats: Vec<AvFormatObj>,
 }
 
+pub struct AvCapturePixelBuffer {
+    pub pixel_buffer: CVPixelBufferRef,
+    pub timestamp_ns: u64,
+    pub width: usize,
+    pub height: usize,
+    pub matrix: CameraColorMatrix,
+}
+
+unsafe impl Send for AvCapturePixelBuffer {}
+
+pub type CameraPixelBufferInputFn = Box<dyn FnMut(AvCapturePixelBuffer) + Send + 'static>;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct CameraStreamKey {
+    input_id: VideoInputId,
+    format_id: VideoFormatId,
+}
+
+#[derive(Default)]
+struct StreamDispatch {
+    video_input_cbs: Vec<Arc<Mutex<Option<VideoInputFn>>>>,
+    frame_input_cbs: Vec<Arc<Mutex<Option<CameraFrameInputFn>>>>,
+    pixel_buffer_cbs: Vec<Arc<Mutex<Option<CameraPixelBufferInputFn>>>>,
+    preview_frame_input_cbs: Vec<Arc<Mutex<Option<CameraFrameInputFn>>>>,
+    preview_pixel_buffer_cbs: Vec<Arc<Mutex<Option<CameraPixelBufferInputFn>>>>,
+    encoders: Vec<Arc<Mutex<Option<VideoEncoder>>>>,
+}
+
+struct PreviewSubscription {
+    stream: CameraStreamKey,
+    frame_cb: Arc<Mutex<Option<CameraFrameInputFn>>>,
+    pixel_buffer_cb: Arc<Mutex<Option<CameraPixelBufferInputFn>>>,
+}
+
+struct CameraStreamNode {
+    _callback: AvVideoCaptureCallback,
+    session: RcObjcId,
+    output: RcObjcId,
+    queue: ObjcId,
+    dispatch: Arc<Mutex<StreamDispatch>>,
+}
+
 pub struct AvCaptureAccess {
     pub access_granted: bool,
     pub video_input_cb: [Arc<Mutex<Option<VideoInputFn>>>; MAX_VIDEO_DEVICE_INDEX],
+    pub camera_frame_input_cb: [Arc<Mutex<Option<CameraFrameInputFn>>>; MAX_VIDEO_DEVICE_INDEX],
+    pub camera_pixel_buffer_input_cb:
+        [Arc<Mutex<Option<CameraPixelBufferInputFn>>>; MAX_VIDEO_DEVICE_INDEX],
+    pub video_output_cb: [Arc<Mutex<Option<VideoOutputFn>>>; MAX_VIDEO_DEVICE_INDEX],
+    pub video_encoder_config: [Arc<Mutex<Option<VideoEncoderConfig>>>; MAX_VIDEO_DEVICE_INDEX],
+    video_encoder: [Arc<Mutex<Option<VideoEncoder>>>; MAX_VIDEO_DEVICE_INDEX],
     inputs: Vec<AvVideoInput>,
-    sessions: Vec<AvCaptureSession>,
+    streams: HashMap<CameraStreamKey, CameraStreamNode>,
+    slot_streams: [Option<CameraStreamKey>; MAX_VIDEO_DEVICE_INDEX],
+    preview_subscriptions: HashMap<LiveId, PreviewSubscription>,
+    active_inputs: Vec<(VideoInputId, VideoFormatId)>,
 }
 
-pub struct AvCaptureSession {
-    pub input_id: VideoInputId,
-    pub format_id: VideoFormatId,
-    pub callback: AvVideoCaptureCallback,
-    pub session: RcObjcId,
-    pub queue: ObjcId,
-}
-
-impl AvCaptureSession {
+impl CameraStreamNode {
     fn start_session(
-        capture_cb: Arc<Mutex<Option<VideoInputFn>>>,
-        input_id: VideoInputId,
+        dispatch: Arc<Mutex<StreamDispatch>>,
         av_format: &AvFormatObj,
         device: &RcObjcId,
         format: VideoFormat,
@@ -50,33 +102,177 @@ impl AvCaptureSession {
             let mut err: ObjcId = nil;
             let () = msg_send![input, initWithDevice: device.as_id() error: &mut err];
             OSError::from_nserror(err).unwrap();
+            let dispatch_for_cb = dispatch.clone();
             let callback = AvVideoCaptureCallback::new(Box::new(move |sample_buffer| {
-                if let Some(cb) = &mut *capture_cb.try_lock().unwrap() {
-                    let image_buffer = CMSampleBufferGetImageBuffer(sample_buffer);
-                    let bytes_per_row = CVPixelBufferGetBytesPerRow(image_buffer);
-                    CVPixelBufferLockBaseAddress(image_buffer, 0);
-                    let len = CVPixelBufferGetDataSize(image_buffer);
-                    let ptr = CVPixelBufferGetBaseAddress(image_buffer);
-                    let height = CVPixelBufferGetHeight(image_buffer) as usize;
-                    let width = CVPixelBufferGetWidth(image_buffer) as usize;
-                    let len_used = bytes_per_row * height;
-                    let data = std::slice::from_raw_parts_mut(
-                        ptr as *mut u32,
-                        (len as usize).min(len_used) / 4,
-                    );
-                    if width != format.width || height != format.height {
-                        println!(
-                            "Video format not correct got {} x {} for {:?}",
-                            width, height, format
-                        );
-                    }
-                    //crate::log!("{:?} {:?}", std::thread::current().id(), input_id);
-                    cb(VideoBufferRef {
-                        format,
-                        data: VideoBufferRefData::U32(data),
-                    });
-                    CVPixelBufferUnlockBaseAddress(image_buffer, 0);
+                let image_buffer = CMSampleBufferGetImageBuffer(sample_buffer);
+                if image_buffer.is_null() {
+                    return;
                 }
+
+                CVPixelBufferLockBaseAddress(image_buffer, 0);
+
+                let pts = CMSampleBufferGetPresentationTimeStamp(sample_buffer);
+                let timestamp_ns = if pts.timescale > 0 {
+                    (pts.value.max(0) as u64)
+                        .saturating_mul(1_000_000_000)
+                        .saturating_div(pts.timescale as u64)
+                } else {
+                    0
+                };
+                let width = CVPixelBufferGetWidth(image_buffer) as usize;
+                let height = CVPixelBufferGetHeight(image_buffer) as usize;
+
+                let mut frame_ref = None;
+                if CVPixelBufferIsPlanar(image_buffer)
+                    && CVPixelBufferGetPlaneCount(image_buffer) >= 2
+                {
+                    let y_ptr = CVPixelBufferGetBaseAddressOfPlane(image_buffer, 0) as *const u8;
+                    let uv_ptr = CVPixelBufferGetBaseAddressOfPlane(image_buffer, 1) as *const u8;
+                    let y_stride = CVPixelBufferGetBytesPerRowOfPlane(image_buffer, 0);
+                    let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(image_buffer, 1);
+                    let y_h = CVPixelBufferGetHeightOfPlane(image_buffer, 0);
+                    let uv_h = CVPixelBufferGetHeightOfPlane(image_buffer, 1);
+
+                    if !y_ptr.is_null() && !uv_ptr.is_null() {
+                        let y_slice =
+                            std::slice::from_raw_parts(y_ptr, y_stride.saturating_mul(y_h));
+                        let uv_slice =
+                            std::slice::from_raw_parts(uv_ptr, uv_stride.saturating_mul(uv_h));
+                        frame_ref = Some(CameraFrameRef {
+                            timestamp_ns,
+                            width,
+                            height,
+                            layout: CameraFrameLayout::NV12,
+                            matrix: CameraColorMatrix::BT709,
+                            plane_count: 2,
+                            planes: [
+                                CameraFramePlaneRef {
+                                    bytes: y_slice,
+                                    row_stride: y_stride,
+                                    pixel_stride: 1,
+                                },
+                                CameraFramePlaneRef {
+                                    bytes: uv_slice,
+                                    row_stride: uv_stride,
+                                    pixel_stride: 2,
+                                },
+                                CameraFramePlaneRef::empty(),
+                            ],
+                        });
+                    }
+                } else {
+                    let bytes_per_row = CVPixelBufferGetBytesPerRow(image_buffer);
+                    let ptr = CVPixelBufferGetBaseAddress(image_buffer) as *const u8;
+                    if !ptr.is_null() {
+                        let packed =
+                            std::slice::from_raw_parts(ptr, bytes_per_row.saturating_mul(height));
+                        frame_ref = Some(CameraFrameRef {
+                            timestamp_ns,
+                            width,
+                            height,
+                            layout: CameraFrameLayout::YUY2,
+                            matrix: CameraColorMatrix::BT709,
+                            plane_count: 1,
+                            planes: [
+                                CameraFramePlaneRef {
+                                    bytes: packed,
+                                    row_stride: bytes_per_row,
+                                    pixel_stride: 2,
+                                },
+                                CameraFramePlaneRef::empty(),
+                                CameraFramePlaneRef::empty(),
+                            ],
+                        });
+                    }
+                }
+
+                let dispatch_snapshot = {
+                    let guard = dispatch_for_cb.lock().unwrap();
+                    (
+                        guard.video_input_cbs.clone(),
+                        guard.frame_input_cbs.clone(),
+                        guard.pixel_buffer_cbs.clone(),
+                        guard.preview_frame_input_cbs.clone(),
+                        guard.preview_pixel_buffer_cbs.clone(),
+                        guard.encoders.clone(),
+                    )
+                };
+
+                if let Some(frame_ref) = frame_ref {
+                    if frame_ref.layout == CameraFrameLayout::NV12 {
+                        for cb in &dispatch_snapshot.2 {
+                            if let Ok(mut guard) = cb.try_lock() {
+                                if let Some(cb) = &mut *guard {
+                                    CVPixelBufferRetain(image_buffer);
+                                    cb(AvCapturePixelBuffer {
+                                        pixel_buffer: image_buffer,
+                                        timestamp_ns,
+                                        width,
+                                        height,
+                                        matrix: frame_ref.matrix,
+                                    });
+                                }
+                            }
+                        }
+                        for cb in &dispatch_snapshot.4 {
+                            if let Ok(mut guard) = cb.try_lock() {
+                                if let Some(cb) = &mut *guard {
+                                    CVPixelBufferRetain(image_buffer);
+                                    cb(AvCapturePixelBuffer {
+                                        pixel_buffer: image_buffer,
+                                        timestamp_ns,
+                                        width,
+                                        height,
+                                        matrix: frame_ref.matrix,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    for cb in &dispatch_snapshot.1 {
+                        if let Ok(mut guard) = cb.try_lock() {
+                            if let Some(cb) = &mut *guard {
+                                cb(frame_ref);
+                            }
+                        }
+                    }
+                    for cb in &dispatch_snapshot.3 {
+                        if let Ok(mut guard) = cb.try_lock() {
+                            if let Some(cb) = &mut *guard {
+                                cb(frame_ref);
+                            }
+                        }
+                    }
+
+                    for enc in &dispatch_snapshot.5 {
+                        if let Ok(guard) = enc.try_lock() {
+                            if let Some(enc) = &*guard {
+                                let consumed = enc.push_apple_pixel_buffer(image_buffer, timestamp_ns);
+                                if !consumed {
+                                    enc.push_frame(frame_ref);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for cb in &dispatch_snapshot.0 {
+                    if let Ok(mut guard) = cb.try_lock() {
+                        if let Some(cb) = &mut *guard {
+                            let bytes_per_row = CVPixelBufferGetBytesPerRow(image_buffer);
+                            let len_used = bytes_per_row.saturating_mul(height);
+                            let ptr = CVPixelBufferGetBaseAddress(image_buffer);
+                            let data = std::slice::from_raw_parts_mut(ptr as *mut u32, len_used / 4);
+                            cb(VideoBufferRef {
+                                format,
+                                data: VideoBufferRefData::U32(data),
+                            });
+                        }
+                    }
+                }
+
+                CVPixelBufferUnlockBaseAddress(image_buffer, 0);
             }));
 
             let () = msg_send![session, beginConfiguration];
@@ -85,10 +281,6 @@ impl AvCaptureSession {
             let mut err: ObjcId = nil;
             let () = msg_send![device.as_id(), lockForConfiguration: &mut err];
             OSError::from_nserror(err).unwrap();
-
-            let format_ref: CMFormatDescriptionRef =
-                msg_send![av_format.format_obj.as_id(), formatDescription];
-            let res = CMVideoFormatDescriptionGetDimensions(format_ref);
 
             let () = msg_send![device.as_id(), setActiveFormat: av_format.format_obj.as_id()];
             let () = msg_send![device.as_id(), setActiveVideoMinFrameDuration: av_format.min_frame_duration];
@@ -104,13 +296,15 @@ impl AvCaptureSession {
                 let () = msg_send![dict, setObject: num forKey: name];
             }
 
+            let pixel_format = match format.pixel_format {
+                VideoPixelFormat::NV12 => kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                _ => four_char_as_u32("yuvs"),
+            };
             set_number(
                 dict,
                 kCVPixelBufferPixelFormatTypeKey as ObjcId,
-                four_char_as_u32("yuvs") as u64,
+                pixel_format as u64,
             );
-            set_number(dict, kCVPixelBufferWidthKey as ObjcId, res.width as u64);
-            set_number(dict, kCVPixelBufferHeightKey as ObjcId, res.height as u64);
 
             let output: ObjcId = msg_send![class!(AVCaptureVideoDataOutput), new];
             let () = msg_send![output, setVideoSettings: dict];
@@ -119,21 +313,39 @@ impl AvCaptureSession {
             let () =
                 msg_send![output, setSampleBufferDelegate: callback.delegate.as_id() queue: queue];
             let () = msg_send![session, addOutput: output];
+
+            // On iOS, camera sensors are physically landscape. Set the
+            // connection orientation to portrait so AVFoundation delivers
+            // already-rotated frames with correct width/height.
+            #[cfg(target_os = "ios")]
+            {
+                let connection: ObjcId =
+                    msg_send![output, connectionWithMediaType: AVMediaTypeVideo];
+                if connection != nil {
+                    let supported: BOOL = msg_send![connection, isVideoOrientationSupported];
+                    if supported == YES {
+                        // AVCaptureVideoOrientationPortrait = 1
+                        let () = msg_send![connection, setVideoOrientation: 1i32];
+                    }
+                }
+            }
+
             let () = msg_send![session, commitConfiguration];
 
             let () = msg_send![session, startRunning];
             Self {
                 queue,
-                input_id,
-                format_id: format.format_id,
-                callback,
+                _callback: callback,
                 session: RcObjcId::from_unowned(NonNull::new(session).unwrap()),
+                output: RcObjcId::from_owned(NonNull::new(output).unwrap()),
+                dispatch,
             }
         }
     }
 
     fn stop_session(&self) {
         unsafe {
+            let () = msg_send![self.output.as_id(), setSampleBufferDelegate: nil queue: nil];
             let () = msg_send![self.session.as_id(), stopRunning];
             let () = dispatch_release(self.queue);
         }
@@ -147,8 +359,16 @@ impl AvCaptureAccess {
         let capture_access = Arc::new(Mutex::new(Self {
             access_granted: false,
             video_input_cb: Default::default(),
+            camera_frame_input_cb: Default::default(),
+            camera_pixel_buffer_input_cb: Default::default(),
+            video_output_cb: Default::default(),
+            video_encoder_config: Default::default(),
+            video_encoder: Default::default(),
             inputs: Default::default(),
-            sessions: Default::default(),
+            streams: Default::default(),
+            slot_streams: [None; MAX_VIDEO_DEVICE_INDEX],
+            preview_subscriptions: Default::default(),
+            active_inputs: Vec::new(),
         }));
 
         let capture_access_clone = capture_access.clone();
@@ -167,46 +387,438 @@ impl AvCaptureAccess {
         capture_access
     }
 
-    pub fn use_video_input(&mut self, inputs: &[(VideoInputId, VideoFormatId)]) {
-        // enable these video capture devices / disabling others
-        self.sessions.retain_mut(|d| {
-            if inputs.contains(&(d.input_id, d.format_id)) {
-                true
-            } else {
-                d.stop_session();
-                false
+    fn key_for(&self, input_id: VideoInputId, format_id: VideoFormatId) -> Option<CameraStreamKey> {
+        let input = self.inputs.iter().find(|v| v.desc.input_id == input_id)?;
+        if input.desc.formats.iter().any(|f| f.format_id == format_id) {
+            Some(CameraStreamKey { input_id, format_id })
+        } else {
+            None
+        }
+    }
+
+    fn format_for_key(&self, key: CameraStreamKey) -> Option<VideoFormat> {
+        let input = self.inputs.iter().find(|v| v.desc.input_id == key.input_id)?;
+        input.desc.formats.iter().find(|f| f.format_id == key.format_id).copied()
+    }
+
+    fn input_for_key(&self, key: CameraStreamKey) -> Option<&AvVideoInput> {
+        self.inputs.iter().find(|v| v.desc.input_id == key.input_id)
+    }
+
+    fn refresh_slot_encoder(&mut self, index: usize) {
+        let key = self.slot_streams[index];
+        let config_opt = *self.video_encoder_config[index].lock().unwrap();
+        let output_present = self.video_output_cb[index].lock().unwrap().is_some();
+
+        let Some(mut config) = config_opt else {
+            *self.video_encoder[index].lock().unwrap() = None;
+            return;
+        };
+
+        if !matches!(config.source, VideoEncodeSource::Camera { .. }) {
+            return;
+        }
+
+        let Some(key) = key else {
+            *self.video_encoder[index].lock().unwrap() = None;
+            return;
+        };
+
+        let Some(video_format) = self.format_for_key(key) else {
+            *self.video_encoder[index].lock().unwrap() = None;
+            return;
+        };
+
+        if !output_present {
+            *self.video_encoder[index].lock().unwrap() = None;
+            return;
+        }
+
+        config.width = video_format.width as u32;
+        config.height = video_format.height as u32;
+        if let Some(fps) = video_format.frame_rate {
+            config.fps_num = fps.max(1.0).round() as u32;
+            config.fps_den = 1;
+        }
+        config.source = VideoEncodeSource::Camera {
+            input_id: key.input_id,
+            format_id: key.format_id,
+        };
+
+        let output_cb = self.video_output_cb[index].clone();
+        *self.video_encoder[index].lock().unwrap() = VideoEncoder::start(
+            config,
+            Box::new(move |packet| {
+                if let Some(cb) = &mut *output_cb.lock().unwrap() {
+                    cb(packet);
+                }
+            }),
+        );
+    }
+
+    fn build_dispatch_for_key(&self, key: CameraStreamKey) -> StreamDispatch {
+        let mut dispatch = StreamDispatch::default();
+
+        for index in 0..MAX_VIDEO_DEVICE_INDEX {
+            if self.slot_streams[index] != Some(key) {
+                continue;
             }
-        });
-        println!("USE VIDEO INPUT");
-        for (index, d) in inputs.iter().enumerate() {
-            if self
-                .sessions
-                .iter()
-                .find(|v| v.input_id == d.0 && v.format_id == d.1)
-                .is_none()
-            {
-                let input = self.inputs.iter().find(|v| v.desc.input_id == d.0).unwrap();
-                let av_format = input
-                    .av_formats
-                    .iter()
-                    .find(|v| v.format_id == d.1)
-                    .unwrap();
-                let video_capture_cb = self.video_input_cb[index].clone();
-                let video_format = input
-                    .desc
-                    .formats
-                    .iter()
-                    .find(|v| v.format_id == d.1)
-                    .unwrap();
-                self.sessions.push(AvCaptureSession::start_session(
-                    video_capture_cb,
-                    d.0,
-                    av_format,
-                    &input.device_obj,
-                    *video_format,
-                ));
+            if self.video_input_cb[index].lock().unwrap().is_some() {
+                dispatch.video_input_cbs.push(self.video_input_cb[index].clone());
+            }
+            if self.camera_frame_input_cb[index].lock().unwrap().is_some() {
+                dispatch.frame_input_cbs.push(self.camera_frame_input_cb[index].clone());
+            }
+            if self.camera_pixel_buffer_input_cb[index].lock().unwrap().is_some() {
+                dispatch
+                    .pixel_buffer_cbs
+                    .push(self.camera_pixel_buffer_input_cb[index].clone());
+            }
+            if self.video_encoder[index].lock().unwrap().is_some() {
+                dispatch.encoders.push(self.video_encoder[index].clone());
             }
         }
+
+        for sub in self.preview_subscriptions.values() {
+            if sub.stream != key {
+                continue;
+            }
+            if sub.frame_cb.lock().unwrap().is_some() {
+                dispatch.preview_frame_input_cbs.push(sub.frame_cb.clone());
+            }
+            if sub.pixel_buffer_cb.lock().unwrap().is_some() {
+                dispatch
+                    .preview_pixel_buffer_cbs
+                    .push(sub.pixel_buffer_cb.clone());
+            }
+        }
+
+        dispatch
+    }
+
+    fn reconcile_streams(&mut self) {
+        let mut required = HashSet::new();
+        for key in self.slot_streams.iter().flatten() {
+            required.insert(*key);
+        }
+        for sub in self.preview_subscriptions.values() {
+            required.insert(sub.stream);
+        }
+
+        let existing_keys: Vec<_> = self.streams.keys().copied().collect();
+        for key in existing_keys {
+            if !required.contains(&key) {
+                if let Some(node) = self.streams.remove(&key) {
+                    node.stop_session();
+                }
+            }
+        }
+
+        for key in required.iter().copied() {
+            if self.streams.contains_key(&key) {
+                continue;
+            }
+            let Some(input) = self.input_for_key(key) else {
+                continue;
+            };
+            let Some(av_format) = input.av_formats.iter().find(|v| v.format_id == key.format_id)
+            else {
+                continue;
+            };
+            let Some(video_format) = input
+                .desc
+                .formats
+                .iter()
+                .find(|v| v.format_id == key.format_id)
+                .copied()
+            else {
+                continue;
+            };
+
+            let dispatch = Arc::new(Mutex::new(StreamDispatch::default()));
+            let node = CameraStreamNode::start_session(
+                dispatch,
+                av_format,
+                &input.device_obj,
+                video_format,
+            );
+            self.streams.insert(key, node);
+        }
+
+        for key in required {
+            let dispatch = self.build_dispatch_for_key(key);
+            if let Some(node) = self.streams.get_mut(&key) {
+                *node.dispatch.lock().unwrap() = dispatch;
+            }
+        }
+    }
+
+    pub fn use_video_input(&mut self, inputs: &[(VideoInputId, VideoFormatId)]) {
+        self.active_inputs = inputs.to_vec();
+        self.slot_streams = [None; MAX_VIDEO_DEVICE_INDEX];
+
+        for (index, (input_id, format_id)) in inputs.iter().enumerate() {
+            if index >= MAX_VIDEO_DEVICE_INDEX {
+                break;
+            }
+            self.slot_streams[index] = self.key_for(*input_id, *format_id);
+        }
+
+        for index in 0..MAX_VIDEO_DEVICE_INDEX {
+            self.refresh_slot_encoder(index);
+        }
+
+        self.reconcile_streams();
+    }
+
+    pub fn format_size(
+        &self,
+        input_id: VideoInputId,
+        format_id: VideoFormatId,
+    ) -> Option<(u32, u32)> {
+        let input = self.inputs.iter().find(|v| v.desc.input_id == input_id)?;
+        let format = input
+            .desc
+            .formats
+            .iter()
+            .find(|v| v.format_id == format_id)?;
+        Some((format.width as u32, format.height as u32))
+    }
+
+    pub fn active_inputs(&self) -> Vec<(VideoInputId, VideoFormatId)> {
+        self.active_inputs.clone()
+    }
+
+    pub fn configure_video_encoder(
+        &mut self,
+        index: usize,
+        config: VideoEncoderConfig,
+        output: VideoOutputFn,
+    ) -> Result<(), VideoEncodeError> {
+        *self.video_output_cb[index].lock().unwrap() = Some(output);
+        *self.video_encoder_config[index].lock().unwrap() = Some(config);
+
+        if matches!(config.source, VideoEncodeSource::Camera { .. }) {
+            self.refresh_slot_encoder(index);
+            self.reconcile_streams();
+            return Ok(());
+        }
+
+        *self.video_encoder[index].lock().unwrap() = None;
+
+        let output_cb = self.video_output_cb[index].clone();
+        *self.video_encoder[index].lock().unwrap() = VideoEncoder::start(
+            config,
+            Box::new(move |packet| {
+                if let Some(cb) = &mut *output_cb.lock().unwrap() {
+                    cb(packet);
+                }
+            }),
+        );
+        if self.video_encoder[index].lock().unwrap().is_none() {
+            crate::error!("apple video encoder unavailable for slot {}", index);
+            return Err(VideoEncodeError::CodecUnavailable);
+        }
+
+        Ok(())
+    }
+
+    pub fn video_encoder_push_frame(&mut self, index: usize, frame: CameraFrameRef<'_>) {
+        if let Some(encoder) = &*self.video_encoder[index].lock().unwrap() {
+            encoder.push_frame(frame);
+        }
+    }
+
+    pub fn video_encoder_request_keyframe(
+        &mut self,
+        index: usize,
+    ) -> Result<(), VideoEncodeError> {
+        let guard = self.video_encoder[index].lock().unwrap();
+        let encoder = guard
+            .as_ref()
+            .ok_or(VideoEncodeError::EncoderNotStarted)?;
+        encoder.request_keyframe()
+    }
+
+    pub fn video_encoder_capture_texture_frame(
+        &mut self,
+        index: usize,
+        timestamp_ns: u64,
+        textures: &mut CxTexturePool,
+    ) -> Result<(), VideoEncodeError> {
+        let config = self.video_encoder_config[index]
+            .lock()
+            .unwrap()
+            .ok_or(VideoEncodeError::EncoderNotStarted)?;
+        let texture_id = match config.source {
+            VideoEncodeSource::Texture { texture_id } => texture_id,
+            _ => return Err(VideoEncodeError::UnsupportedSource),
+        };
+
+        let encoder_guard = self.video_encoder[index].lock().unwrap();
+        let encoder = encoder_guard
+            .as_ref()
+            .ok_or(VideoEncodeError::EncoderNotStarted)?;
+
+        let cx_texture = &mut textures[texture_id];
+        let alloc = cx_texture
+            .alloc
+            .as_ref()
+            .ok_or(VideoEncodeError::InvalidTexture)?;
+        if alloc.width == 0 || alloc.height == 0 {
+            return Err(VideoEncodeError::InvalidTextureSize);
+        }
+        if alloc.pixel != TexturePixel::BGRAu8 {
+            return Err(VideoEncodeError::UnsupportedTextureFormat);
+        }
+
+        let texture = cx_texture
+            .os
+            .texture
+            .as_ref()
+            .ok_or(VideoEncodeError::InvalidTexture)?
+            .as_id();
+
+        let region = MTLRegion {
+            origin: MTLOrigin { x: 0, y: 0, z: 0 },
+            size: MTLSize {
+                width: alloc.width as u64,
+                height: alloc.height as u64,
+                depth: 1,
+            },
+        };
+
+        // Fast path for Apple backends: read directly into a BGRA CVPixelBuffer
+        // and hand it to the encoder. This removes CPU YUV conversion and avoids
+        // extra frame copies inside the media plugin.
+        let mut pixel_buffer: CVPixelBufferRef = std::ptr::null_mut();
+        let pb_status = unsafe {
+            CVPixelBufferCreate(
+                std::ptr::null(),
+                alloc.width,
+                alloc.height,
+                kCVPixelFormatType_32BGRA,
+                std::ptr::null(),
+                &mut pixel_buffer,
+            )
+        };
+
+        if pb_status == 0 && !pixel_buffer.is_null() {
+            unsafe {
+                CVPixelBufferLockBaseAddress(pixel_buffer, 0);
+                let base = CVPixelBufferGetBaseAddress(pixel_buffer) as *mut u8;
+                let bytes_per_row = CVPixelBufferGetBytesPerRow(pixel_buffer);
+                if !base.is_null() && bytes_per_row >= alloc.width * 4 {
+                    let _: () = msg_send![
+                        texture,
+                        getBytes: base
+                        bytesPerRow: bytes_per_row
+                        bytesPerImage: bytes_per_row * alloc.height
+                        fromRegion: region
+                        mipmapLevel: 0
+                        slice: 0
+                    ];
+                    CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+
+                    let queued = encoder.push_apple_pixel_buffer(pixel_buffer, timestamp_ns);
+                    CVPixelBufferRelease(pixel_buffer);
+                    if queued {
+                        return Ok(());
+                    }
+                } else {
+                    CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+                    CVPixelBufferRelease(pixel_buffer);
+                }
+            }
+        }
+
+        // Fallback path: CPU readback + I420 conversion.
+        let mut bgra = vec![0u8; alloc.width * alloc.height * 4];
+        let _: () = unsafe {
+            msg_send![
+                texture,
+                getBytes: bgra.as_mut_ptr()
+                bytesPerRow: alloc.width * 4
+                bytesPerImage: alloc.width * alloc.height * 4
+                fromRegion: region
+                mipmapLevel: 0
+                slice: 0
+            ]
+        };
+
+        let mut frame = CameraFrameOwned::default();
+        if !convert_bgra_8888_to_i420(
+            &bgra,
+            alloc.width,
+            alloc.height,
+            timestamp_ns,
+            CameraColorMatrix::BT709,
+            &mut frame,
+        ) {
+            return Err(VideoEncodeError::UnsupportedTextureFormat);
+        }
+
+        encoder.push_frame(CameraFrameRef {
+            timestamp_ns: frame.timestamp_ns,
+            width: frame.width,
+            height: frame.height,
+            layout: frame.layout,
+            matrix: frame.matrix,
+            plane_count: frame.plane_count,
+            planes: [
+                CameraFramePlaneRef {
+                    bytes: &frame.planes[0].bytes,
+                    row_stride: frame.planes[0].row_stride,
+                    pixel_stride: frame.planes[0].pixel_stride,
+                },
+                CameraFramePlaneRef {
+                    bytes: &frame.planes[1].bytes,
+                    row_stride: frame.planes[1].row_stride,
+                    pixel_stride: frame.planes[1].pixel_stride,
+                },
+                CameraFramePlaneRef {
+                    bytes: &frame.planes[2].bytes,
+                    row_stride: frame.planes[2].row_stride,
+                    pixel_stride: frame.planes[2].pixel_stride,
+                },
+            ],
+        });
+
+        Ok(())
+    }
+
+    pub fn register_preview(
+        &mut self,
+        video_id: LiveId,
+        input_id: VideoInputId,
+        format_id: VideoFormatId,
+        frame_cb: Option<CameraFrameInputFn>,
+        pixel_buffer_cb: Option<CameraPixelBufferInputFn>,
+    ) {
+        let Some(stream) = self.key_for(input_id, format_id) else {
+            return;
+        };
+
+        self.preview_subscriptions.insert(
+            video_id,
+            PreviewSubscription {
+                stream,
+                frame_cb: Arc::new(Mutex::new(frame_cb)),
+                pixel_buffer_cb: Arc::new(Mutex::new(pixel_buffer_cb)),
+            },
+        );
+
+        self.reconcile_streams();
+    }
+
+    pub fn unregister_preview(&mut self, video_id: LiveId) {
+        self.preview_subscriptions.remove(&video_id);
+        self.reconcile_streams();
+    }
+
+    pub fn session_for(&self, input_id: VideoInputId, format_id: VideoFormatId) -> Option<ObjcId> {
+        let key = CameraStreamKey { input_id, format_id };
+        self.streams.get(&key).map(|s| s.session.as_id())
     }
 
     pub fn get_updated_descs(&mut self) -> Vec<VideoInputDesc> {
@@ -323,6 +935,8 @@ impl AvCaptureAccess {
             }
             self.inputs = inputs;
         }
+        self.reconcile_streams();
+
         let mut out = Vec::new();
         for input in &self.inputs {
             out.push(input.desc.clone());
@@ -359,6 +973,14 @@ impl AvCaptureAccess {
 pub struct AvVideoCaptureCallback {
     _callback: Box<Box<dyn Fn(CMSampleBufferRef) + Send + 'static>>,
     pub delegate: RcObjcId,
+}
+
+impl Drop for AvVideoCaptureCallback {
+    fn drop(&mut self) {
+        unsafe {
+            (*self.delegate.as_id()).set_ivar("callback", 0 as *mut c_void);
+        }
+    }
 }
 
 impl AvVideoCaptureCallback {

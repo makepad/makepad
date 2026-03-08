@@ -309,7 +309,9 @@ impl Cx {
                 if has_pending_draws && d3d11_cx.is_gpu_done() {
                     for window in stdin_windows.iter_mut() {
                         if let Some(presentable_draw) = window.new_frame_being_rendered.take() {
-                            Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(presentable_draw));
+                            Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(
+                                presentable_draw,
+                            ));
                         }
                     }
                 }

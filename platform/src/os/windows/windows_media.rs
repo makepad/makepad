@@ -149,6 +149,54 @@ impl CxMediaApi for Cx {
             .unwrap() = Some(f);
     }
 
+    fn camera_frame_input_box(&mut self, index: usize, f: CameraFrameInputFn) {
+        *self
+            .os
+            .media
+            .media_foundation()
+            .lock()
+            .unwrap()
+            .camera_frame_input_cb[index]
+            .lock()
+            .unwrap() = Some(f);
+    }
+
+    fn video_encoder_output_box(
+        &mut self,
+        index: usize,
+        config: VideoEncoderConfig,
+        f: VideoOutputFn,
+    ) -> Result<(), VideoEncodeError> {
+        if config.codec != VideoCodec::Av1 {
+            return Err(VideoEncodeError::UnsupportedCodec);
+        }
+
+        match config.source {
+            VideoEncodeSource::Camera { .. } => {
+                let camera = self.os.media.media_foundation();
+                let mut camera = camera.lock().unwrap();
+                *camera.video_encoder_config[index].lock().unwrap() = Some(config);
+                *camera.video_output_cb[index].lock().unwrap() = Some(f);
+                Ok(())
+            }
+            VideoEncodeSource::Texture { .. } => {
+                crate::error!("windows video texture source is not implemented");
+                Err(VideoEncodeError::UnsupportedSource)
+            }
+            VideoEncodeSource::CpuFrames { .. } => {
+                crate::error!("windows video cpu-frame source is not implemented");
+                Err(VideoEncodeError::UnsupportedSource)
+            }
+        }
+    }
+
+    fn video_capabilities(&self) -> VideoCapabilities {
+        crate::merge_video_capabilities(
+            VideoCapabilities::default(),
+            crate::media_video_capabilities(),
+        )
+    }
+
     fn use_video_input(&mut self, inputs: &[(VideoInputId, VideoFormatId)]) {
         self.os
             .media
