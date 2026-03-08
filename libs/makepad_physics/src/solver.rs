@@ -19,6 +19,10 @@ const GROUND_RESTITUTION: f32 = 0.0;
 /// We don't currently persist contacts across frames, so this threshold prevents
 /// resting contacts from being treated as "new bouncy contacts" every frame.
 const RESTITUTION_VELOCITY_THRESHOLD: f32 = 1.0;
+/// Maximum distance used to match contact points across consecutive frames.
+const WARMSTART_POINT_MATCH_DISTANCE_SQ: f32 = 0.25 * 0.25;
+/// Contact normals must remain close enough to reuse cached impulses.
+const WARMSTART_NORMAL_DOT_THRESHOLD: f32 = 0.9;
 
 /// Compute erp_inv_dt from spring-damper parameters.
 /// erp_inv_dt = angular_freq / (dt * angular_freq + 2 * damping_ratio)
@@ -73,12 +77,13 @@ pub struct SolverContact {
     pub t1_torque_dir2: Vec3f,
     pub t1_ii_torque_dir1: Vec3f,
     pub t1_ii_torque_dir2: Vec3f,
-    pub r_tangent1: f32,
+    pub lhs_tangent1: f32,
     pub t2_torque_dir1: Vec3f,
     pub t2_torque_dir2: Vec3f,
     pub t2_ii_torque_dir1: Vec3f,
     pub t2_ii_torque_dir2: Vec3f,
-    pub r_tangent2: f32,
+    pub lhs_tangent2: f32,
+    pub lhs_tangent_cross: f32,
     pub impulse_tangent1: f32,
     pub impulse_tangent2: f32,
     pub rhs_tangent1_wo_bias: f32,
@@ -88,6 +93,8 @@ pub struct SolverContact {
 
     pub friction: f32,
     pub cfm_factor: f32,
+    pub manifold_index: usize,
+    pub point_index: usize,
 
     // Stored for bias recomputation during substepping (rapier's builder info pattern).
     // local_p1/local_p2 are contact points in body-local coordinates,
@@ -98,16 +105,27 @@ pub struct SolverContact {
     pub normal_vel: f32, // restitution component
 }
 
-/// Build two tangent vectors perpendicular to a direction.
-fn compute_tangents(dir: Vec3f) -> (Vec3f, Vec3f) {
+fn orthonormal_tangent(dir: Vec3f) -> Vec3f {
     let reference = if dir.x.abs() < 0.9 {
         vec3f(1.0, 0.0, 0.0)
     } else {
         vec3f(0.0, 1.0, 0.0)
     };
-    let t1 = Vec3f::cross(dir, reference).normalize();
-    let t2 = Vec3f::cross(dir, t1);
-    (t1, t2)
+    Vec3f::cross(dir, reference).normalize()
+}
+
+/// Build Rapier's 3D tangent basis from the relative linear velocity.
+fn compute_tangents(dir: Vec3f, linvel1: Vec3f, linvel2: Vec3f) -> (Vec3f, Vec3f) {
+    let relative_linvel = linvel1 - linvel2;
+    let tangent_relative_linvel = relative_linvel - dir * dir.dot(relative_linvel);
+
+    let tangent1 = if tangent_relative_linvel.length() >= 1.0e-4 {
+        tangent_relative_linvel.normalize()
+    } else {
+        orthonormal_tangent(dir)
+    };
+    let tangent2 = Vec3f::cross(dir, tangent1);
+    (tangent1, tangent2)
 }
 
 /// Build solver contacts from manifolds. Follows rapier's constraint generation.
@@ -131,7 +149,7 @@ pub fn prepare_contacts(
     let erp_inv = erp_inv_dt(dt);
     let inv_dt = if dt > 0.0 { 1.0 / dt } else { 0.0 };
 
-    for manifold in manifolds.iter() {
+    for (manifold_index, manifold) in manifolds.iter().enumerate() {
         let a_idx = manifold.body_a;
         let b_idx = manifold.body_b;
 
@@ -148,9 +166,22 @@ pub fn prepare_contacts(
             let normal = point.normal;
             let dir1 = -normal;
 
+            // Rapier builds solver constraints from the midpoint of the two shape points.
+            let world_pt1 = point.world_point_a;
+            let world_pt2 = point.world_point_b;
+            let effective_point = (world_pt1 + world_pt2) * 0.5;
+
             // Moment arms from center of mass to contact point
-            let dp1 = point.offset_a; // contact_world - body_a_position
-            let dp2 = point.offset_b; // contact_world - body_b_position
+            let dp1 = if a_idx == usize::MAX {
+                Vec3f::default()
+            } else {
+                effective_point - bodies[a_idx].pose.position
+            };
+            let dp2 = if b_idx == usize::MAX {
+                Vec3f::default()
+            } else {
+                effective_point - bodies[b_idx].pose.position
+            };
 
             // Rapier convention: torque_dir2 uses -dir1 (= normal)
             let torque_dir1 = Vec3f::cross(dp1, dir1);
@@ -177,8 +208,8 @@ pub fn prepare_contacts(
                 0.0
             };
 
-            // Distance: negative = penetration. Our manifold stores positive penetration.
-            let dist = -point.penetration;
+            // Rapier stores the signed distance between the original shape points.
+            let dist = (world_pt2 - world_pt1).dot(normal);
 
             // RHS bias (rapier formula)
             let rhs_wo_bias = normal_vel + dist.max(0.0) * inv_dt;
@@ -186,50 +217,51 @@ pub fn prepare_contacts(
                 ((dist + ALLOWED_LINEAR_ERROR) * erp_inv).clamp(-MAX_CORRECTIVE_VELOCITY, 0.0);
             let rhs = rhs_wo_bias + rhs_bias;
 
-            // Tangent directions (perpendicular to dir1, same as rapier)
-            let (tangent1, tangent2) = compute_tangents(dir1);
+            // Tangent directions follow Rapier's relative-slip aligned basis.
+            let (tangent1, tangent2) = compute_tangents(dir1, linvel1, linvel2);
 
             // Tangent 1 constraint setup
             let t1_torque_dir1 = Vec3f::cross(dp1, tangent1);
             let t1_torque_dir2 = Vec3f::cross(dp2, -tangent1);
             let t1_ii_torque_dir1 = inv_i1.mul_vec3(t1_torque_dir1);
             let t1_ii_torque_dir2 = inv_i2.mul_vec3(t1_torque_dir2);
-            let inv_r_t1 = im1
+            let lhs_tangent1 = im1
                 + im2
                 + t1_ii_torque_dir1.dot(t1_torque_dir1)
                 + t1_ii_torque_dir2.dot(t1_torque_dir2);
-            let r_tangent1 = if inv_r_t1 > 0.0 { 1.0 / inv_r_t1 } else { 0.0 };
 
             // Tangent 2 constraint setup
             let t2_torque_dir1 = Vec3f::cross(dp1, tangent2);
             let t2_torque_dir2 = Vec3f::cross(dp2, -tangent2);
             let t2_ii_torque_dir1 = inv_i1.mul_vec3(t2_torque_dir1);
             let t2_ii_torque_dir2 = inv_i2.mul_vec3(t2_torque_dir2);
-            let inv_r_t2 = im1
+            let lhs_tangent2 = im1
                 + im2
                 + t2_ii_torque_dir1.dot(t2_torque_dir1)
                 + t2_ii_torque_dir2.dot(t2_torque_dir2);
-            let r_tangent2 = if inv_r_t2 > 0.0 { 1.0 / inv_r_t2 } else { 0.0 };
+            let lhs_tangent_cross = 2.0
+                * (t1_ii_torque_dir1.dot(t2_torque_dir1)
+                    + t1_ii_torque_dir2.dot(t2_torque_dir2));
 
             // Compute body-local contact points for TGS substep updates.
             // After position integration in each substep, we re-transform these
             // to world space to recompute penetration depth (matching rapier).
             // For ground (usize::MAX), store world-space point (ground doesn't move).
             let local_p1 = if a_idx == usize::MAX {
-                point.world_point
+                effective_point
             } else {
                 bodies[a_idx]
                     .pose
                     .invert()
-                    .transform_vec3(&point.world_point)
+                    .transform_vec3(&effective_point)
             };
             let local_p2 = if b_idx == usize::MAX {
-                point.world_point
+                effective_point
             } else {
                 bodies[b_idx]
                     .pose
                     .invert()
-                    .transform_vec3(&point.world_point)
+                    .transform_vec3(&effective_point)
             };
 
             solver_contacts.push(SolverContact {
@@ -245,33 +277,97 @@ pub fn prepare_contacts(
                 r_normal,
                 rhs,
                 rhs_wo_bias,
-                impulse_normal: 0.0,
+                impulse_normal: point.normal_impulse,
                 tangent1,
                 tangent2,
                 t1_torque_dir1,
                 t1_torque_dir2,
                 t1_ii_torque_dir1,
                 t1_ii_torque_dir2,
-                r_tangent1,
+                lhs_tangent1,
                 t2_torque_dir1,
                 t2_torque_dir2,
                 t2_ii_torque_dir1,
                 t2_ii_torque_dir2,
-                r_tangent2,
-                impulse_tangent1: 0.0,
-                impulse_tangent2: 0.0,
+                lhs_tangent2,
+                lhs_tangent_cross,
+                impulse_tangent1: point.tangent_impulse[0],
+                impulse_tangent2: point.tangent_impulse[1],
                 rhs_tangent1_wo_bias: 0.0,
                 rhs_tangent2_wo_bias: 0.0,
                 rhs_tangent1: 0.0,
                 rhs_tangent2: 0.0,
                 friction,
                 cfm_factor: cfm,
+                manifold_index,
+                point_index: pi,
                 local_p1,
                 local_p2,
                 dist,
                 normal_vel,
             });
         }
+    }
+}
+
+pub fn inherit_warmstart_impulses(
+    previous_manifolds: &[ContactManifold],
+    manifolds: &mut [ContactManifold],
+) {
+    for manifold in manifolds.iter_mut() {
+        let Some(previous) = previous_manifolds
+            .iter()
+            .find(|prev| prev.body_a == manifold.body_a && prev.body_b == manifold.body_b)
+        else {
+            continue;
+        };
+
+        let mut used_previous = [false; crate::contact::MAX_CONTACTS];
+        for point in manifold.points[..manifold.num_points].iter_mut() {
+            let mut best_match = None;
+            let mut best_distance_sq = WARMSTART_POINT_MATCH_DISTANCE_SQ;
+
+            for (prev_index, prev_point) in
+                previous.points[..previous.num_points].iter().enumerate()
+            {
+                if used_previous[prev_index] {
+                    continue;
+                }
+                if point.normal.dot(prev_point.normal) < WARMSTART_NORMAL_DOT_THRESHOLD {
+                    continue;
+                }
+                let distance_sq = (point.local_point_a - prev_point.local_point_a).length_squared()
+                    + (point.local_point_b - prev_point.local_point_b).length_squared();
+                if distance_sq <= best_distance_sq {
+                    best_distance_sq = distance_sq;
+                    best_match = Some(prev_index);
+                }
+            }
+
+            if let Some(prev_index) = best_match {
+                used_previous[prev_index] = true;
+                let prev_point = previous.points[prev_index];
+                point.normal_impulse = prev_point.normal_impulse;
+                point.tangent_impulse = prev_point.tangent_impulse;
+            }
+        }
+    }
+}
+
+pub fn writeback_impulses(solver_contacts: &[SolverContact], manifolds: &mut [ContactManifold]) {
+    for solver_contact in solver_contacts {
+        let Some(manifold) = manifolds.get_mut(solver_contact.manifold_index) else {
+            continue;
+        };
+        if solver_contact.point_index >= manifold.num_points {
+            continue;
+        }
+        let point = &mut manifold.points[solver_contact.point_index];
+        point.normal_impulse = solver_contact.impulse_normal;
+        point.tangent_impulse = [
+            solver_contact.impulse_tangent1,
+            solver_contact.impulse_tangent2,
+        ];
     }
 }
 
@@ -343,21 +439,22 @@ pub fn update_contacts(bodies: &[RigidBody], solver_contacts: &mut [SolverContac
         sc.t1_torque_dir2 = Vec3f::cross(dp2, -sc.tangent1);
         sc.t1_ii_torque_dir1 = inv_i1.mul_vec3(sc.t1_torque_dir1);
         sc.t1_ii_torque_dir2 = inv_i2.mul_vec3(sc.t1_torque_dir2);
-        let inv_r_t1 = sc.im1
+        sc.lhs_tangent1 = sc.im1
             + sc.im2
             + sc.t1_ii_torque_dir1.dot(sc.t1_torque_dir1)
             + sc.t1_ii_torque_dir2.dot(sc.t1_torque_dir2);
-        sc.r_tangent1 = if inv_r_t1 > 0.0 { 1.0 / inv_r_t1 } else { 0.0 };
 
         sc.t2_torque_dir1 = Vec3f::cross(dp1, sc.tangent2);
         sc.t2_torque_dir2 = Vec3f::cross(dp2, -sc.tangent2);
         sc.t2_ii_torque_dir1 = inv_i1.mul_vec3(sc.t2_torque_dir1);
         sc.t2_ii_torque_dir2 = inv_i2.mul_vec3(sc.t2_torque_dir2);
-        let inv_r_t2 = sc.im1
+        sc.lhs_tangent2 = sc.im1
             + sc.im2
             + sc.t2_ii_torque_dir1.dot(sc.t2_torque_dir1)
             + sc.t2_ii_torque_dir2.dot(sc.t2_torque_dir2);
-        sc.r_tangent2 = if inv_r_t2 > 0.0 { 1.0 / inv_r_t2 } else { 0.0 };
+        sc.lhs_tangent_cross = 2.0
+            * (sc.t1_ii_torque_dir1.dot(sc.t2_torque_dir1)
+                + sc.t1_ii_torque_dir2.dot(sc.t2_torque_dir2));
 
         // Recompute RHS bias terms
         let rhs_wo_bias = sc.normal_vel + dist.max(0.0) * inv_dt;
@@ -424,6 +521,81 @@ fn tangent_dvel(
     tangent.dot(v1_lin) + torque_dir1.dot(v1_ang) - tangent.dot(v2_lin)
         + torque_dir2.dot(v2_ang)
         + rhs
+}
+
+fn solve_friction(
+    bodies: &mut [RigidBody],
+    sc: &mut SolverContact,
+    rhs_tangent1: f32,
+    rhs_tangent2: f32,
+) {
+    let dvel_t1 = tangent_dvel(
+        bodies,
+        sc,
+        sc.tangent1,
+        sc.t1_torque_dir1,
+        sc.t1_torque_dir2,
+        rhs_tangent1,
+    );
+    let dvel_t2 = tangent_dvel(
+        bodies,
+        sc,
+        sc.tangent2,
+        sc.t2_torque_dir1,
+        sc.t2_torque_dir2,
+        rhs_tangent2,
+    );
+
+    let dvel_00 = dvel_t1 * dvel_t1;
+    let dvel_11 = dvel_t2 * dvel_t2;
+    let dvel_01 = dvel_t1 * dvel_t2;
+    let denom =
+        dvel_00 * sc.lhs_tangent1 + dvel_11 * sc.lhs_tangent2 + dvel_01 * sc.lhs_tangent_cross;
+    if denom <= 0.0 {
+        return;
+    }
+
+    let inv_lhs = (dvel_00 + dvel_11) / denom;
+    let delta_impulse1 = inv_lhs * dvel_t1;
+    let delta_impulse2 = inv_lhs * dvel_t2;
+
+    let limit = sc.friction * sc.impulse_normal;
+    let mut new_t1 = sc.impulse_tangent1 - delta_impulse1;
+    let mut new_t2 = sc.impulse_tangent2 - delta_impulse2;
+    let impulse_len = (new_t1 * new_t1 + new_t2 * new_t2).sqrt();
+    if impulse_len > limit && impulse_len > 0.0 {
+        let scale = limit / impulse_len;
+        new_t1 *= scale;
+        new_t2 *= scale;
+    }
+
+    let dlambda_t1 = new_t1 - sc.impulse_tangent1;
+    let dlambda_t2 = new_t2 - sc.impulse_tangent2;
+    sc.impulse_tangent1 = new_t1;
+    sc.impulse_tangent2 = new_t2;
+
+    if dlambda_t1 != 0.0 {
+        let sc_copy = *sc;
+        apply_impulse_rapier(
+            bodies,
+            &sc_copy,
+            sc.tangent1,
+            sc.t1_ii_torque_dir1,
+            sc.t1_ii_torque_dir2,
+            dlambda_t1,
+        );
+    }
+    if dlambda_t2 != 0.0 {
+        let sc_copy = *sc;
+        apply_impulse_rapier(
+            bodies,
+            &sc_copy,
+            sc.tangent2,
+            sc.t2_ii_torque_dir1,
+            sc.t2_ii_torque_dir2,
+            dlambda_t2,
+        );
+    }
 }
 
 /// Apply impulse along dir1 (rapier convention).
@@ -526,51 +698,8 @@ pub fn solve_contacts(
             let sc_copy = *sc;
             apply_impulse_rapier(bodies, &sc_copy, dir1, ii_td1, ii_td2, dlambda);
 
-            // --- Friction tangent 1 ---
-            let dvel_t1 = {
-                let sc = &solver_contacts[i];
-                tangent_dvel(
-                    bodies,
-                    sc,
-                    sc.tangent1,
-                    sc.t1_torque_dir1,
-                    sc.t1_torque_dir2,
-                    sc.rhs_tangent1,
-                )
-            };
             let sc = &mut solver_contacts[i];
-            let limit = sc.friction * sc.impulse_normal;
-            let new_t1 = (sc.impulse_tangent1 - sc.r_tangent1 * dvel_t1).clamp(-limit, limit);
-            let dlambda_t1 = new_t1 - sc.impulse_tangent1;
-            sc.impulse_tangent1 = new_t1;
-            let tangent1 = sc.tangent1;
-            let t1_ii_td1 = sc.t1_ii_torque_dir1;
-            let t1_ii_td2 = sc.t1_ii_torque_dir2;
-            let sc_copy = *sc;
-            apply_impulse_rapier(bodies, &sc_copy, tangent1, t1_ii_td1, t1_ii_td2, dlambda_t1);
-
-            // --- Friction tangent 2 ---
-            let dvel_t2 = {
-                let sc = &solver_contacts[i];
-                tangent_dvel(
-                    bodies,
-                    sc,
-                    sc.tangent2,
-                    sc.t2_torque_dir1,
-                    sc.t2_torque_dir2,
-                    sc.rhs_tangent2,
-                )
-            };
-            let sc = &mut solver_contacts[i];
-            let limit = sc.friction * sc.impulse_normal;
-            let new_t2 = (sc.impulse_tangent2 - sc.r_tangent2 * dvel_t2).clamp(-limit, limit);
-            let dlambda_t2 = new_t2 - sc.impulse_tangent2;
-            sc.impulse_tangent2 = new_t2;
-            let tangent2 = sc.tangent2;
-            let t2_ii_td1 = sc.t2_ii_torque_dir1;
-            let t2_ii_td2 = sc.t2_ii_torque_dir2;
-            let sc_copy = *sc;
-            apply_impulse_rapier(bodies, &sc_copy, tangent2, t2_ii_td1, t2_ii_td2, dlambda_t2);
+            solve_friction(bodies, sc, sc.rhs_tangent1, sc.rhs_tangent2);
         }
     }
 }
@@ -614,51 +743,13 @@ pub fn solve_contacts_wo_bias(
             let sc_copy = *sc;
             apply_impulse_rapier(bodies, &sc_copy, dir1, ii_td1, ii_td2, dlambda);
 
-            // Friction tangent 1 without bias
-            let dvel_t1 = {
-                let sc = &solver_contacts[i];
-                tangent_dvel(
-                    bodies,
-                    sc,
-                    sc.tangent1,
-                    sc.t1_torque_dir1,
-                    sc.t1_torque_dir2,
-                    sc.rhs_tangent1_wo_bias,
-                )
-            };
             let sc = &mut solver_contacts[i];
-            let limit = sc.friction * sc.impulse_normal;
-            let new_t1 = (sc.impulse_tangent1 - sc.r_tangent1 * dvel_t1).clamp(-limit, limit);
-            let dlambda_t1 = new_t1 - sc.impulse_tangent1;
-            sc.impulse_tangent1 = new_t1;
-            let tangent1 = sc.tangent1;
-            let t1_ii_td1 = sc.t1_ii_torque_dir1;
-            let t1_ii_td2 = sc.t1_ii_torque_dir2;
-            let sc_copy = *sc;
-            apply_impulse_rapier(bodies, &sc_copy, tangent1, t1_ii_td1, t1_ii_td2, dlambda_t1);
-
-            // Friction tangent 2 without bias
-            let dvel_t2 = {
-                let sc = &solver_contacts[i];
-                tangent_dvel(
-                    bodies,
-                    sc,
-                    sc.tangent2,
-                    sc.t2_torque_dir1,
-                    sc.t2_torque_dir2,
-                    sc.rhs_tangent2_wo_bias,
-                )
-            };
-            let sc = &mut solver_contacts[i];
-            let limit = sc.friction * sc.impulse_normal;
-            let new_t2 = (sc.impulse_tangent2 - sc.r_tangent2 * dvel_t2).clamp(-limit, limit);
-            let dlambda_t2 = new_t2 - sc.impulse_tangent2;
-            sc.impulse_tangent2 = new_t2;
-            let tangent2 = sc.tangent2;
-            let t2_ii_td1 = sc.t2_ii_torque_dir1;
-            let t2_ii_td2 = sc.t2_ii_torque_dir2;
-            let sc_copy = *sc;
-            apply_impulse_rapier(bodies, &sc_copy, tangent2, t2_ii_td1, t2_ii_td2, dlambda_t2);
+            solve_friction(
+                bodies,
+                sc,
+                sc.rhs_tangent1_wo_bias,
+                sc.rhs_tangent2_wo_bias,
+            );
         }
     }
 }

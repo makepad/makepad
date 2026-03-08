@@ -9,6 +9,15 @@ const MAX_CLIP_VERTS: usize = 16;
 /// of touching, even if not yet penetrating. Matches rapier's default (0.002).
 pub const PREDICTION_DISTANCE: f32 = 0.002;
 
+fn midpoint(a: Vec3f, b: Vec3f) -> Vec3f {
+    (a + b) * 0.5
+}
+
+fn world_to_local(body: Option<&RigidBody>, point: Vec3f) -> Vec3f {
+    body.map(|body| body.pose.invert().transform_vec3(&point))
+        .unwrap_or(point)
+}
+
 /// Generate contact manifolds for all broad-phase pairs + ground contacts.
 /// Clears and reuses the provided buffer.
 pub fn narrow_phase(
@@ -74,11 +83,14 @@ fn cuboid_ground_contacts(
         if depth > -PREDICTION_DISTANCE {
             // depth > 0 means actual penetration, depth in (-PREDICTION_DISTANCE, 0] means
             // predicted contact (gap smaller than prediction distance)
-            let contact_world = vec3f(corner_world.x, ground_y, corner_world.z);
+            let world_point_a = vec3f(corner_world.x, ground_y, corner_world.z);
+            let world_point_b = corner_world;
             out.push_point(ContactPoint {
-                world_point: contact_world,
-                offset_a: Vec3f::default(), // ground has no center
-                offset_b: contact_world - body.pose.position, // offset from body center
+                world_point: midpoint(world_point_a, world_point_b),
+                world_point_a,
+                world_point_b,
+                local_point_a: world_point_a,
+                local_point_b: world_to_local(Some(body), world_point_b),
                 normal,
                 penetration: depth, // negative = gap (predicted), positive = overlap
                 normal_impulse: 0.0,
@@ -383,10 +395,18 @@ fn generate_face_contacts(
         let dist = p.dot(ref_normal) - ref_plane_d;
         // dist < 0 = actual penetration, dist in [0, PREDICTION_DISTANCE) = predicted contact
         if dist < PREDICTION_DISTANCE {
+            let ref_world = p - ref_normal * dist;
+            let (world_point_a, world_point_b) = if ref_is_a {
+                (ref_world, p)
+            } else {
+                (p, ref_world)
+            };
             out.push_point(ContactPoint {
-                world_point: p,
-                offset_a: p - a.pose.position,
-                offset_b: p - b.pose.position,
+                world_point: midpoint(world_point_a, world_point_b),
+                world_point_a,
+                world_point_b,
+                local_point_a: world_to_local(Some(a), world_point_a),
+                local_point_b: world_to_local(Some(b), world_point_b),
                 normal,
                 penetration: -dist, // positive = penetrating, negative = gap
                 normal_impulse: 0.0,
@@ -485,11 +505,12 @@ fn generate_edge_contact(
     let (pa, pb) =
         closest_points_on_segments(support_a, axes_a[i], he_a[i], support_b, axes_b[j], he_b[j]);
 
-    let contact_world = (pa + pb) * 0.5;
     out.push_point(ContactPoint {
-        world_point: contact_world,
-        offset_a: contact_world - a.pose.position,
-        offset_b: contact_world - b.pose.position,
+        world_point: midpoint(pa, pb),
+        world_point_a: pa,
+        world_point_b: pb,
+        local_point_a: world_to_local(Some(a), pa),
+        local_point_b: world_to_local(Some(b), pb),
         normal,
         penetration,
         normal_impulse: 0.0,
@@ -534,45 +555,81 @@ fn reduce_contacts(manifold: &mut ContactManifold, max_keep: usize) {
         return;
     }
 
-    let mut kept = [false; MAX_CONTACTS];
-    let mut num_kept = 0usize;
+    let mut selected = [usize::MAX; 4];
 
-    // Keep the deepest point first
-    let mut best = 0;
-    for i in 1..manifold.num_points {
-        if manifold.points[i].penetration > manifold.points[best].penetration {
-            best = i;
+    // 1. Keep the deepest contact.
+    let mut deepest_penetration = -f32::MAX;
+    for i in 0..manifold.num_points {
+        if manifold.points[i].penetration > deepest_penetration {
+            deepest_penetration = manifold.points[i].penetration;
+            selected[0] = i;
         }
     }
-    kept[best] = true;
-    num_kept += 1;
 
-    // Keep points that maximize spread from already-kept points
-    while num_kept < max_keep {
-        let mut best_dist = -1.0f32;
-        let mut best_idx = 0;
-        for i in 0..manifold.num_points {
-            if kept[i] {
-                continue;
-            }
-            let mut min_dist = f32::MAX;
-            for j in 0..manifold.num_points {
-                if !kept[j] {
+    if selected[0] == usize::MAX {
+        manifold.num_points = 0;
+        return;
+    }
+
+    // 2. Keep the point furthest away from the deepest contact on body A.
+    let selected_a = manifold.points[selected[0]].world_point_a;
+    let mut furthest_dist = -f32::MAX;
+    for i in 0..manifold.num_points {
+        if i == selected[0] || manifold.points[i].penetration < -PREDICTION_DISTANCE {
+            continue;
+        }
+        let dist = (manifold.points[i].world_point_a - selected_a).length_squared();
+        if dist > furthest_dist {
+            furthest_dist = dist;
+            selected[1] = i;
+        }
+    }
+
+    let num_selected = if selected[1] == usize::MAX {
+        1
+    } else {
+        let selected_b = manifold.points[selected[1]].world_point_a;
+        if selected_a == selected_b {
+            1
+        } else {
+            let selected_ab = selected_b - selected_a;
+            let tangent = Vec3f::cross(selected_ab, manifold.points[selected[0]].normal);
+
+            let mut min_dot = f32::MAX;
+            let mut max_dot = -f32::MAX;
+
+            for i in 0..manifold.num_points {
+                if i == selected[0]
+                    || i == selected[1]
+                    || manifold.points[i].penetration < -PREDICTION_DISTANCE
+                {
                     continue;
                 }
-                let d = (manifold.points[i].world_point - manifold.points[j].world_point)
-                    .length_squared();
-                if d < min_dist {
-                    min_dist = d;
+
+                let dot = (manifold.points[i].world_point_a - selected_a).dot(tangent);
+                if dot < min_dot {
+                    min_dot = dot;
+                    selected[2] = i;
+                }
+                if dot > max_dot {
+                    max_dot = dot;
+                    selected[3] = i;
                 }
             }
-            if min_dist > best_dist {
-                best_dist = min_dist;
-                best_idx = i;
+
+            if selected[2] == usize::MAX {
+                2
+            } else if selected[2] == selected[3] {
+                3
+            } else {
+                4
             }
         }
-        kept[best_idx] = true;
-        num_kept += 1;
+    };
+
+    let mut kept = [false; MAX_CONTACTS];
+    for index in selected.iter().take(num_selected) {
+        kept[*index] = true;
     }
 
     // Compact: move kept points to front
