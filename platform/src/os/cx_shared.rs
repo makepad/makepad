@@ -344,8 +344,10 @@ impl Cx {
                 self.call_event_handler(&Event::Custom(data));
             }
             StudioToApp::KeepAlive | StudioToApp::None => {}
-            other @ StudioToApp::LiveChange { .. } => {
-                self.action(other);
+            StudioToApp::LiveChange { file_name, content } => {
+                self.script_data
+                    .live_reload
+                    .queue_file_change(file_name, content);
             }
             // Stdin-specific: Tick, Swapchain, WindowGeomChange are handled
             // by callers before delegating here. In windowed mode they are
@@ -376,6 +378,14 @@ impl Cx {
         let pos = dvec2(0.0, 0.0);
         for msg in msgs {
             self.dispatch_studio_msg(msg, window_id, pos);
+        }
+    }
+
+    pub(crate) fn run_live_edit_if_needed(&mut self, _backend: &str) {
+        if self.handle_live_edit() {
+            self.draw_shaders.reset_for_live_reload();
+            self.call_event_handler(&Event::LiveEdit);
+            self.redraw_all();
         }
     }
 

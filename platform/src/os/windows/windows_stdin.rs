@@ -164,6 +164,7 @@ impl Cx {
                 WebSocketMessage::Closed => break,
                 WebSocketMessage::Opened => {}
             }
+            self.run_live_edit_if_needed("windows-stdin");
         }
     }
 
@@ -285,6 +286,7 @@ impl Cx {
                 }
 
                 self.stdin_handle_repaint(d3d11_cx, stdin_windows, time);
+                self.run_live_edit_if_needed("windows-stdin");
 
                 let gc_start = self.seconds_since_app_start();
                 let mut gc_heap_live = None;

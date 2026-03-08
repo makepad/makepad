@@ -548,12 +548,7 @@ impl Cx {
                         self.handle_action_receiver();
                     }
 
-                    if self.handle_live_edit() {
-                        // self.draw_shaders.ptr_to_item.clear();
-                        // self.draw_shaders.fingerprints.clear();
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }
+                    self.run_live_edit_if_needed("ios");
                     self.handle_networking_events();
                     self.handle_permission_events();
                 }

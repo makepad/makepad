@@ -237,7 +237,9 @@ pub use crate::video::*;
 
 pub fn theme_mod(vm: &mut ScriptVm) {
     makepad_draw::script_mod(vm);
-    makepad_platform::ime::script_mod(vm);
+    if !vm.is_reload() {
+        makepad_platform::ime::script_mod(vm);
+    }
 
     vm.bx.heap.new_module(id!(prelude));
     vm.bx.heap.new_module(id!(themes));

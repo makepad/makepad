@@ -403,6 +403,18 @@ where
         Self::script_new(vm).script_to_value(vm)
     }
 
+    fn script_reload_default(vm: &mut ScriptVm) -> ScriptValue
+    where
+        Self: Sized,
+    {
+        let type_id = Self::script_type_id_static();
+        if let Some(default_obj) = vm.bx.heap.type_default_for_id(type_id) {
+            default_obj.into()
+        } else {
+            NIL
+        }
+    }
+
     fn script_type_id_static() -> ScriptTypeId {
         ScriptTypeId::of::<Self>()
     }
