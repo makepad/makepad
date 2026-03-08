@@ -67,14 +67,6 @@ script_mod! {
     }
 }
 
-impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        println!("{}", std::mem::size_of::<Button>());
-        crate::makepad_widgets::script_mod(vm);
-        App::from_script_mod(vm, self::script_mod)
-    }
-}
-
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -86,6 +78,12 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        println!("{}", std::mem::size_of::<Button>());
+        crate::makepad_widgets::script_mod(vm);
+        self::script_mod(vm)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());

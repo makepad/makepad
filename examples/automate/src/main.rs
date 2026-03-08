@@ -681,11 +681,6 @@ pub struct App {
 }
 
 impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);
-        App::from_script_mod(vm, self::script_mod)
-    }
-
     fn set_slider_widget_value(&self, cx: &mut Cx, id: LiveId, value: u8) {
         if let Some(mut slider) = self.ui.widget(cx, &[id]).borrow_mut::<Slider>() {
             slider.set_value(cx, value as f64);
@@ -1180,6 +1175,11 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        crate::makepad_widgets::script_mod(vm);
+        self::script_mod(vm)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
