@@ -132,7 +132,7 @@ impl PhysicsWorld {
             &mut self.solver_frictions,
         );
 
-        for substep in 0..NUM_SOLVER_ITERATIONS {
+        for _substep in 0..NUM_SOLVER_ITERATIONS {
             // 1. Apply gravity increment for this substep
             for body in self.bodies.iter_mut() {
                 if body.body_type == BodyType::Dynamic && !body.sleeping {
