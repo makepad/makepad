@@ -279,6 +279,13 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        crate::makepad_widgets::script_mod(vm);
+        crate::makepad_code_editor::script_mod(vm);
+        crate::register_script_modules(vm);
+        self::script_mod(vm)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Timer(timer_event) = event {
             if self

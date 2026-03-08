@@ -151,13 +151,6 @@ script_mod! {
     }
 }
 
-impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);
-        App::from_script_mod(vm, script_mod)
-    }
-}
-
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[new]
@@ -247,6 +240,11 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        crate::makepad_widgets::script_mod(vm);
+        self::script_mod(vm)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let _ = self.match_event_with_draw_2d(cx, event);
     }

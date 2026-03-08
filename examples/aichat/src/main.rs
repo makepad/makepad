@@ -492,10 +492,7 @@ pub struct App {
 }
 
 impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);
-        crate::makepad_code_editor::script_mod(vm);
-
+    fn detect_available_backends() -> Vec<BackendType> {
         let mut available_backends = vec![];
         if ClaudeAcpAgent::is_available() {
             available_backends.push(BackendType::ClaudeSplash);
@@ -511,12 +508,7 @@ impl App {
         if Self::read_key_file("OPENAI_API_KEY").is_some() {
             available_backends.push(BackendType::OpenAi);
         }
-
-        CHAT_DATA.write().unwrap().messages = ChatData::load_from_disk();
-
-        let mut app = App::from_script_mod(vm, self::script_mod);
-        app.available_backends = available_backends;
-        app
+        available_backends
     }
 
     fn read_key_file(path: &str) -> Option<String> {
@@ -760,6 +752,17 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        crate::makepad_widgets::script_mod(vm);
+        crate::makepad_code_editor::script_mod(vm);
+        self::script_mod(vm)
+    }
+
+    fn after_new_from_script(_vm: &mut ScriptVm, app: &mut Self) {
+        CHAT_DATA.write().unwrap().messages = ChatData::load_from_disk();
+        app.available_backends = Self::detect_available_backends();
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
