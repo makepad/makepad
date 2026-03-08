@@ -25,6 +25,7 @@ pub mod open_harmony;
 pub mod egl_sys;
 #[macro_use]
 pub mod gl_sys;
+pub(crate) mod gl_video_upload;
 pub mod libc_sys;
 pub mod module_loader;
 pub mod opengl;
@@ -41,6 +42,8 @@ pub mod gstreamer_sys;
 pub mod ipc;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod linux_video_playback;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod linux_video_player;
 
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod alsa_audio;
@@ -50,6 +53,12 @@ pub mod alsa_midi;
 pub mod alsa_sys;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod linux_media;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod v4l2_sys;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod v4l2_camera;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod v4l2_camera_player;
 
 #[cfg(not(target_os = "android"))]
 pub mod select_timer;

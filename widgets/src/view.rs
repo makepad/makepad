@@ -453,6 +453,11 @@ impl ViewRef {
         }
     }
 
+    pub fn cached_texture_id(&self) -> Option<TextureId> {
+        self.borrow()
+            .and_then(|inner| inner.texture_cache.as_ref().map(|cache| cache.color_texture.texture_id()))
+    }
+
     pub fn child_count(&self) -> usize {
         if let Some(inner) = self.borrow_mut() {
             inner.children.len()

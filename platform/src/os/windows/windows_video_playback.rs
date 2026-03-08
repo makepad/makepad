@@ -40,13 +40,10 @@ const CLSID_MF_MEDIA_ENGINE_CLASS_FACTORY: GUID =
     GUID::from_u128(0xB44392DA_499B_446B_A4CB_005FEAD0E6D5);
 const IID_IMF_MEDIA_ENGINE_CLASS_FACTORY: GUID =
     GUID::from_u128(0x4D645ACE_26AA_4688_9be1_df3516990b93);
-const IID_IMF_MEDIA_ENGINE_NOTIFY: GUID =
-    GUID::from_u128(0xFEE7C112_E776_42B5_9BBF_0048524E2BD5);
+const IID_IMF_MEDIA_ENGINE_NOTIFY: GUID = GUID::from_u128(0xFEE7C112_E776_42B5_9BBF_0048524E2BD5);
 
-const MF_MEDIA_ENGINE_CALLBACK: GUID =
-    GUID::from_u128(0xC60381B8_83A4_41F8_A3D0_DE05076849A9);
-const MF_MEDIA_ENGINE_DXGI_MANAGER: GUID =
-    GUID::from_u128(0x065702da_1094_486d_8617_ee7cc4ee4648);
+const MF_MEDIA_ENGINE_CALLBACK: GUID = GUID::from_u128(0xC60381B8_83A4_41F8_A3D0_DE05076849A9);
+const MF_MEDIA_ENGINE_DXGI_MANAGER: GUID = GUID::from_u128(0x065702da_1094_486d_8617_ee7cc4ee4648);
 const MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT: GUID =
     GUID::from_u128(0x5066893c_8cf9_42bc_8b8a_472212e52726);
 
@@ -172,12 +169,19 @@ struct IMFDXGIDeviceManagerVtbl {
     AddRef: unsafe extern "system" fn(*mut c_void) -> u32,
     Release: unsafe extern "system" fn(*mut c_void) -> u32,
     CloseDeviceHandle: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
-    GetVideoService:
-        unsafe extern "system" fn(*mut c_void, *mut c_void, *const GUID, *mut *mut c_void)
-            -> HRESULT,
-    LockDevice:
-        unsafe extern "system" fn(*mut c_void, *mut c_void, *const GUID, *mut *mut c_void, i32)
-            -> HRESULT,
+    GetVideoService: unsafe extern "system" fn(
+        *mut c_void,
+        *mut c_void,
+        *const GUID,
+        *mut *mut c_void,
+    ) -> HRESULT,
+    LockDevice: unsafe extern "system" fn(
+        *mut c_void,
+        *mut c_void,
+        *const GUID,
+        *mut *mut c_void,
+        i32,
+    ) -> HRESULT,
     OpenDeviceHandle: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
     ResetDevice: unsafe extern "system" fn(*mut c_void, *mut c_void, u32) -> HRESULT,
     TestDevice: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
@@ -218,11 +222,8 @@ struct MFARGB {
 #[repr(C)]
 #[allow(non_snake_case)]
 struct MediaEngineNotifyVtbl {
-    QueryInterface: unsafe extern "system" fn(
-        *mut MediaEngineNotify,
-        *const GUID,
-        *mut *mut c_void,
-    ) -> HRESULT,
+    QueryInterface:
+        unsafe extern "system" fn(*mut MediaEngineNotify, *const GUID, *mut *mut c_void) -> HRESULT,
     AddRef: unsafe extern "system" fn(*mut MediaEngineNotify) -> u32,
     Release: unsafe extern "system" fn(*mut MediaEngineNotify) -> u32,
     EventNotify: unsafe extern "system" fn(*mut MediaEngineNotify, u32, usize, u32) -> HRESULT,
@@ -430,9 +431,12 @@ unsafe fn create_engine_on_mta(
                 Media Foundation class factory is unavailable. \
                 Check: Settings > Apps > Optional features > Media Feature Pack", hr, hr_code);
         } else {
-            error!("VIDEO: CoCreateInstance(MFMediaEngineClassFactory) failed: {:?} (0x{:08X}). \
+            error!(
+                "VIDEO: CoCreateInstance(MFMediaEngineClassFactory) failed: {:?} (0x{:08X}). \
                 This typically means Media Foundation is not properly installed. \
-                Check: Settings > Apps > Optional features > Media Feature Pack", hr, hr_code);
+                Check: Settings > Apps > Optional features > Media Feature Pack",
+                hr, hr_code
+            );
         }
         com_release(dxgi_manager);
         let _ = MFShutdown();
@@ -490,6 +494,7 @@ pub struct WindowsVideoPlayer {
     texture_id: TextureId,
     is_prepared: bool,
     prepare_notified: bool,
+    prepare_error: Option<String>,
     is_eos: bool,
     eos_notified: bool,
     autoplay: bool,
@@ -554,6 +559,7 @@ impl WindowsVideoPlayer {
             texture_id,
             is_prepared: false,
             prepare_notified: false,
+            prepare_error: None,
             is_eos: false,
             eos_notified: false,
             autoplay,
@@ -585,6 +591,10 @@ impl WindowsVideoPlayer {
                 let wide: Vec<u16> = file_url.encode_utf16().chain(std::iter::once(0)).collect();
                 (wide, Some(tmp_path))
             }
+            VideoSource::Camera(..) => {
+                error!("VIDEO: Camera source not supported on Windows");
+                (vec![0], None)
+            }
         }
     }
 
@@ -610,7 +620,9 @@ impl WindowsVideoPlayer {
                     let mut w: u32 = 0;
                     let mut h: u32 = 0;
                     let hr = (vtbl.GetNativeVideoSize)(self.engine, &mut w, &mut h);
-                    if hr.is_ok() && w > 0 && h > 0
+                    if hr.is_ok()
+                        && w > 0
+                        && h > 0
                         && (w != self.video_width || h != self.video_height)
                     {
                         self.video_width = w;
@@ -620,7 +632,9 @@ impl WindowsVideoPlayer {
                     }
                 },
                 ME_EVENT_ERROR => {
-                    error!("VIDEO: MediaEngine error event");
+                    let message = "MediaEngine error event".to_string();
+                    self.prepare_error = Some(message.clone());
+                    error!("VIDEO: {}", message);
                 }
                 _ => {}
             }
@@ -658,9 +672,9 @@ impl WindowsVideoPlayer {
             let texture = texture.unwrap();
             let resource: ID3D11Resource = texture.cast().unwrap();
             let mut srv: Option<ID3D11ShaderResourceView> = None;
-            if let Err(e) = self
-                .d3d11_device
-                .CreateShaderResourceView(&resource, None, Some(&mut srv))
+            if let Err(e) =
+                self.d3d11_device
+                    .CreateShaderResourceView(&resource, None, Some(&mut srv))
             {
                 error!("VIDEO: CreateShaderResourceView failed: {:?}", e);
                 return;
@@ -672,11 +686,17 @@ impl WindowsVideoPlayer {
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
-    pub fn check_prepared(&mut self) -> Option<(u32, u32, u128)> {
+    pub fn check_prepared(
+        &mut self,
+    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
         if self.prepare_notified {
             return None;
         }
         self.process_events();
+        if let Some(err) = self.prepare_error.take() {
+            self.prepare_notified = true;
+            return Some(Err(err));
+        }
         if !self.is_prepared {
             return None;
         }
@@ -701,7 +721,41 @@ impl WindowsVideoPlayer {
             if self.autoplay {
                 let _ = (vtbl.Play)(self.engine);
             }
-            Some((w, h, duration_ms))
+            let is_seekable = duration_ms > 0;
+            let video_tracks = if w > 0 && h > 0 {
+                vec!["video".to_string()]
+            } else {
+                vec![]
+            };
+            let audio_tracks = vec!["audio".to_string()];
+            Some(Ok((
+                w,
+                h,
+                duration_ms,
+                is_seekable,
+                video_tracks,
+                audio_tracks,
+            )))
+        }
+    }
+
+    pub fn set_volume(&self, _volume: f64) {
+        // TODO: implement via IMFMediaEngine::SetVolume
+    }
+
+    pub fn set_playback_rate(&self, _rate: f64) {
+        // TODO: implement via IMFMediaEngine::SetPlaybackRate
+    }
+
+    /// Returns the canPlayType string for the given MIME type on Windows (Media Foundation).
+    pub fn can_play_type(mime: &str) -> &'static str {
+        let base = mime.split(';').next().unwrap_or("").trim();
+        match base {
+            "video/mp4" | "video/x-m4v" => "probably",
+            "audio/mp4" | "audio/x-m4a" | "audio/mpeg" | "audio/wav" | "audio/x-wav" => "probably",
+            "video/webm" | "audio/webm" => "maybe",
+            _ if base.starts_with("video/") || base.starts_with("audio/") => "maybe",
+            _ => "",
         }
     }
 
@@ -750,11 +804,11 @@ impl WindowsVideoPlayer {
             let cxtexture = &mut textures[self.texture_id];
             cxtexture.os.texture = self.render_texture.clone();
             cxtexture.os.shader_resource_view = self.render_srv.clone();
-            cxtexture.format = TextureFormat::VideoRGB;
+            cxtexture.format = TextureFormat::VideoExternal;
             cxtexture.alloc = Some(TextureAlloc {
                 width: self.video_width as usize,
                 height: self.video_height as usize,
-                pixel: TexturePixel::VideoRGB,
+                pixel: TexturePixel::VideoExternal,
                 category: TextureCategory::Video,
             });
             true
