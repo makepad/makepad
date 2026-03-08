@@ -86,6 +86,32 @@ mod tests {
     }
 
     #[test]
+    fn test_quat_integrate_matches_rapier_linearized_step() {
+        use rapier3d::prelude::Rotation;
+
+        let mut q = Quat {
+            x: -0.515755,
+            y: -0.022119,
+            z: 0.856057,
+            w: 0.025963,
+        };
+        q = q.normalized();
+        let omega = vec3f(-0.513201, -0.269972, 0.121054);
+        let dt = 1.0 / 240.0;
+
+        let ours = q.integrate(omega, dt);
+
+        let hang = omega * (dt * 0.5);
+        let delta = Rotation::from_xyzw(hang.x, hang.y, hang.z, 1.0);
+        let rapier = (delta * Rotation::from_xyzw(q.x, q.y, q.z, q.w)).normalize();
+
+        assert!((ours.x - rapier.x).abs() < 1.0e-6, "x {} vs {}", ours.x, rapier.x);
+        assert!((ours.y - rapier.y).abs() < 1.0e-6, "y {} vs {}", ours.y, rapier.y);
+        assert!((ours.z - rapier.z).abs() < 1.0e-6, "z {} vs {}", ours.z, rapier.z);
+        assert!((ours.w - rapier.w).abs() < 1.0e-6, "w {} vs {}", ours.w, rapier.w);
+    }
+
+    #[test]
     fn test_aabb_overlap() {
         let a = Aabb {
             min: vec3f(-1.0, -1.0, -1.0),

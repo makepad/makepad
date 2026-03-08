@@ -113,8 +113,8 @@ impl App {
     pub(super) fn run(vm: &mut ScriptVm) -> Self {
         crate::makepad_widgets::script_mod(vm);
         crate::makepad_code_editor::script_mod(vm);
-        crate::script_mod(vm);
-        App::from_script_mod(vm, self::script_mod)
+        crate::register_script_modules(vm);
+        App::from_script_mod(vm, super::script_mod)
     }
 
     pub(super) fn start_backend(&mut self, cx: &mut Cx) {
