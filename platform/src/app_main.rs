@@ -118,6 +118,7 @@ macro_rules! app_main {
                             <$app as AppMain>::after_new_from_script(vm, &mut app);
                             app
                         }));
+                        cx.start_hot_reload_file_observer_if_requested();
                     }
                     if let Event::LiveEdit = event {
                         let mut app_ref = app.borrow_mut();
@@ -188,6 +189,7 @@ macro_rules! app_main {
                             <$app as AppMain>::after_new_from_script(vm, &mut app);
                             app
                         }));
+                        cx.start_hot_reload_file_observer_if_requested();
                     }
                     if let Event::LiveEdit = event {
                         let mut app_ref = app.borrow_mut();
@@ -232,6 +234,7 @@ macro_rules! app_main {
                             <$app as AppMain>::after_new_from_script(vm, &mut app);
                             app
                         }));
+                        cx.start_hot_reload_file_observer_if_requested();
                     }
                     if let Event::LiveEdit = event {
                         let mut app_ref = app.borrow_mut();

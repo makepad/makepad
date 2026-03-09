@@ -8,9 +8,17 @@ use crate::makepad_script::{
     ScriptValue,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use {
+    crate::thread::SignalToUI,
+    makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot},
+    makepad_studio_protocol::StudioToApp,
+    std::sync::{mpsc::channel, mpsc::Sender, Arc, Mutex},
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PendingLiveChange {
@@ -18,10 +26,11 @@ pub(crate) struct PendingLiveChange {
     content: String,
 }
 
-#[derive(Clone, Debug, Default)]
 pub struct CxLiveReloadState {
     pub(crate) pending_files: Vec<PendingLiveChange>,
     pub script_mod_overrides: Rc<RefCell<HashMap<ScriptModKey, String>>>,
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    pub(crate) file_observer: Option<DesktopHotReloadWatcher>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +55,29 @@ struct CompiledScriptModSite {
     values: Vec<ScriptValue>,
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub(crate) struct DesktopHotReloadWatcher {
+    _watcher: FileSystemWatcher,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+struct HotReloadWatchPlan {
+    roots: Vec<WatchRoot>,
+    files_by_root: HashMap<String, Vec<String>>,
+    initial_contents: HashMap<String, String>,
+}
+
+impl Default for CxLiveReloadState {
+    fn default() -> Self {
+        Self {
+            pending_files: Vec::new(),
+            script_mod_overrides: Default::default(),
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            file_observer: None,
+        }
+    }
+}
+
 impl CxLiveReloadState {
     pub fn queue_file_change(&mut self, file_name: String, content: String) {
         self.pending_files.push(PendingLiveChange { file_name, content });
@@ -53,8 +85,65 @@ impl CxLiveReloadState {
 }
 
 impl Cx {
+    pub fn start_hot_reload_file_observer_if_requested(&mut self) {
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        self.start_desktop_hot_reload_file_observer_if_requested();
+    }
+
     pub fn handle_live_edit(&mut self) -> bool {
         handle_cx_live_edit(self)
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+impl Cx {
+    fn start_desktop_hot_reload_file_observer_if_requested(&mut self) {
+        if !hot_reload_requested_from_args() {
+            return;
+        }
+        if Cx::has_studio_web_socket() {
+            return;
+        }
+        if self.script_data.live_reload.file_observer.is_some() {
+            return;
+        }
+
+        let Some(script_vm) = self.script_vm.as_ref() else {
+            return;
+        };
+        let Some(plan) = collect_hot_reload_watch_plan(script_vm) else {
+            return;
+        };
+
+        let watched_file_count = plan.initial_contents.len();
+        let root_count = plan.roots.len();
+        let file_map = Arc::new(plan.files_by_root);
+        let file_cache = Arc::new(Mutex::new(plan.initial_contents));
+
+        let (tx, rx) = channel::<StudioToApp>();
+        let watcher = FileSystemWatcher::start(plan.roots, {
+            let file_map = Arc::clone(&file_map);
+            let file_cache = Arc::clone(&file_cache);
+            move |event| {
+                forward_hot_reload_fs_event(event.mount, event.path, &file_map, &file_cache, &tx);
+            }
+        });
+
+        match watcher {
+            Ok(watcher) => {
+                Cx::set_control_channel(rx);
+                self.script_data.live_reload.file_observer =
+                    Some(DesktopHotReloadWatcher { _watcher: watcher });
+                crate::log!(
+                    "hot reload watching {} script_mod source files across {} crate roots",
+                    watched_file_count,
+                    root_count
+                );
+            }
+            Err(err) => {
+                crate::error!("hot reload watcher unavailable: {}", err);
+            }
+        }
     }
 }
 
@@ -296,6 +385,155 @@ fn resolve_script_mod_file_candidates(script_mod: &ScriptMod) -> Vec<String> {
     }
 
     candidates
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn hot_reload_requested_from_args() -> bool {
+    std::env::args().any(|arg| arg == "--hot")
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn collect_hot_reload_watch_plan(
+    script_vm: &crate::makepad_script::ScriptVmBase,
+) -> Option<HotReloadWatchPlan> {
+    let excluded_manifest_paths = excluded_hot_reload_manifest_paths();
+    let bodies = script_vm.code.bodies.borrow();
+    let mut roots = BTreeMap::<String, WatchRoot>::new();
+    let mut files_by_root = HashMap::<String, Vec<String>>::new();
+    let mut initial_contents = HashMap::<String, String>::new();
+
+    for body in bodies.iter() {
+        let ScriptSource::Mod(script_mod) = &body.source else {
+            continue;
+        };
+        let Some(root) = hot_reload_root_for_script_mod(script_mod, &excluded_manifest_paths) else {
+            continue;
+        };
+        let Some(file_name) = resolve_script_mod_file_for_watch(script_mod) else {
+            continue;
+        };
+
+        let path = PathBuf::from(&file_name);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+
+        roots
+            .entry(root.clone())
+            .or_insert_with(|| WatchRoot {
+                mount: root.clone(),
+                path: PathBuf::from(&root),
+            });
+
+        initial_contents.entry(file_name.clone()).or_insert(content);
+        files_by_root.entry(root).or_default().push(file_name);
+    }
+
+    if initial_contents.is_empty() {
+        return None;
+    }
+
+    for files in files_by_root.values_mut() {
+        files.sort();
+        files.dedup();
+    }
+
+    Some(HotReloadWatchPlan {
+        roots: roots.into_values().collect(),
+        files_by_root,
+        initial_contents,
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn excluded_hot_reload_manifest_paths() -> HashSet<String> {
+    let platform_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    [
+        platform_dir.to_path_buf(),
+        platform_dir.join("script"),
+        platform_dir.join("../draw"),
+    ]
+    .into_iter()
+    .map(|path| normalize_path_string(&path))
+    .collect()
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn hot_reload_root_for_script_mod(
+    script_mod: &ScriptMod,
+    excluded_manifest_paths: &HashSet<String>,
+) -> Option<String> {
+    let manifest_path = (!script_mod.cargo_manifest_path.is_empty())
+        .then(|| normalize_path_string(Path::new(&script_mod.cargo_manifest_path)));
+    match manifest_path {
+        Some(path) if excluded_manifest_paths.contains(&path) => None,
+        Some(path) => Some(path),
+        None => resolve_script_mod_file_for_watch(script_mod).and_then(|path| {
+            Path::new(&path)
+                .parent()
+                .map(normalize_path_string)
+        }),
+    }
+}
+
+fn resolve_script_mod_file_for_watch(script_mod: &ScriptMod) -> Option<String> {
+    let candidates = resolve_script_mod_file_candidates(script_mod);
+    candidates
+        .iter()
+        .find(|candidate| Path::new(candidate.as_str()).is_file())
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn forward_hot_reload_fs_event(
+    mount: String,
+    path: PathBuf,
+    files_by_root: &HashMap<String, Vec<String>>,
+    file_cache: &Mutex<HashMap<String, String>>,
+    tx: &Sender<StudioToApp>,
+) {
+    let changed_path = normalize_path_string(&path);
+    let candidates = if files_by_root
+        .get(&mount)
+        .is_some_and(|files| files.iter().any(|file| file == &changed_path))
+    {
+        vec![changed_path]
+    } else {
+        files_by_root.get(&mount).cloned().unwrap_or_default()
+    };
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let Ok(mut cache) = file_cache.lock() else {
+        return;
+    };
+    for file_name in candidates {
+        let Ok(content) = std::fs::read_to_string(&file_name) else {
+            continue;
+        };
+        if cache
+            .get(&file_name)
+            .is_some_and(|previous| previous == &content)
+        {
+            continue;
+        }
+        cache.insert(file_name.clone(), content.clone());
+        if tx
+            .send(StudioToApp::LiveChange {
+                file_name,
+                content,
+            })
+            .is_ok()
+        {
+            SignalToUI::set_ui_signal();
+        }
+    }
 }
 
 fn push_unique_candidate(candidates: &mut Vec<String>, path: PathBuf) {
@@ -915,5 +1153,19 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn excludes_platform_script_and_draw_manifests_from_hot_reload() {
+        let excluded = excluded_hot_reload_manifest_paths();
+        assert!(excluded.contains(&normalize_path_string(Path::new(
+            env!("CARGO_MANIFEST_DIR")
+        ))));
+        assert!(excluded.contains(&normalize_path_string(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("script")
+        )));
+        assert!(excluded.contains(&normalize_path_string(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../draw")
+        )));
     }
 }
