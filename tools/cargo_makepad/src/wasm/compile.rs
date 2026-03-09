@@ -1256,18 +1256,34 @@ fn forward_hot_reload_fs_event(
             continue;
         }
         cache.insert(file_name.clone(), content.clone());
-        let _ = tx.send(WasmHotReloadEvent {
-            kind: "live_change".to_string(),
-            file_name,
-            content,
-        });
+        let display_name = hot_reload_display_name(&file_name);
+        println!("hotreload detected: {}", display_name);
+        if tx
+            .send(WasmHotReloadEvent {
+                kind: "live_change".to_string(),
+                file_name,
+                content,
+            })
+            .is_err()
+        {
+            eprintln!("hotreload watcher channel closed before dispatch");
+        }
     }
+}
+
+fn hot_reload_display_name(file_name: &str) -> String {
+    Path::new(file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(file_name)
+        .to_string()
 }
 
 fn broadcast_hot_reload_event(
     event: WasmHotReloadEvent,
     watch_clients: &mut HashMap<u64, mpsc::Sender<Vec<u8>>>,
 ) {
+    let display_name = hot_reload_display_name(&event.file_name);
     let payload = event.serialize_json().into_bytes();
     let stale_clients: Vec<u64> = watch_clients
         .iter()
@@ -1277,6 +1293,20 @@ fn broadcast_hot_reload_event(
         .collect();
     for web_socket_id in stale_clients {
         watch_clients.remove(&web_socket_id);
+    }
+    let delivered = watch_clients.len();
+    if delivered == 0 {
+        println!(
+            "hotreload skipped: {} (no connected /$watch clients)",
+            display_name
+        );
+    } else {
+        println!(
+            "hotreload sent: {} ({} client{})",
+            display_name,
+            delivered,
+            if delivered == 1 { "" } else { "s" }
+        );
     }
 }
 
