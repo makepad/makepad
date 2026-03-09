@@ -1,6 +1,6 @@
 export function init_env(env) {
     let _wasm = null;
-    
+
     env.js_console_log = (u8_ptr, len) => _wasm._bridge.js_console_log(u8_ptr, len);
     env.js_console_error = (u8_ptr, len) => _wasm._bridge.js_console_error(u8_ptr, len);
     env.js_time_now = () => _wasm._bridge.js_time_now();
@@ -115,11 +115,11 @@ export function init_env(env) {
 
 export class WasmBridge {
     static SPLIT_DATA_VERSION = 2;
-    static SPLIT_SLOT_EXPORT_PREFIX = "__mp_split_slot_";
+    static SPLIT_SLOT_EXPORT_PREFIX = "$s";
 
     constructor(wasm, dispatch) {
         this.wasm = wasm;
-        if(wasm === undefined){
+        if (wasm === undefined) {
             return console.error("Wasm object is undefined, check your URL and build output")
         }
         this.wasm._bridge = this;
@@ -128,14 +128,14 @@ export class WasmBridge {
         this.memory = wasm._memory;
         this.wasm_url = wasm._wasm_url;
         this.buffer_ref_len_check = 0;
-        
+
         this.from_wasm_args = {};
-        
+
         this.update_array_buffer_refs();
-        
+
         this.wasm_init_panic_hook();
     }
-    
+
     create_js_message_bridge(wasm_app) {
         let msg = new FromWasmMsg(this, this.wasm_get_js_message_bridge(wasm_app));
         let code = msg.read_str();
@@ -143,7 +143,7 @@ export class WasmBridge {
         // this class can also be loaded from file.
         this.msg_class = new Function("ToWasmMsg", "FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
     }
-    
+
     clear_memory_refs() {
         this.exports = null;
         this.memory = null;
@@ -153,7 +153,7 @@ export class WasmBridge {
         this.f64 = null;
         this.wasm = null;
     }
-    
+
     update_array_buffer_refs() {
         if (this.buffer_ref_len_check != this.memory.buffer.byteLength) {
             this.f32 = new Float32Array(this.memory.buffer);
@@ -162,64 +162,64 @@ export class WasmBridge {
             this.buffer_ref_len_check = this.memory.buffer.byteLength;
         }
     }
-    
+
     new_to_wasm() {
         return new this.msg_class.ToWasmMsg(this);
     }
-    
+
     new_from_wasm(ptr) {
         return new this.msg_class.FromWasmMsg(this, ptr);
     }
-    
+
     clone_data_u8(obj) {
         var dst = new ArrayBuffer(obj.len);
         let u8 = new Uint8Array(dst);
-        u8.set (this.view_data_u8(obj));
+        u8.set(this.view_data_u8(obj));
         return u8;
     }
-    
+
     view_data_u8(obj) {
         return new Uint8Array(this.memory.buffer, obj.ptr, obj.len)
     }
-    
+
     free_data_u8(obj) {
         this.wasm_free_data_u8(obj.ptr, obj.len, obj.capacity);
     }
-    
+
     wasm_get_js_message_bridge(wasm_app) {
         let new_ptr = this.exports.wasm_get_js_message_bridge(wasm_app);
         this.update_array_buffer_refs();
         return new_ptr
     }
-    
+
     wasm_new_msg_with_u64_capacity(capacity) {
         let new_ptr = this.exports.wasm_new_msg_with_u64_capacity(capacity)
         this.update_array_buffer_refs();
         return new_ptr
     }
-    
+
     wasm_msg_reserve_u64(ptr, capacity) {
         let new_ptr = this.exports.wasm_msg_reserve_u64(ptr, capacity);
         this.update_array_buffer_refs();
         return new_ptr
     }
-    
+
     wasm_msg_free(ptr) {
         this.exports.wasm_msg_free(ptr);
         this.update_array_buffer_refs();
     }
-    
+
     wasm_new_data_u8(capacity) {
         let new_ptr = this.exports.wasm_new_data_u8(capacity);
         this.update_array_buffer_refs();
         return new_ptr
     }
-    
+
     wasm_free_data_u8(ptr, len, cap) {
         this.exports.wasm_free_data_u8(ptr, len, cap);
         this.update_array_buffer_refs();
     }
-    
+
     wasm_init_panic_hook() {
         this.exports.wasm_init_panic_hook();
         this.update_array_buffer_refs();
@@ -233,8 +233,8 @@ export class WasmBridge {
         }
         return out
     }*/
-    
-    u8_to_string(ptr, len){
+
+    u8_to_string(ptr, len) {
         let u8 = new Uint8Array(this.memory.buffer, ptr, len);
         let copy = new Uint8Array(len);
         copy.set(u8);
@@ -245,24 +245,24 @@ export class WasmBridge {
     js_console_log(u8_ptr, len) {
         console.log(this.u8_to_string(u8_ptr, len));
     }
-    
+
     js_console_error(u8_ptr, len) {
         console.error(this.u8_to_string(u8_ptr, len), '');
     }
-    
-    js_time_now(){
+
+    js_time_now() {
         return Date.now() / 1000.0;
     }
-            
+
     static create_shared_memory() {
         let timeout = setTimeout(_ => {
             document.body.innerHTML = "<div style='margin-top:30px;margin-left:30px; color:white;'>Please close and re-open the browsertab - Shared memory allocation failed, this is a bug of iOS safari and apple needs to fix it.</div>"
         }, 1000)
-        let mem = new WebAssembly.Memory({initial: 64, maximum: 16384, shared: true});
+        let mem = new WebAssembly.Memory({ initial: 64, maximum: 16384, shared: true });
         clearTimeout(timeout);
         return mem;
     }
-    
+
     static async supports_simd() {
         let bytes = Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11, 0, 10, 4, 110, 97, 109, 101, 2, 3, 1, 0, 0]);
         return WebAssembly.instantiate(bytes).then(_ => {
@@ -310,7 +310,7 @@ export class WasmBridge {
             });
             offset += len;
         }
-        return {version, segments};
+        return { version, segments };
     }
 
     static read_var_u32(bytes, offset) {
@@ -320,7 +320,7 @@ export class WasmBridge {
             const byte = bytes[offset++];
             result |= (byte & 0x7f) << shift;
             if ((byte & 0x80) === 0) {
-                return {value: result >>> 0, offset};
+                return { value: result >>> 0, offset };
             }
             shift += 7;
         }
@@ -416,9 +416,9 @@ export class WasmBridge {
     }
 
     static patch_split_table(primary_exports, secondary_exports) {
-        const split_table = primary_exports.__mp_split_table;
+        const split_table = primary_exports.$s;
         if (!(split_table instanceof WebAssembly.Table)) {
-            throw new Error("primary wasm missing __mp_split_table export");
+            throw new Error("primary wasm missing $s export");
         }
 
         for (const [name, value] of Object.entries(secondary_exports)) {
@@ -469,18 +469,18 @@ export class WasmBridge {
         if (memory !== undefined) {
             env.memory = memory;
         }
-        
-        return WebAssembly.instantiate(module, {env}).then(async wasm => {
+
+        return WebAssembly.instantiate(module, { env }).then(async wasm => {
             set_wasm(wasm);
             wasm._has_thread_support = env.memory !== undefined;
-            wasm._memory = env.memory? env.memory: wasm.exports.memory;
+            wasm._memory = env.memory ? env.memory : wasm.exports.memory;
             wasm._module = module;
             wasm._env = env;
             return wasm
         }, error => {
             if (error.name == "LinkError") { // retry as multithreaded
                 env.memory = this.create_shared_memory();
-                return WebAssembly.instantiate(module, {env}).then(async wasm => {
+                return WebAssembly.instantiate(module, { env }).then(async wasm => {
                     set_wasm(wasm);
                     wasm._has_thread_support = true;
                     wasm._memory = env.memory;
@@ -498,7 +498,7 @@ export class WasmBridge {
             }
         })
     }
-    
+
     static fetch_and_instantiate_wasm(wasm_url, memory, split_config) {
         const has_split_data = split_config && split_config.split_data_url;
         const has_secondary = split_config && split_config.secondary_wasm_url;
@@ -521,7 +521,7 @@ export class WasmBridge {
 
                 const wasm_bytes = new Uint8Array(await wasm_response.arrayBuffer());
                 const module = await this.compile_primary_module(wasm_bytes, split_response_promise);
-                const wasm = await this.instantiate_wasm(module, memory, {_post_signal: _ => {}});
+                const wasm = await this.instantiate_wasm(module, memory, { _post_signal: _ => { } });
                 await this.attach_secondary_wasm(wasm, secondary_response_promise, defer_secondary);
                 return wasm;
             })().catch(error => {
@@ -530,11 +530,11 @@ export class WasmBridge {
         }
         return WebAssembly.compileStreaming(fetch(wasm_url))
             .then(
-            (module) => this.instantiate_wasm(module, memory, {_post_signal: _ => {}}),
-            error => {
-                console.error(error)
-            }
-        )
+                (module) => this.instantiate_wasm(module, memory, { _post_signal: _ => { } }),
+                error => {
+                    console.error(error)
+                }
+            )
     }
 
     static async _instantiate_secondary(secondary_response, primary_wasm) {
@@ -543,7 +543,7 @@ export class WasmBridge {
         primary_wasm._secondary_module = secondary_module;
         const imports = {
             env: primary_wasm._env || {},
-            primary: primary_wasm.exports
+            $p: primary_wasm.exports
         };
         const secondary_instance = await WebAssembly.instantiate(secondary_module, imports);
         this.patch_split_table(primary_wasm.exports, secondary_instance.exports);
@@ -558,15 +558,15 @@ export class ToWasmMsg {
         this.u32_offset = this.u32_ptr + 2;
         this.u32_needed_capacity = 0; //app.u32[this.u32_ptr] << 1;
     }
-    
+
     reserve_u32(u32_capacity) {
         let app = this.app;
-        
+
         this.u32_needed_capacity += u32_capacity;
         let u64_needed_capacity = ((this.u32_needed_capacity & 1) + this.u32_needed_capacity) >> 1;
         let offset = this.u32_offset - this.u32_ptr;
         let u64_len = ((offset & 1) + offset) >> 1;
-        
+
         if (app.u32[this.u32_ptr] - u64_len < u64_needed_capacity) {
             app.u32[this.u32_ptr + 1] = u64_len;
             this.ptr = this.app.wasm_msg_reserve_u64(this.ptr, u64_needed_capacity);
@@ -574,24 +574,24 @@ export class ToWasmMsg {
             this.u32_offset = this.u32_ptr + offset;
         }
     }
-    
+
     // i forgot how to do memcpy with typed arrays. so, we'll do this.
     push_data_u8(input_buffer) {
-        
-        
+
+
         let app = this.app;
-        
+
         let u8_len = input_buffer.byteLength;
         let output_ptr = app.wasm_new_data_u8(u8_len);
         var u8_out = new Uint8Array(app.memory.buffer, output_ptr, u8_len)
         var u8_in = new Uint8Array(input_buffer)
-        
+
         u8_out.set(u8_in);
-        
-        app.u32[this.u32_offset ++] = output_ptr;
-        app.u32[this.u32_offset ++] = u8_len;
+
+        app.u32[this.u32_offset++] = output_ptr;
+        app.u32[this.u32_offset++] = u8_len;
     }
-    
+
     release_ownership() {
         if (this.ptr === 0) {
             throw new Error("double finalise")
@@ -599,29 +599,29 @@ export class ToWasmMsg {
         let app = this.app;
         let ptr = this.ptr;
         let offset = this.u32_offset - this.u32_ptr;
-        
+
         if ((offset & 1) != 0) {
             app.u32[this.u32_offset + 1] = 0
         }
-        
+
         let u64_len = ((offset & 1) + offset) >> 1;
         app.u32[this.u32_ptr + 1] = u64_len;
-        
+
         this.app = null;
         this.ptr = 0;
         this.u32_ptr = 0;
         this.u32_offset = 0;
         this.u32_needed_capacity = 0;
-        
+
         return ptr;
     }
-    
+
     push_str(str) {
         let app = this.app;
         this.reserve_u32(str.length + 1);
-        app.u32[this.u32_offset ++] = str.length;
-        for (let i = 0; i < str.length; i ++) {
-            app.u32[this.u32_offset ++] = str.charCodeAt(i)
+        app.u32[this.u32_offset++] = str.length;
+        for (let i = 0; i < str.length; i++) {
+            app.u32[this.u32_offset++] = str.charCodeAt(i)
         }
     }
 }
@@ -633,7 +633,7 @@ export class FromWasmMsg {
         this.u32_ptr = this.ptr >> 2;
         this.u32_offset = this.u32_ptr + 2;
     }
-    
+
     free() {
         let app = this.app;
         app.wasm_msg_free(this.ptr);
@@ -642,24 +642,24 @@ export class FromWasmMsg {
         this.u32_ptr = 0;
         this.u32_offset = 0;
     }
-    
+
     read_str() {
         let app = this.app;
-        let len = app.u32[this.u32_offset ++];
+        let len = app.u32[this.u32_offset++];
         let str = "";
-        for (let i = 0; i < len; i ++) {
-            str += String.fromCharCode(app.u32[this.u32_offset ++]);
+        for (let i = 0; i < len; i++) {
+            str += String.fromCharCode(app.u32[this.u32_offset++]);
         }
         return str
     }
-    
+
     dispatch_on_app() {
         let app = this.app;
         let u32_len = app.u32[this.u32_ptr + 1] << 1;
         while ((this.u32_offset) - this.u32_ptr < u32_len) {
-            let msg_id = app.u32[this.u32_offset ++];
-            this.u32_offset ++; // skip second u32 of id
-            this.u32_offset ++; // skip body len
+            let msg_id = app.u32[this.u32_offset++];
+            this.u32_offset++; // skip second u32 of id
+            this.u32_offset++; // skip body len
             // dispatch to deserializer
             if (this[msg_id] !== undefined) {
                 this[msg_id]();
@@ -675,7 +675,7 @@ export class FromWasmMsg {
 function base64_to_array_buffer(base64) {
     var bin = window.atob(base64);
     var u8 = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i ++) {
+    for (var i = 0; i < bin.length; i++) {
         u8[i] = bin.charCodeAt(i);
         console.log(u8[i]);
     }

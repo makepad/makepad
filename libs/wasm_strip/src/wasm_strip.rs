@@ -1094,6 +1094,18 @@ fn generate_stub_body(type_idx: u32, param_count: u32, table_slot: u32) -> Vec<u
 }
 
 // Phase 3: Primary module generation
+fn encode_base62(mut num: u32) -> String {
+    if num == 0 {
+        return "0".to_string();
+    }
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut out = String::new();
+    while num > 0 {
+        out.push(ALPHABET[(num % 62) as usize] as char);
+        num /= 62;
+    }
+    out.chars().rev().collect()
+}
 
 fn build_primary_module(
     buf: &[u8],
@@ -1168,21 +1180,21 @@ fn build_primary_module(
                 // Export all defined functions as $f<abs_index>
                 for i in 0..info.func_type_indices.len() {
                     let abs_idx = info.num_func_imports + i as u32;
-                    let name = format!("$f{}", abs_idx);
+                    let name = format!("$f{}", encode_base62(abs_idx));
                     payload.extend_from_slice(&encode_string(&name));
                     payload.push(0x00); // function
                     payload.extend_from_slice(&encode_var_u32(abs_idx));
                 }
 
                 // Export the table used by split stubs so the runtime can patch it later.
-                payload.extend_from_slice(&encode_string("__mp_split_table"));
+                payload.extend_from_slice(&encode_string("$s"));
                 payload.push(0x01); // table
                 payload.extend_from_slice(&encode_var_u32(0));
 
                 // Export all defined tables as $t<abs_index>
                 for i in 0..info.tables.len() {
                     let abs_idx = info.num_table_imports + i as u32;
-                    let name = format!("$t{}", abs_idx);
+                    let name = format!("$t{}", encode_base62(abs_idx));
                     payload.extend_from_slice(&encode_string(&name));
                     payload.push(0x01); // table
                     payload.extend_from_slice(&encode_var_u32(abs_idx));
@@ -1191,7 +1203,7 @@ fn build_primary_module(
                 // Export all defined memories as $m<abs_index>
                 for i in 0..info.memories.len() {
                     let abs_idx = info.num_memory_imports + i as u32;
-                    let name = format!("$m{}", abs_idx);
+                    let name = format!("$m{}", encode_base62(abs_idx));
                     payload.extend_from_slice(&encode_string(&name));
                     payload.push(0x02); // memory
                     payload.extend_from_slice(&encode_var_u32(abs_idx));
@@ -1200,7 +1212,7 @@ fn build_primary_module(
                 // Export all defined globals as $g<abs_index>
                 for i in 0..info.globals.len() {
                     let abs_idx = info.num_global_imports + i as u32;
-                    let name = format!("$g{}", abs_idx);
+                    let name = format!("$g{}", encode_base62(abs_idx));
                     payload.extend_from_slice(&encode_string(&name));
                     payload.push(0x03); // global
                     payload.extend_from_slice(&encode_var_u32(abs_idx));
@@ -1306,8 +1318,8 @@ fn build_secondary_module(
         // Primary defined functions (preserve func indices num_func_imports..num_func_imports+num_defined-1)
         for i in 0..num_defined {
             let abs_idx = info.num_func_imports + i;
-            let name = format!("$f{}", abs_idx);
-            payload.extend_from_slice(&encode_string("primary"));
+            let name = format!("$f{}", encode_base62(abs_idx));
+            payload.extend_from_slice(&encode_string("$p"));
             payload.extend_from_slice(&encode_string(&name));
             payload.push(0x00); // function
             payload.extend_from_slice(&encode_var_u32(info.func_type_indices[i as usize]));
@@ -1326,9 +1338,9 @@ fn build_secondary_module(
         // Primary defined tables
         for i in 0..info.tables.len() {
             let abs_idx = info.num_table_imports + i as u32;
-            let name = format!("$t{}", abs_idx);
+            let name = format!("$t{}", encode_base62(abs_idx));
             let table = &info.tables[i];
-            payload.extend_from_slice(&encode_string("primary"));
+            payload.extend_from_slice(&encode_string("$p"));
             payload.extend_from_slice(&encode_string(&name));
             payload.push(0x01); // table
             payload.push(table.reftype);
@@ -1362,8 +1374,8 @@ fn build_secondary_module(
         // Primary defined memories
         for i in 0..info.memories.len() {
             let abs_idx = info.num_memory_imports + i as u32;
-            let name = format!("$m{}", abs_idx);
-            payload.extend_from_slice(&encode_string("primary"));
+            let name = format!("$m{}", encode_base62(abs_idx));
+            payload.extend_from_slice(&encode_string("$p"));
             payload.extend_from_slice(&encode_string(&name));
             payload.push(0x02); // memory
             payload.extend_from_slice(&encode_limits(&info.memories[i].limits));
@@ -1382,9 +1394,9 @@ fn build_secondary_module(
         // Primary defined globals
         for i in 0..info.globals.len() {
             let abs_idx = info.num_global_imports + i as u32;
-            let name = format!("$g{}", abs_idx);
+            let name = format!("$g{}", encode_base62(abs_idx));
             let global = &info.globals[i];
-            payload.extend_from_slice(&encode_string("primary"));
+            payload.extend_from_slice(&encode_string("$p"));
             payload.extend_from_slice(&encode_string(&name));
             payload.push(0x03); // global
             payload.push(global.valtype);
@@ -1416,7 +1428,7 @@ fn build_secondary_module(
         let secondary_func_import_count = info.num_func_imports + num_defined;
         for i in 0..num_split {
             let slot = table_base_slot + i;
-            let name = format!("__mp_split_slot_{}", slot);
+            let name = format!("$s{}", slot);
             payload.extend_from_slice(&encode_string(&name));
             payload.push(0x00); // function
             payload.extend_from_slice(&encode_var_u32(secondary_func_import_count + i));
@@ -2146,7 +2158,7 @@ mod tests {
         let exports = parse_export_section(&result.primary_wasm, export_section).unwrap();
         assert!(exports
             .iter()
-            .any(|export| export.name == "__mp_split_table" && export.kind == 0x01));
+            .any(|export| export.name == "$s" && export.kind == 0x01));
     }
 
     #[test]
@@ -2176,7 +2188,7 @@ mod tests {
         let exports = parse_export_section(&result.secondary_wasm, export_section).unwrap();
         assert!(exports
             .iter()
-            .any(|export| export.name == "__mp_split_slot_0" && export.kind == 0x00));
+            .any(|export| export.name == "$s0" && export.kind == 0x00));
     }
 
     #[test]
