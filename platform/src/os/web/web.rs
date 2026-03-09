@@ -189,6 +189,13 @@ impl Cx {
                     self.passes[main_pass_id].paint_dirty = true;
                 }
 
+                live_id!(ToWasmLiveFileChange) => {
+                    let tw = ToWasmLiveFileChange::read_to_wasm(&mut to_wasm);
+                    self.script_data
+                        .live_reload
+                        .queue_file_change(tw.file_name, tw.content);
+                }
+
                 live_id!(ToWasmHTTPResponse) => {
                     let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponse::HttpResponse {
@@ -294,20 +301,6 @@ impl Cx {
                         request_id: LiveId::from_lo_hi(tw.request_id_lo, tw.request_id_hi),
                         response: NetworkResponse::WebSocketBinary(tw.data.into_vec_u8())
                     });
-                }*/
-                /*live_id!(ToWasmLiveFileChange)=>{
-                    let tw = ToWasmLiveFileChange::read_to_wasm(&mut to_wasm);
-                    // live file change. lets do it.
-                    if tw.body.len()>0 {
-                        let mut parts = tw.body.split("$$$makepad_live_change$$$");
-                        if let Some(file_name) = parts.next() {
-                            let content = parts.next().unwrap().to_string();
-                            let _ = self.live_file_change_sender.send(vec![LiveFileChange{
-                                file_name:file_name.to_string(),
-                                content
-                            }]);
-                        }
-                    }
                 }*/
                 live_id!(ToWasmVideoPlaybackPrepared) => {
                     let tw = ToWasmVideoPlaybackPrepared::read_to_wasm(&mut to_wasm);

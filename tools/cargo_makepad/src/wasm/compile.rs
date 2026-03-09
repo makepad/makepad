@@ -3,15 +3,18 @@ use crate::makepad_network::{NetworkConfig, NetworkRuntime};
 use crate::makepad_shell::*;
 use crate::makepad_wasm_strip::*;
 use crate::utils::*;
+use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
+use makepad_micro_serde::{SerJson, SerJsonState};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     fs::File,
     io::prelude::*,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc,
+    sync::{mpsc, Arc, Mutex},
+    time::Duration,
 };
 
 pub struct WasmBuildResult {
@@ -33,6 +36,24 @@ pub struct WasmConfig {
     pub split_auto: bool,
     pub split_functions: bool,
     pub split_functions_threshold: usize,
+    pub hot_reload: bool,
+}
+
+#[derive(SerJson, Clone)]
+struct WasmHotReloadEvent {
+    kind: String,
+    file_name: String,
+    content: String,
+}
+
+struct WasmHotReloadPlan {
+    roots: Vec<WatchRoot>,
+    files_by_root: HashMap<String, Vec<String>>,
+    initial_contents: HashMap<String, String>,
+}
+
+struct WasmHotReloadWatcher {
+    _watcher: FileSystemWatcher,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -210,6 +231,11 @@ pub fn generate_html(
             "
         )
     };
+    let auto_reload_script = if config.hot_reload {
+        "\n        <script type='module' src='./makepad_platform/auto_reload.js'></script>"
+    } else {
+        ""
+    };
 
     let preloads = if config.bindgen {
         "
@@ -294,6 +320,7 @@ pub fn generate_html(
                 throw error;
             }}
         </script>
+        {auto_reload_script}
         <link rel='stylesheet' type='text/css' href='./makepad_platform/full_canvas.css'>
     </head> 
     <body>
@@ -973,13 +1000,22 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 }
 
 pub fn run(config: WasmConfig, args: &[String]) -> Result<(), String> {
-    // we should run the compiled folder root as webserver
-    let result = build(config, args)?;
+    let build_crate = get_build_crate_from_args(args)?.to_string();
+    let profile = get_profile_from_args(args);
+    let build_dir = std::env::current_dir()
+        .unwrap()
+        .join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
+    let mut run_config = config;
+    run_config.hot_reload = true;
+
+    let result = build(run_config, args)?;
+    let hot_reload_plan = collect_wasm_hot_reload_watch_plan(&build_crate, &build_dir);
     start_wasm_server(
         result.app_dir,
         config.lan,
         config.port.unwrap_or(8010),
         config.threads,
+        hot_reload_plan,
     );
     Ok(())
 }
@@ -1023,7 +1059,233 @@ fn decode_query_component(input: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
+fn collect_wasm_hot_reload_watch_plan(
+    build_crate: &str,
+    build_dir: &Path,
+) -> Option<WasmHotReloadPlan> {
+    let mut crate_roots = BTreeMap::<String, PathBuf>::new();
+    let build_crate_dir = get_crate_dir(build_crate).ok()?;
+    crate_roots.insert(build_crate.to_string(), build_crate_dir);
+
+    for (name, path) in get_crate_dep_dirs(build_crate, build_dir, WASM_TARGET_TRIPLE) {
+        if should_watch_wasm_crate(build_crate, &name) {
+            crate_roots.entry(name).or_insert(path);
+        }
+    }
+
+    let mut roots = BTreeMap::<String, WatchRoot>::new();
+    let mut files_by_root = HashMap::<String, Vec<String>>::new();
+    let mut initial_contents = HashMap::<String, String>::new();
+
+    for (name, crate_dir) in crate_roots {
+        if !should_watch_wasm_crate(build_crate, &name) {
+            continue;
+        }
+
+        let files = collect_script_mod_files_in_crate(&crate_dir);
+        if files.is_empty() {
+            continue;
+        }
+
+        let mount = normalize_path_string(&crate_dir);
+        roots.entry(mount.clone()).or_insert_with(|| WatchRoot {
+            mount: mount.clone(),
+            path: crate_dir.clone(),
+        });
+
+        for file_name in files {
+            let Ok(content) = fs::read_to_string(&file_name) else {
+                continue;
+            };
+            initial_contents.entry(file_name.clone()).or_insert(content);
+            files_by_root.entry(mount.clone()).or_default().push(file_name);
+        }
+    }
+
+    if initial_contents.is_empty() {
+        return None;
+    }
+
+    for files in files_by_root.values_mut() {
+        files.sort();
+        files.dedup();
+    }
+
+    Some(WasmHotReloadPlan {
+        roots: roots.into_values().collect(),
+        files_by_root,
+        initial_contents,
+    })
+}
+
+fn should_watch_wasm_crate(build_crate: &str, crate_name: &str) -> bool {
+    crate_name == build_crate
+        || !matches!(
+            crate_name,
+            "makepad-platform" | "makepad-script" | "makepad-draw"
+        )
+}
+
+fn collect_script_mod_files_in_crate(crate_dir: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    collect_script_mod_files_recursive(crate_dir, &mut files);
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn collect_script_mod_files_recursive(dir: &Path, files: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "target" || name == ".git" {
+                continue;
+            }
+            collect_script_mod_files_recursive(&path, files);
+            continue;
+        }
+
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if source.contains("script_mod!") {
+            files.push(normalize_path_string(&path));
+        }
+    }
+}
+
+fn start_wasm_hot_reload_watcher(
+    plan: WasmHotReloadPlan,
+    tx: mpsc::Sender<WasmHotReloadEvent>,
+) -> Option<WasmHotReloadWatcher> {
+    let watched_file_count = plan.initial_contents.len();
+    let root_count = plan.roots.len();
+    let file_map = Arc::new(plan.files_by_root);
+    let file_cache = Arc::new(Mutex::new(plan.initial_contents));
+
+    match FileSystemWatcher::start(plan.roots, {
+        let file_map = Arc::clone(&file_map);
+        let file_cache = Arc::clone(&file_cache);
+        move |event| {
+            forward_hot_reload_fs_event(event.mount, event.path, &file_map, &file_cache, &tx);
+        }
+    }) {
+        Ok(watcher) => {
+            println!(
+                "Watching {} script_mod source files across {} crate roots",
+                watched_file_count, root_count
+            );
+            Some(WasmHotReloadWatcher { _watcher: watcher })
+        }
+        Err(err) => {
+            eprintln!("Wasm hot reload watcher unavailable: {}", err);
+            None
+        }
+    }
+}
+
+fn forward_hot_reload_fs_event(
+    mount: String,
+    path: PathBuf,
+    files_by_root: &HashMap<String, Vec<String>>,
+    file_cache: &Mutex<HashMap<String, String>>,
+    tx: &mpsc::Sender<WasmHotReloadEvent>,
+) {
+    let changed_path = normalize_path_string(&path);
+    let candidates = if files_by_root
+        .get(&mount)
+        .is_some_and(|files| files.iter().any(|file| file == &changed_path))
+    {
+        vec![changed_path]
+    } else {
+        files_by_root.get(&mount).cloned().unwrap_or_default()
+    };
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let Ok(mut cache) = file_cache.lock() else {
+        return;
+    };
+
+    for file_name in candidates {
+        let Ok(content) = fs::read_to_string(&file_name) else {
+            continue;
+        };
+        if cache
+            .get(&file_name)
+            .is_some_and(|previous| previous == &content)
+        {
+            continue;
+        }
+        cache.insert(file_name.clone(), content.clone());
+        let _ = tx.send(WasmHotReloadEvent {
+            kind: "live_change".to_string(),
+            file_name,
+            content,
+        });
+    }
+}
+
+fn broadcast_hot_reload_event(
+    event: WasmHotReloadEvent,
+    watch_clients: &mut HashMap<u64, mpsc::Sender<Vec<u8>>>,
+) {
+    let payload = event.serialize_json().into_bytes();
+    let stale_clients: Vec<u64> = watch_clients
+        .iter()
+        .filter_map(|(web_socket_id, sender)| sender.send(payload.clone()).err().map(|_| *web_socket_id))
+        .collect();
+    for web_socket_id in stale_clients {
+        watch_clients.remove(&web_socket_id);
+    }
+}
+
+fn normalize_path_string(path: &Path) -> String {
+    let path = if path.exists() {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    normalize_path(&path).to_string_lossy().replace('\\', "/")
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            std::path::Component::RootDir => out.push(comp.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            std::path::Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
+fn start_wasm_server(
+    root: PathBuf,
+    lan: bool,
+    port: u16,
+    threaded: bool,
+    hot_reload_plan: Option<WasmHotReloadPlan>,
+) {
     let net = NetworkRuntime::new(NetworkConfig::default());
     let addr = if lan {
         SocketAddr::new("0.0.0.0".parse().unwrap(), port)
@@ -1032,6 +1294,7 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
     };
     println!("Starting webserver on http://{:?}", addr);
     let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest>();
+    let (tx_hot_reload, rx_hot_reload) = mpsc::channel::<WasmHotReloadEvent>();
 
     net.start_http_server(HttpServer {
         listen_address: addr,
@@ -1039,12 +1302,37 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
         request: tx_request,
     });
 
+    let hot_reload_watcher =
+        hot_reload_plan.and_then(|plan| start_wasm_hot_reload_watcher(plan, tx_hot_reload));
+
     std::thread::spawn(move || {
-        while let Ok(message) = rx_request.recv() {
-            // only store last change, fix later
+        let _hot_reload_watcher = hot_reload_watcher;
+        let mut watch_clients = HashMap::<u64, mpsc::Sender<Vec<u8>>>::new();
+
+        loop {
+            while let Ok(event) = rx_hot_reload.try_recv() {
+                broadcast_hot_reload_event(event, &mut watch_clients);
+            }
+
+            let message = match rx_request.recv_timeout(Duration::from_millis(100)) {
+                Ok(message) => message,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+
             match message {
-                HttpServerRequest::ConnectWebSocket { .. } => {}
-                HttpServerRequest::DisconnectWebSocket { .. } => {}
+                HttpServerRequest::ConnectWebSocket {
+                    web_socket_id,
+                    headers,
+                    response_sender,
+                } => {
+                    if headers.path == "/$watch" {
+                        watch_clients.insert(web_socket_id, response_sender);
+                    }
+                }
+                HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
+                    watch_clients.remove(&web_socket_id);
+                }
                 HttpServerRequest::BinaryMessage { .. } => {}
                 HttpServerRequest::TextMessage { .. } => {}
                 HttpServerRequest::Get {

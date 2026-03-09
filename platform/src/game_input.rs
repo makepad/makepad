@@ -1,4 +1,12 @@
-use crate::{cx::Cx, event::game_input::GameInputState};
+use crate::event::game_input::GameInputState;
+
+#[cfg(not(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos"
+)))]
+use crate::cx::Cx;
 
 pub trait CxGameInputApi {
     fn game_input_state(&mut self, index: usize) -> Option<&GameInputState>;

@@ -47,9 +47,24 @@ export class WasmWebBrowser extends WasmBridge {
         this.dispatch_first_msg();
     }
 
+    install_live_reload_bridge() {
+        window.makepad_wasm_live_file_change = (file_name, content) => {
+            this.to_wasm.ToWasmLiveFileChange({file_name, content});
+            this.do_wasm_pump();
+        };
+
+        let queue = window.makepad_wasm_live_file_change_queue || [];
+        while (queue.length > 0) {
+            let [file_name, content] = queue.shift();
+            window.makepad_wasm_live_file_change(file_name, content);
+        }
+    }
+
     async load_deps() {
         this.to_wasm = this.new_to_wasm();
+        this.install_live_reload_bridge();
 
+        await this.query_xr_capabilities();
         this.update_window_info();
 
         this.to_wasm.ToWasmInit({
