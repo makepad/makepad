@@ -1,3 +1,8 @@
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
 mod android;
 mod apple;
 mod check;
@@ -146,7 +151,7 @@ fn show_help() {
     println!();
 }
 
-fn main() -> Result<(), Cow<'static, str>> {
+pub(crate) fn main() -> Result<(), Cow<'static, str>> {
     let args: Vec<String> = std::env::args().collect();
 
     // Skip the first argument if it's the binary path or 'cargo'
@@ -184,4 +189,13 @@ fn main() -> Result<(), Cow<'static, str>> {
         }
     };
     result.map_err(Into::into)
+}
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {
+    if let Err(err) = native::main() {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
 }

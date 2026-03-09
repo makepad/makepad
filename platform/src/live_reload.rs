@@ -8,9 +8,12 @@ use crate::makepad_script::{
     ScriptValue,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use std::collections::HashSet;
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use {
@@ -99,9 +102,6 @@ impl Cx {
 impl Cx {
     fn start_desktop_hot_reload_file_observer_if_requested(&mut self) {
         if !hot_reload_requested_from_args() {
-            return;
-        }
-        if Cx::has_studio_web_socket() {
             return;
         }
         if self.script_data.live_reload.file_observer.is_some() {
@@ -479,6 +479,7 @@ fn hot_reload_root_for_script_mod(
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn resolve_script_mod_file_for_watch(script_mod: &ScriptMod) -> Option<String> {
     let candidates = resolve_script_mod_file_candidates(script_mod);
     candidates
