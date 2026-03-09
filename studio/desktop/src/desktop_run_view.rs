@@ -167,6 +167,8 @@ pub struct DesktopRunView {
     #[rust]
     debug_present_ok_count: usize,
     #[rust]
+    app_ready_for_swapchain: bool,
+    #[rust]
     remote_cursor: MouseCursor,
     #[rust]
     is_hovered: bool,
@@ -221,6 +223,7 @@ impl DesktopRunView {
         self.last_swapchain_with_completed_draws = None;
         self.pending_draw = None;
         self.debug_present_ok_count = 0;
+        self.app_ready_for_swapchain = false;
         self.ai_viz_kind = None;
         self.ai_viz_frames_left = 0;
         self.ai_viz_total_frames = 0;
@@ -471,6 +474,9 @@ impl DesktopRunView {
 
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
+            if !self.app_ready_for_swapchain {
+                return outbound;
+            }
             let Some(endpoint_slot) = self.aux_chan_host_endpoint.as_ref() else {
                 return outbound;
             };
@@ -543,6 +549,7 @@ impl DesktopRunView {
         // Re-send bootstrap against the current swapchain instead of reallocating.
         // This keeps shared-memory resources stable while still re-triggering
         // WindowGeomChange/Swapchain after app-side readiness.
+        self.app_ready_for_swapchain = true;
         self.debug_present_ok_count = 0;
         self.bootstrap_pending = true;
         self.bootstrap_tick_count = 0;
