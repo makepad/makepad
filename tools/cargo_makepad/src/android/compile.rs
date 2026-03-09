@@ -2,7 +2,10 @@ use super::sdk::{AndroidSDKUrls, BUILD_TOOLS_DIR, PLATFORMS_DIR};
 use crate::android::{AndroidTarget, AndroidVariant, HostOs};
 use crate::makepad_shell::*;
 use crate::utils::*;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 
 fn aapt_path(sdk_dir: &Path, urls: &AndroidSDKUrls) -> PathBuf {
@@ -47,8 +50,6 @@ struct BuildPaths {
     res_dir: PathBuf,
     manifest_file: PathBuf,
     java_file: PathBuf,
-    java_class: PathBuf,
-    xr_class: PathBuf,
     xr_file: PathBuf,
     dst_unaligned_apk: PathBuf,
     dst_apk: PathBuf,
@@ -87,17 +88,217 @@ fn xr_java(url: &str) -> String {
     )
 }
 
+fn has_explicit_lib_target(cargo_toml: &str, crate_dir: &Path) -> bool {
+    crate_dir.join("src/lib.rs").is_file()
+        || cargo_toml
+            .lines()
+            .any(|line| line.trim_start().starts_with("[lib]"))
+}
+
+fn normalize_toml_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn absolutize_manifest_path(crate_dir: &Path, value: &str) -> String {
+    if value.contains("://") || Path::new(value).is_absolute() {
+        return value.to_string();
+    }
+    let joined = crate_dir.join(value);
+    normalize_toml_path(&joined.canonicalize().unwrap_or(joined))
+}
+
+fn rewrite_relative_toml_value(line: &mut String, key: &str, crate_dir: &Path) {
+    for needle in [format!("{key} ="), format!("{key}=")] {
+        let mut search_from = 0;
+        loop {
+            let Some(rel_pos) = line[search_from..].find(&needle) else {
+                break;
+            };
+            let value_key_start = search_from + rel_pos;
+            let mut quote_pos = value_key_start + needle.len();
+            while line
+                .as_bytes()
+                .get(quote_pos)
+                .is_some_and(|v| v.is_ascii_whitespace())
+            {
+                quote_pos += 1;
+            }
+            let Some(&quote) = line.as_bytes().get(quote_pos) else {
+                break;
+            };
+            if quote != b'"' && quote != b'\'' {
+                search_from = quote_pos.saturating_add(1);
+                continue;
+            }
+            let mut value_end = quote_pos + 1;
+            while let Some(&ch) = line.as_bytes().get(value_end) {
+                if ch == quote && line.as_bytes().get(value_end.saturating_sub(1)) != Some(&b'\\')
+                {
+                    break;
+                }
+                value_end += 1;
+            }
+            if value_end >= line.len() {
+                break;
+            }
+
+            let value = line[quote_pos + 1..value_end].to_string();
+            let replacement = absolutize_manifest_path(crate_dir, &value);
+            line.replace_range(quote_pos + 1..value_end, &replacement);
+            search_from = quote_pos + replacement.len() + 2;
+        }
+    }
+}
+
+fn rewrite_wrapper_manifest_paths(cargo_toml: &str, crate_dir: &Path) -> String {
+    let mut out = String::with_capacity(cargo_toml.len() + 256);
+    for raw_line in cargo_toml.lines() {
+        let mut line = raw_line.to_string();
+        for key in ["path", "build", "readme", "license-file"] {
+            rewrite_relative_toml_value(&mut line, key, crate_dir);
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+fn strip_generated_wrapper_args(args: &[String], build_crate: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    let mut removed_positional = false;
+
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        let skip_arg = matches!(
+            arg.as_str(),
+            "-p"
+                | "--package"
+                | "--manifest-path"
+                | "--exclude"
+                | "--bin"
+                | "--example"
+                | "--test"
+                | "--bench"
+        );
+        if skip_arg {
+            skip_next = true;
+            continue;
+        }
+
+        let skip_prefixed = arg.starts_with("--package=")
+            || arg.starts_with("--manifest-path=")
+            || arg.starts_with("--exclude=")
+            || arg.starts_with("--bin=")
+            || arg.starts_with("--example=")
+            || arg.starts_with("--test=")
+            || arg.starts_with("--bench=");
+        if skip_prefixed
+            || matches!(
+                arg.as_str(),
+                "--workspace"
+                    | "--all-targets"
+                    | "--bins"
+                    | "--examples"
+                    | "--tests"
+                    | "--benches"
+                    | "--lib"
+            )
+        {
+            continue;
+        }
+
+        if !removed_positional && !arg.starts_with('-') && arg == build_crate {
+            removed_positional = true;
+            continue;
+        }
+
+        out.push(arg.clone());
+    }
+
+    out
+}
+
+fn generate_android_wrapper_manifest(
+    build_crate: &str,
+    target_root: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let crate_dir = get_crate_dir(build_crate)?;
+    let cargo_toml_path = crate_dir.join("Cargo.toml");
+    let cargo_toml = fs::read_to_string(&cargo_toml_path)
+        .map_err(|e| format!("Can't read {:?}: {:?}", cargo_toml_path, e))?;
+
+    if has_explicit_lib_target(&cargo_toml, &crate_dir) {
+        return Ok(None);
+    }
+
+    let main_rs = crate_dir.join("src/main.rs");
+    if !main_rs.is_file() {
+        return Err(format!(
+            "Package {build_crate} has no library target and no src/main.rs to wrap for Android"
+        ));
+    }
+
+    let wrapper_dir = target_root
+        .join("makepad-android-wrapper")
+        .join(build_crate.replace('-', "_"));
+    let _ = rmdir(&wrapper_dir);
+    mkdir(&wrapper_dir)?;
+
+    let mut wrapper_manifest = rewrite_wrapper_manifest_paths(&cargo_toml, &crate_dir);
+    wrapper_manifest.push_str("\n[lib]\n");
+    wrapper_manifest.push_str(&format!(
+        "path = \"{}\"\n",
+        normalize_toml_path(&main_rs)
+    ));
+    wrapper_manifest.push_str("\n[workspace]\n");
+
+    let wrapper_manifest_path = wrapper_dir.join("Cargo.toml");
+    fs::write(&wrapper_manifest_path, wrapper_manifest)
+        .map_err(|e| format!("Can't write {:?}: {:?}", wrapper_manifest_path, e))?;
+
+    if let Ok(lock_data) = fs::read(crate_dir.join("Cargo.lock"))
+        .or_else(|_| fs::read(std::env::current_dir().unwrap().join("Cargo.lock")))
+    {
+        let _ = fs::write(wrapper_dir.join("Cargo.lock"), lock_data);
+    }
+
+    Ok(Some(wrapper_manifest_path))
+}
+
 fn rust_build(
     sdk_dir: &Path,
     host_os: HostOs,
+    build_crate: &str,
     args: &[String],
     android_targets: &[AndroidTarget],
     variant: &AndroidVariant,
     urls: &AndroidSDKUrls,
 ) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
+    let target_root = cargo_target_root(&cwd);
     let target_dir = cargo_target_dir(&cwd);
     let target_dir_str = target_dir.to_string_lossy().to_string();
+    let wrapper_manifest = generate_android_wrapper_manifest(build_crate, &target_root)?;
+    let cargo_cwd = wrapper_manifest
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cwd.clone());
+    let cargo_args = if let Some(wrapper_manifest) = &wrapper_manifest {
+        let mut cargo_args = vec![format!(
+            "--manifest-path={}",
+            normalize_toml_path(wrapper_manifest)
+        )];
+        cargo_args.extend(strip_generated_wrapper_args(args, build_crate));
+        cargo_args
+    } else {
+        args.to_vec()
+    };
     let (_ndk_version, ndk_prebuilt_root) =
         resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
     for android_target in android_targets {
@@ -130,7 +331,7 @@ fn rust_build(
         ];
         let mut args_out = Vec::new();
         args_out.extend_from_slice(base_args);
-        for arg in args {
+        for arg in &cargo_args {
             args_out.push(arg);
         }
 
@@ -180,7 +381,7 @@ fn rust_build(
                 ("RUSTFLAGS", &cfg_flag),
                 ("MAKEPAD", &makepad_env),
             ],
-            &cwd,
+            &cargo_cwd,
             "rustup",
             &args_out,
         )?;
@@ -191,7 +392,7 @@ fn rust_build(
 
 /// Resolve the cargo target directory for android builds.
 /// Defaults to `target/android` to avoid invalidating desktop build caches.
-fn cargo_target_dir(cwd: &Path) -> PathBuf {
+fn cargo_target_root(cwd: &Path) -> PathBuf {
     if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
         let target_dir = PathBuf::from(target_dir);
         if target_dir.is_absolute() {
@@ -200,7 +401,15 @@ fn cargo_target_dir(cwd: &Path) -> PathBuf {
             cwd.join(target_dir)
         }
     } else {
-        cwd.join("target").join("android")
+        cwd.join("target")
+    }
+}
+
+fn cargo_target_dir(cwd: &Path) -> PathBuf {
+    if std::env::var_os("CARGO_TARGET_DIR").is_some() {
+        cargo_target_root(cwd)
+    } else {
+        cargo_target_root(cwd).join("android")
     }
 }
 
@@ -274,12 +483,10 @@ fn prepare_build(
     let main_java = main_java(java_url);
     let java_path = java_url.replace('.', "/");
     let java_file = tmp_dir.join(&java_path).join("MakepadApp.java");
-    let java_class = out_dir.join(&java_path).join("MakepadApp.class");
     write_text(&java_file, &main_java)?;
 
     let xr_java = xr_java(java_url);
     let xr_file = tmp_dir.join(&java_path).join("MakepadAppXr.java");
-    let xr_class = out_dir.join(&java_path).join("MakepadAppXr.class");
     write_text(&xr_file, &xr_java)?;
 
     let apk_filename = to_snakecase(app_label);
@@ -295,8 +502,6 @@ fn prepare_build(
         res_dir,
         manifest_file,
         java_file,
-        java_class,
-        xr_class,
         xr_file,
         dst_unaligned_apk,
         dst_apk,
@@ -359,6 +564,11 @@ fn compile_java(
         &cwd,
         java_home.join("bin/javac").to_str().unwrap(),
         &[
+            "-source",
+            "1.8",
+            "-target",
+            "1.8",
+            "-Xlint:-options",
             "-classpath",
             (android_jar_path(sdk_dir, urls).to_str().unwrap()),
             "-Xlint:deprecation",
@@ -405,6 +615,10 @@ fn compile_java(
                 .join("VideoPlayerRunnable.java")
                 .to_str()
                 .unwrap()),
+            (makepad_java_classes_dir
+                .join("H264Encoder.java")
+                .to_str()
+                .unwrap()),
             (build_paths.java_file.to_str().unwrap()),
             (build_paths.xr_file.to_str().unwrap()),
         ],
@@ -418,127 +632,46 @@ fn build_dex(
     build_paths: &BuildPaths,
     urls: &AndroidSDKUrls,
 ) -> Result<(), String> {
-    let makepad_package_path = "dev/makepad/android";
     let java_home = sdk_dir.join("openjdk");
     let cwd = std::env::current_dir().unwrap();
 
-    let compiled_java_classes_dir = build_paths.out_dir.join(makepad_package_path);
+    let mut class_files: Vec<PathBuf> = ls(&build_paths.out_dir)?
+        .into_iter()
+        .filter(|rel| rel.extension().and_then(|ext| ext.to_str()) == Some("class"))
+        .map(|rel| build_paths.out_dir.join(rel))
+        .collect();
+
+    class_files.sort();
+
+    if class_files.is_empty() {
+        return Err(format!(
+            "No compiled Java class files found in {:?}",
+            build_paths.out_dir
+        ));
+    }
+
+    let d8_jar = d8_jar_path(sdk_dir, urls);
+    let android_jar = android_jar_path(sdk_dir, urls);
+
+    let mut args: Vec<&str> = vec![
+        "-cp",
+        d8_jar.to_str().unwrap(),
+        "com.android.tools.r8.D8",
+        "--classpath",
+        android_jar.to_str().unwrap(),
+        "--output",
+        build_paths.out_dir.to_str().unwrap(),
+    ];
+
+    for class_file in &class_files {
+        args.push(class_file.to_str().unwrap());
+    }
 
     shell_env_cap(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
         &cwd,
         java_home.join("bin/java").to_str().unwrap(),
-        &[
-            "-cp",
-            (d8_jar_path(sdk_dir, urls).to_str().unwrap()),
-            "com.android.tools.r8.D8",
-            "--classpath",
-            (android_jar_path(sdk_dir, urls).to_str().unwrap()),
-            "--output",
-            (build_paths.out_dir.to_str().unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadNative.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadSurface.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("ResizingLayout.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadNetwork.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadSocketStream.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadSocketStream$1.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadWebSocket.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadWebSocketReader.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("HttpResponse.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("ByteArrayMediaDataSource.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("VideoPlayer.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("VideoPlayerRunnable.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("VideoPlayer$1.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("VideoPlayer$2.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("VideoPlayer$3.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$1.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$2.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$3.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$4.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$5.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$5$1.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$5$2.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadActivity$6.class")
-                .to_str()
-                .unwrap()),
-            (compiled_java_classes_dir
-                .join("MakepadInputConnection.class")
-                .to_str()
-                .unwrap()),
-            (build_paths.java_class.to_str().unwrap()),
-            (build_paths.xr_class.to_str().unwrap()),
-        ],
+        &args,
     )?;
 
     Ok(())
@@ -1032,7 +1165,7 @@ pub fn build(
         }
     }
 
-    rust_build(sdk_dir, host_os, args, android_targets, variant, urls)?;
+    rust_build(sdk_dir, host_os, build_crate, args, android_targets, variant, urls)?;
     let build_paths = prepare_build(build_crate, &java_url, &app_label, variant, urls)?;
 
     println!("Compiling APK & R.java files");

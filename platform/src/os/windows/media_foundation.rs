@@ -4,6 +4,7 @@ use {
         os::windows::win32_app::TRUE,
         thread::SignalToUI,
         video::*,
+        video_encode::camera_video_encoder::VideoEncoder,
         windows::{
             core::{
                 AsImpl,
@@ -19,32 +20,15 @@ use {
                 IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE,
             },
             Win32::Media::MediaFoundation::{
-                IMFActivate,
-                IMFMediaEvent,
-                IMFMediaSource,
-                IMFMediaType,
-                IMFSample,
-                IMFSourceReader,
-                IMFSourceReaderCallback,
-                //IMF2DBuffer,
-                IMFSourceReaderCallback_Impl,
-                MFCreateAttributes,
-                MFCreateSourceReaderFromMediaSource,
-                MFEnumDeviceSources,
-                MFVideoFormat_MJPG,
-                MFVideoFormat_NV12,
-                MFVideoFormat_RGB24,
-                MFVideoFormat_YUY2,
-                MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
-                MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                IMF2DBuffer, IMFActivate, IMFMediaEvent, IMFMediaSource, IMFMediaType, IMFSample,
+                IMFSourceReader, IMFSourceReaderCallback, IMFSourceReaderCallback_Impl,
+                MFCreateAttributes, MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources,
+                MFVideoFormat_MJPG, MFVideoFormat_NV12, MFVideoFormat_RGB24, MFVideoFormat_YUY2,
+                MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
                 MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
-                MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
-                MF_MT_FRAME_RATE,
-                MF_MT_FRAME_SIZE,
-                MF_MT_SUBTYPE,
-                MF_READWRITE_DISABLE_CONVERTERS,
-                MF_SOURCE_READER_ASYNC_CALLBACK,
-                MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_FRAME_RATE,
+                MF_MT_FRAME_SIZE, MF_MT_SUBTYPE, MF_READWRITE_DISABLE_CONVERTERS,
+                MF_SOURCE_READER_ASYNC_CALLBACK, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
             },
             Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL},
         },
@@ -68,7 +52,9 @@ impl MfInput {
     fn activate(
         &mut self,
         video_format: VideoFormat,
-        callback: Arc<Mutex<Option<Box<dyn FnMut(VideoBufferRef) + Send + 'static>>>>,
+        callback: Arc<Mutex<Option<VideoInputFn>>>,
+        frame_callback: Arc<Mutex<Option<CameraFrameInputFn>>>,
+        video_encoder: Arc<Mutex<Option<VideoEncoder>>>,
     ) {
         if self.active_format.is_some() {
             panic!()
@@ -78,6 +64,8 @@ impl MfInput {
         *cb.config.lock().unwrap() = Some(SourceReaderConfig {
             video_format,
             callback,
+            frame_callback,
+            video_encoder,
         });
         *cb.source_reader.lock().unwrap() = Some(self.source_reader.clone());
         unsafe {
@@ -117,6 +105,10 @@ struct MfMediaType {
 
 pub struct MediaFoundationAccess {
     pub video_input_cb: [Arc<Mutex<Option<VideoInputFn>>>; MAX_VIDEO_DEVICE_INDEX],
+    pub camera_frame_input_cb: [Arc<Mutex<Option<CameraFrameInputFn>>>; MAX_VIDEO_DEVICE_INDEX],
+    pub video_output_cb: [Arc<Mutex<Option<VideoOutputFn>>>; MAX_VIDEO_DEVICE_INDEX],
+    pub video_encoder_config: [Arc<Mutex<Option<VideoEncoderConfig>>>; MAX_VIDEO_DEVICE_INDEX],
+    video_encoder: [Arc<Mutex<Option<VideoEncoder>>>; MAX_VIDEO_DEVICE_INDEX],
     inputs: Vec<MfInput>,
     _enumerator: IMMDeviceEnumerator,
     _change_listener: IMMNotificationClient,
@@ -141,6 +133,10 @@ impl MediaFoundationAccess {
                 _change_listener: change_listener,
                 inputs: Default::default(),
                 video_input_cb: Default::default(),
+                camera_frame_input_cb: Default::default(),
+                video_output_cb: Default::default(),
+                video_encoder_config: Default::default(),
+                video_encoder: Default::default(),
             }));
             change_signal.set();
             access
@@ -148,7 +144,10 @@ impl MediaFoundationAccess {
     }
 
     pub fn use_video_input(&mut self, inputs: &[(VideoInputId, VideoFormatId)]) {
-        // enable these video capture devices / disabling others
+        for slot in &self.video_encoder {
+            *slot.lock().unwrap() = None;
+        }
+
         for (index, (input_id, format_id)) in inputs.iter().enumerate() {
             if let Some(input) = self
                 .inputs
@@ -161,9 +160,39 @@ impl MediaFoundationAccess {
                     .iter()
                     .find(|f| f.format_id == *format_id)
                     .unwrap();
+
+                if let (Some(mut config), true) = (
+                    *self.video_encoder_config[index].lock().unwrap(),
+                    self.video_output_cb[index].lock().unwrap().is_some(),
+                ) {
+                    config.width = video_format.width as u32;
+                    config.height = video_format.height as u32;
+                    if let Some(fps) = video_format.frame_rate {
+                        config.fps_num = fps.max(1.0).round() as u32;
+                        config.fps_den = 1;
+                    }
+                    config.source = VideoEncodeSource::Camera {
+                        input_id: *input_id,
+                        format_id: *format_id,
+                    };
+                    let output_cb = self.video_output_cb[index].clone();
+                    *self.video_encoder[index].lock().unwrap() = VideoEncoder::start(
+                        config,
+                        Box::new(move |packet| {
+                            if let Some(cb) = &mut *output_cb.lock().unwrap() {
+                                cb(packet);
+                            }
+                        }),
+                    );
+                }
+
                 if input.active_format.is_none() {
-                    // activate
-                    input.activate(*video_format, self.video_input_cb[index].clone());
+                    input.activate(
+                        *video_format,
+                        self.video_input_cb[index].clone(),
+                        self.camera_frame_input_cb[index].clone(),
+                        self.video_encoder[index].clone(),
+                    );
                 }
             }
         }
@@ -331,6 +360,8 @@ impl MediaFoundationAccess {
 struct SourceReaderConfig {
     video_format: VideoFormat,
     callback: Arc<Mutex<Option<VideoInputFn>>>,
+    frame_callback: Arc<Mutex<Option<CameraFrameInputFn>>>,
+    video_encoder: Arc<Mutex<Option<VideoEncoder>>>,
 }
 
 pub(crate) struct SourceReaderCallback {
@@ -365,8 +396,133 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback_Impl {
                             let mut ptr = 0 as *mut u8;
                             let mut len = 0;
                             if buffer.Lock(&mut ptr, None, Some(&mut len)).is_ok() {
-                                let ptr = ptr as *mut u32;
-                                let data = std::slice::from_raw_parts_mut(ptr, len as usize >> 2);
+                                let pts_ns = (_lltimestamp.max(0) as u64).saturating_mul(100);
+
+                                let mut frame_ref = None;
+                                let width = config.video_format.width;
+                                let height = config.video_format.height;
+
+                                if let Ok(buffer_2d) = buffer.cast::<IMF2DBuffer>() {
+                                    let mut ptr2d = std::ptr::null_mut();
+                                    let mut stride = 0i32;
+                                    if buffer_2d.Lock2D(&mut ptr2d, &mut stride).is_ok() {
+                                        let row_stride = stride.unsigned_abs() as usize;
+                                        let base_ptr = if stride < 0 {
+                                            unsafe {
+                                                (ptr2d as *const u8).add(
+                                                    row_stride
+                                                        .saturating_mul(height.saturating_sub(1)),
+                                                )
+                                            }
+                                        } else {
+                                            ptr2d as *const u8
+                                        };
+
+                                        match config.video_format.pixel_format {
+                                            VideoPixelFormat::NV12 => {
+                                                let y_len = row_stride.saturating_mul(height);
+                                                let uv_h = height.div_ceil(2);
+                                                let uv_len = row_stride.saturating_mul(uv_h);
+                                                let y = unsafe {
+                                                    std::slice::from_raw_parts(base_ptr, y_len)
+                                                };
+                                                let uv = unsafe {
+                                                    std::slice::from_raw_parts(
+                                                        base_ptr.add(y_len),
+                                                        uv_len,
+                                                    )
+                                                };
+                                                frame_ref = Some(CameraFrameRef {
+                                                    timestamp_ns: pts_ns,
+                                                    width,
+                                                    height,
+                                                    layout: CameraFrameLayout::NV12,
+                                                    matrix: CameraColorMatrix::BT709,
+                                                    plane_count: 2,
+                                                    planes: [
+                                                        CameraFramePlaneRef {
+                                                            bytes: y,
+                                                            row_stride,
+                                                            pixel_stride: 1,
+                                                        },
+                                                        CameraFramePlaneRef {
+                                                            bytes: uv,
+                                                            row_stride,
+                                                            pixel_stride: 2,
+                                                        },
+                                                        CameraFramePlaneRef::empty(),
+                                                    ],
+                                                });
+                                            }
+                                            VideoPixelFormat::YUY2 => {
+                                                let packed_len = row_stride.saturating_mul(height);
+                                                let packed = unsafe {
+                                                    std::slice::from_raw_parts(base_ptr, packed_len)
+                                                };
+                                                frame_ref = Some(CameraFrameRef {
+                                                    timestamp_ns: pts_ns,
+                                                    width,
+                                                    height,
+                                                    layout: CameraFrameLayout::YUY2,
+                                                    matrix: CameraColorMatrix::BT709,
+                                                    plane_count: 1,
+                                                    planes: [
+                                                        CameraFramePlaneRef {
+                                                            bytes: packed,
+                                                            row_stride,
+                                                            pixel_stride: 2,
+                                                        },
+                                                        CameraFramePlaneRef::empty(),
+                                                        CameraFramePlaneRef::empty(),
+                                                    ],
+                                                });
+                                            }
+                                            _ => {}
+                                        }
+
+                                        let _ = buffer_2d.Unlock2D();
+                                    }
+                                }
+
+                                if frame_ref.is_none()
+                                    && config.video_format.pixel_format == VideoPixelFormat::MJPEG
+                                {
+                                    let bytes = unsafe {
+                                        std::slice::from_raw_parts(ptr as *const u8, len as usize)
+                                    };
+                                    frame_ref = Some(CameraFrameRef {
+                                        timestamp_ns: pts_ns,
+                                        width,
+                                        height,
+                                        layout: CameraFrameLayout::Mjpeg,
+                                        matrix: CameraColorMatrix::Unknown,
+                                        plane_count: 1,
+                                        planes: [
+                                            CameraFramePlaneRef {
+                                                bytes,
+                                                row_stride: len as usize,
+                                                pixel_stride: 1,
+                                            },
+                                            CameraFramePlaneRef::empty(),
+                                            CameraFramePlaneRef::empty(),
+                                        ],
+                                    });
+                                }
+
+                                if let Some(frame_ref) = frame_ref {
+                                    if let Some(frame_cb) =
+                                        &mut *config.frame_callback.lock().unwrap()
+                                    {
+                                        frame_cb(frame_ref);
+                                    }
+                                    if let Some(enc) = &*config.video_encoder.lock().unwrap() {
+                                        enc.push_frame(frame_ref);
+                                    }
+                                }
+
+                                let ptr_u32 = ptr as *mut u32;
+                                let data =
+                                    std::slice::from_raw_parts_mut(ptr_u32, len as usize >> 2);
                                 cb(VideoBufferRef {
                                     format: config.video_format,
                                     data: VideoBufferRefData::U32(data),

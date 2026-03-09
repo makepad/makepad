@@ -94,11 +94,8 @@ pub struct CxDrawShaders {
 
 impl CxDrawShaders {
     pub fn reset_for_live_reload(&mut self) {
-        /*
-        self.ptr_to_item.clear();
-        self.fingerprints.clear();
-        self.error_set.clear();
-        self.error_fingerprints.clear();*/
+        self.cache_object_id_to_shader.clear();
+        self.cache_functions_to_shader.clear();
     }
 }
 

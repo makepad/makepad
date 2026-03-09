@@ -123,10 +123,7 @@ impl Cx {
         // }
 
         // Live edits
-        if self.handle_live_edit() {
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-        }
+        self.run_live_edit_if_needed("open-harmony");
 
         // Platform operations
         self.handle_platform_ops();
@@ -531,6 +528,25 @@ impl Cx {
                         inner_size: size,
                         outer_size: size,
                     };
+                    window.is_created = true;
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let window = &mut self.windows[window_id];
+                    window.window_geom.position = position;
+                    window.window_geom.inner_size = size;
+                    window.window_geom.outer_size = size;
+                    window.window_geom.dpi_factor = self.os.dpi_factor;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
                     window.is_created = true;
                 }
                 CxOsOp::StartTimer {

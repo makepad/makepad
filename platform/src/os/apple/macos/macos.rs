@@ -5,11 +5,14 @@ use {
         draw_pass::CxDrawPassParent,
         event::{
             video_playback::{
+                CameraPreviewMode, VideoBufferedRangesEvent, VideoDecodingErrorEvent,
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
-                VideoTextureUpdatedEvent,
+                VideoSeekableRangesEvent, VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
-            Event, GameInputEventChannel, MouseButton, MouseUpEvent, WindowGeom,
+            Event, GameInputEventChannel, MouseButton, MouseUpEvent, VideoSource,
+            WindowGeom,
         },
+        texture::{Texture, TextureFormat},
         makepad_live_id::*,
         makepad_math::*,
         os::{
@@ -17,7 +20,8 @@ use {
                 apple_classes::init_apple_classes_global,
                 apple_game_input::AppleGameInput,
                 apple_sys::*,
-                apple_video_playback::AppleVideoPlayer,
+                apple_util::str_to_nsstring,
+                apple_video_player::AppleUnifiedVideoPlayer,
                 macos::{
                     macos_app::{init_macos_app_global, with_macos_app, MacosApp},
                     macos_event::MacosEvent,
@@ -34,7 +38,13 @@ use {
         window::{CxWindowPool, WindowId},
     },
     makepad_objc_sys::{msg_send, objc_block, sel, sel_impl},
-    std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant},
+    std::{
+        cell::RefCell,
+        collections::HashMap,
+        rc::Rc,
+        sync::{Arc, Mutex},
+        time::Instant,
+    },
 };
 
 #[derive(Clone)]
@@ -90,6 +100,47 @@ impl MetalWindow {
         }
     }
 
+    pub(crate) fn new_popup(
+        window_id: WindowId,
+        metal_cx: &MetalCx,
+        size: Vec2d,
+        position: Vec2d,
+        parent_window: ObjcId,
+    ) -> MetalWindow {
+        let ca_layer: ObjcId = unsafe { msg_send![class!(CAMetalLayer), new] };
+
+        let mut cocoa_window = Box::new(MacosWindow::new(window_id));
+
+        cocoa_window.init_popup(size, position, parent_window);
+        unsafe {
+            let () = msg_send![ca_layer, setDevice: metal_cx.device];
+            let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+            let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
+            let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
+            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
+            let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
+            let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
+            let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
+            let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
+            let () = msg_send![ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, 1.0)];
+
+            let view = cocoa_window.view;
+            let () = msg_send![view, setWantsBestResolutionOpenGLSurface: YES];
+            let () = msg_send![view, setWantsLayer: YES];
+            let () = msg_send![view, setLayerContentsPlacement: 11];
+            let () = msg_send![view, setLayer: ca_layer];
+        }
+
+        MetalWindow {
+            is_resizing: false,
+            window_id,
+            cal_size: Vec2d::default(),
+            ca_layer,
+            window_geom: cocoa_window.get_window_geom(),
+            cocoa_window,
+        }
+    }
+
     pub(crate) fn start_resize(&mut self) {
         self.is_resizing = true;
         let () = unsafe { msg_send![self.ca_layer, setPresentsWithTransaction: YES] };
@@ -115,6 +166,159 @@ impl MetalWindow {
         } else {
             false
         }
+    }
+}
+
+pub(crate) struct MacosNativeCameraPreview {
+    input_id: crate::video::VideoInputId,
+    format_id: crate::video::VideoFormatId,
+    width: u32,
+    height: u32,
+    prepare_notified: bool,
+    camera_access: Option<Arc<Mutex<crate::os::apple::av_capture::AvCaptureAccess>>>,
+    attached_window: Option<WindowId>,
+    host_view: ObjcId,
+    preview_layer: ObjcId,
+}
+
+impl MacosNativeCameraPreview {
+    fn new(
+        input_id: crate::video::VideoInputId,
+        format_id: crate::video::VideoFormatId,
+        camera_access: Arc<Mutex<crate::os::apple::av_capture::AvCaptureAccess>>,
+    ) -> Self {
+        {
+            let mut cam = camera_access.lock().unwrap();
+            *cam.camera_frame_input_cb[0].lock().unwrap() = None;
+            *cam.video_input_cb[0].lock().unwrap() = None;
+            cam.use_video_input(&[(input_id, format_id)]);
+        }
+        let (width, height) = {
+            let cam = camera_access.lock().unwrap();
+            cam.format_size(input_id, format_id).unwrap_or((0, 0))
+        };
+
+        Self {
+            input_id,
+            format_id,
+            width,
+            height,
+            prepare_notified: false,
+            camera_access: Some(camera_access),
+            attached_window: None,
+            host_view: nil,
+            preview_layer: nil,
+        }
+    }
+
+    fn check_prepared(
+        &mut self,
+    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+        if self.prepare_notified {
+            return None;
+        }
+        self.prepare_notified = true;
+        Some(Ok((
+            self.width,
+            self.height,
+            0,
+            false,
+            vec!["camera".to_string()],
+            vec![],
+        )))
+    }
+
+    fn session(&self) -> Option<ObjcId> {
+        let cam = self.camera_access.as_ref()?.lock().unwrap();
+        cam.session_for(self.input_id, self.format_id)
+    }
+
+    fn ensure_attached(&mut self, window_id: WindowId, parent_view: ObjcId, rect: Rect) {
+        unsafe {
+            if self.attached_window != Some(window_id) || self.host_view == nil {
+                self.detach_preview();
+
+                let host_view: ObjcId = msg_send![class!(NSView), alloc];
+                let host_view: ObjcId = msg_send![host_view, initWithFrame: NSRect {
+                    origin: NSPoint { x: rect.pos.x, y: rect.pos.y },
+                    size: NSSize { width: rect.size.x.max(0.0), height: rect.size.y.max(0.0) }
+                }];
+                let () = msg_send![host_view, setWantsLayer: YES];
+                let () = msg_send![parent_view, addSubview: host_view];
+
+                if let Some(session) = self.session() {
+                    let preview_layer: ObjcId = msg_send![class!(AVCaptureVideoPreviewLayer), layerWithSession: session];
+                    if preview_layer != nil {
+                        let gravity = str_to_nsstring("AVLayerVideoGravityResizeAspectFill");
+                        let () = msg_send![preview_layer, setVideoGravity: gravity];
+                        let layer: ObjcId = msg_send![host_view, layer];
+                        if layer != nil {
+                            let () = msg_send![layer, addSublayer: preview_layer];
+                            self.preview_layer = preview_layer;
+                        }
+                    }
+                }
+
+                self.host_view = host_view;
+                self.attached_window = Some(window_id);
+            }
+        }
+    }
+
+    fn update_preview(&mut self, window_id: WindowId, parent_view: ObjcId, rect: Rect, visible: bool) {
+        self.ensure_attached(window_id, parent_view, rect);
+        unsafe {
+            if self.host_view != nil {
+                let frame = NSRect {
+                    origin: NSPoint {
+                        x: rect.pos.x,
+                        y: rect.pos.y,
+                    },
+                    size: NSSize {
+                        width: rect.size.x.max(0.0),
+                        height: rect.size.y.max(0.0),
+                    },
+                };
+                let () = msg_send![self.host_view, setFrame: frame];
+                let () = msg_send![self.host_view, setHidden: if visible { NO } else { YES }];
+                if self.preview_layer != nil {
+                    let () = msg_send![self.preview_layer, setFrame: NSRect {
+                        origin: NSPoint { x: 0.0, y: 0.0 },
+                        size: NSSize { width: rect.size.x.max(0.0), height: rect.size.y.max(0.0) },
+                    }];
+                }
+            }
+        }
+    }
+
+    fn detach_preview(&mut self) {
+        unsafe {
+            if self.preview_layer != nil {
+                let () = msg_send![self.preview_layer, removeFromSuperlayer];
+                self.preview_layer = nil;
+            }
+            if self.host_view != nil {
+                let () = msg_send![self.host_view, removeFromSuperview];
+                self.host_view = nil;
+            }
+        }
+        self.attached_window = None;
+    }
+
+    fn cleanup(&mut self) {
+        self.detach_preview();
+        if let Some(cam) = self.camera_access.take() {
+            let mut cam = cam.lock().unwrap();
+            cam.use_video_input(&[]);
+            *cam.camera_frame_input_cb[0].lock().unwrap() = None;
+            *cam.video_input_cb[0].lock().unwrap() = None;
+        }
+    }
+}
+
+impl Drop for MacosNativeCameraPreview {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }
 
@@ -309,6 +513,7 @@ impl Cx {
                         needs_timer = true;
                     }
                     self.poll_control_channel();
+                    self.handle_actions();
 
                     if self.any_passes_dirty()
                         || self.need_redrawing()
@@ -332,11 +537,7 @@ impl Cx {
                             self.os.timer0_idle_since = Some(now);
                         }
                     }
-                    /*
-                    if self.handle_live_edit() {
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }*/
+                    self.run_live_edit_if_needed("macos");
                     self.handle_networking_events();
                     self.handle_gamepad_events();
                     self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
@@ -367,6 +568,9 @@ impl Cx {
             }
             MacosEvent::WindowLostFocus(window_id) => {
                 self.call_event_handler(&Event::WindowLostFocus(window_id));
+            }
+            MacosEvent::PopupDismissed(event) => {
+                self.call_event_handler(&Event::PopupDismissed(event));
             }
             MacosEvent::WindowResizeLoopStart(window_id) => {
                 if let Some(window) = metal_windows.iter_mut().find(|w| w.window_id == window_id) {
@@ -424,21 +628,66 @@ impl Cx {
                 if has_video_players {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
-                        if let Some((width, height, duration)) = player.check_prepared() {
-                            video_events.push(Event::VideoPlaybackPrepared(
-                                VideoPlaybackPreparedEvent {
-                                    video_id: player.video_id,
-                                    video_width: width,
-                                    video_height: height,
-                                    duration,
-                                },
-                            ));
+                        match player.check_prepared() {
+                            Some(Ok((
+                                width,
+                                height,
+                                duration,
+                                is_seekable,
+                                video_tracks,
+                                audio_tracks,
+                            ))) => {
+                                video_events.push(Event::VideoPlaybackPrepared(
+                                    VideoPlaybackPreparedEvent {
+                                        video_id: player.video_id,
+                                        video_width: width,
+                                        video_height: height,
+                                        duration,
+                                        is_seekable,
+                                        video_tracks,
+                                        audio_tracks,
+                                    },
+                                ));
+                                let seekable = player.seekable_ranges();
+                                if !seekable.is_empty() {
+                                    video_events.push(Event::VideoSeekableRanges(
+                                        VideoSeekableRangesEvent {
+                                            video_id: player.video_id,
+                                            ranges: seekable,
+                                        },
+                                    ));
+                                }
+                                let buffered = player.buffered_ranges();
+                                if !buffered.is_empty() {
+                                    video_events.push(Event::VideoBufferedRanges(
+                                        VideoBufferedRangesEvent {
+                                            video_id: player.video_id,
+                                            ranges: buffered,
+                                        },
+                                    ));
+                                }
+                            }
+                            Some(Err(err)) => {
+                                video_events.push(Event::VideoDecodingError(
+                                    VideoDecodingErrorEvent {
+                                        video_id: player.video_id,
+                                        error: err,
+                                    },
+                                ));
+                            }
+                            None => {}
                         }
                         if player.poll_frame(&mut self.textures) {
                             video_events.push(Event::VideoTextureUpdated(
                                 VideoTextureUpdatedEvent {
                                     video_id: player.video_id,
                                     current_position_ms: player.current_position_ms(),
+                                    yuv: crate::event::video_playback::VideoYuvMetadata {
+                                        enabled: player.is_software_mode(),
+                                        matrix: player.yuv_matrix(),
+                                        biplanar: player.yuv_biplanar() > 0.5,
+                                        rotation_steps: 0.0,
+                                    },
                                 },
                             ));
                         }
@@ -596,6 +845,36 @@ impl Cx {
                     metal_windows.push(metal_window);
                     window.is_created = true;
                 }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let window = &mut self.windows[window_id];
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    // Find the parent NSWindow handle for coordinate conversion
+                    let parent_ns_window = metal_windows
+                        .iter()
+                        .find(|w| w.window_id == parent_window_id)
+                        .map(|w| w.cocoa_window.window)
+                        .unwrap_or(nil);
+                    let metal_window = MetalWindow::new_popup(
+                        window_id,
+                        &metal_cx,
+                        size,
+                        position,
+                        parent_ns_window,
+                    );
+                    window.window_geom = metal_window.window_geom.clone();
+                    metal_windows.push(metal_window);
+                    window.is_created = true;
+                }
                 CxOsOp::ResizeWindow(window_id, size) => {
                     if let Some(metal_window) =
                         metal_windows.iter_mut().find(|w| w.window_id == window_id)
@@ -726,6 +1005,63 @@ impl Cx {
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
                 CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::AttachCameraNativePreview { video_id, area } => {
+                    let Some(draw_list_id) = area.draw_list_id() else {
+                        continue;
+                    };
+                    let Some(draw_pass_id) = self.draw_lists[draw_list_id].draw_pass_id else {
+                        continue;
+                    };
+                    let Some(window_id) = self.get_pass_window_id(draw_pass_id) else {
+                        continue;
+                    };
+                    let Some(metal_window) = metal_windows.iter().find(|w| w.window_id == window_id)
+                    else {
+                        continue;
+                    };
+
+                    let mut rect = area.clipped_rect(self);
+                    let win_h = self.windows[window_id].window_geom.inner_size.y;
+                    rect.pos.y = (win_h - rect.pos.y - rect.size.y).max(0.0);
+                    let parent_view = metal_window.cocoa_window.view;
+
+                    if let Some(preview) = self.os.native_camera_previews.get_mut(&video_id) {
+                        preview.update_preview(window_id, parent_view, rect, true);
+                    }
+                }
+                CxOsOp::UpdateCameraNativePreview {
+                    video_id,
+                    area,
+                    visible,
+                } => {
+                    let Some(draw_list_id) = area.draw_list_id() else {
+                        continue;
+                    };
+                    let Some(draw_pass_id) = self.draw_lists[draw_list_id].draw_pass_id else {
+                        continue;
+                    };
+                    let Some(window_id) = self.get_pass_window_id(draw_pass_id) else {
+                        continue;
+                    };
+                    let Some(metal_window) = metal_windows.iter().find(|w| w.window_id == window_id)
+                    else {
+                        continue;
+                    };
+
+                    let mut rect = area.clipped_rect(self);
+                    let win_h = self.windows[window_id].window_geom.inner_size.y;
+                    rect.pos.y = (win_h - rect.pos.y - rect.size.y).max(0.0);
+                    let parent_view = metal_window.cocoa_window.view;
+
+                    if let Some(preview) = self.os.native_camera_previews.get_mut(&video_id) {
+                        preview.update_preview(window_id, parent_view, rect, visible);
+                    }
+                }
+                CxOsOp::DetachCameraNativePreview { video_id } => {
+                    if let Some(preview) = self.os.native_camera_previews.get_mut(&video_id) {
+                        preview.detach_preview();
+                    }
+                }
                 CxOsOp::SaveFileDialog(settings) => {
                     with_macos_app(|app| app.open_save_file_dialog(settings));
                 }
@@ -759,49 +1095,135 @@ impl Cx {
                 CxOsOp::PrepareVideoPlayback(
                     video_id,
                     source,
+                    camera_preview_mode,
                     _gl_handle,
                     texture_id,
                     autoplay,
                     should_loop,
                 ) => {
-                    let player = AppleVideoPlayer::new(
+                    if let Some(mut player) = self.os.video_players.remove(&video_id) {
+                        player.cleanup();
+                    }
+                    if let Some(mut preview) = self.os.native_camera_previews.remove(&video_id) {
+                        preview.cleanup();
+                    }
+
+                    if let VideoSource::Camera(input_id, format_id) = source {
+                        if matches!(camera_preview_mode, CameraPreviewMode::Texture) {
+                            crate::log!(
+                                "VIDEO: macOS camera texture mode is not available, using native preview"
+                            );
+                        }
+                        let camera_access = self.os.media.av_capture();
+                        let mut preview = MacosNativeCameraPreview::new(
+                            input_id,
+                            format_id,
+                            camera_access,
+                        );
+                        if let Some(Ok((
+                            width,
+                            height,
+                            duration,
+                            is_seekable,
+                            video_tracks,
+                            audio_tracks,
+                        ))) = preview.check_prepared()
+                        {
+                            self.call_event_handler(&Event::VideoPlaybackPrepared(
+                                VideoPlaybackPreparedEvent {
+                                    video_id,
+                                    video_width: width,
+                                    video_height: height,
+                                    duration,
+                                    is_seekable,
+                                    video_tracks,
+                                    audio_tracks,
+                                },
+                            ));
+                        }
+                        self.os.native_camera_previews.insert(video_id, preview);
+                        continue;
+                    }
+
+                    // Allocate YUV textures internally for software/NV12 decode path
+                    let tex_y = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
+                    let tex_u = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
+                    let tex_v = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
+                    let tex_y_id = tex_y.texture_id();
+                    let tex_u_id = tex_u.texture_id();
+                    let tex_v_id = tex_v.texture_id();
+                    let player = AppleUnifiedVideoPlayer::new(
                         metal_cx.device,
                         video_id,
                         texture_id,
+                        tex_y_id,
+                        tex_u_id,
+                        tex_v_id,
                         source,
                         autoplay,
                         should_loop,
                     );
                     self.os.video_players.insert(video_id, player);
+                    // Notify widget so it can bind textures to shader slots
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(
+                        VideoYuvTexturesReady {
+                            video_id,
+                            tex_y,
+                            tex_u,
+                            tex_v,
+                        },
+                    ));
                     // Keep timer alive so we can poll for video frames
                     self.ensure_timer0_started();
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if self.os.native_camera_previews.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.play();
                     }
                 }
                 CxOsOp::PauseVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if self.os.native_camera_previews.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.pause();
                     }
                 }
                 CxOsOp::ResumeVideoPlayback(video_id) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if self.os.native_camera_previews.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.resume();
                     }
                 }
                 CxOsOp::MuteVideoPlayback(video_id) => {
+                    if self.os.native_camera_previews.contains_key(&video_id) {
+                        continue;
+                    }
                     if let Some(player) = self.os.video_players.get(&video_id) {
                         player.mute();
                     }
                 }
                 CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    if self.os.native_camera_previews.contains_key(&video_id) {
+                        continue;
+                    }
                     if let Some(player) = self.os.video_players.get(&video_id) {
                         player.unmute();
                     }
                 }
                 CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    if let Some(mut preview) = self.os.native_camera_previews.remove(&video_id) {
+                        preview.cleanup();
+                        self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id },
+                        ));
+                        continue;
+                    }
                     if let Some(mut player) = self.os.video_players.remove(&video_id) {
                         player.cleanup();
                         self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
@@ -810,9 +1232,44 @@ impl Cx {
                     }
                 }
                 CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
-                    if let Some(player) = self.os.video_players.get(&video_id) {
+                    if self.os.native_camera_previews.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
                         player.seek_to(position_ms);
                     }
+                }
+                CxOsOp::SetVideoVolume(video_id, volume) => {
+                    if self.os.native_camera_previews.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.set_volume(volume);
+                    }
+                }
+                CxOsOp::SetVideoPlaybackRate(video_id, rate) => {
+                    if self.os.native_camera_previews.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(player) = self.os.video_players.get(&video_id) {
+                        player.set_playback_rate(rate);
+                    }
+                }
+                CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
+                    use crate::texture::TextureId;
+                    let player = AppleUnifiedVideoPlayer::new(
+                        metal_cx.device,
+                        video_id,
+                        TextureId::default(),
+                        TextureId::default(),
+                        TextureId::default(),
+                        TextureId::default(),
+                        source,
+                        autoplay,
+                        should_loop,
+                    );
+                    self.os.video_players.insert(video_id, player);
+                    self.ensure_timer0_started();
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
@@ -834,9 +1291,22 @@ impl Cx {
         }
     }
 
+    fn check_camera_permission_status(&self) -> crate::permission::PermissionStatus {
+        unsafe {
+            let permission_status: i32 = msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: AVMediaTypeVideo];
+            match permission_status {
+                3 => crate::permission::PermissionStatus::Granted,
+                2 => crate::permission::PermissionStatus::DeniedPermanent,
+                1 => crate::permission::PermissionStatus::DeniedPermanent,
+                _ => crate::permission::PermissionStatus::NotDetermined,
+            }
+        }
+    }
+
     fn handle_permission_check(&mut self, permission: Permission, request_id: i32) {
         let status = match permission {
             Permission::AudioInput => self.check_audio_permission_status(),
+            Permission::Camera => self.check_camera_permission_status(),
         };
 
         self.call_event_handler(&crate::event::Event::PermissionResult(
@@ -849,45 +1319,25 @@ impl Cx {
     }
 
     fn handle_permission_request(&mut self, permission: Permission, request_id: i32) {
-        match permission {
-            Permission::AudioInput => {
-                let status = self.check_audio_permission_status();
-                match status {
-                    crate::permission::PermissionStatus::Granted => {
-                        // Already granted, don't re-ask
-                        self.call_event_handler(&crate::event::Event::PermissionResult(
-                            crate::permission::PermissionResult {
-                                permission,
-                                request_id,
-                                status,
-                            },
-                        ));
-                    }
-                    crate::permission::PermissionStatus::DeniedPermanent => {
-                        // Previously denied, send denied event
-                        self.call_event_handler(&crate::event::Event::PermissionResult(
-                            crate::permission::PermissionResult {
-                                permission,
-                                request_id,
-                                status,
-                            },
-                        ));
-                    }
-                    crate::permission::PermissionStatus::NotDetermined => {
-                        // Need to request permission
-                        self.macos_request_audio_permission(permission, request_id);
-                    }
-                    _ => {
-                        // For other statuses, send the result directly
-                        self.call_event_handler(&crate::event::Event::PermissionResult(
-                            crate::permission::PermissionResult {
-                                permission,
-                                request_id,
-                                status,
-                            },
-                        ));
-                    }
+        let status = match permission {
+            Permission::AudioInput => self.check_audio_permission_status(),
+            Permission::Camera => self.check_camera_permission_status(),
+        };
+        match status {
+            crate::permission::PermissionStatus::NotDetermined => {
+                match permission {
+                    Permission::AudioInput => self.macos_request_audio_permission(permission, request_id),
+                    Permission::Camera => self.macos_request_camera_permission(permission, request_id),
                 }
+            }
+            _ => {
+                self.call_event_handler(&crate::event::Event::PermissionResult(
+                    crate::permission::PermissionResult {
+                        permission,
+                        request_id,
+                        status,
+                    },
+                ));
             }
         }
     }
@@ -911,6 +1361,26 @@ impl Cx {
             });
 
             let () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType:AVMediaTypeAudio completionHandler:&completion_handler];
+        }
+    }
+
+    fn macos_request_camera_permission(&mut self, permission: Permission, request_id: i32) {
+        unsafe {
+            let completion_handler = objc_block!(move |granted: BOOL| {
+                let permission_result = crate::permission::PermissionResult {
+                    permission,
+                    request_id,
+                    status: if granted == YES {
+                        crate::permission::PermissionStatus::Granted
+                    } else {
+                        crate::permission::PermissionStatus::DeniedPermanent
+                    },
+                };
+
+                Self::dispatch_permission_result_to_main_thread(permission_result);
+            });
+
+            let () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType:AVMediaTypeVideo completionHandler:&completion_handler];
         }
     }
 
@@ -1022,5 +1492,6 @@ pub struct CxOs {
     pub metal_device: Option<ObjcId>,
     pub(crate) game_input_events: GameInputEventChannel,
     pub(crate) apple_game_input: Option<AppleGameInput>,
-    pub(crate) video_players: HashMap<LiveId, AppleVideoPlayer>,
+    pub(crate) video_players: HashMap<LiveId, AppleUnifiedVideoPlayer>,
+    pub(crate) native_camera_previews: HashMap<LiveId, MacosNativeCameraPreview>,
 }

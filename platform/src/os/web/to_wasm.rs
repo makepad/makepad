@@ -127,6 +127,12 @@ pub struct ToWasmPaintDirty {}
 #[derive(ToWasm)]
 pub struct ToWasmRedrawAll {}
 
+#[derive(ToWasm)]
+pub struct ToWasmLiveFileChange {
+    pub file_name: String,
+    pub content: String,
+}
+
 // Touch API
 
 #[derive(ToWasm, Clone, Debug)]

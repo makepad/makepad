@@ -161,6 +161,7 @@ impl Cx {
                 WebSocketMessage::Closed => break,
                 WebSocketMessage::Opened => {}
             }
+            self.run_live_edit_if_needed("macos-stdin");
         }
     }
 
@@ -295,12 +296,14 @@ impl Cx {
                 if SignalToUI::check_and_clear_action_signal() {
                     self.handle_action_receiver();
                 }
+                self.poll_control_channel();
                 let events = self.os.stdin_timers.get_dispatch();
                 for event in events {
                     self.handle_script_timer(&event);
                     self.call_event_handler(&Event::Timer(event));
                 }
 
+                self.run_live_edit_if_needed("macos-stdin");
                 self.handle_networking_events();
                 self.handle_gamepad_events();
                 self.stdin_handle_platform_ops(metal_cx, stdin_windows);
@@ -369,6 +372,12 @@ impl Cx {
                         window_id: window_id.id(),
                         kind_id: window.kind_id,
                     });
+                }
+                CxOsOp::CreatePopupWindow { window_id, .. } => {
+                    while window_id.id() >= stdin_windows.len() {
+                        stdin_windows.push(StdinWindow::new());
+                    }
+                    self.windows[window_id].is_created = true;
                 }
                 CxOsOp::SetCursor(cursor) => {
                     Self::stdin_send_to_host(AppToStudio::SetCursor(cursor.into()));

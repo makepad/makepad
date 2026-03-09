@@ -344,8 +344,10 @@ impl Cx {
                 self.call_event_handler(&Event::Custom(data));
             }
             StudioToApp::KeepAlive | StudioToApp::None => {}
-            other @ StudioToApp::LiveChange { .. } => {
-                self.action(other);
+            StudioToApp::LiveChange { file_name, content } => {
+                self.script_data
+                    .live_reload
+                    .queue_file_change(file_name, content);
             }
             // Stdin-specific: Tick, Swapchain, WindowGeomChange are handled
             // by callers before delegating here. In windowed mode they are
@@ -379,6 +381,14 @@ impl Cx {
         }
     }
 
+    pub(crate) fn run_live_edit_if_needed(&mut self, _backend: &str) {
+        if self.handle_live_edit() {
+            self.draw_shaders.reset_for_live_reload();
+            self.call_event_handler(&Event::LiveEdit);
+            self.redraw_all();
+        }
+    }
+
     // Same logic as headless::raster::encode_png_rgba which is behind
     // cfg(headless) and unavailable to the windowed backend.
     #[allow(dead_code)]
@@ -406,7 +416,7 @@ impl Cx {
 
     pub(crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
-        if Cx::has_studio_web_socket() || Cx::local_profile_capture_enabled() {
+        if (Cx::has_studio_web_socket() && !crate::web_socket::STUDIO_STDOUT_MODE.load(std::sync::atomic::Ordering::SeqCst)) || Cx::local_profile_capture_enabled() {
             let start = self.seconds_since_app_start();
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);
@@ -483,6 +493,9 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        if let Event::PermissionResult(result) = event {
+            self.handle_camera_permission_result(result);
+        }
         self.inner_call_event_handler(event);
         self.inner_key_focus_change();
         self.handle_triggers();

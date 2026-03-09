@@ -5,9 +5,9 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
-            Event, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent, TextClipboardEvent,
-            TimerEvent, ToWasmMsgEvent, TouchUpdateEvent, VideoPlaybackCompletedEvent,
-            VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
+            Event, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent,
+            TextClipboardEvent, TimerEvent, ToWasmMsgEvent, TouchUpdateEvent,
+            VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent, VideoSource, VideoTextureUpdatedEvent, WindowGeom,
             WindowGeomChangeEvent,
         },
@@ -189,6 +189,13 @@ impl Cx {
                     self.passes[main_pass_id].paint_dirty = true;
                 }
 
+                live_id!(ToWasmLiveFileChange) => {
+                    let tw = ToWasmLiveFileChange::read_to_wasm(&mut to_wasm);
+                    self.script_data
+                        .live_reload
+                        .queue_file_change(tw.file_name, tw.content);
+                }
+
                 live_id!(ToWasmHTTPResponse) => {
                     let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
                     network_responses.push(NetworkResponse::HttpResponse {
@@ -238,6 +245,7 @@ impl Cx {
                     let tw = ToWasmPermissionResult::read_to_wasm(&mut to_wasm);
                     let permission = match tw.permission.as_str() {
                         "microphone" => Permission::AudioInput,
+                        "camera" => Permission::Camera,
                         _ => {
                             crate::log!("Unknown web permission: {}", tw.permission);
                             continue;
@@ -294,20 +302,6 @@ impl Cx {
                         response: NetworkResponse::WebSocketBinary(tw.data.into_vec_u8())
                     });
                 }*/
-                /*live_id!(ToWasmLiveFileChange)=>{
-                    let tw = ToWasmLiveFileChange::read_to_wasm(&mut to_wasm);
-                    // live file change. lets do it.
-                    if tw.body.len()>0 {
-                        let mut parts = tw.body.split("$$$makepad_live_change$$$");
-                        if let Some(file_name) = parts.next() {
-                            let content = parts.next().unwrap().to_string();
-                            let _ = self.live_file_change_sender.send(vec![LiveFileChange{
-                                file_name:file_name.to_string(),
-                                content
-                            }]);
-                        }
-                    }
-                }*/
                 live_id!(ToWasmVideoPlaybackPrepared) => {
                     let tw = ToWasmVideoPlaybackPrepared::read_to_wasm(&mut to_wasm);
                     let video_id = LiveId::from_lo_hi(tw.video_id_lo, tw.video_id_hi);
@@ -318,6 +312,9 @@ impl Cx {
                             video_width: tw.video_width,
                             video_height: tw.video_height,
                             duration,
+                            is_seekable: duration > 0,
+                            video_tracks: if tw.video_width > 0 && tw.video_height > 0 { vec!["video".to_string()] } else { vec![] },
+                            audio_tracks: vec!["audio".to_string()],
                         },
                     ));
                 }
@@ -331,6 +328,12 @@ impl Cx {
                         VideoTextureUpdatedEvent {
                             video_id,
                             current_position_ms,
+                            yuv: crate::event::video_playback::VideoYuvMetadata {
+                                enabled: false,
+                                matrix: 0.0,
+                                biplanar: false,
+                                rotation_steps: 0.0,
+                            },
                         },
                     ));
                     self.redraw_all();
@@ -411,10 +414,7 @@ impl Cx {
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
 
-        if self.handle_live_edit() {
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-        }
+        self.run_live_edit_if_needed("web");
 
         self.handle_platform_ops();
         self.handle_media_signals();
@@ -486,6 +486,26 @@ impl Cx {
 
                     self.windows[window_id].is_created = true;
                     self.redraw_all();
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let mut geom = self.os.window_geom.clone();
+                    geom.position = position;
+                    geom.inner_size = size;
+                    geom.outer_size = size;
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = geom;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    window.is_created = true;
                 }
                 CxOsOp::FullscreenWindow(_window_id) => {
                     self.os.from_wasm(FromWasmFullScreen {});
@@ -562,6 +582,7 @@ impl Cx {
                 } => {
                     let permission_str = match permission {
                         Permission::AudioInput => "microphone",
+                        Permission::Camera => "camera",
                     };
                     self.os.from_wasm(FromWasmCheckPermission {
                         permission: permission_str.to_string(),
@@ -574,13 +595,22 @@ impl Cx {
                 } => {
                     let permission_str = match permission {
                         Permission::AudioInput => "microphone",
+                        Permission::Camera => "camera",
                     };
                     self.os.from_wasm(FromWasmRequestPermission {
                         permission: permission_str.to_string(),
                         request_id: request_id as u32,
                     });
                 }
-                CxOsOp::PrepareVideoPlayback(video_id, source, _external_texture_id, texture_id, autoplay, should_loop) => {
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _camera_preview_mode,
+                    _external_texture_id,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                ) => {
                     match source {
                         VideoSource::Network(url) => {
                             self.os.from_wasm(FromWasmPrepareVideoPlayback {
@@ -606,8 +636,15 @@ impl Cx {
                                 VideoDecodingErrorEvent { video_id, error },
                             ));
                         }
+                        VideoSource::Camera(..) => {
+                            let error = "VideoSource::Camera is not supported on web".to_string();
+                            crate::error!("{}", error);
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
+                        }
                     }
-                }
+                },
                 CxOsOp::BeginVideoPlayback(video_id) => {
                     self.os.from_wasm(FromWasmBeginVideoPlayback {
                         video_id_lo: video_id.lo(),
@@ -655,6 +692,13 @@ impl Cx {
                 CxOsOp::UpdateVideoSurfaceTexture(_) => {
                     // On web, texture updates happen in the JS animation frame loop
                 }
+                // New ops — no-op on Web (not yet wired to JS)
+                CxOsOp::AttachCameraNativePreview { .. }
+                | CxOsOp::UpdateCameraNativePreview { .. }
+                | CxOsOp::DetachCameraNativePreview { .. } => {}
+                CxOsOp::SetVideoVolume(_, _) => {}
+                CxOsOp::SetVideoPlaybackRate(_, _) => {}
+                CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*
@@ -709,6 +753,7 @@ impl CxOsApi for Cx {
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
+            ToWasmLiveFileChange::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
             ToWasmWindowLostFocus::to_js_code(),
             ToWasmHTTPResponse::to_js_code(),
@@ -742,7 +787,6 @@ impl CxOsApi for Cx {
             FromWasmTextCopyResponse::to_js_code(),
             FromWasmShowTextIME::to_js_code(),
             FromWasmHideTextIME::to_js_code(),
-            FromWasmCreateThread::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
             FromWasmCancelHTTPRequest::to_js_code(),
             FromWasmCheckPermission::to_js_code(),
@@ -780,12 +824,16 @@ impl CxOsApi for Cx {
             FromWasmSeekVideoPlayback::to_js_code(),
             FromWasmCleanupVideoPlaybackResources::to_js_code(),
         ]);
+        #[cfg(target_feature = "atomics")]
+        self.os
+            .append_from_wasm_js(&[FromWasmCreateThread::to_js_code()]);
     }
 
     fn seconds_since_app_start(&self) -> f64 {
         0.0
     }
 
+    #[cfg(target_feature = "atomics")]
     fn spawn_thread<F>(&mut self, f: F)
     where
         F: FnOnce() + Send + 'static,
@@ -796,6 +844,13 @@ impl CxOsApi for Cx {
             context_ptr: context_ptr as u32,
             timer: 0,
         });
+    }
+
+    #[cfg(not(target_feature = "atomics"))]
+    fn spawn_thread<F>(&mut self, _f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
     }
 
     fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace) {
@@ -828,6 +883,7 @@ impl CxOsApi for Cx {
 }
 
 impl Cx {
+    #[cfg(target_feature = "atomics")]
     #[allow(dead_code)]
     pub(crate) fn spawn_timer_thread<F>(&mut self, timer: u32, f: F)
     where
@@ -841,6 +897,14 @@ impl Cx {
         });
     }
 
+    #[cfg(not(target_feature = "atomics"))]
+    #[allow(dead_code)]
+    pub(crate) fn spawn_timer_thread<F>(&mut self, _timer: u32, _f: F)
+    where
+        F: Fn() + Send + 'static,
+    {
+    }
+
     pub fn time_now() -> f64 {
         unsafe { js_time_now() }
     }
@@ -851,14 +915,14 @@ extern "C" {
 }
 
 #[export_name = "wasm_thread_entrypoint"]
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
     closure();
 }
 
 #[export_name = "wasm_thread_timer_entrypoint"]
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 pub unsafe extern "C" fn wasm_thread_timer_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn Fn() + Send + 'static>);
     closure();
@@ -866,7 +930,7 @@ pub unsafe extern "C" fn wasm_thread_timer_entrypoint(closure_ptr: u32) {
 }
 
 #[export_name = "wasm_thread_alloc_tls_and_stack"]
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
     let mut v = Vec::<u64>::new();
     v.reserve_exact(tls_size as usize);

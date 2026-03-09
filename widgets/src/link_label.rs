@@ -2,8 +2,8 @@ use crate::{
     button::{Button, ButtonAction},
     makepad_derive_widget::*,
     makepad_draw::*,
-    widget_async::ScriptAsyncResult,
     widget::*,
+    widget_async::ScriptAsyncResult,
 };
 
 script_mod! {

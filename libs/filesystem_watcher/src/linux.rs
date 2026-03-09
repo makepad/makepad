@@ -24,6 +24,7 @@ const IN_CREATE: u32 = 0x0000_0100;
 const IN_DELETE: u32 = 0x0000_0200;
 const IN_DELETE_SELF: u32 = 0x0000_0400;
 const IN_MOVE_SELF: u32 = 0x0000_0800;
+const IN_ISDIR: u32 = 0x4000_0000;
 
 #[repr(C)]
 struct InotifyEvent {
@@ -212,32 +213,66 @@ fn run_loop(roots: Vec<WatchRoot>, stop: Arc<AtomicBool>, on_event: WatchCallbac
         }
 
         let mut touched_mounts = HashSet::new();
+        let mut changed_paths = Vec::<(String, PathBuf)>::new();
         let mut offset = 0usize;
         let end = read_len as usize;
         while offset + size_of::<InotifyEvent>() <= end {
             let event = unsafe { &*(buffer.as_ptr().add(offset) as *const InotifyEvent) };
             offset += size_of::<InotifyEvent>();
             let name_len = event.len as usize;
-            offset = (offset + name_len).min(end);
-            if let Some((mount, _path)) = table.wd_to_entry.get(&event.wd) {
-                touched_mounts.insert(mount.clone());
+            let name_end = (offset + name_len).min(end);
+            let name_bytes = &buffer[offset..name_end];
+            offset = name_end;
+            if let Some((mount, watched_dir)) = table.wd_to_entry.get(&event.wd) {
+                let changed_path = changed_path_for_event(watched_dir, name_bytes);
+                push_unique_change(&mut changed_paths, mount.clone(), changed_path);
+                if event_requires_rescan(event.mask) {
+                    touched_mounts.insert(mount.clone());
+                }
             }
         }
 
         for mount in touched_mounts {
-            let root_path = table.roots.get(&mount).cloned();
             let _ = table.rescan_mount(&mount);
-            if let Some(path) = root_path {
-                on_event(FileSystemEvent {
-                    mount: mount.clone(),
-                    path,
-                    kind: FileSystemEventKind::Changed,
-                });
-            }
+        }
+
+        for (mount, path) in changed_paths {
+            on_event(FileSystemEvent {
+                mount,
+                path,
+                kind: FileSystemEventKind::Changed,
+            });
         }
     }
 
     table.close_all();
+}
+
+fn event_requires_rescan(mask: u32) -> bool {
+    (mask & (IN_DELETE_SELF | IN_MOVE_SELF)) != 0
+        || ((mask & IN_ISDIR) != 0
+            && (mask & (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO)) != 0)
+}
+
+fn changed_path_for_event(watched_dir: &Path, name_bytes: &[u8]) -> PathBuf {
+    let name_len = name_bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(name_bytes.len());
+    if name_len == 0 {
+        return watched_dir.to_path_buf();
+    }
+    watched_dir.join(Path::new(std::ffi::OsStr::from_bytes(&name_bytes[..name_len])))
+}
+
+fn push_unique_change(changes: &mut Vec<(String, PathBuf)>, mount: String, path: PathBuf) {
+    if changes
+        .iter()
+        .any(|(existing_mount, existing_path)| existing_mount == &mount && existing_path == &path)
+    {
+        return;
+    }
+    changes.push((mount, path));
 }
 
 fn collect_dirs(root: &Path, out: &mut Vec<PathBuf>) {
@@ -265,5 +300,31 @@ fn collect_dirs(root: &Path, out: &mut Vec<PathBuf>) {
             }
             stack.push(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_event_path_uses_directory_and_name() {
+        let path = changed_path_for_event(Path::new("/tmp/project/src"), b"main.rs\0\0");
+        assert_eq!(path, PathBuf::from("/tmp/project/src/main.rs"));
+    }
+
+    #[test]
+    fn self_event_path_falls_back_to_watched_directory() {
+        let path = changed_path_for_event(Path::new("/tmp/project/src"), b"");
+        assert_eq!(path, PathBuf::from("/tmp/project/src"));
+    }
+
+    #[test]
+    fn rescans_when_directory_tree_changes() {
+        assert!(event_requires_rescan(IN_CREATE | IN_ISDIR));
+        assert!(event_requires_rescan(IN_MOVED_TO | IN_ISDIR));
+        assert!(event_requires_rescan(IN_DELETE_SELF));
+        assert!(!event_requires_rescan(IN_CLOSE_WRITE));
+        assert!(!event_requires_rescan(IN_MODIFY));
     }
 }

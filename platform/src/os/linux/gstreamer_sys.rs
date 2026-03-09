@@ -17,6 +17,7 @@ pub type GstStructure = c_void;
 pub type GstMessage = c_void;
 pub type GObject = c_void;
 pub type GstMiniObject = c_void;
+pub type GstMemory = c_void;
 
 // GLib GError — domain (GQuark/u32) + code (gint/i32) + message (*gchar)
 #[repr(C)]
@@ -41,6 +42,10 @@ pub const GST_FORMAT_TIME: c_int = 3;
 pub const GST_SEEK_FLAG_FLUSH: c_uint = 1 << 0;
 pub const GST_SEEK_FLAG_ACCURATE: c_uint = 1 << 1;
 pub const GST_SEEK_FLAG_KEY_UNIT: c_uint = 1 << 2;
+
+// GstSeekType
+pub const GST_SEEK_TYPE_NONE: c_int = 0;
+pub const GST_SEEK_TYPE_SET: c_int = 1;
 
 // GstMessageType (bitmask)
 pub const GST_MESSAGE_ERROR: c_uint = 1 << 1;
@@ -75,6 +80,7 @@ pub struct LibGStreamer {
     _gstapp: ModuleLoader,
     _gobject: ModuleLoader,
     _glib: ModuleLoader,
+    _gstgl: Option<ModuleLoader>,
 
     // libgstreamer-1.0.so.0
     pub gst_init: unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char),
@@ -90,6 +96,16 @@ pub struct LibGStreamer {
     pub gst_element_query_duration: unsafe extern "C" fn(*mut GstElement, c_int, *mut i64) -> c_int,
     pub gst_element_seek_simple:
         unsafe extern "C" fn(*mut GstElement, c_int, c_uint, i64) -> c_int,
+    pub gst_element_seek:
+        unsafe extern "C" fn(*mut GstElement, f64, c_int, c_uint, c_int, i64, c_int, i64) -> c_int,
+    pub gst_element_query: unsafe extern "C" fn(*mut GstElement, *mut c_void) -> c_int,
+    pub gst_query_new_seeking: unsafe extern "C" fn(c_int) -> *mut c_void,
+    pub gst_query_parse_seeking:
+        unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int, *mut i64, *mut i64),
+    pub gst_query_new_buffering: unsafe extern "C" fn(c_int) -> *mut c_void,
+    pub gst_query_get_n_buffering_ranges: unsafe extern "C" fn(*mut c_void) -> c_uint,
+    pub gst_query_parse_nth_buffering_range:
+        unsafe extern "C" fn(*mut c_void, c_uint, *mut i64, *mut i64) -> c_int,
     pub gst_element_get_bus: unsafe extern "C" fn(*mut GstElement) -> *mut GstBus,
     pub gst_bus_pop_filtered: unsafe extern "C" fn(*mut GstBus, c_uint) -> *mut GstMessage,
     pub gst_message_parse_error:
@@ -97,6 +113,7 @@ pub struct LibGStreamer {
     pub gst_object_unref: unsafe extern "C" fn(*mut c_void),
     pub gst_sample_get_buffer: unsafe extern "C" fn(*mut GstSample) -> *mut GstBuffer,
     pub gst_sample_get_caps: unsafe extern "C" fn(*mut GstSample) -> *mut GstCaps,
+    pub gst_buffer_peek_memory: unsafe extern "C" fn(*mut GstBuffer, c_uint) -> *mut GstMemory,
     pub gst_buffer_map: unsafe extern "C" fn(*mut GstBuffer, *mut GstMapInfo, c_uint) -> c_int,
     pub gst_buffer_unmap: unsafe extern "C" fn(*mut GstBuffer, *mut GstMapInfo),
     pub gst_caps_from_string: unsafe extern "C" fn(*const c_char) -> *mut GstCaps,
@@ -114,6 +131,10 @@ pub struct LibGStreamer {
     pub gst_app_sink_is_eos: unsafe extern "C" fn(*mut GstElement) -> c_int,
     pub gst_app_sink_set_caps: unsafe extern "C" fn(*mut GstElement, *const GstCaps),
 
+    // libgstgl-1.0.so.0 (optional, enables Linux zero-copy GLMemory path)
+    pub gst_is_gl_memory: Option<unsafe extern "C" fn(*mut GstMemory) -> c_int>,
+    pub gst_gl_memory_get_texture_id: Option<unsafe extern "C" fn(*mut GstMemory) -> u32>,
+
     // libgobject-2.0.so.0  — variadic, we load it once and cast to different signatures
     pub g_object_set_string:
         unsafe extern "C" fn(*mut GObject, *const c_char, *const c_char, *const c_void),
@@ -121,6 +142,8 @@ pub struct LibGStreamer {
         unsafe extern "C" fn(*mut GObject, *const c_char, c_int, *const c_void),
     pub g_object_set_ptr:
         unsafe extern "C" fn(*mut GObject, *const c_char, *mut c_void, *const c_void),
+    pub g_object_set_double:
+        unsafe extern "C" fn(*mut GObject, *const c_char, f64, *const c_void),
 
     // libglib-2.0.so.0
     pub g_free: unsafe extern "C" fn(*mut c_void),
@@ -133,6 +156,7 @@ impl LibGStreamer {
         let gstapp = ModuleLoader::load("libgstapp-1.0.so.0").ok()?;
         let gobject = ModuleLoader::load("libgobject-2.0.so.0").ok()?;
         let glib = ModuleLoader::load("libglib-2.0.so.0").ok()?;
+        let gstgl = ModuleLoader::load("libgstgl-1.0.so.0").ok();
 
         Some(LibGStreamer {
             gst_init: gst.get_symbol("gst_init").ok()?,
@@ -142,12 +166,20 @@ impl LibGStreamer {
             gst_element_query_position: gst.get_symbol("gst_element_query_position").ok()?,
             gst_element_query_duration: gst.get_symbol("gst_element_query_duration").ok()?,
             gst_element_seek_simple: gst.get_symbol("gst_element_seek_simple").ok()?,
+            gst_element_seek: gst.get_symbol("gst_element_seek").ok()?,
+            gst_element_query: gst.get_symbol("gst_element_query").ok()?,
+            gst_query_new_seeking: gst.get_symbol("gst_query_new_seeking").ok()?,
+            gst_query_parse_seeking: gst.get_symbol("gst_query_parse_seeking").ok()?,
+            gst_query_new_buffering: gst.get_symbol("gst_query_new_buffering").ok()?,
+            gst_query_get_n_buffering_ranges: gst.get_symbol("gst_query_get_n_buffering_ranges").ok()?,
+            gst_query_parse_nth_buffering_range: gst.get_symbol("gst_query_parse_nth_buffering_range").ok()?,
             gst_element_get_bus: gst.get_symbol("gst_element_get_bus").ok()?,
             gst_bus_pop_filtered: gst.get_symbol("gst_bus_pop_filtered").ok()?,
             gst_message_parse_error: gst.get_symbol("gst_message_parse_error").ok()?,
             gst_object_unref: gst.get_symbol("gst_object_unref").ok()?,
             gst_sample_get_buffer: gst.get_symbol("gst_sample_get_buffer").ok()?,
             gst_sample_get_caps: gst.get_symbol("gst_sample_get_caps").ok()?,
+            gst_buffer_peek_memory: gst.get_symbol("gst_buffer_peek_memory").ok()?,
             gst_buffer_map: gst.get_symbol("gst_buffer_map").ok()?,
             gst_buffer_unmap: gst.get_symbol("gst_buffer_unmap").ok()?,
             gst_caps_from_string: gst.get_symbol("gst_caps_from_string").ok()?,
@@ -161,10 +193,18 @@ impl LibGStreamer {
             gst_app_sink_is_eos: gstapp.get_symbol("gst_app_sink_is_eos").ok()?,
             gst_app_sink_set_caps: gstapp.get_symbol("gst_app_sink_set_caps").ok()?,
 
+            gst_is_gl_memory: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_is_gl_memory").ok()),
+            gst_gl_memory_get_texture_id: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_memory_get_texture_id").ok()),
+
             // g_object_set is variadic — we load it once and cast to different signatures
             g_object_set_string: gobject.get_symbol("g_object_set").ok()?,
             g_object_set_int: gobject.get_symbol("g_object_set").ok()?,
             g_object_set_ptr: gobject.get_symbol("g_object_set").ok()?,
+            g_object_set_double: gobject.get_symbol("g_object_set").ok()?,
 
             g_free: glib.get_symbol("g_free").ok()?,
             g_error_free: glib.get_symbol("g_error_free").ok()?,
@@ -173,6 +213,7 @@ impl LibGStreamer {
             _gstapp: gstapp,
             _gobject: gobject,
             _glib: glib,
+            _gstgl: gstgl,
         })
     }
 

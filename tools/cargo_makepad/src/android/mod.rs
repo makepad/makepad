@@ -389,6 +389,29 @@ impl HostOs {
     }
 }
 
+fn android_help() -> &'static str {
+    "Android commands:\n\
+  cargo makepad android [options] install-toolchain\n\
+  cargo makepad android [options] build <cargo args>\n\
+  cargo makepad android [options] run <cargo args>\n\
+  cargo makepad android [options] adb <adb args>\n\
+\n\
+Common options:\n\
+  --abi=aarch64|x86_64|armv7|i686|all   (default: aarch64)\n\
+  --package-name=<id>\n\
+  --app-label=<label>\n\
+  --sdk-path=<path>\n\
+  --host-os=linux-x64|windows-x64|macos-aarch64|macos-x64\n\
+  --variant=default|quest\n\
+  --devices=<serial1,serial2,...>        (for run)\n\
+  --keep-sdk-sources\n\
+\n\
+Examples:\n\
+  cargo makepad android --abi=aarch64 build -p my-app --release\n\
+  cargo makepad android --abi=aarch64 run -p my-app --release\n\
+  cargo makepad android adb devices -l"
+}
+
 pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     #[allow(unused)]
     let mut host_os = HostOs::Unsupported;
@@ -434,6 +457,19 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             break;
         }
     }
+
+    if args.is_empty() {
+        return Err(format!(
+            "missing android subcommand. use one of: install-toolchain, build, run, adb\n\n{}",
+            android_help()
+        ));
+    }
+
+    if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+        println!("{}", android_help());
+        return Ok(());
+    }
+
     if sdk_path.is_none() {
         sdk_path = Some(format!(
             "{}/{}",
@@ -493,7 +529,11 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             &urls,
             devices,
         ),
-        _ => Err(format!("{} is not a valid command or option", args[0])),
+        _ => Err(format!(
+            "{} is not a valid android subcommand\n\n{}",
+            args[0],
+            android_help()
+        )),
     }
 }
 

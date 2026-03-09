@@ -1,14 +1,9 @@
 use super::super::shared_framebuf::PollTimers;
 use super::gstreamer_sys::LibGStreamer;
 use super::linux_media::CxLinuxMedia;
-use super::linux_video_playback::GStreamerVideoPlayer;
+use super::linux_video_player::LinuxVideoPlayer;
 
-use crate::{
-    cx::Cx,
-    makepad_live_id::LiveId,
-    opengl_cx::OpenglCx,
-    CxOsApi, OpenUrlInPlace,
-};
+use crate::{cx::Cx, makepad_live_id::LiveId, opengl_cx::OpenglCx, CxOsApi, OpenUrlInPlace};
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
 // Import OpenglCx from x11 for the unified type
 
@@ -35,12 +30,10 @@ fn forced_windowing_protocol_from_args() -> Option<WindowingProtocol> {
 
 // Protocol detection for windowing system
 fn detect_windowing_protocol() -> WindowingProtocol {
-    // Linux stdin-loop rendering path is currently implemented for X11.
-    // Force child processes started by Studio into that backend so they
-    // render into RunView instead of opening a standalone window.
-    if is_stdin_loop_mode() {
-        return WindowingProtocol::X11;
-    }
+    // stdin-loop mode renders into Studio's RunView via shared framebuffers.
+    // Both X11 and Wayland backends support this path, so let normal
+    // protocol detection proceed instead of forcing X11.
+
 
     if let Some(protocol) = forced_windowing_protocol_from_args() {
         return protocol;
@@ -174,7 +167,7 @@ pub struct CxOs {
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
     pub opengl_cx: Option<OpenglCx>,
-    pub(crate) video_players: HashMap<LiveId, GStreamerVideoPlayer>,
+    pub(crate) video_players: HashMap<LiveId, LinuxVideoPlayer>,
     pub(crate) gstreamer: Option<LibGStreamer>,
 }
 

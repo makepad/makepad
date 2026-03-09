@@ -227,6 +227,7 @@ impl Cx {
                 WebSocketMessage::Closed => break,
                 WebSocketMessage::Opened => {}
             }
+            self.run_live_edit_if_needed("linux-x11-stdin");
         }
     }
 
@@ -423,6 +424,7 @@ impl Cx {
                 if SignalToUI::check_and_clear_action_signal() {
                     self.handle_action_receiver();
                 }
+                self.poll_control_channel();
 
                 let events = self.os.stdin_timers.get_dispatch();
                 for event in events {
@@ -430,10 +432,7 @@ impl Cx {
                     self.call_event_handler(&Event::Timer(event));
                 }
 
-                if self.handle_live_edit() {
-                    self.call_event_handler(&Event::LiveEdit);
-                    self.redraw_all();
-                }
+                self.run_live_edit_if_needed("linux-x11-stdin");
                 self.handle_networking_events();
                 self.stdin_handle_platform_ops(stdin_windows);
 
@@ -482,13 +481,18 @@ impl Cx {
                     while window_id.id() >= stdin_windows.len() {
                         stdin_windows.push(StdinWindow::default());
                     }
-                    //let stdin_window = &mut stdin_windows[window_id.id()];
                     let window = &mut self.windows[window_id];
                     window.is_created = true;
                     Self::stdin_send_to_host(AppToStudio::CreateWindow {
                         window_id: window_id.id(),
                         kind_id: window.kind_id,
                     });
+                }
+                CxOsOp::CreatePopupWindow { window_id, .. } => {
+                    while window_id.id() >= stdin_windows.len() {
+                        stdin_windows.push(StdinWindow::default());
+                    }
+                    self.windows[window_id].is_created = true;
                 }
                 CxOsOp::SetCursor(cursor) => {
                     Self::stdin_send_to_host(AppToStudio::SetCursor(cursor.into()));

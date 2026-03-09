@@ -10,6 +10,11 @@ use makepad_studio_protocol::{
 };
 use std::collections::VecDeque;
 
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+use crate::makepad_widgets::makepad_platform::shared_framebuf::aux_chan;
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+use std::sync::{Arc, Mutex};
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -144,7 +149,13 @@ pub struct DesktopRunView {
     #[rust]
     last_rect: Rect,
     #[rust]
+    last_dpi_factor: f64,
+    #[rust]
     redraw_countdown: usize,
+    #[rust]
+    bootstrap_pending: bool,
+    #[rust]
+    bootstrap_tick_count: u32,
     #[rust]
     current_target: Option<RunTarget>,
     #[rust]
@@ -171,6 +182,10 @@ pub struct DesktopRunView {
     ai_viz_queue: VecDeque<InputVizEvent>,
     #[rust]
     ime_pos: Option<Vec2d>,
+
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    aux_chan_host_endpoint: Option<Arc<Mutex<Option<aux_chan::HostEndpoint>>>>,
 }
 
 impl ScriptHook for DesktopRunView {
@@ -211,7 +226,12 @@ impl DesktopRunView {
         self.ai_viz_total_frames = 0;
         self.ai_viz_queue.clear();
         self.ime_pos = None;
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        { self.aux_chan_host_endpoint = None; }
         self.last_rect = Rect::default();
+        self.last_dpi_factor = 0.0;
+        self.bootstrap_pending = target.is_some();
+        self.bootstrap_tick_count = 0;
         if target.is_some() {
             // Keep redrawing during startup so bootstrap messages can be resent
             // until the child app socket is ready.
@@ -335,6 +355,41 @@ impl DesktopRunView {
         false
     }
 
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    fn setup_aux_chan(&mut self, studio_addr: Option<&str>, build_id: QueryId) {
+        // Only create the listener once per target
+        if self.aux_chan_host_endpoint.is_some() {
+            return;
+        }
+        let Some(studio_addr) = studio_addr else { return };
+        let listener = match aux_chan::ExternalEndpointListener::new_for_studio(
+            studio_addr,
+            &build_id.0.to_string(),
+        ) {
+            Ok(l) => l,
+            Err(err) => {
+                log!("aux_chan listener failed: {}", err);
+                return;
+            }
+        };
+        let slot = Arc::new(Mutex::new(None));
+        self.aux_chan_host_endpoint = Some(slot.clone());
+        // Accept in background — the child may take a long time to compile and start.
+        std::thread::Builder::new()
+            .name("aux-chan-accept".into())
+            .spawn(move || {
+                match listener.accept_host_endpoint() {
+                    Ok(endpoint) => {
+                        *slot.lock().unwrap() = Some(endpoint);
+                    }
+                    Err(err) => {
+                        crate::log!("aux_chan accept failed: {}", err);
+                    }
+                }
+            })
+            .ok();
+    }
+
     fn ensure_swapchain_for_rect(
         &mut self,
         cx: &mut Cx,
@@ -346,19 +401,6 @@ impl DesktopRunView {
             return;
         }
 
-        let force_bootstrap = self.debug_present_ok_count == 0;
-        let mut outbound = Vec::new();
-        if self.last_rect != rect || force_bootstrap {
-            outbound.push(StudioToApp::WindowGeomChange {
-                window_id: target.window_id,
-                dpi_factor,
-                left: 0.0,
-                top: 0.0,
-                width: rect.size.x,
-                height: rect.size.y,
-            });
-        }
-
         let min_width = ((rect.size.x * dpi_factor).ceil() as u32).max(1);
         let min_height = ((rect.size.y * dpi_factor).ceil() as u32).max(1);
         let needs_new_swapchain = self
@@ -367,15 +409,20 @@ impl DesktopRunView {
             .map(|swapchain| {
                 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
                 {
-                    min_width != swapchain.alloc_width || min_height != swapchain.alloc_height
+                    min_width != swapchain.alloc_width
+                        || min_height != swapchain.alloc_height
+                        || swapchain.window_id != target.window_id
                 }
                 #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
                 {
-                    min_width > swapchain.alloc_width || min_height > swapchain.alloc_height
+                    min_width > swapchain.alloc_width
+                        || min_height > swapchain.alloc_height
+                        || swapchain.window_id != target.window_id
                 }
             })
             .unwrap_or(true);
 
+        let rect_changed = self.last_rect != rect || self.last_dpi_factor != dpi_factor;
         if needs_new_swapchain {
             if self.last_swapchain_with_completed_draws.is_none() {
                 self.last_swapchain_with_completed_draws = self.swapchain.take();
@@ -399,30 +446,72 @@ impl DesktopRunView {
             ));
         }
 
+        if rect_changed || needs_new_swapchain {
+            self.bootstrap_pending = true;
+            self.bootstrap_tick_count = 0;
+        }
+
+        self.last_rect = rect;
+        self.last_dpi_factor = dpi_factor;
+    }
+
+    fn build_bootstrap_msgs(&mut self, cx: &mut Cx, target: RunTarget) -> Vec<StudioToApp> {
+        if self.last_rect.size.x <= 0.0 || self.last_rect.size.y <= 0.0 {
+            return Vec::new();
+        }
+
+        let mut outbound = vec![StudioToApp::WindowGeomChange {
+            window_id: target.window_id,
+            dpi_factor: self.last_dpi_factor,
+            left: 0.0,
+            top: 0.0,
+            width: self.last_rect.size.x,
+            height: self.last_rect.size.y,
+        }];
+
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        {
+            let Some(endpoint_slot) = self.aux_chan_host_endpoint.as_ref() else {
+                return outbound;
+            };
+            let endpoint_guard = endpoint_slot.lock().unwrap();
+            let Some(host_endpoint) = endpoint_guard.as_ref() else {
+                return outbound;
+            };
+            if let Some(swapchain) = self.swapchain.as_mut() {
+                match shared_swapchain_from_host_swapchain(swapchain, cx, host_endpoint) {
+                    Ok(shared) => outbound.push(StudioToApp::Swapchain(shared)),
+                    Err(err) => log!("swapchain share failed: {:?}", err),
+                }
+            }
+        }
         #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-        if (needs_new_swapchain || force_bootstrap) && self.swapchain.is_some() {
+        {
             if let Some(swapchain) = self.swapchain.as_ref() {
                 let shared_swapchain = shared_swapchain_from_host_swapchain(swapchain, cx);
                 outbound.push(StudioToApp::Swapchain(shared_swapchain));
             }
         }
 
-        self.last_rect = rect;
-        if !outbound.is_empty() {
-            self.emit_to_app(cx, target.build_id, outbound);
-        }
+        outbound
     }
 
     pub fn set_presentable_draw(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) {
         if self.try_present_draw(cx, presentable_draw) {
             self.pending_draw = None;
             self.debug_present_ok_count += 1;
+            self.bootstrap_pending = false;
+            self.bootstrap_tick_count = 0;
         } else {
             self.pending_draw = Some(presentable_draw);
         }
     }
 
-    pub fn set_run_target(&mut self, cx: &mut Cx, build_id: QueryId, window_id: Option<usize>) {
+    pub fn set_run_target(&mut self, cx: &mut Cx, build_id: QueryId, window_id: Option<usize>, _studio_addr: Option<&str>) {
+        // set_target must run before setup_aux_chan: it clears
+        // aux_chan_host_endpoint when the target changes, so calling
+        // setup_aux_chan first would create an endpoint that set_target
+        // immediately destroys.
         self.set_target(
             cx,
             Some(RunTarget {
@@ -432,6 +521,9 @@ impl DesktopRunView {
                 window_id: window_id.unwrap_or(0),
             }),
         );
+
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        self.setup_aux_chan(_studio_addr, build_id);
     }
 
     pub fn rebootstrap_after_app_ready(
@@ -451,8 +543,9 @@ impl DesktopRunView {
         // Re-send bootstrap against the current swapchain instead of reallocating.
         // This keeps shared-memory resources stable while still re-triggering
         // WindowGeomChange/Swapchain after app-side readiness.
-        self.last_rect = Rect::default();
         self.debug_present_ok_count = 0;
+        self.bootstrap_pending = true;
+        self.bootstrap_tick_count = 0;
         self.redraw_countdown = self.redraw_countdown.max(240);
         self.redraw(cx);
     }
@@ -647,7 +740,16 @@ impl Widget for DesktopRunView {
         if let Event::Timer(timer_event) = event {
             if self.tick_timer.is_timer(timer_event).is_some() {
                 if let Some(target) = target {
-                    self.emit_to_app(cx, target.build_id, vec![StudioToApp::Tick]);
+                    let mut msgs = Vec::new();
+                    let should_bootstrap = self.debug_present_ok_count == 0 || self.bootstrap_pending;
+                    if should_bootstrap {
+                        self.bootstrap_tick_count = self.bootstrap_tick_count.wrapping_add(1);
+                        if self.bootstrap_tick_count == 1 || self.bootstrap_tick_count % 15 == 0 {
+                            msgs.extend(self.build_bootstrap_msgs(cx, target));
+                        }
+                    }
+                    msgs.push(StudioToApp::Tick);
+                    self.emit_to_app(cx, target.build_id, msgs);
                 }
             }
         }
@@ -769,9 +871,9 @@ impl Widget for DesktopRunView {
 }
 
 impl DesktopRunViewRef {
-    pub fn set_run_target(&self, cx: &mut Cx, build_id: QueryId, window_id: Option<usize>) {
+    pub fn set_run_target(&self, cx: &mut Cx, build_id: QueryId, window_id: Option<usize>, studio_addr: Option<&str>) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.set_run_target(cx, build_id, window_id);
+            inner.set_run_target(cx, build_id, window_id, studio_addr);
         }
     }
 

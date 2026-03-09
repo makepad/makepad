@@ -110,13 +110,6 @@ impl App {
         }
     }
 
-    pub(super) fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);
-        crate::makepad_code_editor::script_mod(vm);
-        crate::script_mod(vm);
-        App::from_script_mod(vm, self::script_mod)
-    }
-
     pub(super) fn start_backend(&mut self, cx: &mut Cx) {
         let current_path = match env::current_dir().and_then(|p| p.canonicalize()) {
             Ok(path) => path,
@@ -188,6 +181,10 @@ impl App {
 
     pub(super) fn send_studio(&mut self, msg: ClientToHub) -> Option<QueryId> {
         self.data.studio.as_mut().map(|studio| studio.send(msg))
+    }
+
+    pub(super) fn studio_addr(&self) -> Option<String> {
+        self.data.studio.as_ref().and_then(|s| s.studio_addr())
     }
 
     pub(super) fn mount_state(&self, mount: &str) -> Option<&MountState> {

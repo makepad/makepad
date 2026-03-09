@@ -71,23 +71,34 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 uid_field = Some(field.name.clone());
             }
         }
+        if uid_field.is_some() && deref_field.is_some() {
+            return error(
+                "Widget derive does not allow #[uid] together with #[deref]; widget_uid() must come from the deref field",
+            );
+        }
+        if uid_field.is_none() && wrap_field.is_none() && deref_field.is_none() {
+            return error(
+                "Widget derive requires either an explicit #[uid] WidgetUid field or a #[deref]/#[wrap] field",
+            );
+        }
+
         tb.add("impl").stream(generic.clone());
         tb.add("WidgetNode for")
             .ident(&struct_name)
             .stream(generic)
             .stream(where_clause)
             .add("{");
-        if let Some(uid_field) = &uid_field {
+        if let Some(deref_field) = &deref_field {
+            tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
+                .ident(deref_field)
+                .add(".widget_uid()}");
+        } else if let Some(uid_field) = &uid_field {
             tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
                 .ident(uid_field)
                 .add("}");
         } else if let Some(wrap_field) = &wrap_field {
             tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
                 .ident(wrap_field)
-                .add(".widget_uid()}");
-        } else if let Some(deref_field) = &deref_field {
-            tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
-                .ident(deref_field)
                 .add(".widget_uid()}");
         }
 

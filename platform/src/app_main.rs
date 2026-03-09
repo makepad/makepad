@@ -1,6 +1,7 @@
 use crate::cx::Cx;
 use crate::event::Event;
 use crate::ui_runner::UiRunner;
+use makepad_script::{ScriptValue, ScriptVm};
 
 #[cfg(target_env = "ohos")]
 pub use napi_ohos;
@@ -69,6 +70,19 @@ pub fn resolve_studio_http(default: &str) -> String {
 }
 
 pub trait AppMain {
+    fn script_mod(_vm: &mut ScriptVm) -> ScriptValue
+    where
+        Self: Sized,
+    {
+        panic!("AppMain::script_mod not implemented for this app")
+    }
+
+    fn after_new_from_script(_vm: &mut ScriptVm, _app: &mut Self)
+    where
+        Self: Sized,
+    {
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
     fn ui_runner(&self) -> UiRunner<Self>
     where
@@ -82,6 +96,11 @@ pub trait AppMain {
 #[macro_export]
 macro_rules! app_main {
     ( $ app: ident) => {
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        fn main() {
+            app_main();
+        }
+
         #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
         pub fn app_main() {
             Cx::init_log();
@@ -93,10 +112,28 @@ macro_rules! app_main {
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(
                 move |cx, event| {
                     if let Event::Startup = event {
-                        *app.borrow_mut() = Some(cx.with_vm(|vm| $app::run(vm)));
+                        *app.borrow_mut() = Some(cx.with_vm(|vm| {
+                            let value = <$app as AppMain>::script_mod(vm);
+                            let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
+                            <$app as AppMain>::after_new_from_script(vm, &mut app);
+                            app
+                        }));
+                        cx.start_hot_reload_file_observer_if_requested();
                     }
                     if let Event::LiveEdit = event {
-                        //app.borrow_mut().update_main(cx);
+                        let mut app_ref = app.borrow_mut();
+                        if let Some(app) = app_ref.as_mut() {
+                            cx.with_vm(|vm| {
+                                let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                                <$app as $crate::ScriptApply>::script_apply(
+                                    app,
+                                    vm,
+                                    &$crate::Apply::Reload,
+                                    &mut $crate::Scope::empty(),
+                                    value,
+                                );
+                            });
+                        }
                     }
                     if let Some(app) = &mut *app.borrow_mut() {
                         <dyn AppMain>::handle_event(app, cx, event);
@@ -146,10 +183,28 @@ macro_rules! app_main {
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                     if let Event::Startup = event {
-                        *app.borrow_mut() = Some(cx.with_vm(|vm| $app::run(vm)));
+                        *app.borrow_mut() = Some(cx.with_vm(|vm| {
+                            let value = <$app as AppMain>::script_mod(vm);
+                            let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
+                            <$app as AppMain>::after_new_from_script(vm, &mut app);
+                            app
+                        }));
+                        cx.start_hot_reload_file_observer_if_requested();
                     }
                     if let Event::LiveEdit = event {
-                        //app.borrow_mut().update_main(cx);
+                        let mut app_ref = app.borrow_mut();
+                        if let Some(app) = app_ref.as_mut() {
+                            cx.with_vm(|vm| {
+                                let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                                <$app as $crate::ScriptApply>::script_apply(
+                                    app,
+                                    vm,
+                                    &$crate::Apply::Reload,
+                                    &mut $crate::Scope::empty(),
+                                    value,
+                                );
+                            });
+                        }
                     }
                     if let Some(app) = &mut *app.borrow_mut() {
                         <dyn AppMain>::handle_event(app, cx, event);
@@ -173,10 +228,28 @@ macro_rules! app_main {
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                     if let Event::Startup = event {
-                        *app.borrow_mut() = Some(cx.with_vm(|vm| $app::run(vm)));
+                        *app.borrow_mut() = Some(cx.with_vm(|vm| {
+                            let value = <$app as AppMain>::script_mod(vm);
+                            let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
+                            <$app as AppMain>::after_new_from_script(vm, &mut app);
+                            app
+                        }));
+                        cx.start_hot_reload_file_observer_if_requested();
                     }
                     if let Event::LiveEdit = event {
-                        //app.borrow_mut().update_main(cx);
+                        let mut app_ref = app.borrow_mut();
+                        if let Some(app) = app_ref.as_mut() {
+                            cx.with_vm(|vm| {
+                                let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                                <$app as $crate::ScriptApply>::script_apply(
+                                    app,
+                                    vm,
+                                    &$crate::Apply::Reload,
+                                    &mut $crate::Scope::empty(),
+                                    value,
+                                );
+                            });
+                        }
                     }
                     if let Some(app) = &mut *app.borrow_mut() {
                         <dyn AppMain>::handle_event(app, cx, event);
@@ -201,7 +274,27 @@ macro_rules! app_main {
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                 if let Event::Startup = event {
-                    *app.borrow_mut() = Some(cx.with_vm(|vm| $app::run(vm)));
+                    *app.borrow_mut() = Some(cx.with_vm(|vm| {
+                        let value = <$app as AppMain>::script_mod(vm);
+                        let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
+                        <$app as AppMain>::after_new_from_script(vm, &mut app);
+                        app
+                    }));
+                }
+                if let Event::LiveEdit = event {
+                    let mut app_ref = app.borrow_mut();
+                    if let Some(app) = app_ref.as_mut() {
+                        cx.with_vm(|vm| {
+                            let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                            <$app as $crate::ScriptApply>::script_apply(
+                                app,
+                                vm,
+                                &$crate::Apply::Reload,
+                                &mut $crate::Scope::empty(),
+                                value,
+                            );
+                        });
+                    }
                 }
                 if let Some(app) = &mut *app.borrow_mut() {
                     <dyn AppMain>::handle_event(app, cx, event);

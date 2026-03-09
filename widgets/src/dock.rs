@@ -1362,7 +1362,13 @@ impl Widget for Dock {
                 }
             }
         }
-        if event.requires_visibility() {
+        // Drag/drop hit-testing must stay scoped to the visible tab content.
+        // Otherwise hidden cached tab items can claim the drop before the
+        // selected tab sees it.
+        let visible_items_only = event.requires_visibility()
+            || matches!(event, Event::Drag(_) | Event::Drop(_) | Event::DragEnd);
+
+        if visible_items_only {
             for (_id, item) in self.visible_items() {
                 item.handle_event(cx, event, scope);
             }

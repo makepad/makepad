@@ -578,7 +578,7 @@ impl Cx {
 
                         if cxtexture.format.is_vec() {
                             cxtexture.update_vec_texture(gl, &self.os_type);
-                        } else if cxtexture.format.is_video() {
+                        } else if cxtexture.format.is_video_external() {
                             let is_initial_setup = cxtexture.setup_video_texture(gl);
                             if is_initial_setup {
                                 let e = Event::TextureHandleReady(TextureHandleReadyEvent {
@@ -588,6 +588,8 @@ impl Cx {
                                 to_dispatch.push(e);
                             }
                         }
+                        // VideoYuvPlane textures are uploaded externally via
+                        // upload_r8_plane_to_gl and need no setup here.
                     }
                     for i in 0..sh.mapping.textures.len() {
                         let gl = self.os.gl();
@@ -607,9 +609,7 @@ impl Cx {
                             let cxtexture = &mut self.textures[texture_id];
                             let bind_target = match cxtexture.format {
                                 #[cfg(target_os = "android")]
-                                TextureFormat::VideoRGB => gl_sys::TEXTURE_EXTERNAL_OES,
-                                #[cfg(not(target_os = "android"))]
-                                TextureFormat::VideoRGB => gl_sys::TEXTURE_2D,
+                                TextureFormat::VideoExternal => gl_sys::TEXTURE_EXTERNAL_OES,
                                 TextureFormat::VecCubeBGRAu8_32 { .. } => gl_sys::TEXTURE_CUBE_MAP,
                                 _ => gl_sys::TEXTURE_2D,
                             };
@@ -1403,7 +1403,7 @@ impl GlShader {
         program: u32,
         prefix: &str,
         slots: usize,
-        inputs: &[crate::draw_shader::DrawShaderInput],
+        _inputs: &[crate::draw_shader::DrawShaderInput],
     ) -> Vec<OpenglAttribute> {
         let mut attribs = Vec::new();
 
@@ -1417,15 +1417,6 @@ impl GlShader {
 
         let stride = (slots * mem::size_of::<f32>()) as i32;
         let num_attr = ceil_div4(slots);
-        let mut chunk_formats = vec![DrawShaderAttrFormat::Float; num_attr];
-        for input in inputs {
-            if input.attr_format == DrawShaderAttrFormat::Float {
-                continue;
-            }
-            for slot in input.offset..(input.offset + input.slots) {
-                chunk_formats[slot / 4] = input.attr_format;
-            }
-        }
         let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
         for i in 0..num_attr {
             let mut name0 = prefix.to_string();
@@ -1447,7 +1438,7 @@ impl GlShader {
                         size,
                         stride,
                         (i * 4 * mem::size_of::<f32>()),
-                        chunk_formats[i]
+                        DrawShaderAttrFormat::Float
                     );
                 }
                 attribs.push(OpenglAttribute {
@@ -1456,7 +1447,7 @@ impl GlShader {
                     offset: (i * 4 * mem::size_of::<f32>()) as usize,
                     size: size,
                     stride: stride,
-                    attr_format: chunk_formats[i],
+                    attr_format: DrawShaderAttrFormat::Float,
                 })
             }
         }
@@ -1632,18 +1623,22 @@ impl CxOsDrawShader {
         let sampler_helpers = "
             vec4 depth_clip(vec4 w, vec4 c, float clip);
             vec4 sample2d(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
+            vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){return textureLod(sampler, vec2(pos.x, pos.y), lod);}
             vec4 sample2d_bgra(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, 1.0 - pos.y));}
             vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
+            vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){return textureLod(sampler, dir, lod);}
             vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir).zyxw;}
             ";
         #[cfg(not(target_os = "android"))]
         let sampler_helpers = "
             vec4 depth_clip(vec4 w, vec4 c, float clip);
             vec4 sample2d(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
+            vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){return textureLod(sampler, vec2(pos.x, pos.y), lod);}
             vec4 sample2d_bgra(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, 1.0 - pos.y));}
             vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
+            vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){return textureLod(sampler, dir, lod);}
             vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir).zyxw;}
             ";
 
@@ -1845,10 +1840,22 @@ pub struct CxOsUniformBuffer {
     pub buffer: OpenglBuffer,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CxOsTexture {
     pub gl_texture: Option<u32>,
+    /// True when Makepad owns the GL texture object and must delete it.
+    pub gl_texture_owned: bool,
     pub gl_renderbuffer: Option<u32>,
+}
+
+impl Default for CxOsTexture {
+    fn default() -> Self {
+        Self {
+            gl_texture: None,
+            gl_texture_owned: true,
+            gl_renderbuffer: None,
+        }
+    }
 }
 
 impl CxTexture {
@@ -1878,6 +1885,7 @@ impl CxTexture {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
                     (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                     self.os.gl_texture = Some(gl_texture.assume_init());
+                    self.os.gl_texture_owned = true;
                 }
             }
             needs_realloc = true;
@@ -2195,6 +2203,7 @@ impl CxTexture {
                     let mut gl_texture = std::mem::MaybeUninit::uninit();
                     (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                     self.os.gl_texture = Some(gl_texture.assume_init());
+                    self.os.gl_texture_owned = true;
                 }
             }
 
@@ -2290,6 +2299,7 @@ impl CxTexture {
                 unsafe {
                     (gl.glGenTextures)(1, gl_texture.as_mut_ptr());
                     self.os.gl_texture = Some(gl_texture.assume_init());
+                    self.os.gl_texture_owned = true;
                 }
             }
             unsafe { (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap()) };
@@ -2406,8 +2416,10 @@ impl CxTexture {
     pub fn free_previous_resources(&mut self, gl: &LibGl) {
         if let Some(mut old_os) = self.previous_platform_resource.take() {
             if let Some(gl_texture) = old_os.gl_texture.take() {
-                unsafe { (gl.glDeleteTextures)(1, &gl_texture) };
-                crate::log!("Deleted texture: {}", gl_texture);
+                if old_os.gl_texture_owned {
+                    unsafe { (gl.glDeleteTextures)(1, &gl_texture) };
+                    crate::log!("Deleted texture: {}", gl_texture);
+                }
             }
             if let Some(gl_renderbuffer) = old_os.gl_renderbuffer.take() {
                 unsafe { (gl.glDeleteRenderbuffers)(1, &gl_renderbuffer) };

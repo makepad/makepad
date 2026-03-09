@@ -141,7 +141,8 @@ impl Widget for Tooltip {
     }
 
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
-        self.label(cx, ids!(content.tooltip_label)).set_text(cx, text);
+        self.label(cx, ids!(content.tooltip_label))
+            .set_text(cx, text);
     }
 }
 

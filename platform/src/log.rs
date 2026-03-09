@@ -65,11 +65,18 @@ pub(crate) fn log_with_level_makepad_platform(
             extern "C" {
                 pub fn __android_log_write(prio: c_int, tag: *const u8, text: *const u8) -> c_int;
             }
+            // Android log priorities: 2=VERBOSE, 3=DEBUG, 4=INFO, 5=WARN, 6=ERROR
+            // Some devices (e.g. Motorola/MediaTek) suppress DEBUG by default.
+            let prio: c_int = match level {
+                LogLevel::Error | LogLevel::Panic => 6,
+                LogLevel::Warning => 5,
+                _ => 4,
+            };
             let msg = format!(
                 "{}:{}:{} - {}\0",
                 file_name, line_start, column_start, message
             );
-            unsafe { __android_log_write(3, "Makepad\0".as_ptr(), msg.as_ptr()) };
+            unsafe { __android_log_write(prio, "Makepad\0".as_ptr(), msg.as_ptr()) };
         }
         #[cfg(target_env = "ohos")]
         {
@@ -101,11 +108,16 @@ pub(crate) fn log_with_level_makepad_platform(
             extern "C" {
                 pub fn __android_log_write(prio: c_int, tag: *const u8, text: *const u8) -> c_int;
             }
+            let prio: c_int = match level {
+                LogLevel::Error | LogLevel::Panic => 6,
+                LogLevel::Warning => 5,
+                _ => 4,
+            };
             let msg = format!(
                 "{}:{}:{} - {}\0",
                 file_name, line_start, column_start, message
             );
-            unsafe { __android_log_write(3, "Makepad\0".as_ptr(), msg.as_ptr()) };
+            unsafe { __android_log_write(prio, "Makepad\0".as_ptr(), msg.as_ptr()) };
         }
 
         Cx::send_studio_message(AppToStudio::LogItem(StudioLogItem {

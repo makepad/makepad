@@ -12,8 +12,10 @@ metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 [dependencies]
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
-makepad-network = { path = "./network", version = "1.0.0", features = ["script"] }
-makepad-script = { path="./script", version="1.0.0"}
+makepad-network = { path = "./network", version = "1.0.0", features = [
+    "script",
+] }
+makepad-script = { path = "./script", version = "1.0.0" }
 makepad-zune-png = { path = "../libs/zune/zune-png", version = "0.5.1" }
 smallvec = { version = "1.15", path = "../libs/smallvec" }
 bitflags = { version = "2.10", path = "../libs/bitflags" }
@@ -25,6 +27,8 @@ memmap2 = "0.9"
 default = ["bundled-fonts"]
 bundled-fonts = []
 system-fonts = []
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+makepad-filesystem-watcher = { path = "../libs/filesystem_watcher", version = "0.1.0" }
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }
@@ -58,22 +62,30 @@ makepad-apple-sys = { path = "../libs/apple_sys", version = "1.0.0" }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
 wayland-client = { path = "../libs/linux/wayland-client" }
-wayland-protocols = { path = "../libs/linux/wayland-protocols", features = ["client", "unstable", "staging"] }
+wayland-protocols = { path = "../libs/linux/wayland-protocols", features = [
+    "client",
+    "unstable",
+    "staging",
+] }
 wayland-egl = { path = "../libs/linux/wayland-egl" }
-naga = {version = "27.0", features = ["wgsl-in", "spv-out"]}
+naga = { version = "27.0", features = ["wgsl-in", "spv-out"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 wayland-client = { path = "../libs/linux/wayland-client" }
-wayland-protocols = { path = "../libs/linux/wayland-protocols", features = ["client", "unstable", "staging"] }
+wayland-protocols = { path = "../libs/linux/wayland-protocols", features = [
+    "client",
+    "unstable",
+    "staging",
+] }
 wayland-egl = { path = "../libs/linux/wayland-egl" }
-naga = {version = "27.0", features = ["wgsl-in", "spv-out"]}
+naga = { version = "27.0", features = ["wgsl-in", "spv-out"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ## Note: we must not use local 'path' dependencies on `makepad-jni-sys` or `makepad-android-state`
 ## in order to guarantee that only one instance of each crate exists in the app binary.
-makepad-jni-sys = {version = "0.4.0"}
-makepad-android-state = {version = "0.1.0"}
-naga = {version = "27.0", features = ["wgsl-in", "spv-out"]}
+makepad-jni-sys = { version = "0.4.0" }
+makepad-android-state = { version = "0.1.0" }
+naga = { version = "27.0", features = ["wgsl-in", "spv-out"] }
 ash = "0.38"
 
 [target.'cfg(target_env = "ohos")'.dependencies]
