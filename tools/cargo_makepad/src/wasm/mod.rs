@@ -86,6 +86,7 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         split_auto: false,
         split_functions: false,
         split_functions_threshold: 200,
+        hot_reload: false,
     };
 
     // pull out options
