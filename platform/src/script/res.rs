@@ -214,62 +214,6 @@ fn should_skip_eager_resource_load(_abs_path: &str) -> bool {
 }
 
 impl Cx {
-    pub fn dump_script_resource_stats(&self, label: &str) {
-        let resources = self.script_data.resources.resources.borrow();
-        let mut total_count = 0usize;
-        let mut pending_count = 0usize;
-        let mut loading_count = 0usize;
-        let mut loaded_count = 0usize;
-        let mut error_count = 0usize;
-        let mut loaded_bytes = 0usize;
-        let mut loaded_builtin_theme_font_count = 0usize;
-        let mut loaded_builtin_theme_font_bytes = 0usize;
-        let mut top_loaded: Vec<(usize, String)> = Vec::new();
-
-        for res in resources.iter() {
-            total_count += 1;
-            match &res.data {
-                CxScriptResourceData::NotLoaded => pending_count += 1,
-                CxScriptResourceData::Loading => loading_count += 1,
-                CxScriptResourceData::Error(_) => error_count += 1,
-                CxScriptResourceData::Loaded(data) => {
-                    loaded_count += 1;
-                    let size = data.len();
-                    loaded_bytes += size;
-                    if is_builtin_theme_bundled_text_font_path(&res.abs_path) {
-                        loaded_builtin_theme_font_count += 1;
-                        loaded_builtin_theme_font_bytes += size;
-                    }
-                    top_loaded.push((size, res.abs_path.clone()));
-                }
-            }
-        }
-
-        top_loaded.sort_by(|a, b| b.0.cmp(&a.0));
-
-        crate::log!(
-            "res.dump_stats [{}]: total={} loaded={} loading={} pending={} error={} loaded_bytes={} builtin_theme_font_count={} builtin_theme_font_bytes={}",
-            label,
-            total_count,
-            loaded_count,
-            loading_count,
-            pending_count,
-            error_count,
-            loaded_bytes,
-            loaded_builtin_theme_font_count,
-            loaded_builtin_theme_font_bytes
-        );
-        for (idx, (size, path)) in top_loaded.iter().take(10).enumerate() {
-            crate::log!(
-                "res.dump_stats [{}]: top_loaded[{}] bytes={} path={}",
-                label,
-                idx,
-                size,
-                path
-            );
-        }
-    }
-
     fn load_script_resource_impl(
         &mut self,
         handle: ScriptHandle,
@@ -413,13 +357,6 @@ impl Cx {
                 #[cfg(target_arch = "wasm32")]
                 &crate_manifests,
             );
-        }
-
-        if std::env::var("MAKEPAD_DUMP_RESOURCE_STATS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        {
-            self.dump_script_resource_stats("load_all_script_resources");
         }
     }
 }
@@ -786,25 +723,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let cx = vm.host.cx_mut();
             cx.load_all_script_resources();
             value
-        },
-    );
-
-    // res.dump_stats("optional label") - log loaded resource counts and bytes
-    vm.add_method(
-        res,
-        id_lut!(dump_stats),
-        script_args_def!(label = NIL),
-        move |vm, args| {
-            let label = script_value!(vm, args.label);
-            let label = if label.is_string_like() {
-                vm.string_with(label, |_vm, s| s.to_string())
-                    .unwrap_or_else(|| "manual".to_string())
-            } else {
-                "manual".to_string()
-            };
-            let cx = vm.host.cx_mut();
-            cx.dump_script_resource_stats(&label);
-            NIL
         },
     );
 

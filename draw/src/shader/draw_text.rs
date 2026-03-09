@@ -1227,7 +1227,6 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
     if !fonts.is_font_known(font_id) {
         match query_system_font(family) {
             Ok(system_font) => {
-                let font_bytes = system_font.data.len();
                 fonts.define_font(
                     font_id,
                     FontDefinition {
@@ -1238,12 +1237,6 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
                         variations: Vec::new(),
                     },
                 );
-                if std::env::var("MAKEPAD_DUMP_SYSTEM_FONT_STATS")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false)
-                {
-                    log!("system-font loaded family='{family}' bytes={font_bytes}");
-                }
                 clear_failed_system_font_lookup(font_id);
             }
             Err(SystemFontError::Io(err)) => {
