@@ -727,7 +727,7 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandState {
                 cursor_end,
             } => {}
             zwp_text_input_v3::Event::CommitString { text } => {
-                if let Some(text_str) = text {
+                if let Some(text_str) = text.filter(|text| !text.chars().all(char::is_control)) {
                     state.do_callback(XlibEvent::TextInput(TextInputEvent {
                         input: text_str,
                         replace_last: false,
@@ -917,7 +917,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                 time: state.time_now(),
                             }));
 
-                            if !block_text && !text_str.is_empty() {
+                            if !block_text && text_str.chars().any(|ch| !ch.is_control()) {
                                 state.do_callback(XlibEvent::TextInput(TextInputEvent {
                                     input: text_str,
                                     replace_last: false,
