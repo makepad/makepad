@@ -6,10 +6,15 @@ use {
         video::{
             CameraFrameRef, VideoDecodeError, VideoEncodeError, VideoEncoderConfig, VideoOutputFn,
         },
-        video_decode::yuv::YuvPlaneData,
     },
     std::sync::{Arc, OnceLock},
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::video_decode::yuv::YuvPlaneData;
+
+#[cfg(target_arch = "wasm32")]
+pub struct YuvPlaneData;
 
 // ---------------------------------------------------------------------------
 // MSE (Media Source Extensions) player trait

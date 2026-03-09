@@ -1,3 +1,8 @@
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, RawFd};
@@ -718,9 +723,15 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
-fn main() {
+pub(crate) fn main() {
     if let Err(err) = run() {
         let _ = writeln!(io::stderr(), "tui_test: {err}");
         std::process::exit(1);
     }
+}
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {
+    native::main();
 }
