@@ -2,31 +2,51 @@
 fn main() {}
 
 #[cfg(not(target_arch = "wasm32"))]
-mod native {
 mod android;
+#[cfg(not(target_arch = "wasm32"))]
 mod apple;
+#[cfg(not(target_arch = "wasm32"))]
 mod check;
+#[cfg(not(target_arch = "wasm32"))]
 mod open_harmony;
+#[cfg(not(target_arch = "wasm32"))]
 mod desktop;
+#[cfg(not(target_arch = "wasm32"))]
 mod studio;
+#[cfg(not(target_arch = "wasm32"))]
 mod tunnel;
+#[cfg(not(target_arch = "wasm32"))]
 mod utils;
+#[cfg(not(target_arch = "wasm32"))]
 mod wasm;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::borrow::Cow;
 
+#[cfg(not(target_arch = "wasm32"))]
 use android::*;
+#[cfg(not(target_arch = "wasm32"))]
 use apple::*;
+#[cfg(not(target_arch = "wasm32"))]
 use check::*;
+#[cfg(not(target_arch = "wasm32"))]
 pub use makepad_network;
+#[cfg(not(target_arch = "wasm32"))]
 pub use makepad_shell;
+#[cfg(not(target_arch = "wasm32"))]
 pub use makepad_wasm_strip;
+#[cfg(not(target_arch = "wasm32"))]
 use open_harmony::*;
+#[cfg(not(target_arch = "wasm32"))]
 use desktop::*;
+#[cfg(not(target_arch = "wasm32"))]
 use studio::*;
+#[cfg(not(target_arch = "wasm32"))]
 use tunnel::*;
+#[cfg(not(target_arch = "wasm32"))]
 use wasm::*;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn show_help() {
     println!("Makepad's cargo extension");
     println!("    This tool is used to configure and build makepad applications for more complex platforms");
@@ -151,7 +171,8 @@ fn show_help() {
     println!();
 }
 
-pub(crate) fn main() -> Result<(), Cow<'static, str>> {
+#[cfg(not(target_arch = "wasm32"))]
+fn main() -> Result<(), Cow<'static, str>> {
     let args: Vec<String> = std::env::args().collect();
 
     // Skip the first argument if it's the binary path or 'cargo'
@@ -189,13 +210,4 @@ pub(crate) fn main() -> Result<(), Cow<'static, str>> {
         }
     };
     result.map_err(Into::into)
-}
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn main() {
-    if let Err(err) = native::main() {
-        eprintln!("{err}");
-        std::process::exit(1);
-    }
 }
