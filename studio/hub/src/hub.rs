@@ -51,13 +51,19 @@ pub struct HubConnection {
     event_tx: Sender<HubEvent>,
     recv_typed: ToUIReceiver<HubToClient>,
     next_counter: u64,
-    _gateway: Option<GatewayHandle>,
+    gateway: Option<GatewayHandle>,
     _core_thread: JoinHandle<()>,
 }
 
 impl HubConnection {
     pub fn client_id(&self) -> ClientId {
         self.client_id
+    }
+
+    /// Returns the studio address string used by child processes to connect
+    /// back to the hub (e.g. `"127.0.0.1:8001"`).
+    pub fn studio_addr(&self) -> Option<String> {
+        self.gateway.as_ref().map(|g| studio_addr_for_child(g.listen_address))
     }
 
     pub fn send(&mut self, msg: ClientToHub) -> QueryId {
@@ -144,7 +150,7 @@ impl StudioHub {
             event_tx,
             recv_typed: typed_rx,
             next_counter: 0,
-            _gateway: gateway,
+            gateway,
             _core_thread: core_thread,
         })
     }

@@ -30,12 +30,10 @@ fn forced_windowing_protocol_from_args() -> Option<WindowingProtocol> {
 
 // Protocol detection for windowing system
 fn detect_windowing_protocol() -> WindowingProtocol {
-    // Linux stdin-loop rendering path is currently implemented for X11.
-    // Force child processes started by Studio into that backend so they
-    // render into RunView instead of opening a standalone window.
-    if is_stdin_loop_mode() {
-        return WindowingProtocol::X11;
-    }
+    // stdin-loop mode renders into Studio's RunView via shared framebuffers.
+    // Both X11 and Wayland backends support this path, so let normal
+    // protocol detection proceed instead of forcing X11.
+
 
     if let Some(protocol) = forced_windowing_protocol_from_args() {
         return protocol;

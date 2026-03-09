@@ -183,6 +183,10 @@ impl App {
         self.data.studio.as_mut().map(|studio| studio.send(msg))
     }
 
+    pub(super) fn studio_addr(&self) -> Option<String> {
+        self.data.studio.as_ref().and_then(|s| s.studio_addr())
+    }
+
     pub(super) fn mount_state(&self, mount: &str) -> Option<&MountState> {
         self.data.mounts.get(mount)
     }

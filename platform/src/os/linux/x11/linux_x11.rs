@@ -300,6 +300,7 @@ impl X11Cx {
                         cx.handle_action_receiver();
                     }
                     cx.poll_control_channel();
+                    cx.handle_actions();
                     cx.handle_networking_events();
 
                     // Poll video players on the timer tick (every ~8ms).
