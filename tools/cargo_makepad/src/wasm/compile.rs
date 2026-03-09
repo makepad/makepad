@@ -1056,6 +1056,16 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                     if path == "/" {
                         path = "/index.html";
                     }
+                    let (cache_control, cache_extra) = if path.ends_with(".wasm") {
+                        (
+                            "no-store, must-revalidate",
+                            "Pragma: no-cache\r\n\
+                            Expires: 0\r\n\
+                            ",
+                        )
+                    } else {
+                        ("max-age=86400", "")
+                    };
 
                     // alright wasm http server
                     if path == "/$watch" || path == "/favicon.ico" {
@@ -1165,11 +1175,14 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                                     Content-Type: {}\r\n\
                                     {}\
                                     Content-encoding: br\r\n\
-                                    Cache-Control: max-age=86400\r\n\
+                                    Cache-Control: {}\r\n\
+                                    {}\
                                     Content-Length: {}\r\n\
                                     Connection: close\r\n\r\n",
                                     mime_type,
                                     coop_coep_headers,
+                                    cache_control,
+                                    cache_extra,
                                     body.len()
                                 );
                                 let _ = response_sender.send(HttpServerResponse { header, body });
@@ -1191,11 +1204,14 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                                 Content-Type: {}\r\n\
                                 {}\
                                 Content-encoding: none\r\n\
-                                Cache-Control: max-age=86400\r\n\
+                                Cache-Control: {}\r\n\
+                                {}\
                                 Content-Length: {}\r\n\
                                 Connection: close\r\n\r\n",
                                 mime_type,
                                 coop_coep_headers,
+                                cache_control,
+                                cache_extra,
                                 body.len()
                             );
                             let _ = response_sender.send(HttpServerResponse { header, body });

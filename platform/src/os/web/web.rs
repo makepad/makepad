@@ -651,20 +651,6 @@ impl Cx {
                             ));
                         }
                     }
-                    VideoSource::InMemory(_) => {
-                        let error = "VideoSource::InMemory is not supported on web".to_string();
-                        crate::error!("{}", error);
-                        self.call_event_handler(&Event::VideoDecodingError(
-                            VideoDecodingErrorEvent { video_id, error },
-                        ));
-                    }
-                    VideoSource::Filesystem(_) => {
-                        let error = "VideoSource::Filesystem is not supported on web".to_string();
-                        crate::error!("{}", error);
-                        self.call_event_handler(&Event::VideoDecodingError(
-                            VideoDecodingErrorEvent { video_id, error },
-                        ));
-                    }
                 },
                 CxOsOp::BeginVideoPlayback(video_id) => {
                     self.os.from_wasm(FromWasmBeginVideoPlayback {
