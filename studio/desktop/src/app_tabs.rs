@@ -322,9 +322,10 @@ impl App {
                     .run_tab_state
                     .get(&tab_id)
                     .and_then(|state| state.window_id);
+                let addr = self.studio_addr();
                 dock.item(tab_id)
                     .desktop_run_view(cx, ids!(run_view))
-                    .set_run_target(cx, build_id, window_id);
+                    .set_run_target(cx, build_id, window_id, addr.as_deref());
                 if select {
                     dock.select_tab(cx, tab_id);
                 }
@@ -366,9 +367,10 @@ impl App {
             },
         );
         dock.set_tab_title(cx, tab_id, package.to_string());
+        let addr = self.studio_addr();
         dock.item(tab_id)
             .desktop_run_view(cx, ids!(run_view))
-            .set_run_target(cx, build_id, None);
+            .set_run_target(cx, build_id, None, addr.as_deref());
         Some(tab_id)
     }
 
@@ -391,11 +393,12 @@ impl App {
             })
             .collect();
 
+        let addr = self.studio_addr();
         for (tab_id, mount, build_id, window_id) in targets {
             if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
                 dock.item(tab_id)
                     .desktop_run_view(cx, ids!(run_view))
-                    .set_run_target(cx, build_id, window_id);
+                    .set_run_target(cx, build_id, window_id, addr.as_deref());
             }
         }
     }

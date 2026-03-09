@@ -493,8 +493,8 @@ pub mod aux_chan {
             Ok(Self { path, listener })
         }
 
-        pub fn accept_host_endpoint(self) -> io::Result<HostEndpoint> {
-            let deadline = Instant::now() + Duration::from_secs(10);
+        pub fn accept_host_endpoint(&self) -> io::Result<HostEndpoint> {
+            let deadline = Instant::now() + Duration::from_secs(120);
             loop {
                 match self.listener.accept() {
                     Ok((stream, _)) => {

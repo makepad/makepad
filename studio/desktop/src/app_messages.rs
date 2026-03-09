@@ -266,9 +266,10 @@ impl App {
                         window_id = state.window_id;
                     }
                     if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                        let addr = self.studio_addr();
                         dock.item(tab_id)
                             .desktop_run_view(cx, ids!(run_view))
-                            .set_run_target(cx, build_id, window_id);
+                            .set_run_target(cx, build_id, window_id, addr.as_deref());
                         dock.redraw_tab(cx, tab_id);
                     }
                 }
@@ -346,8 +347,9 @@ impl App {
                 }
                 if let Some(mount) = mount {
                     if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                        let addr = self.studio_addr();
                         let run_view = dock.item(tab_id).desktop_run_view(cx, ids!(run_view));
-                        run_view.set_run_target(cx, build_id, Some(window_id));
+                        run_view.set_run_target(cx, build_id, Some(window_id), addr.as_deref());
                         run_view.rebootstrap_after_app_ready(cx, build_id, window_id);
                         dock.redraw_tab(cx, tab_id);
                     }
@@ -377,8 +379,9 @@ impl App {
                     return;
                 };
                 if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                    let addr = self.studio_addr();
                     let run_view = dock.item(tab_id).desktop_run_view(cx, ids!(run_view));
-                    run_view.set_run_target(cx, build_id, Some(window_id));
+                    run_view.set_run_target(cx, build_id, Some(window_id), addr.as_deref());
                     run_view.set_presentable_draw(cx, presentable_draw);
                     dock.redraw_tab(cx, tab_id);
                 }
