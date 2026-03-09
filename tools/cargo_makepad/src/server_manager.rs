@@ -132,7 +132,7 @@ impl WasmServerOwnershipGuard {
             }
         };
 
-        let lock_state = classify_lock_state(maybe_lock.as_ref(), probes);
+        let lock_state = classify_lock_state(maybe_lock.as_ref(), listen_addr, probes);
         if let Some(lock) = maybe_lock {
             match lock_state {
                 LockState::LiveLock => {
@@ -215,10 +215,13 @@ impl Drop for WasmServerOwnershipGuard {
 
 fn classify_lock_state(
     lock: Option<&WasmServerLockMetadata>,
+    listen_addr: SocketAddr,
     probes: &impl ServerManagerProbes,
 ) -> LockState {
     match lock {
-        Some(lock) if probes.is_pid_alive(lock.pid) => LockState::LiveLock,
+        Some(lock) if probes.is_pid_alive(lock.pid) && probes.pid_owns_port(lock.pid, listen_addr) => {
+            LockState::LiveLock
+        }
         Some(_) => LockState::StaleLock,
         None => LockState::NoLock,
     }
@@ -351,21 +354,41 @@ fn startup_lock_is_stale(
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
         Err(_) => return Ok(file_older_than(lock_path, STARTUP_LOCK_STALE_TIMEOUT)),
     };
-    if let Some(pid) = parse_startup_lock_pid(&content) {
+    let parsed_lock = parse_startup_lock_info(&content);
+    if let Some(started_at_ms) = parsed_lock.started_at_ms {
+        let max_age_ms = STARTUP_LOCK_STALE_TIMEOUT.as_millis() as u64;
+        if probes.now_unix_millis().saturating_sub(started_at_ms) >= max_age_ms {
+            return Ok(true);
+        }
+    }
+    if let Some(pid) = parsed_lock.pid {
         return Ok(!probes.is_pid_alive(pid));
     }
     Ok(file_older_than(lock_path, STARTUP_LOCK_STALE_TIMEOUT))
 }
 
-fn parse_startup_lock_pid(content: &str) -> Option<u32> {
+struct StartupLockInfo {
+    pid: Option<u32>,
+    started_at_ms: Option<u64>,
+}
+
+fn parse_startup_lock_info(content: &str) -> StartupLockInfo {
+    let mut parsed = StartupLockInfo {
+        pid: None,
+        started_at_ms: None,
+    };
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("pid=") {
             if let Ok(pid) = value.trim().parse::<u32>() {
-                return Some(pid);
+                parsed.pid = Some(pid);
+            }
+        } else if let Some(value) = line.strip_prefix("started_at=") {
+            if let Ok(started_at_ms) = value.trim().parse::<u64>() {
+                parsed.started_at_ms = Some(started_at_ms);
             }
         }
     }
-    None
+    parsed
 }
 
 fn file_older_than(path: &Path, min_age: Duration) -> bool {
@@ -430,8 +453,10 @@ fn normalize_path_string(path: &Path) -> String {
 trait ServerManagerProbes {
     fn current_pid(&self) -> u32;
     fn now_unix_secs(&self) -> u64;
+    fn now_unix_millis(&self) -> u64;
     fn is_pid_alive(&self, pid: u32) -> bool;
     fn terminate_pid(&self, pid: u32) -> Result<(), String>;
+    fn pid_owns_port(&self, pid: u32, addr: SocketAddr) -> bool;
     fn is_port_in_use(&self, addr: SocketAddr) -> bool;
     fn wait_for_port_release(&self, addr: SocketAddr, timeout: Duration) -> bool;
     fn describe_port_occupant(&self, addr: SocketAddr) -> Option<String>;
@@ -451,12 +476,23 @@ impl ServerManagerProbes for LiveServerManagerProbes {
             .unwrap_or(0)
     }
 
+    fn now_unix_millis(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|v| v.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
     fn is_pid_alive(&self, pid: u32) -> bool {
         pid_is_alive(pid)
     }
 
     fn terminate_pid(&self, pid: u32) -> Result<(), String> {
         terminate_pid(pid)
+    }
+
+    fn pid_owns_port(&self, pid: u32, addr: SocketAddr) -> bool {
+        port_occupant_info(addr).is_some_and(|occupant| occupant.pid == pid)
     }
 
     fn is_port_in_use(&self, addr: SocketAddr) -> bool {
@@ -481,8 +517,28 @@ impl ServerManagerProbes for LiveServerManagerProbes {
     }
 }
 
+#[derive(Clone, Debug)]
+struct PortOccupant {
+    pid: u32,
+    command: Option<String>,
+}
+
+impl PortOccupant {
+    fn describe(&self) -> String {
+        match &self.command {
+            Some(command) => format!("pid {} ({})", self.pid, command),
+            None => format!("pid {}", self.pid),
+        }
+    }
+}
+
 #[cfg(unix)]
 fn describe_port_occupant(addr: SocketAddr) -> Option<String> {
+    port_occupant_info(addr).map(|occupant| occupant.describe())
+}
+
+#[cfg(unix)]
+fn port_occupant_info(addr: SocketAddr) -> Option<PortOccupant> {
     let port = addr.port();
     let output = Command::new("lsof")
         .arg("-nP")
@@ -496,11 +552,11 @@ fn describe_port_occupant(addr: SocketAddr) -> Option<String> {
     if !output.status.success() && output.stdout.is_empty() {
         return None;
     }
-    parse_lsof_pid_and_command(&output.stdout)
+    parse_lsof_occupant(&output.stdout)
 }
 
 #[cfg(unix)]
-fn parse_lsof_pid_and_command(stdout: &[u8]) -> Option<String> {
+fn parse_lsof_occupant(stdout: &[u8]) -> Option<PortOccupant> {
     let mut pid: Option<u32> = None;
     let mut command: Option<String> = None;
     for line in String::from_utf8_lossy(stdout).lines() {
@@ -508,7 +564,10 @@ fn parse_lsof_pid_and_command(stdout: &[u8]) -> Option<String> {
             if let Ok(parsed_pid) = rest.trim().parse::<u32>() {
                 pid = Some(parsed_pid);
                 if let Some(command) = command {
-                    return Some(format!("pid {} ({})", parsed_pid, command));
+                    return Some(PortOccupant {
+                        pid: parsed_pid,
+                        command: Some(command),
+                    });
                 }
             }
         } else if let Some(rest) = line.strip_prefix('c') {
@@ -517,17 +576,25 @@ fn parse_lsof_pid_and_command(stdout: &[u8]) -> Option<String> {
                 command = Some(parsed_command);
                 if let Some(pid) = pid {
                     if let Some(command) = command.as_ref() {
-                        return Some(format!("pid {} ({})", pid, command));
+                        return Some(PortOccupant {
+                            pid,
+                            command: Some(command.clone()),
+                        });
                     }
                 }
             }
         }
     }
-    pid.map(|pid| format!("pid {}", pid))
+    pid.map(|pid| PortOccupant { pid, command: None })
 }
 
 #[cfg(windows)]
 fn describe_port_occupant(addr: SocketAddr) -> Option<String> {
+    port_occupant_info(addr).map(|occupant| occupant.describe())
+}
+
+#[cfg(windows)]
+fn port_occupant_info(addr: SocketAddr) -> Option<PortOccupant> {
     let port = addr.port();
     let output = Command::new("netstat")
         .arg("-ano")
@@ -553,11 +620,14 @@ fn describe_port_occupant(addr: SocketAddr) -> Option<String> {
             if let Some(name) =
                 parse_windows_tasklist_name(&String::from_utf8_lossy(&task_output.stdout))
             {
-                return Some(format!("pid {} ({})", pid, name));
+                return Some(PortOccupant {
+                    pid,
+                    command: Some(name),
+                });
             }
         }
     }
-    Some(format!("pid {}", pid))
+    Some(PortOccupant { pid, command: None })
 }
 
 #[cfg(windows)]
@@ -605,6 +675,11 @@ fn parse_windows_tasklist_name(stdout: &str) -> Option<String> {
 
 #[cfg(not(any(unix, windows)))]
 fn describe_port_occupant(_addr: SocketAddr) -> Option<String> {
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+fn port_occupant_info(_addr: SocketAddr) -> Option<PortOccupant> {
     None
 }
 
@@ -760,7 +835,9 @@ mod tests {
     struct MockProbes {
         current_pid: u32,
         now_unix_secs: u64,
+        now_unix_millis: u64,
         alive_pids: HashSet<u32>,
+        owned_port_pids: HashSet<u32>,
         terminated_pids: RefCell<Vec<u32>>,
         port_in_use: bool,
         wait_port_release: bool,
@@ -776,6 +853,10 @@ mod tests {
             self.now_unix_secs
         }
 
+        fn now_unix_millis(&self) -> u64 {
+            self.now_unix_millis
+        }
+
         fn is_pid_alive(&self, pid: u32) -> bool {
             self.alive_pids.contains(&pid)
         }
@@ -783,6 +864,10 @@ mod tests {
         fn terminate_pid(&self, pid: u32) -> Result<(), String> {
             self.terminated_pids.borrow_mut().push(pid);
             Ok(())
+        }
+
+        fn pid_owns_port(&self, pid: u32, _addr: SocketAddr) -> bool {
+            self.owned_port_pids.contains(&pid)
         }
 
         fn is_port_in_use(&self, _addr: SocketAddr) -> bool {
@@ -861,7 +946,9 @@ mod tests {
         let probes = MockProbes {
             current_pid: 100,
             now_unix_secs: 555,
+            now_unix_millis: 555_000,
             alive_pids: HashSet::new(),
+            owned_port_pids: HashSet::new(),
             terminated_pids: RefCell::new(Vec::new()),
             port_in_use: false,
             wait_port_release: true,
@@ -895,7 +982,9 @@ mod tests {
         let probes = MockProbes {
             current_pid: 100,
             now_unix_secs: 555,
+            now_unix_millis: 555_000,
             alive_pids: HashSet::new(),
+            owned_port_pids: HashSet::new(),
             terminated_pids: RefCell::new(Vec::new()),
             port_in_use: false,
             wait_port_release: true,
@@ -921,12 +1010,14 @@ mod tests {
     fn live_startup_lock_blocks_prepare() {
         let workspace = new_temp_workspace("startup-live");
         let startup_lock_path = startup_lock_path_for_port(&workspace, 8010);
-        write_startup_lock(&startup_lock_path, "pid=42\nstarted_at=1\n");
+        write_startup_lock(&startup_lock_path, "pid=42\nstarted_at=555000\n");
 
         let probes = MockProbes {
             current_pid: 100,
             now_unix_secs: 555,
+            now_unix_millis: 555_000,
             alive_pids: HashSet::from([42]),
+            owned_port_pids: HashSet::new(),
             terminated_pids: RefCell::new(Vec::new()),
             port_in_use: false,
             wait_port_release: true,
@@ -954,14 +1045,17 @@ mod tests {
         let probes = MockProbes {
             current_pid: 100,
             now_unix_secs: 555,
+            now_unix_millis: 555_000,
             alive_pids: HashSet::new(),
+            owned_port_pids: HashSet::new(),
             terminated_pids: RefCell::new(Vec::new()),
             port_in_use: false,
             wait_port_release: true,
             occupant_description: None,
         };
+        let listen_addr = listen_address(8010, false);
         assert_eq!(
-            evaluate_startup_scenario(LockState::NoLock, probes.port_in_use),
+            evaluate_startup_scenario(classify_lock_state(None, listen_addr, &probes), probes.port_in_use),
             StartupScenario::NoLock
         );
 
@@ -976,7 +1070,7 @@ mod tests {
         };
         assert_eq!(
             evaluate_startup_scenario(
-                classify_lock_state(Some(&stale_lock), &probes),
+                classify_lock_state(Some(&stale_lock), listen_addr, &probes),
                 probes.port_in_use
             ),
             StartupScenario::StaleLock
@@ -988,11 +1082,12 @@ mod tests {
 
         let live_probes = MockProbes {
             alive_pids: HashSet::from([42]),
+            owned_port_pids: HashSet::from([42]),
             ..probes
         };
         assert_eq!(
             evaluate_startup_scenario(
-                classify_lock_state(Some(&stale_lock), &live_probes),
+                classify_lock_state(Some(&stale_lock), listen_addr, &live_probes),
                 live_probes.port_in_use
             ),
             StartupScenario::LiveLock
@@ -1014,7 +1109,9 @@ mod tests {
         let probes = MockProbes {
             current_pid: 100,
             now_unix_secs: 555,
+            now_unix_millis: 555_000,
             alive_pids: HashSet::new(),
+            owned_port_pids: HashSet::new(),
             terminated_pids: RefCell::new(Vec::new()),
             port_in_use: true,
             wait_port_release: true,
@@ -1030,6 +1127,71 @@ mod tests {
         assert!(
             err.contains("pid 4321 (python3)"),
             "unexpected error text: {err}"
+        );
+    }
+
+    #[test]
+    fn lock_pid_reuse_is_treated_as_stale_without_termination() {
+        let workspace = new_temp_workspace("pid-reuse");
+        let lock_path = lock_path_for_port(&workspace, 8010);
+        write_test_lock(
+            &lock_path,
+            &WasmServerLockMetadata {
+                format_version: LOCK_FORMAT_VERSION,
+                pid: 4242,
+                port: 8010,
+                workspace_root: normalize_path_string(&workspace),
+                crate_name: "old-app".to_string(),
+                profile: "release".to_string(),
+                started_at: 1,
+            },
+        );
+
+        let probes = MockProbes {
+            current_pid: 100,
+            now_unix_secs: 555,
+            now_unix_millis: 555_000,
+            alive_pids: HashSet::from([4242]),
+            owned_port_pids: HashSet::new(),
+            terminated_pids: RefCell::new(Vec::new()),
+            port_in_use: false,
+            wait_port_release: true,
+            occupant_description: None,
+        };
+
+        let guard = WasmServerOwnershipGuard::prepare_with_probes(
+            &workspace, "new-app", "release", 8010, false, &probes,
+        )
+        .unwrap();
+        assert!(!lock_path.exists(), "reused-pid lock should be removed");
+        assert!(
+            probes.terminated_pids.borrow().is_empty(),
+            "reused pid must not be terminated when it does not own the port"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn startup_lock_ages_out_even_if_pid_is_alive() {
+        let workspace = new_temp_workspace("startup-lock-aged");
+        let startup_lock_path = startup_lock_path_for_port(&workspace, 8010);
+        write_startup_lock(&startup_lock_path, "pid=42\nstarted_at=1000\n");
+
+        let probes = MockProbes {
+            current_pid: 100,
+            now_unix_secs: 555,
+            now_unix_millis: 1000 + STARTUP_LOCK_STALE_TIMEOUT.as_millis() as u64 + 1,
+            alive_pids: HashSet::from([42]),
+            owned_port_pids: HashSet::new(),
+            terminated_pids: RefCell::new(Vec::new()),
+            port_in_use: false,
+            wait_port_release: true,
+            occupant_description: None,
+        };
+
+        assert!(
+            startup_lock_is_stale(&startup_lock_path, &probes).unwrap(),
+            "startup lock should be stale once it exceeds max age"
         );
     }
 }
