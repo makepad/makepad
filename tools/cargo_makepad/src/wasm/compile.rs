@@ -4,7 +4,16 @@ use crate::makepad_shell::*;
 use crate::makepad_wasm_strip::*;
 use crate::server_manager::WasmServerOwnershipGuard;
 use crate::utils::*;
-use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
+use makepad_live_reload_core::{
+    hot_reload_display_name,
+    normalize_path_string,
+    start_live_reload_watcher,
+    LiveReloadFileChange,
+    LiveReloadLogger,
+    LiveReloadWatchPlan,
+    LiveReloadWatcherHandle,
+    WatchRoot,
+};
 use makepad_micro_serde::{SerJson, SerJsonState};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -14,7 +23,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
-    sync::{mpsc, Arc, Mutex},
+    sync::mpsc,
     time::Duration,
 };
 
@@ -45,16 +54,6 @@ struct WasmHotReloadEvent {
     kind: String,
     file_name: String,
     content: String,
-}
-
-struct WasmHotReloadPlan {
-    roots: Vec<WatchRoot>,
-    files_by_root: HashMap<String, Vec<String>>,
-    initial_contents: HashMap<String, String>,
-}
-
-struct WasmHotReloadWatcher {
-    _watcher: FileSystemWatcher,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1085,7 +1084,7 @@ fn decode_query_component(input: &str) -> String {
 fn collect_wasm_hot_reload_watch_plan(
     build_crate: &str,
     build_dir: &Path,
-) -> Option<WasmHotReloadPlan> {
+) -> Option<LiveReloadWatchPlan> {
     let mut crate_roots = BTreeMap::<String, PathBuf>::new();
     let build_crate_dir = get_crate_dir(build_crate).ok()?;
     crate_roots.insert(build_crate.to_string(), build_crate_dir);
@@ -1137,7 +1136,7 @@ fn collect_wasm_hot_reload_watch_plan(
         files.dedup();
     }
 
-    Some(WasmHotReloadPlan {
+    Some(LiveReloadWatchPlan {
         roots: roots.into_values().collect(),
         files_by_root,
         initial_contents,
@@ -1191,92 +1190,31 @@ fn collect_script_mod_files_recursive(dir: &Path, files: &mut Vec<String>) {
 }
 
 fn start_wasm_hot_reload_watcher(
-    plan: WasmHotReloadPlan,
+    plan: LiveReloadWatchPlan,
     tx: mpsc::Sender<WasmHotReloadEvent>,
-) -> Option<WasmHotReloadWatcher> {
-    let watched_file_count = plan.initial_contents.len();
-    let root_count = plan.roots.len();
-    let file_map = Arc::new(plan.files_by_root);
-    let file_cache = Arc::new(Mutex::new(plan.initial_contents));
-
-    match FileSystemWatcher::start(plan.roots, {
-        let file_map = Arc::clone(&file_map);
-        let file_cache = Arc::clone(&file_cache);
-        move |event| {
-            forward_hot_reload_fs_event(event.mount, event.path, &file_map, &file_cache, &tx);
-        }
-    }) {
-        Ok(watcher) => {
-            println!(
-                "Watching {} script_mod source files across {} crate roots",
-                watched_file_count, root_count
-            );
-            Some(WasmHotReloadWatcher { _watcher: watcher })
-        }
+) -> Option<LiveReloadWatcherHandle> {
+    let logger = LiveReloadLogger::new(
+        |message| println!("{}", message),
+        |message| eprintln!("{}", message),
+    );
+    match start_live_reload_watcher(
+        plan,
+        move |change: LiveReloadFileChange| {
+            tx.send(WasmHotReloadEvent {
+                kind: "live_change".to_string(),
+                file_name: change.file_name,
+                content: change.content,
+            })
+            .map_err(|_| "channel closed".to_string())
+        },
+        logger,
+    ) {
+        Ok(watcher) => Some(watcher),
         Err(err) => {
-            eprintln!("Wasm hot reload watcher unavailable: {}", err);
+            eprintln!("hot reload watcher unavailable: {}", err);
             None
         }
     }
-}
-
-fn forward_hot_reload_fs_event(
-    mount: String,
-    path: PathBuf,
-    files_by_root: &HashMap<String, Vec<String>>,
-    file_cache: &Mutex<HashMap<String, String>>,
-    tx: &mpsc::Sender<WasmHotReloadEvent>,
-) {
-    let changed_path = normalize_path_string(&path);
-    let candidates = if files_by_root
-        .get(&mount)
-        .is_some_and(|files| files.iter().any(|file| file == &changed_path))
-    {
-        vec![changed_path]
-    } else {
-        files_by_root.get(&mount).cloned().unwrap_or_default()
-    };
-
-    if candidates.is_empty() {
-        return;
-    }
-
-    let Ok(mut cache) = file_cache.lock() else {
-        return;
-    };
-
-    for file_name in candidates {
-        let Ok(content) = fs::read_to_string(&file_name) else {
-            continue;
-        };
-        if cache
-            .get(&file_name)
-            .is_some_and(|previous| previous == &content)
-        {
-            continue;
-        }
-        cache.insert(file_name.clone(), content.clone());
-        let display_name = hot_reload_display_name(&file_name);
-        println!("hotreload detected: {}", display_name);
-        if tx
-            .send(WasmHotReloadEvent {
-                kind: "live_change".to_string(),
-                file_name,
-                content,
-            })
-            .is_err()
-        {
-            eprintln!("hotreload watcher channel closed before dispatch");
-        }
-    }
-}
-
-fn hot_reload_display_name(file_name: &str) -> String {
-    Path::new(file_name)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(file_name)
-        .to_string()
 }
 
 fn broadcast_hot_reload_event(
@@ -1310,39 +1248,12 @@ fn broadcast_hot_reload_event(
     }
 }
 
-fn normalize_path_string(path: &Path) -> String {
-    let path = if path.exists() {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    } else {
-        path.to_path_buf()
-    };
-    normalize_path(&path).to_string_lossy().replace('\\', "/")
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
-            std::path::Component::RootDir => out.push(comp.as_os_str()),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
-                }
-            }
-            std::path::Component::Normal(part) => out.push(part),
-        }
-    }
-    out
-}
-
 fn start_wasm_server(
     root: PathBuf,
     lan: bool,
     port: u16,
     threaded: bool,
-    hot_reload_plan: Option<WasmHotReloadPlan>,
+    hot_reload_plan: Option<LiveReloadWatchPlan>,
     ownership_guard: &mut WasmServerOwnershipGuard,
 ) -> Result<(), String> {
     let net = NetworkRuntime::new(NetworkConfig::default());
