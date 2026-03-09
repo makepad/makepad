@@ -135,6 +135,7 @@ impl DrawShaderTextureInput {
     }
 }
 
+#[cfg(target_feature = "atomics")]
 #[derive(FromWasm)]
 pub struct FromWasmCreateThread {
     pub context_ptr: u32,
