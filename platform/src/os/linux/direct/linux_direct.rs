@@ -172,6 +172,7 @@ impl Cx {
                     if SignalToUI::check_and_clear_action_signal() {
                         self.handle_action_receiver();
                     }
+                    self.poll_control_channel();
                     self.handle_networking_events();
                 } else {
                     self.handle_script_timer(&e);

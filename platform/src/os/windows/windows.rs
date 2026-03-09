@@ -330,6 +330,7 @@ impl Cx {
                 if SignalToUI::check_and_clear_action_signal() {
                     self.handle_action_receiver();
                 }
+                self.poll_control_channel();
 
                 self.run_live_edit_if_needed("windows");
                 self.handle_networking_events();
