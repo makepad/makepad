@@ -1,3 +1,4 @@
+use super::server_manager::WasmServerOwnershipGuard;
 use crate::makepad_network::http_server::*;
 use crate::makepad_network::{NetworkConfig, NetworkRuntime};
 use crate::makepad_shell::*;
@@ -128,7 +129,10 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
         out_path.to_string_lossy().into_owned(),
         in_path.to_string_lossy().into_owned(),
     ];
-    let status = Command::new("wasm-opt").args(&args).current_dir(cwd).output();
+    let status = Command::new("wasm-opt")
+        .args(&args)
+        .current_dir(cwd)
+        .output();
     match status {
         Ok(ref output) if output.status.success() => match fs::read(&out_path) {
             Ok(optimized) => {
@@ -146,7 +150,10 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
             if stderr.trim().is_empty() {
                 println!("wasm-opt: skipped (Binaryen wasm-opt failed; install from https://github.com/WebAssembly/binaryen)");
             } else {
-                println!("wasm-opt: skipped ({})", stderr.lines().next().unwrap_or(stderr.trim()));
+                println!(
+                    "wasm-opt: skipped ({})",
+                    stderr.lines().next().unwrap_or(stderr.trim())
+                );
             }
         }
         Err(e) => {
@@ -375,7 +382,7 @@ fn minify_js(input: &str) -> String {
     let mut in_string = false;
     let mut string_char = '\0';
     let mut in_regex = false;
-    
+
     while let Some(c) = chars.next() {
         if in_string {
             out.push(c);
@@ -407,7 +414,9 @@ fn minify_js(input: &str) -> String {
                         Some(&'/') => {
                             // Line comment
                             while let Some(&next_c) = chars.peek() {
-                                if next_c == '\n' { break; }
+                                if next_c == '\n' {
+                                    break;
+                                }
                                 chars.next();
                             }
                         }
@@ -461,9 +470,12 @@ fn minify_js(input: &str) -> String {
             }
         }
     }
-    
+
     // final compacting: remove empty lines
-    out.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
+    out.lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn cp_brotli(
@@ -483,7 +495,7 @@ pub fn cp_brotli(
     } else {
         cp(source_path, dest_path, exec)?;
     }
-    
+
     if compress {
         brotli_compress(dest_path);
     } else {
@@ -829,15 +841,21 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             });
         }
         let result = if config.split_auto && config.split {
-            let cold_result = wasm_split_functions_cold(&output)
-                .map_err(|e| format!("Cannot auto split wasm functions {:?}: {:?}", wasm_source, e))?;
+            let cold_result = wasm_split_functions_cold(&output).map_err(|e| {
+                format!(
+                    "Cannot auto split wasm functions {:?}: {:?}",
+                    wasm_source, e
+                )
+            })?;
             if cold_result.split_count > 0 && cold_result.primary_wasm.len() < output.len() {
                 defer_secondary_wasm = true;
                 auto_split_outcome = AutoSplitOutcome::Deferred;
                 cold_result
             } else {
                 let fallback = wasm_split_functions(&output, config.split_functions_threshold)
-                    .map_err(|e| format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e))?;
+                    .map_err(|e| {
+                        format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e)
+                    })?;
                 if fallback.split_count > 0 {
                     auto_split_outcome = AutoSplitOutcome::StartupPathFallback;
                 }
@@ -849,7 +867,9 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         };
         if result.split_count == 0 {
             if config.split_auto && config.split {
-                println!("Function split: no selectable functions found for automatic split, skipping");
+                println!(
+                    "Function split: no selectable functions found for automatic split, skipping"
+                );
             } else {
                 println!(
                     "Function split: no functions above threshold ({} bytes), skipping",
@@ -880,14 +900,8 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     result.split_count, result.total_functions, config.split_functions_threshold
                 );
             }
-            println!(
-                "  primary:   {} bytes",
-                result.primary_wasm.len()
-            );
-            println!(
-                "  secondary: {} bytes",
-                result.secondary_wasm.len()
-            );
+            println!("  primary:   {} bytes", result.primary_wasm.len());
+            println!("  secondary: {} bytes", result.secondary_wasm.len());
             output = result.primary_wasm;
             fs::write(&secondary_wasm_dest, &result.secondary_wasm)
                 .map_err(|e| format!("Can't write file {:?} {:?}", secondary_wasm_dest, e))?;
@@ -1002,21 +1016,30 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 pub fn run(config: WasmConfig, args: &[String]) -> Result<(), String> {
     let build_crate = get_build_crate_from_args(args)?.to_string();
     let profile = get_profile_from_args(args);
-    let build_dir = std::env::current_dir()
-        .unwrap()
-        .join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
+    let workspace_root = std::env::current_dir()
+        .map_err(|err| format!("failed to resolve workspace root: {}", err))?;
+    let build_dir = workspace_root.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
+    let port = config.port.unwrap_or(8010);
     let mut run_config = config;
     run_config.hot_reload = true;
 
     let result = build(run_config, args)?;
     let hot_reload_plan = collect_wasm_hot_reload_watch_plan(&build_crate, &build_dir);
+    let mut ownership_guard = WasmServerOwnershipGuard::prepare(
+        &workspace_root,
+        &build_crate,
+        &profile,
+        port,
+        config.lan,
+    )?;
     start_wasm_server(
         result.app_dir,
         config.lan,
-        config.port.unwrap_or(8010),
+        port,
         config.threads,
         hot_reload_plan,
-    );
+        &mut ownership_guard,
+    )?;
     Ok(())
 }
 
@@ -1098,7 +1121,10 @@ fn collect_wasm_hot_reload_watch_plan(
                 continue;
             };
             initial_contents.entry(file_name.clone()).or_insert(content);
-            files_by_root.entry(mount.clone()).or_default().push(file_name);
+            files_by_root
+                .entry(mount.clone())
+                .or_default()
+                .push(file_name);
         }
     }
 
@@ -1245,7 +1271,9 @@ fn broadcast_hot_reload_event(
     let payload = event.serialize_json().into_bytes();
     let stale_clients: Vec<u64> = watch_clients
         .iter()
-        .filter_map(|(web_socket_id, sender)| sender.send(payload.clone()).err().map(|_| *web_socket_id))
+        .filter_map(|(web_socket_id, sender)| {
+            sender.send(payload.clone()).err().map(|_| *web_socket_id)
+        })
         .collect();
     for web_socket_id in stale_clients {
         watch_clients.remove(&web_socket_id);
@@ -1285,7 +1313,8 @@ fn start_wasm_server(
     port: u16,
     threaded: bool,
     hot_reload_plan: Option<WasmHotReloadPlan>,
-) {
+    ownership_guard: &mut WasmServerOwnershipGuard,
+) -> Result<(), String> {
     let net = NetworkRuntime::new(NetworkConfig::default());
     let addr = if lan {
         SocketAddr::new("0.0.0.0".parse().unwrap(), port)
@@ -1296,16 +1325,20 @@ fn start_wasm_server(
     let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest>();
     let (tx_hot_reload, rx_hot_reload) = mpsc::channel::<WasmHotReloadEvent>();
 
-    net.start_http_server(HttpServer {
+    let _listen_thread = net.start_http_server(HttpServer {
         listen_address: addr,
         post_max_size: 1024 * 1024,
         request: tx_request,
     });
+    if _listen_thread.is_none() {
+        return Err(format!("failed to bind wasm webserver on {}", addr));
+    }
+    ownership_guard.activate()?;
 
     let hot_reload_watcher =
         hot_reload_plan.and_then(|plan| start_wasm_hot_reload_watcher(plan, tx_hot_reload));
 
-    std::thread::spawn(move || {
+    let loop_thread = std::thread::spawn(move || {
         let _hot_reload_watcher = hot_reload_watcher;
         let mut watch_clients = HashMap::<u64, mpsc::Sender<Vec<u8>>>::new();
 
@@ -1552,7 +1585,9 @@ fn start_wasm_server(
                 }
             }
         }
-    })
-    .join()
-    .unwrap();
+    });
+    loop_thread
+        .join()
+        .map_err(|_| "wasm webserver event loop thread panicked".to_string())?;
+    Ok(())
 }
