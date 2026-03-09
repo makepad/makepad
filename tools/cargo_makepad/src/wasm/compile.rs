@@ -211,6 +211,18 @@ pub fn generate_html(
         )
     };
 
+    let preloads = if config.bindgen {
+        "
+        <link rel='modulepreload' href='./makepad_wasm_bridge/wasm_bridge.js'>
+        <link rel='modulepreload' href='./bindgen.js'>
+        <link rel='modulepreload' href='./makepad_platform/web_gl.js'>
+        "
+    } else {
+        "
+        <link rel='modulepreload' href='./makepad_platform/web_gl.js'>
+        "
+    };
+
     format!(
         "
     <!DOCTYPE html>
@@ -219,6 +231,7 @@ pub fn generate_html(
         <meta charset='utf-8'>
         <meta name='viewport' content='width=device-width, initial-scale=1.0, user-scalable=no'>
         <title>{wasm}</title>
+        {preloads}
         <script type='module'>
             const reportBrowserIssue = async (kind, data) => {{
                 try {{
@@ -1044,7 +1057,7 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                                     Content-Type: {}\r\n\
                                     {}\
                                     Content-encoding: br\r\n\
-                                    Cache-Control: max-age:0\r\n\
+                                    Cache-Control: max-age=86400\r\n\
                                     Content-Length: {}\r\n\
                                     Connection: close\r\n\r\n",
                                     mime_type,
@@ -1070,7 +1083,7 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                                 Content-Type: {}\r\n\
                                 {}\
                                 Content-encoding: none\r\n\
-                                Cache-Control: max-age:0\r\n\
+                                Cache-Control: max-age=86400\r\n\
                                 Content-Length: {}\r\n\
                                 Connection: close\r\n\r\n",
                                 mime_type,
