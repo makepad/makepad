@@ -25,6 +25,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct CodeView {
+    #[uid]
+    uid: WidgetUid,
     #[live]
     pub editor: CodeEditor,
     // alright we have to have a session and a document.
@@ -38,6 +40,10 @@ pub struct CodeView {
 }
 
 impl WidgetNode for CodeView {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+
     fn walk(&mut self, cx: &mut Cx) -> Walk {
         self.editor.walk(cx)
     }

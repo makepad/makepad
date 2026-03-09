@@ -25,9 +25,7 @@ impl WidgetUid {
 }
 
 pub trait WidgetNode: ScriptApply {
-    fn widget_uid(&self) -> WidgetUid {
-        WidgetUid(0)
-    }
+    fn widget_uid(&self) -> WidgetUid;
     /// Enumerate direct children for widget-tree indexing.
     fn children(&self, _visit: &mut dyn FnMut(LiveId, WidgetRef)) {}
 
