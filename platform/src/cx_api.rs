@@ -414,7 +414,8 @@ impl Cx {
 
     /// Get resource data intended for font parsing.
     ///
-    /// This attempts mmap for local file-backed resources only.
+    /// This tries mmap for local file-backed resources, then falls back to
+    /// already-loaded resource bytes (required for wasm/network-backed assets).
     pub fn get_resource_font_bytes(&mut self, handle: ScriptHandle) -> Option<SharedBytes> {
         let resource_path = {
             let resources = self.script_data.resources.resources.borrow();
@@ -430,7 +431,7 @@ impl Cx {
             }
         }
 
-        None
+        self.get_resource(handle).map(SharedBytes::from_owned)
     }
 
     pub fn null_texture(&self) -> Texture {

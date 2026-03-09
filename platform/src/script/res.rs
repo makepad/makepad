@@ -378,8 +378,9 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "system-fonts")]
     #[test]
-    fn skips_builtin_theme_bundled_fonts() {
+    fn skips_builtin_theme_bundled_fonts_with_system_fonts_feature() {
         assert!(should_skip_eager_resource_load(
             "/tmp/widgets/resources/IBMPlexSans-Text.ttf"
         ));
@@ -399,6 +400,20 @@ mod tests {
             "/tmp/widgets/resources/LXGWWenKaiBold.ttf"
         ));
         assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/NotoColorEmoji.ttf"
+        ));
+        assert!(is_builtin_theme_bundled_text_font_path(
+            "/tmp/widgets/resources/NotoColorEmoji.ttf"
+        ));
+    }
+
+    #[cfg(not(feature = "system-fonts"))]
+    #[test]
+    fn does_not_skip_builtin_theme_fonts_without_system_fonts_feature() {
+        assert!(!should_skip_eager_resource_load(
+            "/tmp/widgets/resources/IBMPlexSans-Text.ttf"
+        ));
+        assert!(!should_skip_eager_resource_load(
             "/tmp/widgets/resources/NotoColorEmoji.ttf"
         ));
         assert!(is_builtin_theme_bundled_text_font_path(

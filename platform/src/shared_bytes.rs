@@ -50,12 +50,10 @@ impl SharedBytes {
             match MappedBytes::map_file(path) {
                 Ok(Some(mapped)) => {
                     MMAP_HITS.fetch_add(1, Ordering::Relaxed);
-                    debug_mmap_log(path, "mapped");
                     return Ok(Self::Mapped(Rc::new(mapped)));
                 }
                 Ok(None) => {
                     MMAP_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-                    debug_mmap_log(path, "map-empty");
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("cannot mmap empty file: {}", path.display()),
@@ -63,7 +61,6 @@ impl SharedBytes {
                 }
                 Err(err) => {
                     MMAP_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-                    debug_mmap_log(path, &format!("map-error: {err}"));
                     return Err(err);
                 }
             }
@@ -72,7 +69,6 @@ impl SharedBytes {
         #[cfg(target_arch = "wasm32")]
         {
             MMAP_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-            debug_mmap_log(path, "map-unsupported");
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "mmap font loading is unsupported on wasm32",
@@ -159,13 +155,6 @@ impl MappedBytes {
 static MMAP_HITS: AtomicU64 = AtomicU64::new(0);
 static MMAP_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static OWNED_LOADS: AtomicU64 = AtomicU64::new(0);
-
-fn debug_mmap_log(path: &Path, message: &str) {
-    #[cfg(debug_assertions)]
-    if std::env::var_os("MAKEPAD_FONT_MMAP_DEBUG").is_some() {
-        crate::log!("font mmap: {} ({})", path.display(), message);
-    }
-}
 
 #[cfg(test)]
 mod tests {
