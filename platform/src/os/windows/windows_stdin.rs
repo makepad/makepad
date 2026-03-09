@@ -164,6 +164,7 @@ impl Cx {
                 WebSocketMessage::Closed => break,
                 WebSocketMessage::Opened => {}
             }
+            self.run_live_edit_if_needed("windows-stdin");
         }
     }
 
@@ -285,6 +286,7 @@ impl Cx {
                 }
 
                 self.stdin_handle_repaint(d3d11_cx, stdin_windows, time);
+                self.run_live_edit_if_needed("windows-stdin");
 
                 let gc_start = self.seconds_since_app_start();
                 let mut gc_heap_live = None;
@@ -309,7 +311,9 @@ impl Cx {
                 if has_pending_draws && d3d11_cx.is_gpu_done() {
                     for window in stdin_windows.iter_mut() {
                         if let Some(presentable_draw) = window.new_frame_being_rendered.take() {
-                            Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(presentable_draw));
+                            Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(
+                                presentable_draw,
+                            ));
                         }
                     }
                 }
@@ -347,6 +351,12 @@ impl Cx {
                             texture: swapchain.presentable_images[present_index].image.clone(),
                         }];
                     }*/
+                }
+                CxOsOp::CreatePopupWindow { window_id, .. } => {
+                    while window_id.id() >= stdin_windows.len() {
+                        stdin_windows.push(StdinWindow::default());
+                    }
+                    self.windows[window_id].is_created = true;
                 }
                 CxOsOp::SetCursor(cursor) => {
                     Self::stdin_send_to_host(AppToStudio::SetCursor(cursor.into()));

@@ -17,9 +17,12 @@ workspace.members = [
     "examples/comfyui",
     "examples/aichat",
     "examples/pdf",
+    "examples/exf",
+    "examples/shader",
     "examples/text_input",
+    "examples/text_selection",
     "examples/counter",
-    "examples/gpu_mb3d",
+    "examples/camera",
 #    "examples/matrix",
     "libs/gltf",
     "libs/splat",
@@ -40,10 +43,9 @@ workspace.members = [
     "tools/cargo_makepad",
     "tools/tui_test",
     "libs/mb3d",
+    "libs/openexr",
     "libs/git",
     "libs/fast_inflate",
-    # "libs/voice",
-#    "libs/matrix",
 ]
 
 workspace.exclude = [

@@ -701,6 +701,7 @@ pub struct ScriptParser {
     pub index: u32,
     pub opcodes: Vec<ScriptValue>,
     pub source_map: Vec<Option<u32>>,
+    pub had_error: bool,
 
     state: Vec<State>,
     pub file: String,
@@ -721,6 +722,7 @@ impl Default for ScriptParser {
             index: 0,
             opcodes: Default::default(),
             source_map: Default::default(),
+            had_error: false,
             state: vec![State::BeginStmt {
                 last_was_sep: false,
             }],
@@ -749,7 +751,8 @@ pub struct ParserCheckpoint {
 }
 
 impl ScriptParser {
-    pub fn report_error(&self, tokenizer: &ScriptTokenizer, msg: String) {
+    pub fn report_error(&mut self, tokenizer: &ScriptTokenizer, msg: String) {
+        self.had_error = true;
         let (line, col) = tokenizer
             .token_index_to_row_col(self.index)
             .unwrap_or((0, 0));

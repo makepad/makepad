@@ -2,7 +2,10 @@ use crate::{
     cx::Cx,
     draw_pass::DrawPassId,
     draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderOptions, DrawShaderId},
-    draw_vars::{DrawVars, DRAW_CALL_DYN_UNIFORMS, DRAW_CALL_TEXTURE_SLOTS},
+    draw_vars::{
+        DrawVars, DRAW_CALL_DYN_UNIFORMS, DRAW_CALL_TEXTURE_SLOTS,
+        DRAW_CALL_UNIFORM_BUFFER_SLOTS,
+    },
     geometry::GeometryId,
     id_pool::*,
     makepad_error_log::*,
@@ -12,6 +15,7 @@ use crate::{
     os::{CxOsDrawCall, CxOsDrawList},
     script::vm::*,
     texture::{Texture, TextureFormat, TextureId, TextureUpdated},
+    uniform_buffer::UniformBuffer,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -432,6 +436,7 @@ pub struct CxDrawCall {
     pub geometry_id: Option<GeometryId>,
     pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS], // user uniforms
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
+    pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
 }
@@ -447,6 +452,7 @@ impl CxDrawCall {
             draw_call_uniforms: DrawCallUniforms::default(),
             dyn_uniforms: draw_vars.dyn_uniforms,
             texture_slots: draw_vars.texture_slots.clone(),
+            uniform_buffer_slots: draw_vars.uniform_buffer_slots.clone(),
             instance_dirty: true,
             uniforms_dirty: true,
         }
@@ -707,6 +713,35 @@ impl CxDrawList {
                         if diff {
                             Self::append_trace_log(format!(
                                 "append_barrier texture_diff shader={} at_draw_item={}",
+                                draw_call.draw_shader_id.index, i
+                            ));
+                            if can_cross {
+                                continue;
+                            }
+                            break;
+                        }
+
+                        for i in 0..sh.mapping.uniform_buffers.len() {
+                            fn neq(a: &Option<UniformBuffer>, b: &Option<UniformBuffer>) -> bool {
+                                if let Some(a) = a {
+                                    if let Some(b) = b {
+                                        return a.uniform_buffer_id() != b.uniform_buffer_id();
+                                    }
+                                    return true;
+                                }
+                                b.is_some()
+                            }
+                            if neq(
+                                &draw_call.uniform_buffer_slots[i],
+                                &draw_vars.uniform_buffer_slots[i],
+                            ) {
+                                diff = true;
+                                break;
+                            }
+                        }
+                        if diff {
+                            Self::append_trace_log(format!(
+                                "append_barrier uniform_buffer_diff shader={} at_draw_item={}",
                                 draw_call.draw_shader_id.index, i
                             ));
                             if can_cross {

@@ -159,8 +159,6 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Window {
-    #[uid]
-    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     //#[rust] caption_size: Vec2d,

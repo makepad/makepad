@@ -197,8 +197,13 @@ script_mod! {
             get_color: fn() {
                 return self.color
                     .mix(self.color_hover.mix(self.color_down, self.down), self.hover)
-                    .mix(self.color_empty, self.empty)
-                    .mix(self.color_focus, self.focus)
+                    .mix(
+                        self.color_empty
+                            .mix(self.color_empty_hover, self.hover)
+                            .mix(self.color_empty_focus, self.focus),
+                        self.empty
+                    )
+                    .mix(self.color_focus, self.focus * (1.0 - self.empty))
                     .mix(self.color_disabled, self.disabled)
             }
         }
@@ -1464,6 +1469,7 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Default);
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::KeyFocus(_) => {

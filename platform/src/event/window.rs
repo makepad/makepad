@@ -40,6 +40,31 @@ pub struct WindowCloseRequestedEvent {
 pub struct WindowClosedEvent {
     pub window_id: WindowId,
 }
+
+#[derive(Clone, Debug)]
+pub enum PopupDismissReason {
+    FocusLost,
+    OutsideClick,
+    Escape,
+    Compositor,
+    ParentClosed,
+}
+
+/// Notification that a popup window should be closed.
+///
+/// The app **must** call `WindowHandle::close()` to actually close the popup.
+/// The framework does not auto-close popup windows on dismissal.
+///
+/// On Wayland the compositor may force-close the surface (`PopupDone`); in
+/// that case `PopupDismissed` fires after the surface is already gone.
+///
+/// Common reasons: `OutsideClick`, `FocusLost`, `Escape`, `Compositor`,
+/// `ParentClosed`.
+#[derive(Clone, Debug)]
+pub struct PopupDismissedEvent {
+    pub window_id: WindowId,
+    pub reason: PopupDismissReason,
+}
 /*
 #[derive(Clone, Debug)]
 pub struct WindowResizeLoopEvent {

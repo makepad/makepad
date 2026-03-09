@@ -207,6 +207,8 @@ pub struct DesktopTerminalView {
     last_finger_abs: Option<Vec2d>,
     #[rust]
     last_frame: Option<TerminalFramebuffer>,
+    #[rust]
+    ime_pos: Option<Vec2d>,
 }
 
 impl ScriptHook for DesktopTerminalView {}
@@ -317,6 +319,14 @@ impl DesktopTerminalView {
         self.follow_output = true;
     }
 
+    fn scrollbar_total_lines(frame: &TerminalFramebuffer) -> usize {
+        // Custom scroll-region apps like Codex report `is_tui = true`, but they
+        // can still have real scrollback above the viewport. Capping these
+        // frames to `pty_rows` collapses the scrollbar to a single screen and
+        // causes redraws to clamp the scroll position back to the top.
+        frame.total_lines
+    }
+
     fn invalidate_glyph_cache_if_needed(&mut self, cx: &Cx2d) {
         let font_size = self.draw_text.text_style.font_size;
         let font_scale = self.draw_text.font_scale;
@@ -422,6 +432,54 @@ impl DesktopTerminalView {
         );
     }
 
+    fn requested_frame_range(
+        visible_top_row: usize,
+        visible_rows: usize,
+        selection: Option<((usize, usize), (usize, usize))>,
+    ) -> (usize, usize) {
+        let mut start_row = visible_top_row;
+        let mut end_row_exclusive = visible_top_row.saturating_add(visible_rows.max(1));
+
+        if let Some(((selection_start_row, _), (selection_end_row, _))) = selection {
+            start_row = start_row.min(selection_start_row);
+            end_row_exclusive = end_row_exclusive.max(selection_end_row.saturating_add(1));
+        }
+
+        let max_span = u16::MAX as usize;
+        if end_row_exclusive.saturating_sub(start_row) > max_span {
+            end_row_exclusive = start_row.saturating_add(max_span);
+        }
+
+        (start_row, end_row_exclusive)
+    }
+
+    fn visible_frame_rows(
+        frame: &TerminalFramebuffer,
+        scroll_y: f64,
+        cell_height: f64,
+        max_visible_rows: usize,
+        screen_top: f64,
+    ) -> Option<(usize, usize, f64)> {
+        let frame_rows = frame.rows as usize;
+        if frame_rows == 0 || cell_height <= 0.0 {
+            return None;
+        }
+
+        let frame_top_pixels = frame.top_row as f64 * cell_height;
+        let scroll_delta = (scroll_y - frame_top_pixels).max(0.0);
+        let start_row = ((scroll_delta / cell_height).floor() as usize).min(frame_rows);
+        let render_rows = frame_rows
+            .saturating_sub(start_row)
+            .min(max_visible_rows.max(1));
+        if render_rows == 0 {
+            return None;
+        }
+
+        let intra_row_offset = scroll_delta - start_row as f64 * cell_height;
+        let origin_y = screen_top - intra_row_offset;
+        Some((start_row, render_rows, origin_y))
+    }
+
     fn draw_framebuffer(&mut self, cx: &mut Cx2d, frame: &TerminalFramebuffer) {
         let cols = frame.cols as usize;
         let rows = frame.rows as usize;
@@ -435,27 +493,11 @@ impl DesktopTerminalView {
         let screen_bottom = self.unscrolled_rect.pos.y + self.unscrolled_rect.size.y - self.pad_y;
         let usable_height = (screen_bottom - screen_top).max(0.0);
         let max_visible_rows = (usable_height / cell_height).ceil().max(1.0) as usize + 2;
-        let render_rows = rows.min(max_visible_rows);
-
-        let max_scroll = self.max_scroll_pixels_for_total_lines(frame.total_lines);
-        let is_full_screen = max_scroll > 0.0;
-
-        let (origin_y, start_row) = if self.follow_output && is_full_screen {
-            let grid_height = render_rows as f64 * cell_height;
-            let y = screen_bottom - grid_height;
-            let sr = rows.saturating_sub(render_rows);
-            let bottom_overflow = (y + grid_height) - screen_bottom;
-            (y - bottom_overflow, sr)
-        } else {
-            let scroll_y = self.current_scroll_pixels();
-            let frame_top_pixels = frame.top_row as f64 * cell_height;
-            let y = if max_scroll <= 0.0 {
-                screen_top
-            } else {
-                screen_top - (scroll_y - frame_top_pixels)
-            };
-
-            (y, 0)
+        let scroll_y = self.current_scroll_pixels();
+        let Some((start_row, render_rows, origin_y)) =
+            Self::visible_frame_rows(frame, scroll_y, cell_height, max_visible_rows, screen_top)
+        else {
+            return;
         };
 
         let origin_x = self.unscrolled_rect.pos.x + self.pad_x;
@@ -537,12 +579,16 @@ impl DesktopTerminalView {
 
         if frame.cursor_visible && frame.cursor_row >= 0 {
             let cursor_row = frame.cursor_row as usize;
-            // Map cursor's frame row to our render range
+            // Map cursor's frame row to the visible slice of the framebuffer.
             if cursor_row >= start_row && cursor_row < start_row + render_rows {
                 let visible_row = cursor_row - start_row;
                 let cursor_col = (frame.cursor_col as usize).min(cols.saturating_sub(1));
                 let cx_x = origin_x + cursor_col as f64 * cell_width;
                 let cx_y = origin_y + visible_row as f64 * cell_height + self.cursor_y_offset;
+                self.ime_pos = Some(dvec2(
+                    cx_x - self.unscrolled_rect.pos.x,
+                    cx_y - self.unscrolled_rect.pos.y + cell_height,
+                ));
                 self.draw_cursor.focus = if has_focus { 1.0 } else { 0.0 };
                 self.draw_cursor.draw_abs(
                     cx,
@@ -946,6 +992,7 @@ impl Widget for DesktopTerminalView {
         self.viewport_rect = cx.turtle().rect();
         self.unscrolled_rect = cx.turtle().rect_unscrolled();
         self.refresh_cell_metrics(cx);
+        self.ime_pos = Some(dvec2(self.pad_x, self.pad_y + self.cell_height));
 
         let path = scope
             .data
@@ -973,28 +1020,12 @@ impl Widget for DesktopTerminalView {
             .ceil()
             .max(1.0) as u16
             + 1;
-
+        let req_rows_usize = req_rows as usize;
         let pty_rows = ((self.viewport_rect.size.y - self.pad_y * 2.0) / cell_height)
             .floor()
             .max(1.0) as u16;
-        let frame_matches_viewport = frame
-            .as_ref()
-            .map(|frame| frame.cols == req_cols && frame.rows >= req_rows)
-            .unwrap_or(false);
-        if frame.is_some() && !frame_matches_viewport {
-            self.last_requested = None;
-        }
 
-        let total_lines_for_scroll = frame
-            .as_ref()
-            .map(|frame| {
-                if frame.is_tui {
-                    frame.total_lines.min(pty_rows as usize)
-                } else {
-                    frame.total_lines
-                }
-            })
-            .unwrap_or(0);
+        let total_lines_for_scroll = frame.as_ref().map(Self::scrollbar_total_lines).unwrap_or(0);
         self.last_total_lines = total_lines_for_scroll;
 
         if self.follow_output {
@@ -1003,8 +1034,36 @@ impl Widget for DesktopTerminalView {
             self.clamp_scroll_position(cx, self.last_total_lines);
         }
 
+        let visible_top_row = (self.current_scroll_pixels() / cell_height)
+            .floor()
+            .max(0.0) as usize;
+        let selection = self.selection_ordered();
+        let (requested_top_row, requested_end_row_exclusive) =
+            Self::requested_frame_range(visible_top_row, req_rows_usize, selection);
+        let requested_rows = requested_end_row_exclusive
+            .saturating_sub(requested_top_row)
+            .max(req_rows_usize)
+            .min(u16::MAX as usize) as u16;
+
+        let frame_matches_viewport = frame
+            .as_ref()
+            .map(|frame| {
+                let frame_end_row_exclusive = frame.top_row.saturating_add(frame.rows as usize);
+                frame.cols == req_cols
+                    && frame.rows >= req_rows
+                    && (selection.is_none()
+                        || (frame.top_row <= requested_top_row
+                            && frame_end_row_exclusive >= requested_end_row_exclusive))
+            })
+            .unwrap_or(false);
+        if frame.is_some() && !frame_matches_viewport {
+            self.last_requested = None;
+        }
+
         if let Some(path) = path.as_deref() {
-            let top_row = if self.follow_output {
+            let top_row = if selection.is_some() {
+                requested_top_row
+            } else if self.follow_output {
                 usize::MAX
             } else {
                 let top = (self.current_scroll_pixels() / cell_height)
@@ -1015,7 +1074,12 @@ impl Widget for DesktopTerminalView {
                     .saturating_sub(pty_rows.max(1) as usize);
                 top.min(max_top)
             };
-            self.send_viewport_request(cx, path, req_cols, req_rows, pty_rows, top_row);
+            let rows = if selection.is_some() {
+                requested_rows
+            } else {
+                req_rows
+            };
+            self.send_viewport_request(cx, path, req_cols, rows, pty_rows, top_row);
         }
 
         self.last_frame = frame.clone();
@@ -1041,6 +1105,11 @@ impl Widget for DesktopTerminalView {
             .set_used(self.viewport_rect.size.x.max(1.0), used_height);
         self.scroll_bars.end(cx);
         self.area = self.scroll_bars.area();
+        if path.is_some() && cx.has_key_focus(self.scroll_bars.area()) {
+            if let Some(ime_pos) = self.ime_pos {
+                cx.show_text_ime(self.scroll_bars.area(), ime_pos);
+            }
+        }
         DrawStep::done()
     }
 
@@ -1164,7 +1233,11 @@ impl Widget for DesktopTerminalView {
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::Text);
             }
-            Hit::KeyFocus(_) | Hit::KeyFocusLost(_) => {
+            Hit::KeyFocus(_) => {
+                self.draw_bg.redraw(cx);
+            }
+            Hit::KeyFocusLost(_) => {
+                cx.hide_text_ime();
                 self.draw_bg.redraw(cx);
             }
             Hit::KeyDown(e) => {
@@ -1309,5 +1382,61 @@ fn map_keycode(kc: KeyCode) -> TermKeyCode {
         KeyCode::F11 => TK::F11,
         KeyCode::F12 => TK::F12,
         _ => TK::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollbar_total_lines_preserves_scrollback_for_custom_scroll_region_apps() {
+        let frame = TerminalFramebuffer {
+            is_tui: true,
+            rows: 20,
+            total_lines: 240,
+            ..Default::default()
+        };
+
+        assert_eq!(DesktopTerminalView::scrollbar_total_lines(&frame), 240);
+    }
+
+    #[test]
+    fn scrollbar_total_lines_keeps_plain_terminal_history() {
+        let frame = TerminalFramebuffer {
+            is_tui: false,
+            rows: 20,
+            total_lines: 75,
+            ..Default::default()
+        };
+
+        assert_eq!(DesktopTerminalView::scrollbar_total_lines(&frame), 75);
+    }
+
+    #[test]
+    fn requested_frame_range_expands_to_cover_selection_outside_viewport() {
+        let selection = Some(((12, 4), (34, 9)));
+        let (start_row, end_row_exclusive) =
+            DesktopTerminalView::requested_frame_range(20, 8, selection);
+
+        assert_eq!(start_row, 12);
+        assert_eq!(end_row_exclusive, 35);
+    }
+
+    #[test]
+    fn visible_frame_rows_starts_rendering_at_current_scroll_offset() {
+        let frame = TerminalFramebuffer {
+            top_row: 80,
+            rows: 40,
+            ..Default::default()
+        };
+
+        let (start_row, render_rows, origin_y) =
+            DesktopTerminalView::visible_frame_rows(&frame, 955.0, 10.0, 6, 100.0)
+                .expect("expected visible rows");
+
+        assert_eq!(start_row, 15);
+        assert_eq!(render_rows, 6);
+        assert_eq!(origin_y, 95.0);
     }
 }

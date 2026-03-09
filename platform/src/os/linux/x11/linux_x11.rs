@@ -1,7 +1,9 @@
 use {
     self::super::super::{
         egl_sys, gstreamer_sys::LibGStreamer, linux_video_playback::GStreamerVideoPlayer,
-        opengl_cx::OpenglCx, x11::x11_sys, x11::xlib_app::*, x11::xlib_event::*,
+        linux_video_player::{LinuxVideoPlayer, YuvTextureSet}, opengl_cx::OpenglCx,
+        v4l2_camera_player::V4l2CameraPlayer, x11::x11_sys, x11::xlib_app::*,
+        x11::xlib_event::*,
     },
     self::super::opengl_x11::OpenglWindow,
     crate::{
@@ -10,8 +12,9 @@ use {
         draw_pass::CxDrawPassParent,
         event::{
             video_playback::{
-                VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
-                VideoPlaybackResourcesReleasedEvent, VideoTextureUpdatedEvent,
+                VideoBufferedRangesEvent, VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
+                VideoPlaybackResourcesReleasedEvent, VideoSeekableRangesEvent,
+                VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
             *,
         },
@@ -19,6 +22,7 @@ use {
         makepad_live_id::*,
         makepad_math::dvec2,
         os::cx_native::EventFlow,
+        texture::TextureFormat,
         thread::SignalToUI,
         CxWindowPool,
     },
@@ -138,12 +142,19 @@ impl X11Cx {
                 cx.call_event_handler(&Event::WindowGeomChange(re));
             }
             XlibEvent::WindowClosed(wc) => {
-                let mut cx = self.cx.borrow_mut();
                 let window_id = wc.window_id;
+                self.close_popup_children(opengl_windows, xlib_app, window_id);
+
+                let mut cx = self.cx.borrow_mut();
                 cx.call_event_handler(&Event::WindowClosed(wc));
                 // lets remove the window from the set
                 cx.windows[window_id].is_created = false;
                 if let Some(index) = opengl_windows.iter().position(|w| w.window_id == window_id) {
+                    if let Some(xid) = opengl_windows[index].xlib_window.window {
+                        unsafe {
+                            xlib_app.release_popup_grab(xid);
+                        }
+                    }
                     opengl_windows.remove(index);
                     if opengl_windows.len() == 0 {
                         xlib_app.terminate_event_loop();
@@ -151,6 +162,10 @@ impl X11Cx {
                         return EventFlow::Exit;
                     }
                 }
+            }
+            XlibEvent::PopupDismissed(event) => {
+                let mut cx = self.cx.borrow_mut();
+                cx.call_event_handler(&Event::PopupDismissed(event));
             }
             XlibEvent::Paint => {
                 {
@@ -295,28 +310,73 @@ impl X11Cx {
                         let mut players = std::mem::take(&mut cx.os.video_players);
                         let mut video_events = Vec::new();
                         for (_video_id, player) in players.iter_mut() {
-                            if let Some((width, height, duration)) = player.check_prepared() {
-                                video_events.push(Event::VideoPlaybackPrepared(
-                                    VideoPlaybackPreparedEvent {
-                                        video_id: player.video_id,
-                                        video_width: width,
-                                        video_height: height,
-                                        duration,
-                                    },
-                                ));
+                            match player.check_prepared() {
+                                Some(Ok((
+                                    width,
+                                    height,
+                                    duration,
+                                    is_seekable,
+                                    video_tracks,
+                                    audio_tracks,
+                                ))) => {
+                                    video_events.push(Event::VideoPlaybackPrepared(
+                                        VideoPlaybackPreparedEvent {
+                                            video_id: player.video_id(),
+                                            video_width: width,
+                                            video_height: height,
+                                            duration,
+                                            is_seekable,
+                                            video_tracks,
+                                            audio_tracks,
+                                        },
+                                    ));
+                                    let seekable = player.seekable_ranges();
+                                    if !seekable.is_empty() {
+                                        video_events.push(Event::VideoSeekableRanges(
+                                            VideoSeekableRangesEvent {
+                                                video_id: player.video_id(),
+                                                ranges: seekable,
+                                            },
+                                        ));
+                                    }
+                                    let buffered = player.buffered_ranges();
+                                    if !buffered.is_empty() {
+                                        video_events.push(Event::VideoBufferedRanges(
+                                            VideoBufferedRangesEvent {
+                                                video_id: player.video_id(),
+                                                ranges: buffered,
+                                            },
+                                        ));
+                                    }
+                                }
+                                Some(Err(err)) => {
+                                    video_events.push(Event::VideoDecodingError(
+                                        VideoDecodingErrorEvent {
+                                            video_id: player.video_id(),
+                                            error: err,
+                                        },
+                                    ));
+                                }
+                                None => {}
                             }
                             if player.poll_frame(unsafe { &*gl }, &mut cx.textures) {
                                 video_events.push(Event::VideoTextureUpdated(
                                     VideoTextureUpdatedEvent {
-                                        video_id: player.video_id,
+                                        video_id: player.video_id(),
                                         current_position_ms: player.current_position_ms(),
+                                        yuv: crate::event::video_playback::VideoYuvMetadata {
+                                            enabled: player.is_yuv_mode(),
+                                            matrix: player.yuv_matrix(),
+                                            biplanar: false,
+                                            rotation_steps: 0.0,
+                                        },
                                     },
                                 ));
                             }
                             if player.check_eos() {
                                 video_events.push(Event::VideoPlaybackCompleted(
                                     crate::event::video_playback::VideoPlaybackCompletedEvent {
-                                        video_id: player.video_id,
+                                        video_id: player.video_id(),
                                     },
                                 ));
                             }
@@ -331,10 +391,7 @@ impl X11Cx {
                     cx.call_event_handler(&Event::Timer(e))
                 }
 
-                if cx.handle_live_edit() {
-                    cx.call_event_handler(&Event::LiveEdit);
-                    cx.redraw_all();
-                }
+                cx.run_live_edit_if_needed("linux-x11");
                 return EventFlow::Wait;
             }
         }
@@ -392,6 +449,58 @@ impl X11Cx {
         }
     }
 
+    fn close_popup_window(
+        &mut self,
+        opengl_windows: &mut Vec<OpenglWindow>,
+        xlib_app: &mut XlibApp,
+        window_id: crate::window::WindowId,
+        reason: Option<PopupDismissReason>,
+    ) {
+        if let Some(index) = opengl_windows.iter().position(|w| w.window_id == window_id) {
+            let mut cx = self.cx.borrow_mut();
+            if let Some(reason) = reason {
+                cx.call_event_handler(&Event::PopupDismissed(PopupDismissedEvent {
+                    window_id,
+                    reason,
+                }));
+            }
+            cx.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
+            cx.windows[window_id].is_created = false;
+            if let Some(xid) = opengl_windows[index].xlib_window.window {
+                unsafe {
+                    xlib_app.release_popup_grab(xid);
+                }
+            }
+            opengl_windows[index].xlib_window.close_window();
+            opengl_windows.remove(index);
+        }
+    }
+
+    fn close_popup_children(
+        &mut self,
+        opengl_windows: &mut Vec<OpenglWindow>,
+        xlib_app: &mut XlibApp,
+        parent_window_id: crate::window::WindowId,
+    ) {
+        loop {
+            let child = opengl_windows
+                .iter()
+                .find(|w| w.xlib_window.popup_parent == Some(parent_window_id))
+                .map(|w| w.window_id);
+            if let Some(child_window_id) = child {
+                self.close_popup_children(opengl_windows, xlib_app, child_window_id);
+                self.close_popup_window(
+                    opengl_windows,
+                    xlib_app,
+                    child_window_id,
+                    Some(PopupDismissReason::ParentClosed),
+                );
+            } else {
+                break;
+            }
+        }
+    }
+
     fn handle_platform_ops(
         &mut self,
         opengl_windows: &mut Vec<OpenglWindow>,
@@ -417,14 +526,56 @@ impl X11Cx {
                     opengl_windows.push(opengl_window);
                     window.is_created = true;
                 }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
+                    let opengl_window =
+                        OpenglWindow::new_popup(window_id, parent_window_id, gl_cx, size, position);
+                    let window = &mut cx.windows[window_id];
+                    window.window_geom = opengl_window.window_geom.clone();
+                    window.is_created = true;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    if let Some(xid) = opengl_window.xlib_window.window {
+                        unsafe {
+                            xlib_app.activate_popup_grab(xid, grab_keyboard);
+                        }
+                    }
+                    opengl_windows.push(opengl_window);
+                }
                 CxOsOp::CloseWindow(window_id) => {
-                    cx.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
+                    drop(cx);
+                    self.close_popup_children(opengl_windows, xlib_app, window_id);
+                    cx = self.cx.borrow_mut();
+
                     if let Some(index) =
                         opengl_windows.iter().position(|w| w.window_id == window_id)
                     {
-                        cx.windows[window_id].is_created = false;
-                        opengl_windows[index].xlib_window.close_window();
-                        opengl_windows.remove(index);
+                        if opengl_windows[index].xlib_window.is_popup {
+                            drop(cx);
+                            self.close_popup_window(opengl_windows, xlib_app, window_id, None);
+                            cx = self.cx.borrow_mut();
+                        } else {
+                            cx.call_event_handler(&Event::WindowClosed(WindowClosedEvent {
+                                window_id,
+                            }));
+                            cx.windows[window_id].is_created = false;
+                            if let Some(xid) = opengl_windows[index].xlib_window.window {
+                                unsafe {
+                                    xlib_app.release_popup_grab(xid);
+                                }
+                            }
+                            opengl_windows[index].xlib_window.close_window();
+                            opengl_windows.remove(index);
+                        }
                         if opengl_windows.len() == 0 {
                             ret = EventFlow::Exit
                         }
@@ -526,10 +677,12 @@ impl X11Cx {
                     let pos = area.clipped_rect(&cx).pos + pos;
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_spot(pos);
+                        w.xlib_window.set_ime_active(true);
                     });
                 }
                 CxOsOp::HideTextIME => {
                     opengl_windows.iter_mut().for_each(|w| {
+                        w.xlib_window.set_ime_active(false);
                         w.xlib_window.set_ime_spot(dvec2(0.0, 0.0));
                     });
                 }
@@ -567,16 +720,46 @@ impl X11Cx {
                 CxOsOp::PrepareVideoPlayback(
                     video_id,
                     source,
+                    _camera_preview_mode,
                     _external_texture_id,
                     texture_id,
                     autoplay,
                     should_loop,
                 ) => {
                     // Skip if an active player already exists for this video_id
-                    if cx.os.video_players.get(&video_id).map_or(false, |p| p.is_active()) {
+                    if cx
+                        .os
+                        .video_players
+                        .get(&video_id)
+                        .map_or(false, |p| p.is_active())
+                    {
                         continue;
                     }
-                    // Lazy-load GStreamer
+                    // Camera source: use V4L2 capture player with YUV plane textures
+                    if let VideoSource::Camera(input_id, format_id) = source {
+                        let camera_access = cx.os.media.v4l2_camera();
+                        let tex_y = cx.textures.alloc(TextureFormat::VideoYuvPlane);
+                        let tex_u = cx.textures.alloc(TextureFormat::VideoYuvPlane);
+                        let tex_v = cx.textures.alloc(TextureFormat::VideoYuvPlane);
+                        let tex_y_id = tex_y.texture_id();
+                        let tex_u_id = tex_u.texture_id();
+                        let tex_v_id = tex_v.texture_id();
+                        let player = V4l2CameraPlayer::new(
+                            video_id, tex_y_id, tex_u_id, tex_v_id, input_id, format_id, camera_access,
+                        );
+                        cx.os.video_players.insert(video_id, LinuxVideoPlayer::Camera(player));
+                        cx.call_event_handler(&Event::VideoYuvTexturesReady(
+                            VideoYuvTexturesReady { video_id, tex_y, tex_u, tex_v },
+                        ));
+                        continue;
+                    }
+                    // Try GStreamer first, fall back to software rav1d
+                    let mut use_software = std::env::var_os("MAKEPAD_FORCE_SOFTWARE_VIDEO").is_some();
+                    if use_software {
+                        crate::log!(
+                            "VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder"
+                        );
+                    }
                     if cx.os.gstreamer.is_none() {
                         match LibGStreamer::try_load() {
                             Some(gst) => {
@@ -584,46 +767,98 @@ impl X11Cx {
                                 cx.os.gstreamer = Some(gst);
                             }
                             None => {
-                                let error_msg = "GStreamer not available — install gstreamer1.0-plugins-base and gstreamer1.0-plugins-good.".to_string();
-                                crate::error!("VIDEO: {}", error_msg);
-                                cx.call_event_handler(&Event::VideoDecodingError(
-                                    VideoDecodingErrorEvent {
+                                crate::log!(
+                                    "VIDEO: GStreamer not available, using software video decoder"
+                                );
+                                use_software = true;
+                            }
+                        }
+                    }
+                    if !use_software {
+                        if cx.os.gstreamer.is_some() {
+                            let yuv = YuvTextureSet::new(
+                                cx.textures.alloc(TextureFormat::VideoYuvPlane),
+                                cx.textures.alloc(TextureFormat::VideoYuvPlane),
+                                cx.textures.alloc(TextureFormat::VideoYuvPlane),
+                            );
+                            let gst = cx.os.gstreamer.as_ref().unwrap();
+
+                            let player = GStreamerVideoPlayer::new(
+                                gst,
+                                video_id,
+                                texture_id,
+                                Some(yuv.ids),
+                                source.clone(),
+                                autoplay,
+                                should_loop,
+                            );
+                            if player.is_active() {
+                                cx.os.video_players.insert(
+                                    video_id,
+                                    LinuxVideoPlayer::GStreamer {
+                                        player,
+                                        yuv: Some(yuv.clone()),
+                                    },
+                                );
+                                cx.call_event_handler(&Event::VideoYuvTexturesReady(
+                                    VideoYuvTexturesReady {
                                         video_id,
-                                        error: error_msg,
+                                        tex_y: yuv.tex_y,
+                                        tex_u: yuv.tex_u,
+                                        tex_v: yuv.tex_v,
                                     },
                                 ));
                                 continue;
                             }
+                            crate::log!("VIDEO: GStreamer pipeline failed, falling back to software video decoder");
+                            use_software = true;
                         }
                     }
-                    if let Some(ref gst) = cx.os.gstreamer {
-                        let player = GStreamerVideoPlayer::new(
-                            gst, video_id, texture_id, source, autoplay, should_loop,
+                    if use_software {
+                        // Allocate YUV textures internally for software decode
+                        let yuv = YuvTextureSet::new(
+                            cx.textures.alloc(TextureFormat::VideoYuvPlane),
+                            cx.textures.alloc(TextureFormat::VideoYuvPlane),
+                            cx.textures.alloc(TextureFormat::VideoYuvPlane),
                         );
-                        if player.is_active() {
-                            cx.os.video_players.insert(video_id, player);
-                        } else {
-                            cx.call_event_handler(&Event::VideoDecodingError(
-                                VideoDecodingErrorEvent {
-                                    video_id,
-                                    error: "Failed to initialize Linux GStreamer playback pipeline".to_string(),
-                                },
-                            ));
-                        }
+                        let player = crate::video_decode::software_video::SoftwareVideoPlayer::new(
+                            video_id,
+                            texture_id,
+                            source,
+                            autoplay,
+                            should_loop,
+                        );
+                        cx.os.video_players.insert(
+                            video_id,
+                            LinuxVideoPlayer::Software {
+                                player,
+                                yuv: yuv.clone(),
+                                yuv_matrix: 0.0,
+                            },
+                        );
+                        // Notify widget so it can bind textures to shader slots
+                        cx.call_event_handler(&Event::VideoYuvTexturesReady(
+                            VideoYuvTexturesReady {
+                                video_id,
+                                tex_y: yuv.tex_y,
+                                tex_u: yuv.tex_u,
+                                tex_v: yuv.tex_v,
+                            },
+                        ));
                     }
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {
-                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                    if let Some(player) = cx.os.video_players.get_mut(&video_id) {
                         player.play();
                     }
                 }
                 CxOsOp::PauseVideoPlayback(video_id) => {
-                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                    if let Some(player) = cx.os.video_players.get_mut(&video_id) {
                         player.pause();
                     }
                 }
                 CxOsOp::ResumeVideoPlayback(video_id) => {
-                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                    if let Some(player) = cx.os.video_players.get_mut(&video_id) {
                         player.resume();
                     }
                 }
@@ -646,8 +881,73 @@ impl X11Cx {
                     }
                 }
                 CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
-                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                    if let Some(player) = cx.os.video_players.get_mut(&video_id) {
                         player.seek_to(position_ms);
+                    }
+                }
+                CxOsOp::SetVideoVolume(video_id, volume) => {
+                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                        player.set_volume(volume);
+                    }
+                }
+                CxOsOp::SetVideoPlaybackRate(video_id, rate) => {
+                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                        player.set_playback_rate(rate);
+                    }
+                }
+                CxOsOp::AttachCameraNativePreview { .. }
+                | CxOsOp::UpdateCameraNativePreview { .. }
+                | CxOsOp::DetachCameraNativePreview { .. } => {
+                    // Native camera preview is emulated via composited texture path on Linux.
+                }
+                CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
+                    if cx
+                        .os
+                        .video_players
+                        .get(&video_id)
+                        .map_or(false, |p| p.is_active())
+                    {
+                        continue;
+                    }
+                    if cx.os.gstreamer.is_none() {
+                        match super::super::gstreamer_sys::LibGStreamer::try_load() {
+                            Some(gst) => {
+                                gst.init();
+                                cx.os.gstreamer = Some(gst);
+                            }
+                            None => {
+                                cx.call_event_handler(&Event::VideoDecodingError(
+                                    VideoDecodingErrorEvent {
+                                        video_id,
+                                        error: "GStreamer not available".to_string(),
+                                    },
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(ref gst) = cx.os.gstreamer {
+                        let player = GStreamerVideoPlayer::new_audio_only(
+                            gst,
+                            video_id,
+                            source,
+                            autoplay,
+                            should_loop,
+                        );
+                        if player.is_active() {
+                            cx.os.video_players.insert(
+                                video_id,
+                                LinuxVideoPlayer::GStreamer { player, yuv: None },
+                            );
+                        } else {
+                            cx.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent {
+                                    video_id,
+                                    error: "Failed to initialize audio-only GStreamer pipeline"
+                                        .to_string(),
+                                },
+                            ));
+                        }
                     }
                 }
                 CxOsOp::UpdateVideoSurfaceTexture(_) => {

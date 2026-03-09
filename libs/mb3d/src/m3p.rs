@@ -1,4 +1,4 @@
-use std::io::{self, Read, Cursor};
+use std::io::{self, Cursor, Read};
 
 // Binary reader helpers
 trait ReadExt: Read {
@@ -212,8 +212,10 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
 
     let mand_id = c.read_i32()?;
     if mand_id != 44 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData,
-            format!("Invalid MandId: {} (expected 44)", mand_id)));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid MandId: {} (expected 44)", mand_id),
+        ));
     }
 
     let width = c.read_i32()?;
@@ -274,15 +276,14 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     // TMandHeader10:
     //   MCSoftShadowRadius (ShortFloat) @224
     //   HSmaxLengthMultiplier (Single) @226
-    let soft_shadow_radius = short_float_to_f64(
-        u16::from_le_bytes(data[224..226].try_into().unwrap())
-    );
+    let soft_shadow_radius =
+        short_float_to_f64(u16::from_le_bytes(data[224..226].try_into().unwrap()));
     let hs_max_length_multiplier = f32::from_le_bytes(data[226..230].try_into().unwrap()) as f64;
     let s_raystep_limiter = f32::from_le_bytes(data[242..246].try_into().unwrap());
 
     // skip to 246 for view matrix
     c.skip(22)?; // 224 + 22 = 246
-    
+
     // bVolLightNr is at 343
     let b_vol_light_nr = data[343];
     let b_calculate_hard_shadow = data[133];
@@ -314,11 +315,11 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let _b_color_map = data[435];
     let additional_options = data[439];
     // TLightingParas9 stores TBpos[3..11] starting at offset 440.
-    let tbpos_3 = i32::from_le_bytes(data[440..444].try_into().unwrap());  // TBpos[3]
-    let tbpos_4 = i32::from_le_bytes(data[444..448].try_into().unwrap());  // TBpos[4]
-    let tbpos_5 = i32::from_le_bytes(data[448..452].try_into().unwrap());  // TBpos[5]
-    let tbpos_6 = i32::from_le_bytes(data[452..456].try_into().unwrap());  // TBpos[6]
-    let tbpos_7 = i32::from_le_bytes(data[456..460].try_into().unwrap());  // TBpos[7]
+    let tbpos_3 = i32::from_le_bytes(data[440..444].try_into().unwrap()); // TBpos[3]
+    let tbpos_4 = i32::from_le_bytes(data[444..448].try_into().unwrap()); // TBpos[4]
+    let tbpos_5 = i32::from_le_bytes(data[448..452].try_into().unwrap()); // TBpos[5]
+    let tbpos_6 = i32::from_le_bytes(data[452..456].try_into().unwrap()); // TBpos[6]
+    let tbpos_7 = i32::from_le_bytes(data[456..460].try_into().unwrap()); // TBpos[7]
     let tboptions = u32::from_le_bytes(data[476..480].try_into().unwrap());
     let tbpos_9 = i32::from_le_bytes(data[464..468].try_into().unwrap());
     let tbpos_10 = i32::from_le_bytes(data[468..472].try_into().unwrap());
@@ -368,7 +369,7 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         let g = lc.read_u8_val()?;
         let b = lc.read_u8_val()?;
         let _light_map_nr = lc.read_u16()?;
-        
+
         // Double7B for LXpos
         let mut x_bytes = [0u8; 8];
         lc.read_exact(&mut x_bytes[1..8])?;
@@ -414,7 +415,11 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
         gc.read_exact(&mut color_dif)?;
         let mut color_spe = [0u8; 4];
         gc.read_exact(&mut color_spe)?;
-        lighting.l_cols.push(M3PLCol { pos, color_dif, color_spe });
+        lighting.l_cols.push(M3PLCol {
+            pos,
+            color_dif,
+            color_spe,
+        });
     }
 
     // ICols starting at 792
@@ -470,9 +475,9 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let ssao_r_count = data[187] as i32;
     let ao_dithering = data[188] as i32;
     let deao_max_l = f32::from_le_bytes(data[374..378].try_into().unwrap()) as f64;
-    
+
     let amb_shad = (lighting.tbpos_11 & 0xFF) as f64 / 53.0;
-    
+
     let diffuse_shadowing = lighting
         .lights
         .get(3)
@@ -493,18 +498,43 @@ pub fn parse(path: &str) -> io::Result<M3PFile> {
     let min_iterations = i32::from_le_bytes(data[135..139].try_into().unwrap());
 
     Ok(M3PFile {
-        mand_id, width, height, iterations, min_iterations, b_steps_after_de_stop,
-        i_options, b_new_options, b_color_on_it, b_dfog_it, b_vol_light_nr,
-        b_calculate_hard_shadow, b_hs_calculated, b_calc1_hs_soft,
-        z_start, z_end,
-        x_mid, y_mid, z_mid,
-        xw_rot, yw_rot, zw_rot,
-        zoom, rstop, fov_y, step_width,
+        mand_id,
+        width,
+        height,
+        iterations,
+        min_iterations,
+        b_steps_after_de_stop,
+        i_options,
+        b_new_options,
+        b_color_on_it,
+        b_dfog_it,
+        b_vol_light_nr,
+        b_calculate_hard_shadow,
+        b_hs_calculated,
+        b_calc1_hs_soft,
+        z_start,
+        z_end,
+        x_mid,
+        y_mid,
+        z_mid,
+        xw_rot,
+        yw_rot,
+        zw_rot,
+        zoom,
+        rstop,
+        fov_y,
+        step_width,
         s_raystep_limiter,
         b_vary_de_stop,
-        de_stop, z_step_div,
-        soft_shadow_radius, hs_max_length_multiplier,
-        is_julia, julia_x, julia_y, julia_z, julia_w,
+        de_stop,
+        z_step_div,
+        soft_shadow_radius,
+        hs_max_length_multiplier,
+        is_julia,
+        julia_x,
+        julia_y,
+        julia_z,
+        julia_w,
         view_matrix,
         lighting,
         ssao,

@@ -4,8 +4,10 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_platform::event::video_playback::*,
+    makepad_platform::video::{VideoFormatId, VideoInputId},
     widget::*,
 };
+use std::rc::Rc;
 script_mod! {
     use mod.prelude.widgets_internal.*
 
@@ -19,7 +21,14 @@ script_mod! {
         draw_bg +: {
             video_texture: texture_video()
             thumbnail_texture: texture_2d(float)
+            tex_y: texture_2d(float)
+            tex_u: texture_2d(float)
+            tex_v: texture_2d(float)
             show_thumbnail: uniform(0.0)
+            yuv_type: uniform(0.0)
+            yuv_enabled: uniform(0.0)
+            yuv_biplanar: uniform(0.0)
+            yuv_rotation_steps: uniform(0.0)
 
             opacity: instance(1.0)
             image_scale: instance(vec2(1.0, 1.0))
@@ -28,12 +37,64 @@ script_mod! {
             source_size: uniform(vec2(1.0, 1.0))
             target_size: uniform(vec2(-1.0, -1.0))
 
+            sample_yuv: fn(coord: vec2) -> vec4 {
+                let coord_90 = vec2(1.0 - coord.y, coord.x)
+                let coord_180 = vec2(1.0 - coord.x, 1.0 - coord.y)
+                let coord_270 = vec2(coord.y, 1.0 - coord.x)
+
+                let is_90 = step(0.5, self.yuv_rotation_steps) * step(self.yuv_rotation_steps, 1.5)
+                let is_180 = step(1.5, self.yuv_rotation_steps) * step(self.yuv_rotation_steps, 2.5)
+                let is_270 = step(2.5, self.yuv_rotation_steps)
+                let is_0 = 1.0 - is_90 - is_180 - is_270
+                let sample_coord = coord * is_0 + coord_90 * is_90 + coord_180 * is_180 + coord_270 * is_270
+
+                let y_val = self.tex_y.sample(sample_coord).x
+                // Biplanar NV12: U in tex_u.r, V in tex_u.g
+                // Triplanar I420: U in tex_u.r, V in tex_v.r
+                let uv_sample = self.tex_u.sample(sample_coord)
+                let u_val = uv_sample.x
+                let v_val = mix(self.tex_v.sample(sample_coord).x, uv_sample.y, step(0.5, self.yuv_biplanar))
+
+                // Limited range: Y [16..235] -> [0..1], UV [16..240] -> [-0.5..0.5]
+                let y = (y_val * 255.0 - 16.0) / 219.0
+                let u = (u_val * 255.0 - 128.0) / 224.0
+                let v = (v_val * 255.0 - 128.0) / 224.0
+
+                // BT.709 (yuv_type == 0.0)
+                let r709 = y + 1.5748 * v
+                let g709 = y - 0.1873 * u - 0.4681 * v
+                let b709 = y + 1.8556 * u
+
+                // BT.601 (yuv_type == 1.0)
+                let r601 = y + 1.402 * v
+                let g601 = y - 0.3441 * u - 0.7141 * v
+                let b601 = y + 1.772 * u
+
+                // BT.2020 (yuv_type == 2.0)
+                let r2020 = y + 1.4746 * v
+                let g2020 = y - 0.1646 * u - 0.5714 * v
+                let b2020 = y + 1.8814 * u
+
+                // Select matrix by yuv_type uniform
+                let is_601 = step(0.5, self.yuv_type) * step(self.yuv_type, 1.5)
+                let is_2020 = step(1.5, self.yuv_type)
+                let is_709 = 1.0 - is_601 - is_2020
+
+                let r = is_709 * r709 + is_601 * r601 + is_2020 * r2020
+                let g = is_709 * g709 + is_601 * g601 + is_2020 * g2020
+                let b = is_709 * b709 + is_601 * b601 + is_2020 * b2020
+
+                return vec4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), 1.0)
+            }
+
             get_color_scale_pan: fn() {
                 // Early return for default scaling and panning,
                 // used when walk size is not specified or non-fixed.
                 if self.target_size.x <= 0.0 || self.target_size.y <= 0.0 {
                     if self.show_thumbnail > 0.0 {
                         return self.thumbnail_texture.sample_as_bgra(self.pos).xyzw
+                    } else if self.yuv_enabled > 0.5 {
+                        return self.sample_yuv(self.pos)
                     } else {
                         return self.video_texture.sample_video(self.pos)
                     }
@@ -67,6 +128,8 @@ script_mod! {
 
                 if self.show_thumbnail > 0.5 {
                     return self.thumbnail_texture.sample_as_bgra(adjusted_pos).xyzw
+                } else if self.yuv_enabled > 0.5 {
+                    return self.sample_yuv(adjusted_pos)
                 } else {
                     return self.video_texture.sample_video(adjusted_pos)
                 }
@@ -335,6 +398,8 @@ pub struct Video {
     #[live]
     source: VideoDataSource,
     #[rust]
+    in_memory_source: Option<Rc<Vec<u8>>>,
+    #[rust]
     video_texture: Option<Texture>,
     #[rust]
     video_texture_handle: Option<u32>,
@@ -343,6 +408,19 @@ pub struct Video {
     thumbnail_source: Option<ScriptHandleRef>,
     #[rust]
     thumbnail_texture: Option<Texture>,
+    // YUV plane textures (software AV1 path)
+    #[rust]
+    tex_y: Option<Texture>,
+    #[rust]
+    tex_u: Option<Texture>,
+    #[rust]
+    tex_v: Option<Texture>,
+    #[rust]
+    source_mode: VideoSourceMode,
+    #[live(VideoCameraPreviewMode::Auto)]
+    camera_preview_mode: VideoCameraPreviewMode,
+    #[rust]
+    native_preview_attached: bool,
 
     // Playback
     #[live(false)]
@@ -420,6 +498,7 @@ impl ScriptHook for Video {
         _value: ScriptValue,
     ) {
         vm.with_cx_mut(|cx| {
+            self.ensure_primary_texture(cx);
             self.apply_thumbnail_settings(cx);
             // Prepare the video when autoplay is enabled (so it starts immediately) or when
             // show_idle_thumbnail is true (so the first frame is available as a thumbnail).
@@ -495,6 +574,39 @@ impl VideoRef {
         }
     }
 
+    pub fn set_camera_preview_mode(&self, cx: &mut Cx, mode: VideoCameraPreviewMode) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_camera_preview_mode(cx, mode);
+        }
+    }
+
+    /// Sets a camera source for the video.
+    pub fn set_source_camera(
+        &self,
+        _cx: &mut Cx,
+        input_id: VideoInputId,
+        format_id: VideoFormatId,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.playback_state == PlaybackState::Unprepared {
+                inner.source = VideoDataSource::Camera {
+                    input_id: input_id.0,
+                    format_id: format_id.0,
+                };
+                inner.source_mode = VideoSourceMode::YuvPlanes;
+            }
+        }
+    }
+
+    /// Sets an in-memory source for the video data.
+    ///
+    /// This bypasses filesystem and network paths and is useful for embedded media assets.
+    pub fn set_source_in_memory(&self, data: Rc<Vec<u8>>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_source_in_memory(data);
+        }
+    }
+
     /// Determines if this video instance should dispatch [`VideoAction::TextureUpdated`] actions on each texture update.
     /// This is disbaled by default because it can be quite nosiy when debugging actions.
     pub fn should_dispatch_texture_updates(&self, should_dispatch: bool) {
@@ -567,6 +679,21 @@ impl VideoRef {
     }
 }
 
+#[derive(Clone, Debug, Script, ScriptHook, PartialEq)]
+pub enum VideoCameraPreviewMode {
+    #[pick]
+    Auto,
+    Texture,
+    Native,
+}
+
+#[derive(Default, PartialEq, Debug)]
+enum VideoSourceMode {
+    #[default]
+    ExternalTexture,
+    YuvPlanes,
+}
+
 #[derive(Default, PartialEq, Debug)]
 enum PlaybackState {
     #[default]
@@ -616,6 +743,8 @@ impl Widget for Video {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_bg.end(cx);
 
+        self.sync_native_camera_preview(cx);
+
         if self.show_controls {
             self.draw_center_play_button(cx);
             self.draw_controls(cx);
@@ -635,6 +764,17 @@ impl Widget for Video {
 
         let uid = self.widget_uid();
         match event {
+            Event::VideoYuvTexturesReady(event) => {
+                if event.video_id == self.id {
+                    self.tex_y = Some(event.tex_y.clone());
+                    self.tex_u = Some(event.tex_u.clone());
+                    self.tex_v = Some(event.tex_v.clone());
+                    self.draw_bg.draw_vars.set_texture(2, &event.tex_y);
+                    self.draw_bg.draw_vars.set_texture(3, &event.tex_u);
+                    self.draw_bg.draw_vars.set_texture(4, &event.tex_v);
+
+                }
+            }
             Event::VideoPlaybackPrepared(event) => {
                 if event.video_id == self.id {
                     self.handle_playback_prepared(cx, event);
@@ -654,6 +794,16 @@ impl Widget for Video {
                     } else if event.current_position_ms > 0 {
                         self.current_position_ms = event.current_position_ms;
                     }
+                    // Update YUV shader uniforms from platform event
+                    self.draw_bg
+                        .set_uniform(cx, id!(yuv_enabled), &[event.yuv.shader_enabled()]);
+                    self.draw_bg
+                        .set_uniform(cx, id!(yuv_type), &[event.yuv.matrix]);
+                    self.draw_bg
+                        .set_uniform(cx, id!(yuv_biplanar), &[event.yuv.shader_biplanar()]);
+                    self.draw_bg
+                        .set_uniform(cx, id!(yuv_rotation_steps), &[event.yuv.rotation_steps]);
+
                     self.redraw(cx);
                     if self.playback_state == PlaybackState::Prepared && self.autoplay {
                         self.playback_state = PlaybackState::Playing;
@@ -676,6 +826,10 @@ impl Widget for Video {
             Event::VideoPlaybackResourcesReleased(event) => {
                 if event.video_id == self.id {
                     self.playback_state = PlaybackState::Unprepared;
+                    if self.native_preview_attached {
+                        cx.detach_camera_native_preview(self.id);
+                        self.native_preview_attached = false;
+                    }
                     cx.widget_action(uid, VideoAction::PlayerReset);
                 }
             }
@@ -707,22 +861,106 @@ impl ImageCacheImpl for Video {
 }
 
 impl Video {
+    fn resolve_camera_preview_mode(&self) -> makepad_platform::event::video_playback::CameraPreviewMode {
+        use makepad_platform::event::video_playback::CameraPreviewMode as PlatformMode;
+        match self.camera_preview_mode {
+            VideoCameraPreviewMode::Texture => PlatformMode::Texture,
+            VideoCameraPreviewMode::Native => PlatformMode::Native,
+            VideoCameraPreviewMode::Auto => {
+                #[cfg(any(target_os = "ios", target_os = "android", target_os = "macos"))]
+                {
+                    PlatformMode::Native
+                }
+                #[cfg(not(any(target_os = "ios", target_os = "android", target_os = "macos")))]
+                {
+                    PlatformMode::Texture
+                }
+            }
+        }
+    }
+
+    fn should_use_native_camera_preview(&self) -> bool {
+        matches!(self.source, VideoDataSource::Camera { .. })
+            && matches!(
+                self.resolve_camera_preview_mode(),
+                makepad_platform::event::video_playback::CameraPreviewMode::Native
+            )
+    }
+
+    fn sync_native_camera_preview(&mut self, cx: &mut Cx) {
+        if !self.should_use_native_camera_preview() {
+            if self.native_preview_attached {
+                cx.detach_camera_native_preview(self.id);
+                self.native_preview_attached = false;
+            }
+            return;
+        }
+
+        let area = self.draw_bg.area();
+        let visible = self.playback_state != PlaybackState::CleaningUp
+            && self.playback_state != PlaybackState::Unprepared;
+
+        if !visible {
+            if self.native_preview_attached {
+                cx.detach_camera_native_preview(self.id);
+                self.native_preview_attached = false;
+            }
+            return;
+        }
+
+        if !self.native_preview_attached {
+            cx.attach_camera_native_preview(self.id, area);
+            self.native_preview_attached = true;
+        }
+        cx.update_camera_native_preview(self.id, area, visible);
+    }
+
+    fn infer_source_mode(&self) -> VideoSourceMode {
+        if self.in_memory_source.is_some() {
+            return VideoSourceMode::ExternalTexture;
+        }
+        match &self.source {
+            VideoDataSource::Camera { .. } => VideoSourceMode::YuvPlanes,
+            _ => VideoSourceMode::ExternalTexture,
+        }
+    }
+
+    fn ensure_primary_texture(&mut self, cx: &mut Cx) {
+        let desired = self.infer_source_mode();
+        let needs_recreate = self.video_texture.is_none() || self.source_mode != desired;
+
+        if needs_recreate {
+            self.video_texture = Some(match desired {
+                VideoSourceMode::ExternalTexture => {
+                    Texture::new_with_format(cx, TextureFormat::VideoExternal)
+                }
+                // In YUV mode the primary texture is unused (shader samples
+                // tex_y/tex_u/tex_v), but it must still be a valid video texture
+                // for the pipeline plumbing.
+                VideoSourceMode::YuvPlanes => {
+                    Texture::new_with_format(cx, TextureFormat::VideoExternal)
+                }
+            });
+        }
+
+        self.source_mode = desired;
+        if let Some(texture) = self.video_texture.as_ref() {
+            self.draw_bg.draw_vars.set_texture(0, texture);
+        }
+    }
+
     fn init_video_texture(&mut self, cx: &mut Cx) {
         self.id = LiveId::unique();
-
-        if self.video_texture.is_none() {
-            let new_texture = Texture::new_with_format(cx, TextureFormat::VideoRGB);
-            self.video_texture = Some(new_texture);
-        }
-        let texture = self.video_texture.as_mut().unwrap();
-        self.draw_bg.draw_vars.set_texture(0, &texture);
+        self.ensure_primary_texture(cx);
 
         #[cfg(target_os = "android")]
-        match cx.os_type() {
-            OsType::Android(params) if params.is_emulator => {
-                panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
+        if self.source_mode == VideoSourceMode::ExternalTexture {
+            match cx.os_type() {
+                OsType::Android(params) if params.is_emulator => {
+                    panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
+                }
+                _ => {}
             }
-            _ => {}
         }
 
         self.should_prepare_playback = self.autoplay;
@@ -749,40 +987,59 @@ impl Video {
     }
 
     fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
+        self.ensure_primary_texture(cx);
         if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
-            // On Android, wait for GL texture handle before preparing
+            // On Android, external texture mode waits for GL texture handle.
             #[cfg(target_os = "android")]
-            if self.video_texture_handle.is_none() {
-                // texture is not yet ready, this method will be called again on TextureHandleReady
+            if self.source_mode == VideoSourceMode::ExternalTexture
+                && self.video_texture_handle.is_none()
+            {
                 return;
             }
 
-            let source = match &self.source {
-                VideoDataSource::Dependency { res } => {
-                    if let Some(handle_ref) = res {
-                        let handle = handle_ref.as_handle();
-                        match cx.get_resource(handle) {
-                            Some(data) => VideoSource::InMemory(data),
-                            None => {
-                                error!("Attempted to prepare playback: resource not found");
-                                return;
+            let source = if let Some(data) = self.in_memory_source.clone() {
+                VideoSource::InMemory(data)
+            } else {
+                match &self.source {
+                    VideoDataSource::Dependency { res } => {
+                        if let Some(handle_ref) = res {
+                            let handle = handle_ref.as_handle();
+                            match cx.get_resource(handle) {
+                                Some(data) => VideoSource::InMemory(data),
+                                None => {
+                                    error!("Attempted to prepare playback: resource not found");
+                                    return;
+                                }
                             }
+                        } else {
+                            error!("Attempted to prepare playback: no resource handle provided");
+                            return;
                         }
-                    } else {
-                        error!("Attempted to prepare playback: no resource handle provided");
-                        return;
                     }
+                    VideoDataSource::Network { url } => VideoSource::Network(url.to_string()),
+                    VideoDataSource::Filesystem { path } => {
+                        VideoSource::Filesystem(path.to_string())
+                    }
+                    VideoDataSource::Camera {
+                        input_id,
+                        format_id,
+                    } => VideoSource::Camera(VideoInputId(*input_id), VideoFormatId(*format_id)),
                 }
-                VideoDataSource::Network { url } => VideoSource::Network(url.to_string()),
-                VideoDataSource::Filesystem { path } => VideoSource::Filesystem(path.to_string()),
             };
 
             let Some(texture) = self.video_texture.as_ref() else {
                 return;
             };
+            let camera_preview_mode = if matches!(source, VideoSource::Camera(..)) {
+                self.resolve_camera_preview_mode()
+            } else {
+                makepad_platform::event::video_playback::CameraPreviewMode::Texture
+            };
+
             cx.prepare_video_playback(
                 self.id,
                 source,
+                camera_preview_mode,
                 self.video_texture_handle.unwrap_or(0),
                 texture.texture_id(),
                 self.autoplay,
@@ -994,6 +1251,10 @@ impl Video {
                 self.playback_state = PlaybackState::Unprepared;
                 self.should_prepare_playback = false;
                 self.last_error = Some(event.error.clone());
+                if self.native_preview_attached {
+                    cx.detach_camera_native_preview(self.id);
+                    self.native_preview_attached = false;
+                }
                 self.redraw(cx);
             }
         }
@@ -1066,10 +1327,13 @@ impl Video {
 
     fn stop_and_cleanup_resources(&mut self, cx: &mut Cx) {
         if self.playback_state != PlaybackState::Unprepared
-            && self.playback_state != PlaybackState::Preparing
             && self.playback_state != PlaybackState::CleaningUp
         {
             cx.cleanup_video_playback_resources(self.id);
+            if self.native_preview_attached {
+                cx.detach_camera_native_preview(self.id);
+                self.native_preview_attached = false;
+            }
 
             self.playback_state = PlaybackState::CleaningUp;
             self.autoplay = false;
@@ -1079,7 +1343,36 @@ impl Video {
 
     fn set_source(&mut self, source: VideoDataSource) {
         if self.playback_state == PlaybackState::Unprepared {
+            self.in_memory_source = None;
+            self.source_mode = match source {
+                VideoDataSource::Camera { .. } => VideoSourceMode::YuvPlanes,
+                _ => VideoSourceMode::ExternalTexture,
+            };
             self.source = source;
+        } else {
+            error!(
+                "Attempted to set source while player {} state is: {:?}",
+                self.id.0, self.playback_state
+            );
+        }
+    }
+
+    fn set_camera_preview_mode(&mut self, cx: &mut Cx, mode: VideoCameraPreviewMode) {
+        if self.camera_preview_mode == mode {
+            return;
+        }
+        self.camera_preview_mode = mode;
+        if self.native_preview_attached && !self.should_use_native_camera_preview() {
+            cx.detach_camera_native_preview(self.id);
+            self.native_preview_attached = false;
+        }
+        self.redraw(cx);
+    }
+
+    fn set_source_in_memory(&mut self, data: Rc<Vec<u8>>) {
+        if self.playback_state == PlaybackState::Unprepared {
+            self.source_mode = VideoSourceMode::ExternalTexture;
+            self.in_memory_source = Some(data);
         } else {
             error!(
                 "Attempted to set source while player {} state is: {:?}",
@@ -1346,14 +1639,18 @@ impl Video {
         let text_h = laid_out.size_in_lpxs.height as f64;
 
         let bg_h = text_h + 2.0 * pad_y;
-        self.draw_error_bg.draw_abs(cx, Rect {
-            pos: dvec2(video_rect.pos.x, video_rect.pos.y),
-            size: dvec2(video_rect.size.x, bg_h),
-        });
+        self.draw_error_bg.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(video_rect.pos.x, video_rect.pos.y),
+                size: dvec2(video_rect.size.x, bg_h),
+            },
+        );
 
         let text_x = video_rect.pos.x + ((video_rect.size.x - text_w) * 0.5).max(pad_x);
         let text_y = video_rect.pos.y + pad_y;
-        self.draw_error_text.draw_abs(cx, dvec2(text_x, text_y), msg);
+        self.draw_error_text
+            .draw_abs(cx, dvec2(text_x, text_y), msg);
     }
 
     fn seek_to_position_from_x(&mut self, cx: &mut Cx, abs_x: f64) {
@@ -1512,4 +1809,6 @@ pub enum VideoDataSource {
     Network { url: String },
     #[live {path: "".to_string()}]
     Filesystem { path: String },
+    #[live {input_id: LiveId::empty(), format_id: LiveId::empty()}]
+    Camera { input_id: LiveId, format_id: LiveId },
 }

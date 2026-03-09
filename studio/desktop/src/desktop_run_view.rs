@@ -169,6 +169,8 @@ pub struct DesktopRunView {
     ai_viz_total_frames: u8,
     #[rust]
     ai_viz_queue: VecDeque<InputVizEvent>,
+    #[rust]
+    ime_pos: Option<Vec2d>,
 }
 
 impl ScriptHook for DesktopRunView {
@@ -196,6 +198,7 @@ impl DesktopRunView {
         if self.current_target == target {
             return;
         }
+        let had_target = self.current_target.is_some();
         self.current_target = target;
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
@@ -207,12 +210,16 @@ impl DesktopRunView {
         self.ai_viz_frames_left = 0;
         self.ai_viz_total_frames = 0;
         self.ai_viz_queue.clear();
+        self.ime_pos = None;
         self.last_rect = Rect::default();
         if target.is_some() {
             // Keep redrawing during startup so bootstrap messages can be resent
             // until the child app socket is ready.
             self.redraw_countdown = self.redraw_countdown.max(240);
         } else {
+            if had_target {
+                cx.hide_text_ime();
+            }
             self.redraw_countdown = 0;
         }
         self.draw_app.set_texture(0, &cx.null_texture());
@@ -505,6 +512,18 @@ impl DesktopRunView {
         Some(dvec2(abs.x - rect.pos.x, abs.y - rect.pos.y))
     }
 
+    fn default_ime_pos(rect: Rect) -> Vec2d {
+        dvec2((rect.size.x * 0.5).max(0.0), (rect.size.y * 0.5).max(0.0))
+    }
+
+    fn clamped_ime_pos(&self, rect: Rect) -> Vec2d {
+        let pos = self.ime_pos.unwrap_or_else(|| Self::default_ime_pos(rect));
+        dvec2(
+            pos.x.clamp(0.0, rect.size.x.max(0.0)),
+            pos.y.clamp(0.0, rect.size.y.max(0.0)),
+        )
+    }
+
     fn default_mouse_button(device: &DigitDevice) -> MouseButton {
         device.mouse_button().unwrap_or(MouseButton::PRIMARY)
     }
@@ -616,6 +635,9 @@ impl Widget for DesktopRunView {
                 .draw_walk_all(cx, scope, Walk::abs_rect(rect));
         }
         self.area = self.draw_app.area();
+        if target.is_some() && cx.has_key_focus(self.area) {
+            cx.show_text_ime(self.area, self.clamped_ime_pos(rect));
+        }
         DrawStep::done()
     }
 
@@ -635,9 +657,18 @@ impl Widget for DesktopRunView {
         };
 
         match event.hits(cx, self.area) {
+            Hit::KeyFocus(_) => {
+                self.redraw(cx);
+            }
+            Hit::KeyFocusLost(_) => {
+                cx.hide_text_ime();
+                self.redraw(cx);
+            }
             Hit::FingerDown(e) => {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
                     cx.set_key_focus(self.area);
+                    self.ime_pos = Some(local);
+                    self.redraw(cx);
                     self.emit_to_app(
                         cx,
                         target.build_id,

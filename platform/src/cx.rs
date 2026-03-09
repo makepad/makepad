@@ -19,6 +19,7 @@ use {
         script::script::CxScriptData,
         thread::SignalToUI,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
+        uniform_buffer::CxUniformBufferPool,
         window::CxWindowPool,
     },
     makepad_futures::{
@@ -40,6 +41,16 @@ use {
 //pub use makepad_shader_compiler::makepad_derive_live::*;
 //pub use makepad_shader_compiler::makepad_math::*;
 
+pub(crate) struct PendingCameraPlayback {
+    pub video_id: LiveId,
+    pub source: crate::event::VideoSource,
+    pub camera_preview_mode: crate::event::video_playback::CameraPreviewMode,
+    pub external_texture_id: u32,
+    pub texture_id: crate::texture::TextureId,
+    pub autoplay: bool,
+    pub should_loop: bool,
+}
+
 pub struct Cx {
     pub script_vm: Option<Box<ScriptVmBase>>,
     pub script_data: CxScriptData,
@@ -60,6 +71,7 @@ pub struct Cx {
     pub draw_lists: CxDrawListPool,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
+    pub uniform_buffers: CxUniformBufferPool,
     pub(crate) geometries: CxGeometryPool,
 
     pub draw_shaders: CxDrawShaders,
@@ -81,6 +93,7 @@ pub struct Cx {
     pub(crate) drag_drop: CxDragDrop,
 
     pub(crate) platform_ops: Vec<CxOsOp>,
+    pub(crate) pending_camera_playbacks: Vec<PendingCameraPlayback>,
 
     pub(crate) new_next_frames: HashSet<NextFrame>,
 
@@ -346,6 +359,7 @@ impl Cx {
             draw_matrices: Default::default(),
             geometries: Default::default(),
             textures,
+            uniform_buffers: Default::default(),
 
             draw_shaders: Default::default(),
 
@@ -365,6 +379,7 @@ impl Cx {
             ime_area: Default::default(),
             keyboard_shift: 0.0,
             platform_ops: Default::default(),
+            pending_camera_playbacks: Vec::new(),
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
 
@@ -405,15 +420,13 @@ impl Cx {
 
             script_data: CxScriptData {
                 crate_manifests: vm.bx.code.crate_manifests.clone(),
+                live_reload: crate::live_reload::CxLiveReloadState {
+                    script_mod_overrides: vm.bx.code.script_mod_overrides.clone(),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             script_vm: Some(vm.bx),
         }
-    }
-}
-
-impl Cx {
-    pub fn handle_live_edit(&mut self) -> bool {
-        false
     }
 }

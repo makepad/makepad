@@ -18,8 +18,8 @@ use {
         script::vm::*,
         texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel},
     },
-    makepad_studio_protocol::{AppToStudio, GPUSample},
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
+    makepad_studio_protocol::{AppToStudio, GPUSample},
     makepad_zune_png::{
         makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},
         PngEncoder,
@@ -371,6 +371,23 @@ impl Cx {
                         uniform_bytes_uploaded = uniform_bytes_uploaded
                             .saturating_add((draw_call.dyn_uniforms.len() * 4 * 2) as u64);
                     }
+                    for (slot, id) in shp.custom_uniform_buffer_ids.iter().enumerate() {
+                        let Some(uniform_buffer) = draw_call.uniform_buffer_slots[slot].as_ref() else {
+                            let () = msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
+                            let () = msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
+                            continue;
+                        };
+                        let data = &self.uniform_buffers[uniform_buffer.uniform_buffer_id()].data;
+                        if data.is_empty() {
+                            let () = msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
+                            let () = msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
+                            continue;
+                        }
+                        let () = msg_send![encoder, setVertexBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 atIndex: *id];
+                        let () = msg_send![encoder, setFragmentBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 atIndex: *id];
+                        uniform_bytes_uploaded = uniform_bytes_uploaded
+                            .saturating_add((data.len() * 2) as u64);
+                    }
                     if let Some(id) = shp.scope_uniform_buffer_id {
                         let scope_buf = &sh.mapping.scope_uniforms_buf;
                         if !scope_buf.is_empty() {
@@ -399,14 +416,14 @@ impl Cx {
                         let () = unsafe {
                             msg_send![
                                 encoder,
-                                setFragmentTexture: nil
+                                setFragmentTexture: metal_cx.fallback_texture
                                 atIndex: i as u64
                             ]
                         };
                         let () = unsafe {
                             msg_send![
                                 encoder,
-                                setVertexTexture: nil
+                                setVertexTexture: metal_cx.fallback_texture
                                 atIndex: i as u64
                             ]
                         };
@@ -436,6 +453,24 @@ impl Cx {
                             msg_send![
                                 encoder,
                                 setVertexTexture: texture.as_id()
+                                atIndex: i as u64
+                            ]
+                        };
+                    } else {
+                        // No Metal texture backing yet — bind a 1×1 fallback
+                        // texture. On iOS, sampling from nil is a GPU fault
+                        // that aborts the command buffer.
+                        let () = unsafe {
+                            msg_send![
+                                encoder,
+                                setFragmentTexture: metal_cx.fallback_texture
+                                atIndex: i as u64
+                            ]
+                        };
+                        let () = unsafe {
+                            msg_send![
+                                encoder,
+                                setVertexTexture: metal_cx.fallback_texture
                                 atIndex: i as u64
                             ]
                         };
@@ -1157,7 +1192,7 @@ impl Cx {
             if let Some(os_shader_id) = found_os_shader_id {
                 cx_shader.os_shader_id = Some(os_shader_id);
             } else {
-                if let Some(shp) = CxOsDrawShader::new(metal_cx, mtlsl, &bindings) {
+                if let Some(shp) = CxOsDrawShader::new(metal_cx, mtlsl, &cx_shader.mapping, &bindings) {
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
@@ -1270,6 +1305,10 @@ impl DrawPassMode {
 pub struct MetalCx {
     pub device: ObjcId,
     command_queue: ObjcId,
+    /// 1×1 BGRA fallback texture bound when a texture slot has no backing
+    /// MTLTexture. Prevents Metal command-buffer aborts on iOS where sampling
+    /// from nil is a GPU fault.
+    fallback_texture: ObjcId,
 }
 
 #[derive(Clone, Default)]
@@ -1293,9 +1332,36 @@ pub struct SlErr {
 impl MetalCx {
     pub(crate) fn new() -> MetalCx {
         let device = get_default_metal_device().expect("Cannot get default metal device");
+        let fallback_texture = unsafe {
+            let descriptor: ObjcId = msg_send![class!(MTLTextureDescriptor), new];
+            let _: () = msg_send![descriptor, setTextureType: MTLTextureType::D2];
+            let _: () = msg_send![descriptor, setWidth: 1u64];
+            let _: () = msg_send![descriptor, setHeight: 1u64];
+            let _: () = msg_send![descriptor, setDepth: 1u64];
+            let _: () = msg_send![descriptor, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+            let _: () = msg_send![descriptor, setStorageMode: MTLStorageMode::Shared];
+            let _: () = msg_send![descriptor, setUsage: MTLTextureUsage::ShaderRead];
+            let tex: ObjcId = msg_send![device, newTextureWithDescriptor: descriptor];
+            let _: () = msg_send![descriptor, release];
+            // Write transparent black pixel
+            let zero: [u8; 4] = [0, 0, 0, 0];
+            let region = MTLRegion {
+                origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                size: MTLSize { width: 1, height: 1, depth: 1 },
+            };
+            let _: () = msg_send![
+                tex,
+                replaceRegion: region
+                mipmapLevel: 0u64
+                withBytes: zero.as_ptr() as *const std::ffi::c_void
+                bytesPerRow: 4u64
+            ];
+            tex
+        };
         MetalCx {
             command_queue: unsafe { msg_send![device, newCommandQueue] },
-            device: device,
+            device,
+            fallback_texture,
         }
     }
 }
@@ -1309,6 +1375,7 @@ pub struct CxOsDrawShader {
     pass_uniform_buffer_id: Option<u64>,
     draw_list_uniform_buffer_id: Option<u64>,
     dyn_uniform_buffer_id: Option<u64>,
+    custom_uniform_buffer_ids: Vec<u64>,
     scope_uniform_buffer_id: Option<u64>,
     pub mtlsl: String,
 }
@@ -1511,6 +1578,7 @@ impl CxOsDrawShader {
     pub(crate) fn new(
         metal_cx: &MetalCx,
         mtlsl: String,
+        mapping: &CxDrawShaderMapping,
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
         let options = RcObjcId::from_owned(unsafe { msg_send![class!(MTLCompileOptions), new] });
@@ -1597,6 +1665,11 @@ impl CxOsDrawShader {
             .map(|i| i as u64);
         // dyn_uniform_buffer_id is not in bindings, it uses the IoUniform struct at buffer(2)
         let dyn_uniform_buffer_id = Some(2);
+        let custom_uniform_buffer_ids = mapping
+            .uniform_buffers
+            .iter()
+            .map(|input| input.buffer_index as u64)
+            .collect();
         // scope_uniform_buffer_id comes from bindings if there are scope uniforms
         let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u64);
 
@@ -1607,6 +1680,7 @@ impl CxOsDrawShader {
             pass_uniform_buffer_id,
             draw_list_uniform_buffer_id,
             dyn_uniform_buffer_id,
+            custom_uniform_buffer_ids,
             scope_uniform_buffer_id,
             mtlsl,
         });
@@ -1617,6 +1691,9 @@ impl CxOsDrawShader {
 pub struct CxOsDrawCall {
     instance_buffer: MetalBuffer,
 }
+
+#[derive(Default)]
+pub struct CxOsUniformBuffer {}
 
 #[derive(Default)]
 pub struct CxOsGeometry {
@@ -1701,7 +1778,8 @@ fn texture_pixel_to_mtl_pixel(pix: &TexturePixel) -> MTLPixelFormat {
         TexturePixel::RGu8 => MTLPixelFormat::RG8Unorm,
         TexturePixel::Rf32 => MTLPixelFormat::R32Float,
         TexturePixel::D32 => MTLPixelFormat::Depth32Float,
-        TexturePixel::VideoRGB => MTLPixelFormat::BGRA8Unorm,
+        TexturePixel::VideoYuvPlane => MTLPixelFormat::R8Unorm,
+        TexturePixel::VideoExternal => MTLPixelFormat::BGRA8Unorm,
     }
 }
 impl CxTexture {
@@ -1973,8 +2051,9 @@ impl CxTexture {
             let _: () = msg_send![dict, setObject: pf_val forKey: pf_key];
 
             // Required for CoreVideo + OpenGLES texture cache interop on iOS.
-            let gl_tex_compat_key =
-                crate::os::apple::apple_util::str_to_nsstring("IOSurfaceOpenGLESTextureCompatibility");
+            let gl_tex_compat_key = crate::os::apple::apple_util::str_to_nsstring(
+                "IOSurfaceOpenGLESTextureCompatibility",
+            );
             let gl_tex_compat_val: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
             let _: () = msg_send![dict, setObject: gl_tex_compat_val forKey: gl_tex_compat_key];
 
@@ -2002,13 +2081,16 @@ impl CxTexture {
         }
 
         if iosurface.is_null() {
-            crate::error!("Failed to create IOSurface {}x{}", alloc.width, alloc.height);
+            crate::error!(
+                "Failed to create IOSurface {}x{}",
+                alloc.width,
+                alloc.height
+            );
             return 0;
         }
 
         // Get the global IOSurface ID for cross-process sharing
         let iosurface_id = unsafe { IOSurfaceGetID(iosurface) };
-
 
         // Create Metal texture descriptor
         let descriptor = RcObjcId::from_owned(
@@ -2268,10 +2350,14 @@ impl CglRenderBridge {
 
         unsafe {
             let attribs: &[u32] = &[
-                K_CGL_PFA_OPENGL_PROFILE, K_CGL_OGL_PVERSION_3_2_CORE,
-                K_CGL_PFA_COLOR_SIZE, 24,
-                K_CGL_PFA_DEPTH_SIZE, 24,
-                K_CGL_PFA_STENCIL_SIZE, 8,
+                K_CGL_PFA_OPENGL_PROFILE,
+                K_CGL_OGL_PVERSION_3_2_CORE,
+                K_CGL_PFA_COLOR_SIZE,
+                24,
+                K_CGL_PFA_DEPTH_SIZE,
+                24,
+                K_CGL_PFA_STENCIL_SIZE,
+                8,
                 K_CGL_PFA_ACCELERATED,
                 K_CGL_PFA_DOUBLE_BUFFER,
                 0,
@@ -2280,11 +2366,19 @@ impl CglRenderBridge {
             let mut pix: CGLPixelFormatObj = std::ptr::null_mut();
             let mut npix: i32 = 0;
             let err = CGLChoosePixelFormat(attribs.as_ptr(), &mut pix, &mut npix);
-            assert!(err == 0 && !pix.is_null(), "CGLChoosePixelFormat failed: {}", err);
+            assert!(
+                err == 0 && !pix.is_null(),
+                "CGLChoosePixelFormat failed: {}",
+                err
+            );
 
             let mut ctx: CGLContextObj = std::ptr::null_mut();
             let err = CGLCreateContext(pix, std::ptr::null_mut(), &mut ctx);
-            assert!(err == 0 && !ctx.is_null(), "CGLCreateContext failed: {}", err);
+            assert!(
+                err == 0 && !ctx.is_null(),
+                "CGLCreateContext failed: {}",
+                err
+            );
 
             // Load OpenGL.framework for dlsym-based proc address lookup
             extern "C" {
@@ -2292,7 +2386,10 @@ impl CglRenderBridge {
             }
             let framework_path = b"/System/Library/Frameworks/OpenGL.framework/OpenGL\0";
             let opengl_framework = dlopen(framework_path.as_ptr() as *const i8, 1); // RTLD_LAZY
-            assert!(!opengl_framework.is_null(), "Failed to load OpenGL.framework");
+            assert!(
+                !opengl_framework.is_null(),
+                "Failed to load OpenGL.framework"
+            );
 
             CglRenderBridge {
                 cgl_context: ctx,
@@ -2426,7 +2523,10 @@ impl EaglRenderBridge {
 
             let framework_path = b"/System/Library/Frameworks/OpenGLES.framework/OpenGLES\0";
             let opengles_framework = dlopen(framework_path.as_ptr() as *const i8, 1); // RTLD_LAZY
-            assert!(!opengles_framework.is_null(), "Failed to load OpenGLES.framework");
+            assert!(
+                !opengles_framework.is_null(),
+                "Failed to load OpenGLES.framework"
+            );
 
             EaglRenderBridge {
                 eagl_context: ctx,
@@ -2436,9 +2536,8 @@ impl EaglRenderBridge {
     }
 
     pub fn make_current(&self) {
-        let success: bool = unsafe {
-            msg_send![class!(EAGLContext), setCurrentContext: self.eagl_context]
-        };
+        let success: bool =
+            unsafe { msg_send![class!(EAGLContext), setCurrentContext: self.eagl_context] };
         assert!(success, "EAGLContext setCurrentContext failed");
     }
 
@@ -2468,17 +2567,11 @@ impl EaglRenderBridge {
         height: usize,
     ) -> (u32, ObjcId) {
         use crate::os::apple::apple_sys::{
-            kCVPixelBufferOpenGLESCompatibilityKey,
-            kCVPixelBufferMetalCompatibilityKey,
-            kCVPixelBufferIOSurfacePropertiesKey,
-            kCVPixelFormatType_32BGRA,
-            CVPixelBufferCreate,
-            CVPixelBufferRef,
-            CVMetalTextureCacheCreate,
-            CVMetalTextureCacheRef,
-            CVMetalTextureRef,
-            CVMetalTextureCacheCreateTextureFromImage,
-            CVMetalTextureGetTexture,
+            kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
+            kCVPixelBufferOpenGLESCompatibilityKey, kCVPixelFormatType_32BGRA,
+            CVMetalTextureCacheCreate, CVMetalTextureCacheCreateTextureFromImage,
+            CVMetalTextureCacheRef, CVMetalTextureGetTexture, CVMetalTextureRef,
+            CVPixelBufferCreate, CVPixelBufferRef,
         };
 
         const GL_TEXTURE_2D: u32 = 0x0DE1;
@@ -2552,7 +2645,10 @@ impl EaglRenderBridge {
             let _: () = msg_send![pb_attrs, release];
             assert!(
                 status == 0 && !pixel_buffer.is_null(),
-                "CVPixelBufferCreate failed: {} ({}x{})", status, width, height,
+                "CVPixelBufferCreate failed: {} ({}x{})",
+                status,
+                width,
+                height,
             );
 
             // -- 2. GL texture from CVPixelBuffer -----------------------------
@@ -2566,7 +2662,8 @@ impl EaglRenderBridge {
             );
             assert!(
                 status == 0 && !gl_cache.is_null(),
-                "CVOpenGLESTextureCacheCreate failed: {}", status,
+                "CVOpenGLESTextureCacheCreate failed: {}",
+                status,
             );
 
             let mut cv_gl_tex: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -2587,7 +2684,9 @@ impl EaglRenderBridge {
             assert!(
                 status == 0 && !cv_gl_tex.is_null(),
                 "CVOpenGLESTextureCacheCreateTextureFromImage failed: {} ({}x{})",
-                status, width, height,
+                status,
+                width,
+                height,
             );
 
             let gl_texture_id = CVOpenGLESTextureGetName(cv_gl_tex);
@@ -2608,7 +2707,8 @@ impl EaglRenderBridge {
             );
             assert!(
                 status == 0 && !mtl_cache.is_null(),
-                "CVMetalTextureCacheCreate failed: {}", status,
+                "CVMetalTextureCacheCreate failed: {}",
+                status,
             );
 
             let mut cv_mtl_tex: CVMetalTextureRef = std::ptr::null_mut();
@@ -2626,11 +2726,16 @@ impl EaglRenderBridge {
             assert!(
                 status == 0 && !cv_mtl_tex.is_null(),
                 "CVMetalTextureCacheCreateTextureFromImage failed: {} ({}x{})",
-                status, width, height,
+                status,
+                width,
+                height,
             );
 
             let metal_texture: ObjcId = CVMetalTextureGetTexture(cv_mtl_tex);
-            assert!(!metal_texture.is_null(), "CVMetalTextureGetTexture returned null");
+            assert!(
+                !metal_texture.is_null(),
+                "CVMetalTextureGetTexture returned null"
+            );
             // Retain — CVMetalTextureGetTexture returns unretained reference.
             let _: () = msg_send![metal_texture, retain];
 

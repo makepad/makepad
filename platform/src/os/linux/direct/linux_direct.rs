@@ -178,10 +178,7 @@ impl Cx {
                     self.call_event_handler(&Event::Timer(e))
                 }
 
-                if self.handle_live_edit() {
-                    self.call_event_handler(&Event::LiveEdit);
-                    self.redraw_all();
-                }
+                self.run_live_edit_if_needed("linux-direct");
             }
         }
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
@@ -287,6 +284,31 @@ impl Cx {
                         inner_size: size,
                         outer_size: size,
                     };
+                    window.is_created = true;
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = WindowGeom {
+                        dpi_factor: direct_app.dpi_factor,
+                        can_fullscreen: false,
+                        xr_is_presenting: false,
+                        is_fullscreen: false,
+                        is_topmost: true,
+                        position,
+                        inner_size: size,
+                        outer_size: size,
+                    };
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
                     window.is_created = true;
                 }
                 CxOsOp::StartTimer {

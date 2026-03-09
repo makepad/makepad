@@ -238,6 +238,7 @@ impl Cx {
                     let tw = ToWasmPermissionResult::read_to_wasm(&mut to_wasm);
                     let permission = match tw.permission.as_str() {
                         "microphone" => Permission::AudioInput,
+                        "camera" => Permission::Camera,
                         _ => {
                             crate::log!("Unknown web permission: {}", tw.permission);
                             continue;
@@ -318,6 +319,9 @@ impl Cx {
                             video_width: tw.video_width,
                             video_height: tw.video_height,
                             duration,
+                            is_seekable: duration > 0,
+                            video_tracks: if tw.video_width > 0 && tw.video_height > 0 { vec!["video".to_string()] } else { vec![] },
+                            audio_tracks: vec!["audio".to_string()],
                         },
                     ));
                 }
@@ -331,6 +335,12 @@ impl Cx {
                         VideoTextureUpdatedEvent {
                             video_id,
                             current_position_ms,
+                            yuv: crate::event::video_playback::VideoYuvMetadata {
+                                enabled: false,
+                                matrix: 0.0,
+                                biplanar: false,
+                                rotation_steps: 0.0,
+                            },
                         },
                     ));
                     self.redraw_all();
@@ -411,10 +421,7 @@ impl Cx {
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
 
-        if self.handle_live_edit() {
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-        }
+        self.run_live_edit_if_needed("web");
 
         self.handle_platform_ops();
         self.handle_media_signals();
@@ -486,6 +493,26 @@ impl Cx {
 
                     self.windows[window_id].is_created = true;
                     self.redraw_all();
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let mut geom = self.os.window_geom.clone();
+                    geom.position = position;
+                    geom.inner_size = size;
+                    geom.outer_size = size;
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = geom;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    window.is_created = true;
                 }
                 CxOsOp::FullscreenWindow(_window_id) => {
                     self.os.from_wasm(FromWasmFullScreen {});
@@ -562,6 +589,7 @@ impl Cx {
                 } => {
                     let permission_str = match permission {
                         Permission::AudioInput => "microphone",
+                        Permission::Camera => "camera",
                     };
                     self.os.from_wasm(FromWasmCheckPermission {
                         permission: permission_str.to_string(),
@@ -574,6 +602,7 @@ impl Cx {
                 } => {
                     let permission_str = match permission {
                         Permission::AudioInput => "microphone",
+                        Permission::Camera => "camera",
                     };
                     self.os.from_wasm(FromWasmRequestPermission {
                         permission: permission_str.to_string(),
@@ -583,20 +612,44 @@ impl Cx {
                 CxOsOp::PrepareVideoPlayback(
                     video_id,
                     source,
+                    _camera_preview_mode,
                     _external_texture_id,
                     texture_id,
                     autoplay,
                     should_loop,
-                ) => match source {
-                    VideoSource::Network(url) => {
-                        self.os.from_wasm(FromWasmPrepareVideoPlayback {
-                            video_id_lo: video_id.lo(),
-                            video_id_hi: video_id.hi(),
-                            texture_id: texture_id.0,
-                            source_url: url,
-                            autoplay,
-                            should_loop,
-                        });
+                ) => {
+                    match source {
+                        VideoSource::Network(url) => {
+                            self.os.from_wasm(FromWasmPrepareVideoPlayback {
+                                video_id_lo: video_id.lo(),
+                                video_id_hi: video_id.hi(),
+                                texture_id: texture_id.0,
+                                source_url: url,
+                                autoplay,
+                                should_loop,
+                            });
+                        }
+                        VideoSource::InMemory(_) => {
+                            let error = "VideoSource::InMemory is not supported on web".to_string();
+                            crate::error!("{}", error);
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
+                        }
+                        VideoSource::Filesystem(_) => {
+                            let error = "VideoSource::Filesystem is not supported on web".to_string();
+                            crate::error!("{}", error);
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
+                        }
+                        VideoSource::Camera(..) => {
+                            let error = "VideoSource::Camera is not supported on web".to_string();
+                            crate::error!("{}", error);
+                            self.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
+                        }
                     }
                     VideoSource::InMemory(_) => {
                         let error = "VideoSource::InMemory is not supported on web".to_string();
@@ -660,6 +713,13 @@ impl Cx {
                 CxOsOp::UpdateVideoSurfaceTexture(_) => {
                     // On web, texture updates happen in the JS animation frame loop
                 }
+                // New ops — no-op on Web (not yet wired to JS)
+                CxOsOp::AttachCameraNativePreview { .. }
+                | CxOsOp::UpdateCameraNativePreview { .. }
+                | CxOsOp::DetachCameraNativePreview { .. } => {}
+                CxOsOp::SetVideoVolume(_, _) => {}
+                CxOsOp::SetVideoPlaybackRate(_, _) => {}
+                CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*

@@ -8,11 +8,9 @@ use {
         os::{
             apple::apple_sys::*,
             apple::apple_util::{nsstring_to_string, str_to_nsstring},
-            apple::{
-                tvos::{
-                    tvos_app::{get_tvos_app_global, init_tvos_app_global, TvosApp},
-                    tvos_event::TvosEvent,
-                },
+            apple::tvos::{
+                tvos_app::{get_tvos_app_global, init_tvos_app_global, TvosApp},
+                tvos_event::TvosEvent,
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
@@ -134,12 +132,7 @@ impl Cx {
                         self.handle_action_receiver();
                     }
 
-                    if self.handle_live_edit() {
-                        // self.draw_shaders.ptr_to_item.clear();
-                        // self.draw_shaders.fingerprints.clear();
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }
+                    self.run_live_edit_if_needed("tvos");
                     self.handle_networking_events();
                 }
             }
@@ -207,6 +200,26 @@ impl Cx {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
                     window.window_geom = get_tvos_app_global().last_window_geom.clone();
+                    window.is_created = true;
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let mut geom = get_tvos_app_global().last_window_geom.clone();
+                    geom.position = position;
+                    geom.inner_size = size;
+                    geom.outer_size = size;
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = geom;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
                     window.is_created = true;
                 }
                 CxOsOp::StartTimer {
