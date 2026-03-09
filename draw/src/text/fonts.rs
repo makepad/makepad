@@ -30,6 +30,21 @@ impl Fonts {
                 rasterizer.msdfer().settings(),
             )
         };
+        if std::env::var("MAKEPAD_DUMP_SYSTEM_FONT_STATS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            let atlas_pixels = atlas_size.width.saturating_mul(atlas_size.height);
+            let atlas_bytes = atlas_pixels.saturating_mul(std::mem::size_of::<u32>());
+            log!(
+                "text-atlas: size={}x{} pixels={} bytes_per_buffer={} estimated_cpu_plus_texture_bytes={}",
+                atlas_size.width,
+                atlas_size.height,
+                atlas_pixels,
+                atlas_bytes,
+                atlas_bytes.saturating_mul(2)
+            );
+        }
 
         let mut msdf_job_sender: FromUISender<QueuedMsdfJob> = Default::default();
         let msdf_result_receiver: ToUIReceiver<CompletedMsdfJob> = Default::default();

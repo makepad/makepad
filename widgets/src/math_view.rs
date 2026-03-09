@@ -138,7 +138,9 @@ impl Widget for MathView {
 impl MathView {
     fn compile_math(&mut self, cx: &mut Cx2d) {
         let font_family_id = self.draw_text.text_style.font_family_id();
-        self.draw_text.text_style.ensure_fonts_loaded(cx.cx.cx);
+        self.draw_text
+            .text_style
+            .ensure_fonts_loaded_for_text(cx.cx.cx, &self.text);
         if self.text == self.old_text
             && self.font_size == self.old_font_size
             && self.old_font_family_id == Some(font_family_id)

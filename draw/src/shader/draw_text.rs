@@ -540,7 +540,9 @@ impl DrawText {
         align: Align,
         text: &str,
     ) -> Rc<LaidoutText> {
-        self.text_style.font_family.ensure_fonts_loaded(cx);
+        self.text_style
+            .font_family
+            .ensure_fonts_loaded_for_text(cx, Some(text));
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 
@@ -822,12 +824,15 @@ impl FontFamily {
         (self.id.0).into()
     }
 
-    fn update_font_definitions(&self, cx: &mut Cx, fonts: &mut Fonts) {
+    fn update_font_definitions(&self, cx: &mut Cx, fonts: &mut Fonts, text: Option<&str>) {
         let mut font_ids = Vec::new();
 
         for member in &self.members {
             #[cfg(feature = "system-fonts")]
             if let Some(role) = system_font_role_for_member(cx, member.handle) {
+                if !system_font_role_is_needed_for_text(role, text) {
+                    continue;
+                }
                 let _ = try_push_system_font_role(fonts, &mut font_ids, role);
                 continue;
             }
@@ -868,13 +873,14 @@ impl FontFamily {
         );
     }
 
-    fn ensure_fonts_loaded(&self, cx: &mut Cx) {
+    fn ensure_fonts_loaded_for_text(&self, cx: &mut Cx, text: Option<&str>) {
         CxDraw::lazy_construct_fonts(cx);
 
-        let family_id = self.to_font_family_id();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
 
+        #[cfg(not(feature = "system-fonts"))]
         {
+            let family_id = self.to_font_family_id();
             let fonts_ref = fonts.borrow();
             if fonts_ref.is_font_family_complete(family_id) {
                 return;
@@ -889,7 +895,9 @@ impl FontFamily {
             }
             cx.load_script_resource(member.handle);
         }
+        #[cfg(not(feature = "system-fonts"))]
         {
+            let family_id = self.to_font_family_id();
             let fonts_ref = fonts.borrow();
             if fonts_ref.is_font_family_complete(family_id) {
                 return;
@@ -897,7 +905,11 @@ impl FontFamily {
         }
 
         let mut fonts_ref = fonts.borrow_mut();
-        self.update_font_definitions(cx, &mut fonts_ref);
+        self.update_font_definitions(cx, &mut fonts_ref, text);
+    }
+
+    fn ensure_fonts_loaded(&self, cx: &mut Cx) {
+        self.ensure_fonts_loaded_for_text(cx, None);
     }
 }
 
@@ -955,11 +967,79 @@ fn try_push_system_font_role(
     font_ids: &mut Vec<FontId>,
     role: SystemFontRole,
 ) -> bool {
-    let mut pushed_any = false;
     for family in system_fallback_families_for_role(role) {
-        pushed_any |= try_push_system_font(fonts, font_ids, family);
+        if try_push_system_font(fonts, font_ids, family) {
+            return true;
+        }
     }
-    pushed_any
+    false
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_font_role_is_needed_for_text(role: SystemFontRole, text: Option<&str>) -> bool {
+    let Some(text) = text else {
+        // No text context available: preserve previous eager behavior.
+        return true;
+    };
+    match role {
+        SystemFontRole::SansRegular
+        | SystemFontRole::SansBold
+        | SystemFontRole::SansItalic
+        | SystemFontRole::SansBoldItalic => true,
+        SystemFontRole::CjkRegular | SystemFontRole::CjkBold => text_has_cjk(text),
+        SystemFontRole::Emoji => text_has_emoji(text),
+    }
+}
+
+#[cfg(feature = "system-fonts")]
+fn text_has_cjk(text: &str) -> bool {
+    text.chars().any(is_cjk_char)
+}
+
+#[cfg(feature = "system-fonts")]
+fn is_cjk_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        // CJK radicals, punctuation, and phonetics
+        0x2E80..=0x2FFF
+            | 0x3000..=0x303F
+            | 0x3040..=0x30FF
+            | 0x3100..=0x312F
+            | 0x31A0..=0x31EF
+            // Hangul ranges
+            | 0x1100..=0x11FF
+            | 0x3130..=0x318F
+            | 0xAC00..=0xD7AF
+            // Core CJK ideographs
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFFEF
+            // CJK extensions B..I and compatibility supplements
+            | 0x20000..=0x2EE5F
+            | 0x2F800..=0x2FA1F
+    )
+}
+
+#[cfg(feature = "system-fonts")]
+fn text_has_emoji(text: &str) -> bool {
+    text.chars().any(is_emoji_char)
+}
+
+#[cfg(feature = "system-fonts")]
+fn is_emoji_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        // Misc symbols + dingbats often represented by emoji fonts
+        0x2600..=0x27BF
+            // Variation selector / emoji joiner support chars
+            | 0x200D
+            | 0xFE0F
+            // Main emoji blocks
+            | 0x1F000..=0x1FAFF
+            | 0x1FB00..=0x1FBFF
+    )
 }
 
 #[cfg(feature = "system-fonts")]
@@ -1147,6 +1227,7 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
     if !fonts.is_font_known(font_id) {
         match query_system_font(family) {
             Ok(system_font) => {
+                let font_bytes = system_font.data.len();
                 fonts.define_font(
                     font_id,
                     FontDefinition {
@@ -1157,6 +1238,12 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
                         variations: Vec::new(),
                     },
                 );
+                if std::env::var("MAKEPAD_DUMP_SYSTEM_FONT_STATS")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                {
+                    log!("system-font loaded family='{family}' bytes={font_bytes}");
+                }
                 clear_failed_system_font_lookup(font_id);
             }
             Err(SystemFontError::Io(err)) => {
@@ -1219,7 +1306,10 @@ fn clear_failed_system_font_lookup(font_id: FontId) {
 
 #[cfg(all(test, feature = "system-fonts"))]
 mod system_font_tests {
-    use super::{system_fallback_families_for_role, system_font_role_for_resource_path, SystemFontRole};
+    use super::{
+        is_cjk_char, is_emoji_char, system_fallback_families_for_role, system_font_role_for_resource_path,
+        system_font_role_is_needed_for_text, SystemFontRole,
+    };
 
     #[test]
     fn maps_bundled_theme_resources_to_system_roles() {
@@ -1301,6 +1391,39 @@ mod system_font_tests {
             assert!(system_fallback_families_for_role(SystemFontRole::SansRegular).is_empty());
         }
     }
+
+    #[test]
+    fn system_role_text_gating_keeps_ascii_lightweight() {
+        let ascii = Some("counter +1");
+        assert!(system_font_role_is_needed_for_text(
+            SystemFontRole::SansRegular,
+            ascii
+        ));
+        assert!(!system_font_role_is_needed_for_text(
+            SystemFontRole::CjkRegular,
+            ascii
+        ));
+        assert!(!system_font_role_is_needed_for_text(
+            SystemFontRole::Emoji,
+            ascii
+        ));
+    }
+
+    #[test]
+    fn system_role_text_gating_detects_cjk_and_emoji() {
+        let cjk = Some("你好");
+        let emoji = Some("hello 😀");
+        assert!(system_font_role_is_needed_for_text(
+            SystemFontRole::CjkRegular,
+            cjk
+        ));
+        assert!(system_font_role_is_needed_for_text(
+            SystemFontRole::Emoji,
+            emoji
+        ));
+        assert!(is_cjk_char('漢'));
+        assert!(is_emoji_char('😀'));
+    }
 }
 
 impl TextStyle {
@@ -1310,6 +1433,10 @@ impl TextStyle {
 
     pub fn ensure_fonts_loaded(&self, cx: &mut Cx) {
         self.font_family.ensure_fonts_loaded(cx);
+    }
+
+    pub fn ensure_fonts_loaded_for_text(&self, cx: &mut Cx, text: &str) {
+        self.font_family.ensure_fonts_loaded_for_text(cx, Some(text));
     }
 }
 
