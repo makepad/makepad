@@ -342,13 +342,121 @@ fn remove_brotli_artifact(dest_path: &PathBuf) {
     let _ = fs::remove_file(dest_path_br);
 }
 
+fn minify_js(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut string_char = '\0';
+    let mut in_regex = false;
+    
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if c == '\\' {
+                if let Some(next_c) = chars.next() {
+                    out.push(next_c);
+                }
+            } else if c == string_char {
+                in_string = false;
+            }
+        } else if in_regex {
+            out.push(c);
+            if c == '\\' {
+                if let Some(next_c) = chars.next() {
+                    out.push(next_c);
+                }
+            } else if c == '/' {
+                in_regex = false;
+            }
+        } else {
+            match c {
+                '\'' | '"' | '`' => {
+                    in_string = true;
+                    string_char = c;
+                    out.push(c);
+                }
+                '/' => {
+                    match chars.peek() {
+                        Some(&'/') => {
+                            // Line comment
+                            while let Some(&next_c) = chars.peek() {
+                                if next_c == '\n' { break; }
+                                chars.next();
+                            }
+                        }
+                        Some(&'*') => {
+                            // Block comment
+                            chars.next();
+                            while let Some(next_c) = chars.next() {
+                                if next_c == '*' {
+                                    if let Some(&'/') = chars.peek() {
+                                        chars.next();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            out.push(c);
+                            // Very basic regex literal detection:
+                            // If we see a slash not preceded by a value-like character
+                            // it's likely a regex. This is a heuristic.
+                            if let Some(last_c) = out.trim_end().chars().last() {
+                                if "(,=:[!&|?<>~;{+*-".contains(last_c) {
+                                    in_regex = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                ' ' | '\t' | '\r' => {
+                    // Only push a single space, and only if we need it
+                    if out.ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '$') {
+                        if let Some(&next_c) = chars.peek() {
+                            if next_c.is_alphanumeric() || next_c == '_' || next_c == '$' {
+                                out.push(' ');
+                            }
+                        }
+                    }
+                }
+                '\n' => {
+                    out.push('\n');
+                    // skip following whitespace
+                    while let Some(&next_c) = chars.peek() {
+                        if next_c == ' ' || next_c == '\t' || next_c == '\r' {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                _ => out.push(c),
+            }
+        }
+    }
+    
+    // final compacting: remove empty lines
+    out.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
+}
+
 pub fn cp_brotli(
     source_path: &PathBuf,
     dest_path: &PathBuf,
     exec: bool,
     compress: bool,
 ) -> Result<(), String> {
-    cp(source_path, dest_path, exec)?;
+    if source_path.extension().and_then(|s| s.to_str()) == Some("js") {
+        if let Ok(content) = std::fs::read_to_string(source_path) {
+            let minified = minify_js(&content);
+            std::fs::write(dest_path, minified)
+                .map_err(|e| format!("Could not write minified JS to {:?}: {}", dest_path, e))?;
+        } else {
+            cp(source_path, dest_path, exec)?;
+        }
+    } else {
+        cp(source_path, dest_path, exec)?;
+    }
+    
     if compress {
         brotli_compress(dest_path);
     } else {
