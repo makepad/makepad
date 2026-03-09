@@ -602,16 +602,25 @@ pub mod aux_chan {
         client_endpoint: &ClientEndpoint,
     ) -> io::Result<LinuxOwnedImage> {
         let makepad_studio_protocol::LinuxSharedImage { drm_format, plane } = image;
-        let dma_buf_fd = client_endpoint.recv().and_then(|(recv_id, recv_fd)| {
-            if recv_id != id {
-                Err(io_error_other(format!(
-                    "recv_fds_from_aux_chan: ID mismatch \
-                     (expected {id:?}, got {recv_id:?}",
-                )))
-            } else {
-                Ok(recv_fd)
+        let mut mismatches = 0usize;
+        let dma_buf_fd = loop {
+            let (recv_id, recv_fd) = client_endpoint.recv()?;
+            if recv_id == id {
+                break recv_fd;
             }
-        })?;
+            mismatches += 1;
+            if mismatches >= 64 {
+                return Err(io_error_other(format!(
+                    "recv_fds_from_aux_chan: ID mismatch \
+                     (expected {id:?}, last got {recv_id:?}, dropped {mismatches} stale images)",
+                )));
+            }
+        };
+        if mismatches != 0 {
+            crate::warning!(
+                "recv_fds_from_aux_chan: dropped {mismatches} stale swapchain images before {id:?}"
+            );
+        }
         Ok(LinuxOwnedImage {
             drm_format: crate::os::linux::dma_buf::DrmFormat {
                 fourcc: drm_format.fourcc,
