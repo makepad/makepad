@@ -18,6 +18,9 @@ makepad-zune-png = { path = "../libs/zune/zune-png", version = "0.5.1" }
 smallvec = { version = "1.15", path = "../libs/smallvec" }
 bitflags = { version = "2.10", path = "../libs/bitflags" }
 
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+makepad-filesystem-watcher = { path = "../libs/filesystem_watcher", version = "0.1.0" }
+
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }
 

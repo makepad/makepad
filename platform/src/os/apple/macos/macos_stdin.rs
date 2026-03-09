@@ -296,6 +296,7 @@ impl Cx {
                 if SignalToUI::check_and_clear_action_signal() {
                     self.handle_action_receiver();
                 }
+                self.poll_control_channel();
                 let events = self.os.stdin_timers.get_dispatch();
                 for event in events {
                     self.handle_script_timer(&event);
