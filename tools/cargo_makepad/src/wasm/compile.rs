@@ -4,7 +4,14 @@ use crate::makepad_shell::*;
 use crate::makepad_wasm_strip::*;
 use crate::utils::*;
 use std::{
-    collections::HashMap, fs, fs::File, io::prelude::*, net::SocketAddr, path::PathBuf, sync::mpsc,
+    collections::HashMap,
+    fs,
+    fs::File,
+    io::prelude::*,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::mpsc,
 };
 
 pub struct WasmBuildResult {
@@ -20,9 +27,146 @@ pub struct WasmConfig {
     pub brotli: bool,
     pub bindgen: bool,
     pub threads: bool,
+    pub optimize_size: bool,
+    pub wasm_opt: bool,
+    pub split: bool,
+    pub split_auto: bool,
+    pub split_functions: bool,
+    pub split_functions_threshold: usize,
 }
 
-pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AutoSplitOutcome {
+    NotAttempted,
+    Deferred,
+    StartupPathFallback,
+}
+
+fn format_section_counts(summary: &WasmSectionSummary) -> String {
+    if summary.counts.is_empty() {
+        return "none".to_string();
+    }
+
+    summary
+        .counts
+        .iter()
+        .map(|(name, count)| {
+            if *count == 1 {
+                name.clone()
+            } else {
+                format!("{name} x{count}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_wasm_size_report(report: &WasmSizeReport) {
+    println!("Wasm size report:");
+    println!("  original:  {} bytes", report.original_bytes);
+    println!("  stripped:  {} bytes", report.stripped_bytes);
+    println!("  optimized: {} bytes", report.optimized_bytes);
+    println!(
+        "  debug sections removed:  {} bytes ({})",
+        report.debug_sections.total_bytes,
+        format_section_counts(&report.debug_sections)
+    );
+    println!(
+        "  custom sections removed: {} bytes ({})",
+        report.custom_sections.total_bytes,
+        format_section_counts(&report.custom_sections)
+    );
+}
+
+fn print_wasm_split_report(primary_bytes: usize, split_bytes: usize, segments: usize) {
+    println!("Wasm split report:");
+    println!("  primary wasm:    {} bytes", primary_bytes);
+    println!("  split data blob: {} bytes", split_bytes);
+    println!("  segment count:   {}", segments);
+    println!("  split total:     {} bytes", primary_bytes + split_bytes);
+}
+
+/// Run Binaryen wasm-opt -Os on the given wasm bytes if the tool is installed.
+/// Returns the optimized bytes on success, or the original bytes on failure (with a note).
+fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
+    let build_dir = cwd.join("target/makepad-wasm-opt-tmp");
+    if fs::create_dir_all(&build_dir).is_err() {
+        println!("wasm-opt: skipped (cannot create temp dir)");
+        return data.to_vec();
+    }
+    let in_path = build_dir.join("in.wasm");
+    let out_path = build_dir.join("out.wasm");
+    if fs::write(&in_path, data).is_err() {
+        println!("wasm-opt: skipped (cannot write temp file)");
+        return data.to_vec();
+    }
+    let args = vec![
+        "--all-features".into(),
+        "-Os".into(),
+        "-o".into(),
+        out_path.to_string_lossy().into_owned(),
+        in_path.to_string_lossy().into_owned(),
+    ];
+    let status = Command::new("wasm-opt").args(&args).current_dir(cwd).output();
+    match status {
+        Ok(ref output) if output.status.success() => match fs::read(&out_path) {
+            Ok(optimized) => {
+                let _ = fs::remove_file(&in_path);
+                let _ = fs::remove_file(&out_path);
+                println!("wasm-opt: {} -> {} bytes", data.len(), optimized.len());
+                return optimized;
+            }
+            Err(_) => {
+                println!("wasm-opt: skipped (cannot read output)");
+            }
+        },
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.trim().is_empty() {
+                println!("wasm-opt: skipped (Binaryen wasm-opt failed; install from https://github.com/WebAssembly/binaryen)");
+            } else {
+                println!("wasm-opt: skipped ({})", stderr.lines().next().unwrap_or(stderr.trim()));
+            }
+        }
+        Err(e) => {
+            println!("wasm-opt: skipped ({e})");
+        }
+    }
+    let _ = fs::remove_file(&in_path);
+    let _ = fs::remove_file(&out_path);
+    data.to_vec()
+}
+
+fn print_brotli_size_report(
+    wasm_bytes: usize,
+    wasm_brotli_bytes: usize,
+    split_bytes: Option<usize>,
+    split_brotli_bytes: Option<usize>,
+) {
+    println!("Brotli size report:");
+    println!(
+        "  wasm:            {} -> {} bytes",
+        wasm_bytes, wasm_brotli_bytes
+    );
+    if let (Some(split_bytes), Some(split_brotli_bytes)) = (split_bytes, split_brotli_bytes) {
+        println!(
+            "  split data blob: {} -> {} bytes",
+            split_bytes, split_brotli_bytes
+        );
+        println!(
+            "  compressed total: {} bytes",
+            wasm_brotli_bytes + split_brotli_bytes
+        );
+    }
+}
+
+pub fn generate_html(
+    wasm: &str,
+    split_data_path: Option<&str>,
+    secondary_wasm_path: Option<&str>,
+    defer_secondary_wasm: bool,
+    config: &WasmConfig,
+) -> String {
     let init = if config.bindgen {
         format!(
             "
@@ -42,14 +186,41 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
             "
         )
     } else {
+        let defer_secondary = if defer_secondary_wasm {
+            ", defer_secondary_wasm: true"
+        } else {
+            ""
+        };
+        let split_options = match (split_data_path, secondary_wasm_path) {
+            (Some(data), Some(funcs)) => format!(
+                ", undefined, {{ split_data_url: '{data}', secondary_wasm_url: '{funcs}'{defer_secondary} }}"
+            ),
+            (Some(data), None) => format!(", undefined, {{ split_data_url: '{data}' }}"),
+            (None, Some(funcs)) => format!(
+                ", undefined, {{ secondary_wasm_url: '{funcs}'{defer_secondary} }}"
+            ),
+            (None, None) => String::new(),
+        };
         format!(
             "
             const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
             const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
-                './{wasm}.wasm'
+                './{wasm}.wasm'{split_options}
             );
             "
         )
+    };
+
+    let preloads = if config.bindgen {
+        "
+        <link rel='modulepreload' href='./makepad_wasm_bridge/wasm_bridge.js'>
+        <link rel='modulepreload' href='./bindgen.js'>
+        <link rel='modulepreload' href='./makepad_platform/web_gl.js'>
+        "
+    } else {
+        "
+        <link rel='modulepreload' href='./makepad_platform/web_gl.js'>
+        "
     };
 
     format!(
@@ -60,6 +231,7 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
         <meta charset='utf-8'>
         <meta name='viewport' content='width=device-width, initial-scale=1.0, user-scalable=no'>
         <title>{wasm}</title>
+        {preloads}
         <script type='module'>
             const reportBrowserIssue = async (kind, data) => {{
                 try {{
@@ -137,7 +309,7 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
     )
 }
 
-fn brotli_compress(dest_path: &PathBuf) {
+fn brotli_compress(dest_path: &PathBuf) -> usize {
     let source_file_name = dest_path.file_name().unwrap().to_string_lossy().to_string();
     let dest_path_br = dest_path
         .parent()
@@ -150,11 +322,121 @@ fn brotli_compress(dest_path: &PathBuf) {
     let data = fs::read(&dest_path).expect("Can't read file");
     {
         let mut writer =
-            brotli::CompressorWriter::new(&mut brotli_data, 4096 /* buffer size */, 12, 22);
+            brotli::CompressorWriter::new(&mut brotli_data, 65536 /* buffer size */, 11, 24);
         writer.write_all(&data).expect("Can't write data");
     }
     let mut brotli_file = File::create(dest_path_br).unwrap();
     brotli_file.write_all(&brotli_data).unwrap();
+    brotli_data.len()
+}
+
+fn remove_brotli_artifact(dest_path: &PathBuf) {
+    let source_file_name = match dest_path.file_name() {
+        Some(name) => name.to_string_lossy().to_string(),
+        None => return,
+    };
+    let dest_path_br = match dest_path.parent() {
+        Some(parent) => parent.join(format!("{}.br", source_file_name)),
+        None => return,
+    };
+    let _ = fs::remove_file(dest_path_br);
+}
+
+fn minify_js(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut string_char = '\0';
+    let mut in_regex = false;
+    
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if c == '\\' {
+                if let Some(next_c) = chars.next() {
+                    out.push(next_c);
+                }
+            } else if c == string_char {
+                in_string = false;
+            }
+        } else if in_regex {
+            out.push(c);
+            if c == '\\' {
+                if let Some(next_c) = chars.next() {
+                    out.push(next_c);
+                }
+            } else if c == '/' {
+                in_regex = false;
+            }
+        } else {
+            match c {
+                '\'' | '"' | '`' => {
+                    in_string = true;
+                    string_char = c;
+                    out.push(c);
+                }
+                '/' => {
+                    match chars.peek() {
+                        Some(&'/') => {
+                            // Line comment
+                            while let Some(&next_c) = chars.peek() {
+                                if next_c == '\n' { break; }
+                                chars.next();
+                            }
+                        }
+                        Some(&'*') => {
+                            // Block comment
+                            chars.next();
+                            while let Some(next_c) = chars.next() {
+                                if next_c == '*' {
+                                    if let Some(&'/') = chars.peek() {
+                                        chars.next();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            out.push(c);
+                            // Very basic regex literal detection:
+                            // If we see a slash not preceded by a value-like character
+                            // it's likely a regex. This is a heuristic.
+                            if let Some(last_c) = out.trim_end().chars().last() {
+                                if "(,=:[!&|?<>~;{+*-".contains(last_c) {
+                                    in_regex = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                ' ' | '\t' | '\r' => {
+                    // Only push a single space, and only if we need it
+                    if out.ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '$') {
+                        if let Some(&next_c) = chars.peek() {
+                            if next_c.is_alphanumeric() || next_c == '_' || next_c == '$' {
+                                out.push(' ');
+                            }
+                        }
+                    }
+                }
+                '\n' => {
+                    out.push('\n');
+                    // skip following whitespace
+                    while let Some(&next_c) = chars.peek() {
+                        if next_c == ' ' || next_c == '\t' || next_c == '\r' {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                _ => out.push(c),
+            }
+        }
+    }
+    
+    // final compacting: remove empty lines
+    out.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
 }
 
 pub fn cp_brotli(
@@ -163,21 +445,38 @@ pub fn cp_brotli(
     exec: bool,
     compress: bool,
 ) -> Result<(), String> {
-    cp(source_path, dest_path, exec)?;
+    if source_path.extension().and_then(|s| s.to_str()) == Some("js") {
+        if let Ok(content) = std::fs::read_to_string(source_path) {
+            let minified = minify_js(&content);
+            std::fs::write(dest_path, minified)
+                .map_err(|e| format!("Could not write minified JS to {:?}: {}", dest_path, e))?;
+        } else {
+            cp(source_path, dest_path, exec)?;
+        }
+    } else {
+        cp(source_path, dest_path, exec)?;
+    }
+    
     if compress {
         brotli_compress(dest_path);
+    } else {
+        remove_brotli_artifact(dest_path);
     }
     Ok(())
 }
 
 const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
-const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
+const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
 const WASM_RUSTFLAGS_SINGLE_THREADED: &str =
-    "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C opt-level=z";
+    "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C opt-level=z";
 
 fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, String> {
-    let target_spec_dir = cwd.join("target/makepad-wasm-target");
+    let target_spec_dir = if threaded {
+        cwd.join("target/makepad-wasm-target/threads")
+    } else {
+        cwd.join("target/makepad-wasm-target/single")
+    };
     mkdir(&target_spec_dir)?;
     let target_spec_path = target_spec_dir.join(format!("{WASM_TARGET_TRIPLE}.json"));
 
@@ -215,8 +514,12 @@ fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, Stri
         );
     }
 
-    fs::write(&target_spec_path, target_spec)
-        .map_err(|e| format!("Can't write wasm target spec {:?}: {:?}", target_spec_path, e))?;
+    fs::write(&target_spec_path, target_spec).map_err(|e| {
+        format!(
+            "Can't write wasm target spec {:?}: {:?}",
+            target_spec_path, e
+        )
+    })?;
     Ok(target_spec_path)
 }
 
@@ -284,6 +587,8 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 cp(&source_path, &dest_path, false)?;
                 if config.brotli {
                     brotli_compress(&dest_path);
+                } else {
+                    remove_brotli_artifact(&dest_path);
                 }
                 Ok(())
             },
@@ -408,11 +713,12 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 cp(&source_path2, &dest_path, false)?;
                 if config.brotli {
                     brotli_compress(&dest_path);
+                } else {
+                    remove_brotli_artifact(&dest_path);
                 }
                 Ok(())
             })?;
         }
-
     }
     let wasm_source = if config.bindgen {
         shell(
@@ -459,30 +765,188 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     };
 
     let wasm_dest = app_dir.join(format!("{}.wasm", build_crate));
-    if config.strip {
-        if let Ok(data) = fs::read(&wasm_source) {
-            if let Ok(strip) = wasm_strip_debug(&data) {
-                fs::write(&wasm_dest, strip)
-                    .map_err(|e| format!("Can't write file {:?} {:?} ", wasm_dest, e))?;
-            } else {
-                return Err(format!("Cannot parse wasm {:?}", wasm_source));
-            }
+    let mut output = if config.optimize_size || config.strip {
+        let data = fs::read(&wasm_source)
+            .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
+
+        if config.optimize_size {
+            let report = wasm_size_report(&data)
+                .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?;
+            print_wasm_size_report(&report);
+            wasm_optimize_size(&data).map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
         } else {
-            return Err(format!("Cannot read wasm file {:?}", wasm_source));
+            wasm_strip_custom_sections(&data)
+                .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
         }
     } else {
-        cp(&wasm_source, &wasm_dest, false)?;
+        fs::read(&wasm_source).map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?
+    };
+
+    if config.wasm_opt {
+        output = try_wasm_opt(&output, &cwd);
     }
-    if config.brotli {
-        brotli_compress(&wasm_dest);
-    }
+
+    // `--split` implies function splitting as part of the higher-level split pipeline.
+    let split_functions_enabled = config.split || config.split_functions;
+
+    // Function splitting: split large functions into primary (stubs) + secondary (real bodies)
+    let secondary_wasm_dest = app_dir.join(format!("{}.secondary.wasm", build_crate));
+    let mut defer_secondary_wasm = false;
+    let mut auto_split_outcome = AutoSplitOutcome::NotAttempted;
+    let secondary_wasm_path = if split_functions_enabled {
+        if config.bindgen {
+            return Err(if config.split {
+                "--split is not supported together with --bindgen".to_string()
+            } else {
+                "--split-functions is not supported together with --bindgen".to_string()
+            });
+        }
+        let result = if config.split_auto && config.split {
+            let cold_result = wasm_split_functions_cold(&output)
+                .map_err(|e| format!("Cannot auto split wasm functions {:?}: {:?}", wasm_source, e))?;
+            if cold_result.split_count > 0 && cold_result.primary_wasm.len() < output.len() {
+                defer_secondary_wasm = true;
+                auto_split_outcome = AutoSplitOutcome::Deferred;
+                cold_result
+            } else {
+                let fallback = wasm_split_functions(&output, config.split_functions_threshold)
+                    .map_err(|e| format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e))?;
+                if fallback.split_count > 0 {
+                    auto_split_outcome = AutoSplitOutcome::StartupPathFallback;
+                }
+                fallback
+            }
+        } else {
+            wasm_split_functions(&output, config.split_functions_threshold)
+                .map_err(|e| format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e))?
+        };
+        if result.split_count == 0 {
+            if config.split_auto && config.split {
+                println!("Function split: no selectable functions found for automatic split, skipping");
+            } else {
+                println!(
+                    "Function split: no functions above threshold ({} bytes), skipping",
+                    config.split_functions_threshold
+                );
+            }
+            let _ = fs::remove_file(&secondary_wasm_dest);
+            remove_brotli_artifact(&secondary_wasm_dest);
+            None
+        } else {
+            if config.split_auto && config.split {
+                println!(
+                    "Function split: {} of {} functions split (automatic mode)",
+                    result.split_count, result.total_functions
+                );
+                match auto_split_outcome {
+                    AutoSplitOutcome::Deferred => {
+                        println!("  mode: cold-first split, secondary deferred");
+                    }
+                    AutoSplitOutcome::StartupPathFallback => {
+                        println!("  mode: automatic fallback split, secondary remains on the startup path");
+                    }
+                    AutoSplitOutcome::NotAttempted => {}
+                }
+            } else {
+                println!(
+                    "Function split: {} of {} functions split (threshold: {} bytes)",
+                    result.split_count, result.total_functions, config.split_functions_threshold
+                );
+            }
+            println!(
+                "  primary:   {} bytes",
+                result.primary_wasm.len()
+            );
+            println!(
+                "  secondary: {} bytes",
+                result.secondary_wasm.len()
+            );
+            output = result.primary_wasm;
+            fs::write(&secondary_wasm_dest, &result.secondary_wasm)
+                .map_err(|e| format!("Can't write file {:?} {:?}", secondary_wasm_dest, e))?;
+            if config.brotli {
+                brotli_compress(&secondary_wasm_dest);
+            } else {
+                remove_brotli_artifact(&secondary_wasm_dest);
+            }
+            Some(format!("./{}.secondary.wasm", build_crate))
+        }
+    } else {
+        let _ = fs::remove_file(&secondary_wasm_dest);
+        remove_brotli_artifact(&secondary_wasm_dest);
+        None
+    };
+
+    let split_data_dest = app_dir.join(format!("{}.data.bin", build_crate));
+    let mut split_data_bytes = None;
+    let mut split_brotli_bytes = None;
+    let split_data_path = if config.split {
+        if config.bindgen {
+            return Err("--split is not supported together with --bindgen".to_string());
+        }
+        let split = wasm_split_data_segments(&output)
+            .map_err(|_| format!("Cannot split wasm data section {:?}", wasm_source))?;
+        print_wasm_split_report(
+            split.primary_wasm.len(),
+            split.split_data.len(),
+            split.segment_count,
+        );
+        output = split.primary_wasm;
+        if split.split_data.is_empty() {
+            let _ = fs::remove_file(&split_data_dest);
+            remove_brotli_artifact(&split_data_dest);
+            None
+        } else {
+            split_data_bytes = Some(split.split_data.len());
+            fs::write(&split_data_dest, &split.split_data)
+                .map_err(|e| format!("Can't write file {:?} {:?} ", split_data_dest, e))?;
+            if config.brotli {
+                split_brotli_bytes = Some(brotli_compress(&split_data_dest));
+            } else {
+                remove_brotli_artifact(&split_data_dest);
+            }
+            Some(format!("./{}.data.bin", build_crate))
+        }
+    } else {
+        let _ = fs::remove_file(&split_data_dest);
+        remove_brotli_artifact(&split_data_dest);
+        None
+    };
+
+    fs::write(&wasm_dest, output)
+        .map_err(|e| format!("Can't write file {:?} {:?} ", wasm_dest, e))?;
+    let wasm_bytes = fs::metadata(&wasm_dest)
+        .map_err(|e| format!("Can't stat file {:?} {:?} ", wasm_dest, e))?
+        .len() as usize;
+    let wasm_brotli_bytes = if config.brotli {
+        Some(brotli_compress(&wasm_dest))
+    } else {
+        remove_brotli_artifact(&wasm_dest);
+        None
+    };
     // generate html file
     let index_path = app_dir.join("index.html");
-    let html = generate_html(build_crate, &config);
+    let html = generate_html(
+        build_crate,
+        split_data_path.as_deref(),
+        secondary_wasm_path.as_deref(),
+        defer_secondary_wasm,
+        &config,
+    );
     fs::write(&index_path, &html.as_bytes())
         .map_err(|e| format!("Can't write {:?} {:?} ", index_path, e))?;
     if config.brotli {
         brotli_compress(&index_path);
+    } else {
+        remove_brotli_artifact(&index_path);
+    }
+    if let Some(wasm_brotli_bytes) = wasm_brotli_bytes {
+        print_brotli_size_report(
+            wasm_bytes,
+            wasm_brotli_bytes,
+            split_data_bytes,
+            split_brotli_bytes,
+        );
     }
     println!("Created wasm package: {:?}", app_dir);
     if config.threads {
@@ -504,6 +968,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     println!("*.jpg => image/jpg");
     println!("*.svg => image/svg+xml");
     println!("*.md => text/markdown");
+    println!("*.bin => application/octet-stream");
     Ok(WasmBuildResult { app_dir })
 }
 
@@ -591,6 +1056,16 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                     if path == "/" {
                         path = "/index.html";
                     }
+                    let (cache_control, cache_extra) = if path.ends_with(".wasm") {
+                        (
+                            "no-store, must-revalidate",
+                            "Pragma: no-cache\r\n\
+                            Expires: 0\r\n\
+                            ",
+                        )
+                    } else {
+                        ("max-age=86400", "")
+                    };
 
                     // alright wasm http server
                     if path == "/$watch" || path == "/favicon.ico" {
@@ -643,6 +1118,8 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                         "image/svg+xml"
                     } else if path.ends_with(".glb") {
                         "model/gltf-binary"
+                    } else if path.ends_with(".bin") {
+                        "application/octet-stream"
                     } else if path.ends_with(".md") {
                         "text/markdown"
                     } else if path.ends_with(".woff") {
@@ -698,11 +1175,14 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                                     Content-Type: {}\r\n\
                                     {}\
                                     Content-encoding: br\r\n\
-                                    Cache-Control: max-age:0\r\n\
+                                    Cache-Control: {}\r\n\
+                                    {}\
                                     Content-Length: {}\r\n\
                                     Connection: close\r\n\r\n",
                                     mime_type,
                                     coop_coep_headers,
+                                    cache_control,
+                                    cache_extra,
                                     body.len()
                                 );
                                 let _ = response_sender.send(HttpServerResponse { header, body });
@@ -724,11 +1204,14 @@ pub fn start_wasm_server(root: PathBuf, lan: bool, port: u16, threaded: bool) {
                                 Content-Type: {}\r\n\
                                 {}\
                                 Content-encoding: none\r\n\
-                                Cache-Control: max-age:0\r\n\
+                                Cache-Control: {}\r\n\
+                                {}\
                                 Content-Length: {}\r\n\
                                 Connection: close\r\n\r\n",
                                 mime_type,
                                 coop_coep_headers,
+                                cache_control,
+                                cache_extra,
                                 body.len()
                             );
                             let _ = response_sender.send(HttpServerResponse { header, body });

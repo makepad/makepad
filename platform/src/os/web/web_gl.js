@@ -198,17 +198,39 @@ export class WasmWebGL extends WasmWebBrowser {
     if (!gl_buf || ptr_f32.ptr == 0 || ptr_f32.len == 0) {
       return;
     }
+    if (
+      gl_buf._last_upload_serial === this.buffer_upload_serial &&
+      gl_buf._last_upload_ptr === ptr_f32.ptr &&
+      gl_buf._last_upload_len === ptr_f32.len &&
+      gl_buf._last_upload_memory === this.memory.buffer
+    ) {
+      return;
+    }
     let data = new Float32Array(this.memory.buffer, ptr_f32.ptr, ptr_f32.len);
-    this.upload_uniform_buffer_data(gl, gl_buf, data);
+    this.upload_uniform_buffer_data(gl, gl_buf, data, gl.DYNAMIC_DRAW);
+    gl_buf._last_upload_serial = this.buffer_upload_serial;
+    gl_buf._last_upload_ptr = ptr_f32.ptr;
+    gl_buf._last_upload_len = ptr_f32.len;
+    gl_buf._last_upload_memory = this.memory.buffer;
   }
 
-  upload_uniform_buffer_data(gl, gl_buf, data) {
+  upload_uniform_buffer_data(gl, gl_buf, data, usage = gl.DYNAMIC_DRAW) {
     if (!gl_buf || !data || data.length == 0) {
       return;
     }
     gl.bindBuffer(gl.UNIFORM_BUFFER, gl_buf);
-    gl.bufferData(gl.UNIFORM_BUFFER, data, gl.STATIC_DRAW);
+    this.upload_buffer_data(gl, gl.UNIFORM_BUFFER, gl_buf, data, usage);
     gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+  }
+
+  upload_buffer_data(gl, target, gl_buf, data, usage) {
+    const byte_length = data.byteLength || data.length * 4;
+    if (gl_buf._buffer_byte_length !== byte_length) {
+      gl.bufferData(target, data, usage);
+      gl_buf._buffer_byte_length = byte_length;
+    } else {
+      gl.bufferSubData(target, 0, data);
+    }
   }
 
   bind_uniform_block(gl, binding, gl_buf) {
@@ -407,7 +429,7 @@ export class WasmWebGL extends WasmWebBrowser {
     buf.length = array.length;
 
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.gl_buf);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, array, gl.STATIC_DRAW);
+    this.upload_buffer_data(gl, gl.ELEMENT_ARRAY_BUFFER, buf.gl_buf, array, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
   }
 
@@ -429,7 +451,7 @@ export class WasmWebGL extends WasmWebBrowser {
     buf.length = array.length;
 
     gl.bindBuffer(gl.ARRAY_BUFFER, buf.gl_buf);
-    gl.bufferData(gl.ARRAY_BUFFER, array, gl.STATIC_DRAW);
+    this.upload_buffer_data(gl, gl.ARRAY_BUFFER, buf.gl_buf, array, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
 
