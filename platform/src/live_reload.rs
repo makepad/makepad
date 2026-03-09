@@ -8,12 +8,9 @@ use crate::makepad_script::{
     ScriptValue,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-use std::collections::HashSet;
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use {
@@ -171,7 +168,9 @@ fn handle_cx_live_edit(cx: &mut Cx) -> bool {
         .clone();
     let mut next_overrides = current_overrides.clone();
 
+    let mut processed_files = 0usize;
     for (file_name, content) in latest_by_file {
+        processed_files += 1;
         let compiled_sites = collect_compiled_sites_for_file(script_vm, &file_name);
         if compiled_sites.is_empty() {
             continue;
@@ -251,6 +250,11 @@ fn handle_cx_live_edit(cx: &mut Cx) -> bool {
         .live_reload
         .script_mod_overrides
         .borrow_mut() = next_overrides;
+    crate::log!(
+        "hot reload applied {} override(s) from {} file change(s)",
+        cx.script_data.live_reload.script_mod_overrides.borrow().len(),
+        processed_files
+    );
     true
 }
 
@@ -260,6 +264,7 @@ fn collect_compiled_sites_for_file(
 ) -> Vec<CompiledScriptModSite> {
     let bodies = script_vm.code.bodies.borrow();
     let mut sites = Vec::new();
+    let mut seen = HashSet::<ScriptModKey>::new();
 
     for body in bodies.iter() {
         let ScriptSource::Mod(script_mod) = &body.source else {
@@ -268,8 +273,12 @@ fn collect_compiled_sites_for_file(
         let Some(compiled_file_name) = resolve_matching_script_mod_file(script_mod, file_name) else {
             continue;
         };
+        let key = ScriptModKey::from_script_mod(script_mod);
+        if !seen.insert(key.clone()) {
+            continue;
+        }
         sites.push(CompiledScriptModSite {
-            key: ScriptModKey::from_script_mod(script_mod),
+            key,
             file_name: compiled_file_name,
             original_code: script_mod.code.clone(),
             values: script_mod.values.clone(),
@@ -525,6 +534,7 @@ fn forward_hot_reload_fs_event(
             continue;
         }
         cache.insert(file_name.clone(), content.clone());
+        crate::log!("hot reload detected: {}", hot_reload_display_name(&file_name));
         if tx
             .send(StudioToApp::LiveChange {
                 file_name,
@@ -533,8 +543,19 @@ fn forward_hot_reload_fs_event(
             .is_ok()
         {
             SignalToUI::set_ui_signal();
+        } else {
+            crate::error!("hot reload watcher channel closed before dispatch");
         }
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn hot_reload_display_name(file_name: &str) -> String {
+    Path::new(file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(file_name)
+        .to_string()
 }
 
 fn push_unique_candidate(candidates: &mut Vec<String>, path: PathBuf) {
