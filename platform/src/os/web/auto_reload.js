@@ -1,35 +1,63 @@
-function watchFileChange() {
-    
-    var req = new XMLHttpRequest()
-    req.timeout = 60000
-    req.addEventListener("error", function() {
-        
-        setTimeout(function() {
-            location.href = location.href
-        }, 500)
-    })
-    req.responseType = 'text'
-    req.addEventListener("load", function() {
-        if (req.status === 201) return watchFileChange();
-        if (req.status === 200) {
-            if (req.response == ""){
-                return
-            }
-            var msg = JSON.parse(req.response);
-            if (msg.type == "file_change") {
-                location.href = location.href
-            }
-            if (msg.type == "build_start") {
-                let note = "Rebuilding application..."
-                if (document.title != note) {
-                    document.title = note;
-                    console.log(note);
-                }
-                watchFileChange();
-            }
-        }
-    })
-    req.open("GET", "/$watch?" + ('' + Math.random()).slice(2))
-    req.send()
+const RETRY_MS = 500;
+const decoder = new TextDecoder();
+
+window.makepad_wasm_live_file_change_queue =
+    window.makepad_wasm_live_file_change_queue || [];
+
+async function decodeMessage(data) {
+    if (typeof data === "string") {
+        return data;
+    }
+    if (data instanceof ArrayBuffer) {
+        return decoder.decode(new Uint8Array(data));
+    }
+    if (ArrayBuffer.isView(data)) {
+        return decoder.decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    }
+    if (data instanceof Blob) {
+        return decoder.decode(new Uint8Array(await data.arrayBuffer()));
+    }
+    return "";
 }
-watchFileChange()
+
+function dispatchLiveChange(msg) {
+    const hook = window.makepad_wasm_live_file_change;
+    if (typeof hook === "function") {
+        hook(msg.file_name || "", msg.content || "");
+        return;
+    }
+    window.makepad_wasm_live_file_change_queue.push([
+        msg.file_name || "",
+        msg.content || "",
+    ]);
+}
+
+function watchFileChange() {
+    const protocol = location.protocol === "https:" ? "wss://" : "ws://";
+    const socket = new WebSocket(`${protocol}${location.host}/$watch`);
+    socket.binaryType = "arraybuffer";
+    socket.onmessage = async (event) => {
+        let text = await decodeMessage(event.data);
+        if (!text) {
+            return;
+        }
+        let msg = null;
+        try {
+            msg = JSON.parse(text);
+        }
+        catch (_error) {
+            return;
+        }
+        if (msg.kind === "live_change") {
+            dispatchLiveChange(msg);
+        }
+    };
+    socket.onclose = () => {
+        window.setTimeout(watchFileChange, RETRY_MS);
+    };
+    socket.onerror = () => {
+        socket.close();
+    };
+}
+
+watchFileChange();
