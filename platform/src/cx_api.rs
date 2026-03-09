@@ -403,6 +403,15 @@ impl Cx {
         None
     }
 
+    /// Get the absolute path registered for a script resource handle.
+    pub fn get_resource_abs_path(&self, handle: ScriptHandle) -> Option<String> {
+        let resources = self.script_data.resources.resources.borrow();
+        resources
+            .iter()
+            .find(|res| res.handle == handle)
+            .map(|res| res.abs_path.clone())
+    }
+
     /// Get resource data intended for font parsing.
     ///
     /// This attempts mmap for local file-backed resources only.

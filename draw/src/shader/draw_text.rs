@@ -826,6 +826,12 @@ impl FontFamily {
         let mut font_ids = Vec::new();
 
         for member in &self.members {
+            #[cfg(feature = "system-fonts")]
+            if let Some(role) = system_font_role_for_member(cx, member.handle) {
+                let _ = try_push_system_font_role(fonts, &mut font_ids, role);
+                continue;
+            }
+
             let font_id: FontId = (member.handle.index() as u64).into();
 
             if !fonts.is_font_known(font_id) {
@@ -849,18 +855,15 @@ impl FontFamily {
                 font_ids.push(font_id);
             }
         }
-        #[cfg(feature = "system-fonts")]
-        {
-            for family in default_system_fallback_families() {
-                try_push_system_font(fonts, &mut font_ids, family);
-            }
-        }
 
         fonts.set_font_family_definition(
             self.to_font_family_id(),
             FontFamilyDefinition {
-                font_ids,
+                #[cfg(feature = "system-fonts")]
+                expected_member_count: font_ids.len(),
+                #[cfg(not(feature = "system-fonts"))]
                 expected_member_count: self.members.len(),
+                font_ids,
             },
         );
     }
@@ -880,6 +883,10 @@ impl FontFamily {
 
         // Slow path: request only the resources needed by this family, then re-check.
         for member in &self.members {
+            #[cfg(feature = "system-fonts")]
+            if system_font_role_for_member(cx, member.handle).is_some() {
+                continue;
+            }
             cx.load_script_resource(member.handle);
         }
         {
@@ -895,27 +902,227 @@ impl FontFamily {
 }
 
 #[cfg(feature = "system-fonts")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SystemFontRole {
+    SansRegular,
+    SansBold,
+    SansItalic,
+    SansBoldItalic,
+    CjkRegular,
+    CjkBold,
+    Emoji,
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_font_role_for_member(cx: &Cx, handle: ScriptHandle) -> Option<SystemFontRole> {
+    let path = cx.get_resource_abs_path(handle)?;
+    system_font_role_for_resource_path(&path)
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_font_role_for_resource_path(path: &str) -> Option<SystemFontRole> {
+    if !is_widgets_theme_resource_path(path) {
+        return None;
+    }
+
+    let basename = resource_basename(path)?;
+    match basename.to_ascii_lowercase().as_str() {
+        "ibmplexsans-text.ttf" => Some(SystemFontRole::SansRegular),
+        "ibmplexsans-semibold.ttf" => Some(SystemFontRole::SansBold),
+        "ibmplexsans-italic.ttf" => Some(SystemFontRole::SansItalic),
+        "ibmplexsans-bolditalic.ttf" => Some(SystemFontRole::SansBoldItalic),
+        "lxgwwenkairegular.ttf" => Some(SystemFontRole::CjkRegular),
+        "lxgwwenkaibold.ttf" => Some(SystemFontRole::CjkBold),
+        "notocoloremoji.ttf" => Some(SystemFontRole::Emoji),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "system-fonts")]
+fn is_widgets_theme_resource_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("/widgets/resources/") || lower.contains("\\widgets\\resources\\")
+}
+
+#[cfg(feature = "system-fonts")]
+fn resource_basename(path: &str) -> Option<&str> {
+    path.rsplit(|ch| ch == '/' || ch == '\\').next()
+}
+
+#[cfg(feature = "system-fonts")]
+fn try_push_system_font_role(
+    fonts: &mut Fonts,
+    font_ids: &mut Vec<FontId>,
+    role: SystemFontRole,
+) -> bool {
+    let mut pushed_any = false;
+    for family in system_fallback_families_for_role(role) {
+        pushed_any |= try_push_system_font(fonts, font_ids, family);
+    }
+    pushed_any
+}
+
+#[cfg(feature = "system-fonts")]
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
-fn default_system_fallback_families() -> &'static [&'static str] {
-    &["PingFang SC", "Apple Color Emoji"]
+fn system_fallback_families_for_role(role: SystemFontRole) -> &'static [&'static str] {
+    match role {
+        SystemFontRole::SansRegular => &["Arial", "Helvetica Neue", ".SF NS Text", "SF Pro Text"],
+        SystemFontRole::SansBold => &[
+            "Arial Bold",
+            "Helvetica Neue Bold",
+            ".SF NS Text Bold",
+            "SF Pro Text Bold",
+            "Arial",
+            "Helvetica Neue",
+            ".SF NS Text",
+        ],
+        SystemFontRole::SansItalic => &[
+            "Arial Italic",
+            "Helvetica Neue Italic",
+            ".SF NS Text Italic",
+            "SF Pro Text Italic",
+            "Arial",
+            "Helvetica Neue",
+            ".SF NS Text",
+        ],
+        SystemFontRole::SansBoldItalic => &[
+            "Arial Bold Italic",
+            "Helvetica Neue Bold Italic",
+            ".SF NS Text Bold Italic",
+            "SF Pro Text Bold Italic",
+            "Arial Bold",
+            "Arial Italic",
+            ".SF NS Text Bold",
+            ".SF NS Text Italic",
+            "Arial",
+            "Helvetica Neue",
+            ".SF NS Text",
+        ],
+        SystemFontRole::CjkRegular => &["PingFang SC", "Hiragino Sans GB", "STHeiti", ".SF NS Text"],
+        SystemFontRole::CjkBold => &[
+            "PingFang SC Bold",
+            "Hiragino Sans GB W6",
+            "STHeiti Medium",
+            "PingFang SC",
+            "Hiragino Sans GB",
+        ],
+        SystemFontRole::Emoji => &["Apple Color Emoji"],
+    }
 }
 
 #[cfg(feature = "system-fonts")]
 #[cfg(target_os = "windows")]
-fn default_system_fallback_families() -> &'static [&'static str] {
-    &["Microsoft YaHei", "Segoe UI Emoji"]
+fn system_fallback_families_for_role(role: SystemFontRole) -> &'static [&'static str] {
+    match role {
+        SystemFontRole::SansRegular => &["Segoe UI", "Arial"],
+        SystemFontRole::SansBold => &[
+            "Segoe UI Bold",
+            "Segoe UI Semibold",
+            "Arial Bold",
+            "Segoe UI",
+            "Arial",
+        ],
+        SystemFontRole::SansItalic => {
+            &["Segoe UI Italic", "Arial Italic", "Segoe UI", "Arial"]
+        }
+        SystemFontRole::SansBoldItalic => &[
+            "Segoe UI Bold Italic",
+            "Segoe UI Semibold Italic",
+            "Arial Bold Italic",
+            "Segoe UI Bold",
+            "Segoe UI Italic",
+            "Segoe UI",
+        ],
+        SystemFontRole::CjkRegular => &["Microsoft YaHei", "Microsoft JhengHei", "SimSun", "Segoe UI"],
+        SystemFontRole::CjkBold => &[
+            "Microsoft YaHei Bold",
+            "Microsoft JhengHei Bold",
+            "Microsoft YaHei",
+            "Microsoft JhengHei",
+        ],
+        SystemFontRole::Emoji => &["Segoe UI Emoji"],
+    }
 }
 
 #[cfg(feature = "system-fonts")]
 #[cfg(target_os = "linux")]
-fn default_system_fallback_families() -> &'static [&'static str] {
-    &["Noto Sans CJK SC", "Noto Color Emoji"]
+fn system_fallback_families_for_role(role: SystemFontRole) -> &'static [&'static str] {
+    match role {
+        SystemFontRole::SansRegular => {
+            &["Noto Sans", "DejaVu Sans", "Liberation Sans", "Arial", "sans-serif"]
+        }
+        SystemFontRole::SansBold => &[
+            "Noto Sans Bold",
+            "DejaVu Sans Bold",
+            "Liberation Sans Bold",
+            "sans-serif bold",
+            "Noto Sans",
+            "DejaVu Sans",
+            "sans-serif",
+        ],
+        SystemFontRole::SansItalic => &[
+            "Noto Sans Italic",
+            "DejaVu Sans Oblique",
+            "Liberation Sans Italic",
+            "sans-serif italic",
+            "Noto Sans",
+            "DejaVu Sans",
+            "sans-serif",
+        ],
+        SystemFontRole::SansBoldItalic => &[
+            "Noto Sans Bold Italic",
+            "DejaVu Sans Bold Oblique",
+            "Liberation Sans Bold Italic",
+            "sans-serif bold italic",
+            "Noto Sans Bold",
+            "Noto Sans Italic",
+            "Noto Sans",
+            "sans-serif",
+        ],
+        SystemFontRole::CjkRegular => &[
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "WenQuanYi Zen Hei",
+            "Droid Sans Fallback",
+            "sans-serif",
+        ],
+        SystemFontRole::CjkBold => &[
+            "Noto Sans CJK SC Bold",
+            "Noto Sans SC Bold",
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "WenQuanYi Zen Hei Bold",
+            "WenQuanYi Zen Hei",
+        ],
+        SystemFontRole::Emoji => {
+            &["Noto Color Emoji", "EmojiOne Color", "Twitter Color Emoji", "Apple Color Emoji"]
+        }
+    }
 }
 
 #[cfg(feature = "system-fonts")]
 #[cfg(target_os = "android")]
-fn default_system_fallback_families() -> &'static [&'static str] {
-    &["Noto Sans CJK SC", "Noto Color Emoji"]
+fn system_fallback_families_for_role(role: SystemFontRole) -> &'static [&'static str] {
+    match role {
+        SystemFontRole::SansRegular => &["Roboto", "Noto Sans"],
+        SystemFontRole::SansBold => &["Roboto Bold", "Roboto Medium", "Noto Sans Bold", "Roboto"],
+        SystemFontRole::SansItalic => &["Roboto Italic", "Noto Sans Italic", "Roboto"],
+        SystemFontRole::SansBoldItalic => {
+            &["Roboto Bold Italic", "Roboto Bold", "Roboto Italic", "Roboto"]
+        }
+        SystemFontRole::CjkRegular => {
+            &["Noto Sans CJK SC", "Noto Sans SC", "Droid Sans Fallback", "Noto Sans"]
+        }
+        SystemFontRole::CjkBold => &[
+            "Noto Sans CJK SC Bold",
+            "Noto Sans SC Bold",
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "Droid Sans Fallback",
+            "Noto Sans Bold",
+        ],
+        SystemFontRole::Emoji => &["Noto Color Emoji", "Emoji"],
+    }
 }
 
 #[cfg(feature = "system-fonts")]
@@ -927,15 +1134,15 @@ fn default_system_fallback_families() -> &'static [&'static str] {
     target_os = "ios",
     target_os = "tvos"
 )))]
-fn default_system_fallback_families() -> &'static [&'static str] {
+fn system_fallback_families_for_role(_role: SystemFontRole) -> &'static [&'static str] {
     &[]
 }
 
 #[cfg(feature = "system-fonts")]
-fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &str) {
+fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &str) -> bool {
     let font_id = system_font_id(family);
     if system_font_lookup_failed(font_id) {
-        return;
+        return false;
     }
     if !fonts.is_font_known(font_id) {
         match query_system_font(family) {
@@ -947,6 +1154,7 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
                         index: system_font.index,
                         ascender_fudge_in_ems: 0.0,
                         descender_fudge_in_ems: 0.0,
+                        variations: Vec::new(),
                     },
                 );
                 clear_failed_system_font_lookup(font_id);
@@ -960,14 +1168,15 @@ fn try_push_system_font(fonts: &mut Fonts, font_ids: &mut Vec<FontId>, family: &
                 record_failed_system_font_lookup(font_id);
             }
             Err(SystemFontError::Unsupported) => {
-                // Unsupported platforms use bundled fonts or leave fallback empty.
                 record_failed_system_font_lookup(font_id);
             }
         }
     }
     if fonts.is_font_known(font_id) {
         font_ids.push(font_id);
+        return true;
     }
+    false
 }
 
 #[cfg(feature = "system-fonts")]
@@ -1006,6 +1215,92 @@ fn clear_failed_system_font_lookup(font_id: FontId) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     failed.remove(&font_id);
+}
+
+#[cfg(all(test, feature = "system-fonts"))]
+mod system_font_tests {
+    use super::{system_fallback_families_for_role, system_font_role_for_resource_path, SystemFontRole};
+
+    #[test]
+    fn maps_bundled_theme_resources_to_system_roles() {
+        assert_eq!(
+            system_font_role_for_resource_path("/tmp/widgets/resources/IBMPlexSans-Text.ttf"),
+            Some(SystemFontRole::SansRegular)
+        );
+        assert_eq!(
+            system_font_role_for_resource_path("/tmp/widgets/resources/IBMPlexSans-SemiBold.ttf"),
+            Some(SystemFontRole::SansBold)
+        );
+        assert_eq!(
+            system_font_role_for_resource_path("/tmp/widgets/resources/IBMPlexSans-Italic.ttf"),
+            Some(SystemFontRole::SansItalic)
+        );
+        assert_eq!(
+            system_font_role_for_resource_path("/tmp/widgets/resources/IBMPlexSans-BoldItalic.ttf"),
+            Some(SystemFontRole::SansBoldItalic)
+        );
+        assert_eq!(
+            system_font_role_for_resource_path("/tmp/widgets/resources/LXGWWenKaiRegular.ttf"),
+            Some(SystemFontRole::CjkRegular)
+        );
+        assert_eq!(
+            system_font_role_for_resource_path("/tmp/widgets/resources/LXGWWenKaiBold.ttf"),
+            Some(SystemFontRole::CjkBold)
+        );
+        assert_eq!(
+            system_font_role_for_resource_path("/tmp/widgets/resources/NotoColorEmoji.ttf"),
+            Some(SystemFontRole::Emoji)
+        );
+    }
+
+    #[test]
+    fn keeps_code_icon_and_custom_resources_bundled() {
+        assert_eq!(
+            system_font_role_for_resource_path("/tmp/widgets/resources/LiberationMono-Regular.ttf"),
+            None
+        );
+        assert_eq!(
+            system_font_role_for_resource_path("/tmp/widgets/resources/fa-solid-900.ttf"),
+            None
+        );
+        assert_eq!(
+            system_font_role_for_resource_path("/tmp/app/resources/IBMPlexSans-Text.ttf"),
+            None
+        );
+    }
+
+    #[test]
+    fn system_role_fallback_lists_are_non_empty() {
+        #[cfg(any(
+            target_os = "android",
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos"
+        ))]
+        {
+            assert!(!system_fallback_families_for_role(SystemFontRole::SansRegular).is_empty());
+            assert!(!system_fallback_families_for_role(SystemFontRole::SansBold).is_empty());
+            assert!(!system_fallback_families_for_role(SystemFontRole::SansItalic).is_empty());
+            assert!(!system_fallback_families_for_role(SystemFontRole::SansBoldItalic).is_empty());
+            assert!(!system_fallback_families_for_role(SystemFontRole::CjkRegular).is_empty());
+            assert!(!system_fallback_families_for_role(SystemFontRole::CjkBold).is_empty());
+            assert!(!system_fallback_families_for_role(SystemFontRole::Emoji).is_empty());
+        }
+
+        #[cfg(not(any(
+            target_os = "android",
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos"
+        )))]
+        {
+            assert!(system_fallback_families_for_role(SystemFontRole::SansRegular).is_empty());
+        }
+    }
 }
 
 impl TextStyle {

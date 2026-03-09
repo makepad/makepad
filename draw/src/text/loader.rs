@@ -201,6 +201,7 @@ mod tests {
                 index: 0,
                 ascender_fudge_in_ems: -0.1,
                 descender_fudge_in_ems: 0.0,
+                variations: Vec::new(),
             },
         );
 

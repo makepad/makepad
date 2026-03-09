@@ -972,12 +972,14 @@ mod tests {
                 index: 0,
                 ascender_fudge_in_ems: -0.1,
                 descender_fudge_in_ems: 0.0,
+                variations: Vec::new(),
             },
         );
         layouter.define_font_family(
             family_id,
             FontFamilyDefinition {
                 font_ids: vec![font_id],
+                expected_member_count: 1,
             },
         );
 

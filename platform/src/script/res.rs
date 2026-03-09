@@ -180,6 +180,35 @@ fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
     }
 }
 
+#[cfg(feature = "system-fonts")]
+fn should_skip_eager_resource_load(abs_path: &str) -> bool {
+    let lower = abs_path.to_ascii_lowercase();
+    let is_widgets_resource =
+        lower.contains("/widgets/resources/") || lower.contains("\\widgets\\resources\\");
+    if !is_widgets_resource {
+        return false;
+    }
+    let basename = lower
+        .rsplit(|ch| ch == '/' || ch == '\\')
+        .next()
+        .unwrap_or_default();
+    matches!(
+        basename,
+        "ibmplexsans-text.ttf"
+            | "ibmplexsans-semibold.ttf"
+            | "ibmplexsans-italic.ttf"
+            | "ibmplexsans-bolditalic.ttf"
+            | "lxgwwenkairegular.ttf"
+            | "lxgwwenkaibold.ttf"
+            | "notocoloremoji.ttf"
+    )
+}
+
+#[cfg(not(feature = "system-fonts"))]
+fn should_skip_eager_resource_load(_abs_path: &str) -> bool {
+    false
+}
+
 impl Cx {
     fn load_script_resource_impl(
         &mut self,
@@ -311,7 +340,11 @@ impl Cx {
 
         let handles = {
             let resources = self.script_data.resources.resources.borrow();
-            resources.iter().map(|res| res.handle).collect::<Vec<_>>()
+            resources
+                .iter()
+                .filter(|res| !should_skip_eager_resource_load(&res.abs_path))
+                .map(|res| res.handle)
+                .collect::<Vec<_>>()
         };
 
         for handle in handles {
@@ -321,6 +354,49 @@ impl Cx {
                 &crate_manifests,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_eager_resource_load;
+
+    #[test]
+    fn does_not_skip_non_widgets_or_non_theme_fonts() {
+        assert!(!should_skip_eager_resource_load(
+            "/tmp/app/resources/IBMPlexSans-Text.ttf"
+        ));
+        assert!(!should_skip_eager_resource_load(
+            "/tmp/widgets/resources/LiberationMono-Regular.ttf"
+        ));
+        assert!(!should_skip_eager_resource_load(
+            "/tmp/widgets/resources/fa-solid-900.ttf"
+        ));
+    }
+
+    #[test]
+    fn skips_builtin_theme_bundled_fonts() {
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/IBMPlexSans-Text.ttf"
+        ));
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/IBMPlexSans-SemiBold.ttf"
+        ));
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/IBMPlexSans-Italic.ttf"
+        ));
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/IBMPlexSans-BoldItalic.ttf"
+        ));
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/LXGWWenKaiRegular.ttf"
+        ));
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/LXGWWenKaiBold.ttf"
+        ));
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/NotoColorEmoji.ttf"
+        ));
     }
 }
 
