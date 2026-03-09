@@ -136,6 +136,13 @@ fn headless_texture_info(
     cache: &mut TextureConversionCache,
 ) -> Option<[usize; 4]> {
     match &cxtexture.format {
+        TextureFormat::VecMipRGBAf32 {
+            width,
+            height,
+            data: Some(data),
+            ..
+        }
+        |
         TextureFormat::VecRGBAf32 {
             width,
             height,

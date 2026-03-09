@@ -71,6 +71,11 @@ impl WaylandCx {
             )
         });
 
+        if crate::app_main::should_run_stdin_loop_from_env() {
+            cx.borrow_mut().in_makepad_studio = true;
+            return cx.borrow_mut().stdin_event_loop();
+        }
+
         let mut event_queue = conn.new_event_queue();
         let qhandle = event_queue.handle();
         display.get_registry(&qhandle, ());
@@ -332,6 +337,7 @@ impl WaylandCx {
                         cx.handle_action_receiver();
                     }
                     cx.poll_control_channel();
+                    cx.handle_actions();
                     cx.handle_networking_events();
 
                     // Poll video players on the timer tick (every ~8ms).

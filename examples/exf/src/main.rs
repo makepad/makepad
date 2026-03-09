@@ -1,6 +1,9 @@
 pub use makepad_widgets;
 
-use makepad_openexr::{read_file, ExrPart, SampleBuffer};
+use makepad_mb3d_render::exr_meta::{
+    ViewerCameraMetadata, MB3D_CAMERA_ATTRIBUTE_NAME, MB3D_MIP_LEVEL_ATTRIBUTE_NAME,
+};
+use makepad_openexr::{read_headers_file, read_part_file, ExrPart, SampleBuffer};
 use makepad_widgets::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +14,11 @@ app_main!(App);
 const DEFAULT_STYLE_MIX: f32 = 0.58;
 const DEFAULT_CONTOUR_GAIN: f32 = 0.72;
 const DEFAULT_GLOW_GAIN: f32 = 0.44;
+const DEFAULT_HALO_WIDTH: f32 = 1.0;
+const DEFAULT_HALO_FOG: f32 = 1.0;
+const DEFAULT_LIGHT_GAIN: f32 = 1.8;
+const DEFAULT_LIGHT_RADIUS: f32 = 1.5;
+const DEFAULT_LIGHT_LIFT: f32 = 0.45;
 const MIN_ZOOM: f32 = 0.5;
 const MAX_ZOOM: f32 = 8.0;
 
@@ -26,7 +34,7 @@ struct PackSpec {
     channels: [ChannelSlot; 4],
 }
 
-const PACK_SPECS: [PackSpec; 10] = [
+const PACK_SPECS: [PackSpec; 9] = [
     PackSpec {
         label: "surface",
         channels: [
@@ -69,7 +77,7 @@ const PACK_SPECS: [PackSpec; 10] = [
             ChannelSlot::Named("normal.X"),
             ChannelSlot::Named("normal.Y"),
             ChannelSlot::Named("normal.Z"),
-            ChannelSlot::Constant(1.0),
+            ChannelSlot::Named("orbit.R2"),
         ],
     },
     PackSpec {
@@ -79,15 +87,6 @@ const PACK_SPECS: [PackSpec; 10] = [
             ChannelSlot::Named("orbit.Y"),
             ChannelSlot::Named("orbit.Z"),
             ChannelSlot::Named("orbit.W"),
-        ],
-    },
-    PackSpec {
-        label: "space",
-        channels: [
-            ChannelSlot::Named("orbit.R2"),
-            ChannelSlot::Named("position.X"),
-            ChannelSlot::Named("position.Y"),
-            ChannelSlot::Named("position.Z"),
         ],
     },
     PackSpec {
@@ -131,7 +130,6 @@ script_mod! {
         folds_tex: texture_2d(float)
         normal_tex: texture_2d(float)
         orbit_tex: texture_2d(float)
-        space_tex: texture_2d(float)
         style_tex: texture_2d(float)
         traps_tex: texture_2d(float)
         uncertainty_tex: texture_2d(float)
@@ -140,9 +138,25 @@ script_mod! {
         style_mix: 0.58
         contour_gain: 0.72
         glow_gain: 0.44
+        halo_width: 1.0
+        halo_fog: 1.0
+        light_gain: 1.8
+        light_radius: 1.5
+        light_lift: 0.45
+        time: 0.0
+        debug_view: 0.0
         zoom: 1.0
+        max_mip_level: 0.0
         pan: vec2(0.0, 0.0)
         image_size: vec2(1.0, 1.0)
+        depth_min: 0.0
+        depth_inv_range: 1.0
+        camera_mid: vec3(0.0, 0.0, 0.0)
+        camera_right_step: vec3(1.0, 0.0, 0.0)
+        camera_up_step: vec3(0.0, 1.0, 0.0)
+        camera_forward_dir: vec3(0.0, 0.0, 1.0)
+        camera_fov_y: 45.0
+        camera_z_start_delta: 0.0
 
         viewport_uv: fn() -> vec2 {
             let rect_aspect = self.rect_size.x / max(self.rect_size.y, 0.0001)
@@ -156,6 +170,35 @@ script_mod! {
             }
 
             return p / max(self.zoom, 0.001) + self.pan + vec2(0.5, 0.5)
+        }
+
+        auto_lod: fn() -> float {
+            let fit_scale = min(
+                self.rect_size.x / max(self.image_size.x, 1.0),
+                self.rect_size.y / max(self.image_size.y, 1.0)
+            )
+            let pixel_scale = fit_scale * max(self.zoom, 0.001)
+            let lod = if pixel_scale >= 1.0 {
+                0.0
+            } else {
+                log2(1.0 / max(pixel_scale, 0.0001))
+            }
+            return clamp(lod, 0.0, self.max_mip_level)
+        }
+
+        selected_lod: fn() -> float {
+            return floor(self.auto_lod() + 0.5)
+        }
+
+        camera_ray: fn(uv: vec2) -> vec3 {
+            let aspect = self.image_size.x / max(self.image_size.y, 1.0)
+            let tan_half_fov = tan(self.camera_fov_y * 0.017453292519943295 * 0.5)
+            let plane = (vec2(0.5, 0.5) - uv) * vec2(aspect, 1.0) * (tan_half_fov * 2.0)
+            return normalize(vec3(plane.x, plane.y, -1.0))
+        }
+
+        camera_position: fn(uv: vec2, raw_depth: float) -> vec3 {
+            return self.camera_ray(uv) * raw_depth
         }
 
         backdrop: fn(grid_uv: vec2) -> vec3 {
@@ -221,9 +264,88 @@ script_mod! {
             return clamp(length(trap.xyz - vec3(0.5, 0.5, 0.5)) * 1.8 + trap.w, 0.0, 1.0)
         }
 
+        raw_depth_value: fn(uv: vec2, lod: float) -> float {
+            return max(
+                self.metrics_tex.sample_lod(uv, clamp(lod, 0.0, self.max_mip_level)).x,
+                0.0
+            )
+        }
+
+        depth_value: fn(uv: vec2, lod: float) -> float {
+            return clamp(
+                (self.raw_depth_value(uv, lod) - self.depth_min) * self.depth_inv_range,
+                0.0,
+                1.0
+            )
+        }
+
+        world_normal: fn(uv: vec2, lod: float) -> vec3 {
+            let raw = self.normal_tex.sample_lod(uv, clamp(lod, 0.0, self.max_mip_level)).xyz
+            let len_sq = dot(raw, raw)
+            if len_sq <= 1e-8 {
+                return vec3(0.0, 0.0, 1.0)
+            }
+            return raw / sqrt(len_sq)
+        }
+
+        camera_basis_normal: fn(world_normal: vec3) -> vec3 {
+            let right_dir = normalize(self.camera_right_step)
+            let up_dir = normalize(self.camera_up_step)
+            let forward_dir = normalize(self.camera_forward_dir)
+            let basis = vec3(
+                dot(world_normal, right_dir),
+                dot(world_normal, up_dir),
+                dot(world_normal, forward_dir)
+            )
+            let len_sq = dot(basis, basis)
+            if len_sq <= 1e-8 {
+                return vec3(0.0, 0.0, 1.0)
+            }
+            return basis / sqrt(len_sq)
+        }
+
+        depth_gauss_mip: fn(uv: vec2, lod: float, radius: float) -> float {
+            let center_lod = clamp(lod + max(radius, 0.0), 0.0, self.max_mip_level)
+            let lower_lod = clamp(center_lod - 1.0, 0.0, self.max_mip_level)
+            let upper_lod = clamp(center_lod + 1.0, 0.0, self.max_mip_level)
+            let lower = self.depth_value(uv, lower_lod)
+            let center = self.depth_value(uv, center_lod)
+            let upper = self.depth_value(uv, upper_lod)
+            return clamp((lower + center * 2.0 + upper) * 0.25, 0.0, 1.0)
+        }
+
+        reconstruct_position: fn(uv: vec2, raw_depth: float) -> vec3 {
+            let image_width = max(self.image_size.x, 1.0)
+            let image_height = max(self.image_size.y, 1.0)
+            let sample_x = uv.x * image_width - 0.5
+            let sample_y = uv.y * image_height - 0.5
+            let half_w = image_width * 0.5
+            let half_h = image_height * 0.5
+            let fov_mul = self.camera_fov_y * 0.017453292519943295 / image_height
+            let cafx = (half_w - sample_x) * fov_mul
+            let cafy = (sample_y - half_h) * fov_mul
+            let local_dir = normalize(vec3(-sin(cafx), sin(cafy), cos(cafx) * cos(cafy)))
+            let right_dir = normalize(self.camera_right_step)
+            let up_dir = normalize(self.camera_up_step)
+            let forward_dir = normalize(self.camera_forward_dir)
+            let ray_dir = normalize(
+                right_dir * local_dir.x
+                + up_dir * local_dir.y
+                + forward_dir * local_dir.z
+            )
+            let ray_origin =
+                self.camera_mid
+                + forward_dir * self.camera_z_start_delta
+                + self.camera_right_step * (sample_x - half_w)
+                + self.camera_up_step * (sample_y - half_h)
+            return ray_origin + ray_dir * raw_depth
+        }
+
         pixel: fn() {
             let uv = self.viewport_uv()
             let grid_uv = self.pos * vec2(12.0, 12.0)
+            let lod = self.selected_lod()
+            let mip_scale = pow(2.0, max(lod, 0.0))
             let inside =
                 uv.x >= 0.0 &&
                 uv.x <= 1.0 &&
@@ -235,78 +357,64 @@ script_mod! {
                 return Pal.premul(vec4(self.backdrop(grid_uv), 1.0))
             }
 
-            let surface = self.surface_tex.sample(uv)
-            let flow = self.flow_tex.sample(uv)
-            let metrics = self.metrics_tex.sample(uv)
-            let folds = self.folds_tex.sample(uv)
-            let normal_raw = self.normal_tex.sample(uv)
-            let orbit = self.orbit_tex.sample(uv)
-            let space = self.space_tex.sample(uv)
-            let style = self.style_tex.sample(uv)
-            let traps = self.traps_tex.sample(uv)
-            let uncertainty = self.uncertainty_tex.sample(uv)
+            let surface = self.surface_tex.sample_lod(uv, lod)
+            let flow = self.flow_tex.sample_lod(uv, lod)
+            let metrics = self.metrics_tex.sample_lod(uv, lod)
+            let folds = self.folds_tex.sample_lod(uv, lod)
+            let normal_pack = self.normal_tex.sample_lod(uv, lod)
+            let orbit = self.orbit_tex.sample_lod(uv, lod)
+            let style = self.style_tex.sample_lod(uv, lod)
+            let traps = self.traps_tex.sample_lod(uv, lod)
+            let uncertainty = self.uncertainty_tex.sample_lod(uv, lod)
 
-            let t = 0.0
+            let t = self.time * 0.35
             let texel = vec2(
-                1.0 / max(self.image_size.x, 1.0),
-                1.0 / max(self.image_size.y, 1.0)
+                mip_scale / max(self.image_size.x, 1.0),
+                mip_scale / max(self.image_size.y, 1.0)
             )
             let uv_px = clamp(uv + vec2(texel.x, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0))
             let uv_mx = clamp(uv - vec2(texel.x, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0))
             let uv_py = clamp(uv + vec2(0.0, texel.y), vec2(0.0, 0.0), vec2(1.0, 1.0))
             let uv_my = clamp(uv - vec2(0.0, texel.y), vec2(0.0, 0.0), vec2(1.0, 1.0))
-            let halo_offset_a = texel * 8.0
-            let halo_offset_b = texel * 26.0
-            let uv_hax = clamp(uv + vec2(halo_offset_a.x, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0))
-            let uv_hbx = clamp(uv - vec2(halo_offset_a.x, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0))
-            let uv_hay = clamp(uv + vec2(0.0, halo_offset_a.y), vec2(0.0, 0.0), vec2(1.0, 1.0))
-            let uv_hby = clamp(uv - vec2(0.0, halo_offset_a.y), vec2(0.0, 0.0), vec2(1.0, 1.0))
-            let uv_hcx = clamp(uv + vec2(halo_offset_b.x, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0))
-            let uv_hdx = clamp(uv - vec2(halo_offset_b.x, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0))
-            let uv_hcy = clamp(uv + vec2(0.0, halo_offset_b.y), vec2(0.0, 0.0), vec2(1.0, 1.0))
-            let uv_hdy = clamp(uv - vec2(0.0, halo_offset_b.y), vec2(0.0, 0.0), vec2(1.0, 1.0))
-            let original_beauty = clamp(surface.xyz, vec3(0.0), vec3(1.0))
             let ao = clamp(surface.w, 0.0, 1.0)
-            let normal = normalize(normal_raw.xyz * 2.0 - 1.0)
-            let normal_px = normalize(self.normal_tex.sample(uv_px).xyz * 2.0 - 1.0)
-            let normal_mx = normalize(self.normal_tex.sample(uv_mx).xyz * 2.0 - 1.0)
-            let normal_py = normalize(self.normal_tex.sample(uv_py).xyz * 2.0 - 1.0)
-            let normal_my = normalize(self.normal_tex.sample(uv_my).xyz * 2.0 - 1.0)
-            let depth = clamp(metrics.x, 0.0, 1.0)
-            let depth_px = clamp(self.metrics_tex.sample(uv_px).x, 0.0, 1.0)
-            let depth_mx = clamp(self.metrics_tex.sample(uv_mx).x, 0.0, 1.0)
-            let depth_py = clamp(self.metrics_tex.sample(uv_py).x, 0.0, 1.0)
-            let depth_my = clamp(self.metrics_tex.sample(uv_my).x, 0.0, 1.0)
-            let halo_depth_a =
-                clamp(self.metrics_tex.sample(uv_hax).x, 0.0, 1.0)
-                + clamp(self.metrics_tex.sample(uv_hbx).x, 0.0, 1.0)
-                + clamp(self.metrics_tex.sample(uv_hay).x, 0.0, 1.0)
-                + clamp(self.metrics_tex.sample(uv_hby).x, 0.0, 1.0)
-            let halo_depth_b =
-                clamp(self.metrics_tex.sample(uv_hcx).x, 0.0, 1.0)
-                + clamp(self.metrics_tex.sample(uv_hdx).x, 0.0, 1.0)
-                + clamp(self.metrics_tex.sample(uv_hcy).x, 0.0, 1.0)
-                + clamp(self.metrics_tex.sample(uv_hdy).x, 0.0, 1.0)
+            let raw_normal = self.world_normal(uv, lod)
+            let normal_px = self.world_normal(uv_px, lod)
+            let normal_mx = self.world_normal(uv_mx, lod)
+            let normal_py = self.world_normal(uv_py, lod)
+            let normal_my = self.world_normal(uv_my, lod)
+            if self.debug_view > 0.5 && self.debug_view < 1.5 {
+                let normal_rgb = clamp(raw_normal * 0.5 + vec3(0.5, 0.5, 0.5), vec3(0.0), vec3(1.0))
+                return Pal.premul(vec4(normal_rgb, 1.0))
+            }
+            let raw_depth = max(metrics.x, 0.0)
+            let depth = clamp((raw_depth - self.depth_min) * self.depth_inv_range, 0.0, 1.0)
+            let depth_px = self.depth_value(uv_px, lod)
+            let depth_mx = self.depth_value(uv_mx, lod)
+            let depth_py = self.depth_value(uv_py, lod)
+            let depth_my = self.depth_value(uv_my, lod)
+            let glow_radius_a = 0.35 + self.halo_width * 1.6
+            let glow_radius_b = glow_radius_a + 0.75 + self.halo_width * 0.9
+            let halo_depth_a = self.depth_gauss_mip(uv, lod, glow_radius_a)
+            let halo_depth_b = self.depth_gauss_mip(uv, lod, glow_radius_b)
             let estimator = clamp(metrics.y, 0.0, 1.0)
             let iterations = clamp(metrics.z, 0.0, 1.0)
             let march_steps = clamp(metrics.w, 0.0, 1.0)
             let roughness = clamp(flow.w, 0.0, 1.0)
-            let pos = vec3(space.y, space.z, space.w)
+            let pos = self.reconstruct_position(uv, raw_depth)
+            let view_pos = self.camera_position(uv, raw_depth)
+            let view_dir = normalize(view_pos * -1.0)
+            let normal = if dot(raw_normal, view_dir) < 0.0 {
+                raw_normal * -1.0
+            } else {
+                raw_normal
+            }
+            let orbit_r2 = clamp(normal_pack.w, 0.0, 1.0)
             let far_mix = 1.0 - depth
-            let halo_far_a = 1.0 - halo_depth_a * 0.25
-            let halo_far_b = 1.0 - halo_depth_b * 0.25
-            let halo_ao_a =
-                clamp(self.surface_tex.sample(uv_hax).w, 0.0, 1.0)
-                + clamp(self.surface_tex.sample(uv_hbx).w, 0.0, 1.0)
-                + clamp(self.surface_tex.sample(uv_hay).w, 0.0, 1.0)
-                + clamp(self.surface_tex.sample(uv_hby).w, 0.0, 1.0)
-            let halo_ao_b =
-                clamp(self.surface_tex.sample(uv_hcx).w, 0.0, 1.0)
-                + clamp(self.surface_tex.sample(uv_hdx).w, 0.0, 1.0)
-                + clamp(self.surface_tex.sample(uv_hcy).w, 0.0, 1.0)
-                + clamp(self.surface_tex.sample(uv_hdy).w, 0.0, 1.0)
-            let halo_open_a = halo_ao_a * 0.25
-            let halo_open_b = halo_ao_b * 0.25
+            let halo_far_a = 1.0 - halo_depth_a
+            let halo_far_b = 1.0 - halo_depth_b
+            let halo_open_a = clamp((halo_depth_a - depth) * 2.8, 0.0, 1.0)
+            let halo_open_b = clamp((halo_depth_b - depth) * 2.2, 0.0, 1.0)
+            let halo_fog = self.halo_fog
             let normal_edge = (length(normal_px - normal_mx) + length(normal_py - normal_my)) * 0.34
             let depth_edge = (abs(depth_px - depth_mx) + abs(depth_py - depth_my)) * 3.2
             let edge_glow = clamp(normal_edge + depth_edge + far_mix * 0.04, 0.0, 1.0)
@@ -324,7 +432,7 @@ script_mod! {
             let trap_energy = clamp(length(traps.xyz - vec3(0.5, 0.5, 0.5)) * 1.8 + traps.w, 0.0, 1.0)
             let uncertainty_band = clamp(uncertainty.z * 1.2 + uncertainty.x * 0.8 + uncertainty.y * 0.5, 0.0, 1.0)
             let fold_grid = clamp((folds.x + folds.y + folds.z + folds.w) * 0.35, 0.0, 1.0)
-            let orbit_heat = clamp(length(orbit.xyz - vec3(0.5, 0.5, 0.5)) * 1.2 + orbit.w * 0.35 + space.x * 0.35, 0.0, 1.0)
+            let orbit_heat = clamp(length(orbit.xyz - vec3(0.5, 0.5, 0.5)) * 1.2 + orbit.w * 0.35 + orbit_r2 * 0.35, 0.0, 1.0)
             let branch_bias = clamp(flow.x * 0.7 + flow.y * 0.5 + flow.z * 0.25, 0.0, 1.0)
             let sign_echo = clamp((style.x + style.y + style.z) * 0.33, 0.0, 1.0)
             let phase = fract(flow.z)
@@ -335,320 +443,128 @@ script_mod! {
                 + pos.z * 11.0
                 + depth * 20.0
             )
-            let light_a = normalize(vec3(-0.64, 0.36, 0.68))
-            let light_b = normalize(vec3(0.22, -0.26, 0.80))
-            let light_c = normalize(vec3(0.14, 0.84, 0.52))
-            let view_dir = normalize(vec3(0.0, 0.0, 1.0))
-            let half_a = normalize(light_a + view_dir)
-            let half_b = normalize(light_b + view_dir)
-            let half_c = normalize(light_c + view_dir)
-            let ndotl_a = clamp(dot(normal, light_a), 0.0, 1.0)
-            let ndotl_b = clamp(dot(normal, light_b), 0.0, 1.0)
-            let ndotl_c = clamp(dot(normal, light_c), 0.0, 1.0)
-            let ambient_color = vec3(0.03, 0.06, 0.10).mix(
-                vec3(0.24, 0.40, 0.64),
-                clamp(normal.y * 0.5 + 0.5, 0.0, 1.0)
+            let particle_uv = vec2(0.50, 0.50)
+                + vec2(sin(t * 0.73), cos(t * 0.51)) * vec2(0.08, 0.06)
+            let particle_raw_depth = self.raw_depth_value(particle_uv, lod)
+            let particle_depth = clamp((particle_raw_depth - self.depth_min) * self.depth_inv_range, 0.0, 1.0)
+            let particle_screen = (particle_uv - uv)
+                * vec2(self.image_size.x / max(self.image_size.y, 1.0), 1.0)
+            let light_lift_world = self.light_lift * 0.18 / max(self.depth_inv_range, 0.000001)
+            let particle_anchor = self.camera_position(particle_uv, particle_raw_depth)
+            let particle_pos = particle_anchor - self.camera_ray(particle_uv) * light_lift_world
+            let particle_delta = particle_pos - view_pos
+            let particle_dist = max(length(particle_delta), 0.0001)
+            let particle_flat_dir = normalize(vec3(
+                particle_screen.x * 2.6,
+                particle_screen.y * 2.6,
+                -1.75
+            ))
+            let particle_point_dir = particle_delta / particle_dist
+            let particle_dir = normalize(particle_flat_dir.mix(particle_point_dir, 0.58))
+            let particle_half = normalize(particle_dir + view_dir)
+            let particle_ndotl = clamp(dot(normal, particle_dir), 0.0, 1.0)
+            let particle_wrap = clamp(dot(normal, particle_dir) * 0.5 + 0.5, 0.0, 1.0)
+            let particle_spec = pow(
+                clamp(dot(normal, particle_half), 0.0, 1.0),
+                10.0 + (1.0 - roughness) * 42.0
             )
-            let ambient = ambient_color * (0.22 + ao * 0.24 + far_mix * 0.06)
+            let particle_gloss = pow(
+                particle_wrap,
+                8.0 + (1.0 - roughness) * 20.0
+            )
+            let particle_screen_dist = length(particle_screen)
+            let particle_radius = self.light_radius * (1.0 + self.halo_width * 0.35)
+            let particle_sprite = pow(
+                clamp(1.0 - particle_screen_dist * (2.8 / particle_radius), 0.0, 1.0),
+                3.6
+            )
+            let particle_core = pow(
+                clamp(1.0 - particle_screen_dist * (5.2 / particle_radius), 0.0, 1.0),
+                5.4
+            )
+            let particle_haze = pow(
+                clamp(
+                    1.0 - particle_screen_dist * (1.45 / (1.0 + self.halo_width * 1.8)),
+                    0.0,
+                    1.0
+                ),
+                2.2
+            )
+            let particle_depth_gate = clamp(1.0 - abs(depth - particle_depth) * 2.6, 0.0, 1.0)
+            let particle_range_falloff =
+                1.0
+                / (
+                    1.0
+                    + particle_dist
+                    * self.depth_inv_range
+                    * (0.85 / max(self.light_radius, 0.25))
+                )
+            let particle_screen_falloff = particle_sprite * 0.35 + particle_core * 0.65
+            let particle_attenuation =
+                particle_screen_falloff
+                * particle_range_falloff
+                * (0.30 + particle_depth_gate * 0.70)
+            let particle_color = vec3(0.16, 0.90, 1.26)
+                .mix(vec3(1.10, 0.96, 0.54), 0.5 + 0.5 * sin(t * 0.41 + 0.8))
             let base_albedo = self.stone_palette(phase)
-                .mix(vec3(0.78, 0.96, 1.08), fold_grid * 0.12 + beauty_ribbon * 0.08 + contour * 0.05)
-                .mix(vec3(0.06, 0.12, 0.24), trap_energy * 0.10 + far_mix * 0.08)
-            let diffuse =
-                vec3(0.84, 0.92, 1.00) * (ndotl_a * 0.70)
-                + vec3(0.32, 0.60, 0.94) * (ndotl_b * 0.30)
-                + vec3(0.48, 0.86, 1.10) * (ndotl_c * rim * 0.12)
-            let fresnel = pow(clamp(1.0 - dot(normal, view_dir), 0.0, 1.0), 4.0)
-            let spec_power = 18.0 + (1.0 - roughness) * 110.0
-            let spec_core = pow(clamp(dot(normal, half_a), 0.0, 1.0), spec_power)
-            let spec_fill = pow(clamp(dot(normal, half_b), 0.0, 1.0), 12.0 + (1.0 - roughness) * 64.0)
-            let spec_rim = pow(clamp(dot(normal, half_c), 0.0, 1.0), 10.0 + (1.0 - roughness) * 40.0)
-            let rainbow_phase = phase * 6.2831853 + orbit.w * 7.0 + space.x * 4.0
-            let rainbow_spec = self.rainbow_band(rainbow_phase)
-            let spec_color = vec3(0.92, 0.98, 1.00).mix(
-                rainbow_spec,
-                clamp(trap_energy * 0.16 + self.style_mix * 0.08, 0.0, 1.0)
-            )
-            let spec_intensity = (0.20 + trap_energy * 0.46 + contour * 0.28 + uncertainty_band * 0.22)
-                * (0.82 + self.glow_gain * 0.56)
-            let animated_ribbon = 0.5 + 0.5 * sin(
-                pos.x * 22.0
-                - pos.y * 17.0
-                + pos.z * 13.0
-                + depth * 36.0
-            )
-            let animated_wave = 0.5 + 0.5 * sin(
-                pos.x * 16.0
-                - pos.z * 12.0
-                + branch_bias * 9.0
-                + traps.w * 7.0
-            )
-            let animated_chroma = self.rainbow_band(
-                depth * 18.0
-                + orbit.x * 9.0
-                + orbit.y * 7.0
-                + pos.z * 5.0
-            )
-            let glitter = self.feature_spark_mask(
-                traps.x * 8.0 + traps.w * 6.0 + orbit.w * 2.0 + phase * 2.5,
-                traps.y * 9.0 - traps.z * 7.0 + depth * 3.0 + space.x * 2.0,
-                iterations * 8.0 + march_steps * 7.0 + sign_echo * 3.0 + branch_bias * 2.0,
-                roughness,
-                edge_glow
-            )
-            let glitter_color = self.rainbow_band(
-                depth * 32.0
-                + orbit_heat * 12.0
-                + sign_echo * 8.0
-            )
-            let halo_trap_a =
-                self.trap_strength(self.traps_tex.sample(uv_hax))
-                + self.trap_strength(self.traps_tex.sample(uv_hbx))
-                + self.trap_strength(self.traps_tex.sample(uv_hay))
-                + self.trap_strength(self.traps_tex.sample(uv_hby))
-            let halo_trap_b =
-                self.trap_strength(self.traps_tex.sample(uv_hcx))
-                + self.trap_strength(self.traps_tex.sample(uv_hdx))
-                + self.trap_strength(self.traps_tex.sample(uv_hcy))
-                + self.trap_strength(self.traps_tex.sample(uv_hdy))
-            let broad_trap = halo_trap_a * 0.25
-            let wide_trap = halo_trap_b * 0.25
-            let highlight_ribbon = pow(
-                clamp(1.0 - abs(beauty_ribbon - 0.5) * 2.0, 0.0, 1.0),
-                3.0
-            )
-            let lit_surface =
-                (base_albedo * (ambient + diffuse)
-                + spec_color * (spec_core * spec_intensity + spec_fill * 0.12 + spec_rim * 0.08 + fresnel * 0.06)
-                + vec3(rim * 0.06, rim * 0.04, rim * 0.03)
-                + vec3(0.12, 0.08, 0.05) * (highlight_ribbon * 0.18 + contour * 0.03))
-                * (0.42 + 0.28 * ao)
-            let fog_amount = clamp(far_mix * (0.18 + contour * 0.10 + march_steps * 0.06), 0.0, 0.52)
-            let base_beauty = lit_surface.mix(self.fog_palette(far_mix), fog_amount)
-            let pretty_base =
-                base_beauty
-                .mix(
-                    base_beauty * 1.12
-                    + vec3(0.10, 0.18, 0.28) * (highlight_ribbon * 0.20 + spec_core * 0.10)
-                    + vec3(contour * 0.03, contour * 0.04, contour * 0.05),
-                    0.30 + self.style_mix * 0.08
+                .mix(vec3(0.78, 0.96, 1.08), fold_grid * 0.14 + orbit_r2 * 0.10)
+                .mix(vec3(0.06, 0.12, 0.24), trap_energy * 0.12)
+            let ao_term = 0.18 + ao * 0.82
+            let particle_relight = particle_color
+                * particle_attenuation
+                * self.light_gain
+                * (particle_wrap * 0.34 + particle_ndotl * 0.28)
+            let particle_specular = particle_color.mix(vec3(1.0, 1.0, 1.0), 0.45)
+                * max(particle_spec * 1.8, particle_gloss * 0.55)
+                * particle_attenuation
+                * self.light_gain
+                * (7.5 + self.glow_gain * 3.2)
+                * (0.35 + 0.65 * pow(clamp(1.0 - dot(normal, view_dir), 0.0, 1.0), 3.0))
+            if self.debug_view > 1.5 && self.debug_view < 2.5 {
+                let light_debug = vec3(
+                    particle_attenuation,
+                    particle_ndotl,
+                    particle_wrap
                 )
-            let depth_band = pow(
-                0.5 + 0.5 * sin(
-                    far_mix * 28.0
-                    + pos.z * 19.0
-                    - pos.x * 8.0
-                    + pos.y * 6.0
-                ),
-                6.0
-            )
-            let depth_ray = pow(
-                clamp(
-                    1.0 - abs(sin(pos.x * 10.0 + pos.y * 4.5 - far_mix * 10.0)),
-                    0.0,
-                    1.0
-                ),
-                10.0
-            ) * (0.18 + 0.82 * far_mix)
-            let trap_shimmer = pow(
-                0.5 + 0.5 * sin(
-                    traps.x * 13.0
-                    + traps.y * 17.0
-                    + traps.z * 19.0
-                    + traps.w * 23.0
-                    + contour * 9.0
-                ),
-                4.0
-            )
-            let depth_haze = vec3(0.10, 0.22, 0.42) * far_mix * (0.14 + depth_ray * 0.26 + depth_band * 0.14)
-            let depth_sun = vec3(0.72, 0.96, 1.12) * (depth_band * 0.08 + highlight_ribbon * far_mix * 0.04)
-            let trap_glow = vec3(0.18, 0.86, 1.08)
-                .mix(vec3(0.56, 0.38, 1.08), trap_shimmer * 0.34 + pulse * 0.10)
-                * trap_energy
-                * (0.04 + trap_shimmer * 0.10 + contour * 0.04)
-            let embedded_glitter = glitter * (0.08 + far_mix * 0.14 + trap_energy * 0.08 + highlight_ribbon * 0.06)
-            let enhanced_base =
-                pretty_base
-                .mix(
-                    pretty_base
-                    + depth_haze
-                    + depth_sun
-                    + trap_glow
-                    + vec3(0.04, 0.025, 0.015) * (depth_ray * 0.18 + contour * 0.04),
-                    0.26 + far_mix * 0.10 + self.style_mix * 0.06
-                )
-            let base_luma = dot(pretty_base, vec3(0.2126, 0.7152, 0.0722))
-            let cool_grade = vec3(0.02, 0.04, 0.10)
-                .mix(vec3(0.10, 0.16, 0.40), clamp(base_luma * 1.2 + contour * 0.08, 0.0, 1.0))
-                .mix(vec3(0.06, 0.44, 1.10), clamp(branch_bias * 0.38 + orbit_heat * 0.30, 0.0, 1.0))
-                .mix(vec3(0.78, 0.94, 1.06), clamp(highlight_ribbon * 0.14 + spec_core * 0.06, 0.0, 1.0))
-            let cathedral_base =
-                pretty_base
-                .mix(cool_grade * (0.20 + base_luma * 0.94), 0.46)
-                * (0.54 + ao * 0.14)
-            let nebula = vec3(0.08, 0.12, 0.34)
-                .mix(vec3(0.12, 0.56, 1.10), clamp(branch_bias * 0.45 + orbit_heat * 0.18, 0.0, 1.0))
-                * far_mix
-                * (0.08 + depth_band * 0.22 + depth_ray * 0.16)
-            let ember_core = pow(
-                0.5 + 0.5 * sin(
-                    traps.w * 34.0
-                    + depth * 28.0
-                    + pos.z * 16.0
-                    + contour * 7.0
-                ),
-                18.0
-            ) * (0.20 + 0.80 * trap_energy)
-            let ember_sparks = clamp(embedded_glitter * 1.10 + ember_core * 0.28, 0.0, 1.5)
-            let ember_color = vec3(0.64, 0.88, 1.14)
-                .mix(vec3(0.96, 0.96, 1.00), clamp(ember_core * 0.40 + embedded_glitter * 0.15, 0.0, 1.0))
-            let ice_rim = vec3(0.18, 0.84, 1.12)
-                * (branch_bias * 0.16 + rim * 0.10 + sign_echo * 0.08)
-                * (0.25 + 0.75 * pow(animated_wave, 4.0))
-            let cavity_glow = clamp((1.0 - ao) * 0.65 + edge_glow * 0.55 + contour * 0.12, 0.0, 1.0)
-            let lantern_band_a = pow(
-                clamp(1.0 - abs(sin((traps.x * 7.0 + traps.w * 6.0 + orbit.w * 2.0 + phase * 2.0) * 6.2831853)), 0.0, 1.0),
-                6.5
-            )
-            let lantern_band_b = pow(
-                clamp(1.0 - abs(sin((traps.y * 8.0 - traps.z * 5.5 + iterations * 2.0 + depth * 3.0) * 6.2831853)), 0.0, 1.0),
-                6.5
-            )
-            let lantern_halo = clamp(lantern_band_a * 0.55 + lantern_band_b * 0.55, 0.0, 1.0)
-                * (0.20 + 0.80 * cavity_glow)
-                * (0.20 + 0.80 * trap_energy)
-            let lantern_core = lantern_band_a
-                * lantern_band_b
-                * (0.25 + 0.75 * cavity_glow)
-                * (0.20 + 0.80 * trap_energy)
-            let trap_halo = clamp(
-                lantern_halo * 0.55
-                + broad_trap * (0.34 + cavity_glow * 0.24)
-                + wide_trap * (0.18 + halo_far_b * 0.18),
-                0.0,
-                1.5
-            )
-            let void_halo = clamp(
-                halo_far_a * (0.30 + halo_open_a * 0.40)
-                + halo_far_b * (0.20 + halo_open_b * 0.30)
-                + edge_glow * 0.22,
-                0.0,
-                1.6
-            )
-            let uv_isolate_a = pow(
-                clamp(1.0 - abs(sin((phase * 12.0 + branch_bias * 2.0 + orbit.w * 1.4) * 6.2831853)), 0.0, 1.0),
-                10.0
-            )
-            let uv_isolate_b = pow(
-                clamp(1.0 - abs(sin((phase * 7.0 - pos.z * 1.7 + iterations * 1.1 + traps.w * 1.8) * 6.2831853)), 0.0, 1.0),
-                8.0
-            )
-            let uv_seed = uv_isolate_a
-                * (0.20 + 0.80 * uv_isolate_b)
-                * (0.18 + 0.82 * edge_glow)
-                * (0.15 + 0.85 * trap_energy)
-            let uv_core = pow(clamp((uv_seed - 0.12) * 3.2, 0.0, 1.0), 2.2)
-                * (0.20 + 0.80 * cavity_glow)
-            let uv_halo = pow(
-                clamp(
-                    uv_seed * 0.45
-                    + lantern_halo * 0.18
-                    + trap_halo * 0.12
-                    + void_halo * 0.08
-                    - 0.08,
-                    0.0,
-                    1.0
-                ),
-                1.6
-            )
-            let uv_gain = (uv_core * 3.8 + uv_halo * 1.2) * (0.46 + self.glow_gain * 0.42)
-            let lantern_color = vec3(0.70, 0.94, 1.18)
-                .mix(vec3(1.00, 1.00, 1.00), clamp(lantern_core * 0.80 + lantern_halo * 0.20, 0.0, 1.0))
-            let uv_color = vec3(0.24, 0.46, 1.12)
-                .mix(vec3(0.18, 0.92, 1.24), clamp(phase * 0.70 + halo_far_a * 0.20, 0.0, 1.0))
-                .mix(vec3(0.94, 0.96, 1.08), clamp(trap_energy * 0.35 + lantern_core * 0.25, 0.0, 1.0))
-            let cyan_halo = vec3(0.12, 0.78, 1.22)
-                .mix(vec3(0.70, 1.04, 1.12), clamp(void_halo * 0.55 + halo_far_a * 0.25, 0.0, 1.0))
-                * void_halo
-                * (0.28 + halo_far_a * 0.44 + halo_far_b * 0.22)
-            let amber_halo = vec3(0.38, 0.30, 1.04)
-                .mix(vec3(0.88, 0.96, 1.06), clamp(trap_halo * 0.45 + lantern_core * 0.35, 0.0, 1.0))
-                * trap_halo
-                * (0.10 + cavity_glow * 0.18)
-            let optical_glow = uv_color * (uv_gain * 0.12 + uv_halo * 0.30 + trap_halo * 0.08 + void_halo * 0.06)
-            let optical_core = vec3(0.96, 0.98, 1.02) * uv_core * uv_gain * 0.07
-            let original_luma = dot(original_beauty, vec3(0.2126, 0.7152, 0.0722))
-            let original_key = pow(clamp(original_luma * 1.7 - 0.16, 0.0, 1.0), 1.5)
-            let original_fill = original_beauty * (0.16 + original_luma * 0.38)
-            let original_glow = original_beauty * (0.04 + original_key * (0.18 + self.glow_gain * 0.10))
-            let vignette = clamp(1.06 - length(uv - vec2(0.5, 0.5)) * 1.62, 0.0, 1.0)
-            let cavity = clamp((1.0 - ao) * 0.60 + contour * 0.26 + edge_glow * 0.12, 0.0, 1.0)
-            let open_space = clamp(halo_open_a * 0.58 + halo_open_b * 0.42 + (1.0 - ao) * 0.16, 0.0, 1.0)
-            let foreground_mask = clamp(
-                pow(clamp(depth, 0.0, 1.0), 1.85)
-                * (0.42 + cavity * 0.28 + edge_glow * 0.16 + rim * 0.10),
+                return Pal.premul(vec4(clamp(light_debug, vec3(0.0), vec3(1.0)), 1.0))
+            }
+            if self.debug_view > 2.5 {
+                let spec_debug = clamp(particle_specular * 6.0, vec3(0.0), vec3(1.0))
+                return Pal.premul(vec4(spec_debug, 1.0))
+            }
+            let base_layer = base_albedo * ao_term
+            let fog_shape = clamp(
+                halo_open_a * 0.40
+                + halo_open_b * 0.78
+                + edge_glow * 0.18
+                + contour * 0.08,
                 0.0,
                 1.0
             )
-            let background_mask = clamp(
-                pow(clamp(far_mix, 0.0, 1.0), 1.30)
-                * (0.20 + open_space * 0.54 + halo_far_a * 0.18 + void_halo * 0.10),
+            let fog_depth_mix = clamp(halo_far_b * 0.72 + halo_far_a * 0.18 + far_mix * 0.10, 0.0, 1.0)
+            let fog_color = self.fog_palette(fog_depth_mix)
+                .mix(particle_color, 0.24 + 0.22 * particle_wrap)
+            let base_fog_amount = clamp(
+                far_mix * 0.08
+                + halo_open_a * 0.06
+                + halo_open_b * 0.10 * halo_fog,
                 0.0,
-                1.4
+                0.42
             )
-            let midground_mask = clamp(
-                1.0 - abs(depth - 0.48) * 2.6 + open_space * 0.08,
-                0.0,
-                1.0
-            )
-            let foreground_shadow = vec3(0.05, 0.10, 0.16) * foreground_mask * (0.94 + cavity * 0.24)
-            let foreground_rim = vec3(0.18, 0.90, 1.14)
-                * foreground_mask
-                * edge_glow
-                * (0.20 + spec_core * 0.10 + lantern_halo * 0.10)
-            let background_pool = vec3(0.10, 0.50, 1.08)
-                * background_mask
-                * open_space
-                * (0.28 + void_halo * 0.32 + halo_open_a * 0.18 + depth_ray * 0.08)
-            let background_core = vec3(0.86, 0.98, 1.06)
-                * background_mask
-                * open_space
-                * (0.04 + uv_core * 0.24 + lantern_core * 0.10 + depth_sun.x * 0.12)
-            let mid_haze = vec3(0.08, 0.22, 0.40)
-                * midground_mask
-                * (0.04 + depth_band * 0.08 + halo_far_a * 0.06)
-
-            let composite_look =
-                cathedral_base * (0.78 - foreground_mask * 0.56) * vignette
-                + enhanced_base * 0.02
-                + nebula * 0.34
-                + original_fill * (0.28 + background_mask * 0.10)
-                + original_glow * (0.16 + open_space * 0.10)
-                + background_pool
-                + background_core
-                + mid_haze
-                + cyan_halo * 0.46
-                + depth_haze * 0.18
-                + depth_sun * 0.12
-                + trap_glow * 0.08
-                + amber_halo * 0.03
-                + ice_rim * 0.42
-                + optical_glow * 0.34
-                + optical_core * 0.24
-                + lantern_color * (lantern_halo * 0.10 + lantern_core * 0.48)
-                + vec3(1.00, 1.00, 1.00) * lantern_core * 0.06
-                + ember_color * ember_sparks * (0.01 + self.glow_gain * 0.02)
-                + animated_chroma * pow(animated_ribbon, 4.0) * (0.003 + self.style_mix * 0.008)
-                + spec_color * (spec_core * 0.12 + spec_rim * 0.04)
-                + foreground_rim
-                + vec3(contour * 0.016, contour * 0.024, contour * 0.040)
-                - foreground_shadow
-                - vec3(0.02, 0.03, 0.05) * cavity * 0.10
-
-            let mut color = composite_look
-            color = color.mix(color + vec3(trap_energy, contour * 0.25, uncertainty_band) * 0.08, self.glow_gain * 0.25)
-            color = self.display_map(clamp(color, vec3(0.0), vec3(4.5)))
-            color = clamp(color, vec3(0.0), vec3(1.0))
-            return Pal.premul(vec4(color, 1.0))
+            let halo_glow = fog_color
+                * particle_haze
+                * particle_range_falloff
+                * (0.24 + particle_depth_gate * 0.76)
+                * fog_shape
+                * halo_fog
+                * self.light_gain
+                * (0.16 + self.glow_gain * 0.34)
+            let mut color = base_layer.mix(fog_color, base_fog_amount)
+                + particle_relight
+                + particle_specular
+                + halo_glow
+            color = self.display_map(clamp(color, vec3(0.0), vec3(3.0)))
+            return Pal.premul(vec4(clamp(color, vec3(0.0), vec3(1.0)), 1.0))
         }
     }
 
@@ -662,6 +578,7 @@ script_mod! {
             contour_gain: 0.72
             glow_gain: 0.44
             zoom: 1.0
+            max_mip_level: 0.0
             pan: vec2(0.0, 0.0)
             image_size: vec2(1.0, 1.0)
         }
@@ -696,17 +613,10 @@ script_mod! {
                             }
 
                             Hr{}
-                            file_title := Labelbold{text: "Loaded File"}
-                            file_value := TextBox{text: "Scanning /tmp for mb3d EXR renders..."}
-                            status_title := Labelbold{text: "Status"}
-                            status_value := TextBox{text: "Waiting for draw pass"}
-
-                            Hr{}
                             tuning_title := Labelbold{text: "Tuning"}
                             reload_latest_button := Button{text: "Reload Latest"}
                             reset_view_button := Button{text: "Reset View"}
-
-                            Hr{}
+                            toggle_normal_debug_button := Button{text: "Cycle Debug View"}
                             style_slider := SliderRoundFlat{
                                 text: "Style Mix"
                                 min: 0.0
@@ -728,6 +638,51 @@ script_mod! {
                                 step: 0.01
                                 precision: 2
                             }
+                            light_gain_slider := SliderRoundFlat{
+                                text: "Light Gain"
+                                min: 0.0
+                                max: 3.0
+                                step: 0.01
+                                precision: 2
+                            }
+                            light_radius_slider := SliderRoundFlat{
+                                text: "Light Radius"
+                                min: 0.25
+                                max: 4.0
+                                step: 0.01
+                                precision: 2
+                            }
+                            light_lift_slider := SliderRoundFlat{
+                                text: "Light Lift"
+                                min: 0.0
+                                max: 2.5
+                                step: 0.01
+                                precision: 2
+                            }
+                            halo_width_slider := SliderRoundFlat{
+                                text: "Halo Width"
+                                min: 0.0
+                                max: 4.0
+                                step: 0.01
+                                precision: 2
+                            }
+                            halo_fog_slider := SliderRoundFlat{
+                                text: "Halo Fog"
+                                min: 0.0
+                                max: 3.0
+                                step: 0.01
+                                precision: 2
+                            }
+
+                            Hr{}
+                            mip_title := Labelbold{text: "Mip Lookup"}
+                            mip_value := TextBox{text: "Base only"}
+                            view_mode_title := Labelbold{text: "View Mode"}
+                            view_mode_value := TextBox{text: "Beauty"}
+                            file_title := Labelbold{text: "Loaded File"}
+                            file_value := TextBox{text: "Scanning /tmp for mb3d EXR renders..."}
+                            status_title := Labelbold{text: "Status"}
+                            status_value := TextBox{text: "Waiting for draw pass"}
 
                             Filler{}
                             hint := P{
@@ -774,15 +729,28 @@ impl App {
         self.ui.label(cx, ids!(status_value)).set_text(cx, value);
     }
 
+    fn set_mip_value(&self, cx: &mut Cx, value: &str) {
+        self.ui.label(cx, ids!(mip_value)).set_text(cx, value);
+    }
+
+    fn set_view_mode_value(&self, cx: &mut Cx, value: &str) {
+        self.ui.label(cx, ids!(view_mode_value)).set_text(cx, value);
+    }
+
     fn queue_latest_render(&mut self, cx: &mut Cx) {
         if let Some(path) = find_latest_render_exr() {
             self.pending_exr_path = Some(path.clone());
+            self.loaded_summary = None;
+            self.available_mips.clear();
+            self.displayed_mip_value.clear();
             self.set_file_value(cx, &path.display().to_string());
             self.set_status_value(cx, "Queued latest render EXR");
+            self.set_mip_value(cx, "Scanning mip parts...");
         } else {
             self.pending_exr_path = None;
             self.set_file_value(cx, "No mb3d EXR renders found in /tmp");
             self.set_status_value(cx, "Nothing to load");
+            self.set_mip_value(cx, "Base only");
         }
     }
 
@@ -798,28 +766,67 @@ impl App {
             return;
         };
 
-        match inner.load_exr_path(cx, &path) {
+        let source = match discover_viewer_source(&path) {
+            Ok(source) => source,
+            Err(err) => {
+                self.set_file_value(cx, &path.display().to_string());
+                self.set_status_value(cx, &format!("Load failed: {err}"));
+                self.set_mip_value(cx, "Unavailable");
+                self.ui.redraw(cx);
+                cx.redraw_all();
+                return;
+            }
+        };
+        let load_result = inner.load_exr_path(cx, &path, &source.mip_parts, &source.camera);
+        drop(inner);
+
+        match load_result {
             Ok(summary) => {
+                self.loaded_summary = Some(summary);
+                self.available_mips = source.mip_parts;
+                self.displayed_mip_value.clear();
                 self.set_file_value(cx, &path.display().to_string());
                 self.set_status_value(
                     cx,
                     &format!(
-                        "Loaded {}x{} EXR, {} channels, {} texture packs",
+                        "Loaded {}x{} EXR, {} channels, {} texture packs, {} mip levels; auto mip lookup follows zoom",
                         summary.width,
                         summary.height,
                         summary.channel_count,
-                        PACK_SPECS.len()
+                        PACK_SPECS.len(),
+                        summary.mip_count
                     ),
                 );
             }
             Err(err) => {
                 self.set_file_value(cx, &path.display().to_string());
                 self.set_status_value(cx, &format!("Load failed: {err}"));
+                self.set_mip_value(cx, "Unavailable");
             }
         }
 
         self.ui.redraw(cx);
         cx.redraw_all();
+    }
+
+    fn update_auto_mip_display(&mut self, cx: &mut Cx) {
+        let value = if self.available_mips.is_empty() {
+            "Base only".to_string()
+        } else {
+            let viewer = self.viewport_ref(cx);
+            let lod = {
+                let Some(inner) = viewer.borrow::<ExfViewport>() else {
+                    return;
+                };
+                inner.auto_mip_level(cx)
+            };
+            format_auto_mip_value(&self.available_mips, lod)
+        };
+
+        if value != self.displayed_mip_value {
+            self.displayed_mip_value = value.clone();
+            self.set_mip_value(cx, &value);
+        }
     }
 
 }
@@ -830,6 +837,12 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     pending_exr_path: Option<PathBuf>,
+    #[rust]
+    available_mips: Vec<ViewerMipPart>,
+    #[rust]
+    loaded_summary: Option<LoadedExrSummary>,
+    #[rust]
+    displayed_mip_value: String,
 }
 
 impl MatchEvent for App {
@@ -844,17 +857,38 @@ impl MatchEvent for App {
             .slider(cx, ids!(glow_slider))
             .set_value(cx, DEFAULT_GLOW_GAIN as f64);
         self.ui
+            .slider(cx, ids!(light_gain_slider))
+            .set_value(cx, DEFAULT_LIGHT_GAIN as f64);
+        self.ui
+            .slider(cx, ids!(light_radius_slider))
+            .set_value(cx, DEFAULT_LIGHT_RADIUS as f64);
+        self.ui
+            .slider(cx, ids!(light_lift_slider))
+            .set_value(cx, DEFAULT_LIGHT_LIFT as f64);
+        self.ui
+            .slider(cx, ids!(halo_width_slider))
+            .set_value(cx, DEFAULT_HALO_WIDTH as f64);
+        self.ui
+            .slider(cx, ids!(halo_fog_slider))
+            .set_value(cx, DEFAULT_HALO_FOG as f64);
+        self.ui
             .label(cx, ids!(packs))
             .set_text(cx, &format!("GPU bank: {}", pack_schema_summary()));
+        self.displayed_mip_value = "Base only".to_string();
+        self.set_mip_value(cx, "Base only");
+        self.set_view_mode_value(cx, "Beauty");
 
         let args: Vec<String> = std::env::args().collect();
         if let Some(path) = resolve_startup_exr_path(&args) {
             self.pending_exr_path = Some(path.clone());
+            self.loaded_summary = None;
             self.set_file_value(cx, &path.display().to_string());
             self.set_status_value(cx, "Queued EXR for load");
+            self.set_mip_value(cx, "Scanning mip parts...");
         } else {
             self.set_file_value(cx, "No EXR path provided and no /tmp/mb3d*.exr render was found");
             self.set_status_value(cx, "Viewer is idle");
+            self.set_mip_value(cx, "Base only");
         }
     }
 
@@ -866,6 +900,17 @@ impl MatchEvent for App {
             let viewer = self.viewport_ref(cx);
             if let Some(mut inner) = viewer.borrow_mut::<ExfViewport>() {
                 inner.reset_view(cx);
+            };
+        }
+        if self
+            .ui
+            .button(cx, ids!(toggle_normal_debug_button))
+            .clicked(actions)
+        {
+            let viewer = self.viewport_ref(cx);
+            if let Some(mut inner) = viewer.borrow_mut::<ExfViewport>() {
+                inner.cycle_debug_view(cx);
+                self.set_view_mode_value(cx, inner.view_mode_label());
             };
         }
         if let Some(value) = self.ui.slider(cx, ids!(style_slider)).slided(actions) {
@@ -886,6 +931,36 @@ impl MatchEvent for App {
                 inner.set_glow_gain(cx, value as f32);
             };
         }
+        if let Some(value) = self.ui.slider(cx, ids!(light_gain_slider)).slided(actions) {
+            let viewer = self.viewport_ref(cx);
+            if let Some(mut inner) = viewer.borrow_mut::<ExfViewport>() {
+                inner.set_light_gain(cx, value as f32);
+            };
+        }
+        if let Some(value) = self.ui.slider(cx, ids!(light_radius_slider)).slided(actions) {
+            let viewer = self.viewport_ref(cx);
+            if let Some(mut inner) = viewer.borrow_mut::<ExfViewport>() {
+                inner.set_light_radius(cx, value as f32);
+            };
+        }
+        if let Some(value) = self.ui.slider(cx, ids!(light_lift_slider)).slided(actions) {
+            let viewer = self.viewport_ref(cx);
+            if let Some(mut inner) = viewer.borrow_mut::<ExfViewport>() {
+                inner.set_light_lift(cx, value as f32);
+            };
+        }
+        if let Some(value) = self.ui.slider(cx, ids!(halo_width_slider)).slided(actions) {
+            let viewer = self.viewport_ref(cx);
+            if let Some(mut inner) = viewer.borrow_mut::<ExfViewport>() {
+                inner.set_halo_width(cx, value as f32);
+            };
+        }
+        if let Some(value) = self.ui.slider(cx, ids!(halo_fog_slider)).slided(actions) {
+            let viewer = self.viewport_ref(cx);
+            if let Some(mut inner) = viewer.borrow_mut::<ExfViewport>() {
+                inner.set_halo_fog(cx, value as f32);
+            };
+        }
     }
 }
 
@@ -900,6 +975,7 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if matches!(event, Event::Draw(_)) {
             self.try_load_exr(cx);
+            self.update_auto_mip_display(cx);
         }
     }
 }
@@ -918,11 +994,43 @@ pub struct DrawExf {
     #[live]
     glow_gain: f32,
     #[live]
+    halo_width: f32,
+    #[live]
+    halo_fog: f32,
+    #[live]
+    light_gain: f32,
+    #[live]
+    light_radius: f32,
+    #[live]
+    light_lift: f32,
+    #[live]
+    time: f32,
+    #[live]
+    debug_view: f32,
+    #[live]
     zoom: f32,
+    #[live]
+    max_mip_level: f32,
     #[live]
     pan: Vec2f,
     #[live]
     image_size: Vec2f,
+    #[live]
+    depth_min: f32,
+    #[live]
+    depth_inv_range: f32,
+    #[live]
+    camera_mid: Vec3f,
+    #[live]
+    camera_right_step: Vec3f,
+    #[live]
+    camera_up_step: Vec3f,
+    #[live]
+    camera_forward_dir: Vec3f,
+    #[live]
+    camera_fov_y: f32,
+    #[live]
+    camera_z_start_delta: f32,
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -939,6 +1047,8 @@ pub struct ExfViewport {
     #[rust]
     area: Area,
     #[rust]
+    next_frame: NextFrame,
+    #[rust]
     drag_last_abs: Option<DVec2>,
     #[rust(false)]
     loaded: bool,
@@ -948,12 +1058,42 @@ pub struct ExfViewport {
     contour_gain: f32,
     #[rust(DEFAULT_GLOW_GAIN)]
     glow_gain: f32,
+    #[rust(DEFAULT_HALO_WIDTH)]
+    halo_width: f32,
+    #[rust(DEFAULT_HALO_FOG)]
+    halo_fog: f32,
+    #[rust(DEFAULT_LIGHT_GAIN)]
+    light_gain: f32,
+    #[rust(DEFAULT_LIGHT_RADIUS)]
+    light_radius: f32,
+    #[rust(DEFAULT_LIGHT_LIFT)]
+    light_lift: f32,
+    #[rust(0)]
+    debug_view: i32,
     #[rust(1.0)]
     zoom: f32,
+    #[rust(0.0)]
+    max_mip_level: f32,
     #[rust(vec2(0.0, 0.0))]
     pan: Vec2f,
     #[rust(vec2(1.0, 1.0))]
     image_size: Vec2f,
+    #[rust(0.0)]
+    depth_min: f32,
+    #[rust(1.0)]
+    depth_inv_range: f32,
+    #[rust(vec3(0.0, 0.0, 0.0))]
+    camera_mid: Vec3f,
+    #[rust(vec3(1.0, 0.0, 0.0))]
+    camera_right_step: Vec3f,
+    #[rust(vec3(0.0, 1.0, 0.0))]
+    camera_up_step: Vec3f,
+    #[rust(vec3(0.0, 0.0, 1.0))]
+    camera_forward_dir: Vec3f,
+    #[rust(45.0)]
+    camera_fov_y: f32,
+    #[rust(0.0)]
+    camera_z_start_delta: f32,
     #[rust]
     textures: Vec<Texture>,
 }
@@ -963,6 +1103,145 @@ struct LoadedExrSummary {
     width: usize,
     height: usize,
     channel_count: usize,
+    mip_count: usize,
+    depth_min: f32,
+    depth_max: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ViewerMipPart {
+    part_index: usize,
+    level: usize,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ViewerExrSource {
+    mip_parts: Vec<ViewerMipPart>,
+    camera: ViewerCameraMetadata,
+}
+
+fn parse_raw_int_attribute(part: &ExrPart, name: &str) -> Option<i32> {
+    part.other_attributes
+        .iter()
+        .find(|attribute| attribute.name == name && attribute.type_name == "int")
+        .and_then(|attribute| {
+            if attribute.value.len() == 4 {
+                Some(i32::from_le_bytes(attribute.value.as_slice().try_into().ok()?))
+            } else {
+                None
+            }
+        })
+}
+
+fn parse_raw_string_attribute(part: &ExrPart, name: &str) -> Option<String> {
+    part.other_attributes
+        .iter()
+        .find(|attribute| {
+            attribute.name == name
+                && (attribute.type_name == "string" || attribute.type_name == "text")
+        })
+        .and_then(|attribute| String::from_utf8(attribute.value.clone()).ok())
+}
+
+fn discover_viewer_source(path: &Path) -> Result<ViewerExrSource, String> {
+    let image = read_headers_file(path).map_err(|err| err.to_string())?;
+    if image.parts.is_empty() {
+        return Err("EXR has no readable parts".to_string());
+    }
+
+    let camera = image
+        .parts
+        .iter()
+        .find_map(|part| parse_raw_string_attribute(part, MB3D_CAMERA_ATTRIBUTE_NAME))
+        .ok_or_else(|| {
+            format!(
+                "EXR is missing {MB3D_CAMERA_ATTRIBUTE_NAME} metadata; rerender with the current mb3d renderer"
+            )
+        })
+        .and_then(|value| ViewerCameraMetadata::decode_string(&value))?;
+
+    let mut mip_parts = image
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(part_index, part)| {
+            let level = parse_raw_int_attribute(part, MB3D_MIP_LEVEL_ATTRIBUTE_NAME)?;
+            Some((
+                level,
+                ViewerMipPart {
+                    part_index,
+                    level: level.max(0) as usize,
+                    width: part.width().ok()?,
+                    height: part.height().ok()?,
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    if mip_parts.is_empty() {
+        let (part_index, part) = image
+            .parts
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, part)| part.channels.len())
+            .ok_or_else(|| "EXR has no readable parts".to_string())?;
+        return Ok(ViewerExrSource {
+            mip_parts: vec![ViewerMipPart {
+                part_index,
+                level: 0,
+                width: part.width().map_err(|err| err.to_string())?,
+                height: part.height().map_err(|err| err.to_string())?,
+            }],
+            camera,
+        });
+    }
+
+    mip_parts.sort_by_key(|(level, _)| *level);
+    Ok(ViewerExrSource {
+        mip_parts: mip_parts.into_iter().map(|(_, part)| part).collect(),
+        camera,
+    })
+}
+
+fn format_auto_mip_value(parts: &[ViewerMipPart], lod: f32) -> String {
+    if parts.is_empty() {
+        return "Base only".to_string();
+    }
+    let max_slot = parts.len().saturating_sub(1) as f32;
+    let auto_lod = lod.clamp(0.0, max_slot);
+    let selected_slot = (auto_lod + 0.5).floor() as usize;
+    let selected = &parts[selected_slot];
+    format!(
+        "Auto LOD {:.2} -> selected mip {} ({}x{})",
+        auto_lod,
+        selected.level + 1,
+        selected.width,
+        selected.height
+    )
+}
+
+fn auto_mip_level_for_view(
+    image_width: f32,
+    image_height: f32,
+    viewport_width: f32,
+    viewport_height: f32,
+    zoom: f32,
+    max_mip_level: f32,
+) -> f32 {
+    let image_width = image_width.max(1.0);
+    let image_height = image_height.max(1.0);
+    let viewport_width = viewport_width.max(1.0);
+    let viewport_height = viewport_height.max(1.0);
+    let fit_scale = (viewport_width / image_width).min(viewport_height / image_height);
+    let pixel_scale = fit_scale * zoom.max(0.001);
+    let lod = if pixel_scale >= 1.0 {
+        0.0
+    } else {
+        (1.0 / pixel_scale.max(0.0001)).log2()
+    };
+    lod.clamp(0.0, max_mip_level.max(0.0))
 }
 
 impl ExfViewport {
@@ -971,9 +1250,24 @@ impl ExfViewport {
         self.draw_bg.style_mix = self.style_mix;
         self.draw_bg.contour_gain = self.contour_gain;
         self.draw_bg.glow_gain = self.glow_gain;
+        self.draw_bg.halo_width = self.halo_width;
+        self.draw_bg.halo_fog = self.halo_fog;
+        self.draw_bg.light_gain = self.light_gain;
+        self.draw_bg.light_radius = self.light_radius;
+        self.draw_bg.light_lift = self.light_lift;
+        self.draw_bg.debug_view = self.debug_view as f32;
         self.draw_bg.zoom = self.zoom;
+        self.draw_bg.max_mip_level = self.max_mip_level;
         self.draw_bg.pan = self.pan;
         self.draw_bg.image_size = self.image_size;
+        self.draw_bg.depth_min = self.depth_min;
+        self.draw_bg.depth_inv_range = self.depth_inv_range;
+        self.draw_bg.camera_mid = self.camera_mid;
+        self.draw_bg.camera_right_step = self.camera_right_step;
+        self.draw_bg.camera_up_step = self.camera_up_step;
+        self.draw_bg.camera_forward_dir = self.camera_forward_dir;
+        self.draw_bg.camera_fov_y = self.camera_fov_y;
+        self.draw_bg.camera_z_start_delta = self.camera_z_start_delta;
     }
 
     fn ensure_fallback_textures(&mut self, cx: &mut Cx) {
@@ -1020,6 +1314,52 @@ impl ExfViewport {
         self.area.redraw(cx);
     }
 
+    fn set_halo_width(&mut self, cx: &mut Cx, value: f32) {
+        self.halo_width = value.clamp(0.0, 4.0);
+        self.sync_draw_state();
+        self.area.redraw(cx);
+    }
+
+    fn set_halo_fog(&mut self, cx: &mut Cx, value: f32) {
+        self.halo_fog = value.clamp(0.0, 3.0);
+        self.sync_draw_state();
+        self.area.redraw(cx);
+    }
+
+    fn set_light_gain(&mut self, cx: &mut Cx, value: f32) {
+        self.light_gain = value.clamp(0.0, 3.0);
+        self.sync_draw_state();
+        self.area.redraw(cx);
+    }
+
+    fn set_light_radius(&mut self, cx: &mut Cx, value: f32) {
+        self.light_radius = value.clamp(0.25, 4.0);
+        self.sync_draw_state();
+        self.area.redraw(cx);
+    }
+
+    fn set_light_lift(&mut self, cx: &mut Cx, value: f32) {
+        self.light_lift = value.clamp(0.0, 2.5);
+        self.sync_draw_state();
+        self.area.redraw(cx);
+    }
+
+    fn cycle_debug_view(&mut self, cx: &mut Cx) {
+        self.debug_view = (self.debug_view + 1) % 4;
+        self.sync_draw_state();
+        self.area.redraw(cx);
+    }
+
+    fn view_mode_label(&self) -> &'static str {
+        match self.debug_view {
+            0 => "Beauty",
+            1 => "Normal RGB",
+            2 => "Particle Light",
+            3 => "Particle Spec",
+            _ => "Beauty",
+        }
+    }
+
     fn reset_view(&mut self, cx: &mut Cx) {
         self.zoom = 1.0;
         self.pan = vec2(0.0, 0.0);
@@ -1027,16 +1367,56 @@ impl ExfViewport {
         self.area.redraw(cx);
     }
 
-    fn load_exr_path(&mut self, cx: &mut Cx, path: &Path) -> Result<LoadedExrSummary, String> {
-        let image = read_file(path).map_err(|err| err.to_string())?;
-        let part = image
-            .parts
-            .into_iter()
-            .max_by_key(|part| part.channels.len())
-            .ok_or_else(|| "EXR has no readable parts".to_string())?;
-        let summary = load_part_into_texture_bank(part, cx, &mut self.textures)?;
+    fn auto_mip_level(&self, cx: &Cx) -> f32 {
+        if !self.loaded || !self.area.is_valid(cx) {
+            return 0.0;
+        }
+        let rect = self.area.rect(cx);
+        auto_mip_level_for_view(
+            self.image_size.x,
+            self.image_size.y,
+            rect.size.x as f32,
+            rect.size.y as f32,
+            self.zoom,
+            self.max_mip_level,
+        )
+    }
+
+    fn load_exr_path(
+        &mut self,
+        cx: &mut Cx,
+        path: &Path,
+        mip_parts: &[ViewerMipPart],
+        camera: &ViewerCameraMetadata,
+    ) -> Result<LoadedExrSummary, String> {
+        let summary = load_mip_chain_into_texture_bank(path, mip_parts, cx, &mut self.textures)?;
         self.loaded = true;
         self.image_size = vec2(summary.width as f32, summary.height as f32);
+        self.max_mip_level = summary.mip_count.saturating_sub(1) as f32;
+        self.depth_min = summary.depth_min;
+        self.depth_inv_range = if summary.depth_max > summary.depth_min {
+            1.0 / (summary.depth_max - summary.depth_min)
+        } else {
+            0.0
+        };
+        self.camera_mid = vec3(camera.mid.x as f32, camera.mid.y as f32, camera.mid.z as f32);
+        self.camera_right_step = vec3(
+            camera.right_step.x as f32,
+            camera.right_step.y as f32,
+            camera.right_step.z as f32,
+        );
+        self.camera_up_step = vec3(
+            camera.up_step.x as f32,
+            camera.up_step.y as f32,
+            camera.up_step.z as f32,
+        );
+        self.camera_forward_dir = vec3(
+            camera.forward_dir.x as f32,
+            camera.forward_dir.y as f32,
+            camera.forward_dir.z as f32,
+        );
+        self.camera_fov_y = camera.fov_y as f32;
+        self.camera_z_start_delta = camera.z_start_delta as f32;
         self.sync_draw_state();
         self.bind_textures();
         self.area.redraw(cx);
@@ -1046,6 +1426,18 @@ impl ExfViewport {
 
 impl Widget for ExfViewport {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if let Event::NextFrame(ne) = event {
+            if ne.set.contains(&self.next_frame) {
+                self.draw_bg.time = ne.time as f32;
+                self.area.redraw(cx);
+                self.next_frame = cx.new_next_frame();
+            }
+        }
+
+        if matches!(event, Event::Startup) {
+            self.next_frame = cx.new_next_frame();
+        }
+
         match event.hits_with_capture_overload(cx, self.area, true) {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.drag_last_abs = Some(fe.abs);
@@ -1111,30 +1503,115 @@ impl Widget for ExfViewport {
     }
 }
 
-fn load_part_into_texture_bank(
-    part: ExrPart,
+fn load_mip_chain_into_texture_bank(
+    path: &Path,
+    mip_parts: &[ViewerMipPart],
     cx: &mut Cx,
     textures: &mut Vec<Texture>,
 ) -> Result<LoadedExrSummary, String> {
-    let width = part.width().map_err(|err| err.to_string())?;
-    let height = part.height().map_err(|err| err.to_string())?;
-    let channel_count = part.channels.len();
-    let pixel_count = width
-        .checked_mul(height)
-        .ok_or_else(|| "EXR image dimensions overflow".to_string())?;
+    if mip_parts.is_empty() {
+        return Err("EXR has no readable mip parts".to_string());
+    }
 
-    let channel_map = collect_float_channels(part.channels, pixel_count)?;
-    let planes = build_texture_planes(&channel_map, pixel_count)?;
+    let total_plane_len = mip_parts.iter().try_fold(0usize, |acc, part| {
+        let pixels = part
+            .width
+            .checked_mul(part.height)
+            .ok_or_else(|| "EXR image dimensions overflow".to_string())?;
+        let rgba_len = pixels
+            .checked_mul(4)
+            .ok_or_else(|| "EXR mip plane size overflow".to_string())?;
+        acc.checked_add(rgba_len)
+            .ok_or_else(|| "EXR mip chain size overflow".to_string())
+    })?;
 
-    *textures = planes
+    let mut mip_planes = (0..PACK_SPECS.len())
+        .map(|_| Vec::with_capacity(total_plane_len))
+        .collect::<Vec<_>>();
+
+    let base = &mip_parts[0];
+    let mut previous_dims = Some((base.width, base.height));
+    let mut channel_count = 0usize;
+    let mut depth_min = 0.0f32;
+    let mut depth_max = 1.0f32;
+
+    for (slot, mip_part) in mip_parts.iter().enumerate() {
+        if slot > 0 {
+            let (prev_width, prev_height) = previous_dims.expect("previous mip dimensions missing");
+            let expected_width = (prev_width / 2).max(1);
+            let expected_height = (prev_height / 2).max(1);
+            if mip_part.width != expected_width || mip_part.height != expected_height {
+                return Err(format!(
+                    "mip {} had {}x{}, expected {}x{}",
+                    mip_part.level,
+                    mip_part.width,
+                    mip_part.height,
+                    expected_width,
+                    expected_height
+                ));
+            }
+        }
+
+        let part = read_part_file(path, mip_part.part_index).map_err(|err| err.to_string())?;
+        let width = part.width().map_err(|err| err.to_string())?;
+        let height = part.height().map_err(|err| err.to_string())?;
+        if width != mip_part.width || height != mip_part.height {
+            return Err(format!(
+                "mip {} header/data size mismatch: header {}x{}, data {}x{}",
+                mip_part.level, mip_part.width, mip_part.height, width, height
+            ));
+        }
+
+        let part_channel_count = part.channels.len();
+        if slot == 0 {
+            channel_count = part_channel_count;
+        } else if part_channel_count != channel_count {
+            return Err(format!(
+                "mip {} had {} channels, expected {}",
+                mip_part.level, part_channel_count, channel_count
+            ));
+        }
+
+        let pixel_count = width
+            .checked_mul(height)
+            .ok_or_else(|| "EXR image dimensions overflow".to_string())?;
+        let channel_map = collect_float_channels(part.channels, pixel_count)?;
+        if slot == 0 {
+            let depth_values = channel_map
+                .get("depth.Depth")
+                .ok_or_else(|| "EXR is missing channel depth.Depth".to_string())?;
+            let mut min = f32::INFINITY;
+            let mut max = f32::NEG_INFINITY;
+            for &value in depth_values {
+                if value.is_finite() {
+                    min = min.min(value);
+                    max = max.max(value);
+                }
+            }
+            if min.is_finite() && max.is_finite() {
+                depth_min = min;
+                depth_max = max;
+            }
+        }
+        let planes = build_texture_planes(&channel_map, pixel_count)?;
+
+        for (dst, plane) in mip_planes.iter_mut().zip(planes.into_iter()) {
+            dst.extend(plane);
+        }
+        previous_dims = Some((width, height));
+    }
+
+    let max_level = mip_parts.len().saturating_sub(1);
+    *textures = mip_planes
         .into_iter()
         .map(|plane| {
             Texture::new_with_format(
                 cx,
-                TextureFormat::VecRGBAf32 {
-                    width,
-                    height,
+                TextureFormat::VecMipRGBAf32 {
+                    width: base.width,
+                    height: base.height,
                     data: Some(plane),
+                    max_level: Some(max_level),
                     updated: TextureUpdated::Full,
                 },
             )
@@ -1142,9 +1619,12 @@ fn load_part_into_texture_bank(
         .collect();
 
     Ok(LoadedExrSummary {
-        width,
-        height,
+        width: base.width,
+        height: base.height,
         channel_count,
+        mip_count: mip_parts.len(),
+        depth_min,
+        depth_max,
     })
 }
 
@@ -1329,9 +1809,21 @@ mod tests {
     }
 
     #[test]
-    fn fixed_pack_schema_stays_at_ten_rgba_textures() {
-        assert_eq!(PACK_SPECS.len(), 10);
+    fn auto_mip_level_matches_fit_scale() {
+        let lod = auto_mip_level_for_view(7680.0, 4320.0, 640.0, 360.0, 1.0, 5.0);
+        assert!((lod - 3.5849626).abs() < 0.01, "lod was {lod}");
+    }
+
+    #[test]
+    fn auto_mip_level_clamps_when_zoomed_in() {
+        let lod = auto_mip_level_for_view(1920.0, 1080.0, 1920.0, 1080.0, 4.0, 4.0);
+        assert_eq!(lod, 0.0);
+    }
+
+    #[test]
+    fn fixed_pack_schema_stays_at_nine_rgba_textures() {
+        assert_eq!(PACK_SPECS.len(), 9);
         assert_eq!(PACK_SPECS[0].label, "surface");
-        assert_eq!(PACK_SPECS[9].label, "uncertainty");
+        assert_eq!(PACK_SPECS[8].label, "uncertainty");
     }
 }
