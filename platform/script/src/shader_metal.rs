@@ -523,7 +523,7 @@ impl ShaderOutput {
             };
             writeln!(
                 out,
-                "constexpr sampler _s{}(filter::{}, address::{}, coord::{});",
+                "constexpr sampler _s{}(filter::{}, mip_filter::linear, address::{}, coord::{});",
                 idx, filter, address, coord
             )
             .ok();

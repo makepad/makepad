@@ -1,7 +1,7 @@
 use makepad_half::f16;
 use makepad_openexr::{
-    read_file, read_from_slice, write_file, write_to_vec, Compression, ExrChannel, ExrImage,
-    ExrPart,
+    read_file, read_from_slice, read_headers_file, read_part_file, write_file, write_to_vec,
+    Compression, ExrChannel, ExrImage, ExrPart,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -62,6 +62,50 @@ fn roundtrip_pxr24_preserves_half_and_uint_and_quantizes_float() {
 
     let expected = quantized_for_pxr24(&image);
     assert_images_match(&expected, &decoded);
+}
+
+#[test]
+fn read_headers_file_keeps_part_metadata_without_samples() {
+    let image = ExrImage {
+        parts: vec![
+            test_part(Some("beauty".to_string()), 8, 4, Compression::Zip, 1.0),
+            test_part(Some("mip1".to_string()), 4, 2, Compression::Zip, 2.0),
+        ],
+    };
+    let path = temp_path("headers-only.exr");
+    write_file(&path, &image).expect("write_file should succeed");
+
+    let headers = read_headers_file(&path).expect("read_headers_file should succeed");
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(headers.parts.len(), 2);
+    assert_eq!(headers.parts[0].name.as_deref(), Some("beauty"));
+    assert_eq!(headers.parts[1].name.as_deref(), Some("mip1"));
+    assert_eq!(headers.parts[0].width().unwrap(), 8);
+    assert_eq!(headers.parts[1].height().unwrap(), 2);
+    assert!(headers.parts[0]
+        .channels
+        .iter()
+        .all(|channel| channel.samples.len() == 0));
+}
+
+#[test]
+fn read_part_file_only_decodes_requested_part() {
+    let beauty = test_part(Some("beauty".to_string()), 8, 4, Compression::None, 3.0);
+    let mip = test_part(Some("mip1".to_string()), 4, 2, Compression::Zip, 12.0);
+    let image = ExrImage {
+        parts: vec![beauty.clone(), mip.clone()],
+    };
+    let path = temp_path("selected-part.exr");
+    write_file(&path, &image).expect("write_file should succeed");
+
+    let decoded = read_part_file(&path, 1).expect("read_part_file should succeed");
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(decoded.name.as_deref(), Some("mip1"));
+    assert_eq!(decoded.width().unwrap(), 4);
+    assert_eq!(decoded.height().unwrap(), 2);
+    assert_eq!(decoded.channels, mip.channels);
 }
 
 fn test_part(

@@ -134,6 +134,13 @@ pub enum TextureFormat {
         max_level: Option<usize>,
         updated: TextureUpdated,
     },
+    VecMipRGBAf32 {
+        width: usize,
+        height: usize,
+        data: Option<Vec<f32>>,
+        max_level: Option<usize>,
+        updated: TextureUpdated,
+    },
     VecRGBAf32 {
         width: usize,
         height: usize,
@@ -209,6 +216,10 @@ impl std::fmt::Debug for TextureFormat {
                 f,
                 "TextureFormat::VecMipBGRAu8_32(width:{width},height:{height})"
             ),
+            TextureFormat::VecMipRGBAf32 { width, height, .. } => write!(
+                f,
+                "TextureFormat::VecMipRGBAf32(width:{width},height:{height})"
+            ),
             TextureFormat::VecRGBAf32 { width, height, .. } => write!(
                 f,
                 "TextureFormat::VecRGBAf32(width:{width},height:{height})"
@@ -263,6 +274,7 @@ pub(crate) struct TextureAlloc {
 #[derive(Clone, Debug)]
 pub enum TextureCategory {
     Vec,
+    VecMip,
     VecCube,
     Render,
     DepthBuffer,
@@ -275,6 +287,13 @@ impl PartialEq for TextureCategory {
         match self {
             Self::Vec { .. } => {
                 if let Self::Vec { .. } = other {
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::VecMip { .. } => {
+                if let Self::VecMip { .. } = other {
                     true
                 } else {
                     false
@@ -376,6 +395,7 @@ impl CxTexture {
             TextureFormat::VecBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecCubeBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
+            TextureFormat::VecMipRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
             TextureFormat::VecRGu8 { updated, .. } => updated,
@@ -402,6 +422,7 @@ impl CxTexture {
             TextureFormat::VecBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecCubeBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
+            TextureFormat::VecMipRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
             TextureFormat::VecRGu8 { updated, .. } => updated,
@@ -502,6 +523,7 @@ impl TextureFormat {
             Self::VecBGRAu8_32 { .. } => true,
             Self::VecCubeBGRAu8_32 { .. } => true,
             Self::VecMipBGRAu8_32 { .. } => true,
+            Self::VecMipRGBAf32 { .. } => true,
             Self::VecRGBAf32 { .. } => true,
             Self::VecRu8 { .. } => true,
             Self::VecRGu8 { .. } => true,
@@ -539,6 +561,7 @@ impl TextureFormat {
             Self::VecBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecCubeBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecMipBGRAu8_32 { width, height, .. } => Some((*width, *height)),
+            Self::VecMipRGBAf32 { width, height, .. } => Some((*width, *height)),
             Self::VecRGBAf32 { width, height, .. } => Some((*width, *height)),
             Self::VecRu8 { width, height, .. } => Some((*width, *height)),
             Self::VecRGu8 { width, height, .. } => Some((*width, *height)),
@@ -566,7 +589,13 @@ impl TextureFormat {
                 width: *width,
                 height: *height,
                 pixel: TexturePixel::BGRAu8,
-                category: TextureCategory::Vec,
+                category: TextureCategory::VecMip,
+            }),
+            Self::VecMipRGBAf32 { width, height, .. } => Some(TextureAlloc {
+                width: *width,
+                height: *height,
+                pixel: TexturePixel::RGBAf32,
+                category: TextureCategory::VecMip,
             }),
             Self::VecRGBAf32 { width, height, .. } => Some(TextureAlloc {
                 width: *width,
@@ -797,6 +826,7 @@ impl Texture {
         let cx_texture = &mut cx.textures[self.texture_id()];
         let data = match &mut cx_texture.format {
             TextureFormat::VecRf32 { data, .. } => data,
+            TextureFormat::VecMipRGBAf32 { data, .. } => data,
             TextureFormat::VecRGBAf32 { data, .. } => data,
             _ => panic!("Not the correct texture desc for f32 image data"),
         };
@@ -807,6 +837,7 @@ impl Texture {
         let cx_texture = &mut cx.textures[self.texture_id()];
         let (data, updated) = match &mut cx_texture.format {
             TextureFormat::VecRf32 { data, updated, .. } => (data, updated),
+            TextureFormat::VecMipRGBAf32 { data, updated, .. } => (data, updated),
             TextureFormat::VecRGBAf32 { data, updated, .. } => (data, updated),
             _ => panic!("incorrect texture format for f32 image data"),
         };
