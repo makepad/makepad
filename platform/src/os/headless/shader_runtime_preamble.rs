@@ -765,6 +765,10 @@ impl Texture2D {
     pub fn sample<C: TextureSampleCoord>(&self, coord: C) -> Vec4f {
         coord.sample_texture(self)
     }
+
+    pub fn sample_lod<C: TextureSampleCoord>(&self, coord: C, _lod: f32) -> Vec4f {
+        coord.sample_texture(self)
+    }
 }
 
 pub trait TextureSampleCoord {

@@ -1,4 +1,5 @@
 use makepad_half::f16;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 const EXR_MAGIC: u32 = 20000630;
@@ -454,6 +455,77 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<ExrImage> {
     read_from_slice(&std::fs::read(path)?)
 }
 
+pub fn read_headers_file(path: impl AsRef<Path>) -> Result<ExrImage> {
+    let mut cursor = FileCursor::new(std::fs::File::open(path)?);
+    let version = read_and_validate_version(&mut cursor)?;
+    let multipart = (version & MULTIPART_FLAG) != 0;
+    let name_limit = if (version & LONG_NAMES_FLAG) != 0 {
+        255
+    } else {
+        31
+    };
+
+    let parts = parse_headers(&mut cursor, multipart, name_limit)?;
+    validate_parts_for_header_only(&parts, multipart)?;
+    Ok(ExrImage { parts })
+}
+
+pub fn read_part_file(path: impl AsRef<Path>, selected_part_index: usize) -> Result<ExrPart> {
+    let mut cursor = FileCursor::new(std::fs::File::open(path)?);
+    let version = read_and_validate_version(&mut cursor)?;
+    let multipart = (version & MULTIPART_FLAG) != 0;
+    let name_limit = if (version & LONG_NAMES_FLAG) != 0 {
+        255
+    } else {
+        31
+    };
+
+    let mut parts = parse_headers(&mut cursor, multipart, name_limit)?;
+    if selected_part_index >= parts.len() {
+        return Err(Error::InvalidFormat(format!(
+            "invalid part index {selected_part_index} (file has {} parts)",
+            parts.len()
+        )));
+    }
+    let total_chunk_count = total_chunk_count(&parts, multipart)?;
+    let selected_chunk_start = if multipart {
+        let mut start = 0usize;
+        for part in parts.iter().take(selected_part_index) {
+            start = start
+                .checked_add(chunk_count_for_part(part)?)
+                .ok_or_else(|| Error::InvalidFormat("chunk count overflow".to_string()))?;
+        }
+        start
+    } else {
+        0
+    };
+    let selected_chunk_count = chunk_count_for_part(&parts[selected_part_index])?;
+    finalize_part_for_read(&mut parts[selected_part_index], multipart)?;
+
+    let offset_table_start = cursor.position()?;
+    let selected_offset_start = offset_table_start
+        .checked_add((selected_chunk_start as u64).saturating_mul(8))
+        .ok_or_else(|| Error::InvalidFormat("chunk offset table overflow".to_string()))?;
+    cursor.set_pos(selected_offset_start)?;
+    let mut offsets = Vec::with_capacity(selected_chunk_count);
+    for _ in 0..selected_chunk_count {
+        offsets.push(cursor.read_u64()?);
+    }
+
+    for offset in offsets {
+        read_chunk_from_reader(
+            &mut cursor,
+            offset,
+            multipart,
+            selected_part_index,
+            &mut parts[selected_part_index],
+        )?;
+    }
+
+    debug_assert!(selected_chunk_start.saturating_add(selected_chunk_count) <= total_chunk_count);
+    Ok(parts.swap_remove(selected_part_index))
+}
+
 pub fn write_file(path: impl AsRef<Path>, image: &ExrImage) -> Result<()> {
     std::fs::write(path, write_to_vec(image)?)?;
     Ok(())
@@ -461,18 +533,7 @@ pub fn write_file(path: impl AsRef<Path>, image: &ExrImage) -> Result<()> {
 
 pub fn read_from_slice(bytes: &[u8]) -> Result<ExrImage> {
     let mut cursor = ByteCursor::new(bytes);
-    let magic = cursor.read_u32()?;
-    if magic != EXR_MAGIC {
-        return Err(Error::InvalidMagic(magic));
-    }
-
-    let version = cursor.read_u32()?;
-    let version_number = version & 0xff;
-    if version_number != EXR_VERSION {
-        return Err(Error::Unsupported(format!(
-            "unsupported OpenEXR file version {version_number}"
-        )));
-    }
+    let version = read_and_validate_version(&mut cursor)?;
 
     let multipart = (version & MULTIPART_FLAG) != 0;
     let name_limit = if (version & LONG_NAMES_FLAG) != 0 {
@@ -599,8 +660,24 @@ pub fn write_to_vec(image: &ExrImage) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+fn read_and_validate_version(cursor: &mut impl CursorRead) -> Result<u32> {
+    let magic = cursor.read_u32()?;
+    if magic != EXR_MAGIC {
+        return Err(Error::InvalidMagic(magic));
+    }
+
+    let version = cursor.read_u32()?;
+    let version_number = version & 0xff;
+    if version_number != EXR_VERSION {
+        return Err(Error::Unsupported(format!(
+            "unsupported OpenEXR file version {version_number}"
+        )));
+    }
+    Ok(version)
+}
+
 fn parse_headers(
-    cursor: &mut ByteCursor<'_>,
+    cursor: &mut impl CursorRead,
     multipart: bool,
     name_limit: usize,
 ) -> Result<Vec<ExrPart>> {
@@ -631,7 +708,7 @@ fn parse_headers(
 }
 
 fn parse_single_header(
-    cursor: &mut ByteCursor<'_>,
+    cursor: &mut impl CursorRead,
     multipart: bool,
     name_limit: usize,
 ) -> Result<Option<ExrPart>> {
@@ -661,8 +738,8 @@ fn parse_single_header(
                 "attribute {attr_name} has negative payload size {size}"
             )));
         }
-        let payload = cursor.read_bytes(size as usize)?;
-        parse_attribute(&mut part, &attr_name, &type_name, payload, name_limit)?;
+        let payload = cursor.read_vec(size as usize)?;
+        parse_attribute(&mut part, &attr_name, &type_name, &payload, name_limit)?;
     }
 
     Ok(Some(part))
@@ -839,6 +916,28 @@ fn finalize_parts_for_read(parts: &mut [ExrPart]) -> Result<()> {
     Ok(())
 }
 
+fn finalize_part_for_read(part: &mut ExrPart, multipart: bool) -> Result<()> {
+    validate_part(part, multipart, false)?;
+    let pixel_count = part.pixel_count()?;
+    for channel in &mut part.channels {
+        if channel.sampling != [1, 1] {
+            return Err(Error::Unsupported(format!(
+                "channel {} uses unsupported sampling {:?}",
+                channel.name, channel.sampling
+            )));
+        }
+        channel.samples = SampleBuffer::new(channel.pixel_type(), pixel_count);
+    }
+    Ok(())
+}
+
+fn validate_parts_for_header_only(parts: &[ExrPart], multipart: bool) -> Result<()> {
+    for part in parts {
+        validate_part(part, multipart, false)?;
+    }
+    Ok(())
+}
+
 fn finalize_parts_for_write(parts: &mut [ExrPart], multipart: bool) -> Result<()> {
     for part in parts {
         validate_part(part, multipart, true)?;
@@ -971,6 +1070,52 @@ fn read_chunk(bytes: &[u8], offset: usize, multipart: bool, parts: &mut [ExrPart
 
     let start_row = (y - part.data_window.min_y) as usize;
     let lines = (part.height()? - start_row).min(lines_per_chunk);
+    decode_scanline_chunk(part, start_row, lines, packed_size, packed)
+}
+
+fn read_chunk_from_reader(
+    cursor: &mut FileCursor<std::fs::File>,
+    offset: u64,
+    multipart: bool,
+    selected_part_index: usize,
+    part: &mut ExrPart,
+) -> Result<()> {
+    cursor.set_pos(offset)?;
+
+    if multipart {
+        let part_index = usize::try_from(cursor.read_u32()?)
+            .map_err(|_| Error::InvalidFormat("part index overflow".to_string()))?;
+        if part_index != selected_part_index {
+            return Err(Error::InvalidFormat(format!(
+                "chunk offset for part {selected_part_index} pointed at part {part_index}"
+            )));
+        }
+    }
+
+    let y = cursor.read_i32()?;
+    let packed_size = cursor.read_u32()? as usize;
+    let packed = cursor.read_vec(packed_size)?;
+    let lines_per_chunk = part.compression.lines_per_chunk();
+
+    if y < part.data_window.min_y || y > part.data_window.max_y {
+        return Err(Error::InvalidFormat(format!(
+            "chunk y-coordinate {y} is outside data window {}..{}",
+            part.data_window.min_y, part.data_window.max_y
+        )));
+    }
+
+    let start_row = (y - part.data_window.min_y) as usize;
+    let lines = (part.height()? - start_row).min(lines_per_chunk);
+    decode_scanline_chunk(part, start_row, lines, packed_size, &packed)
+}
+
+fn decode_scanline_chunk(
+    part: &mut ExrPart,
+    start_row: usize,
+    lines: usize,
+    packed_size: usize,
+    packed: &[u8],
+) -> Result<()> {
     let expected_size = bytes_per_scanline(part)?
         .checked_mul(lines)
         .ok_or_else(|| Error::InvalidFormat("chunk byte size overflow".to_string()))?;
@@ -1548,6 +1693,33 @@ impl<'a> ByteCursor<'a> {
         Ok(slice)
     }
 
+    fn read_cstring(&mut self, max_len: usize) -> Result<String> {
+        let tail = &self.bytes[self.pos..];
+        let nul = tail
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or_else(|| Error::InvalidFormat("unterminated C string".to_string()))?;
+        if nul > max_len {
+            return Err(Error::InvalidFormat(format!(
+                "string length {nul} exceeds limit {max_len}"
+            )));
+        }
+        let bytes = self.read_bytes(nul + 1)?;
+        String::from_utf8(bytes[..nul].to_vec())
+            .map_err(|_| Error::InvalidFormat("invalid UTF-8 C string".to_string()))
+    }
+}
+
+trait CursorRead {
+    fn read_u8(&mut self) -> Result<u8>;
+    fn read_u32(&mut self) -> Result<u32>;
+    fn read_i32(&mut self) -> Result<i32>;
+    fn read_u64(&mut self) -> Result<u64>;
+    fn read_vec(&mut self, len: usize) -> Result<Vec<u8>>;
+    fn read_cstring(&mut self, max_len: usize) -> Result<String>;
+}
+
+impl CursorRead for ByteCursor<'_> {
     fn read_u8(&mut self) -> Result<u8> {
         Ok(self.read_bytes(1)?[0])
     }
@@ -1564,19 +1736,83 @@ impl<'a> ByteCursor<'a> {
         Ok(u64::from_le_bytes(self.read_bytes(8)?.try_into().unwrap()))
     }
 
+    fn read_vec(&mut self, len: usize) -> Result<Vec<u8>> {
+        Ok(self.read_bytes(len)?.to_vec())
+    }
+
     fn read_cstring(&mut self, max_len: usize) -> Result<String> {
-        let tail = &self.bytes[self.pos..];
-        let nul = tail
-            .iter()
-            .position(|byte| *byte == 0)
-            .ok_or_else(|| Error::InvalidFormat("unterminated C string".to_string()))?;
-        if nul > max_len {
-            return Err(Error::InvalidFormat(format!(
-                "string length {nul} exceeds limit {max_len}"
-            )));
+        ByteCursor::read_cstring(self, max_len)
+    }
+}
+
+struct FileCursor<R> {
+    reader: R,
+}
+
+impl<R> FileCursor<R> {
+    fn new(reader: R) -> Self {
+        Self { reader }
+    }
+}
+
+impl<R: Read + Seek> FileCursor<R> {
+    fn position(&mut self) -> Result<u64> {
+        self.reader.stream_position().map_err(Error::Io)
+    }
+
+    fn set_pos(&mut self, pos: u64) -> Result<()> {
+        self.reader.seek(SeekFrom::Start(pos)).map_err(Error::Io)?;
+        Ok(())
+    }
+}
+
+impl<R: Read + Seek> CursorRead for FileCursor<R> {
+    fn read_u8(&mut self) -> Result<u8> {
+        let mut buf = [0u8; 1];
+        self.reader.read_exact(&mut buf)?;
+        Ok(buf[0])
+    }
+
+    fn read_u32(&mut self) -> Result<u32> {
+        let mut buf = [0u8; 4];
+        self.reader.read_exact(&mut buf)?;
+        Ok(u32::from_le_bytes(buf))
+    }
+
+    fn read_i32(&mut self) -> Result<i32> {
+        let mut buf = [0u8; 4];
+        self.reader.read_exact(&mut buf)?;
+        Ok(i32::from_le_bytes(buf))
+    }
+
+    fn read_u64(&mut self) -> Result<u64> {
+        let mut buf = [0u8; 8];
+        self.reader.read_exact(&mut buf)?;
+        Ok(u64::from_le_bytes(buf))
+    }
+
+    fn read_vec(&mut self, len: usize) -> Result<Vec<u8>> {
+        let mut out = vec![0u8; len];
+        self.reader.read_exact(&mut out)?;
+        Ok(out)
+    }
+
+    fn read_cstring(&mut self, max_len: usize) -> Result<String> {
+        let mut out = Vec::new();
+        loop {
+            let byte = self.read_u8()?;
+            if byte == 0 {
+                break;
+            }
+            out.push(byte);
+            if out.len() > max_len {
+                return Err(Error::InvalidFormat(format!(
+                    "string length {} exceeds limit {max_len}",
+                    out.len()
+                )));
+            }
         }
-        let bytes = self.read_bytes(nul + 1)?;
-        String::from_utf8(bytes[..nul].to_vec())
+        String::from_utf8(out)
             .map_err(|_| Error::InvalidFormat("invalid UTF-8 C string".to_string()))
     }
 }
