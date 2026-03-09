@@ -1,6 +1,5 @@
 mod compile;
 mod sdk;
-mod server_manager;
 use compile::WasmConfig;
 
 fn enable_strip_pipeline(config: &mut WasmConfig) {

@@ -1,9 +1,10 @@
 use makepad_micro_serde::{DeJson, DeJsonErr, DeJsonState, SerJson, SerJsonState};
 use std::{
     fs,
-    io::ErrorKind,
+    io::{ErrorKind, Write},
     net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
+    process::Command,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -13,6 +14,18 @@ const PORT_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 const PORT_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PID_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PID_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const STARTUP_LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const STARTUP_LOCK_WAIT_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(not(test))]
+const STARTUP_LOCK_STALE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const STARTUP_LOCK_STALE_TIMEOUT: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const STARTUP_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(test)]
+const STARTUP_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct WasmServerLockMetadata {
@@ -45,6 +58,7 @@ pub struct WasmServerOwnershipGuard {
     lock_path: PathBuf,
     metadata: WasmServerLockMetadata,
     active: bool,
+    startup_lock: Option<StartupMutexGuard>,
 }
 
 impl WasmServerOwnershipGuard {
@@ -77,13 +91,11 @@ impl WasmServerOwnershipGuard {
                 )
             })?;
         }
-        fs::write(&self.lock_path, self.metadata.serialize_json()).map_err(|err| {
-            format!(
-                "failed to write wasm server lock {:?}: {}",
-                self.lock_path, err
-            )
-        })?;
+        write_file_atomically(&self.lock_path, &self.metadata.serialize_json())?;
         self.active = true;
+        if let Some(startup_lock) = self.startup_lock.take() {
+            drop(startup_lock);
+        }
         Ok(())
     }
 
@@ -105,6 +117,9 @@ impl WasmServerOwnershipGuard {
                 )
             })?;
         }
+        let startup_lock_path = startup_lock_path_for_port(Path::new(&workspace_root), port);
+        let startup_lock =
+            StartupMutexGuard::acquire_with_probes(&startup_lock_path, port, probes)?;
 
         let listen_addr = listen_address(port, lan);
         let maybe_lock = match read_lock_file(&lock_path) {
@@ -145,6 +160,16 @@ impl WasmServerOwnershipGuard {
         }
 
         if probes.is_port_in_use(listen_addr) {
+            if let Some(occupant) = probes.describe_port_occupant(listen_addr) {
+                println!(
+                    "port occupied by non-managed process on {} ({})",
+                    listen_addr, occupant
+                );
+                return Err(format!(
+                    "port occupied by non-managed process on {} ({}); stop the existing process or use --port=<port>",
+                    listen_addr, occupant
+                ));
+            }
             println!("port occupied by non-managed process on {}", listen_addr);
             return Err(format!(
                 "port occupied by non-managed process on {}; stop the existing process or use --port=<port>",
@@ -166,6 +191,7 @@ impl WasmServerOwnershipGuard {
             lock_path,
             metadata,
             active: false,
+            startup_lock: Some(startup_lock),
         })
     }
 
@@ -216,6 +242,140 @@ fn lock_path_for_port(workspace_root: &Path, port: u16) -> PathBuf {
         .join("target")
         .join("makepad-wasm-server")
         .join(format!("{port}.json"))
+}
+
+fn startup_lock_path_for_port(workspace_root: &Path, port: u16) -> PathBuf {
+    workspace_root
+        .join("target")
+        .join("makepad-wasm-server")
+        .join(format!("{port}.startup.lock"))
+}
+
+fn write_file_atomically(path: &Path, contents: &str) -> Result<(), String> {
+    let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&tmp_path, contents).map_err(|err| {
+        format!(
+            "failed to write temporary wasm server lock {:?}: {}",
+            tmp_path, err
+        )
+    })?;
+
+    match fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(err)
+            if matches!(
+                err.kind(),
+                ErrorKind::AlreadyExists | ErrorKind::PermissionDenied
+            ) =>
+        {
+            let _ = fs::remove_file(path);
+            fs::rename(&tmp_path, path).map_err(|rename_err| {
+                let _ = fs::remove_file(&tmp_path);
+                format!(
+                    "failed to replace wasm server lock {:?}: {}",
+                    path, rename_err
+                )
+            })
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&tmp_path);
+            Err(format!(
+                "failed to move wasm server lock {:?} into place: {}",
+                path, err
+            ))
+        }
+    }
+}
+
+struct StartupMutexGuard {
+    lock_path: PathBuf,
+}
+
+impl StartupMutexGuard {
+    fn acquire_with_probes(
+        lock_path: &Path,
+        port: u16,
+        probes: &impl ServerManagerProbes,
+    ) -> Result<Self, String> {
+        let started = SystemTime::now();
+        loop {
+            match fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(lock_path)
+            {
+                Ok(mut file) => {
+                    let _ = writeln!(file, "pid={}", probes.current_pid());
+                    let _ = writeln!(file, "started_at={}", probes.now_unix_secs());
+                    return Ok(Self {
+                        lock_path: lock_path.to_path_buf(),
+                    });
+                }
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    if startup_lock_is_stale(lock_path, probes)? {
+                        println!("startup lock stale, recovering");
+                        remove_lock_file_if_exists(lock_path)?;
+                        continue;
+                    }
+                    if started.elapsed().unwrap_or_default() >= STARTUP_LOCK_WAIT_TIMEOUT {
+                        return Err(format!(
+                            "another wasm run startup is already in progress on port {}; retry shortly or use --port=<port>",
+                            port
+                        ));
+                    }
+                    thread::sleep(STARTUP_LOCK_POLL_INTERVAL);
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "failed to create wasm startup lock {:?}: {}",
+                        lock_path, err
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for StartupMutexGuard {
+    fn drop(&mut self) {
+        let _ = remove_lock_file_if_exists(&self.lock_path);
+    }
+}
+
+fn startup_lock_is_stale(
+    lock_path: &Path,
+    probes: &impl ServerManagerProbes,
+) -> Result<bool, String> {
+    let content = match fs::read_to_string(lock_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Ok(file_older_than(lock_path, STARTUP_LOCK_STALE_TIMEOUT)),
+    };
+    if let Some(pid) = parse_startup_lock_pid(&content) {
+        return Ok(!probes.is_pid_alive(pid));
+    }
+    Ok(file_older_than(lock_path, STARTUP_LOCK_STALE_TIMEOUT))
+}
+
+fn parse_startup_lock_pid(content: &str) -> Option<u32> {
+    for line in content.lines() {
+        if let Some(value) = line.strip_prefix("pid=") {
+            if let Ok(pid) = value.trim().parse::<u32>() {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+fn file_older_than(path: &Path, min_age: Duration) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    modified.elapsed().unwrap_or_default() >= min_age
 }
 
 fn remove_lock_file_if_exists(path: &Path) -> Result<(), String> {
@@ -274,6 +434,7 @@ trait ServerManagerProbes {
     fn terminate_pid(&self, pid: u32) -> Result<(), String>;
     fn is_port_in_use(&self, addr: SocketAddr) -> bool;
     fn wait_for_port_release(&self, addr: SocketAddr, timeout: Duration) -> bool;
+    fn describe_port_occupant(&self, addr: SocketAddr) -> Option<String>;
 }
 
 struct LiveServerManagerProbes;
@@ -314,6 +475,137 @@ impl ServerManagerProbes for LiveServerManagerProbes {
             thread::sleep(PORT_RELEASE_POLL_INTERVAL);
         }
     }
+
+    fn describe_port_occupant(&self, addr: SocketAddr) -> Option<String> {
+        describe_port_occupant(addr)
+    }
+}
+
+#[cfg(unix)]
+fn describe_port_occupant(addr: SocketAddr) -> Option<String> {
+    let port = addr.port();
+    let output = Command::new("lsof")
+        .arg("-nP")
+        .arg(format!("-iTCP:{port}"))
+        .arg("-sTCP:LISTEN")
+        .arg("-Fp")
+        .arg("-Fc")
+        .output()
+        .ok()?;
+
+    if !output.status.success() && output.stdout.is_empty() {
+        return None;
+    }
+    parse_lsof_pid_and_command(&output.stdout)
+}
+
+#[cfg(unix)]
+fn parse_lsof_pid_and_command(stdout: &[u8]) -> Option<String> {
+    let mut pid: Option<u32> = None;
+    let mut command: Option<String> = None;
+    for line in String::from_utf8_lossy(stdout).lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            if let Ok(parsed_pid) = rest.trim().parse::<u32>() {
+                pid = Some(parsed_pid);
+                if let Some(command) = command {
+                    return Some(format!("pid {} ({})", parsed_pid, command));
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix('c') {
+            let parsed_command = rest.trim().to_string();
+            if !parsed_command.is_empty() {
+                command = Some(parsed_command);
+                if let Some(pid) = pid {
+                    if let Some(command) = command.as_ref() {
+                        return Some(format!("pid {} ({})", pid, command));
+                    }
+                }
+            }
+        }
+    }
+    pid.map(|pid| format!("pid {}", pid))
+}
+
+#[cfg(windows)]
+fn describe_port_occupant(addr: SocketAddr) -> Option<String> {
+    let port = addr.port();
+    let output = Command::new("netstat")
+        .arg("-ano")
+        .arg("-p")
+        .arg("tcp")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid = parse_windows_netstat_pid(&stdout, port)?;
+    let task_output = Command::new("tasklist")
+        .arg("/FI")
+        .arg(format!("PID eq {pid}"))
+        .arg("/FO")
+        .arg("CSV")
+        .arg("/NH")
+        .output()
+        .ok();
+    if let Some(task_output) = task_output {
+        if task_output.status.success() {
+            if let Some(name) =
+                parse_windows_tasklist_name(&String::from_utf8_lossy(&task_output.stdout))
+            {
+                return Some(format!("pid {} ({})", pid, name));
+            }
+        }
+    }
+    Some(format!("pid {}", pid))
+}
+
+#[cfg(windows)]
+fn parse_windows_netstat_pid(stdout: &str, port: u16) -> Option<u32> {
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("TCP") {
+            continue;
+        }
+        let columns = trimmed.split_whitespace().collect::<Vec<_>>();
+        if columns.len() < 5 {
+            continue;
+        }
+        let local_addr = columns[1];
+        let state = columns[3];
+        let pid_col = columns[4];
+        if state != "LISTENING" {
+            continue;
+        }
+        if !local_addr.ends_with(&format!(":{port}")) {
+            continue;
+        }
+        if let Ok(pid) = pid_col.parse::<u32>() {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn parse_windows_tasklist_name(stdout: &str) -> Option<String> {
+    let line = stdout.lines().find(|line| !line.trim().is_empty())?;
+    let trimmed = line.trim();
+    if trimmed == "INFO: No tasks are running which match the specified criteria." {
+        return None;
+    }
+    let without_prefix = trimmed.strip_prefix('"')?;
+    let name = without_prefix.split("\",\"").next()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn describe_port_occupant(_addr: SocketAddr) -> Option<String> {
+    None
 }
 
 #[cfg(unix)]
@@ -472,6 +764,7 @@ mod tests {
         terminated_pids: RefCell<Vec<u32>>,
         port_in_use: bool,
         wait_port_release: bool,
+        occupant_description: Option<String>,
     }
 
     impl ServerManagerProbes for MockProbes {
@@ -499,6 +792,10 @@ mod tests {
         fn wait_for_port_release(&self, _addr: SocketAddr, _timeout: Duration) -> bool {
             self.wait_port_release
         }
+
+        fn describe_port_occupant(&self, _addr: SocketAddr) -> Option<String> {
+            self.occupant_description.clone()
+        }
     }
 
     fn new_temp_workspace(name: &str) -> PathBuf {
@@ -515,6 +812,13 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, lock.serialize_json()).unwrap();
+    }
+
+    fn write_startup_lock(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
     }
 
     #[test]
@@ -540,6 +844,7 @@ mod tests {
     fn stale_lock_is_removed_during_prepare() {
         let workspace = new_temp_workspace("stale");
         let lock_path = lock_path_for_port(&workspace, 8010);
+        let startup_lock_path = startup_lock_path_for_port(&workspace, 8010);
         write_test_lock(
             &lock_path,
             &WasmServerLockMetadata {
@@ -560,6 +865,7 @@ mod tests {
             terminated_pids: RefCell::new(Vec::new()),
             port_in_use: false,
             wait_port_release: true,
+            occupant_description: None,
         };
 
         let guard = WasmServerOwnershipGuard::prepare_with_probes(
@@ -568,8 +874,79 @@ mod tests {
         .unwrap();
 
         assert!(!lock_path.exists(), "stale lock should be removed");
+        assert!(
+            startup_lock_path.exists(),
+            "startup lock should be held while guard is alive"
+        );
         assert!(probes.terminated_pids.borrow().is_empty());
         drop(guard);
+        assert!(
+            !startup_lock_path.exists(),
+            "startup lock should be cleaned when guard drops"
+        );
+    }
+
+    #[test]
+    fn stale_startup_lock_is_recovered() {
+        let workspace = new_temp_workspace("startup-stale");
+        let startup_lock_path = startup_lock_path_for_port(&workspace, 8010);
+        write_startup_lock(&startup_lock_path, "pid=999001\nstarted_at=1\n");
+
+        let probes = MockProbes {
+            current_pid: 100,
+            now_unix_secs: 555,
+            alive_pids: HashSet::new(),
+            terminated_pids: RefCell::new(Vec::new()),
+            port_in_use: false,
+            wait_port_release: true,
+            occupant_description: None,
+        };
+
+        let guard = WasmServerOwnershipGuard::prepare_with_probes(
+            &workspace, "new-app", "release", 8010, false, &probes,
+        )
+        .unwrap();
+        assert!(
+            startup_lock_path.exists(),
+            "startup lock should be re-acquired after stale recovery"
+        );
+        drop(guard);
+        assert!(
+            !startup_lock_path.exists(),
+            "startup lock should be removed on drop"
+        );
+    }
+
+    #[test]
+    fn live_startup_lock_blocks_prepare() {
+        let workspace = new_temp_workspace("startup-live");
+        let startup_lock_path = startup_lock_path_for_port(&workspace, 8010);
+        write_startup_lock(&startup_lock_path, "pid=42\nstarted_at=1\n");
+
+        let probes = MockProbes {
+            current_pid: 100,
+            now_unix_secs: 555,
+            alive_pids: HashSet::from([42]),
+            terminated_pids: RefCell::new(Vec::new()),
+            port_in_use: false,
+            wait_port_release: true,
+            occupant_description: None,
+        };
+
+        let err = match WasmServerOwnershipGuard::prepare_with_probes(
+            &workspace, "new-app", "release", 8010, false, &probes,
+        ) {
+            Ok(_) => panic!("prepare should fail while live startup lock is held"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("startup is already in progress"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            startup_lock_path.exists(),
+            "existing startup lock must remain"
+        );
     }
 
     #[test]
@@ -581,6 +958,7 @@ mod tests {
             terminated_pids: RefCell::new(Vec::new()),
             port_in_use: false,
             wait_port_release: true,
+            occupant_description: None,
         };
         assert_eq!(
             evaluate_startup_scenario(LockState::NoLock, probes.port_in_use),
@@ -627,6 +1005,31 @@ mod tests {
         assert_eq!(
             evaluate_startup_scenario(LockState::NoLock, occupied_probes.port_in_use),
             StartupScenario::UnknownOccupant
+        );
+    }
+
+    #[test]
+    fn unknown_occupant_error_includes_pid_hint() {
+        let workspace = new_temp_workspace("unknown-occupant");
+        let probes = MockProbes {
+            current_pid: 100,
+            now_unix_secs: 555,
+            alive_pids: HashSet::new(),
+            terminated_pids: RefCell::new(Vec::new()),
+            port_in_use: true,
+            wait_port_release: true,
+            occupant_description: Some("pid 4321 (python3)".to_string()),
+        };
+
+        let err = match WasmServerOwnershipGuard::prepare_with_probes(
+            &workspace, "new-app", "release", 8010, false, &probes,
+        ) {
+            Ok(_) => panic!("prepare should fail when port is occupied"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("pid 4321 (python3)"),
+            "unexpected error text: {err}"
         );
     }
 }

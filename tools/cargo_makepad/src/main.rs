@@ -12,6 +12,8 @@ mod desktop;
 #[cfg(not(target_arch = "wasm32"))]
 mod open_harmony;
 #[cfg(not(target_arch = "wasm32"))]
+mod server_manager;
+#[cfg(not(target_arch = "wasm32"))]
 mod studio;
 #[cfg(not(target_arch = "wasm32"))]
 mod tunnel;
