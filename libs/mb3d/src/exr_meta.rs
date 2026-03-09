@@ -1,6 +1,10 @@
 use crate::render::Vec3;
 
 pub const MB3D_LIGHTING_ATTRIBUTE_NAME: &str = "makepad.mb3d_lighting";
+pub const MB3D_CAMERA_ATTRIBUTE_NAME: &str = "makepad.mb3d_camera";
+pub const MB3D_MIP_LEVEL_ATTRIBUTE_NAME: &str = "makepad.mb3d_mip_level";
+pub const MB3D_MIP_TOTAL_LEVELS_ATTRIBUTE_NAME: &str = "makepad.mb3d_mip_total_levels";
+pub const MB3D_MIP_FILTER_ATTRIBUTE_NAME: &str = "makepad.mb3d_mip_filter";
 
 #[derive(Debug, Clone, Copy)]
 pub struct ViewerLight {
@@ -21,6 +25,82 @@ pub struct ViewerLightingMetadata {
     pub s_spec: f64,
     pub rough_scale: f64,
     pub lights: Vec<ViewerLight>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ViewerCameraMetadata {
+    pub mid: Vec3,
+    pub right_step: Vec3,
+    pub up_step: Vec3,
+    pub forward_dir: Vec3,
+    pub fov_y: f64,
+    pub z_start_delta: f64,
+}
+
+impl ViewerCameraMetadata {
+    pub fn from_camera(camera: &crate::render::Camera) -> Self {
+        Self {
+            mid: camera.mid,
+            right_step: camera.right,
+            up_step: camera.up,
+            forward_dir: camera.forward.normalize(),
+            fov_y: camera.fov_y,
+            z_start_delta: camera.z_start - camera.mid.z,
+        }
+    }
+
+    pub fn encode_string(&self) -> String {
+        let mut out = String::new();
+        out.push_str("version=1\n");
+        push_vec3_line(&mut out, "mid", self.mid);
+        push_vec3_line(&mut out, "right_step", self.right_step);
+        push_vec3_line(&mut out, "up_step", self.up_step);
+        push_vec3_line(&mut out, "forward_dir", self.forward_dir);
+        push_scalar_line(&mut out, "fov_y", self.fov_y);
+        push_scalar_line(&mut out, "z_start_delta", self.z_start_delta);
+        out
+    }
+
+    pub fn decode_string(input: &str) -> Result<Self, String> {
+        let mut out = Self {
+            mid: Vec3::new(0.0, 0.0, 0.0),
+            right_step: Vec3::new(0.0, 0.0, 0.0),
+            up_step: Vec3::new(0.0, 0.0, 0.0),
+            forward_dir: Vec3::new(0.0, 0.0, 1.0),
+            fov_y: 0.0,
+            z_start_delta: 0.0,
+        };
+        let mut saw_version = false;
+
+        for line in input.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("invalid metadata line {line:?}"));
+            };
+            match key {
+                "version" => {
+                    if value != "1" {
+                        return Err(format!("unsupported metadata version {value:?}"));
+                    }
+                    saw_version = true;
+                }
+                "mid" => out.mid = parse_vec3(value)?,
+                "right_step" => out.right_step = parse_vec3(value)?,
+                "up_step" => out.up_step = parse_vec3(value)?,
+                "forward_dir" => out.forward_dir = parse_vec3(value)?,
+                "fov_y" => out.fov_y = parse_scalar(value)?,
+                "z_start_delta" => out.z_start_delta = parse_scalar(value)?,
+                _ => {}
+            }
+        }
+
+        if !saw_version {
+            return Err("missing metadata version".to_string());
+        }
+        Ok(out)
+    }
 }
 
 impl Default for ViewerLightingMetadata {
@@ -214,5 +294,28 @@ mod tests {
         approx_eq(decoded.lights[0].dir.z, 0.8);
         approx_eq(decoded.lights[1].color.y, 0.3);
         approx_eq(decoded.lights[1].spec_power, 16.0);
+    }
+
+    #[test]
+    fn camera_metadata_roundtrips() {
+        let meta = ViewerCameraMetadata {
+            mid: Vec3::new(1.0, 2.0, 3.0),
+            right_step: Vec3::new(0.5, 0.0, 0.0),
+            up_step: Vec3::new(0.0, 0.5, 0.0),
+            forward_dir: Vec3::new(0.0, 0.0, 1.0),
+            fov_y: 34.5,
+            z_start_delta: -8.25,
+        };
+
+        let encoded = meta.encode_string();
+        let decoded = ViewerCameraMetadata::decode_string(&encoded).unwrap();
+        approx_eq(decoded.mid.x, 1.0);
+        approx_eq(decoded.mid.y, 2.0);
+        approx_eq(decoded.mid.z, 3.0);
+        approx_eq(decoded.right_step.x, 0.5);
+        approx_eq(decoded.up_step.y, 0.5);
+        approx_eq(decoded.forward_dir.z, 1.0);
+        approx_eq(decoded.fov_y, 34.5);
+        approx_eq(decoded.z_start_delta, -8.25);
     }
 }

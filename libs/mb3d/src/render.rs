@@ -313,11 +313,11 @@ impl ExrLayerSpec {
 }
 
 pub fn all_exr_layer_codes() -> &'static str {
-    "abcdefgimnoprtux"
+    "abcdefgimnortux"
 }
 
 pub fn exr_layer_legend() -> &'static str {
-    "a=AO b=branches c=beauty d=depth e=estimator f=folds g=gradient i=iters m=march n=normal o=orbit p=position r=roughness t=traps u=uncertainty x=sign_flips; uppercase=Zip lossless/raw values, lowercase=Pxr24 lossy/display values"
+    "a=AO b=branches c=beauty d=depth e=estimator f=folds g=gradient i=iters m=march n=normal o=orbit p=position r=roughness t=traps u=uncertainty x=sign_flips; uppercase=Zip lossless/raw values, lowercase=Pxr24 lossy/display values except depth/normal/position stay raw for processing"
 }
 
 pub fn parse_exr_layer_specs(spec: &str) -> Result<Vec<ExrLayerSpec>, String> {

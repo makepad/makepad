@@ -1,5 +1,13 @@
-use makepad_mb3d_render::{formulas, m3p, render};
-use makepad_openexr::{self, Compression as ExrCompression, ExrChannel, ExrImage, ExrPart};
+use makepad_mb3d_render::{
+    exr_meta::{
+        ViewerCameraMetadata, MB3D_CAMERA_ATTRIBUTE_NAME, MB3D_MIP_FILTER_ATTRIBUTE_NAME,
+        MB3D_MIP_LEVEL_ATTRIBUTE_NAME, MB3D_MIP_TOTAL_LEVELS_ATTRIBUTE_NAME,
+    },
+    formulas, m3p, render,
+};
+use makepad_openexr::{
+    self, Compression as ExrCompression, ExrChannel, ExrImage, ExrPart, RawAttribute,
+};
 use makepad_zune_core::bit_depth::BitDepth;
 use makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_core::options::EncoderOptions;
@@ -57,14 +65,16 @@ struct Options {
     output_format: OutputFormat,
     exr_layout: ExrLayout,
     exr_layers: Option<Vec<render::ExrLayerSpec>>,
+    exr_mip_chain: bool,
 }
 
 fn usage(program: &str) -> String {
     format!(
-        "Usage: {program} [--scale <factor>] [--no-adaptive-ao] [--aa <none|2x2>] [--format <png|exr>] [--exr-layout <multipart|channels>] [--layers <codes|all>] [input.m3p] [output]\n\
+        "Usage: {program} [--scale <factor>] [--no-adaptive-ao] [--aa <none|2x2>] [--format <png|exr>] [--exr-layout <multipart|channels>] [--layers <codes|all>] [--mip] [input.m3p] [output]\n\
          PNG: writes the beauty image as RGBA8.\n\
          EXR: writes float layers; default layer set is 'c'.\n\
-         EXR layouts: multipart=one EXR part per layer, channels=single-part named channels for AE/ProEXR style workflows where lowercase utility layers are display-normalized while uppercase layers stay raw.\n\
+         EXR layouts: multipart=one EXR part per layer, channels=single-part named channels for AE/ProEXR style workflows where lowercase utility layers are usually display-normalized while reconstruction-critical depth/normal data stays raw and camera metadata is stored in the header.\n\
+         EXR mip: --mip stores repeated /2 levels as multipart parts named mip0..mipN, stopping before the next level would fall below 30x15. This requires --exr-layout=channels.\n\
          EXR layers: {}\n\
          EXR all: {}\n\
          EXR note: lowercase=Pxr24 lossy and uppercase=Zip lossless.",
@@ -118,6 +128,7 @@ fn parse_args() -> Result<Option<Options>, String> {
     let mut output_format = OutputFormat::Png;
     let mut exr_layout = ExrLayout::Multipart;
     let mut layer_codes: Option<String> = None;
+    let mut exr_mip_chain = false;
     let mut positional = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -163,6 +174,7 @@ fn parse_args() -> Result<Option<Options>, String> {
                 let value = next_flag_value(&mut args, "--layers", &program)?;
                 layer_codes = Some(value);
             }
+            "--mip" => exr_mip_chain = true,
             "--no-adaptive-ao" => adaptive_ao = false,
             "-h" | "--help" => {
                 println!("{}", usage(&program));
@@ -179,6 +191,15 @@ fn parse_args() -> Result<Option<Options>, String> {
     if output_format == OutputFormat::Png && layer_codes.is_some() {
         return Err(format!(
             "--layers is only valid with --format=exr\n{}",
+            usage(&program)
+        ));
+    }
+    if output_format == OutputFormat::Png && exr_mip_chain {
+        return Err(format!("--mip is only valid with --format=exr\n{}", usage(&program)));
+    }
+    if exr_mip_chain && exr_layout != ExrLayout::Channels {
+        return Err(format!(
+            "--mip requires --exr-layout=channels so each mip level can be loaded independently\n{}",
             usage(&program)
         ));
     }
@@ -205,6 +226,7 @@ fn parse_args() -> Result<Option<Options>, String> {
         output_format,
         exr_layout,
         exr_layers,
+        exr_mip_chain,
     }))
 }
 
@@ -238,14 +260,145 @@ fn flattened_channel_name(part_name: &str, channel_name: &str, preserve_rgb: boo
     }
 }
 
+const MIP_MIN_WIDTH: usize = 30;
+const MIP_MIN_HEIGHT: usize = 15;
+const GAUSSIAN5_WEIGHTS: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
+const MIP_FILTER_NAME: &str = "gaussian5";
+
+#[derive(Clone, Debug)]
+struct FlattenedChannelImage {
+    width: usize,
+    height: usize,
+    compression: ExrCompression,
+    channels: Vec<ExrChannel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MipLevelShape {
+    level: usize,
+    width: usize,
+    height: usize,
+}
+
+fn mip_level_shapes(width: usize, height: usize) -> Vec<MipLevelShape> {
+    let mut out = vec![MipLevelShape {
+        level: 0,
+        width,
+        height,
+    }];
+
+    let mut current_width = width;
+    let mut current_height = height;
+    while current_width > 1 && current_height > 1 {
+        let next_width = (current_width / 2).max(1);
+        let next_height = (current_height / 2).max(1);
+        if next_width < MIP_MIN_WIDTH || next_height < MIP_MIN_HEIGHT {
+            break;
+        }
+        out.push(MipLevelShape {
+            level: out.len(),
+            width: next_width,
+            height: next_height,
+        });
+        current_width = next_width;
+        current_height = next_height;
+    }
+    out
+}
+
+fn clamp_index(index: isize, max: usize) -> usize {
+    index.clamp(0, max.saturating_sub(1) as isize) as usize
+}
+
+fn gaussian5_sample(samples: &[f32]) -> f32 {
+    let mut weighted = 0.0f32;
+    let mut weight_sum = 0.0f32;
+    for (&sample, &weight) in samples.iter().zip(GAUSSIAN5_WEIGHTS.iter()) {
+        if sample.is_finite() {
+            weighted += sample * weight;
+            weight_sum += weight;
+        }
+    }
+    if weight_sum > 0.0 {
+        weighted / weight_sum
+    } else {
+        0.0
+    }
+}
+
+fn downscale_channel_gaussian5(samples: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let dst_width = (width / 2).max(1);
+    let dst_height = (height / 2).max(1);
+    let mut horizontal = vec![0.0f32; dst_width * height];
+
+    for y in 0..height {
+        let row = &samples[y * width..(y + 1) * width];
+        for dst_x in 0..dst_width {
+            let center = (dst_x * 2) as isize;
+            let taps = [
+                row[clamp_index(center - 2, width)],
+                row[clamp_index(center - 1, width)],
+                row[clamp_index(center, width)],
+                row[clamp_index(center + 1, width)],
+                row[clamp_index(center + 2, width)],
+            ];
+            horizontal[y * dst_width + dst_x] = gaussian5_sample(&taps);
+        }
+    }
+
+    let mut out = vec![0.0f32; dst_width * dst_height];
+    for dst_y in 0..dst_height {
+        let center = (dst_y * 2) as isize;
+        for x in 0..dst_width {
+            let taps = [
+                horizontal[clamp_index(center - 2, height) * dst_width + x],
+                horizontal[clamp_index(center - 1, height) * dst_width + x],
+                horizontal[clamp_index(center, height) * dst_width + x],
+                horizontal[clamp_index(center + 1, height) * dst_width + x],
+                horizontal[clamp_index(center + 2, height) * dst_width + x],
+            ];
+            out[dst_y * dst_width + x] = gaussian5_sample(&taps);
+        }
+    }
+
+    out
+}
+
+fn int_attribute(name: &str, value: i32) -> RawAttribute {
+    RawAttribute {
+        name: name.to_string(),
+        type_name: "int".to_string(),
+        value: value.to_le_bytes().to_vec(),
+    }
+}
+
+fn string_attribute(name: &str, value: &str) -> RawAttribute {
+    RawAttribute {
+        name: name.to_string(),
+        type_name: "string".to_string(),
+        value: value.as_bytes().to_vec(),
+    }
+}
+
+fn append_camera_metadata(part: &mut ExrPart, camera: &ViewerCameraMetadata) {
+    part.other_attributes.push(string_attribute(
+        MB3D_CAMERA_ATTRIBUTE_NAME,
+        &camera.encode_string(),
+    ));
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{flattened_channel_name, flattened_compression, normalize_channels_layout_image};
+    use super::{
+        build_mip_chain_parts, downscale_channel_gaussian5, flattened_channel_name,
+        flattened_compression, mip_level_shapes, normalize_channels_layout_image,
+        FlattenedChannelImage, MipLevelShape, MB3D_MIP_LEVEL_ATTRIBUTE_NAME,
+    };
     use makepad_mb3d_render::render::{
         ExrLayerChannel, ExrLayerCompression, ExrLayerImage, ExrLayerKind, ExrLayerPart,
         ExrLayerSpec,
     };
-    use makepad_openexr::Compression;
+    use makepad_openexr::{Compression, ExrChannel};
 
     #[test]
     fn beauty_channels_stay_display_named() {
@@ -276,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn compressed_depth_is_normalized_for_channels_layout() {
+    fn lossy_depth_channels_keep_raw_values() {
         let spec = ExrLayerSpec {
             kind: ExrLayerKind::Depth,
             compression: ExrLayerCompression::Lossy,
@@ -296,7 +449,7 @@ mod tests {
 
         normalize_channels_layout_image(&mut image);
 
-        assert_eq!(image.parts[0].channels[0].samples, vec![1.0, 0.5, 0.0]);
+        assert_eq!(image.parts[0].channels[0].samples, vec![10.0, 20.0, 30.0]);
     }
 
     #[test]
@@ -349,6 +502,123 @@ mod tests {
         assert_eq!(image.parts.len(), 1);
         assert_eq!(image.parts[0].channels.len(), 1);
         assert_eq!(image.parts[0].channels[0].samples, vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn lossy_position_channels_keep_raw_values() {
+        let spec = ExrLayerSpec {
+            kind: ExrLayerKind::Position,
+            compression: ExrLayerCompression::Lossy,
+        };
+        let samples_x = vec![-3.5, 0.25, 8.0];
+        let samples_y = vec![1.5, -2.0, 4.0];
+        let samples_z = vec![12.0, 6.0, -1.0];
+        let mut image = ExrLayerImage {
+            width: 3,
+            height: 1,
+            parts: vec![ExrLayerPart {
+                spec,
+                name: "position",
+                channels: vec![
+                    ExrLayerChannel {
+                        name: "X",
+                        samples: samples_x.clone(),
+                    },
+                    ExrLayerChannel {
+                        name: "Y",
+                        samples: samples_y.clone(),
+                    },
+                    ExrLayerChannel {
+                        name: "Z",
+                        samples: samples_z.clone(),
+                    },
+                ],
+            }],
+        };
+
+        normalize_channels_layout_image(&mut image);
+
+        assert_eq!(image.parts[0].channels[0].samples, samples_x);
+        assert_eq!(image.parts[0].channels[1].samples, samples_y);
+        assert_eq!(image.parts[0].channels[2].samples, samples_z);
+    }
+
+    #[test]
+    fn mip_shapes_stop_before_sub_30x15_level() {
+        assert_eq!(
+            mip_level_shapes(1920, 1080),
+            vec![
+                MipLevelShape {
+                    level: 0,
+                    width: 1920,
+                    height: 1080
+                },
+                MipLevelShape {
+                    level: 1,
+                    width: 960,
+                    height: 540
+                },
+                MipLevelShape {
+                    level: 2,
+                    width: 480,
+                    height: 270
+                },
+                MipLevelShape {
+                    level: 3,
+                    width: 240,
+                    height: 135
+                },
+                MipLevelShape {
+                    level: 4,
+                    width: 120,
+                    height: 67
+                },
+                MipLevelShape {
+                    level: 5,
+                    width: 60,
+                    height: 33
+                },
+                MipLevelShape {
+                    level: 6,
+                    width: 30,
+                    height: 16
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn gaussian_downscale_preserves_constant_fields() {
+        let src = vec![2.5; 8 * 6];
+        let dst = downscale_channel_gaussian5(&src, 8, 6);
+        assert_eq!(dst.len(), 4 * 3);
+        assert!(dst.iter().all(|value| (*value - 2.5).abs() < 1.0e-6));
+    }
+
+    #[test]
+    fn mip_chain_parts_are_named_and_tagged_by_level() {
+        let parts = build_mip_chain_parts(FlattenedChannelImage {
+            width: 512,
+            height: 256,
+            compression: Compression::Zip,
+            channels: vec![ExrChannel::float("R", vec![1.0; 512 * 256])],
+        })
+        .unwrap();
+
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0].name.as_deref(), Some("mip0"));
+        assert_eq!(parts[1].name.as_deref(), Some("mip1"));
+        assert_eq!(parts[4].name.as_deref(), Some("mip4"));
+        assert_eq!(parts[0].width().unwrap(), 512);
+        assert_eq!(parts[1].width().unwrap(), 256);
+        assert_eq!(
+            parts[1]
+                .other_attributes
+                .iter()
+                .find(|attribute| attribute.name == MB3D_MIP_LEVEL_ATTRIBUTE_NAME)
+                .map(|attribute| i32::from_le_bytes(attribute.value.as_slice().try_into().unwrap())),
+            Some(1)
+        );
     }
 }
 
@@ -435,39 +705,6 @@ fn remap_positive_log(samples: &mut [f32]) {
     }
 }
 
-fn remap_depth(samples: &mut [f32]) {
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    let mut has_finite = false;
-    for &value in samples.iter() {
-        if value.is_finite() {
-            min = min.min(value);
-            max = max.max(value);
-            has_finite = true;
-        }
-    }
-    if !has_finite {
-        samples.fill(0.0);
-        return;
-    }
-
-    let range = max - min;
-    if range.abs() <= 1.0e-30 {
-        for value in samples.iter_mut() {
-            *value = if value.is_finite() { 1.0 } else { 0.0 };
-        }
-        return;
-    }
-
-    for value in samples.iter_mut() {
-        *value = if value.is_finite() {
-            (1.0 - ((*value - min) / range)).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-    }
-}
-
 fn normalize_fold_part(part: &mut render::ExrLayerPart) {
     let (xyz, any_slice) = part.channels.split_at_mut(3);
     let any = &mut any_slice[0].samples;
@@ -510,9 +747,7 @@ fn normalize_channels_layout_image(image: &mut render::ExrLayerImage) {
             | render::ExrLayerKind::Normal
             | render::ExrLayerKind::Roughness
             | render::ExrLayerKind::Traps => {}
-            render::ExrLayerKind::Depth => {
-                remap_depth(&mut part.channels[0].samples);
-            }
+            render::ExrLayerKind::Depth => {}
             render::ExrLayerKind::Estimator => {
                 remap_positive_log(&mut part.channels[0].samples);
             }
@@ -525,64 +760,152 @@ fn normalize_channels_layout_image(image: &mut render::ExrLayerImage) {
                 }
             }
             render::ExrLayerKind::Orbit => normalize_orbit_part(part),
-            render::ExrLayerKind::Position => {
-                for channel in &mut part.channels {
-                    remap_linear(&mut channel.samples);
-                }
-            }
+            render::ExrLayerKind::Position => {}
             render::ExrLayerKind::Uncertainty => normalize_uncertainty_part(part),
         }
     }
 }
 
-fn encode_exr_with_layout(
-    mut image: render::ExrLayerImage,
-    layout: ExrLayout,
-) -> Result<Vec<u8>, String> {
-    if layout == ExrLayout::Channels {
-        normalize_channels_layout_image(&mut image);
-    }
-
-    let render::ExrLayerImage {
-        width,
-        height,
-        parts,
-    } = image;
-    let parts = match layout {
-        ExrLayout::Multipart => parts
-            .into_iter()
-            .map(|part| {
-                let channels = part
-                    .channels
-                    .into_iter()
-                    .map(|channel| ExrChannel::float(channel.name, channel.samples))
-                    .collect();
-                ExrPart::new(
-                    Some(part.name.to_string()),
-                    width,
-                    height,
-                    exr_part_compression(part.spec),
-                    channels,
+fn flatten_channels_layout_image(mut image: render::ExrLayerImage) -> FlattenedChannelImage {
+    normalize_channels_layout_image(&mut image);
+    let compression = flattened_compression(image.parts.iter().map(|part| part.spec));
+    let channels = image
+        .parts
+        .into_iter()
+        .flat_map(|part| {
+            let preserve_rgb = part.spec.kind == render::ExrLayerKind::Beauty;
+            part.channels.into_iter().map(move |channel| {
+                ExrChannel::float(
+                    flattened_channel_name(part.name, channel.name, preserve_rgb),
+                    channel.samples,
                 )
             })
-            .collect(),
-        ExrLayout::Channels => {
-            let compression = flattened_compression(parts.iter().map(|part| part.spec));
-            let channels = parts
+        })
+        .collect();
+    FlattenedChannelImage {
+        width: image.width,
+        height: image.height,
+        compression,
+        channels,
+    }
+}
+
+fn build_mip_chain_parts(base: FlattenedChannelImage) -> Result<Vec<ExrPart>, String> {
+    let level_shapes = mip_level_shapes(base.width, base.height);
+    let total_levels = i32::try_from(level_shapes.len())
+        .map_err(|_| "mip level count overflow".to_string())?;
+    let mut parts = Vec::with_capacity(level_shapes.len());
+
+    let mut current_width = base.width;
+    let mut current_height = base.height;
+    let mut current_channels = base.channels;
+
+    for level_shape in level_shapes {
+        let level_index = i32::try_from(level_shape.level)
+            .map_err(|_| "mip level index overflow".to_string())?;
+        let mut part = ExrPart::new(
+            Some(format!("mip{}", level_shape.level)),
+            current_width,
+            current_height,
+            base.compression,
+            current_channels.clone(),
+        );
+        part.other_attributes.push(int_attribute(
+            MB3D_MIP_LEVEL_ATTRIBUTE_NAME,
+            level_index,
+        ));
+        part.other_attributes.push(int_attribute(
+            MB3D_MIP_TOTAL_LEVELS_ATTRIBUTE_NAME,
+            total_levels,
+        ));
+        part.other_attributes.push(string_attribute(
+            MB3D_MIP_FILTER_ATTRIBUTE_NAME,
+            MIP_FILTER_NAME,
+        ));
+        parts.push(part);
+
+        let next_width = (current_width / 2).max(1);
+        let next_height = (current_height / 2).max(1);
+        if next_width < MIP_MIN_WIDTH || next_height < MIP_MIN_HEIGHT {
+            break;
+        }
+
+        current_channels = current_channels
+            .into_iter()
+            .map(|channel| {
+                let samples = match channel.samples {
+                    makepad_openexr::SampleBuffer::Float(values) => values,
+                    makepad_openexr::SampleBuffer::Half(values) => {
+                        values.into_iter().map(|value| value.to_f32()).collect()
+                    }
+                    makepad_openexr::SampleBuffer::Uint(values) => {
+                        values.into_iter().map(|value| value as f32).collect()
+                    }
+                };
+                ExrChannel::float(
+                    channel.name,
+                    downscale_channel_gaussian5(&samples, current_width, current_height),
+                )
+            })
+            .collect();
+        current_width = next_width;
+        current_height = next_height;
+    }
+
+    Ok(parts)
+}
+
+fn encode_exr_with_layout(
+    image: render::ExrLayerImage,
+    layout: ExrLayout,
+    mip_chain: bool,
+    camera: &ViewerCameraMetadata,
+) -> Result<Vec<u8>, String> {
+    let mut parts = if mip_chain {
+        build_mip_chain_parts(flatten_channels_layout_image(image))?
+    } else {
+        let render::ExrLayerImage {
+            width,
+            height,
+            mut parts,
+        } = image;
+        match layout {
+            ExrLayout::Multipart => parts
                 .into_iter()
-                .flat_map(|part| {
-                    let preserve_rgb = part.spec.kind == render::ExrLayerKind::Beauty;
-                    part.channels.into_iter().map(move |channel| {
-                        ExrChannel::float(
-                            flattened_channel_name(part.name, channel.name, preserve_rgb),
-                            channel.samples,
-                        )
-                    })
+                .map(|part| {
+                    let channels = part
+                        .channels
+                        .into_iter()
+                        .map(|channel| ExrChannel::float(channel.name, channel.samples))
+                        .collect();
+                    ExrPart::new(
+                        Some(part.name.to_string()),
+                        width,
+                        height,
+                        exr_part_compression(part.spec),
+                        channels,
+                    )
                 })
-                .collect();
-            vec![ExrPart::new(None, width, height, compression, channels)]
+                .collect(),
+            ExrLayout::Channels => {
+                let flattened = flatten_channels_layout_image(render::ExrLayerImage {
+                    width,
+                    height,
+                    parts: std::mem::take(&mut parts),
+                });
+                vec![ExrPart::new(
+                    None,
+                    flattened.width,
+                    flattened.height,
+                    flattened.compression,
+                    flattened.channels,
+                )]
+            }
         }
     };
+    for part in &mut parts {
+        append_camera_metadata(part, camera);
+    }
     makepad_openexr::write_to_vec(&ExrImage { parts })
         .map_err(|err| format!("EXR encode failed: {err}"))
 }
@@ -647,10 +970,15 @@ fn main() {
         OutputFormat::Exr => {
             let specs = options.exr_layers.as_ref().expect("EXR layer spec missing");
             eprintln!(
-                "Encoding EXR {}x{} with layout {} and layers {} ...",
+                "Encoding EXR {}x{} with layout {}{} and layers {} ...",
                 w,
                 h,
                 exr_layout_name(options.exr_layout),
+                if options.exr_mip_chain {
+                    " + mip-chain"
+                } else {
+                    ""
+                },
                 selected_layer_codes(specs)
             );
             let image = match render::render_exr_layers(
@@ -666,7 +994,13 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            match encode_exr_with_layout(image, options.exr_layout) {
+            let camera_meta = ViewerCameraMetadata::from_camera(&params.camera);
+            match encode_exr_with_layout(
+                image,
+                options.exr_layout,
+                options.exr_mip_chain,
+                &camera_meta,
+            ) {
                 Ok(out) => out,
                 Err(err) => {
                     eprintln!("{err}");

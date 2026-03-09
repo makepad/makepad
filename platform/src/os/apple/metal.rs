@@ -1830,6 +1830,15 @@ impl CxTexture {
                 unsafe { msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setWidth: alloc.width as u64] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setHeight: alloc.height as u64] };
+            let mip_level_count = match &self.format {
+                TextureFormat::VecMipBGRAu8_32 { max_level, .. }
+                | TextureFormat::VecMipRGBAf32 { max_level, .. } => {
+                    max_level.map(|level| level.saturating_add(1)).unwrap_or(1)
+                }
+                _ => 1,
+            };
+            let _: () =
+                unsafe { msg_send![descriptor.as_id(), setMipmapLevelCount: mip_level_count as u64] };
             let _: () = unsafe {
                 msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]
             };
@@ -1867,6 +1876,45 @@ impl CxTexture {
                     bytesPerRow: (width as u64) * bpp
                 ]
             };
+        }
+
+        fn update_mip_data_f32(
+            texture: &Option<RcObjcId>,
+            width: usize,
+            height: usize,
+            max_level: usize,
+            data: &[f32],
+        ) {
+            let mut offset = 0usize;
+            let mut level_width = width.max(1);
+            let mut level_height = height.max(1);
+            for level in 0..=max_level {
+                let level_len = level_width.saturating_mul(level_height).saturating_mul(4);
+                if offset.saturating_add(level_len) > data.len() {
+                    break;
+                }
+                let region = MTLRegion {
+                    origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                    size: MTLSize {
+                        width: level_width as u64,
+                        height: level_height as u64,
+                        depth: 1,
+                    },
+                };
+                let level_ptr = unsafe { data.as_ptr().add(offset) };
+                let _: () = unsafe {
+                    msg_send![
+                        texture.as_ref().unwrap().as_id(),
+                        replaceRegion: region
+                        mipmapLevel: level as u64
+                        withBytes: level_ptr as *const std::ffi::c_void
+                        bytesPerRow: (level_width as u64) * 16u64
+                    ]
+                };
+                offset = offset.saturating_add(level_len);
+                level_width = (level_width / 2).max(1);
+                level_height = (level_height / 2).max(1);
+            }
         }
 
         fn update_cube_data(
@@ -1954,6 +2002,26 @@ impl CxTexture {
                 (*width as u64)
                     .saturating_mul(*height as u64)
                     .saturating_mul(16)
+            }
+            TextureFormat::VecMipRGBAf32 {
+                width,
+                height,
+                data,
+                max_level,
+                ..
+            } => {
+                if let Some(data) = data.as_ref() {
+                    update_mip_data_f32(
+                        &self.os.texture,
+                        *width,
+                        *height,
+                        max_level.unwrap_or(0),
+                        data,
+                    );
+                    (data.len() as u64).saturating_mul(4)
+                } else {
+                    0
+                }
             }
             TextureFormat::VecRu8 {
                 width,
