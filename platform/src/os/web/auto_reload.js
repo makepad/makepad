@@ -50,6 +50,14 @@ function watchFileChange() {
         }
         if (msg.kind === "live_change") {
             dispatchLiveChange(msg);
+            return;
+        }
+        if (msg.kind === "build_start") {
+            console.log("Rebuilding application...");
+            return;
+        }
+        if (msg.kind === "reload") {
+            location.href = location.href;
         }
     };
     socket.onclose = () => {

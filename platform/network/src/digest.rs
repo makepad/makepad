@@ -57,6 +57,171 @@ impl Default for Sha1 {
     }
 }
 
+pub fn md5_hash(input: &[u8]) -> [u8; 16] {
+    let mut state = [0x67452301u32, 0xefcdab89u32, 0x98badcfeu32, 0x10325476u32];
+    let mut padded = input.to_vec();
+    let bit_len = (padded.len() as u64) * 8;
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_le_bytes());
+
+    for block in padded.chunks_exact(64) {
+        let mut words = [0u32; 16];
+        for (index, word) in words.iter_mut().enumerate() {
+            let offset = index * 4;
+            *word = u32::from_le_bytes([
+                block[offset],
+                block[offset + 1],
+                block[offset + 2],
+                block[offset + 3],
+            ]);
+        }
+
+        let (mut a, mut b, mut c, mut d) = (state[0], state[1], state[2], state[3]);
+        for round in 0..64 {
+            let (mix, word_index, rotate) = match round {
+                0..=15 => ((b & c) | (!b & d), round, [7, 12, 17, 22][round % 4]),
+                16..=31 => (
+                    (d & b) | (!d & c),
+                    (5 * round + 1) % 16,
+                    [5, 9, 14, 20][round % 4],
+                ),
+                32..=47 => (b ^ c ^ d, (3 * round + 5) % 16, [4, 11, 16, 23][round % 4]),
+                _ => (c ^ (b | !d), (7 * round) % 16, [6, 10, 15, 21][round % 4]),
+            };
+            let tmp = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(
+                a.wrapping_add(mix)
+                    .wrapping_add(md5_round_constant(round))
+                    .wrapping_add(words[word_index])
+                    .rotate_left(rotate),
+            );
+            a = tmp;
+        }
+
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+    }
+
+    let mut digest = [0u8; 16];
+    for (index, word) in state.iter().enumerate() {
+        digest[index * 4..(index + 1) * 4].copy_from_slice(&word.to_le_bytes());
+    }
+    digest
+}
+
+pub fn sha256_hash(input: &[u8]) -> [u8; 32] {
+    let mut state = [
+        0x6a09e667u32,
+        0xbb67ae85u32,
+        0x3c6ef372u32,
+        0xa54ff53au32,
+        0x510e527fu32,
+        0x9b05688cu32,
+        0x1f83d9abu32,
+        0x5be0cd19u32,
+    ];
+    let mut padded = input.to_vec();
+    let bit_len = (padded.len() as u64) * 8;
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut schedule = [0u32; 64];
+    for block in padded.chunks_exact(64) {
+        for (index, word) in schedule.iter_mut().take(16).enumerate() {
+            let offset = index * 4;
+            *word = u32::from_be_bytes([
+                block[offset],
+                block[offset + 1],
+                block[offset + 2],
+                block[offset + 3],
+            ]);
+        }
+        for index in 16..64 {
+            let s0 = schedule[index - 15].rotate_right(7)
+                ^ schedule[index - 15].rotate_right(18)
+                ^ (schedule[index - 15] >> 3);
+            let s1 = schedule[index - 2].rotate_right(17)
+                ^ schedule[index - 2].rotate_right(19)
+                ^ (schedule[index - 2] >> 10);
+            schedule[index] = schedule[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(schedule[index - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = state[0];
+        let mut b = state[1];
+        let mut c = state[2];
+        let mut d = state[3];
+        let mut e = state[4];
+        let mut f = state[5];
+        let mut g = state[6];
+        let mut h = state[7];
+
+        for index in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = h
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(SHA256_K[index])
+                .wrapping_add(schedule[index]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+        state[5] = state[5].wrapping_add(f);
+        state[6] = state[6].wrapping_add(g);
+        state[7] = state[7].wrapping_add(h);
+    }
+
+    let mut digest = [0u8; 32];
+    for (index, word) in state.iter().enumerate() {
+        digest[index * 4..(index + 1) * 4].copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
+fn md5_round_constant(round: usize) -> u32 {
+    ((f64::sin((round + 1) as f64).abs() * 4294967296.0).floor() as u64 & 0xffff_ffff) as u32
+}
+
+const SHA256_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
 const BASE64_TABLE: &[u8; 64] = &[
     65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88,
     89, 90, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114,
@@ -379,4 +544,54 @@ pub fn sha1_state_to_bytes(state: &[u32; STATE_LEN]) -> [u8; U8_STATE_LEN] {
         }
     }
     state_bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{md5_hash, sha256_hash};
+
+    #[test]
+    fn md5_matches_known_vectors() {
+        assert_eq!(
+            md5_hash(b""),
+            [
+                0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8,
+                0x42, 0x7e,
+            ]
+        );
+        assert_eq!(
+            md5_hash(b"abc"),
+            [
+                0x90, 0x01, 0x50, 0x98, 0x3c, 0xd2, 0x4f, 0xb0, 0xd6, 0x96, 0x3f, 0x7d, 0x28, 0xe1,
+                0x7f, 0x72,
+            ]
+        );
+        assert_eq!(
+            md5_hash(b"user:realm:pass"),
+            [
+                0x84, 0x93, 0xfb, 0xc5, 0x3b, 0xa5, 0x82, 0xfb, 0x4c, 0x04, 0x4c, 0x45, 0x6b, 0xdc,
+                0x40, 0xeb,
+            ]
+        );
+    }
+
+    #[test]
+    fn sha256_matches_known_vectors() {
+        assert_eq!(
+            sha256_hash(b""),
+            [
+                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+                0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+                0x78, 0x52, 0xb8, 0x55,
+            ]
+        );
+        assert_eq!(
+            sha256_hash(b"abc"),
+            [
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+                0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+                0xf2, 0x00, 0x15, 0xad,
+            ]
+        );
+    }
 }
