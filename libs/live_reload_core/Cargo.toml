@@ -1,0 +1,9 @@
+[package]
+name = "makepad-live-reload-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared live reload watcher core for native and wasm flows"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-filesystem-watcher = { path = "../filesystem_watcher", version = "0.1.0" }

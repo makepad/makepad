@@ -7,20 +7,25 @@ use crate::makepad_script::{
     ScriptSource,
     ScriptValue,
 };
+use makepad_live_reload_core::{normalize_path, normalize_path_string, normalize_relative_path_string};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-use std::collections::HashSet;
-
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use {
     crate::thread::SignalToUI,
-    makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot},
+    makepad_live_reload_core::{
+        start_live_reload_watcher,
+        LiveReloadFileChange,
+        LiveReloadLogger,
+        LiveReloadWatchPlan,
+        LiveReloadWatcherHandle,
+        WatchRoot,
+    },
     makepad_studio_protocol::StudioToApp,
-    std::sync::{mpsc::channel, mpsc::Sender, Arc, Mutex},
+    std::sync::mpsc::channel,
 };
 
 #[derive(Clone, Debug)]
@@ -60,15 +65,11 @@ struct CompiledScriptModSite {
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(crate) struct DesktopHotReloadWatcher {
-    _watcher: FileSystemWatcher,
+    _watcher: LiveReloadWatcherHandle,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-struct HotReloadWatchPlan {
-    roots: Vec<WatchRoot>,
-    files_by_root: HashMap<String, Vec<String>>,
-    initial_contents: HashMap<String, String>,
-}
+type HotReloadWatchPlan = LiveReloadWatchPlan;
 
 impl Default for CxLiveReloadState {
     fn default() -> Self {
@@ -115,30 +116,30 @@ impl Cx {
             return;
         };
 
-        let watched_file_count = plan.initial_contents.len();
-        let root_count = plan.roots.len();
-        let file_map = Arc::new(plan.files_by_root);
-        let file_cache = Arc::new(Mutex::new(plan.initial_contents));
-
         let (tx, rx) = channel::<StudioToApp>();
-        let watcher = FileSystemWatcher::start(plan.roots, {
-            let file_map = Arc::clone(&file_map);
-            let file_cache = Arc::clone(&file_cache);
-            move |event| {
-                forward_hot_reload_fs_event(event.mount, event.path, &file_map, &file_cache, &tx);
-            }
-        });
+        let logger = LiveReloadLogger::new(
+            |message| crate::log!("{}", message),
+            |message| crate::error!("{}", message),
+        );
+        let watcher = start_live_reload_watcher(
+            plan,
+            move |change: LiveReloadFileChange| {
+                tx.send(StudioToApp::LiveChange {
+                    file_name: change.file_name,
+                    content: change.content,
+                })
+                .map_err(|_| "channel closed".to_string())?;
+                SignalToUI::set_ui_signal();
+                Ok(())
+            },
+            logger,
+        );
 
         match watcher {
             Ok(watcher) => {
                 Cx::set_control_channel(rx);
                 self.script_data.live_reload.file_observer =
                     Some(DesktopHotReloadWatcher { _watcher: watcher });
-                crate::log!(
-                    "hot reload watching {} script_mod source files across {} crate roots",
-                    watched_file_count,
-                    root_count
-                );
             }
             Err(err) => {
                 crate::error!("hot reload watcher unavailable: {}", err);
@@ -171,7 +172,9 @@ fn handle_cx_live_edit(cx: &mut Cx) -> bool {
         .clone();
     let mut next_overrides = current_overrides.clone();
 
+    let mut processed_files = 0usize;
     for (file_name, content) in latest_by_file {
+        processed_files += 1;
         let compiled_sites = collect_compiled_sites_for_file(script_vm, &file_name);
         if compiled_sites.is_empty() {
             continue;
@@ -251,6 +254,11 @@ fn handle_cx_live_edit(cx: &mut Cx) -> bool {
         .live_reload
         .script_mod_overrides
         .borrow_mut() = next_overrides;
+    crate::log!(
+        "hot reload applied {} override(s) from {} file change(s)",
+        cx.script_data.live_reload.script_mod_overrides.borrow().len(),
+        processed_files
+    );
     true
 }
 
@@ -260,6 +268,7 @@ fn collect_compiled_sites_for_file(
 ) -> Vec<CompiledScriptModSite> {
     let bodies = script_vm.code.bodies.borrow();
     let mut sites = Vec::new();
+    let mut seen = HashSet::<ScriptModKey>::new();
 
     for body in bodies.iter() {
         let ScriptSource::Mod(script_mod) = &body.source else {
@@ -268,8 +277,12 @@ fn collect_compiled_sites_for_file(
         let Some(compiled_file_name) = resolve_matching_script_mod_file(script_mod, file_name) else {
             continue;
         };
+        let key = ScriptModKey::from_script_mod(script_mod);
+        if !seen.insert(key.clone()) {
+            continue;
+        }
         sites.push(CompiledScriptModSite {
-            key: ScriptModKey::from_script_mod(script_mod),
+            key,
             file_name: compiled_file_name,
             original_code: script_mod.code.clone(),
             values: script_mod.values.clone(),
@@ -489,72 +502,11 @@ fn resolve_script_mod_file_for_watch(script_mod: &ScriptMod) -> Option<String> {
         .or_else(|| candidates.into_iter().next())
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-fn forward_hot_reload_fs_event(
-    mount: String,
-    path: PathBuf,
-    files_by_root: &HashMap<String, Vec<String>>,
-    file_cache: &Mutex<HashMap<String, String>>,
-    tx: &Sender<StudioToApp>,
-) {
-    let changed_path = normalize_path_string(&path);
-    let candidates = if files_by_root
-        .get(&mount)
-        .is_some_and(|files| files.iter().any(|file| file == &changed_path))
-    {
-        vec![changed_path]
-    } else {
-        files_by_root.get(&mount).cloned().unwrap_or_default()
-    };
-
-    if candidates.is_empty() {
-        return;
-    }
-
-    let Ok(mut cache) = file_cache.lock() else {
-        return;
-    };
-    for file_name in candidates {
-        let Ok(content) = std::fs::read_to_string(&file_name) else {
-            continue;
-        };
-        if cache
-            .get(&file_name)
-            .is_some_and(|previous| previous == &content)
-        {
-            continue;
-        }
-        cache.insert(file_name.clone(), content.clone());
-        if tx
-            .send(StudioToApp::LiveChange {
-                file_name,
-                content,
-            })
-            .is_ok()
-        {
-            SignalToUI::set_ui_signal();
-        }
-    }
-}
-
 fn push_unique_candidate(candidates: &mut Vec<String>, path: PathBuf) {
     let normalized = normalize_path_string(&path);
     if !candidates.iter().any(|candidate| candidate == &normalized) {
         candidates.push(normalized);
     }
-}
-
-fn normalize_relative_path_string(path: &Path) -> String {
-    normalize_path(path).to_string_lossy().replace('\\', "/")
-}
-
-fn normalize_path_string(path: &Path) -> String {
-    let path = if path.exists() {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    } else {
-        path.to_path_buf()
-    };
-    normalize_path(&path).to_string_lossy().replace('\\', "/")
 }
 
 fn path_has_component_suffix(path: &Path, suffix: &Path, min_components: usize) -> bool {
@@ -580,23 +532,6 @@ fn normalized_path_components(path: &Path) -> Vec<String> {
         .collect()
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
-            std::path::Component::RootDir => out.push(comp.as_os_str()),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
-                }
-            }
-            std::path::Component::Normal(part) => out.push(part),
-        }
-    }
-    out
-}
 
 fn extract_script_mods_from_rust_file(
     file_name: &str,
