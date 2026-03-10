@@ -68,8 +68,7 @@ fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
         listen_address,
         request: request_sender,
         post_max_size: 1024 * 1024,
-    })
-    else {
+    }) else {
         eprintln!("websocket integration test skipped: failed to start http server");
         return;
     };
@@ -106,9 +105,11 @@ fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
         .ws_open(socket_id, request)
         .expect("ws_open should succeed");
 
-    let opened = wait_for_event(&runtime, Duration::from_secs(4), |event| {
-        matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == socket_id)
-    });
+    let opened = wait_for_event(
+        &runtime,
+        Duration::from_secs(4),
+        |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == socket_id),
+    );
     assert!(opened.is_some(), "did not receive WsOpened");
 
     let payload = vec![1u8, 2, 3, 4, 5];
@@ -250,7 +251,8 @@ fn http_post_body_roundtrip_preserves_json_payload() {
         let body = req[body_start..body_end].to_vec();
         let _ = capture_tx.send((headers, body));
 
-        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
         let _ = stream.flush();
     });
 
@@ -261,7 +263,7 @@ fn http_post_body_roundtrip_preserves_json_payload() {
     );
     request.set_header("Content-Type".to_string(), "application/json".to_string());
     let body = r#"{"messages":[{"role":"user","content":"hello"}],"stream":false}"#;
-    request.set_body_string(body.to_string());
+    request.set_body_string(body);
     runtime
         .http_start(request_id, request)
         .expect("http_start should succeed");
@@ -286,7 +288,9 @@ fn http_post_body_roundtrip_preserves_json_payload() {
         .expect("did not capture local request");
     let captured = String::from_utf8(captured_body).expect("request body must be utf8");
     assert!(
-        headers.to_ascii_lowercase().contains("content-type: application/json"),
+        headers
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"),
         "content-type header missing or wrong: {headers}"
     );
     assert_eq!(captured, body, "request body changed in transport layer");

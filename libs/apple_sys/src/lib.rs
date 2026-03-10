@@ -442,9 +442,16 @@ extern "C" {
     pub fn CVPixelBufferIsPlanar(pixelBuffer: CVPixelBufferRef) -> bool;
     pub fn CVPixelBufferGetPlaneCount(pixelBuffer: CVPixelBufferRef) -> usize;
     pub fn CVPixelBufferGetWidthOfPlane(pixelBuffer: CVPixelBufferRef, planeIndex: usize) -> usize;
-    pub fn CVPixelBufferGetHeightOfPlane(pixelBuffer: CVPixelBufferRef, planeIndex: usize) -> usize;
-    pub fn CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer: CVPixelBufferRef, planeIndex: usize) -> usize;
-    pub fn CVPixelBufferGetBaseAddressOfPlane(pixelBuffer: CVPixelBufferRef, planeIndex: usize) -> *mut c_void;
+    pub fn CVPixelBufferGetHeightOfPlane(pixelBuffer: CVPixelBufferRef, planeIndex: usize)
+        -> usize;
+    pub fn CVPixelBufferGetBytesPerRowOfPlane(
+        pixelBuffer: CVPixelBufferRef,
+        planeIndex: usize,
+    ) -> usize;
+    pub fn CVPixelBufferGetBaseAddressOfPlane(
+        pixelBuffer: CVPixelBufferRef,
+        planeIndex: usize,
+    ) -> *mut c_void;
     pub fn CVPixelBufferRelease(pixelBuffer: CVPixelBufferRef);
     pub fn CVPixelBufferRetain(pixelBuffer: CVPixelBufferRef) -> CVPixelBufferRef;
     pub fn CVPixelBufferCreateWithPlanarBytes(
@@ -459,7 +466,9 @@ extern "C" {
         planeWidth: *mut usize,
         planeHeight: *mut usize,
         planeBytesPerRow: *mut usize,
-        releaseCallback: Option<unsafe extern "C" fn(*mut c_void, *const c_void, usize, usize, *const *const c_void)>,
+        releaseCallback: Option<
+            unsafe extern "C" fn(*mut c_void, *const c_void, usize, usize, *const *const c_void),
+        >,
         releaseRefCon: *mut c_void,
         pixelBufferAttributes: *const c_void,
         pixelBufferOut: *mut CVPixelBufferRef,
@@ -546,9 +555,7 @@ extern "C" {
         compressionSessionOut: *mut VTCompressionSessionRef,
     ) -> OSStatus;
 
-    pub fn VTCompressionSessionPrepareToEncodeFrames(
-        session: VTCompressionSessionRef,
-    ) -> OSStatus;
+    pub fn VTCompressionSessionPrepareToEncodeFrames(session: VTCompressionSessionRef) -> OSStatus;
 
     pub fn VTCompressionSessionEncodeFrame(
         session: VTCompressionSessionRef,
@@ -1159,11 +1166,16 @@ pub struct __CFString {
     _unused: [u8; 0],
 }
 pub type CFStringRef = *const __CFString;
+pub type CFTypeRef = *const c_void;
 pub type CFArrayRef = *const c_void;
 pub type CFDictionaryRef = *const c_void;
 pub type CFAllocatorRef = *const c_void;
 pub type CFNumberRef = *const c_void;
 pub type CFBooleanRef = *const c_void;
+pub type CFDataRef = *const c_void;
+pub type CFErrorRef = *const c_void;
+pub type CFIndex = isize;
+pub type Boolean = u8;
 
 pub const kCFNumberSInt32Type: i32 = 3;
 
@@ -1731,9 +1743,16 @@ extern "C" {
     pub static kCFBooleanFalse: CFBooleanRef;
 
     pub fn CFRelease(cf: *const c_void);
+    pub fn CFArrayCreate(
+        allocator: CFAllocatorRef,
+        values: *const *const c_void,
+        numValues: CFIndex,
+        callBacks: *const c_void,
+    ) -> CFArrayRef;
     pub fn CFArrayGetCount(theArray: CFArrayRef) -> isize;
     pub fn CFArrayGetValueAtIndex(theArray: CFArrayRef, idx: isize) -> *const c_void;
     pub fn CFDictionaryContainsKey(theDict: CFDictionaryRef, key: *const c_void) -> u8;
+    pub fn CFDictionaryGetValue(theDict: CFDictionaryRef, key: *const c_void) -> *const c_void;
     pub fn CFDictionaryCreate(
         allocator: CFAllocatorRef,
         keys: *const *const c_void,
@@ -1742,17 +1761,29 @@ extern "C" {
         keyCallBacks: *const c_void,
         valueCallBacks: *const c_void,
     ) -> CFDictionaryRef;
+    pub fn CFDataCreate(allocator: CFAllocatorRef, bytes: *const u8, length: CFIndex) -> CFDataRef;
+    pub fn CFDataGetLength(theData: CFDataRef) -> CFIndex;
+    pub fn CFDataGetBytePtr(theData: CFDataRef) -> *const u8;
     pub fn CFNumberCreate(
         allocator: CFAllocatorRef,
         theType: i32,
         valuePtr: *const c_void,
     ) -> CFNumberRef;
+    pub fn CFStringCreateWithBytes(
+        alloc: CFAllocatorRef,
+        bytes: *const u8,
+        numBytes: CFIndex,
+        encoding: u32,
+        isExternalRepresentation: Boolean,
+    ) -> CFStringRef;
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type SSLContextRef = *mut c_void;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type SSLConnectionRef = *mut c_void;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub type SSLProtocol = u32;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type SSLProtocolSide = u32;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -1761,7 +1792,15 @@ pub type SSLConnectionType = u32;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const kSSLClientSide: SSLProtocolSide = 1;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
+pub const kSSLServerSide: SSLProtocolSide = 0;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const kSSLStreamType: SSLConnectionType = 0;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub const kSSLDatagramType: SSLConnectionType = 1;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub const kDTLSProtocol1: SSLProtocol = 9;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub const kDTLSProtocol12: SSLProtocol = 11;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const errSSLWouldBlock: OSStatus = -9803;
@@ -1772,7 +1811,22 @@ pub const errSSLClosedAbort: OSStatus = -9806;
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 pub const errSSLServerAuthCompleted: OSStatus = -9841;
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub const errSSLPeerAuthCompleted: OSStatus = -9841;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub const errSSLClientAuthCompleted: OSStatus = -9841;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 pub const kSSLSessionOptionBreakOnServerAuth: i32 = 0;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub const kSSLSessionOptionBreakOnClientAuth: i32 = 2;
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub type SecIdentityRef = *const c_void;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub type SecCertificateRef = *const c_void;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub type SecKeyRef = *const c_void;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub type SecTrustRef = *const c_void;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub type SSLReadFunc = Option<
@@ -1805,13 +1859,28 @@ extern "C" {
         write_func: SSLWriteFunc,
     ) -> OSStatus;
     pub fn SSLSetConnection(context: SSLContextRef, connection: SSLConnectionRef) -> OSStatus;
+    pub fn SSLSetCertificate(context: SSLContextRef, cert_refs: CFArrayRef) -> OSStatus;
     pub fn SSLSetPeerDomainName(
         context: SSLContextRef,
         peer_name: *const c_void,
         peer_name_len: usize,
     ) -> OSStatus;
+    pub fn SSLSetPeerID(
+        context: SSLContextRef,
+        peer_id: *const c_void,
+        peer_id_len: usize,
+    ) -> OSStatus;
     pub fn SSLSetSessionOption(context: SSLContextRef, option: i32, value: bool) -> OSStatus;
+    pub fn SSLSetProtocolVersionMin(context: SSLContextRef, min_version: SSLProtocol) -> OSStatus;
+    pub fn SSLSetProtocolVersionMax(context: SSLContextRef, max_version: SSLProtocol) -> OSStatus;
     pub fn SSLHandshake(context: SSLContextRef) -> OSStatus;
+    pub fn SSLSetDatagramHelloCookie(
+        context: SSLContextRef,
+        cookie: *const c_void,
+        cookie_len: usize,
+    ) -> OSStatus;
+    pub fn SSLSetMaxDatagramRecordSize(context: SSLContextRef, max_size: usize) -> OSStatus;
+    pub fn SSLGetDatagramWriteSize(context: SSLContextRef, buf_size: *mut usize) -> OSStatus;
     pub fn SSLRead(
         context: SSLContextRef,
         data: *mut c_void,
@@ -1824,7 +1893,33 @@ extern "C" {
         data_len: usize,
         processed: *mut usize,
     ) -> OSStatus;
+    pub fn SSLCopyPeerTrust(context: SSLContextRef, trust: *mut SecTrustRef) -> OSStatus;
     pub fn SSLClose(context: SSLContextRef) -> OSStatus;
+    pub static kSecAttrKeyType: CFStringRef;
+    pub static kSecAttrKeyClass: CFStringRef;
+    pub static kSecAttrKeySizeInBits: CFStringRef;
+    pub static kSecAttrKeyTypeRSA: CFStringRef;
+    pub static kSecAttrKeyClassPrivate: CFStringRef;
+    pub fn SecCertificateCreateWithData(
+        allocator: CFAllocatorRef,
+        data: CFDataRef,
+    ) -> SecCertificateRef;
+    pub fn SecCertificateCopyData(certificate: SecCertificateRef) -> CFDataRef;
+    pub fn SecIdentityCreate(
+        allocator: CFAllocatorRef,
+        certificate: SecCertificateRef,
+        private_key: SecKeyRef,
+    ) -> SecIdentityRef;
+    pub fn SecIdentityCopyCertificate(
+        identity: SecIdentityRef,
+        certificate: *mut SecCertificateRef,
+    ) -> OSStatus;
+    pub fn SecKeyCreateWithData(
+        key_data: CFDataRef,
+        attributes: CFDictionaryRef,
+        error: *mut CFErrorRef,
+    ) -> SecKeyRef;
+    pub fn SecTrustCopyCertificateChain(trust: SecTrustRef) -> CFArrayRef;
 }
 
 #[cfg(target_os = "macos")]
