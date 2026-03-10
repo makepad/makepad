@@ -4,16 +4,7 @@ use crate::makepad_shell::*;
 use crate::makepad_wasm_strip::*;
 use crate::server_manager::WasmServerOwnershipGuard;
 use crate::utils::*;
-use makepad_live_reload_core::{
-    hot_reload_display_name,
-    normalize_path_string,
-    start_live_reload_watcher,
-    LiveReloadFileChange,
-    LiveReloadLogger,
-    LiveReloadWatchPlan,
-    LiveReloadWatcherHandle,
-    WatchRoot,
-};
+use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_micro_serde::{SerJson, SerJsonState};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -23,7 +14,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc,
+    sync::{mpsc, Arc, Mutex},
     time::Duration,
 };
 
@@ -56,6 +47,30 @@ struct WasmHotReloadEvent {
     content: String,
 }
 
+enum WasmHotReloadCommand {
+    LiveChange {
+        file_name: String,
+        content: String,
+    },
+    Rebuild,
+}
+
+struct WasmHotReloadPlan {
+    roots: Vec<WatchRoot>,
+    files_by_root: HashMap<String, Vec<String>>,
+    initial_contents: HashMap<String, String>,
+    initial_script_mod_bodies: HashMap<String, Vec<String>>,
+}
+
+struct WasmHotReloadWatcher {
+    _watcher: FileSystemWatcher,
+}
+
+#[derive(Clone)]
+struct WasmRebuildPlan {
+    config: WasmConfig,
+    args: Vec<String>,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AutoSplitOutcome {
     NotAttempted,
@@ -1036,12 +1051,17 @@ pub fn run(config: WasmConfig, args: &[String]) -> Result<(), String> {
         port,
         config.lan,
     )?;
+    let rebuild_plan = WasmRebuildPlan {
+        config: run_config,
+        args: args.to_vec(),
+    };
     start_wasm_server(
         result.app_dir,
         config.lan,
         port,
         config.threads,
         hot_reload_plan,
+        rebuild_plan,
         &mut ownership_guard,
     )?;
     Ok(())
@@ -1089,7 +1109,7 @@ fn decode_query_component(input: &str) -> String {
 fn collect_wasm_hot_reload_watch_plan(
     build_crate: &str,
     build_dir: &Path,
-) -> Option<LiveReloadWatchPlan> {
+) -> Option<WasmHotReloadPlan> {
     let mut crate_roots = BTreeMap::<String, PathBuf>::new();
     let build_crate_dir = get_crate_dir(build_crate).ok()?;
     crate_roots.insert(build_crate.to_string(), build_crate_dir);
@@ -1103,6 +1123,7 @@ fn collect_wasm_hot_reload_watch_plan(
     let mut roots = BTreeMap::<String, WatchRoot>::new();
     let mut files_by_root = HashMap::<String, Vec<String>>::new();
     let mut initial_contents = HashMap::<String, String>::new();
+    let mut initial_script_mod_bodies = HashMap::<String, Vec<String>>::new();
 
     for (name, crate_dir) in crate_roots {
         if !should_watch_wasm_crate(build_crate, &name) {
@@ -1124,11 +1145,13 @@ fn collect_wasm_hot_reload_watch_plan(
             let Ok(content) = fs::read_to_string(&file_name) else {
                 continue;
             };
+            let script_mod_bodies = extract_script_mod_bodies_from_rust_file(&content)
+                .unwrap_or_else(|_| vec![content.clone()]);
             initial_contents.entry(file_name.clone()).or_insert(content);
-            files_by_root
-                .entry(mount.clone())
-                .or_default()
-                .push(file_name);
+            initial_script_mod_bodies
+                .entry(file_name.clone())
+                .or_insert(script_mod_bodies);
+            files_by_root.entry(mount.clone()).or_default().push(file_name);
         }
     }
 
@@ -1141,10 +1164,11 @@ fn collect_wasm_hot_reload_watch_plan(
         files.dedup();
     }
 
-    Some(LiveReloadWatchPlan {
+    Some(WasmHotReloadPlan {
         roots: roots.into_values().collect(),
         files_by_root,
         initial_contents,
+        initial_script_mod_bodies,
     })
 }
 
@@ -1195,26 +1219,37 @@ fn collect_script_mod_files_recursive(dir: &Path, files: &mut Vec<String>) {
 }
 
 fn start_wasm_hot_reload_watcher(
-    plan: LiveReloadWatchPlan,
-    tx: mpsc::Sender<WasmHotReloadEvent>,
-) -> Option<LiveReloadWatcherHandle> {
-    let logger = LiveReloadLogger::new(
-        |message| println!("{}", message),
-        |message| eprintln!("{}", message),
-    );
-    match start_live_reload_watcher(
-        plan,
-        move |change: LiveReloadFileChange| {
-            tx.send(WasmHotReloadEvent {
-                kind: "live_change".to_string(),
-                file_name: change.file_name,
-                content: change.content,
-            })
-            .map_err(|_| "channel closed".to_string())
-        },
-        logger,
-    ) {
-        Ok(watcher) => Some(watcher),
+    plan: WasmHotReloadPlan,
+    tx: mpsc::Sender<WasmHotReloadCommand>,
+) -> Option<WasmHotReloadWatcher> {
+    let watched_file_count = plan.initial_contents.len();
+    let root_count = plan.roots.len();
+    let file_map = Arc::new(plan.files_by_root);
+    let file_cache = Arc::new(Mutex::new(plan.initial_contents));
+    let script_mod_body_cache = Arc::new(Mutex::new(plan.initial_script_mod_bodies));
+
+    match FileSystemWatcher::start(plan.roots, {
+        let file_map = Arc::clone(&file_map);
+        let file_cache = Arc::clone(&file_cache);
+        let script_mod_body_cache = Arc::clone(&script_mod_body_cache);
+        move |event| {
+            forward_hot_reload_fs_event(
+                event.mount,
+                event.path,
+                &file_map,
+                &file_cache,
+                &script_mod_body_cache,
+                &tx,
+            );
+        }
+    }) {
+        Ok(watcher) => {
+            println!(
+                "Watching {} hotpatchable script_mod source files across {} crate roots",
+                watched_file_count, root_count
+            );
+            Some(WasmHotReloadWatcher { _watcher: watcher })
+        }
         Err(err) => {
             eprintln!("hot reload watcher unavailable: {}", err);
             None
@@ -1222,34 +1257,440 @@ fn start_wasm_hot_reload_watcher(
     }
 }
 
+fn forward_hot_reload_fs_event(
+    mount: String,
+    path: PathBuf,
+    files_by_root: &HashMap<String, Vec<String>>,
+    file_cache: &Mutex<HashMap<String, String>>,
+    script_mod_body_cache: &Mutex<HashMap<String, Vec<String>>>,
+    tx: &mpsc::Sender<WasmHotReloadCommand>,
+) {
+    let changed_path = normalize_path_string(&path);
+    let is_hot_file = files_by_root
+        .get(&mount)
+        .is_some_and(|files| files.iter().any(|file| file == &changed_path));
+    let candidates = if is_hot_file {
+        vec![changed_path]
+    } else {
+        files_by_root.get(&mount).cloned().unwrap_or_default()
+    };
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let Ok(mut cache) = file_cache.lock() else {
+        return;
+    };
+    let Ok(mut body_cache) = script_mod_body_cache.lock() else {
+        return;
+    };
+
+    for file_name in candidates {
+        let Ok(content) = fs::read_to_string(&file_name) else {
+            continue;
+        };
+        if cache
+            .get(&file_name)
+            .is_some_and(|previous| previous == &content)
+        {
+            continue;
+        }
+        cache.insert(file_name.clone(), content.clone());
+        let next_bodies =
+            extract_script_mod_bodies_from_rust_file(&content).unwrap_or_else(|_| vec![content.clone()]);
+        let previous_bodies = body_cache
+            .get(&file_name)
+            .cloned()
+            .unwrap_or_default();
+        body_cache.insert(file_name.clone(), next_bodies.clone());
+
+        if next_bodies != previous_bodies {
+            let _ = tx.send(WasmHotReloadCommand::LiveChange { file_name, content });
+        } else {
+            let _ = tx.send(WasmHotReloadCommand::Rebuild);
+        }
+        return;
+    }
+
+    if !is_hot_file && should_trigger_wasm_rebuild(&path) {
+        let _ = tx.send(WasmHotReloadCommand::Rebuild);
+    }
+}
+
 fn broadcast_hot_reload_event(
     event: WasmHotReloadEvent,
     watch_clients: &mut HashMap<u64, mpsc::Sender<Vec<u8>>>,
 ) {
-    let display_name = hot_reload_display_name(&event.file_name);
     let payload = event.serialize_json().into_bytes();
     let stale_clients: Vec<u64> = watch_clients
         .iter()
-        .filter_map(|(web_socket_id, sender)| {
-            sender.send(payload.clone()).err().map(|_| *web_socket_id)
-        })
+        .filter_map(|(web_socket_id, sender)| sender.send(payload.clone()).err().map(|_| *web_socket_id))
         .collect();
     for web_socket_id in stale_clients {
         watch_clients.remove(&web_socket_id);
     }
-    let delivered = watch_clients.len();
-    if delivered == 0 {
-        println!(
-            "hotreload skipped: {} (no connected /$watch clients)",
-            display_name
-        );
+}
+
+fn make_hot_reload_event(kind: &str) -> WasmHotReloadEvent {
+    WasmHotReloadEvent {
+        kind: kind.to_string(),
+        file_name: String::new(),
+        content: String::new(),
+    }
+}
+
+fn rebuild_wasm_app(plan: &WasmRebuildPlan, watch_clients: &mut HashMap<u64, mpsc::Sender<Vec<u8>>>) {
+    broadcast_hot_reload_event(make_hot_reload_event("build_start"), watch_clients);
+    println!("Wasm hot reload fallback: rebuilding app");
+    match build(plan.config, &plan.args) {
+        Ok(_) => {
+            println!("Wasm hot reload fallback: rebuild complete");
+            broadcast_hot_reload_event(make_hot_reload_event("reload"), watch_clients);
+        }
+        Err(err) => {
+            eprintln!("Wasm hot reload fallback: rebuild failed: {}", err);
+        }
+    }
+}
+
+fn should_trigger_wasm_rebuild(path: &Path) -> bool {
+    if path.components().any(|component| {
+        let part = component.as_os_str().to_string_lossy();
+        part == "target" || part == ".git"
+    }) {
+        return false;
+    }
+
+    let Some(file_name) = path.file_name().map(|name| name.to_string_lossy()) else {
+        return false;
+    };
+    if file_name.starts_with('.')
+        || file_name == "4913"
+        || file_name.ends_with('~')
+        || file_name.ends_with(".swp")
+        || file_name.ends_with(".tmp")
+        || file_name.ends_with(".orig")
+    {
+        return false;
+    }
+
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => matches!(
+            ext,
+            "rs"
+                | "toml"
+                | "js"
+                | "css"
+                | "html"
+                | "md"
+                | "svg"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "webp"
+                | "glb"
+                | "ttf"
+                | "otf"
+                | "woff"
+                | "woff2"
+                | "bin"
+                | "ron"
+        ),
+        None => false,
+    }
+}
+
+fn normalize_path_string(path: &Path) -> String {
+    let path = if path.exists() {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
     } else {
-        println!(
-            "hotreload sent: {} ({} client{})",
-            display_name,
-            delivered,
-            if delivered == 1 { "" } else { "s" }
-        );
+        path.to_path_buf()
+    };
+    normalize_path(&path).to_string_lossy().replace('\\', "/")
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            std::path::Component::RootDir => out.push(comp.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            std::path::Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
+fn extract_script_mod_bodies_from_rust_file(source: &str) -> Result<Vec<String>, String> {
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    let mut extracted = Vec::new();
+
+    while i < bytes.len() {
+        if let Some(end) = skip_non_code_segment(bytes, i)? {
+            i = end;
+            continue;
+        }
+
+        if is_ident_start(bytes[i]) {
+            let ident_start = i;
+            i += 1;
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+
+            if &source[ident_start..i] == "script_mod" {
+                let mut j = skip_ws_and_comments(bytes, i)?;
+                if bytes.get(j) == Some(&b'!') {
+                    j += 1;
+                    j = skip_ws_and_comments(bytes, j)?;
+                    if bytes.get(j) == Some(&b'{') {
+                        let end = find_matching_delim(bytes, j, b'{', b'}')?;
+                        extracted.push(source[j + 1..end].to_string());
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+            continue;
+        }
+
+        i += utf8_char_len(bytes[i]);
+    }
+
+    Ok(extracted)
+}
+
+fn skip_non_code_segment(bytes: &[u8], i: usize) -> Result<Option<usize>, String> {
+    if i >= bytes.len() {
+        return Ok(None);
+    }
+    if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
+        return Ok(Some(skip_line_comment(bytes, i)));
+    }
+    if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+        return Ok(Some(skip_block_comment(bytes, i)?));
+    }
+    if let Some((prefix_len, hashes)) = raw_string_prefix(bytes, i) {
+        return Ok(Some(skip_raw_string(bytes, i, prefix_len, hashes)?));
+    }
+    if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'"') {
+        return Ok(Some(skip_quoted(bytes, i, 1, b'"')?));
+    }
+    if bytes[i] == b'"' {
+        return Ok(Some(skip_quoted(bytes, i, 0, b'"')?));
+    }
+    if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'\'') {
+        if let Some(end) = char_literal_end(bytes, i, 1) {
+            return Ok(Some(end));
+        }
+    }
+    if let Some(end) = char_literal_end(bytes, i, 0) {
+        return Ok(Some(end));
+    }
+    Ok(None)
+}
+
+fn skip_ws_and_comments(bytes: &[u8], mut i: usize) -> Result<usize, String> {
+    loop {
+        i = skip_ascii_whitespace(bytes, i);
+        if bytes.get(i) == Some(&b'/') && bytes.get(i + 1) == Some(&b'/') {
+            i = skip_line_comment(bytes, i);
+            continue;
+        }
+        if bytes.get(i) == Some(&b'/') && bytes.get(i + 1) == Some(&b'*') {
+            i = skip_block_comment(bytes, i)?;
+            continue;
+        }
+        return Ok(i);
+    }
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+fn find_matching_delim(bytes: &[u8], mut i: usize, open: u8, close: u8) -> Result<usize, String> {
+    let mut depth = 0usize;
+    while i < bytes.len() {
+        if let Some(end) = skip_non_code_segment(bytes, i)? {
+            i = end;
+            continue;
+        }
+        if bytes[i] == open {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == close {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(i);
+            }
+            i += 1;
+            continue;
+        }
+        i += utf8_char_len(bytes[i]);
+    }
+    Err("wasm hot reload hit an unclosed delimiter while scanning Rust source".to_string())
+}
+
+fn raw_string_prefix(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
+    if i >= bytes.len() {
+        return None;
+    }
+
+    let (mut j, prefix_len) = if bytes[i] == b'r' && bytes.get(i + 1) == Some(&b'b') {
+        (i + 2, 2)
+    } else if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'r') {
+        (i + 2, 2)
+    } else if bytes[i] == b'r' {
+        (i + 1, 1)
+    } else {
+        return None;
+    };
+
+    let mut hashes = 0usize;
+    while bytes.get(j) == Some(&b'#') {
+        hashes += 1;
+        j += 1;
+    }
+    if bytes.get(j) != Some(&b'"') {
+        return None;
+    }
+    Some((prefix_len + 1 + hashes + 1, hashes))
+}
+
+fn skip_raw_string(
+    bytes: &[u8],
+    i: usize,
+    prefix_len: usize,
+    hashes: usize,
+) -> Result<usize, String> {
+    let mut j = i + prefix_len;
+    while j < bytes.len() {
+        if bytes[j] == b'"'
+            && j + hashes < bytes.len()
+            && bytes[j + 1..j + 1 + hashes].iter().all(|byte| *byte == b'#')
+        {
+            return Ok(j + 1 + hashes);
+        }
+        j += 1;
+    }
+    Err("wasm hot reload hit an unterminated raw string".to_string())
+}
+
+fn skip_quoted(bytes: &[u8], i: usize, prefix_len: usize, quote: u8) -> Result<usize, String> {
+    let mut j = i + prefix_len + 1;
+    while j < bytes.len() {
+        if bytes[j] == b'\\' {
+            j += 1;
+            if j < bytes.len() {
+                j += 1;
+            }
+            continue;
+        }
+        if bytes[j] == quote {
+            return Ok(j + 1);
+        }
+        j += 1;
+    }
+    Err("wasm hot reload hit an unterminated string literal".to_string())
+}
+
+fn char_literal_end(bytes: &[u8], i: usize, prefix_len: usize) -> Option<usize> {
+    let quote_index = i + prefix_len;
+    if quote_index >= bytes.len() || bytes[quote_index] != b'\'' {
+        return None;
+    }
+
+    let mut j = quote_index + 1;
+    if j >= bytes.len() {
+        return None;
+    }
+
+    if bytes[j] == b'\\' {
+        j += 1;
+        if j >= bytes.len() {
+            return None;
+        }
+        if bytes[j] == b'u' && bytes.get(j + 1) == Some(&b'{') {
+            j += 2;
+            while j < bytes.len() && bytes[j] != b'}' && bytes[j] != b'\n' {
+                j += 1;
+            }
+            if j >= bytes.len() || bytes[j] != b'}' {
+                return None;
+            }
+            j += 1;
+        } else {
+            j += 1;
+        }
+    } else {
+        if bytes[j] == b'\'' || bytes[j] == b'\n' {
+            return None;
+        }
+        j += utf8_char_len(bytes[j]);
+    }
+
+    (bytes.get(j) == Some(&b'\'')).then_some(j + 1)
+}
+
+fn skip_line_comment(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i] != b'\n' {
+        i += 1;
+    }
+    i
+}
+
+fn skip_block_comment(bytes: &[u8], mut i: usize) -> Result<usize, String> {
+    let mut depth = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                return Ok(i);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    Err("wasm hot reload hit an unterminated block comment".to_string())
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+fn is_ident_continue(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
+}
+
+fn utf8_char_len(byte: u8) -> usize {
+    if byte < 0x80 {
+        1
+    } else if byte & 0b1110_0000 == 0b1100_0000 {
+        2
+    } else if byte & 0b1111_0000 == 0b1110_0000 {
+        3
+    } else {
+        4
     }
 }
 
@@ -1258,7 +1699,8 @@ fn start_wasm_server(
     lan: bool,
     port: u16,
     threaded: bool,
-    hot_reload_plan: Option<LiveReloadWatchPlan>,
+    hot_reload_plan: Option<WasmHotReloadPlan>,
+    rebuild_plan: WasmRebuildPlan,
     ownership_guard: &mut WasmServerOwnershipGuard,
 ) -> Result<(), String> {
     let net = NetworkRuntime::new(NetworkConfig::default());
@@ -1269,7 +1711,7 @@ fn start_wasm_server(
     };
     println!("Starting webserver on http://{:?}", addr);
     let (tx_request, rx_request) = mpsc::channel::<HttpServerRequest>();
-    let (tx_hot_reload, rx_hot_reload) = mpsc::channel::<WasmHotReloadEvent>();
+    let (tx_hot_reload, rx_hot_reload) = mpsc::channel::<WasmHotReloadCommand>();
 
     let _listen_thread = net.start_http_server(HttpServer {
         listen_address: addr,
@@ -1287,10 +1729,36 @@ fn start_wasm_server(
     let loop_thread = std::thread::spawn(move || {
         let _hot_reload_watcher = hot_reload_watcher;
         let mut watch_clients = HashMap::<u64, mpsc::Sender<Vec<u8>>>::new();
+        let rebuild_plan = rebuild_plan;
+        let mut rebuild_queued = false;
 
         loop {
-            while let Ok(event) = rx_hot_reload.try_recv() {
-                broadcast_hot_reload_event(event, &mut watch_clients);
+            let mut pending_live_changes = Vec::<(String, String)>::new();
+            while let Ok(command) = rx_hot_reload.try_recv() {
+                match command {
+                    WasmHotReloadCommand::LiveChange { file_name, content } => {
+                        pending_live_changes.push((file_name, content));
+                    }
+                    WasmHotReloadCommand::Rebuild => {
+                        rebuild_queued = true;
+                    }
+                }
+            }
+
+            if rebuild_queued {
+                rebuild_queued = false;
+                rebuild_wasm_app(&rebuild_plan, &mut watch_clients);
+            } else {
+                for (file_name, content) in pending_live_changes.drain(..) {
+                    broadcast_hot_reload_event(
+                        WasmHotReloadEvent {
+                            kind: "live_change".to_string(),
+                            file_name,
+                            content,
+                        },
+                        &mut watch_clients,
+                    );
+                }
             }
 
             let message = match rx_request.recv_timeout(Duration::from_millis(100)) {
@@ -1536,4 +2004,68 @@ fn start_wasm_server(
         .join()
         .map_err(|_| "wasm webserver event loop thread panicked".to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_mod_extraction_ignores_non_code_segments() {
+        let source = r###"
+            // script_mod!{ ignored_comment }
+            const STR: &str = "script_mod!{ ignored_string }";
+            const RAW: &str = r#"script_mod!{ ignored_raw }"#;
+
+            script_mod!{
+                use mod.prelude.widgets.*
+                ui: Root{}
+            }
+        "###;
+
+        let bodies = extract_script_mod_bodies_from_rust_file(source).unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("ui: Root{}"));
+        assert!(!bodies[0].contains("ignored_comment"));
+        assert!(!bodies[0].contains("ignored_string"));
+        assert!(!bodies[0].contains("ignored_raw"));
+    }
+
+    #[test]
+    fn script_mod_extraction_stays_stable_for_outside_edits() {
+        let before = r#"
+            fn helper() -> usize { 1 }
+            script_mod!{
+                use mod.prelude.widgets.*
+                ui: Root{}
+            }
+        "#;
+        let after = r#"
+            fn helper() -> usize { 2 }
+            script_mod!{
+                use mod.prelude.widgets.*
+                ui: Root{}
+            }
+        "#;
+
+        assert_eq!(
+            extract_script_mod_bodies_from_rust_file(before).unwrap(),
+            extract_script_mod_bodies_from_rust_file(after).unwrap()
+        );
+    }
+
+    #[test]
+    fn wasm_rebuild_filter_skips_temp_and_target_paths() {
+        assert!(should_trigger_wasm_rebuild(Path::new("/tmp/app/src/main.rs")));
+        assert!(should_trigger_wasm_rebuild(Path::new(
+            "/tmp/app/resources/theme.ron"
+        )));
+        assert!(!should_trigger_wasm_rebuild(Path::new(
+            "/tmp/app/target/debug/main.rs"
+        )));
+        assert!(!should_trigger_wasm_rebuild(Path::new(
+            "/tmp/app/src/main.rs.swp"
+        )));
+        assert!(!should_trigger_wasm_rebuild(Path::new("/tmp/app/.git/index")));
+    }
 }
