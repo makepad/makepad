@@ -486,8 +486,13 @@ pub fn cp_brotli(
     if source_path.extension().and_then(|s| s.to_str()) == Some("js") {
         if let Ok(content) = std::fs::read_to_string(source_path) {
             let minified = minify_js(&content);
-            std::fs::write(dest_path, minified)
-                .map_err(|e| format!("Could not write minified JS to {:?}: {}", dest_path, e))?;
+            if let Err(e) = std::fs::write(dest_path, minified) {
+                println!(
+                    "Warning: could not write minified JS to {:?}: {}. Falling back to unminified copy.",
+                    dest_path, e
+                );
+                cp(source_path, dest_path, exec)?;
+            }
         } else {
             cp(source_path, dest_path, exec)?;
         }
