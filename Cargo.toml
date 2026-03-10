@@ -35,6 +35,7 @@ workspace.members = [
     "libs/apple_sys",
     "platform/network",
     "libs/filesystem_watcher",
+    "libs/live_reload_core",
     "platform/script/test",
     "platform/studio",
     # "widgets/test",
