@@ -1,5 +1,7 @@
 use super::*;
 
+const MAKEPAD_SPLASH_RUNNABLE: &str = "makepad.splash";
+
 macro_rules! ui_file_sync_trace {
     ($($arg:tt)*) => {};
 }
@@ -205,7 +207,10 @@ impl App {
                 };
                 let mut stop_count = 0usize;
                 for build in builds {
-                    if build.active && build.mount == mount {
+                    if build.active
+                        && build.mount == mount
+                        && build.package != MAKEPAD_SPLASH_RUNNABLE
+                    {
                         if let Some(tab_id) =
                             self.data.run_tab_by_build.get(&build.build_id).copied()
                         {
@@ -227,8 +232,8 @@ impl App {
                     &format!("stop-all {}: {} running build(s)", mount, stop_count),
                 );
             }
-            HubToClient::RunnableBuilds { mount, builds } => {
-                self.mount_state_mut(&mount).runnable_builds = builds;
+            HubToClient::RunItems { mount, items } => {
+                self.mount_state_mut(&mount).run_items = items;
                 if self.data.active_mount.as_deref() == Some(mount.as_str()) {
                     self.refresh_active_mount_run_list(cx);
                     self.set_status(cx, &format!("run targets loaded: {}", mount));
@@ -239,6 +244,9 @@ impl App {
                 mount,
                 package,
             } => {
+                if package == MAKEPAD_SPLASH_RUNNABLE {
+                    return;
+                }
                 let _ = self.ensure_mount_tab(cx, &mount);
                 if self.data.active_mount.as_deref() != Some(mount.as_str()) {
                     self.select_mount(cx, &mount);
@@ -284,6 +292,13 @@ impl App {
                 build_id,
                 exit_code,
             } => {
+                if self.data.build_package.get(&build_id).map(String::as_str)
+                    == Some(MAKEPAD_SPLASH_RUNNABLE)
+                {
+                    self.data.build_package.remove(&build_id);
+                    self.data.build_to_mount.remove(&build_id);
+                    return;
+                }
                 self.data.build_to_mount.remove(&build_id);
                 self.stop_profiler_query_for_build(build_id);
                 self.data.profiler_running_by_build.insert(build_id, false);

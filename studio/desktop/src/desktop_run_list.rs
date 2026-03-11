@@ -134,10 +134,9 @@ script_mod! {
 
 #[derive(Clone, Debug, Default)]
 pub enum DesktopRunListAction {
-    RunPackage {
+    RunItem {
         mount: String,
-        package: String,
-        outside_studio: bool,
+        name: String,
     },
     #[default]
     None,
@@ -145,10 +144,9 @@ pub enum DesktopRunListAction {
 
 #[derive(Clone, Debug, PartialEq, Default)]
 enum RunListRowData {
-    RunPackage {
+    RunItem {
         mount: String,
-        package: String,
-        index: usize,
+        name: String,
     },
     #[default]
     None,
@@ -164,8 +162,6 @@ impl ActionDefaultRef for RunListRowData {
 pub struct DesktopRunList {
     #[deref]
     view: View,
-    #[rust]
-    selected_index: Option<usize>,
 }
 
 impl DesktopRunList {
@@ -189,22 +185,15 @@ impl DesktopRunList {
         let Some(entries) = data
             .mounts
             .get(active_mount)
-            .map(|mount| &mount.runnable_builds)
+            .map(|mount| &mount.run_items)
         else {
             self.draw_empty(cx, list, "Loading run targets...");
             return;
         };
 
         if entries.is_empty() {
-            self.draw_empty(cx, list, "No runnable packages found");
+            self.draw_empty(cx, list, "No run items available");
             return;
-        }
-
-        if self
-            .selected_index
-            .is_some_and(|selected| selected >= entries.len())
-        {
-            self.selected_index = None;
         }
 
         let empty_rows = Self::empty_fill_rows(list, cx, entries.len());
@@ -229,11 +218,10 @@ impl DesktopRunList {
                 }
             });
             let button = item.button(cx, ids!(row_button));
-            button.set_text(cx, &entry.package);
-            button.set_action_data(RunListRowData::RunPackage {
+            button.set_text(cx, &entry.name);
+            button.set_action_data(RunListRowData::RunItem {
                 mount: active_mount.to_string(),
-                package: entry.package.clone(),
-                index: item_id,
+                name: entry.name.clone(),
             });
             item.draw_all(cx, &mut Scope::empty());
         }
@@ -280,22 +268,17 @@ impl Widget for DesktopRunList {
             for (_item_id, item) in run_list.items_with_actions(actions) {
                 let button = item.button(cx, ids!(row_button));
                 if let Some(modifiers) = button.clicked_modifiers(actions) {
-                    if let RunListRowData::RunPackage {
-                        mount,
-                        package,
-                        index,
-                    } = button.action_data().cast_ref()
+                    if let RunListRowData::RunItem { mount, name } = button.action_data().cast_ref()
                     {
-                        self.selected_index = Some(*index);
                         cx.widget_action(
                             uid,
-                            DesktopRunListAction::RunPackage {
+                            DesktopRunListAction::RunItem {
                                 mount: mount.clone(),
-                                package: package.clone(),
-                                outside_studio: modifiers.logo || modifiers.control,
+                                name: name.clone(),
                             },
                         );
                     }
+                    let _ = modifiers;
                 }
             }
         }
@@ -303,15 +286,11 @@ impl Widget for DesktopRunList {
 }
 
 impl DesktopRunListRef {
-    pub fn run_requested(&self, actions: &Actions) -> Option<(String, String, bool)> {
+    pub fn run_requested(&self, actions: &Actions) -> Option<(String, String)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let DesktopRunListAction::RunPackage {
-                mount,
-                package,
-                outside_studio,
-            } = item.cast()
+            if let DesktopRunListAction::RunItem { mount, name } = item.cast()
             {
-                return Some((mount, package, outside_studio));
+                return Some((mount, name));
             }
         }
         None

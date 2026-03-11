@@ -37,10 +37,7 @@ use makepad_studio_protocol::hub_protocol::{
     ClientToHub, FileNodeType, HubToClient, LogEntry, QueryId,
 };
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::path::{Component, Path};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
 #[path = "app_backend.rs"]
 mod app_backend;
@@ -80,18 +77,6 @@ fn push_capped_deque<T>(entries: &mut std::collections::VecDeque<T>, entry: T, m
     while entries.len() > max_len {
         entries.pop_front();
     }
-}
-
-fn studio_signal_timing_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        env::var("MAKEPAD_STUDIO_SIGNAL_TIMING")
-            .map(|value| {
-                let value = value.trim().to_ascii_lowercase();
-                !matches!(value.as_str(), "" | "0" | "false" | "off")
-            })
-            .unwrap_or(false)
-    })
 }
 
 fn parse_path_line_column_token(token: &str) -> Option<(String, usize, usize)> {
@@ -161,11 +146,11 @@ impl MatchEvent for App {
                 {
                     self.queue_mount_file_filter(cx, &active_mount, filter);
                 }
-                if let Some((mount, package, outside_studio)) = workspace
+                if let Some((mount, name)) = workspace
                     .desktop_run_list(cx, ids!(run_list))
                     .run_requested(actions)
                 {
-                    self.run_package(cx, &mount, &package, outside_studio);
+                    self.run_item(cx, &mount, &name);
                 }
                 if workspace.button(cx, ids!(run_stop_all)).clicked(actions) {
                     self.request_stop_all_builds_for_mount(cx, &active_mount);
@@ -304,9 +289,6 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let signal_timing = matches!(event, Event::Signal) && studio_signal_timing_enabled();
-        let signal_start = signal_timing.then(Instant::now);
-
         if let Event::Timer(timer_event) = event {
             if self
                 .file_filter_debounce_timer
@@ -320,39 +302,10 @@ impl AppMain for App {
         self.ui
             .handle_event(cx, event, &mut Scope::with_data(&mut self.data));
 
-        let drain_start = signal_timing.then(Instant::now);
-        let drained_messages = if matches!(event, Event::Signal) {
+        if matches!(event, Event::Signal) {
             self.drain_studio_messages(cx)
-        } else {
-            0
-        };
-        let drain_elapsed = drain_start.map(|start| start.elapsed()).unwrap_or_default();
-
-        let refresh_start = signal_timing.then(Instant::now);
-        self.refresh_run_view_targets(cx);
-        let refresh_elapsed = refresh_start.map(|start| start.elapsed()).unwrap_or_default();
-
-        let save_start = signal_timing.then(Instant::now);
-        let saved_state = self.save_state_if_needed(cx);
-        let save_elapsed = save_start.map(|start| start.elapsed()).unwrap_or_default();
-
-        if let Some(signal_start) = signal_start {
-            let total_elapsed = signal_start.elapsed();
-            if total_elapsed >= Duration::from_millis(8)
-                || drain_elapsed >= Duration::from_millis(4)
-                || refresh_elapsed >= Duration::from_millis(4)
-                || save_elapsed >= Duration::from_millis(4)
-            {
-                log!(
-                    "[studio-signal] total={:.2}ms drain={:.2}ms msgs={} refresh={:.2}ms save={:.2}ms saved={}",
-                    total_elapsed.as_secs_f64() * 1000.0,
-                    drain_elapsed.as_secs_f64() * 1000.0,
-                    drained_messages,
-                    refresh_elapsed.as_secs_f64() * 1000.0,
-                    save_elapsed.as_secs_f64() * 1000.0,
-                    saved_state,
-                );
-            }
         }
+        self.refresh_run_view_targets(cx);
+        self.save_state_if_needed(cx);
     }
 }

@@ -382,7 +382,7 @@ fn should_emit_protocol_response(msg: &HubToClient) -> bool {
             | HubToClient::FindFileResults { .. }
             | HubToClient::SearchFileResults { .. }
             | HubToClient::Builds { .. }
-            | HubToClient::RunnableBuilds { .. }
+            | HubToClient::RunItems { .. }
             | HubToClient::BuildStarted { .. }
             | HubToClient::BuildStopped { .. }
             | HubToClient::AppStarted { .. }

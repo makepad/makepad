@@ -50,7 +50,7 @@ script_mod! {
         ..mod.draw.DrawQuad
         status_kind: instance(GitStatusDotKind.None)
         color_new: #x58c26d
-        color_modified: #xd86464
+        color_modified: #FA0
         color_deleted: #xd86464
         color_mixed: #xd86464
         pixel: fn() {
