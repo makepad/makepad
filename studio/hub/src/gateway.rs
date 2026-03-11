@@ -1,6 +1,6 @@
 use crate::dispatch::HubEvent;
 use makepad_studio_protocol::hub_protocol::QueryId;
-use makepad_network::{
+use makepad_script_std::makepad_network::{
     start_http_server, HttpServer, HttpServerRequest, HttpServerResponse, ToUISender,
 };
 use std::collections::HashMap;

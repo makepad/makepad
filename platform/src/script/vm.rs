@@ -1,56 +1,6 @@
-use crate::cx::*;
 use crate::*;
 use makepad_script::*;
 use std::any::Any;
-
-impl Cx {
-    pub fn with_vm_and_async<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
-        let mut bx = self
-            .script_vm
-            .take()
-            .expect("Script VM swapped off, make sure to call with_cx if you want this to work'");
-        bx.threads.set_current_to_first_unpaused_thread();
-        let mut vm = ScriptVm { host: self, bx };
-        let r = f(&mut vm);
-        self.script_vm = Some(vm.bx);
-        self.handle_script_tasks();
-        r
-    }
-
-    pub fn with_vm<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
-        let mut bx = self
-            .script_vm
-            .take()
-            .expect("Script VM swapped off, make sure to call with_cx if you want this to work'");
-        bx.threads.set_current_to_first_unpaused_thread();
-        let mut vm = ScriptVm { host: self, bx };
-        let r = f(&mut vm);
-        // Drain any errors that accumulated during script_apply calls
-        vm.drain_errors();
-        self.script_vm = Some(vm.bx);
-        r
-    }
-
-    pub fn with_vm_thread<R, F: FnOnce(&mut ScriptVm) -> R>(
-        &mut self,
-        thread_id: ScriptThreadId,
-        f: F,
-    ) -> R {
-        let mut bx = self
-            .script_vm
-            .take()
-            .expect("Script VM swapped off, make sure to call with_cx if you want this to work'");
-        bx.threads.set_current_thread_id(thread_id);
-        let mut vm = ScriptVm { host: self, bx };
-        let r = f(&mut vm);
-        self.script_vm = Some(vm.bx);
-        r
-    }
-
-    pub fn eval(&mut self, script_mod: ScriptMod) -> ScriptValue {
-        self.with_vm_and_async(|vm| vm.eval(script_mod))
-    }
-}
 
 pub trait ScriptVmCx {
     fn cx_mut(&mut self) -> &mut Cx;

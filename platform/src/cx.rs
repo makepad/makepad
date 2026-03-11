@@ -333,13 +333,18 @@ impl Cx {
             SignalToUI::set_ui_signal();
         })));
 
+        let mut script_std = makepad_script_std::ScriptStd::with_network_runtime(net.clone());
+        let mut script_host = 0;
         let mut vm = ScriptVm {
-            host: &mut 0,
+            host: &mut script_host,
+            std: &mut script_std,
             bx: Box::new(ScriptVmBase::new()),
         };
 
         //todo!();
         crate::script::script_mod(&mut vm);
+        let script_vm = std::mem::replace(&mut vm.bx, Box::new(ScriptVmBase::empty()));
+        drop(vm);
 
         Self {
             package_root: None,
@@ -419,14 +424,15 @@ impl Cx {
             net,
 
             script_data: CxScriptData {
-                crate_manifests: vm.bx.code.crate_manifests.clone(),
+                std: script_std,
+                crate_manifests: script_vm.code.crate_manifests.clone(),
                 live_reload: crate::live_reload::CxLiveReloadState {
-                    script_mod_overrides: vm.bx.code.script_mod_overrides.clone(),
+                    script_mod_overrides: script_vm.code.script_mod_overrides.clone(),
                     ..Default::default()
                 },
                 ..Default::default()
             },
-            script_vm: Some(vm.bx),
+            script_vm: Some(script_vm),
         }
     }
 }

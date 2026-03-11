@@ -806,11 +806,7 @@ fn terminal_codex_fast_vs_slow_wiggle_same_final_frame() {
     let wiggle: &[u16] = &[30, 12, 28, 10, 26, 14, 29, 11, 27, 13, 30, 20];
 
     let mut run_mode = |path: &str, slow: bool| -> String {
-        let tui_log_path = format!(
-            "/tmp/{}.{}.log",
-            path.replace('/', "_"),
-            std::process::id()
-        );
+        let tui_log_path = format!("/tmp/{}.{}.log", path.replace('/', "_"), std::process::id());
         let mut env = std::collections::HashMap::new();
         env.insert("TUI_LOG".to_string(), tui_log_path.clone());
         let _ = connection.send(ClientToHub::TerminalOpen {
@@ -824,7 +820,11 @@ fn terminal_codex_fast_vs_slow_wiggle_same_final_frame() {
             Duration::from_secs(5),
             |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == path),
         );
-        assert!(opened.is_some(), "did not receive TerminalOpened for {}", path);
+        assert!(
+            opened.is_some(),
+            "did not receive TerminalOpened for {}",
+            path
+        );
 
         request_terminal_viewport(&mut connection, path, 80, 20, usize::MAX);
         let _ = connection.send(ClientToHub::TerminalInput {
@@ -846,7 +846,9 @@ fn terminal_codex_fast_vs_slow_wiggle_same_final_frame() {
                     &connection,
                     path,
                     Duration::from_secs(6),
-                    |frame| frame.rows == *rows && !framebuffer_last_row_text(frame).trim().is_empty(),
+                    |frame| {
+                        frame.rows == *rows && !framebuffer_last_row_text(frame).trim().is_empty()
+                    },
                 )
                 .expect("did not observe slow wiggle step frame");
             }
@@ -1008,11 +1010,7 @@ fn terminal_makepad_tui_fast_resize_during_output_matches_no_resize() {
     let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
     let mut run_mode = |path: &str, fast_resize: bool| -> String {
-        let tui_log_path = format!(
-            "/tmp/{}.{}.log",
-            path.replace('/', "_"),
-            std::process::id()
-        );
+        let tui_log_path = format!("/tmp/{}.{}.log", path.replace('/', "_"), std::process::id());
         let mut env = std::collections::HashMap::new();
         env.insert("TUI_LOG".to_string(), tui_log_path.clone());
         let _ = connection.send(ClientToHub::TerminalOpen {
@@ -1026,7 +1024,11 @@ fn terminal_makepad_tui_fast_resize_during_output_matches_no_resize() {
             Duration::from_secs(5),
             |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == path),
         );
-        assert!(opened.is_some(), "did not receive TerminalOpened for {}", path);
+        assert!(
+            opened.is_some(),
+            "did not receive TerminalOpened for {}",
+            path
+        );
 
         request_terminal_viewport(&mut connection, path, 80, 20, usize::MAX);
         let launch = format!("{}\n", tui_bin.display());
@@ -1118,13 +1120,11 @@ fn terminal_makepad_tui_fast_resize_during_output_matches_no_resize() {
         })
         .expect("did not observe settle 21-row frame");
         request_terminal_viewport(&mut connection, path, 80, 20, usize::MAX);
-        let settled = wait_for_terminal_frame_where(
-            &connection,
-            path,
-            Duration::from_secs(3),
-            |frame| frame.rows == 20,
-        )
-        .expect("did not observe settle 20-row frame");
+        let settled =
+            wait_for_terminal_frame_where(&connection, path, Duration::from_secs(3), |frame| {
+                frame.rows == 20
+            })
+            .expect("did not observe settle 20-row frame");
         let final_text = framebuffer_to_text(&settled);
 
         let _ = connection.send(ClientToHub::TerminalInput {
@@ -1190,11 +1190,7 @@ fn terminal_makepad_tui_fast_then_slow_same_session_matches_slow_only() {
                        path: &str,
                        do_fast_first: bool|
      -> String {
-        let tui_log_path = format!(
-            "/tmp/{}.{}.log",
-            path.replace('/', "_"),
-            std::process::id()
-        );
+        let tui_log_path = format!("/tmp/{}.{}.log", path.replace('/', "_"), std::process::id());
         let mut env = std::collections::HashMap::new();
         env.insert("TUI_LOG".to_string(), tui_log_path.clone());
         let _ = connection.send(ClientToHub::TerminalOpen {
@@ -1208,7 +1204,11 @@ fn terminal_makepad_tui_fast_then_slow_same_session_matches_slow_only() {
             Duration::from_secs(5),
             |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == path),
         );
-        assert!(opened.is_some(), "did not receive TerminalOpened for {}", path);
+        assert!(
+            opened.is_some(),
+            "did not receive TerminalOpened for {}",
+            path
+        );
 
         request_terminal_viewport(connection, path, 80, 20, usize::MAX);
         let launch = format!("{}\n", tui_bin.display());
@@ -1296,13 +1296,11 @@ fn terminal_makepad_tui_fast_then_slow_same_session_matches_slow_only() {
         })
         .expect("did not observe settle 21-row frame");
         request_terminal_viewport(connection, path, 80, 20, usize::MAX);
-        let settled = wait_for_terminal_frame_where(
-            connection,
-            path,
-            Duration::from_secs(3),
-            |frame| frame.rows == 20,
-        )
-        .expect("did not observe settle 20-row frame");
+        let settled =
+            wait_for_terminal_frame_where(connection, path, Duration::from_secs(3), |frame| {
+                frame.rows == 20
+            })
+            .expect("did not observe settle 20-row frame");
         let final_text = framebuffer_to_text(&settled);
 
         let _ = connection.send(ClientToHub::TerminalInput {
@@ -1508,6 +1506,300 @@ fn runnable_builds_are_scoped_per_mount() {
             assert_eq!(mount, "beta");
             assert_eq!(builds.len(), 1);
             assert_eq!(builds[0].package, "beta-app");
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn splash_runnable_prints_hello() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.std\nstd.println(\"hello\")\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::LoadRunnableBuilds {
+        mount: "repo".to_string(),
+    });
+    let runnable = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::RunnableBuilds { mount, .. } if mount == "repo"),
+    )
+    .expect("did not receive runnable builds");
+    match runnable {
+        HubToClient::RunnableBuilds { builds, .. } => {
+            assert!(
+                builds.iter().any(|build| build.package == "makepad.splash"),
+                "expected makepad.splash runnable"
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::Run {
+        mount: "repo".to_string(),
+        process: "makepad.splash".to_string(),
+        args: Vec::new(),
+        standalone: None,
+        env: None,
+        buildbox: None,
+    });
+
+    let started = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::BuildStarted { mount, package, .. } if mount == "repo" && package == "makepad.splash"),
+    )
+    .expect("did not receive BuildStarted");
+    let build_id = match started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let stopped = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::BuildStopped { build_id: id, exit_code: Some(0) } if *id == build_id),
+    );
+    assert!(stopped.is_some(), "did not receive successful BuildStopped");
+
+    let query_id = connection.send(ClientToHub::QueryLogs {
+        build_id: Some(build_id),
+        level: None,
+        source: None,
+        file: None,
+        pattern: Some("hello".to_string()),
+        is_regex: None,
+        since_index: None,
+        live: Some(false),
+    });
+    let log_results = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::QueryLogResults {
+                query_id: id, ..
+            } if *id == query_id
+        )
+    })
+    .expect("did not receive QueryLogResults");
+
+    match log_results {
+        HubToClient::QueryLogResults { entries, done, .. } => {
+            assert!(done);
+            let messages: Vec<String> = entries
+                .iter()
+                .map(|entry| entry.1.message.clone())
+                .collect();
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.1.message.contains("hello")),
+                "expected hello in splash logs, got {:?}",
+                messages
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn observe_mount_auto_starts_splash() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.std\nstd.println(\"hello\")\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(true),
+    });
+
+    let started = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::BuildStarted { mount, package, .. } if mount == "repo" && package == "makepad.splash"),
+    )
+    .expect("did not receive BuildStarted");
+    let build_id = match started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let stopped = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::BuildStopped { build_id: id, exit_code: Some(0) } if *id == build_id),
+    );
+    assert!(stopped.is_some(), "did not receive successful BuildStopped");
+
+    let query_id = connection.send(ClientToHub::QueryLogs {
+        build_id: Some(build_id),
+        level: None,
+        source: None,
+        file: None,
+        pattern: Some("hello".to_string()),
+        is_regex: None,
+        since_index: None,
+        live: Some(false),
+    });
+    let log_results = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::QueryLogResults {
+                query_id: id, ..
+            } if *id == query_id
+        )
+    })
+    .expect("did not receive QueryLogResults");
+
+    match log_results {
+        HubToClient::QueryLogResults { entries, done, .. } => {
+            assert!(done);
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.1.message.contains("hello")),
+                "expected hello in splash logs"
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn observe_mount_reload_splash_after_save() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.std\nstd.println(\"one\")\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(true),
+    });
+
+    let first_started = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::BuildStarted { mount, package, .. } if mount == "repo" && package == "makepad.splash"),
+    )
+    .expect("did not receive initial BuildStarted");
+    let first_build_id = match first_started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let first_stopped = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::BuildStopped { build_id: id, exit_code: Some(0) } if *id == first_build_id),
+    );
+    assert!(
+        first_stopped.is_some(),
+        "did not receive successful initial BuildStopped"
+    );
+
+    let new_content = "use mod.std\nstd.println(\"two\")\n".to_string();
+    let _ = connection.send(ClientToHub::SaveTextFile {
+        path: "repo/makepad.splash".to_string(),
+        content: new_content,
+    });
+
+    let saved = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::TextFileSaved { path, .. } if path == "repo/makepad.splash"
+        )
+    });
+    assert!(saved.is_some(), "did not receive TextFileSaved");
+
+    let second_started = wait_for_message(&connection, Duration::from_secs(6), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted {
+                build_id,
+                mount,
+                package,
+            } if mount == "repo" && package == "makepad.splash" && *build_id != first_build_id
+        )
+    })
+    .expect("did not receive reloaded BuildStarted");
+    let second_build_id = match second_started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let second_stopped = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::BuildStopped { build_id: id, exit_code: Some(0) } if *id == second_build_id),
+    );
+    assert!(
+        second_stopped.is_some(),
+        "did not receive successful reloaded BuildStopped"
+    );
+
+    let query_id = connection.send(ClientToHub::QueryLogs {
+        build_id: Some(second_build_id),
+        level: None,
+        source: None,
+        file: None,
+        pattern: Some("two".to_string()),
+        is_regex: None,
+        since_index: None,
+        live: Some(false),
+    });
+    let log_results = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::QueryLogResults {
+                query_id: id, ..
+            } if *id == query_id
+        )
+    })
+    .expect("did not receive QueryLogResults for reloaded splash");
+
+    match log_results {
+        HubToClient::QueryLogResults { entries, done, .. } => {
+            assert!(done);
+            assert!(
+                entries.iter().any(|entry| entry.1.message.contains("two")),
+                "expected updated splash logs"
+            );
         }
         _ => unreachable!(),
     }

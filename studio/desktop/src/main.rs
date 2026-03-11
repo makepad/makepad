@@ -44,6 +44,8 @@ use std::path::{Component, Path};
 mod app_backend;
 #[path = "app_messages.rs"]
 mod app_messages;
+#[path = "app_state.rs"]
+mod app_state;
 #[path = "app_tabs.rs"]
 mod app_tabs;
 
@@ -119,8 +121,9 @@ pub struct App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        self.start_backend(cx);
         self.set_current_file_label(cx, None);
+        self.start_backend(cx);
+        self.load_state(cx, 0);
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -303,5 +306,6 @@ impl AppMain for App {
             self.drain_studio_messages(cx);
         }
         self.refresh_run_view_targets(cx);
+        self.save_state_if_needed(cx);
     }
 }

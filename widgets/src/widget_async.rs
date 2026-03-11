@@ -3,6 +3,7 @@ use {
     crate::makepad_script::{script_err_not_found, ScriptFnRef, ScriptThreadId},
     crate::widget::WidgetUid,
     crate::widget_tree::CxWidgetExt,
+    std::any::Any,
     std::collections::{HashMap, VecDeque},
     std::sync::atomic::{AtomicU64, Ordering},
 };
@@ -738,6 +739,22 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
 }
 
 fn register_task_hooks(cx: &mut Cx) {
-    cx.add_script_task_on_thread_completed_hook(on_widget_script_thread_completed);
-    cx.add_script_task_pump_hook(pump_widget_async);
+    cx.add_script_task_on_thread_completed_hook(on_widget_script_thread_completed_hook);
+    cx.add_script_task_pump_hook(pump_widget_async_hook);
+}
+
+fn on_widget_script_thread_completed_hook(
+    host: &mut dyn Any,
+    thread_id: ScriptThreadId,
+    result: ScriptValue,
+) -> bool {
+    host.downcast_mut::<Cx>()
+        .map(|cx| on_widget_script_thread_completed(cx, thread_id, result))
+        .unwrap_or(false)
+}
+
+fn pump_widget_async_hook(host: &mut dyn Any) -> bool {
+    host.downcast_mut::<Cx>()
+        .map(pump_widget_async)
+        .unwrap_or(false)
 }

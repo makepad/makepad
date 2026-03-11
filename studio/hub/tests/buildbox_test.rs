@@ -1,6 +1,6 @@
 use makepad_live_id::LiveId;
 use makepad_micro_serde::{DeBin, SerBin};
-use makepad_network::{
+use makepad_script_std::makepad_network::{
     HttpMethod, HttpRequest, NetworkConfig, NetworkResponse, NetworkRuntime, WsMessage, WsSend,
 };
 use makepad_studio_hub::{HubConfig, MountConfig, StudioHub};

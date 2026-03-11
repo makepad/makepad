@@ -37,6 +37,7 @@ workspace.members = [
     "libs/filesystem_watcher",
     "libs/live_reload_core",
     "platform/script/test",
+    "platform/script/std",
     "platform/studio",
     # "widgets/test",
     "studio/hub",
