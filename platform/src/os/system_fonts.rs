@@ -38,15 +38,22 @@ pub fn builtin_theme_font_role_for_resource_path(path: &str) -> Option<BuiltinTh
     }
 
     let basename = resource_basename(path)?;
-    match basename.to_ascii_lowercase().as_str() {
-        "ibmplexsans-text.ttf" => Some(BuiltinThemeFontRole::SansRegular),
-        "ibmplexsans-semibold.ttf" => Some(BuiltinThemeFontRole::SansBold),
-        "ibmplexsans-italic.ttf" => Some(BuiltinThemeFontRole::SansItalic),
-        "ibmplexsans-bolditalic.ttf" => Some(BuiltinThemeFontRole::SansBoldItalic),
-        "lxgwwenkairegular.ttf" => Some(BuiltinThemeFontRole::CjkRegular),
-        "lxgwwenkaibold.ttf" => Some(BuiltinThemeFontRole::CjkBold),
-        "notocoloremoji.ttf" => Some(BuiltinThemeFontRole::Emoji),
-        _ => None,
+    if basename.eq_ignore_ascii_case("IBMPlexSans-Text.ttf") {
+        Some(BuiltinThemeFontRole::SansRegular)
+    } else if basename.eq_ignore_ascii_case("IBMPlexSans-SemiBold.ttf") {
+        Some(BuiltinThemeFontRole::SansBold)
+    } else if basename.eq_ignore_ascii_case("IBMPlexSans-Italic.ttf") {
+        Some(BuiltinThemeFontRole::SansItalic)
+    } else if basename.eq_ignore_ascii_case("IBMPlexSans-BoldItalic.ttf") {
+        Some(BuiltinThemeFontRole::SansBoldItalic)
+    } else if basename.eq_ignore_ascii_case("LXGWWenKaiRegular.ttf") {
+        Some(BuiltinThemeFontRole::CjkRegular)
+    } else if basename.eq_ignore_ascii_case("LXGWWenKaiBold.ttf") {
+        Some(BuiltinThemeFontRole::CjkBold)
+    } else if basename.eq_ignore_ascii_case("NotoColorEmoji.ttf") {
+        Some(BuiltinThemeFontRole::Emoji)
+    } else {
+        None
     }
 }
 
@@ -55,12 +62,28 @@ pub fn is_builtin_theme_bundled_text_font_path(path: &str) -> bool {
 }
 
 fn is_widgets_theme_resource_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("/widgets/resources/") || lower.contains("\\widgets\\resources\\")
+    let mut prev_is_widgets = false;
+    for component in path.split(['/', '\\']) {
+        let is_resources = component.eq_ignore_ascii_case("resources");
+        if prev_is_widgets && is_resources {
+            return true;
+        }
+        prev_is_widgets = component.eq_ignore_ascii_case("widgets");
+    }
+    false
 }
 
 fn resource_basename(path: &str) -> Option<&str> {
     path.rsplit(['/', '\\']).next()
+}
+
+pub(crate) fn query_first_readable_font(candidates: &[&str]) -> Result<SystemFontData, SystemFontError> {
+    for candidate in candidates {
+        if let Ok(data) = SharedBytes::from_file_mmap_or_read(candidate) {
+            return Ok(SystemFontData { data, index: 0 });
+        }
+    }
+    Err(SystemFontError::NotFound)
 }
 
 /// Query the operating system for a font by family name and return raw font data.
@@ -137,6 +160,12 @@ mod tests {
         assert_eq!(
             builtin_theme_font_role_for_resource_path("/tmp/widgets/resources/NotoColorEmoji.ttf"),
             Some(BuiltinThemeFontRole::Emoji)
+        );
+        assert_eq!(
+            builtin_theme_font_role_for_resource_path(
+                "/tmp/WIDGETS/RESOURCES/ibmplexsans-text.ttf"
+            ),
+            Some(BuiltinThemeFontRole::SansRegular)
         );
     }
 

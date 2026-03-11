@@ -1,78 +1,76 @@
-use crate::{
-    os::system_fonts::{SystemFontData, SystemFontError, SystemFontProvider},
-    shared_bytes::SharedBytes,
+use crate::os::system_fonts::{
+    query_first_readable_font, SystemFontData, SystemFontError, SystemFontProvider,
 };
-use std::path::PathBuf;
 
 pub struct AndroidSystemFontProvider;
 
 impl SystemFontProvider for AndroidSystemFontProvider {
     fn query_font(&self, family: &str) -> Result<SystemFontData, SystemFontError> {
-        for candidate in font_candidates(family) {
-            if let Ok(data) = SharedBytes::from_file_mmap_or_read(&candidate) {
-                return Ok(SystemFontData { data, index: 0 });
-            }
-        }
-        Err(SystemFontError::NotFound)
+        query_first_readable_font(font_candidates(family))
     }
 }
 
-fn font_candidates(family: &str) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+fn font_candidates(family: &str) -> &'static [&'static str] {
     if family.eq_ignore_ascii_case("roboto") {
-        out.push("/system/fonts/Roboto-Regular.ttf".into());
-        out.push("/product/fonts/Roboto-Regular.ttf".into());
+        &["/system/fonts/Roboto-Regular.ttf", "/product/fonts/Roboto-Regular.ttf"]
     } else if family.eq_ignore_ascii_case("roboto bold")
         || family.eq_ignore_ascii_case("roboto medium")
     {
-        out.push("/system/fonts/Roboto-Bold.ttf".into());
-        out.push("/product/fonts/Roboto-Bold.ttf".into());
-        out.push("/system/fonts/Roboto-Medium.ttf".into());
-        out.push("/product/fonts/Roboto-Medium.ttf".into());
+        &[
+            "/system/fonts/Roboto-Bold.ttf",
+            "/product/fonts/Roboto-Bold.ttf",
+            "/system/fonts/Roboto-Medium.ttf",
+            "/product/fonts/Roboto-Medium.ttf",
+        ]
     } else if family.eq_ignore_ascii_case("roboto italic") {
-        out.push("/system/fonts/Roboto-Italic.ttf".into());
-        out.push("/product/fonts/Roboto-Italic.ttf".into());
+        &["/system/fonts/Roboto-Italic.ttf", "/product/fonts/Roboto-Italic.ttf"]
     } else if family.eq_ignore_ascii_case("roboto bold italic") {
-        out.push("/system/fonts/Roboto-BoldItalic.ttf".into());
-        out.push("/product/fonts/Roboto-BoldItalic.ttf".into());
+        &[
+            "/system/fonts/Roboto-BoldItalic.ttf",
+            "/product/fonts/Roboto-BoldItalic.ttf",
+        ]
     } else if family.eq_ignore_ascii_case("noto sans") {
-        out.push("/system/fonts/NotoSans-Regular.ttf".into());
-        out.push("/product/fonts/NotoSans-Regular.ttf".into());
+        &["/system/fonts/NotoSans-Regular.ttf", "/product/fonts/NotoSans-Regular.ttf"]
     } else if family.eq_ignore_ascii_case("noto sans bold") {
-        out.push("/system/fonts/NotoSans-Bold.ttf".into());
-        out.push("/product/fonts/NotoSans-Bold.ttf".into());
+        &["/system/fonts/NotoSans-Bold.ttf", "/product/fonts/NotoSans-Bold.ttf"]
     } else if family.eq_ignore_ascii_case("noto sans italic") {
-        out.push("/system/fonts/NotoSans-Italic.ttf".into());
-        out.push("/product/fonts/NotoSans-Italic.ttf".into());
+        &["/system/fonts/NotoSans-Italic.ttf", "/product/fonts/NotoSans-Italic.ttf"]
     } else if family.eq_ignore_ascii_case("noto sans cjk sc")
         || family.eq_ignore_ascii_case("noto sans cjk")
         || family.eq_ignore_ascii_case("noto sans sc")
         || family.eq_ignore_ascii_case("droid sans fallback")
     {
-        out.push("/system/fonts/NotoSansCJK-Regular.ttc".into());
-        out.push("/product/fonts/NotoSansCJK-Regular.ttc".into());
-        out.push("/system/fonts/NotoSansSC-Regular.otf".into());
-        out.push("/product/fonts/NotoSansSC-Regular.otf".into());
-        out.push("/system/fonts/DroidSansFallback.ttf".into());
+        &[
+            "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/product/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/NotoSansSC-Regular.otf",
+            "/product/fonts/NotoSansSC-Regular.otf",
+            "/system/fonts/DroidSansFallback.ttf",
+        ]
     } else if family.eq_ignore_ascii_case("noto sans cjk sc bold")
         || family.eq_ignore_ascii_case("noto sans sc bold")
     {
-        out.push("/system/fonts/NotoSansCJK-Bold.ttc".into());
-        out.push("/product/fonts/NotoSansCJK-Bold.ttc".into());
-        out.push("/system/fonts/NotoSansSC-Bold.otf".into());
-        out.push("/product/fonts/NotoSansSC-Bold.otf".into());
-        out.push("/system/fonts/NotoSansCJK-Regular.ttc".into());
-        out.push("/product/fonts/NotoSansCJK-Regular.ttc".into());
-        out.push("/system/fonts/NotoSansSC-Regular.otf".into());
-        out.push("/product/fonts/NotoSansSC-Regular.otf".into());
+        &[
+            "/system/fonts/NotoSansCJK-Bold.ttc",
+            "/product/fonts/NotoSansCJK-Bold.ttc",
+            "/system/fonts/NotoSansSC-Bold.otf",
+            "/product/fonts/NotoSansSC-Bold.otf",
+            "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/product/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/NotoSansSC-Regular.otf",
+            "/product/fonts/NotoSansSC-Regular.otf",
+        ]
     } else if family.eq_ignore_ascii_case("noto color emoji")
         || family.eq_ignore_ascii_case("emoji")
     {
-        out.push("/system/fonts/NotoColorEmoji.ttf".into());
-        out.push("/product/fonts/NotoColorEmoji.ttf".into());
-        out.push("/system/fonts/SamsungColorEmoji.ttf".into());
+        &[
+            "/system/fonts/NotoColorEmoji.ttf",
+            "/product/fonts/NotoColorEmoji.ttf",
+            "/system/fonts/SamsungColorEmoji.ttf",
+        ]
+    } else {
+        &[]
     }
-    out
 }
 
 pub fn query_font(family: &str) -> Result<SystemFontData, SystemFontError> {

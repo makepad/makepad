@@ -1,86 +1,91 @@
-use crate::{
-    os::system_fonts::{SystemFontData, SystemFontError, SystemFontProvider},
-    shared_bytes::SharedBytes,
+use crate::os::system_fonts::{
+    query_first_readable_font, SystemFontData, SystemFontError, SystemFontProvider,
 };
-use std::path::PathBuf;
 
 pub struct AppleSystemFontProvider;
 
 impl SystemFontProvider for AppleSystemFontProvider {
     fn query_font(&self, family: &str) -> Result<SystemFontData, SystemFontError> {
-        for candidate in font_candidates(family) {
-            if let Ok(data) = SharedBytes::from_file_mmap_or_read(&candidate) {
-                return Ok(SystemFontData { data, index: 0 });
-            }
-        }
-        Err(SystemFontError::NotFound)
+        query_first_readable_font(font_candidates(family))
     }
 }
 
-fn font_candidates(family: &str) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+fn font_candidates(family: &str) -> &'static [&'static str] {
     if family.eq_ignore_ascii_case("apple color emoji") {
-        out.push("/System/Library/Fonts/Apple Color Emoji.ttc".into());
+        &["/System/Library/Fonts/Apple Color Emoji.ttc"]
     } else if family.eq_ignore_ascii_case(".sf ns text")
         || family.eq_ignore_ascii_case("sf pro text")
     {
-        out.push("/System/Library/Fonts/Supplemental/Arial.ttf".into());
-        out.push("/System/Library/Fonts/Helvetica.ttc".into());
-        out.push("/System/Library/Fonts/SFNS.ttf".into());
-        out.push("/System/Library/Fonts/SFNSDisplay.ttf".into());
+        &[
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/SFNSDisplay.ttf",
+        ]
     } else if family.eq_ignore_ascii_case(".sf ns text bold")
         || family.eq_ignore_ascii_case("sf pro text bold")
     {
-        out.push("/System/Library/Fonts/Supplemental/Arial Bold.ttf".into());
-        out.push("/System/Library/Fonts/Helvetica.ttc".into());
-        out.push("/System/Library/Fonts/SFNSBold.ttf".into());
-        out.push("/System/Library/Fonts/SFNSDisplay-Bold.ttf".into());
+        &[
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/SFNSBold.ttf",
+            "/System/Library/Fonts/SFNSDisplay-Bold.ttf",
+        ]
     } else if family.eq_ignore_ascii_case(".sf ns text italic")
         || family.eq_ignore_ascii_case("sf pro text italic")
     {
-        out.push("/System/Library/Fonts/Supplemental/Arial Italic.ttf".into());
-        out.push("/System/Library/Fonts/Helvetica.ttc".into());
-        out.push("/System/Library/Fonts/SFNSItalic.ttf".into());
-        out.push("/System/Library/Fonts/SFNSDisplay-Italic.ttf".into());
+        &[
+            "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/SFNSItalic.ttf",
+            "/System/Library/Fonts/SFNSDisplay-Italic.ttf",
+        ]
     } else if family.eq_ignore_ascii_case(".sf ns text bold italic")
         || family.eq_ignore_ascii_case("sf pro text bold italic")
     {
-        out.push("/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf".into());
-        out.push("/System/Library/Fonts/Helvetica.ttc".into());
-        out.push("/System/Library/Fonts/SFNSBoldItalic.ttf".into());
-        out.push("/System/Library/Fonts/SFNSDisplay-BoldItalic.ttf".into());
-    } else if family.eq_ignore_ascii_case("helvetica neue") {
-        out.push("/System/Library/Fonts/Helvetica.ttc".into());
-    } else if family.eq_ignore_ascii_case("helvetica neue bold") {
-        out.push("/System/Library/Fonts/Helvetica.ttc".into());
-    } else if family.eq_ignore_ascii_case("helvetica neue italic") {
-        out.push("/System/Library/Fonts/Helvetica.ttc".into());
-    } else if family.eq_ignore_ascii_case("helvetica neue bold italic") {
-        out.push("/System/Library/Fonts/Helvetica.ttc".into());
+        &[
+            "/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/SFNSBoldItalic.ttf",
+            "/System/Library/Fonts/SFNSDisplay-BoldItalic.ttf",
+        ]
+    } else if family.eq_ignore_ascii_case("helvetica neue")
+        || family.eq_ignore_ascii_case("helvetica neue bold")
+        || family.eq_ignore_ascii_case("helvetica neue italic")
+        || family.eq_ignore_ascii_case("helvetica neue bold italic")
+    {
+        &["/System/Library/Fonts/Helvetica.ttc"]
     } else if family.eq_ignore_ascii_case("arial") {
-        out.push("/System/Library/Fonts/Supplemental/Arial.ttf".into());
+        &["/System/Library/Fonts/Supplemental/Arial.ttf"]
     } else if family.eq_ignore_ascii_case("arial bold") {
-        out.push("/System/Library/Fonts/Supplemental/Arial Bold.ttf".into());
+        &["/System/Library/Fonts/Supplemental/Arial Bold.ttf"]
     } else if family.eq_ignore_ascii_case("arial italic") {
-        out.push("/System/Library/Fonts/Supplemental/Arial Italic.ttf".into());
+        &["/System/Library/Fonts/Supplemental/Arial Italic.ttf"]
     } else if family.eq_ignore_ascii_case("arial bold italic") {
-        out.push("/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf".into());
+        &["/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf"]
     } else if family.eq_ignore_ascii_case("pingfang sc") || family.eq_ignore_ascii_case("stheiti") {
-        out.push("/System/Library/Fonts/PingFang.ttc".into());
-        out.push("/System/Library/Fonts/STHeiti Light.ttc".into());
-        out.push("/System/Library/Fonts/STHeiti Medium.ttc".into());
+        &[
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+        ]
     } else if family.eq_ignore_ascii_case("pingfang sc bold")
         || family.eq_ignore_ascii_case("stheiti medium")
     {
-        out.push("/System/Library/Fonts/PingFang.ttc".into());
-        out.push("/System/Library/Fonts/STHeiti Medium.ttc".into());
+        &[
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+        ]
     } else if family.eq_ignore_ascii_case("hiragino sans gb")
         || family.eq_ignore_ascii_case("hiragino sans gb w6")
     {
-        out.push("/System/Library/Fonts/PingFang.ttc".into());
-        out.push("/System/Library/Fonts/STHeiti Medium.ttc".into());
+        &[
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+        ]
+    } else {
+        &[]
     }
-    out
 }
 
 pub fn query_font(family: &str) -> Result<SystemFontData, SystemFontError> {
