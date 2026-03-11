@@ -15,8 +15,6 @@ script_mod! {
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawText3d {
-    #[deref]
-    pub draw_super: DrawRotatedText,
     #[rust(Mat4f::identity())]
     pub view_matrix: Mat4f,
     #[rust(Mat4f::identity())]
@@ -35,6 +33,8 @@ pub struct DrawText3d {
     pub billboard_flag_spacing: f32,
     #[rust(0.0)]
     pub text_rotation: f32,
+    #[deref]
+    pub draw_super: DrawRotatedText,
 }
 
 impl DrawText3d {

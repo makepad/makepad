@@ -2220,7 +2220,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     /// matching `pop_clip_rect` will have their GPU `draw_clip` intersected
     /// with this rect. Must be balanced with `pop_clip_rect`.
     pub fn push_clip_rect(&mut self, rect: Rect) {
-        self.align_list.push(AlignEntry::BeginClip(rect.pos, rect.pos + rect.size));
+        self.align_list
+            .push(AlignEntry::BeginClip(rect.pos, rect.pos + rect.size));
     }
 
     /// Pop a clip rectangle previously pushed by `push_clip_rect`.

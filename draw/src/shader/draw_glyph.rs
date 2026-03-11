@@ -257,11 +257,11 @@ script_mod! {
         fragment: fn() {
             self.fb0 = self.pixel()
         }
-        
+
         get_color: fn(){
             self.color
         }
-        
+
         pixel: fn() {
             if self.curve_count < 0.5 {
                 return vec4(0.0, 0.0, 0.0, 0.0)

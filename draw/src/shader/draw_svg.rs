@@ -215,7 +215,9 @@ impl DrawSvg {
         self.draw_super.rect_pos = rect.pos.into();
         self.draw_super.rect_size = rect.size.into();
 
-        let doc = self.svg_doc.take().unwrap();
+        let Some(doc) = self.svg_doc.take() else {
+            return;
+        };
 
         let (lw, lh) = doc.logical_size();
 

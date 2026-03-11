@@ -295,7 +295,7 @@ fn sample_point_at_distance(points: &[Vec2d], cumulative: &[f64], distance: f64)
     let total = *cumulative.last()?;
     let d = distance.clamp(0.0, total);
 
-    let idx = match cumulative.binary_search_by(|v| v.partial_cmp(&d).unwrap()) {
+    let idx = match cumulative.binary_search_by(|v| v.total_cmp(&d)) {
         Ok(i) => return Some(points[i]),
         Err(i) => i,
     };

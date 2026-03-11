@@ -144,7 +144,15 @@ impl Shaper {
                 let missing_end = glyph_groups
                     .peek()
                     .map_or(end, |next_glyph_group| next_glyph_group[0].cluster);
-                self.shape_recursive(text, fonts, features, direction, missing_start, missing_end, out_glyphs);
+                self.shape_recursive(
+                    text,
+                    fonts,
+                    features,
+                    direction,
+                    missing_start,
+                    missing_end,
+                    out_glyphs,
+                );
             } else {
                 out_glyphs.extend(glyph_group.iter().cloned());
             }
@@ -177,13 +185,16 @@ impl Shaper {
         }
         let rb_features: Vec<rustybuzz::Feature> = features
             .iter()
-            .map(|&(tag, value)| rustybuzz::Feature::new(
-                rustybuzz::ttf_parser::Tag::from_bytes(&tag.to_be_bytes()),
-                value,
-                ..,
-            ))
+            .map(|&(tag, value)| {
+                rustybuzz::Feature::new(
+                    rustybuzz::ttf_parser::Tag::from_bytes(&tag.to_be_bytes()),
+                    value,
+                    ..,
+                )
+            })
             .collect();
-        let glyph_buffer = rustybuzz::shape(font.rustybuzz_face(), &rb_features, unicode_buffer);
+        let glyph_buffer =
+            font.with_rustybuzz_face(|face| rustybuzz::shape(face, &rb_features, unicode_buffer));
         out_glyphs.extend(
             glyph_buffer
                 .glyph_infos()

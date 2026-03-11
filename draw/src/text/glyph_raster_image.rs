@@ -11,21 +11,21 @@ use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
 use makepad_zune_png::PngDecoder;
 
 #[derive(Clone, Debug)]
-pub struct GlyphRasterImage<'a> {
+pub struct GlyphRasterImage {
     origin_in_dpxs: Point<f32>,
     dpxs_per_em: f32,
     #[allow(dead_code)]
     format: Format,
-    data: &'a [u8],
+    data: Vec<u8>,
 }
 
-impl<'a> GlyphRasterImage<'a> {
-    pub fn from_raster_glyph_image(image: ttf_parser::RasterGlyphImage<'a>) -> Option<Self> {
+impl GlyphRasterImage {
+    pub fn from_raster_glyph_image(image: ttf_parser::RasterGlyphImage<'_>) -> Option<Self> {
         Some(Self {
             origin_in_dpxs: Point::new(image.x as f32, image.y as f32),
             dpxs_per_em: image.pixels_per_em as f32,
             format: Format::from_raster_image_format(image.format)?,
-            data: image.data,
+            data: image.data.to_vec(),
         })
     }
 
@@ -53,7 +53,7 @@ impl<'a> GlyphRasterImage<'a> {
     }
 
     fn decode_size_png(&self) -> Size<usize> {
-        let cursor = ZCursor::new(self.data);
+        let cursor = ZCursor::new(self.data.as_slice());
         let mut decoder = PngDecoder::new(cursor);
         if decoder.decode_headers().is_err() {
             return Size {
@@ -80,7 +80,7 @@ impl<'a> GlyphRasterImage<'a> {
     }
 
     fn decode_png(&self, image: &mut SubimageMut<Bgra>) {
-        let cursor = ZCursor::new(self.data);
+        let cursor = ZCursor::new(self.data.as_slice());
         let mut decoder = PngDecoder::new(cursor);
         if decoder.decode_headers().is_err() {
             return;

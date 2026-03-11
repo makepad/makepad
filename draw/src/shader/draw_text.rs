@@ -983,7 +983,8 @@ impl TextStyle {
     }
 
     pub fn ensure_fonts_loaded_for_text(&self, cx: &mut Cx, text: &str) {
-        self.font_family.ensure_fonts_loaded_for_text(cx, Some(text));
+        self.font_family
+            .ensure_fonts_loaded_for_text(cx, Some(text));
     }
 }
 

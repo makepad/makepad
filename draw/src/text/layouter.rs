@@ -981,9 +981,18 @@ mod tests {
 
     #[test]
     fn parses_text_atlas_size_from_env_value() {
-        assert_eq!(parse_text_atlas_size_value("1024"), Some(Size::new(1024, 1024)));
-        assert_eq!(parse_text_atlas_size_value("1024x2048"), Some(Size::new(1024, 2048)));
-        assert_eq!(parse_text_atlas_size_value("1024X2048"), Some(Size::new(1024, 2048)));
+        assert_eq!(
+            parse_text_atlas_size_value("1024"),
+            Some(Size::new(1024, 1024))
+        );
+        assert_eq!(
+            parse_text_atlas_size_value("1024x2048"),
+            Some(Size::new(1024, 2048))
+        );
+        assert_eq!(
+            parse_text_atlas_size_value("1024X2048"),
+            Some(Size::new(1024, 2048))
+        );
         assert_eq!(parse_text_atlas_size_value(""), None);
         assert_eq!(parse_text_atlas_size_value("64"), None);
         assert_eq!(parse_text_atlas_size_value("bogus"), None);

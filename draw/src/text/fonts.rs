@@ -9,7 +9,7 @@ use {
         rasterizer::{CompletedMsdfJob, OutlineRasterizationMode, QueuedMsdfJob, Rasterizer},
     },
     crate::makepad_platform::*,
-    std::{cell::RefCell, mem, rc::Rc},
+    std::{cell::RefCell, rc::Rc},
 };
 
 pub struct Fonts {
@@ -166,8 +166,12 @@ impl Fonts {
     fn prepare_atlas_texture(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let dirty_rect = rasterizer.color_atlas_mut().take_dirty_image().bounds();
-        let pixels: Vec<u32> =
-            unsafe { mem::transmute(rasterizer.color_atlas_mut().replace_pixels(Vec::new())) };
+        let pixels: Vec<u32> = rasterizer
+            .color_atlas_mut()
+            .take_pixels()
+            .into_iter()
+            .map(|px| px.bits)
+            .collect();
         self.atlas_texture.put_back_vec_u32(
             cx,
             pixels,
@@ -189,11 +193,11 @@ impl Fonts {
     fn prepare_atlas(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let pixels = self.atlas_texture.take_vec_u32(cx);
-        unsafe {
-            rasterizer
-                .color_atlas_mut()
-                .replace_pixels(mem::transmute(pixels))
-        };
+        let pixels = pixels
+            .into_iter()
+            .map(|bits| Bgra { bits })
+            .collect::<Vec<_>>();
+        rasterizer.color_atlas_mut().replace_pixels(pixels);
     }
 
     fn dispatch_msdf_jobs(&mut self) {
