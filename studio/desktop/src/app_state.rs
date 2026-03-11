@@ -22,8 +22,12 @@ struct AppStateRon {
 }
 
 impl App {
-    fn state_file_path(slot: usize) -> String {
+    fn legacy_state_file_path(slot: usize) -> String {
         format!("makepad_state{}.ron", slot)
+    }
+
+    fn state_file_path(slot: usize) -> String {
+        format!(".makepad/studio_state{}.ron", slot)
     }
 
     fn persistent_workspace_tab_ids(
@@ -236,7 +240,9 @@ impl App {
     }
 
     pub(super) fn load_state(&mut self, cx: &mut Cx, slot: usize) {
-        let Ok(contents) = fs::read_to_string(Self::state_file_path(slot)) else {
+        let contents = fs::read_to_string(Self::state_file_path(slot))
+            .or_else(|_| fs::read_to_string(Self::legacy_state_file_path(slot)));
+        let Ok(contents) = contents else {
             return;
         };
         let Ok(state) = AppStateRon::deserialize_ron(&contents) else {
@@ -399,6 +405,7 @@ impl App {
             mount_dock_items,
             mounts,
         };
+        let _ = fs::create_dir_all(".makepad");
         let _ = fs::write(Self::state_file_path(slot), state.serialize_ron());
     }
 

@@ -914,15 +914,19 @@ impl Dock {
     }
 
     fn select_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
-        self.needs_save = true;
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
                 DockItem::Tabs { tabs, selected, .. } => {
                     if let Some(pos) = tabs.iter().position(|v| *v == tab_id) {
+                        if *selected == pos {
+                            return;
+                        }
+                        self.needs_save = true;
                         *selected = pos;
                         if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
                             tab_bar.contents_draw_list.redraw(cx);
                         }
+                        return;
                     }
                 }
                 _ => (),
@@ -931,8 +935,11 @@ impl Dock {
     }
 
     fn set_tab_title(&mut self, cx: &mut Cx, tab_id: LiveId, new_name: String) {
-        self.needs_save = true;
         if let Some(DockItem::Tab { name, .. }) = self.dock_items.get_mut(&tab_id) {
+            if *name == new_name {
+                return;
+            }
+            self.needs_save = true;
             *name = new_name;
             self.redraw_tab(cx, tab_id);
         }
