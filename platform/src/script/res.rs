@@ -180,6 +180,39 @@ fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
     }
 }
 
+fn should_skip_eager_resource_load(abs_path: &str) -> bool {
+    is_heavy_bundled_fallback_font_path(abs_path)
+}
+
+fn is_heavy_bundled_fallback_font_path(path: &str) -> bool {
+    if !is_widgets_resources_path(path) {
+        return false;
+    }
+    matches!(
+        resource_basename(path),
+        Some(name)
+            if name.eq_ignore_ascii_case("LXGWWenKaiRegular.ttf")
+                || name.eq_ignore_ascii_case("LXGWWenKaiBold.ttf")
+                || name.eq_ignore_ascii_case("NotoColorEmoji.ttf")
+    )
+}
+
+fn is_widgets_resources_path(path: &str) -> bool {
+    let mut prev_is_widgets = false;
+    for component in path.split(['/', '\\']) {
+        let is_resources = component.eq_ignore_ascii_case("resources");
+        if prev_is_widgets && is_resources {
+            return true;
+        }
+        prev_is_widgets = component.eq_ignore_ascii_case("widgets");
+    }
+    false
+}
+
+fn resource_basename(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\']).next()
+}
+
 impl Cx {
     fn load_script_resource_impl(
         &mut self,
@@ -311,7 +344,11 @@ impl Cx {
 
         let handles = {
             let resources = self.script_data.resources.resources.borrow();
-            resources.iter().map(|res| res.handle).collect::<Vec<_>>()
+            resources
+                .iter()
+                .filter(|res| !should_skip_eager_resource_load(&res.abs_path))
+                .map(|res| res.handle)
+                .collect::<Vec<_>>()
         };
 
         for handle in handles {
@@ -321,6 +358,30 @@ impl Cx {
                 &crate_manifests,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_eager_resource_load;
+
+    #[test]
+    fn skips_only_heavy_widgets_fallback_fonts() {
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/LXGWWenKaiRegular.ttf"
+        ));
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/LXGWWenKaiBold.ttf"
+        ));
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/NotoColorEmoji.ttf"
+        ));
+        assert!(!should_skip_eager_resource_load(
+            "/tmp/widgets/resources/IBMPlexSans-Text.ttf"
+        ));
+        assert!(!should_skip_eager_resource_load(
+            "/tmp/app/resources/LXGWWenKaiRegular.ttf"
+        ));
     }
 }
 
