@@ -114,9 +114,12 @@ impl<'a> CxDraw<'a> {
                         scroll_stack.push(*area);
                     }
                     NavItem::EndScroll(area) => {
-                        if *area != scroll_stack.pop().unwrap() {
-                            panic!()
+                        let Some(popped) = scroll_stack.pop() else {
+                            return None;
                         };
+                        if *area != popped {
+                            return None;
+                        }
                     }
                 }
             }

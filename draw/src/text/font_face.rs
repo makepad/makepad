@@ -4,7 +4,7 @@ use {super::loader::FontData, rustybuzz, rustybuzz::ttf_parser};
 pub struct FontFace {
     data: FontData,
     index: u32,
-    variations: Vec<(u32, f32)>,
+    variations: Vec<rustybuzz::Variation>,
 }
 
 impl FontFace {
@@ -28,15 +28,7 @@ impl FontFace {
         self.with_ttf_parser_face(|ttf_face| {
             let mut rb_face = rustybuzz::Face::from_face(ttf_face.clone());
             if !self.variations.is_empty() {
-                let rb_variations: Vec<rustybuzz::Variation> = self
-                    .variations
-                    .iter()
-                    .map(|&(tag, value)| rustybuzz::Variation {
-                        tag: ttf_parser::Tag::from_bytes(&tag.to_be_bytes()),
-                        value,
-                    })
-                    .collect();
-                rb_face.set_variations(&rb_variations);
+                rb_face.set_variations(&self.variations);
             }
             f(&rb_face)
         })
@@ -48,6 +40,10 @@ impl FontFace {
 
     pub fn set_variations(&mut self, variations: &[(u32, f32)]) {
         self.variations.clear();
-        self.variations.extend_from_slice(variations);
+        self.variations
+            .extend(variations.iter().map(|&(tag, value)| rustybuzz::Variation {
+                tag: ttf_parser::Tag::from_bytes(&tag.to_be_bytes()),
+                value,
+            }));
     }
 }

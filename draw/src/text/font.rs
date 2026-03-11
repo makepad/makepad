@@ -133,15 +133,17 @@ impl Font {
         }
     }
 
-    pub fn glyph_raster_image(
+    pub fn with_glyph_raster_image<R>(
         &self,
         glyph_id: GlyphId,
         dpxs_per_em: f32,
-    ) -> Option<GlyphRasterImage> {
+        f: impl FnOnce(GlyphRasterImage<'_>) -> R,
+    ) -> Option<R> {
         self.with_ttf_parser_face(|face| {
             let glyph_id = ttf_parser::GlyphId(glyph_id);
             let image = face.glyph_raster_image(glyph_id, dpxs_per_em as u16)?;
-            GlyphRasterImage::from_raster_glyph_image(image)
+            let raster = GlyphRasterImage::from_raster_glyph_image(image)?;
+            Some(f(raster))
         })
     }
 
