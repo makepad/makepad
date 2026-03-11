@@ -5,7 +5,7 @@ use crate::{
 };
 use makepad_studio_protocol::hub_protocol::{
     EventSample, FileNodeType, FileTreeData, GCSample, GPUSample, GitStatus, LogSource, QueryId,
-    RunnableBuild, TerminalFramebuffer,
+    RunItem, TerminalFramebuffer,
 };
 use makepad_studio_protocol::LogLevel;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -66,7 +66,7 @@ pub struct MountState {
     pub root: PathBuf,
     pub tab_id: Option<LiveId>,
     pub file_tree_data: Option<FileTreeData>,
-    pub runnable_builds: Vec<RunnableBuild>,
+    pub run_items: Vec<RunItem>,
     pub log_entries: VecDeque<UiLogEntry>,
     pub terminal_files: Vec<String>,
     pub terminals_initialized: bool,
@@ -87,7 +87,7 @@ impl Default for MountState {
             root: PathBuf::new(),
             tab_id: None,
             file_tree_data: None,
-            runnable_builds: Vec::new(),
+            run_items: Vec::new(),
             log_entries: VecDeque::new(),
             terminal_files: Vec::new(),
             terminals_initialized: false,
@@ -292,15 +292,20 @@ impl FlatFileTree {
             if !matches!(node.node_type, FileNodeType::Dir) {
                 continue;
             }
-            let mut status = node.git_status;
+            let mut status = None;
             let children = node.children.clone();
             for child_id in children {
                 if let Some(child) = self.nodes.get(&child_id) {
-                    status = merge_git_status(status, child.git_status);
+                    status = Some(match status {
+                        Some(current) => merge_git_status(current, child.git_status),
+                        None => child.git_status,
+                    });
                 }
             }
             if let Some(node) = self.nodes.get_mut(&id) {
-                node.git_status = status;
+                if let Some(status) = status {
+                    node.git_status = status;
+                }
             }
         }
     }
@@ -436,5 +441,32 @@ mod tests {
             tree.git_status_dot_for_path("repo"),
             GitStatusDotKind::Deleted
         );
+    }
+
+    #[test]
+    fn stale_folder_git_status_is_recomputed_from_children() {
+        let data = FileTreeData {
+            nodes: vec![
+                FileNode {
+                    path: "repo".to_string(),
+                    name: "repo".to_string(),
+                    node_type: FileNodeType::Dir,
+                    git_status: GitStatus::Modified,
+                },
+                FileNode {
+                    path: "repo/src".to_string(),
+                    name: "src".to_string(),
+                    node_type: FileNodeType::Dir,
+                    git_status: GitStatus::Modified,
+                },
+                file("repo/src/lib.rs", GitStatus::Clean),
+            ],
+        };
+
+        let mut tree = FlatFileTree::default();
+        tree.rebuild(&data);
+
+        assert_eq!(tree.git_status_dot_for_path("repo/src"), GitStatusDotKind::None);
+        assert_eq!(tree.git_status_dot_for_path("repo"), GitStatusDotKind::None);
     }
 }

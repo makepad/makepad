@@ -143,9 +143,8 @@ impl DesktopFileTree {
     fn status_dot_color(status: GitStatusDotKind) -> Vec4 {
         match status {
             GitStatusDotKind::New => vec4(0.345, 0.761, 0.427, 1.0),
-            GitStatusDotKind::Modified | GitStatusDotKind::Deleted | GitStatusDotKind::Mixed => {
-                vec4(0.847, 0.392, 0.392, 1.0)
-            }
+            GitStatusDotKind::Modified => vec4(1.0, 0.667, 0.0, 1.0),
+            GitStatusDotKind::Deleted | GitStatusDotKind::Mixed => vec4(0.847, 0.392, 0.392, 1.0),
             GitStatusDotKind::None => vec4(0.42, 0.48, 0.56, 0.45),
         }
     }

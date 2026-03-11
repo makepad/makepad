@@ -96,6 +96,7 @@ impl App {
                 tabs,
                 selected,
                 closable,
+                hide_tab_bar,
             } => {
                 let mut kept = Vec::new();
                 for tab_id in tabs {
@@ -114,6 +115,7 @@ impl App {
                             tabs: kept,
                             selected,
                             closable,
+                            hide_tab_bar,
                         },
                     );
                     Some(item_id)
