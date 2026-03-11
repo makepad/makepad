@@ -12,6 +12,7 @@ metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 [dependencies]
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
+makepad-script-std = { path = "./script/std", version = "1.0.0" }
 makepad-network = { path = "./network", version = "1.0.0", features = ["script"] }
 makepad-script = { path="./script", version="1.0.0"}
 makepad-live-reload-core = { path = "../libs/live_reload_core", version = "0.1.0" }

@@ -7,8 +7,10 @@ use makepad_script::*;
 use std::collections::BTreeMap;
 
 pub fn main() {
+    let mut std = 0;
     let vm = &mut ScriptVm {
         host: &mut 0,
+        std: &mut std,
         bx: Box::new(ScriptVmBase::new()),
     };
 

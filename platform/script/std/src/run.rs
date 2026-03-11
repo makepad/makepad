@@ -1,8 +1,8 @@
-use crate::script::vm::*;
-use crate::*;
+use crate::{vm, ScriptStd, ScriptVmStdExt};
+use makepad_network::{FromUISender, ToUIReceiver};
 use makepad_script::*;
-
 use std::{
+    any::Any,
     collections::hash_map::HashMap,
     io::prelude::*,
     io::BufReader,
@@ -30,15 +30,15 @@ enum ChildIn {
     Term,
 }
 
-pub struct CxScriptChildProcess {
+pub struct ScriptChildProcessState {
     #[allow(unused)]
-    id: LiveId,
+    pub id: LiveId,
     child: ChildProcess,
-    events: ChildEvents,
+    pub events: ScriptChildEvents,
 }
 
 #[derive(Script, ScriptHook)]
-pub struct ChildEvents {
+pub struct ScriptChildEvents {
     #[live]
     pub on_stdout: Option<ScriptFnRef>,
     #[live]
@@ -48,7 +48,7 @@ pub struct ChildEvents {
 }
 
 #[derive(Script, ScriptHook)]
-pub struct ChildCmd {
+pub struct ScriptChildCmd {
     #[live]
     pub cmd: String,
     #[live]
@@ -59,62 +59,50 @@ pub struct ChildCmd {
     pub cwd: Option<String>,
 }
 
-impl Cx {
-    pub(crate) fn handle_script_child_processes(&mut self) {
-        let mut i = 0;
-        while i < self.script_data.child_processes.len() {
-            let mut term = false;
+pub fn handle_script_child_processes<H: Any>(
+    host: &mut H,
+    std: &mut ScriptStd,
+    script_vm: &mut Option<Box<ScriptVmBase>>,
+) {
+    let mut i = 0;
+    while i < std.data.child_processes.len() {
+        let mut term = false;
 
-            while let Ok(value) = self.script_data.child_processes[i]
-                .child
-                .out_recv
-                .try_recv()
-            {
-                match value {
-                    ChildOut::StdOut(s) => {
-                        if let Some(handler) = self.script_data.child_processes[i]
-                            .events
-                            .on_stdout
-                            .as_object()
-                        {
-                            self.with_vm_and_async(|vm| {
-                                let str = vm.bx.heap.new_string_from_str(&s);
-                                vm.call(handler.into(), &[str.into()]);
-                            })
-                        }
-                    }
-                    ChildOut::StdErr(s) => {
-                        if let Some(handler) = self.script_data.child_processes[i]
-                            .events
-                            .on_stderr
-                            .as_object()
-                        {
-                            self.with_vm_and_async(|vm| {
-                                let str = vm.bx.heap.new_string_from_str(&s);
-                                vm.call(handler.into(), &[str.into()]);
-                            })
-                        }
-                    }
-                    ChildOut::Term => {
-                        if let Some(handler) = self.script_data.child_processes[i]
-                            .events
-                            .on_term
-                            .as_object()
-                        {
-                            self.with_vm_and_async(|vm| {
-                                vm.call(handler.into(), &[]);
-                            })
-                        }
-                        term = true;
-                        break;
+        while let Ok(value) = std.data.child_processes[i].child.out_recv.try_recv() {
+            match value {
+                ChildOut::StdOut(s) => {
+                    if let Some(handler) = std.data.child_processes[i].events.on_stdout.as_object()
+                    {
+                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                            let str = vm.bx.heap.new_string_from_str(&s);
+                            vm.call(handler.into(), &[str.into()]);
+                        });
                     }
                 }
+                ChildOut::StdErr(s) => {
+                    if let Some(handler) = std.data.child_processes[i].events.on_stderr.as_object()
+                    {
+                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                            let str = vm.bx.heap.new_string_from_str(&s);
+                            vm.call(handler.into(), &[str.into()]);
+                        });
+                    }
+                }
+                ChildOut::Term => {
+                    if let Some(handler) = std.data.child_processes[i].events.on_term.as_object() {
+                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                            vm.call(handler.into(), &[]);
+                        });
+                    }
+                    term = true;
+                    break;
+                }
             }
-            if term {
-                self.script_data.child_processes.remove(i);
-            } else {
-                i += 1;
-            }
+        }
+        if term {
+            std.data.child_processes.remove(i);
+        } else {
+            i += 1;
         }
     }
 }
@@ -122,8 +110,8 @@ impl Cx {
 pub fn script_mod(vm: &mut ScriptVm) {
     let run = vm.new_module(id_lut!(run));
 
-    set_script_value_to_api!(vm, run.ChildEvents);
-    set_script_value_to_api!(vm, run.ChildCmd);
+    set_script_value_to_api!(vm, run.ScriptChildEvents);
+    set_script_value_to_api!(vm, run.ScriptChildCmd);
 
     vm.add_method(
         run,
@@ -133,14 +121,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let cmd = script_value!(vm, args.cmd);
             let events = script_value!(vm, args.events);
 
-            if !script_has_proto!(vm, cmd, run.ChildCmd)
-                || !script_has_proto!(vm, events, run.ChildEvents)
+            if !script_has_proto!(vm, cmd, run.ScriptChildCmd)
+                || !script_has_proto!(vm, events, run.ScriptChildEvents)
             {
                 return script_err_type_mismatch!(vm.trap(), "invalid run arg type");
             }
 
-            let cmd = ChildCmd::script_from_value(vm, cmd);
-            let events = ChildEvents::script_from_value(vm, events);
+            let cmd = ScriptChildCmd::script_from_value(vm, cmd);
+            let events = ScriptChildEvents::script_from_value(vm, events);
 
             let mut cmd_build = Command::new(cmd.cmd);
 
@@ -161,19 +149,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 cmd_build.current_dir(cwd);
             }
 
-            let cx = vm.cx_mut();
-
             match ChildProcess::spawn(cmd_build) {
                 Ok(child) => {
                     let id = LiveId::unique();
-                    cx.script_data
+                    vm.std_mut::<ScriptStd>()
+                        .data
                         .child_processes
-                        .push(CxScriptChildProcess { child, id, events });
+                        .push(ScriptChildProcessState { child, id, events });
                     id.escape()
                 }
-                Err(_e) => {
-                    script_err_io!(vm.bx.threads.trap(), "child process error")
-                }
+                Err(_) => script_err_io!(vm.bx.threads.trap(), "child process error"),
             }
         },
     );
@@ -241,14 +226,10 @@ impl ChildProcess {
                 while let Ok(line) = in_recv.recv() {
                     match line {
                         ChildIn::Send(line) => {
-                            if let Err(_) = stdin.write_all(line.as_bytes()) {
-                                //println!("Stdin send error {}",e);
-                            }
+                            let _ = stdin.write_all(line.as_bytes());
                             let _ = stdin.flush();
                         }
-                        ChildIn::Term => {
-                            break;
-                        }
+                        ChildIn::Term => break,
                     }
                 }
             });
@@ -259,12 +240,5 @@ impl ChildProcess {
             out_recv,
             child,
         })
-    }
-
-    #[allow(unused)]
-    pub fn kill(mut self) {
-        let _ = self.in_send.send(ChildIn::Term);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }

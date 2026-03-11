@@ -1,7 +1,7 @@
 use crate::log_store::{
     query_log_entries, AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore,
 };
-use crate::process_manager::ProcessManager;
+use crate::process_manager::{ProcessManager, MAKEPAD_SPLASH_RUNNABLE};
 use crate::terminal_manager::TerminalManager;
 use crate::virtual_fs::VirtualFs;
 use crate::worker_pool::WorkerPool;
@@ -16,7 +16,7 @@ use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_git::{FileStatus as GitFileStatus, Repository as GitRepository};
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
-use makepad_network::ToUISender;
+use makepad_script_std::makepad_network::ToUISender;
 use makepad_studio_protocol::hub_protocol as backend_proto;
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent, KeyModifiers,
@@ -245,6 +245,7 @@ pub struct HubCore {
     fs_event_last_by_path: HashMap<String, Instant>,
     fs_pending_diffs: HashMap<String, Vec<backend_proto::FileTreeChange>>,
     fs_pending_reload_mounts: HashSet<String>,
+    pending_mount_root_splash_restarts: HashSet<String>,
     file_tree_load_waiters: HashMap<String, HashSet<ClientId>>,
     fs_diff_flush_scheduled: bool,
     fs_event_last_prune: Instant,
@@ -297,6 +298,7 @@ impl HubCore {
             fs_event_last_by_path: HashMap::new(),
             fs_pending_diffs: HashMap::new(),
             fs_pending_reload_mounts: HashSet::new(),
+            pending_mount_root_splash_restarts: HashSet::new(),
             file_tree_load_waiters: HashMap::new(),
             fs_diff_flush_scheduled: false,
             fs_event_last_prune: Instant::now(),
@@ -630,6 +632,7 @@ impl HubCore {
                 self.vfs.unmount(&name);
                 self.reset_fs_watcher();
                 self.primary_ui_by_mount.remove(&name);
+                self.pending_mount_root_splash_restarts.remove(&name);
                 self.build_mount_by_id.retain(|_, mount| mount != &name);
                 self.send_ui_reply(
                     client_id,
@@ -647,8 +650,12 @@ impl HubCore {
                 );
             }
             ClientToHub::ObserveMount { mount, primary } => {
-                if primary.unwrap_or(true) {
-                    self.primary_ui_by_mount.insert(mount, client_id);
+                let primary = primary.unwrap_or(true);
+                if primary {
+                    self.primary_ui_by_mount.insert(mount.clone(), client_id);
+                    if let Err(err) = self.ensure_mount_root_splash_running(&mount) {
+                        self.send_ui_error(client_id, err);
+                    }
                 } else if self.primary_ui_by_mount.get(&mount) == Some(&client_id) {
                     self.primary_ui_by_mount.remove(&mount);
                 }
@@ -706,14 +713,20 @@ impl HubCore {
                 if save_ok {
                     if path.ends_with(".rs") {
                         if let Ok(disk_path) = self.vfs.resolve_path(&path) {
-                            let disk_path =
-                                disk_path.canonicalize().unwrap_or_else(|_| disk_path.clone());
+                            let disk_path = disk_path
+                                .canonicalize()
+                                .unwrap_or_else(|_| disk_path.clone());
                             self.forward_live_change_to_builds(
                                 "save",
                                 &path,
                                 disk_path.to_string_lossy().replace('\\', "/"),
                                 content.clone(),
                             );
+                        }
+                    }
+                    if let Some((mount, rest)) = path.split_once('/') {
+                        if rest == MAKEPAD_SPLASH_RUNNABLE {
+                            self.request_mount_root_splash_reload(mount);
                         }
                     }
                     self.self_save_suppress_until_by_path
@@ -921,6 +934,64 @@ impl HubCore {
                 env,
                 buildbox,
             } => {
+                if process == MAKEPAD_SPLASH_RUNNABLE {
+                    if buildbox.is_some() {
+                        self.send_ui_error(
+                            client_id,
+                            "makepad.splash runs are not supported on buildboxes yet".to_string(),
+                        );
+                        return;
+                    }
+                    if env.as_ref().is_some_and(|env| !env.is_empty()) {
+                        self.send_ui_error(
+                            client_id,
+                            "makepad.splash env overrides are not supported yet".to_string(),
+                        );
+                        return;
+                    }
+                    if standalone.unwrap_or(false) {
+                        self.send_ui_error(
+                            client_id,
+                            "makepad.splash does not use standalone mode".to_string(),
+                        );
+                        return;
+                    }
+                    if !app_args.is_empty() {
+                        self.send_ui_error(
+                            client_id,
+                            "makepad.splash args are not supported yet".to_string(),
+                        );
+                        return;
+                    }
+
+                    let build_id = self.alloc_build_id();
+                    let cwd = match self.vfs.resolve_mount(&mount) {
+                        Ok(cwd) => cwd,
+                        Err(err) => {
+                            self.send_ui_error(client_id, err.to_string());
+                            return;
+                        }
+                    };
+                    match self.process_manager.start_script_run(
+                        build_id,
+                        mount.clone(),
+                        &cwd,
+                        self.event_tx.clone(),
+                    ) {
+                        Ok(info) => {
+                            self.build_mount_by_id
+                                .insert(info.build_id, info.mount.clone());
+                            self.broadcast_ui_message(HubToClient::BuildStarted {
+                                build_id: info.build_id,
+                                mount: info.mount,
+                                package: info.package,
+                            });
+                        }
+                        Err(err) => self.send_ui_error(client_id, err),
+                    }
+                    return;
+                }
+
                 let cargo_args =
                     build_run_cargo_args(&process, app_args, standalone.unwrap_or(false));
                 let build_id = self.alloc_build_id();
@@ -1518,6 +1589,9 @@ impl HubCore {
         if self.should_suppress_self_save_event(&virtual_path, now) {
             return;
         }
+        if Self::is_mount_root_splash_virtual_path(&mount, &virtual_path) {
+            self.request_mount_root_splash_reload(&mount);
+        }
         if path_is_file && !self.should_ignore_virtual_path(&mount, &virtual_path) {
             self.broadcast_ui_message(HubToClient::FileChanged {
                 path: virtual_path.clone(),
@@ -2012,9 +2086,7 @@ impl HubCore {
             ) {
                 eprintln!(
                     "[studio-hotreload] failed build={} virtual_path={} error={}",
-                    build_id.0,
-                    virtual_path,
-                    err
+                    build_id.0, virtual_path, err
                 );
             }
         }
@@ -2056,6 +2128,121 @@ impl HubCore {
         builds.extend(self.remote_builds.values().cloned());
         builds.sort_by_key(|build| build.build_id.0);
         builds
+    }
+
+    fn mount_has_root_splash(&self, mount: &str) -> bool {
+        self.vfs
+            .resolve_mount(mount)
+            .map(|cwd| cwd.join(MAKEPAD_SPLASH_RUNNABLE).is_file())
+            .unwrap_or(false)
+    }
+
+    fn is_mount_root_splash_virtual_path(mount: &str, virtual_path: &str) -> bool {
+        virtual_path == format!("{}/{}", mount, MAKEPAD_SPLASH_RUNNABLE)
+    }
+
+    fn mount_root_splash_build_ids(&self, mount: &str) -> Vec<QueryId> {
+        let mut build_ids: Vec<QueryId> = self
+            .process_manager
+            .list_builds()
+            .into_iter()
+            .filter_map(|build| {
+                (build.active && build.mount == mount && build.package == MAKEPAD_SPLASH_RUNNABLE)
+                    .then_some(build.build_id)
+            })
+            .collect();
+        build_ids.sort_by_key(|build_id| build_id.0);
+        build_ids
+    }
+
+    fn mount_root_splash_running(&self, mount: &str) -> bool {
+        !self.mount_root_splash_build_ids(mount).is_empty()
+    }
+
+    fn ensure_mount_root_splash_running(
+        &mut self,
+        mount: &str,
+    ) -> Result<Option<BuildInfo>, String> {
+        if !self.mount_has_root_splash(mount) || self.mount_root_splash_running(mount) {
+            return Ok(None);
+        }
+
+        let build_id = self.alloc_build_id();
+        let cwd = self
+            .vfs
+            .resolve_mount(mount)
+            .map_err(|err| err.to_string())?;
+        let info = self.process_manager.start_script_run(
+            build_id,
+            mount.to_string(),
+            &cwd,
+            self.event_tx.clone(),
+        )?;
+        self.build_mount_by_id
+            .insert(info.build_id, info.mount.clone());
+        self.broadcast_ui_message(HubToClient::BuildStarted {
+            build_id: info.build_id,
+            mount: info.mount.clone(),
+            package: info.package.clone(),
+        });
+        Ok(Some(info))
+    }
+
+    fn start_mount_root_splash_with_reporting(&mut self, mount: &str) {
+        if let Err(err) = self.ensure_mount_root_splash_running(mount) {
+            if let Some(client_id) = self.primary_ui_for_mount(mount) {
+                self.send_ui_error(client_id, err);
+            } else {
+                eprintln!(
+                    "[studio2-backend] failed to start {} for mount {}: {}",
+                    MAKEPAD_SPLASH_RUNNABLE, mount, err
+                );
+            }
+        }
+    }
+
+    fn request_mount_root_splash_reload(&mut self, mount: &str) {
+        let build_ids = self.mount_root_splash_build_ids(mount);
+        if build_ids.is_empty() {
+            if self.primary_ui_for_mount(mount).is_some() && self.mount_has_root_splash(mount) {
+                self.start_mount_root_splash_with_reporting(mount);
+            }
+            return;
+        }
+
+        if self.mount_has_root_splash(mount) {
+            self.pending_mount_root_splash_restarts
+                .insert(mount.to_string());
+        } else {
+            self.pending_mount_root_splash_restarts.remove(mount);
+        }
+
+        for build_id in build_ids {
+            if let Err(err) = self.process_manager.stop_build(build_id) {
+                if let Some(client_id) = self.primary_ui_for_mount(mount) {
+                    self.send_ui_error(client_id, err);
+                } else {
+                    eprintln!(
+                        "[studio2-backend] failed to stop {} build {} for mount {}: {}",
+                        MAKEPAD_SPLASH_RUNNABLE, build_id.0, mount, err
+                    );
+                }
+            }
+        }
+    }
+
+    fn maybe_restart_pending_mount_root_splash(&mut self, mount: &str) {
+        if !self.pending_mount_root_splash_restarts.remove(mount) {
+            return;
+        }
+        if self.mount_root_splash_running(mount) || !self.mount_has_root_splash(mount) {
+            if self.mount_has_root_splash(mount) {
+                self.pending_mount_root_splash_restarts
+                    .insert(mount.to_string());
+            }
+            return;
+        }
+        self.start_mount_root_splash_with_reporting(mount);
     }
 
     fn primary_ui_for_mount(&self, mount: &str) -> Option<ClientId> {
@@ -2433,18 +2620,17 @@ impl HubCore {
         }
     }
     fn on_process_exited(&mut self, build_id: QueryId, exit_code: Option<i32>) {
-        if self
-            .process_manager
-            .mark_exited(build_id, exit_code)
-            .is_none()
-        {
+        let Some(info) = self.process_manager.mark_exited(build_id, exit_code) else {
             return;
-        }
+        };
         self.build_mount_by_id.remove(&build_id);
         self.broadcast_ui_message(HubToClient::BuildStopped {
             build_id,
             exit_code,
         });
+        if info.package == MAKEPAD_SPLASH_RUNNABLE {
+            self.maybe_restart_pending_mount_root_splash(&info.mount);
+        }
     }
 
     fn on_terminal_output(&mut self, path: String, data: Vec<u8>) {
@@ -2830,6 +3016,20 @@ struct ParsedCargoLogEntry {
 }
 
 fn discover_runnable_builds(root_path: &Path) -> Result<Vec<RunnableBuild>, String> {
+    let mut builds = Vec::new();
+    let mut seen = HashSet::new();
+    if root_path.join(MAKEPAD_SPLASH_RUNNABLE).is_file() {
+        builds.push(RunnableBuild {
+            package: MAKEPAD_SPLASH_RUNNABLE.to_string(),
+        });
+        seen.insert(MAKEPAD_SPLASH_RUNNABLE.to_string());
+    }
+
+    if !root_path.join("Cargo.toml").is_file() {
+        builds.sort_by(|a, b| a.package.cmp(&b.package));
+        return Ok(builds);
+    }
+
     let output = Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version=1"])
         .current_dir(root_path)
@@ -2856,8 +3056,6 @@ fn discover_runnable_builds(root_path: &Path) -> Result<Vec<RunnableBuild>, Stri
     let metadata = CargoMetadata::deserialize_json_lenient(&stdout)
         .map_err(|err| format!("failed to parse cargo metadata json: {err:?}"))?;
 
-    let mut builds = Vec::new();
-    let mut seen = HashSet::new();
     for package in metadata.packages {
         let has_bin_target = package
             .targets
@@ -3462,7 +3660,7 @@ fn file_tree_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_network::ToUIReceiver;
+    use makepad_script_std::makepad_network::ToUIReceiver;
     use std::sync::mpsc;
 
     #[test]
