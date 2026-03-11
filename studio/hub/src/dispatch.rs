@@ -9,7 +9,7 @@ use backend_proto::{
     BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec, BuildInfo, ClientId,
     ClientToHub, ClientToHubEnvelope, EventSample as HubEventSample, GCSample as StudioGCSample,
     GPUSample as StudioGPUSample, HubToBuildBox, HubToBuildBoxVec, HubToClient, LogEntry,
-    LogSource, QueryId, RunViewInputVizKind, RunnableBuild, SaveResult, SearchResult,
+    LogSource, QueryId, RunItem, RunViewInputVizKind, SaveResult, SearchResult,
     TerminalFramebuffer,
 };
 use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
@@ -27,7 +27,6 @@ use makepad_terminal_core::{StyleFlags, Terminal};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -91,6 +90,18 @@ pub enum HubEvent {
     ProcessExited {
         build_id: QueryId,
         exit_code: Option<i32>,
+    },
+    RunItemsUpdated {
+        mount: String,
+        items: Vec<RunItem>,
+    },
+    ScriptRunRequest {
+        mount: String,
+        cwd: PathBuf,
+        program: String,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+        package: Option<String>,
     },
     TerminalOutput {
         path: String,
@@ -226,6 +237,7 @@ pub struct HubCore {
     buildbox_sockets: HashMap<u64, BuildBoxSocket>,
     buildbox_by_name: HashMap<String, u64>,
     build_mount_by_id: HashMap<QueryId, String>,
+    run_items_by_mount: HashMap<String, Vec<RunItem>>,
     primary_ui_by_mount: HashMap<String, ClientId>,
     remote_builds: HashMap<QueryId, BuildInfo>,
     remote_build_owner: HashMap<QueryId, String>,
@@ -279,6 +291,7 @@ impl HubCore {
             buildbox_sockets: HashMap::new(),
             buildbox_by_name: HashMap::new(),
             build_mount_by_id: HashMap::new(),
+            run_items_by_mount: HashMap::new(),
             primary_ui_by_mount: HashMap::new(),
             remote_builds: HashMap::new(),
             remote_build_owner: HashMap::new(),
@@ -422,6 +435,15 @@ impl HubCore {
                 build_id,
                 exit_code,
             } => self.on_process_exited(build_id, exit_code),
+            HubEvent::RunItemsUpdated { mount, items } => self.on_run_items_updated(mount, items),
+            HubEvent::ScriptRunRequest {
+                mount,
+                cwd,
+                program,
+                args,
+                env,
+                package,
+            } => self.on_script_run_request(mount, cwd, program, args, env, package),
             HubEvent::TerminalOutput { path, data } => self.on_terminal_output(path, data),
             HubEvent::TerminalResized { path, cols, rows } => {
                 self.on_terminal_resized(path, cols, rows)
@@ -634,6 +656,7 @@ impl HubCore {
                 self.primary_ui_by_mount.remove(&name);
                 self.pending_mount_root_splash_restarts.remove(&name);
                 self.build_mount_by_id.retain(|_, mount| mount != &name);
+                self.run_items_by_mount.remove(&name);
                 self.send_ui_reply(
                     client_id,
                     HubToClient::FileTree {
@@ -658,6 +681,9 @@ impl HubCore {
                     }
                 } else if self.primary_ui_by_mount.get(&mount) == Some(&client_id) {
                     self.primary_ui_by_mount.remove(&mount);
+                }
+                if let Some(items) = self.run_items_by_mount.get(&mount).cloned() {
+                    self.send_ui_reply(client_id, HubToClient::RunItems { mount, items });
                 }
             }
             ClientToHub::LoadFileTree { mount } => {
@@ -841,19 +867,9 @@ impl HubCore {
                     },
                 );
             }
-            ClientToHub::LoadRunnableBuilds { mount } => {
-                let cwd = match self.vfs.resolve_mount(&mount) {
-                    Ok(cwd) => cwd,
-                    Err(err) => {
-                        self.send_ui_error(client_id, err.to_string());
-                        return;
-                    }
-                };
-                match discover_runnable_builds(&cwd) {
-                    Ok(builds) => {
-                        self.send_ui_reply(client_id, HubToClient::RunnableBuilds { mount, builds })
-                    }
-                    Err(err) => self.send_ui_error(client_id, err),
+            ClientToHub::RunItem { mount, name } => {
+                if let Err(err) = self.process_manager.invoke_script_run_item(&mount, &name) {
+                    self.send_ui_error(client_id, err);
                 }
             }
             ClientToHub::Cargo {
@@ -976,6 +992,7 @@ impl HubCore {
                         build_id,
                         mount.clone(),
                         &cwd,
+                        self.studio_addr.clone(),
                         self.event_tx.clone(),
                     ) {
                         Ok(info) => {
@@ -1564,6 +1581,11 @@ impl HubCore {
             self.reload_mount_file_tree_broadcast(&mount);
             return;
         };
+        if self.is_git_status_watch_virtual_path(&mount, &virtual_path) {
+            self.invalidate_git_status_cache_for_mount(&mount);
+            self.reload_mount_file_tree_broadcast(&mount);
+            return;
+        }
         if self.should_ignore_fs_watch_virtual_path(&mount, &virtual_path) {
             return;
         }
@@ -1739,6 +1761,23 @@ impl HubCore {
                 compute_filetree_change_for_path(&git_status_cache, &disk_path, virtual_path);
             let _ = event_tx.send(HubEvent::WorkerFileTreeDeltaDone { mount, change });
         });
+    }
+
+    fn invalidate_git_status_cache_for_mount(&mut self, mount: &str) {
+        let Ok(root) = self.vfs.resolve_mount(mount) else {
+            return;
+        };
+        if let Ok(mut cache_guard) = self.git_status_cache.lock() {
+            cache_guard.entries.retain(|path, _| !path.starts_with(&root));
+        }
+    }
+
+    fn is_git_status_watch_virtual_path(&self, mount: &str, virtual_path: &str) -> bool {
+        let prefix = format!("{}/", mount);
+        let Some(rest) = virtual_path.strip_prefix(&prefix) else {
+            return false;
+        };
+        rest == ".git" || rest.starts_with(".git/")
     }
 
     fn should_ignore_fs_watch_virtual_path(&self, mount: &str, virtual_path: &str) -> bool {
@@ -2176,6 +2215,7 @@ impl HubCore {
             build_id,
             mount.to_string(),
             &cwd,
+            self.studio_addr.clone(),
             self.event_tx.clone(),
         )?;
         self.build_mount_by_id
@@ -2262,6 +2302,56 @@ impl HubCore {
             self.send_ui_message(client_id, msg, self.ui_format(client_id));
         } else {
             self.broadcast_ui_message(msg);
+        }
+    }
+
+    fn on_run_items_updated(&mut self, mount: String, items: Vec<RunItem>) {
+        self.run_items_by_mount.insert(mount.clone(), items.clone());
+        self.broadcast_ui_message(HubToClient::RunItems { mount, items });
+    }
+
+    fn on_script_run_request(
+        &mut self,
+        mount: String,
+        cwd: PathBuf,
+        program: String,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+        package: Option<String>,
+    ) {
+        let build_id = self.alloc_build_id();
+        let package = package.unwrap_or_else(|| display_name_from_command(&program, &args));
+        match self.process_manager.start_command_run(
+            build_id,
+            mount.clone(),
+            package.clone(),
+            &cwd,
+            program,
+            args,
+            env,
+            false,
+            self.studio_addr.clone(),
+            self.event_tx.clone(),
+        ) {
+            Ok(info) => {
+                self.build_mount_by_id
+                    .insert(info.build_id, info.mount.clone());
+                self.broadcast_ui_message(HubToClient::BuildStarted {
+                    build_id: info.build_id,
+                    mount: info.mount,
+                    package: info.package,
+                });
+            }
+            Err(err) => {
+                if let Some(client_id) = self.primary_ui_for_mount(&mount) {
+                    self.send_ui_error(client_id, err);
+                } else {
+                    eprintln!(
+                        "[studio2-backend] failed to start scripted run for mount {}: {}",
+                        mount, err
+                    );
+                }
+            }
         }
     }
 
@@ -2629,6 +2719,11 @@ impl HubCore {
             exit_code,
         });
         if info.package == MAKEPAD_SPLASH_RUNNABLE {
+            self.run_items_by_mount.insert(info.mount.clone(), Vec::new());
+            self.broadcast_ui_message(HubToClient::RunItems {
+                mount: info.mount.clone(),
+                items: Vec::new(),
+            });
             self.maybe_restart_pending_mount_root_splash(&info.mount);
         }
     }
@@ -2964,22 +3059,6 @@ impl HubCore {
 }
 
 #[derive(Clone, Debug, Default, DeJson)]
-struct CargoMetadata {
-    packages: Vec<CargoMetadataPackage>,
-}
-
-#[derive(Clone, Debug, Default, DeJson)]
-struct CargoMetadataPackage {
-    name: String,
-    targets: Vec<CargoMetadataTarget>,
-}
-
-#[derive(Clone, Debug, Default, DeJson)]
-struct CargoMetadataTarget {
-    kind: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, DeJson)]
 struct RustcCompilerMessage {
     reason: String,
     message: Option<RustcMessage>,
@@ -3015,60 +3094,18 @@ struct ParsedCargoLogEntry {
     column: Option<usize>,
 }
 
-fn discover_runnable_builds(root_path: &Path) -> Result<Vec<RunnableBuild>, String> {
-    let mut builds = Vec::new();
-    let mut seen = HashSet::new();
-    if root_path.join(MAKEPAD_SPLASH_RUNNABLE).is_file() {
-        builds.push(RunnableBuild {
-            package: MAKEPAD_SPLASH_RUNNABLE.to_string(),
-        });
-        seen.insert(MAKEPAD_SPLASH_RUNNABLE.to_string());
-    }
-
-    if !root_path.join("Cargo.toml").is_file() {
-        builds.sort_by(|a, b| a.package.cmp(&b.package));
-        return Ok(builds);
-    }
-
-    let output = Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version=1"])
-        .current_dir(root_path)
-        .output()
-        .map_err(|err| {
-            format!(
-                "failed to run cargo metadata in {}: {}",
-                root_path.display(),
-                err
-            )
-        })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        return Err(format!(
-            "cargo metadata failed in {}\n{}\n{}",
-            root_path.display(),
-            stderr.trim(),
-            stdout.trim()
-        ));
-    }
-
-    let metadata = CargoMetadata::deserialize_json_lenient(&stdout)
-        .map_err(|err| format!("failed to parse cargo metadata json: {err:?}"))?;
-
-    for package in metadata.packages {
-        let has_bin_target = package
-            .targets
-            .iter()
-            .any(|target| target.kind.iter().any(|kind| kind == "bin"));
-        if has_bin_target && seen.insert(package.name.clone()) {
-            builds.push(RunnableBuild {
-                package: package.name,
-            });
+fn display_name_from_command(program: &str, args: &[String]) -> String {
+    if program == "cargo" {
+        if let Some(package) = parse_package_name(args) {
+            return package;
         }
     }
-    builds.sort_by(|a, b| a.package.cmp(&b.package));
-    Ok(builds)
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(program)
+        .to_string()
 }
 
 fn terminal_framebuffer_from_terminal(
@@ -4390,6 +4427,30 @@ mod tests {
                 )
             }),
             "expected full FileTree reload to include repo/src/from_dir_event.rs"
+        );
+    }
+
+    #[test]
+    fn mount_fs_changed_git_metadata_path_triggers_full_tree_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+        fs::write(dir.path().join(".git/index"), "").unwrap();
+
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+        core.handle_event(HubEvent::MountFsChanged {
+            mount: "repo".to_string(),
+            path: dir.path().join(".git/index"),
+        });
+
+        pump_core(&mut core, Duration::from_millis(400));
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
+        assert!(
+            messages
+                .iter()
+                .any(|msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo")),
+            "expected .git metadata fs event to trigger a full FileTree reload"
         );
     }
 

@@ -1439,25 +1439,20 @@ fn unmount_emits_file_tree_diff_scoped_to_mount() {
 }
 
 #[test]
-fn runnable_builds_are_scoped_per_mount() {
+fn run_items_are_pushed_per_mount() {
     let mount_a = tempfile::tempdir().unwrap();
     let mount_b = tempfile::tempdir().unwrap();
 
-    fs::create_dir_all(mount_a.path().join("src")).unwrap();
     fs::write(
-        mount_a.path().join("Cargo.toml"),
-        "[package]\nname = \"alpha-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        mount_a.path().join("makepad.splash"),
+        "use mod.hub\nhub.set_run_items([{name:\"alpha-app\" in_studio:true on_run:fn(){}}])\n",
     )
     .unwrap();
-    fs::write(mount_a.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-
-    fs::create_dir_all(mount_b.path().join("src")).unwrap();
     fs::write(
-        mount_b.path().join("Cargo.toml"),
-        "[package]\nname = \"beta-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        mount_b.path().join("makepad.splash"),
+        "use mod.hub\nhub.set_run_items([{name:\"beta-app\" in_studio:true on_run:fn(){}}])\n",
     )
     .unwrap();
-    fs::write(mount_b.path().join("src/main.rs"), "fn main() {}\n").unwrap();
 
     let config = HubConfig {
         mounts: vec![
@@ -1474,41 +1469,361 @@ fn runnable_builds_are_scoped_per_mount() {
     };
     let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
 
-    let _ = connection.send(ClientToHub::LoadRunnableBuilds {
+    let _ = connection.send(ClientToHub::ObserveMount {
         mount: "alpha".to_string(),
+        primary: Some(true),
     });
     let alpha = wait_for_message(
         &connection,
         Duration::from_secs(5),
-        |msg| matches!(msg, HubToClient::RunnableBuilds { mount, .. } if mount == "alpha"),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "alpha" && items.len() == 1),
     )
-    .expect("did not receive alpha runnable builds");
+    .expect("did not receive alpha run items");
     match alpha {
-        HubToClient::RunnableBuilds { mount, builds } => {
+        HubToClient::RunItems { mount, items } => {
             assert_eq!(mount, "alpha");
-            assert_eq!(builds.len(), 1);
-            assert_eq!(builds[0].package, "alpha-app");
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].name, "alpha-app");
         }
         _ => unreachable!(),
     }
 
-    let _ = connection.send(ClientToHub::LoadRunnableBuilds {
+    let _ = connection.send(ClientToHub::ObserveMount {
         mount: "beta".to_string(),
+        primary: Some(true),
     });
     let beta = wait_for_message(
         &connection,
         Duration::from_secs(5),
-        |msg| matches!(msg, HubToClient::RunnableBuilds { mount, .. } if mount == "beta"),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "beta" && items.len() == 1),
     )
-    .expect("did not receive beta runnable builds");
+    .expect("did not receive beta run items");
     match beta {
-        HubToClient::RunnableBuilds { mount, builds } => {
+        HubToClient::RunItems { mount, items } => {
             assert_eq!(mount, "beta");
-            assert_eq!(builds.len(), 1);
-            assert_eq!(builds[0].package, "beta-app");
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].name, "beta-app");
         }
         _ => unreachable!(),
     }
+}
+
+#[test]
+fn run_item_executes_named_on_run_callback() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.std\nuse mod.hub\nhub.set_run_items([{name:\"hello\" in_studio:true on_run:fn(){std.println(\"hello from item\")}}])\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(true),
+    });
+    let started = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| {
+            matches!(
+                msg,
+                HubToClient::BuildStarted { mount, package, .. }
+                    if mount == "repo" && package == "makepad.splash"
+            )
+        },
+    )
+    .expect("did not receive BuildStarted");
+    let build_id = match started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.len() == 1),
+    )
+    .expect("did not receive RunItems");
+    match run_items {
+        HubToClient::RunItems { items, .. } => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].name, "hello");
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::RunItem {
+        mount: "repo".to_string(),
+        name: "hello".to_string(),
+    });
+    let _ = drain_messages(&connection, Duration::from_millis(250));
+
+    let query_id = connection.send(ClientToHub::QueryLogs {
+        build_id: Some(build_id),
+        level: None,
+        source: None,
+        file: None,
+        pattern: Some("hello from item".to_string()),
+        is_regex: None,
+        since_index: None,
+        live: Some(false),
+    });
+    let log_results = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::QueryLogResults {
+                query_id: id, ..
+            } if *id == query_id
+        )
+    })
+    .expect("did not receive QueryLogResults");
+
+    match log_results {
+        HubToClient::QueryLogResults { entries, done, .. } => {
+            assert!(done);
+            let messages: Vec<String> = entries
+                .iter()
+                .map(|entry| entry.1.message.clone())
+                .collect();
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.1.message.contains("hello from item")),
+                "expected run item log in splash logs, got {:?}",
+                messages
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::StopBuild { build_id });
+}
+
+#[test]
+fn run_item_spawns_cargo_run_for_clicked_name() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"makepad-example-splash\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() {\n    println!(\"hello from clicked item\");\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.hub\nhub.set_run_items([{name:\"makepad-example-splash\" in_studio:true on_run:fn(){let name = me.name hub.run({\"STUDIO\":hub.studio_ip}, \"cargo\", [\"run\" \"-p\" name \"--release\" \"--message-format=json\" \"--\" \"--message-format=json\" \"--stdin-loop\"])}}])\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(true),
+    });
+    let splash_started = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| {
+            matches!(
+                msg,
+                HubToClient::BuildStarted { mount, package, .. }
+                    if mount == "repo" && package == "makepad.splash"
+            )
+        },
+    )
+    .expect("did not receive splash BuildStarted");
+    let splash_build_id = match splash_started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.len() == 1),
+    )
+    .expect("did not receive RunItems");
+    match run_items {
+        HubToClient::RunItems { items, .. } => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].name, "makepad-example-splash");
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::RunItem {
+        mount: "repo".to_string(),
+        name: "makepad-example-splash".to_string(),
+    });
+
+    let child_started = wait_for_message(
+        &connection,
+        Duration::from_secs(10),
+        |msg| {
+            matches!(
+                msg,
+                HubToClient::BuildStarted {
+                    build_id,
+                    mount,
+                    package,
+                } if *build_id != splash_build_id
+                    && mount == "repo"
+                    && package == "makepad-example-splash"
+            )
+        },
+    )
+    .expect("did not receive child BuildStarted");
+    let child_build_id = match child_started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let child_stopped = wait_for_message(
+        &connection,
+        Duration::from_secs(20),
+        |msg| matches!(msg, HubToClient::BuildStopped { build_id, exit_code: Some(0) } if *build_id == child_build_id),
+    );
+    assert!(
+        child_stopped.is_some(),
+        "did not receive successful child BuildStopped"
+    );
+
+    let query_id = connection.send(ClientToHub::QueryLogs {
+        build_id: Some(child_build_id),
+        level: None,
+        source: None,
+        file: None,
+        pattern: Some("hello from clicked item".to_string()),
+        is_regex: None,
+        since_index: None,
+        live: Some(false),
+    });
+    let log_results = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::QueryLogResults {
+                query_id: id, ..
+            } if *id == query_id
+        )
+    })
+    .expect("did not receive child QueryLogResults");
+
+    match log_results {
+        HubToClient::QueryLogResults { entries, done, .. } => {
+            assert!(done);
+            let messages: Vec<String> = entries
+                .iter()
+                .map(|entry| entry.1.message.clone())
+                .collect();
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.1.message.contains("hello from clicked item")),
+                "expected child build log output, got {:?}",
+                messages
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::StopBuild {
+        build_id: splash_build_id,
+    });
+}
+
+#[test]
+fn run_item_reports_script_error_in_hub_run_args() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.hub\nhub.set_run_items([{name:\"broken\" in_studio:true on_run:fn(){hub.run(nil, \"cargo\", [\"run\" \"-p\" self.package])}}])\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(true),
+    });
+    let started = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| {
+            matches!(
+                msg,
+                HubToClient::BuildStarted { mount, package, .. }
+                    if mount == "repo" && package == "makepad.splash"
+            )
+        },
+    )
+    .expect("did not receive BuildStarted");
+    let build_id = match started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.len() == 1),
+    )
+    .expect("did not receive RunItems");
+    match run_items {
+        HubToClient::RunItems { items, .. } => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].name, "broken");
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::RunItem {
+        mount: "repo".to_string(),
+        name: "broken".to_string(),
+    });
+    let unexpected_build = wait_for_message(&connection, Duration::from_millis(500), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted {
+                build_id: id, ..
+            } if *id != build_id
+        )
+    });
+    assert!(
+        unexpected_build.is_none(),
+        "expected invalid hub.run args to prevent spawning a child build, got {:?}",
+        unexpected_build
+    );
+
+    let _ = connection.send(ClientToHub::StopBuild { build_id });
 }
 
 #[test]
@@ -1528,25 +1843,6 @@ fn splash_runnable_prints_hello() {
         ..Default::default()
     };
     let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
-
-    let _ = connection.send(ClientToHub::LoadRunnableBuilds {
-        mount: "repo".to_string(),
-    });
-    let runnable = wait_for_message(
-        &connection,
-        Duration::from_secs(3),
-        |msg| matches!(msg, HubToClient::RunnableBuilds { mount, .. } if mount == "repo"),
-    )
-    .expect("did not receive runnable builds");
-    match runnable {
-        HubToClient::RunnableBuilds { builds, .. } => {
-            assert!(
-                builds.iter().any(|build| build.package == "makepad.splash"),
-                "expected makepad.splash runnable"
-            );
-        }
-        _ => unreachable!(),
-    }
 
     let _ = connection.send(ClientToHub::Run {
         mount: "repo".to_string(),

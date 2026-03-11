@@ -465,7 +465,7 @@ impl Repository {
         self.status_with_options(worktree::StatusOptions {
             skip_hidden: true,
             skip_target_dirs: true,
-            skip_worktree_content_compare: true,
+            skip_worktree_content_compare: false,
         })
     }
 
@@ -484,7 +484,7 @@ impl Repository {
         let options = worktree::StatusOptions {
             skip_hidden: true,
             skip_target_dirs: true,
-            skip_worktree_content_compare: true,
+            skip_worktree_content_compare: false,
         };
 
         let head_oid = match self.head_blob_oid_for_path(&path) {

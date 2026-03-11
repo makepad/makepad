@@ -1,5 +1,6 @@
 use super::*;
 use makepad_studio_protocol::hub_protocol::{FileNode, FileTreeChange};
+use std::env;
 
 fn parse_mounts_spec(spec: &str, item_sep: char, pair_sep: char) -> Vec<MountConfig> {
     spec.split(item_sep)
@@ -147,9 +148,6 @@ impl App {
                         mount.path.clone();
                     let _ = self.ensure_mount_tab(cx, &mount.name);
                     let _ = self.send_studio(ClientToHub::LoadFileTree {
-                        mount: mount.name.clone(),
-                    });
-                    let _ = self.send_studio(ClientToHub::LoadRunnableBuilds {
                         mount: mount.name.clone(),
                     });
                     let _ = self.send_studio(ClientToHub::ObserveMount {
@@ -799,15 +797,6 @@ impl App {
             self.set_status(cx, &format!("loading mount: {}", mount));
         }
         self.ensure_mount_terminal_file(cx, mount);
-        if self
-            .mount_state(mount)
-            .map(|mount| mount.runnable_builds.is_empty())
-            .unwrap_or(true)
-        {
-            let _ = self.send_studio(ClientToHub::LoadRunnableBuilds {
-                mount: mount.to_string(),
-            });
-        }
         self.apply_mount_toolbar_state(cx, mount);
         self.restart_log_query_for_mount(cx, mount);
         self.refresh_active_mount_run_list(cx);

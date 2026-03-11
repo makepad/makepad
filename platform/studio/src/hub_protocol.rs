@@ -94,8 +94,9 @@ pub enum ClientToHub {
 
     // === Build Control ===
     ListBuilds,
-    LoadRunnableBuilds {
+    RunItem {
         mount: String,
+        name: String,
     },
     Cargo {
         mount: String,
@@ -288,9 +289,9 @@ pub enum HubToClient {
     Builds {
         builds: Vec<BuildInfo>,
     },
-    RunnableBuilds {
+    RunItems {
         mount: String,
-        builds: Vec<RunnableBuild>,
+        items: Vec<RunItem>,
     },
     BuildStarted {
         build_id: QueryId,
@@ -546,8 +547,9 @@ pub struct BuildInfo {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
-pub struct RunnableBuild {
-    pub package: String,
+pub struct RunItem {
+    pub name: String,
+    pub in_studio: bool,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]

@@ -817,45 +817,19 @@ impl App {
         }
     }
 
-    pub(super) fn run_package(
-        &mut self,
-        cx: &mut Cx,
-        mount: &str,
-        package: &str,
-        outside_studio: bool,
-    ) {
+    pub(super) fn run_item(&mut self, cx: &mut Cx, mount: &str, name: &str) {
         if self.data.active_mount.as_deref() != Some(mount) {
             self.select_mount(cx, mount);
         }
-        if !outside_studio {
-            self.close_mount_run_and_log_tabs(cx, mount);
-        }
-        let Some(build_id) = self.send_studio(ClientToHub::Run {
+        let Some(_query_id) = self.send_studio(ClientToHub::RunItem {
             mount: mount.to_string(),
-            process: package.to_string(),
-            args: Vec::new(),
-            standalone: Some(outside_studio),
-            env: None,
-            buildbox: None,
+            name: name.to_string(),
         }) else {
             self.set_status(cx, "backend not connected");
             return;
         };
-        self.data.build_to_mount.insert(build_id, mount.to_string());
-        self.data
-            .build_package
-            .insert(build_id, package.to_string());
-        self.data
-            .active_log_build_by_mount
-            .insert(mount.to_string(), build_id);
-        if outside_studio {
-            self.set_status(
-                cx,
-                &format!("starting {} on {} (external window)", package, mount),
-            );
-        } else {
-            self.set_status(cx, &format!("starting {} on {}", package, mount));
-        }
+        self.close_mount_run_and_log_tabs(cx, mount);
+        self.set_status(cx, &format!("running {} on {}", name, mount));
     }
 
     pub(super) fn handle_run_view_actions(&mut self, actions: &Actions) {
