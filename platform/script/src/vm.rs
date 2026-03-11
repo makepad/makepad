@@ -164,6 +164,7 @@ impl ScriptCode {
 
 pub struct ScriptVm<'a> {
     pub host: &'a mut dyn Any,
+    pub std: &'a mut dyn Any,
     pub bx: Box<ScriptVmBase>,
 }
 
@@ -1191,8 +1192,10 @@ mod tests {
     #[test]
     fn script_apply_eval_refreshes_interpolated_values_on_reused_callsite() {
         let mut host = ();
+        let mut std = ();
         let mut vm = ScriptVm {
             host: &mut host,
+            std: &mut std,
             bx: Box::new(ScriptVmBase::new()),
         };
 

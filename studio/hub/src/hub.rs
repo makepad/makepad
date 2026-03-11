@@ -2,7 +2,7 @@ use crate::dispatch::{HubCore, HubEvent};
 use crate::gateway::{start_http_gateway, GatewayHandle};
 use makepad_studio_protocol::hub_protocol::{ClientId, QueryId, HubToClient, ClientToHub, ClientToHubEnvelope};
 use crate::virtual_fs::VirtualFs;
-use makepad_network::ToUIReceiver;
+use makepad_script_std::makepad_network::ToUIReceiver;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};

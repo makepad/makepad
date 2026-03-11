@@ -80,11 +80,12 @@ pub use makepad_objc_sys;
 pub use ::windows;
 
 pub use makepad_futures;
-pub use makepad_network;
+pub use makepad_script_std::makepad_network;
+pub use makepad_script_std::makepad_script;
 pub use makepad_studio_protocol as studio;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
-pub use makepad_script::trap;
+pub use makepad_script_std::makepad_script::trap;
 
 pub use crate::gl_render_bridge::{GlApi, GlRenderBridge};
 
@@ -206,11 +207,10 @@ pub use {
     log::*,
     makepad_math::makepad_micro_serde,
     makepad_math::*,
-    makepad_network::{
+    makepad_script_std::makepad_network::{
         HttpError, HttpMethod, HttpProgress, HttpRequest, HttpResponse, NetworkResponse,
     },
-    makepad_script,
-    makepad_script::{
+    makepad_script_std::makepad_script::{
         apply::*, handle::*, heap::*, makepad_error_log, makepad_live_id, makepad_live_id::*,
         makepad_math, makepad_script_derive, makepad_script_derive::*, native::*, object::*,
         script_args, script_args_def, script_array_index, script_has_proto, script_is_fn,
