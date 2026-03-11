@@ -9,6 +9,7 @@ pub mod log;
 mod cx;
 mod arc_string_mut;
 mod cx_api;
+mod shared_bytes;
 
 pub mod action;
 pub mod game_input;
@@ -186,6 +187,7 @@ pub use {
         },
         midi::*,
         os::*,
+        shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         script::vm::*,
         texture::{
             Texture, TextureAnimation, TextureFormat, TextureId, TextureSize, TextureUpdated,
