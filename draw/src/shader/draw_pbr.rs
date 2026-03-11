@@ -1322,10 +1322,20 @@ impl DrawPbr {
         let radius = radius.min(half_extent).max(0.0);
         let inner = half_extent - radius; // Half-extent of the inner (flat) box
 
-        let mut positions = Vec::new();
-        let mut normals = Vec::new();
-        let mut uvs = Vec::new();
-        let mut indices = Vec::new();
+        let face_vertex_count = 6 * (segments + 1) * (segments + 1);
+        let edge_vertex_count = 12 * (segments + 1) * (cs + 1);
+        let corner_vertex_count = 8 * (cs + 1) * (cs + 1);
+        let total_vertex_count = face_vertex_count + edge_vertex_count + corner_vertex_count;
+
+        let face_index_count = 6 * segments * segments * 6;
+        let edge_index_count = 12 * segments * cs * 6;
+        let corner_index_count = 8 * cs * cs * 6;
+        let total_index_count = face_index_count + edge_index_count + corner_index_count;
+
+        let mut positions = Vec::with_capacity(total_vertex_count);
+        let mut normals = Vec::with_capacity(total_vertex_count);
+        let mut uvs = Vec::with_capacity(total_vertex_count);
+        let mut indices = Vec::with_capacity(total_index_count);
 
         // Macro to push a vertex inline (avoids borrow-checker issues with closures)
         macro_rules! push_vert {
@@ -1820,10 +1830,8 @@ impl DrawPbr {
         if self.acc_verts.is_empty() || self.acc_indices.is_empty() {
             return;
         }
-        let verts = std::mem::take(&mut self.acc_verts);
-        let indices = std::mem::take(&mut self.acc_indices);
         let geom = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx.cx));
-        geom.update(cx.cx.cx, indices, verts);
+        geom.update_with_recycled_buffers(cx.cx.cx, &mut self.acc_indices, &mut self.acc_verts);
         self.draw_vars.geometry_id = Some(geom.geometry_id());
         self.apply_draw_uniforms(cx);
         cx.new_draw_call(&self.draw_vars);

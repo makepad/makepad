@@ -81,6 +81,9 @@ impl Layouter {
     }
 
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
+        if self.cache_size == 0 {
+            return Rc::new(self.layout(params.to_owned()));
+        }
         if let Some(result) = self.cached_results.get(&params as &dyn LayoutParams) {
             return result.clone();
         }
@@ -89,9 +92,10 @@ impl Layouter {
             self.cached_results.remove(&params);
         }
         let params = params.to_owned();
-        let result = Rc::new(self.layout(params.clone()));
-        self.cached_params.push_back(params.clone());
-        self.cached_results.insert(params, result.clone());
+        let cache_key = params.clone();
+        let result = Rc::new(self.layout(params));
+        self.cached_params.push_back(cache_key.clone());
+        self.cached_results.insert(cache_key, result.clone());
         result
     }
 

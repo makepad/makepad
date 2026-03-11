@@ -68,6 +68,9 @@ impl Shaper {
     }
 
     pub fn get_or_shape(&mut self, params: ShapeParams) -> Rc<ShapedText> {
+        if self.cache_size == 0 {
+            return Rc::new(self.shape(params));
+        }
         if let Some(result) = self.cached_results.get(&params) {
             return result.clone();
         }
@@ -75,9 +78,10 @@ impl Shaper {
             let params = self.cached_params.pop_front().unwrap();
             self.cached_results.remove(&params);
         }
-        let result = Rc::new(self.shape(params.clone()));
-        self.cached_params.push_back(params.clone());
-        self.cached_results.insert(params, result.clone());
+        let cache_key = params.clone();
+        let result = Rc::new(self.shape(params));
+        self.cached_params.push_back(cache_key.clone());
+        self.cached_results.insert(cache_key, result.clone());
         result
     }
 

@@ -392,6 +392,7 @@ impl DrawVector {
         const TEX_WIDTH: usize = 2048;
         let row = self.gradient_row_count;
         self.gradient_row_count += 1;
+        self.gradient_texture_data.reserve(TEX_WIDTH);
 
         // Rasterize stops into TEX_WIDTH pixels
         for i in 0..TEX_WIDTH {
@@ -670,13 +671,27 @@ impl DrawVector {
         }
 
         let geom = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx.cx));
-        geom.update(cx.cx.cx, self.acc_indices.clone(), self.acc_verts.clone());
+        geom.update_with_recycled_buffers(cx.cx.cx, &mut self.acc_indices, &mut self.acc_verts);
         self.draw_vars.geometry_id = Some(geom.geometry_id());
         cx.new_draw_call(&self.draw_vars);
         if self.draw_vars.can_instance() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
+    }
+
+    /// Submit the already uploaded geometry as a draw call without rebuilding or reuploading.
+    pub fn submit_existing_geometry(&mut self, cx: &mut Cx2d) -> bool {
+        let Some(geom) = self.geometry.as_ref() else {
+            return false;
+        };
+        self.draw_vars.geometry_id = Some(geom.geometry_id());
+        cx.new_draw_call(&self.draw_vars);
+        if self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+        true
     }
 
     /// Convenience: walk_turtle, begin, call draw_fn, end
