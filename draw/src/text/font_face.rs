@@ -17,7 +17,7 @@ impl FontFace {
             _pinned: PhantomPinned,
         });
         unsafe {
-            let data: &'static [u8] = mem::transmute(&**inner.data);
+            let data: &'static [u8] = mem::transmute(inner.data.as_slice());
             let ttf_parser_face = ttf_parser::Face::parse(data, index).ok()?;
             let rustybuzz_face = rustybuzz::Face::from_face(ttf_parser_face.clone());
             let inner_ref = Pin::as_mut(&mut inner).get_unchecked_mut();

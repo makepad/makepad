@@ -21,6 +21,7 @@ use {
         makepad_math::{Rect, Vec2d},
         makepad_network::HttpRequest,
         makepad_script::value::ScriptHandle,
+        shared_bytes::SharedBytes,
         texture::{Texture, TextureId},
         window::WindowId,
     },
@@ -400,6 +401,37 @@ impl Cx {
         }
 
         None
+    }
+
+    /// Get the absolute path registered for a script resource handle.
+    pub fn get_resource_abs_path(&self, handle: ScriptHandle) -> Option<String> {
+        let resources = self.script_data.resources.resources.borrow();
+        resources
+            .iter()
+            .find(|res| res.handle == handle)
+            .map(|res| res.abs_path.clone())
+    }
+
+    /// Get resource data intended for font parsing.
+    ///
+    /// This tries mmap for local file-backed resources, then falls back to
+    /// already-loaded resource bytes (required for wasm/network-backed assets).
+    pub fn get_resource_font_bytes(&mut self, handle: ScriptHandle) -> Option<SharedBytes> {
+        let resource_path = {
+            let resources = self.script_data.resources.resources.borrow();
+            resources
+                .iter()
+                .find(|res| res.handle == handle)
+                .map(|res| res.abs_path.clone())
+        };
+
+        if let Some(path) = resource_path {
+            if let Ok(bytes) = SharedBytes::from_file_mmap_or_read(&path) {
+                return Some(bytes);
+            }
+        }
+
+        self.get_resource(handle).map(SharedBytes::from_owned)
     }
 
     pub fn null_texture(&self) -> Texture {

@@ -17,6 +17,7 @@ use {
         borrow::Borrow,
         cell::RefCell,
         collections::{HashMap, VecDeque},
+        env,
         hash::{Hash, Hasher},
         mem,
         rc::Rc,
@@ -112,6 +113,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
+        let atlas_size = default_text_atlas_size();
         Self {
             loader: loader::Settings {
                 shaper: shaper::Settings { cache_size: 4096 },
@@ -141,12 +143,43 @@ impl Default for Settings {
                         max_estimated_segments: 1000,
                     },
                     outline_rasterization_mode: rasterizer::OutlineRasterizationMode::Msdf,
-                    atlas_size: Size::new(4096, 4096),
+                    atlas_size,
                 },
             },
             cache_size: 4096,
         }
     }
+}
+
+fn default_text_atlas_size() -> Size<usize> {
+    atlas_size_override_from_env().unwrap_or_else(|| Size::new(2048, 2048))
+}
+
+fn atlas_size_override_from_env() -> Option<Size<usize>> {
+    let raw = env::var("MAKEPAD_TEXT_ATLAS_SIZE").ok()?;
+    parse_text_atlas_size_value(raw.trim())
+}
+
+fn parse_text_atlas_size_value(value: &str) -> Option<Size<usize>> {
+    if value.is_empty() {
+        return None;
+    }
+
+    fn parse_dim(dim: &str) -> Option<usize> {
+        let parsed = dim.trim().parse::<usize>().ok()?;
+        if (256..=8192).contains(&parsed) {
+            Some(parsed)
+        } else {
+            None
+        }
+    }
+
+    if let Some((w, h)) = value.split_once('x').or_else(|| value.split_once('X')) {
+        return Some(Size::new(parse_dim(w)?, parse_dim(h)?));
+    }
+
+    let dim = parse_dim(value)?;
+    Some(Size::new(dim, dim))
 }
 
 #[derive(Debug)]
@@ -939,5 +972,20 @@ impl LaidoutGlyph {
 
     pub fn rasterize(&self, dpx_per_em: f32) -> Option<RasterizedGlyph> {
         self.font.rasterize_glyph(self.id, dpx_per_em)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_text_atlas_size_value, Size};
+
+    #[test]
+    fn parses_text_atlas_size_from_env_value() {
+        assert_eq!(parse_text_atlas_size_value("1024"), Some(Size::new(1024, 1024)));
+        assert_eq!(parse_text_atlas_size_value("1024x2048"), Some(Size::new(1024, 2048)));
+        assert_eq!(parse_text_atlas_size_value("1024X2048"), Some(Size::new(1024, 2048)));
+        assert_eq!(parse_text_atlas_size_value(""), None);
+        assert_eq!(parse_text_atlas_size_value("64"), None);
+        assert_eq!(parse_text_atlas_size_value("bogus"), None);
     }
 }

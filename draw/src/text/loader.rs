@@ -8,10 +8,11 @@ use {
         shaper,
         shaper::Shaper,
     },
+    crate::makepad_platform::SharedBytes,
     std::{cell::RefCell, collections::HashMap, rc::Rc},
 };
 
-pub type FontData = Rc<Vec<u8>>;
+pub type FontData = SharedBytes;
 
 #[derive(Clone, Debug)]
 pub struct Loader {
@@ -171,4 +172,41 @@ pub struct FontDefinition {
     pub descender_fudge_in_ems: f32,
     /// Font variation axis settings as (tag_u32, value) pairs.
     pub variations: Vec<(u32, f32)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FontDefinition, Loader};
+    use crate::{
+        makepad_platform::SharedBytes,
+        text::{font::FontId, layouter},
+    };
+    use std::path::PathBuf;
+
+    fn bundled_font_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources/IBMPlexSans-Text.ttf")
+    }
+
+    #[test]
+    fn get_or_load_font_reuses_cached_instance() {
+        let mut loader = Loader::new(layouter::Settings::default().loader);
+        let font_id: FontId = 0xCAFE_BABE_u64.into();
+        let font_data = SharedBytes::from_file_mmap_or_read(bundled_font_path())
+            .expect("font bytes should load");
+
+        loader.define_font(
+            font_id,
+            FontDefinition {
+                data: font_data,
+                index: 0,
+                ascender_fudge_in_ems: -0.1,
+                descender_fudge_in_ems: 0.0,
+                variations: Vec::new(),
+            },
+        );
+
+        let first = loader.get_or_load_font(font_id).clone();
+        let second = loader.get_or_load_font(font_id).clone();
+        assert!(std::rc::Rc::ptr_eq(&first, &second));
+    }
 }
