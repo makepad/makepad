@@ -180,32 +180,9 @@ fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
     }
 }
 
-fn is_builtin_theme_bundled_text_font_path(abs_path: &str) -> bool {
-    let lower = abs_path.to_ascii_lowercase();
-    let is_widgets_resource =
-        lower.contains("/widgets/resources/") || lower.contains("\\widgets\\resources\\");
-    if !is_widgets_resource {
-        return false;
-    }
-    let basename = lower
-        .rsplit(|ch| ch == '/' || ch == '\\')
-        .next()
-        .unwrap_or_default();
-    matches!(
-        basename,
-        "ibmplexsans-text.ttf"
-            | "ibmplexsans-semibold.ttf"
-            | "ibmplexsans-italic.ttf"
-            | "ibmplexsans-bolditalic.ttf"
-            | "lxgwwenkairegular.ttf"
-            | "lxgwwenkaibold.ttf"
-            | "notocoloremoji.ttf"
-    )
-}
-
 #[cfg(feature = "system-fonts")]
 fn should_skip_eager_resource_load(abs_path: &str) -> bool {
-    is_builtin_theme_bundled_text_font_path(abs_path)
+    crate::os::is_builtin_theme_bundled_text_font_path(abs_path)
 }
 
 #[cfg(not(feature = "system-fonts"))]
@@ -363,7 +340,7 @@ impl Cx {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_builtin_theme_bundled_text_font_path, should_skip_eager_resource_load};
+    use super::should_skip_eager_resource_load;
 
     #[test]
     fn does_not_skip_non_widgets_or_non_theme_fonts() {
@@ -402,7 +379,7 @@ mod tests {
         assert!(should_skip_eager_resource_load(
             "/tmp/widgets/resources/NotoColorEmoji.ttf"
         ));
-        assert!(is_builtin_theme_bundled_text_font_path(
+        assert!(crate::os::is_builtin_theme_bundled_text_font_path(
             "/tmp/widgets/resources/NotoColorEmoji.ttf"
         ));
     }
@@ -416,7 +393,7 @@ mod tests {
         assert!(!should_skip_eager_resource_load(
             "/tmp/widgets/resources/NotoColorEmoji.ttf"
         ));
-        assert!(is_builtin_theme_bundled_text_font_path(
+        assert!(crate::os::is_builtin_theme_bundled_text_font_path(
             "/tmp/widgets/resources/NotoColorEmoji.ttf"
         ));
     }

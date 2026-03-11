@@ -914,51 +914,12 @@ impl FontFamily {
 }
 
 #[cfg(feature = "system-fonts")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SystemFontRole {
-    SansRegular,
-    SansBold,
-    SansItalic,
-    SansBoldItalic,
-    CjkRegular,
-    CjkBold,
-    Emoji,
-}
+type SystemFontRole = BuiltinThemeFontRole;
 
 #[cfg(feature = "system-fonts")]
 fn system_font_role_for_member(cx: &Cx, handle: ScriptHandle) -> Option<SystemFontRole> {
     let path = cx.get_resource_abs_path(handle)?;
-    system_font_role_for_resource_path(&path)
-}
-
-#[cfg(feature = "system-fonts")]
-fn system_font_role_for_resource_path(path: &str) -> Option<SystemFontRole> {
-    if !is_widgets_theme_resource_path(path) {
-        return None;
-    }
-
-    let basename = resource_basename(path)?;
-    match basename.to_ascii_lowercase().as_str() {
-        "ibmplexsans-text.ttf" => Some(SystemFontRole::SansRegular),
-        "ibmplexsans-semibold.ttf" => Some(SystemFontRole::SansBold),
-        "ibmplexsans-italic.ttf" => Some(SystemFontRole::SansItalic),
-        "ibmplexsans-bolditalic.ttf" => Some(SystemFontRole::SansBoldItalic),
-        "lxgwwenkairegular.ttf" => Some(SystemFontRole::CjkRegular),
-        "lxgwwenkaibold.ttf" => Some(SystemFontRole::CjkBold),
-        "notocoloremoji.ttf" => Some(SystemFontRole::Emoji),
-        _ => None,
-    }
-}
-
-#[cfg(feature = "system-fonts")]
-fn is_widgets_theme_resource_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("/widgets/resources/") || lower.contains("\\widgets\\resources\\")
-}
-
-#[cfg(feature = "system-fonts")]
-fn resource_basename(path: &str) -> Option<&str> {
-    path.rsplit(|ch| ch == '/' || ch == '\\').next()
+    builtin_theme_font_role_for_resource_path(&path)
 }
 
 #[cfg(feature = "system-fonts")]
@@ -1300,38 +1261,42 @@ fn clear_failed_system_font_lookup(font_id: FontId) {
 #[cfg(all(test, feature = "system-fonts"))]
 mod system_font_tests {
     use super::{
-        is_cjk_char, is_emoji_char, system_fallback_families_for_role, system_font_role_for_resource_path,
-        system_font_role_is_needed_for_text, SystemFontRole,
+        builtin_theme_font_role_for_resource_path, is_cjk_char, is_emoji_char,
+        system_fallback_families_for_role, system_font_role_is_needed_for_text, SystemFontRole,
     };
 
     #[test]
     fn maps_bundled_theme_resources_to_system_roles() {
         assert_eq!(
-            system_font_role_for_resource_path("/tmp/widgets/resources/IBMPlexSans-Text.ttf"),
+            builtin_theme_font_role_for_resource_path("/tmp/widgets/resources/IBMPlexSans-Text.ttf"),
             Some(SystemFontRole::SansRegular)
         );
         assert_eq!(
-            system_font_role_for_resource_path("/tmp/widgets/resources/IBMPlexSans-SemiBold.ttf"),
+            builtin_theme_font_role_for_resource_path(
+                "/tmp/widgets/resources/IBMPlexSans-SemiBold.ttf"
+            ),
             Some(SystemFontRole::SansBold)
         );
         assert_eq!(
-            system_font_role_for_resource_path("/tmp/widgets/resources/IBMPlexSans-Italic.ttf"),
+            builtin_theme_font_role_for_resource_path("/tmp/widgets/resources/IBMPlexSans-Italic.ttf"),
             Some(SystemFontRole::SansItalic)
         );
         assert_eq!(
-            system_font_role_for_resource_path("/tmp/widgets/resources/IBMPlexSans-BoldItalic.ttf"),
+            builtin_theme_font_role_for_resource_path(
+                "/tmp/widgets/resources/IBMPlexSans-BoldItalic.ttf"
+            ),
             Some(SystemFontRole::SansBoldItalic)
         );
         assert_eq!(
-            system_font_role_for_resource_path("/tmp/widgets/resources/LXGWWenKaiRegular.ttf"),
+            builtin_theme_font_role_for_resource_path("/tmp/widgets/resources/LXGWWenKaiRegular.ttf"),
             Some(SystemFontRole::CjkRegular)
         );
         assert_eq!(
-            system_font_role_for_resource_path("/tmp/widgets/resources/LXGWWenKaiBold.ttf"),
+            builtin_theme_font_role_for_resource_path("/tmp/widgets/resources/LXGWWenKaiBold.ttf"),
             Some(SystemFontRole::CjkBold)
         );
         assert_eq!(
-            system_font_role_for_resource_path("/tmp/widgets/resources/NotoColorEmoji.ttf"),
+            builtin_theme_font_role_for_resource_path("/tmp/widgets/resources/NotoColorEmoji.ttf"),
             Some(SystemFontRole::Emoji)
         );
     }
@@ -1339,15 +1304,17 @@ mod system_font_tests {
     #[test]
     fn keeps_code_icon_and_custom_resources_bundled() {
         assert_eq!(
-            system_font_role_for_resource_path("/tmp/widgets/resources/LiberationMono-Regular.ttf"),
+            builtin_theme_font_role_for_resource_path(
+                "/tmp/widgets/resources/LiberationMono-Regular.ttf"
+            ),
             None
         );
         assert_eq!(
-            system_font_role_for_resource_path("/tmp/widgets/resources/fa-solid-900.ttf"),
+            builtin_theme_font_role_for_resource_path("/tmp/widgets/resources/fa-solid-900.ttf"),
             None
         );
         assert_eq!(
-            system_font_role_for_resource_path("/tmp/app/resources/IBMPlexSans-Text.ttf"),
+            builtin_theme_font_role_for_resource_path("/tmp/app/resources/IBMPlexSans-Text.ttf"),
             None
         );
     }
