@@ -458,6 +458,8 @@ pub struct DockItemTabs {
     pub selected: usize,
     #[live(true)]
     pub closable: bool,
+    #[live]
+    pub hide_tab_bar: bool,
 }
 
 impl DockItemTabs {
@@ -466,6 +468,7 @@ impl DockItemTabs {
             tabs: self.tabs.clone(),
             selected: self.selected,
             closable: self.closable,
+            hide_tab_bar: self.hide_tab_bar,
         }
     }
 }
@@ -506,6 +509,8 @@ pub enum DockItem {
         tabs: Vec<LiveId>,
         selected: usize,
         closable: bool,
+        #[cfg_attr(feature = "serde", serde(default))]
+        hide_tab_bar: bool,
     },
     Tab {
         name: String,
@@ -534,6 +539,7 @@ impl DockItem {
             tabs,
             selected,
             closable,
+            hide_tab_bar: false,
         }
     }
 
@@ -908,15 +914,19 @@ impl Dock {
     }
 
     fn select_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
-        self.needs_save = true;
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
                 DockItem::Tabs { tabs, selected, .. } => {
                     if let Some(pos) = tabs.iter().position(|v| *v == tab_id) {
+                        if *selected == pos {
+                            return;
+                        }
+                        self.needs_save = true;
                         *selected = pos;
                         if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
                             tab_bar.contents_draw_list.redraw(cx);
                         }
+                        return;
                     }
                 }
                 _ => (),
@@ -925,8 +935,11 @@ impl Dock {
     }
 
     fn set_tab_title(&mut self, cx: &mut Cx, tab_id: LiveId, new_name: String) {
-        self.needs_save = true;
         if let Some(DockItem::Tab { name, .. }) = self.dock_items.get_mut(&tab_id) {
+            if *name == new_name {
+                return;
+            }
+            self.needs_save = true;
             *name = new_name;
             self.redraw_tab(cx, tab_id);
         }
@@ -969,6 +982,7 @@ impl Dock {
                     tabs,
                     selected,
                     closable,
+                    ..
                 } => {
                     if let Some(pos) = tabs.iter().position(|v| *v == tab_id) {
                         let tabs_id = *tabs_id;
@@ -1038,6 +1052,7 @@ impl Dock {
                         DockItem::Tabs {
                             tabs: vec![item],
                             closable: true,
+                            hide_tab_bar: false,
                             selected: 0,
                         },
                     );
@@ -1455,7 +1470,7 @@ impl Widget for Dock {
                     splitter.end(cx);
                 }
                 Some(DrawStackItem::Tabs { id }) => {
-                    if let Some(DockItem::Tabs { selected, .. }) = self.dock_items.get(&id) {
+                    if let Some(DockItem::Tabs { selected, hide_tab_bar, .. }) = self.dock_items.get(&id) {
                         let tab_bar_template = self.tab_bar.clone();
                         let tab_bar = self.tab_bars.get_or_insert(cx, id, |cx| {
                             cx.with_vm(|vm| TabBarWrap {
@@ -1467,9 +1482,14 @@ impl Widget for Dock {
                                 contents_rect: Rect::default(),
                             })
                         });
-                        let walk = tab_bar.tab_bar.walk(cx);
-                        tab_bar.tab_bar.begin(cx, Some(*selected), walk);
-                        stack.push(DrawStackItem::TabLabel { id, index: 0 });
+                        if !*hide_tab_bar {
+                            let walk = tab_bar.tab_bar.walk(cx);
+                            tab_bar.tab_bar.begin(cx, Some(*selected), walk);
+                            stack.push(DrawStackItem::TabLabel { id, index: 0 });
+                        } else {
+                            // Skip the tab bar entirely, go straight to content.
+                            stack.push(DrawStackItem::TabLabel { id, index: usize::MAX });
+                        }
                     } else {
                         panic!()
                     }
@@ -1490,7 +1510,9 @@ impl Widget for Dock {
                                 index: index + 1,
                             });
                         } else {
-                            tab_bar.tab_bar.end(cx);
+                            if index != usize::MAX {
+                                tab_bar.tab_bar.end(cx);
+                            }
                             tab_bar.contents_rect = cx.turtle().rect();
                             if !tabs.is_empty()
                                 && tab_bar
