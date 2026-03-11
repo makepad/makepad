@@ -130,7 +130,7 @@ impl DrawText3d {
         let ndc_x = clip.x * inv_w;
         let ndc_y = clip.y * inv_w;
         let ndc_z = clip.z * inv_w;
-        if ndc_z < -1.0 || ndc_z > 1.0 {
+        if !(-1.0..=1.0).contains(&ndc_z) {
             return None;
         }
 

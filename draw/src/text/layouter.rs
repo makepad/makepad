@@ -345,7 +345,7 @@ impl LayoutContext {
     }
 
     fn finish_current_row(&mut self, newline: bool) {
-        let font = self.font_family.fonts().get(0);
+        let font = self.font_family.fonts().first();
         let font_size_in_lpxs = self.style.font_size_in_lpxs();
         let ascender_in_lpxs = font.map_or(0.0, |font| font.ascender_in_ems()) * font_size_in_lpxs;
         let descender_in_lpxs =
@@ -734,11 +734,10 @@ impl LaidoutText {
             if cursor.index < row.text.end_in_parent() {
                 return row_index;
             }
-            if cursor.index == row.text.end_in_parent() {
-                if row.newline || !cursor.prefer_next_row {
+            if cursor.index == row.text.end_in_parent()
+                && (row.newline || !cursor.prefer_next_row) {
                     return row_index;
                 }
-            }
         }
         self.rows.len() - 1
     }
@@ -772,7 +771,7 @@ impl LaidoutText {
         let index = row.x_in_lpxs_to_index(position.x_in_lpxs);
         Cursor {
             index: row.text.start_in_parent() + index,
-            prefer_next_row: if index == 0 { true } else { false },
+            prefer_next_row: index == 0,
         }
     }
 

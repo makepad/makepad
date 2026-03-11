@@ -494,6 +494,7 @@ impl DrawVector {
     /// Draw a blurred rounded-rect shadow.
     /// (x,y,w,h) = rect, corner = corner radius, blur = blur sigma,
     /// offset_x/y = shadow offset. Uses current paint color.
+    #[allow(clippy::too_many_arguments)]
     pub fn shadow(
         &mut self,
         x: f32,
@@ -560,11 +561,7 @@ impl DrawVector {
             VectorPaint::Solid { color } => {
                 // For shapes with shader effects, store the world-space bounding box
                 // in param1-param4 so the pixel shader can compute proper UVs.
-                let params = if let Some(bbox) = self.cur_effect_bbox {
-                    bbox
-                } else {
-                    [0.0; 4]
-                };
+                let params = self.cur_effect_bbox.unwrap_or([0.0; 4]);
                 (0.0, params, *color)
             }
             VectorPaint::LinearGradient {

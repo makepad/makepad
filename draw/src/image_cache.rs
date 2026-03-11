@@ -39,7 +39,7 @@ impl ImageBuffer {
                     out[i] = ((a as u32) << 24)
                         | ((r as u32) << 16)
                         | ((g as u32) << 8)
-                        | ((b as u32) << 0);
+                        | (b as u32);
                 }
             }
             3 => {
@@ -48,7 +48,7 @@ impl ImageBuffer {
                     let g = in_data[i * 3 + 1];
                     let b = in_data[i * 3 + 2];
                     out[i] =
-                        0xff000000 | ((r as u32) << 16) | ((g as u32) << 8) | ((b as u32) << 0);
+                        0xff000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                 }
             }
             2 => {
@@ -58,16 +58,16 @@ impl ImageBuffer {
                     out[i] = ((a as u32) << 24)
                         | ((r as u32) << 16)
                         | ((r as u32) << 8)
-                        | ((r as u32) << 0);
+                        | (r as u32);
                 }
             }
             1 => {
                 for i in 0..pixels {
                     let r = in_data[i];
-                    out[i] = ((0xff as u32) << 24)
+                    out[i] = (0xff_u32 << 24)
                         | ((r as u32) << 16)
                         | ((r as u32) << 8)
-                        | ((r as u32) << 0);
+                        | (r as u32);
                 }
             }
             unsupported => return Err(ImageError::InvalidPixelAlignment(unsupported)),
@@ -169,7 +169,7 @@ impl ImageBuffer {
                         "Failed to get animated PNG image info",
                     )))?;
             post_process_image(
-                &info,
+                info,
                 colorspace,
                 &frame,
                 &pix,
@@ -190,7 +190,7 @@ impl ImageBuffer {
                                 << 24)
                                 | ((r as u32) << 16)
                                 | ((g as u32) << 8)
-                                | ((b as u32) << 0);
+                                | (b as u32);
                         }
                     }
                 }
@@ -203,7 +203,7 @@ impl ImageBuffer {
                             final_buffer.data[(y + cy) * total_width + (x + cx)] = 0xff000000
                                 | ((r as u32) << 16)
                                 | ((g as u32) << 8)
-                                | ((b as u32) << 0);
+                                | (b as u32);
                         }
                     }
                 }
@@ -266,6 +266,12 @@ pub struct ImageCache {
     pub map: HashMap<PathBuf, ImageCacheEntry>,
     pub thread_pool: Option<TagThreadPool<PathBuf>>,
     pub pending_http_requests: HashMap<LiveId, PathBuf>,
+}
+
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ImageCache {
@@ -394,7 +400,7 @@ fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), 
             let cursor = ZCursor::new(data);
             let mut decoder = JpegDecoder::new(cursor);
             decoder.decode_headers().map_err(ImageError::JpgDecode)?;
-            let image_info = decoder.info().ok_or_else(|| {
+            let image_info = decoder.info().ok_or({
                 ImageError::JpgDecode(JpgDecodeErrors::FormatStatic(
                     "Failed to get JPG image info after decoding headers",
                 ))

@@ -117,6 +117,7 @@ impl Shaper {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn shape_recursive(
         &mut self,
         text: &str,
@@ -128,7 +129,7 @@ impl Shaper {
         out_glyphs: &mut Vec<ShapedGlyph>,
     ) {
         let (font, fonts) = fonts.split_first().unwrap();
-        let mut glyphs = self.reusable_glyphs.pop().unwrap_or(Vec::new());
+        let mut glyphs = self.reusable_glyphs.pop().unwrap_or_default();
         self.shape_step(text, font, features, direction, start, end, &mut glyphs);
         let mut glyph_groups = glyphs
             .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
@@ -136,7 +137,7 @@ impl Shaper {
         while let Some(glyph_group) = glyph_groups.next() {
             if glyph_group.iter().any(|glyph| glyph.id == 0) && !fonts.is_empty() {
                 let missing_start = glyph_group[0].cluster;
-                while glyph_groups.peek().map_or(false, |glyph_group| {
+                while glyph_groups.peek().is_some_and(|glyph_group| {
                     glyph_group.iter().any(|glyph| glyph.id == 0)
                 }) {
                     glyph_groups.next();
@@ -162,6 +163,7 @@ impl Shaper {
         self.reusable_glyphs.push(glyphs);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn shape_step(
         &mut self,
         text: &str,

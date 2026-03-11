@@ -298,7 +298,7 @@ impl Rasterizer {
             slot.rect
         };
 
-        return Some(RasterizedGlyph {
+        Some(RasterizedGlyph {
             atlas_kind: AtlasKind::Grayscale,
             atlas_size: self.atlas.size(),
             atlas_image_bounds,
@@ -306,7 +306,7 @@ impl Rasterizer {
             atlas_plane: slot.plane.index(),
             origin_in_dpxs: bounds_in_ems.origin * dpxs_per_em,
             dpxs_per_em,
-        });
+        })
     }
 
     fn rasterize_glyph_outline_msdf(
