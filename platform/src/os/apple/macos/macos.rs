@@ -833,7 +833,7 @@ impl Cx {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
-                    let metal_window = MetalWindow::new(
+                    let mut metal_window = MetalWindow::new(
                         window_id,
                         &metal_cx,
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
@@ -841,6 +841,14 @@ impl Cx {
                         &window.create_title,
                         window.is_fullscreen,
                     );
+                    let visuals = window.window_visuals();
+                    metal_window.cocoa_window.set_window_visuals(visuals);
+                    let layer_opaque = if visuals.transparent { NO } else { YES };
+                    let layer_alpha = if visuals.transparent { 0.0 } else { 1.0 };
+                    let () = unsafe { msg_send![metal_window.ca_layer, setOpaque: layer_opaque] };
+                    let () = unsafe {
+                        msg_send![metal_window.ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, layer_alpha)]
+                    };
                     window.window_geom = metal_window.window_geom.clone();
                     metal_windows.push(metal_window);
                     window.is_created = true;
@@ -864,13 +872,16 @@ impl Cx {
                         .find(|w| w.window_id == parent_window_id)
                         .map(|w| w.cocoa_window.window)
                         .unwrap_or(nil);
-                    let metal_window = MetalWindow::new_popup(
+                    let mut metal_window = MetalWindow::new_popup(
                         window_id,
                         &metal_cx,
                         size,
                         position,
                         parent_ns_window,
                     );
+                    metal_window
+                        .cocoa_window
+                        .set_window_visuals(window.window_visuals());
                     window.window_geom = metal_window.window_geom.clone();
                     metal_windows.push(metal_window);
                     window.is_created = true;
@@ -948,6 +959,19 @@ impl Cx {
                         metal_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
                         metal_window.cocoa_window.set_window_buttons_visible(true);
+                    }
+                }
+                CxOsOp::SetWindowVisuals(window_id, visuals) => {
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        metal_window.cocoa_window.set_window_visuals(visuals);
+                        let layer_opaque = if visuals.transparent { NO } else { YES };
+                        let layer_alpha = if visuals.transparent { 0.0 } else { 1.0 };
+                        let () = unsafe { msg_send![metal_window.ca_layer, setOpaque: layer_opaque] };
+                        let () = unsafe {
+                            msg_send![metal_window.ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, layer_alpha)]
+                        };
                     }
                 }
                 CxOsOp::ShowTextIME(area, pos, _config) => {

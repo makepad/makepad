@@ -11,7 +11,7 @@ use {
             win32_app::{encode_wide, with_win32_app, Win32App},
             win32_event::*,
         },
-        window::WindowId,
+        window::{WindowBackdrop, WindowId, WindowVisuals},
         windows::{
             core::PCWSTR,
             //core::IntoParam,
@@ -40,8 +40,8 @@ use {
                     Controls::{MARGINS, WM_MOUSELEAVE},
                     Input::{
                         Ime::{
-                            ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, ImmAssociateContext,
-                            CFS_POINT, COMPOSITIONFORM, HIMC,
+                            ImmAssociateContext, ImmGetContext, ImmReleaseContext,
+                            ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM, HIMC,
                         },
                         KeyboardAndMouse::{
                             GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
@@ -85,7 +85,7 @@ use {
     },
     std::{
         cell::{Cell, RefCell},
-        ffi::OsStr,
+        ffi::{c_void, OsStr},
         mem,
         os::windows::ffi::OsStrExt,
         rc::Rc,
@@ -93,6 +93,36 @@ use {
         sync::Mutex,
     },
 };
+
+#[repr(C)]
+struct AccentPolicy {
+    accent_state: u32,
+    accent_flags: u32,
+    gradient_color: u32,
+    animation_id: u32,
+}
+
+#[repr(C)]
+struct WindowCompositionAttribData {
+    attrib: u32,
+    pv_data: *mut c_void,
+    cb_data: usize,
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn SetWindowCompositionAttribute(hwnd: HWND, data: *mut WindowCompositionAttribData) -> i32;
+}
+
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmSetWindowAttribute(
+        hwnd: HWND,
+        dw_attribute: u32,
+        pv_attribute: *const c_void,
+        cb_attribute: u32,
+    ) -> i32;
+}
 /*
 // Copied from Microsoft so it refers to the right IDropTarget
 #[allow(non_snake_case)]
@@ -935,6 +965,57 @@ impl Win32Window {
                 false,
             )
             .unwrap();
+        }
+    }
+
+    pub fn apply_window_visuals(&mut self, visuals: WindowVisuals) {
+        const DWM_ATTRIBUTE_SYSTEM_BACKDROP_TYPE: u32 = 38;
+        const S_OK: i32 = 0;
+        const DWMSBT_NONE: i32 = 1;
+        const DWMSBT_MAINWINDOW: i32 = 2;
+        const DWMSBT_TRANSIENTWINDOW: i32 = 3;
+        const DWMSBT_TABBEDWINDOW: i32 = 4;
+
+        const WCA_ACCENT_POLICY: u32 = 19;
+        const ACCENT_DISABLED: u32 = 0;
+        const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
+
+        let backdrop = match visuals.backdrop {
+            WindowBackdrop::None => DWMSBT_NONE,
+            WindowBackdrop::Auto | WindowBackdrop::Mica => DWMSBT_MAINWINDOW,
+            WindowBackdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
+            WindowBackdrop::Vibrancy | WindowBackdrop::Blur => DWMSBT_TABBEDWINDOW,
+        };
+
+        let hr = unsafe {
+            DwmSetWindowAttribute(
+                self.hwnd,
+                DWM_ATTRIBUTE_SYSTEM_BACKDROP_TYPE,
+                &backdrop as *const _ as *const c_void,
+                std::mem::size_of::<i32>() as u32,
+            )
+        };
+
+        if hr != S_OK {
+            let accent_state = if visuals.backdrop == WindowBackdrop::None {
+                ACCENT_DISABLED
+            } else {
+                ACCENT_ENABLE_BLURBEHIND
+            };
+            let mut accent = AccentPolicy {
+                accent_state,
+                accent_flags: 0,
+                gradient_color: 0,
+                animation_id: 0,
+            };
+            let mut data = WindowCompositionAttribData {
+                attrib: WCA_ACCENT_POLICY,
+                pv_data: &mut accent as *mut _ as *mut c_void,
+                cb_data: std::mem::size_of::<AccentPolicy>(),
+            };
+            unsafe {
+                SetWindowCompositionAttribute(self.hwnd, &mut data);
+            }
         }
     }
 

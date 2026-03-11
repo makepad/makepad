@@ -428,6 +428,9 @@ impl Cx {
                         &window.create_title,
                         window.is_fullscreen,
                     );
+                    let visuals = window.window_visuals();
+                    let mut d3d11_window = d3d11_window;
+                    d3d11_window.win32_window.apply_window_visuals(visuals);
 
                     window.window_geom = d3d11_window.window_geom.clone();
                     d3d11_windows.push(d3d11_window);
@@ -470,6 +473,10 @@ impl Cx {
 
                     let d3d11_window =
                         D3d11Window::new_popup(window_id, &d3d11_cx, size, screen_position);
+                    let mut d3d11_window = d3d11_window;
+                    d3d11_window
+                        .win32_window
+                        .apply_window_visuals(window.window_visuals());
                     window.window_geom = d3d11_window.window_geom.clone();
                     d3d11_windows.push(d3d11_window);
                     window.is_created = true;
@@ -542,6 +549,13 @@ impl Cx {
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
                         window.win32_window.set_topmost(is_topmost);
+                    }
+                }
+                CxOsOp::SetWindowVisuals(window_id, visuals) => {
+                    if let Some(window) =
+                        d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.win32_window.apply_window_visuals(visuals);
                     }
                 }
                 CxOsOp::CopyToClipboard(content) => unsafe {
