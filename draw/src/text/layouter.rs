@@ -81,6 +81,9 @@ impl Layouter {
     }
 
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
+        if self.cache_size == 0 {
+            return Rc::new(self.layout(params.to_owned()));
+        }
         if let Some(result) = self.cached_results.get(&params as &dyn LayoutParams) {
             return result.clone();
         }
@@ -89,9 +92,10 @@ impl Layouter {
             self.cached_results.remove(&params);
         }
         let params = params.to_owned();
-        let result = Rc::new(self.layout(params.clone()));
-        self.cached_params.push_back(params.clone());
-        self.cached_results.insert(params, result.clone());
+        let cache_key = params.clone();
+        let result = Rc::new(self.layout(params));
+        self.cached_params.push_back(cache_key.clone());
+        self.cached_results.insert(cache_key, result.clone());
         result
     }
 
@@ -345,7 +349,7 @@ impl LayoutContext {
     }
 
     fn finish_current_row(&mut self, newline: bool) {
-        let font = self.font_family.fonts().get(0);
+        let font = self.font_family.fonts().first();
         let font_size_in_lpxs = self.style.font_size_in_lpxs();
         let ascender_in_lpxs = font.map_or(0.0, |font| font.ascender_in_ems()) * font_size_in_lpxs;
         let descender_in_lpxs =
@@ -734,11 +738,10 @@ impl LaidoutText {
             if cursor.index < row.text.end_in_parent() {
                 return row_index;
             }
-            if cursor.index == row.text.end_in_parent() {
-                if row.newline || !cursor.prefer_next_row {
+            if cursor.index == row.text.end_in_parent()
+                && (row.newline || !cursor.prefer_next_row) {
                     return row_index;
                 }
-            }
         }
         self.rows.len() - 1
     }
@@ -772,7 +775,7 @@ impl LaidoutText {
         let index = row.x_in_lpxs_to_index(position.x_in_lpxs);
         Cursor {
             index: row.text.start_in_parent() + index,
-            prefer_next_row: if index == 0 { true } else { false },
+            prefer_next_row: index == 0,
         }
     }
 
@@ -981,9 +984,18 @@ mod tests {
 
     #[test]
     fn parses_text_atlas_size_from_env_value() {
-        assert_eq!(parse_text_atlas_size_value("1024"), Some(Size::new(1024, 1024)));
-        assert_eq!(parse_text_atlas_size_value("1024x2048"), Some(Size::new(1024, 2048)));
-        assert_eq!(parse_text_atlas_size_value("1024X2048"), Some(Size::new(1024, 2048)));
+        assert_eq!(
+            parse_text_atlas_size_value("1024"),
+            Some(Size::new(1024, 1024))
+        );
+        assert_eq!(
+            parse_text_atlas_size_value("1024x2048"),
+            Some(Size::new(1024, 2048))
+        );
+        assert_eq!(
+            parse_text_atlas_size_value("1024X2048"),
+            Some(Size::new(1024, 2048))
+        );
         assert_eq!(parse_text_atlas_size_value(""), None);
         assert_eq!(parse_text_atlas_size_value("64"), None);
         assert_eq!(parse_text_atlas_size_value("bogus"), None);

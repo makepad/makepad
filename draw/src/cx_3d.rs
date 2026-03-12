@@ -21,6 +21,6 @@ impl<'a, 'b> DerefMut for Cx3d<'a, 'b> {
 
 impl<'a, 'b> Cx3d<'a, 'b> {
     pub fn new(cx: &'b mut CxDraw<'a>) -> Self {
-        Self { cx: cx }
+        Self { cx }
     }
 }

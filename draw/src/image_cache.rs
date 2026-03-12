@@ -26,48 +26,56 @@ pub struct ImageBuffer {
 
 impl ImageBuffer {
     pub fn new(in_data: &[u8], width: usize, height: usize) -> Result<ImageBuffer, ImageError> {
-        let mut out = Vec::new();
         let pixels = width * height;
-        out.resize(pixels, 0u32);
+        if pixels == 0 {
+            return Ok(ImageBuffer {
+                width,
+                height,
+                data: Vec::new(),
+                animation: None,
+            });
+        }
+        let mut out = Vec::with_capacity(pixels);
         match in_data.len() / pixels {
             4 => {
-                for i in 0..pixels {
-                    let r = in_data[i * 4];
-                    let g = in_data[i * 4 + 1];
-                    let b = in_data[i * 4 + 2];
-                    let a = in_data[i * 4 + 3];
-                    out[i] = ((a as u32) << 24)
-                        | ((r as u32) << 16)
-                        | ((g as u32) << 8)
-                        | ((b as u32) << 0);
+                for rgba in in_data.chunks_exact(4).take(pixels) {
+                    let r = rgba[0];
+                    let g = rgba[1];
+                    let b = rgba[2];
+                    let a = rgba[3];
+                    out.push(
+                        ((a as u32) << 24)
+                            | ((r as u32) << 16)
+                            | ((g as u32) << 8)
+                            | (b as u32),
+                    );
                 }
             }
             3 => {
-                for i in 0..pixels {
-                    let r = in_data[i * 3];
-                    let g = in_data[i * 3 + 1];
-                    let b = in_data[i * 3 + 2];
-                    out[i] =
-                        0xff000000 | ((r as u32) << 16) | ((g as u32) << 8) | ((b as u32) << 0);
+                for rgb in in_data.chunks_exact(3).take(pixels) {
+                    let r = rgb[0];
+                    let g = rgb[1];
+                    let b = rgb[2];
+                    out.push(0xff000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
                 }
             }
             2 => {
-                for i in 0..pixels {
-                    let r = in_data[i * 2];
-                    let a = in_data[i * 2 + 1];
-                    out[i] = ((a as u32) << 24)
-                        | ((r as u32) << 16)
-                        | ((r as u32) << 8)
-                        | ((r as u32) << 0);
+                for ra in in_data.chunks_exact(2).take(pixels) {
+                    let r = ra[0];
+                    let a = ra[1];
+                    out.push(
+                        ((a as u32) << 24)
+                            | ((r as u32) << 16)
+                            | ((r as u32) << 8)
+                            | (r as u32),
+                    );
                 }
             }
             1 => {
-                for i in 0..pixels {
-                    let r = in_data[i];
-                    out[i] = ((0xff as u32) << 24)
-                        | ((r as u32) << 16)
-                        | ((r as u32) << 8)
-                        | ((r as u32) << 0);
+                for r in in_data.iter().copied().take(pixels) {
+                    out.push(
+                        (0xff_u32 << 24) | ((r as u32) << 16) | ((r as u32) << 8) | (r as u32),
+                    );
                 }
             }
             unsupported => return Err(ImageError::InvalidPixelAlignment(unsupported)),
@@ -169,7 +177,7 @@ impl ImageBuffer {
                         "Failed to get animated PNG image info",
                     )))?;
             post_process_image(
-                &info,
+                info,
                 colorspace,
                 &frame,
                 &pix,
@@ -190,7 +198,7 @@ impl ImageBuffer {
                                 << 24)
                                 | ((r as u32) << 16)
                                 | ((g as u32) << 8)
-                                | ((b as u32) << 0);
+                                | (b as u32);
                         }
                     }
                 }
@@ -203,7 +211,7 @@ impl ImageBuffer {
                             final_buffer.data[(y + cy) * total_width + (x + cx)] = 0xff000000
                                 | ((r as u32) << 16)
                                 | ((g as u32) << 8)
-                                | ((b as u32) << 0);
+                                | (b as u32);
                         }
                     }
                 }
@@ -266,6 +274,12 @@ pub struct ImageCache {
     pub map: HashMap<PathBuf, ImageCacheEntry>,
     pub thread_pool: Option<TagThreadPool<PathBuf>>,
     pub pending_http_requests: HashMap<LiveId, PathBuf>,
+}
+
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ImageCache {
@@ -394,7 +408,7 @@ fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), 
             let cursor = ZCursor::new(data);
             let mut decoder = JpegDecoder::new(cursor);
             decoder.decode_headers().map_err(ImageError::JpgDecode)?;
-            let image_info = decoder.info().ok_or_else(|| {
+            let image_info = decoder.info().ok_or({
                 ImageError::JpgDecode(JpgDecodeErrors::FormatStatic(
                     "Failed to get JPG image info after decoding headers",
                 ))
@@ -623,16 +637,13 @@ pub fn handle_image_cache_network_responses(cx: &mut Cx, e: &NetworkResponsesEve
         return;
     }
 
-    let mut decode_queue = Vec::<(PathBuf, Arc<Vec<u8>>)>::new();
+    let mut decode_queue = Vec::<(PathBuf, Arc<Vec<u8>>)>::with_capacity(e.len());
 
     {
         let cache = cx.get_global::<ImageCache>();
         for response in e {
             match response {
-                NetworkResponse::HttpError {
-                    request_id,
-                    error,
-                } => {
+                NetworkResponse::HttpError { request_id, error } => {
                     let Some(image_path) = cache.pending_http_requests.remove(request_id) else {
                         continue;
                     };

@@ -13,6 +13,7 @@ pub struct VectorRenderParams {
     pub zbias: f32,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn tessellate_path_fill(
     path: &mut VectorPath,
     tess: &mut Tessellator,
@@ -36,6 +37,7 @@ pub fn tessellate_path_fill(
     path.clear();
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn tessellate_path_stroke(
     path: &mut VectorPath,
     tess: &mut Tessellator,

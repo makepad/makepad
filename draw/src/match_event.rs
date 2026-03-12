@@ -129,6 +129,7 @@ pub trait MatchEvent {
         }
     }
 
+    #[allow(clippy::result_unit_err)]
     fn match_event_with_draw_2d(&mut self, cx: &mut Cx, event: &Event) -> Result<(), ()> {
         match event {
             Event::Draw(e) => {
