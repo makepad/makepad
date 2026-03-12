@@ -1,6 +1,5 @@
 use makepad_script_std::makepad_network::{
-    EventSink, HttpRequest, HttpResponse, NetworkBackend, NetworkRuntime,
-    NetworkResponse, WsSend,
+    EventSink, HttpRequest, HttpResponse, NetworkBackend, NetworkResponse, NetworkRuntime, WsSend,
 };
 use makepad_script_std::makepad_script::{makepad_live_id::LiveId, script, ScriptArrayStorage, *};
 use makepad_script_std::{pump_network_runtime, script_mod, with_vm, ScriptStd};
@@ -16,8 +15,7 @@ impl NetworkBackend for TestBackend {
         _request: HttpRequest,
         sink: EventSink,
     ) -> Result<(), makepad_script_std::makepad_network::NetworkError> {
-        let response =
-            HttpResponse::new(LiveId(42), 200, BTreeMap::new(), Some(b"ok".to_vec()));
+        let response = HttpResponse::new(LiveId(42), 200, BTreeMap::new(), Some(b"ok".to_vec()));
         sink.emit(NetworkResponse::HttpResponse {
             request_id,
             response,
@@ -81,7 +79,9 @@ fn headless_http_request_resolves_promise_through_script_std() {
         })
     });
 
-    let promise = promise.as_handle().expect("script should return a promise handle");
+    let promise = promise
+        .as_handle()
+        .expect("script should return a promise handle");
     assert_eq!(std.data.http_requests.len(), 1);
 
     let responses = pump_network_runtime(&mut host, &mut std, &mut script_vm);

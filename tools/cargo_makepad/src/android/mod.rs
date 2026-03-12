@@ -15,6 +15,12 @@ pub enum AndroidVariant {
     Default,
     Quest,
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AndroidConfig {
+    pub small_fonts: bool,
+}
+
 impl AndroidVariant {
     fn from_str(opt: &str) -> Result<Self, String> {
         for opt in opt.split(",") {
@@ -395,11 +401,14 @@ fn android_help() -> &'static str {
   cargo makepad android [options] build <cargo args>\n\
   cargo makepad android [options] run <cargo args>\n\
   cargo makepad android [options] adb <adb args>\n\
+  cargo makepad android [options] adb-tcp [port]\n\
 \n\
 Common options:\n\
   --abi=aarch64|x86_64|armv7|i686|all   (default: aarch64)\n\
   --package-name=<id>\n\
   --app-label=<label>\n\
+  --small-fonts\n\
+  --no-icon\n\
   --sdk-path=<path>\n\
   --host-os=linux-x64|windows-x64|macos-aarch64|macos-x64\n\
   --variant=default|quest\n\
@@ -409,7 +418,9 @@ Common options:\n\
 Examples:\n\
   cargo makepad android --abi=aarch64 build -p my-app --release\n\
   cargo makepad android --abi=aarch64 run -p my-app --release\n\
-  cargo makepad android adb devices -l"
+  cargo makepad android adb devices -l\n\
+  cargo makepad android adb-tcp\n\
+  cargo makepad android --devices=<serial> adb-tcp 5555"
 }
 
 pub fn handle_android(mut args: &[String]) -> Result<(), String> {
@@ -430,6 +441,8 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let mut variant = AndroidVariant::Default;
     let mut targets = vec![AndroidTarget::aarch64];
     let mut keep_sdk_sources = false;
+    let mut no_icon = false;
+    let mut config = AndroidConfig::default();
 
     let urls = sdk::ANDROID_SDK_URLS_33;
 
@@ -450,6 +463,10 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             devices = d.split(",").map(|v| v.to_string()).collect()
         } else if let Some(opt) = v.strip_prefix("--variant=") {
             variant = AndroidVariant::from_str(opt)?;
+        } else if v.trim() == "--small-fonts" {
+            config.small_fonts = true;
+        } else if v.trim() == "--no-icon" {
+            no_icon = true;
         } else if v.trim() == "--keep-sdk-sources" {
             keep_sdk_sources = true;
         } else {
@@ -460,7 +477,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
 
     if args.is_empty() {
         return Err(format!(
-            "missing android subcommand. use one of: install-toolchain, build, run, adb\n\n{}",
+            "missing android subcommand. use one of: install-toolchain, build, run, adb, adb-tcp\n\n{}",
             android_help()
         ));
     }
@@ -480,9 +497,11 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
 
     let cwd = std::env::current_dir().unwrap();
     let sdk_dir = cwd.join(sdk_path.unwrap());
+    crate::utils::set_no_icon_requested(no_icon);
 
     match args[0].as_ref() {
         "adb" => compile::adb(&sdk_dir, host_os, &args[1..]),
+        "adb-tcp" => compile::adb_tcp(&sdk_dir, host_os, &devices, &args[1..]),
         "java" => compile::java(&sdk_dir, host_os, &args[1..]),
         "javac" => compile::javac(&sdk_dir, host_os, &args[1..]),
         "rustup-toolchain-install" | "rustup-install-toolchain" => {
@@ -514,6 +533,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
                 &args[1..],
                 &targets,
                 &variant,
+                &config,
                 &urls,
             )?;
             Ok(())
@@ -526,6 +546,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             &args[1..],
             &targets,
             &variant,
+            &config,
             &urls,
             devices,
         ),
@@ -543,14 +564,16 @@ mod tests {
 
     #[test]
     fn default_manifest_uses_splash_and_app_themes() {
-        let xml = AndroidVariant::Default.manifest_xml("App", "MakepadApp", "dev.makepad.app", 33, true);
+        let xml =
+            AndroidVariant::Default.manifest_xml("App", "MakepadApp", "dev.makepad.app", 33, true);
         assert!(xml.contains("android:theme=\"@style/MakepadAppTheme\""));
         assert!(xml.contains("android:theme=\"@style/MakepadLaunchTheme\""));
     }
 
     #[test]
     fn quest_manifest_uses_splash_and_app_themes() {
-        let xml = AndroidVariant::Quest.manifest_xml("App", "MakepadApp", "dev.makepad.app", 33, true);
+        let xml =
+            AndroidVariant::Quest.manifest_xml("App", "MakepadApp", "dev.makepad.app", 33, true);
         assert!(xml.contains("android:theme=\"@style/MakepadAppTheme\""));
         assert!(xml.contains("android:theme=\"@style/MakepadLaunchTheme\""));
     }

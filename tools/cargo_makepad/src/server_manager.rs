@@ -219,7 +219,9 @@ fn classify_lock_state(
     probes: &impl ServerManagerProbes,
 ) -> LockState {
     match lock {
-        Some(lock) if probes.is_pid_alive(lock.pid) && probes.pid_owns_port(lock.pid, listen_addr) => {
+        Some(lock)
+            if probes.is_pid_alive(lock.pid) && probes.pid_owns_port(lock.pid, listen_addr) =>
+        {
             LockState::LiveLock
         }
         Some(_) => LockState::StaleLock,
@@ -1055,7 +1057,10 @@ mod tests {
         };
         let listen_addr = listen_address(8010, false);
         assert_eq!(
-            evaluate_startup_scenario(classify_lock_state(None, listen_addr, &probes), probes.port_in_use),
+            evaluate_startup_scenario(
+                classify_lock_state(None, listen_addr, &probes),
+                probes.port_in_use
+            ),
             StartupScenario::NoLock
         );
 

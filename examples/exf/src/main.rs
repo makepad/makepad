@@ -828,7 +828,6 @@ impl App {
             self.set_mip_value(cx, &value);
         }
     }
-
 }
 
 #[derive(Script, ScriptHook)]
@@ -886,14 +885,21 @@ impl MatchEvent for App {
             self.set_status_value(cx, "Queued EXR for load");
             self.set_mip_value(cx, "Scanning mip parts...");
         } else {
-            self.set_file_value(cx, "No EXR path provided and no /tmp/mb3d*.exr render was found");
+            self.set_file_value(
+                cx,
+                "No EXR path provided and no /tmp/mb3d*.exr render was found",
+            );
             self.set_status_value(cx, "Viewer is idle");
             self.set_mip_value(cx, "Base only");
         }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(cx, ids!(reload_latest_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(reload_latest_button))
+            .clicked(actions)
+        {
             self.queue_latest_render(cx);
         }
         if self.ui.button(cx, ids!(reset_view_button)).clicked(actions) {
@@ -937,7 +943,11 @@ impl MatchEvent for App {
                 inner.set_light_gain(cx, value as f32);
             };
         }
-        if let Some(value) = self.ui.slider(cx, ids!(light_radius_slider)).slided(actions) {
+        if let Some(value) = self
+            .ui
+            .slider(cx, ids!(light_radius_slider))
+            .slided(actions)
+        {
             let viewer = self.viewport_ref(cx);
             if let Some(mut inner) = viewer.borrow_mut::<ExfViewport>() {
                 inner.set_light_radius(cx, value as f32);
@@ -1128,7 +1138,9 @@ fn parse_raw_int_attribute(part: &ExrPart, name: &str) -> Option<i32> {
         .find(|attribute| attribute.name == name && attribute.type_name == "int")
         .and_then(|attribute| {
             if attribute.value.len() == 4 {
-                Some(i32::from_le_bytes(attribute.value.as_slice().try_into().ok()?))
+                Some(i32::from_le_bytes(
+                    attribute.value.as_slice().try_into().ok()?,
+                ))
             } else {
                 None
             }
@@ -1399,7 +1411,11 @@ impl ExfViewport {
         } else {
             0.0
         };
-        self.camera_mid = vec3(camera.mid.x as f32, camera.mid.y as f32, camera.mid.z as f32);
+        self.camera_mid = vec3(
+            camera.mid.x as f32,
+            camera.mid.y as f32,
+            camera.mid.z as f32,
+        );
         self.camera_right_step = vec3(
             camera.right_step.x as f32,
             camera.right_step.y as f32,
@@ -1488,7 +1504,6 @@ impl Widget for ExfViewport {
             }
             _ => {}
         }
-
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -1720,10 +1735,7 @@ fn find_latest_render_exr() -> Option<PathBuf> {
     })
 }
 
-fn find_latest_exr_matching(
-    dir: &Path,
-    matches: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
+fn find_latest_exr_matching(dir: &Path, matches: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return None;

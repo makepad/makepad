@@ -284,10 +284,18 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(push_view_c)).clicked(&actions) {
             stack_nav.push(cx, live_id!(stack_view_c));
         }
-        if self.ui.button(cx, ids!(push_nested_from_a)).clicked(&actions) {
+        if self
+            .ui
+            .button(cx, ids!(push_nested_from_a))
+            .clicked(&actions)
+        {
             stack_nav.push(cx, live_id!(stack_view_b));
         }
-        if self.ui.button(cx, ids!(push_nested_from_b)).clicked(&actions) {
+        if self
+            .ui
+            .button(cx, ids!(push_nested_from_b))
+            .clicked(&actions)
+        {
             stack_nav.push(cx, live_id!(stack_view_c));
         }
         if self.ui.button(cx, ids!(pop_to_root_btn)).clicked(&actions) {
@@ -302,7 +310,9 @@ impl MatchEvent for App {
         ];
         for (item_id, title) in desktop_items {
             if let Some(_) = self.ui.view(cx, item_id).finger_down(actions) {
-                self.ui.label(cx, ids!(desktop_detail_title)).set_text(cx, title);
+                self.ui
+                    .label(cx, ids!(desktop_detail_title))
+                    .set_text(cx, title);
                 self.ui.label(cx, ids!(desktop_detail_body)).set_text(
                     cx,
                     &format!("{} detail content.\n\nOn Desktop, the list and detail are visible side-by-side.", title),
@@ -321,7 +331,9 @@ impl MatchEvent for App {
         for (item_id, title) in mobile_items {
             if let Some(_) = self.ui.view(cx, item_id).finger_down(actions) {
                 mobile_nav.set_title(cx, live_id!(mobile_detail_view), title);
-                self.ui.label(cx, ids!(mobile_detail_title)).set_text(cx, title);
+                self.ui
+                    .label(cx, ids!(mobile_detail_title))
+                    .set_text(cx, title);
                 self.ui.label(cx, ids!(mobile_detail_body)).set_text(
                     cx,
                     &format!("{} detail content.\n\nOn Mobile, this was pushed onto the navigation stack.", title),

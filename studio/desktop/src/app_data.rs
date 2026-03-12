@@ -466,7 +466,10 @@ mod tests {
         let mut tree = FlatFileTree::default();
         tree.rebuild(&data);
 
-        assert_eq!(tree.git_status_dot_for_path("repo/src"), GitStatusDotKind::None);
+        assert_eq!(
+            tree.git_status_dot_for_path("repo/src"),
+            GitStatusDotKind::None
+        );
         assert_eq!(tree.git_status_dot_for_path("repo"), GitStatusDotKind::None);
     }
 }

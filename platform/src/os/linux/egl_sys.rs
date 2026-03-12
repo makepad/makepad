@@ -551,7 +551,6 @@ pub unsafe fn create_egl_context_openxr(
                 &mut value as *mut _ as *mut _,
             );
             if value != cfg_attributes[j + 1] {
-                crate::log!("FAILED AT {} {} {}", value, cfg_attributes[j + 1], j);
                 break;
             }
             j += 2;
@@ -564,6 +563,9 @@ pub unsafe fn create_egl_context_openxr(
     }
 
     if !exact_cfg_found {
+        crate::warning!(
+            "No exact EGL config match for requested Android XR context; falling back to the first available config"
+        );
         config = available_cfgs[0];
     }
     let ctx_attributes = vec![EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE];

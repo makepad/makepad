@@ -103,13 +103,13 @@ pub mod expandable_panel;
 pub mod scroll_shadow;
 pub mod stack_navigation;
 
+pub mod callout_tooltip;
 pub mod file_tree;
 pub mod modal;
 pub mod page_flip;
 pub mod popup_notification;
 pub mod slides_view;
 pub mod tooltip;
-pub mod callout_tooltip;
 pub mod video;
 
 pub mod command_text_input;
@@ -138,6 +138,7 @@ pub use crate::{
     bare_step::*,
     button::*,
     cached_widget::*,
+    callout_tooltip::*,
     check_box::*,
     desktop_button::*,
     dock::*,
@@ -187,7 +188,6 @@ pub use crate::{
 
     text_input::*,
     tooltip::*,
-    callout_tooltip::*,
     // Navigation and panels
     touch_gesture::*,
     turtle_step::*,
@@ -486,7 +486,7 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             MouseCursor:mod.draw.MouseCursor
         }
         mod.theme = mod.themes.dark
-        
+
     });
 }
 

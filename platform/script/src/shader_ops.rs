@@ -173,27 +173,27 @@ impl ShaderFnCompiler {
     pub(crate) fn handle_logic_phi(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
         // Loop to handle nested logic ops that may complete at the same IP
         loop {
-            let ready_logic_index = self
-                .mes
-                .iter()
-                .enumerate()
-                .rev()
-                .find_map(|(index, me)| match me {
-                    ShaderMe::FnBody { .. }
-                    | ShaderMe::ForLoop { .. }
-                    | ShaderMe::LoopBody { .. }
-                    | ShaderMe::IfBody { .. } => None,
-                    ShaderMe::LogicOp { target_ip, .. } if self.trap.ip.index >= *target_ip => {
-                        Some(index)
-                    }
-                    ShaderMe::LogicOp { .. }
-                    | ShaderMe::BuiltinCall { .. }
-                    | ShaderMe::PodBuiltinMethod { .. }
-                    | ShaderMe::ScriptCall { .. }
-                    | ShaderMe::Pod { .. }
-                    | ShaderMe::ArrayConstruct { .. }
-                    | ShaderMe::TextureBuiltin { .. } => Some(usize::MAX),
-                });
+            let ready_logic_index =
+                self.mes
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, me)| match me {
+                        ShaderMe::FnBody { .. }
+                        | ShaderMe::ForLoop { .. }
+                        | ShaderMe::LoopBody { .. }
+                        | ShaderMe::IfBody { .. } => None,
+                        ShaderMe::LogicOp { target_ip, .. } if self.trap.ip.index >= *target_ip => {
+                            Some(index)
+                        }
+                        ShaderMe::LogicOp { .. }
+                        | ShaderMe::BuiltinCall { .. }
+                        | ShaderMe::PodBuiltinMethod { .. }
+                        | ShaderMe::ScriptCall { .. }
+                        | ShaderMe::Pod { .. }
+                        | ShaderMe::ArrayConstruct { .. }
+                        | ShaderMe::TextureBuiltin { .. } => Some(usize::MAX),
+                    });
 
             let Some(index) = ready_logic_index else {
                 break;

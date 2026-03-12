@@ -847,7 +847,9 @@ impl<'a> ScriptVm<'a> {
             .map(|(key, value)| (*key, *value))
             .collect();
         for (key, value) in globals {
-            self.bx.heap.force_value_in_map(scope_obj, key.into(), value);
+            self.bx
+                .heap
+                .force_value_in_map(scope_obj, key.into(), value);
         }
     }
 
@@ -981,7 +983,8 @@ impl<'a> ScriptVm<'a> {
             if body.source_len == 0 {
                 body.tokenizer.clear();
                 body.parser = ScriptParser::default();
-                body.tokenizer.tokenize(&body.effective_code, &mut self.bx.heap);
+                body.tokenizer
+                    .tokenize(&body.effective_code, &mut self.bx.heap);
                 body.parser.parse(
                     &body.tokenizer,
                     &script_mod.file,

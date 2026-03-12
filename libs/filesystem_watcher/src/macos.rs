@@ -139,7 +139,8 @@ extern "C" fn fsevent_callback(
         let count = unsafe { CFArrayGetCount(paths_array) }.max(0) as usize;
         let total = num_events.min(count);
         for i in 0..total {
-            let cf_path = unsafe { CFArrayGetValueAtIndex(paths_array, i as CFIndex) } as CFStringRef;
+            let cf_path =
+                unsafe { CFArrayGetValueAtIndex(paths_array, i as CFIndex) } as CFStringRef;
             if cf_path.is_null() {
                 continue;
             }
@@ -241,14 +242,8 @@ fn run_loop_thread_main(
         }
 
         let values = [cf_root as *const c_void];
-        let cf_array = unsafe {
-            CFArrayCreate(
-                std::ptr::null(),
-                values.as_ptr(),
-                1,
-                std::ptr::null(),
-            )
-        };
+        let cf_array =
+            unsafe { CFArrayCreate(std::ptr::null(), values.as_ptr(), 1, std::ptr::null()) };
         if cf_array.is_null() {
             unsafe {
                 CFRelease(cf_root);

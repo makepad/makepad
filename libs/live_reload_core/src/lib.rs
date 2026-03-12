@@ -316,14 +316,7 @@ mod tests {
             },
         );
 
-        forward_hot_reload_fs_event(
-            mount,
-            dir,
-            &files_by_root,
-            &file_cache,
-            &sink,
-            &logger,
-        );
+        forward_hot_reload_fs_event(mount, dir, &files_by_root, &file_cache, &sink, &logger);
 
         let out = delivered.lock().unwrap();
         assert_eq!(out.len(), 2);

@@ -24,6 +24,7 @@ workspace.members = [
     "examples/counter",
     "examples/camera",
     "examples/windows_blur",
+    "examples/xr",
 #    "examples/matrix",
     "libs/gltf",
     "libs/splat",

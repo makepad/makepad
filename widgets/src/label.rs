@@ -1,4 +1,6 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_async::ScriptAsyncResult};
+use crate::{
+    makepad_derive_widget::*, makepad_draw::*, widget::*, widget_async::ScriptAsyncResult,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*

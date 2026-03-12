@@ -403,8 +403,7 @@ struct ControllerState {
     dial_top: [f32; 8],
 }
 
-impl ControllerState {
-}
+impl ControllerState {}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ControllerButtons {
@@ -413,8 +412,7 @@ struct ControllerButtons {
     power: bool,
 }
 
-impl ControllerButtons {
-}
+impl ControllerButtons {}
 
 #[derive(Debug, Clone)]
 struct MidiMirrorState {
@@ -829,15 +827,20 @@ impl App {
                                 if load_preset_slot(index, &mut state) {
                                     last_event = format!("UI loaded preset {:02}", index);
                                     if DEBUG_SCENE_EVENTS {
-                                        println!("scene_change source=ui action=load slot={index:02}");
+                                        println!(
+                                            "scene_change source=ui action=load slot={index:02}"
+                                        );
                                     }
                                 } else {
                                     last_event = format!("UI preset {:02} not found", index);
                                     if DEBUG_SCENE_EVENTS {
-                                        println!("scene_change source=ui action=missing slot={index:02}");
+                                        println!(
+                                            "scene_change source=ui action=missing slot={index:02}"
+                                        );
                                     }
                                 }
-                                ui_scene_cooldown_until = Instant::now() + Duration::from_millis(350);
+                                ui_scene_cooldown_until =
+                                    Instant::now() + Duration::from_millis(350);
                                 buttons.preset.fill(false);
                                 buttons.preset[index] = true;
                                 for channel in 0..8 {
@@ -947,7 +950,8 @@ impl App {
                                                 buttons.preset[channel] = true;
                                                 if buttons.write_preset {
                                                     save_state_file(&preset_file(channel), &state);
-                                                    last_event = format!("Saved preset {:02}", channel);
+                                                    last_event =
+                                                        format!("Saved preset {:02}", channel);
                                                     if DEBUG_SCENE_EVENTS {
                                                         println!(
                                                             "scene_change source=midi action=save slot={channel:02} note=52 ch={}",
@@ -955,7 +959,8 @@ impl App {
                                                         );
                                                     }
                                                 } else if load_preset_slot(channel, &mut state) {
-                                                    last_event = format!("Loaded preset {:02}", channel);
+                                                    last_event =
+                                                        format!("Loaded preset {:02}", channel);
                                                     if DEBUG_SCENE_EVENTS {
                                                         println!(
                                                             "scene_change source=midi action=load slot={channel:02} note=52 ch={}",
@@ -1004,7 +1009,8 @@ impl App {
                                                 buttons.preset[index] = true;
                                                 if buttons.write_preset {
                                                     save_state_file(&preset_file(index), &state);
-                                                    last_event = format!("Saved preset {:02}", index);
+                                                    last_event =
+                                                        format!("Saved preset {:02}", index);
                                                     if DEBUG_SCENE_EVENTS {
                                                         println!(
                                                             "scene_change source=midi action=save slot={index:02} note={} ch={}",
@@ -1013,7 +1019,8 @@ impl App {
                                                         );
                                                     }
                                                 } else if load_preset_slot(index, &mut state) {
-                                                    last_event = format!("Loaded preset {:02}", index);
+                                                    last_event =
+                                                        format!("Loaded preset {:02}", index);
                                                     if DEBUG_SCENE_EVENTS {
                                                         println!(
                                                             "scene_change source=midi action=load slot={index:02} note={} ch={}",

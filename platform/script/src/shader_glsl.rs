@@ -71,8 +71,11 @@ impl ShaderOutput {
         for io in &self.io {
             if let ShaderIoKind::UniformBuffer = io.kind {
                 let block_name = self.glsl_uniform_block_name(io.name);
-                let type_name = self.glsl_type_name_from_ty(vm, io.ty);
                 let io_name = self.backend.map_io_name(io.name);
+                if io_name == "draw_pass" && self.glsl_write_draw_pass_uniform_block(vm, io.ty, &block_name, &io_name, out) {
+                    continue;
+                }
+                let type_name = self.glsl_type_name_from_ty(vm, io.ty);
                 writeln!(out, "layout(std140) uniform {} {{", block_name).ok();
                 writeln!(out, "    {} unibuf_{};", type_name, io_name).ok();
                 writeln!(out, "}};").ok();
@@ -110,6 +113,37 @@ impl ShaderOutput {
         if has_scope_uniforms {
             writeln!(out, "}};").ok();
         }
+    }
+
+    fn glsl_write_draw_pass_uniform_block(
+        &self,
+        vm: &ScriptVm,
+        ty: ScriptPodType,
+        block_name: &str,
+        io_name: &str,
+        out: &mut String,
+    ) -> bool {
+        let pod_ty = vm.bx.heap.pod_type_ref(ty);
+        let ScriptPodTy::Struct { fields, .. } = &pod_ty.ty else {
+            return false;
+        };
+
+        writeln!(out, "layout(std140) uniform {} {{", block_name).ok();
+        for field in fields {
+            let field_name = self.backend.map_field_name(field.name);
+            let type_name = self.glsl_type_name_inline(&field.ty);
+            match field_name.as_str() {
+                "camera_projection" | "camera_view" | "depth_projection" | "depth_view" => {
+                    writeln!(out, "    {} {}[2];", type_name, field_name).ok();
+                }
+                "camera_projection_r" | "camera_view_r" | "depth_projection_r" | "depth_view_r" => {}
+                _ => {
+                    writeln!(out, "    {} {};", type_name, field_name).ok();
+                }
+            }
+        }
+        writeln!(out, "}} unibuf_{};", io_name).ok();
+        true
     }
 
     fn glsl_write_texture_uniforms(&self, out: &mut String) {
@@ -447,7 +481,11 @@ impl ShaderOutput {
             GlslPackedFormat::Float
         };
 
-        if attribute_packing && attr_format != GlslPackedFormat::Float && slots > 1 && (*offset & 3) != 0 {
+        if attribute_packing
+            && attr_format != GlslPackedFormat::Float
+            && slots > 1
+            && (*offset & 3) != 0
+        {
             *offset += 4 - (*offset & 3);
         }
         out.push(GlslPackedField {
@@ -457,7 +495,11 @@ impl ShaderOutput {
             offset: *offset,
         });
         *offset += slots;
-        if attribute_packing && attr_format != GlslPackedFormat::Float && slots > 1 && (*offset & 3) != 0 {
+        if attribute_packing
+            && attr_format != GlslPackedFormat::Float
+            && slots > 1
+            && (*offset & 3) != 0
+        {
             *offset += 4 - (*offset & 3);
         }
     }
@@ -473,13 +515,7 @@ impl ShaderOutput {
             .map(|slot| Self::glsl_packed_component(prefix, field.offset + slot))
             .collect::<Vec<_>>();
         let mut scalar_index = 0usize;
-        self.glsl_reconstruct_from_scalars(
-            vm,
-            field.ty,
-            source,
-            &scalars,
-            &mut scalar_index,
-        )
+        self.glsl_reconstruct_from_scalars(vm, field.ty, source, &scalars, &mut scalar_index)
     }
 
     /// Emit assignment statements to unpack a packed field into a variable.
@@ -585,7 +621,11 @@ impl ShaderOutput {
                 let mut comps = Vec::new();
                 for _ in 0..mat_ty.dim() {
                     let scalar = Self::glsl_take_scalar_or_zero(scalars, scalar_index);
-                    comps.push(Self::glsl_convert_scalar_expr(source, &ScriptPodTy::F32, &scalar));
+                    comps.push(Self::glsl_convert_scalar_expr(
+                        source,
+                        &ScriptPodTy::F32,
+                        &scalar,
+                    ));
                 }
                 format!("{}({})", self.glsl_type_name_inline(ty), comps.join(", "))
             }
@@ -663,7 +703,11 @@ impl ShaderOutput {
         }
     }
 
-    fn glsl_convert_scalar_expr(source: GlslPackedSource, target: &ScriptPodTy, expr: &str) -> String {
+    fn glsl_convert_scalar_expr(
+        source: GlslPackedSource,
+        target: &ScriptPodTy,
+        expr: &str,
+    ) -> String {
         match source {
             GlslPackedSource::NumericFloat => match target {
                 ScriptPodTy::F32 | ScriptPodTy::F16 => expr.to_string(),

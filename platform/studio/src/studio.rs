@@ -200,7 +200,10 @@ pub enum AppToStudio {
     WidgetQuery(WidgetQueryResponse),
     TweakHits(TweakHitsResponse),
     BeforeStartup,
-    CreateWindow { window_id: usize, kind_id: usize },
+    CreateWindow {
+        window_id: usize,
+        kind_id: usize,
+    },
     AfterStartup,
     RequestAnimationFrame,
     SetCursor(MouseCursor),

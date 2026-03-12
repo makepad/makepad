@@ -4,7 +4,7 @@ use makepad_network::{
     ServerWebSocketMessageHeader, WebSocketParser, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
 use makepad_studio_protocol::hub_protocol::{
-    ClientId, QueryId, HubToClient, ClientToHub, ClientToHubEnvelope,
+    ClientId, ClientToHub, ClientToHubEnvelope, HubToClient, QueryId,
 };
 use std::collections::{HashSet, VecDeque};
 use std::env;
@@ -108,8 +108,10 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
         .next()
         .ok_or_else(|| format!("failed to resolve studio address {addr}"))?;
 
-    let (stream, leftover) = connect_websocket(socket_addr, &host_header, STUDIO_UI_PATH)
-        .map_err(|err| format!("failed to connect to studio websocket at {addr}{STUDIO_UI_PATH}: {err}"))?;
+    let (stream, leftover) =
+        connect_websocket(socket_addr, &host_header, STUDIO_UI_PATH).map_err(|err| {
+            format!("failed to connect to studio websocket at {addr}{STUDIO_UI_PATH}: {err}")
+        })?;
     let mut read_stream = stream
         .try_clone()
         .map_err(|e| format!("failed to clone websocket stream for reading: {e}"))?;
@@ -348,7 +350,13 @@ fn emit_protocol_response(
             exit_code,
         } => {
             state.auto_log_subscriptions.remove(&build_id);
-            write_protocol_response(out, HubToClient::BuildStopped { build_id, exit_code })
+            write_protocol_response(
+                out,
+                HubToClient::BuildStopped {
+                    build_id,
+                    exit_code,
+                },
+            )
         }
         HubToClient::AppStarted { build_id } => {
             write_protocol_response(out, HubToClient::AppStarted { build_id })

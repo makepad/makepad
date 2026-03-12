@@ -1334,6 +1334,7 @@ impl Cx {
         let status = match permission {
             Permission::AudioInput => self.check_audio_permission_status(),
             Permission::Camera => self.check_camera_permission_status(),
+            Permission::SceneAccess => crate::permission::PermissionStatus::DeniedPermanent,
         };
 
         self.call_event_handler(&crate::event::Event::PermissionResult(
@@ -1349,6 +1350,7 @@ impl Cx {
         let status = match permission {
             Permission::AudioInput => self.check_audio_permission_status(),
             Permission::Camera => self.check_camera_permission_status(),
+            Permission::SceneAccess => crate::permission::PermissionStatus::DeniedPermanent,
         };
         match status {
             crate::permission::PermissionStatus::NotDetermined => match permission {
@@ -1356,6 +1358,7 @@ impl Cx {
                     self.macos_request_audio_permission(permission, request_id)
                 }
                 Permission::Camera => self.macos_request_camera_permission(permission, request_id),
+                Permission::SceneAccess => {}
             },
             _ => {
                 self.call_event_handler(&crate::event::Event::PermissionResult(

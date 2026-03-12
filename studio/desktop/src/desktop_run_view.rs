@@ -230,7 +230,9 @@ impl DesktopRunView {
         self.ai_viz_queue.clear();
         self.ime_pos = None;
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        { self.aux_chan_host_endpoint = None; }
+        {
+            self.aux_chan_host_endpoint = None;
+        }
         self.last_rect = Rect::default();
         self.last_dpi_factor = 0.0;
         self.bootstrap_pending = target.is_some();
@@ -364,7 +366,9 @@ impl DesktopRunView {
         if self.aux_chan_host_endpoint.is_some() {
             return;
         }
-        let Some(studio_addr) = studio_addr else { return };
+        let Some(studio_addr) = studio_addr else {
+            return;
+        };
         let listener = match aux_chan::ExternalEndpointListener::new_for_studio(
             studio_addr,
             &build_id.0.to_string(),
@@ -380,14 +384,12 @@ impl DesktopRunView {
         // Accept in background — the child may take a long time to compile and start.
         std::thread::Builder::new()
             .name("aux-chan-accept".into())
-            .spawn(move || {
-                match listener.accept_host_endpoint() {
-                    Ok(endpoint) => {
-                        *slot.lock().unwrap() = Some(endpoint);
-                    }
-                    Err(err) => {
-                        crate::log!("aux_chan accept failed: {}", err);
-                    }
+            .spawn(move || match listener.accept_host_endpoint() {
+                Ok(endpoint) => {
+                    *slot.lock().unwrap() = Some(endpoint);
+                }
+                Err(err) => {
+                    crate::log!("aux_chan accept failed: {}", err);
                 }
             })
             .ok();
@@ -513,7 +515,13 @@ impl DesktopRunView {
         }
     }
 
-    pub fn set_run_target(&mut self, cx: &mut Cx, build_id: QueryId, window_id: Option<usize>, _studio_addr: Option<&str>) {
+    pub fn set_run_target(
+        &mut self,
+        cx: &mut Cx,
+        build_id: QueryId,
+        window_id: Option<usize>,
+        _studio_addr: Option<&str>,
+    ) {
         // set_target must run before setup_aux_chan: it clears
         // aux_chan_host_endpoint when the target changes, so calling
         // setup_aux_chan first would create an endpoint that set_target
@@ -748,7 +756,8 @@ impl Widget for DesktopRunView {
             if self.tick_timer.is_timer(timer_event).is_some() {
                 if let Some(target) = target {
                     let mut msgs = Vec::new();
-                    let should_bootstrap = self.debug_present_ok_count == 0 || self.bootstrap_pending;
+                    let should_bootstrap =
+                        self.debug_present_ok_count == 0 || self.bootstrap_pending;
                     if should_bootstrap {
                         self.bootstrap_tick_count = self.bootstrap_tick_count.wrapping_add(1);
                         if self.bootstrap_tick_count == 1 || self.bootstrap_tick_count % 15 == 0 {
@@ -878,7 +887,13 @@ impl Widget for DesktopRunView {
 }
 
 impl DesktopRunViewRef {
-    pub fn set_run_target(&self, cx: &mut Cx, build_id: QueryId, window_id: Option<usize>, studio_addr: Option<&str>) {
+    pub fn set_run_target(
+        &self,
+        cx: &mut Cx,
+        build_id: QueryId,
+        window_id: Option<usize>,
+        studio_addr: Option<&str>,
+    ) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_run_target(cx, build_id, window_id, studio_addr);
         }

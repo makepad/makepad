@@ -199,10 +199,11 @@ impl WindowsUnifiedVideoPlayer {
         };
 
         let mut texture: Option<ID3D11Texture2D> = None;
-        if self
-            .d3d11_device
-            .CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture))
-            .is_err()
+        if unsafe {
+            self.d3d11_device
+                .CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture))
+        }
+        .is_err()
         {
             return;
         }
@@ -218,10 +219,14 @@ impl WindowsUnifiedVideoPlayer {
         };
 
         let mut shader_resource_view: Option<ID3D11ShaderResourceView> = None;
-        if self
-            .d3d11_device
-            .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
-            .is_err()
+        if unsafe {
+            self.d3d11_device.CreateShaderResourceView(
+                &resource,
+                None,
+                Some(&mut shader_resource_view),
+            )
+        }
+        .is_err()
         {
             return;
         }

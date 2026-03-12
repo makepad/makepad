@@ -1,7 +1,7 @@
 use crate::utils::{
     get_build_crate_from_args, get_crate_dir, get_package_binary_name, get_profile_from_args,
-    get_target_from_args, resolve_app_icon_env, AppIconEnv, APP_ICON_ENV_VARS,
-    APP_ICON_IDX_1024, APP_ICON_IDX_512, APP_ICON_IDX_ICO,
+    get_target_from_args, resolve_app_icon_env, AppIconEnv, APP_ICON_ENV_VARS, APP_ICON_IDX_1024,
+    APP_ICON_IDX_512, APP_ICON_IDX_ICO,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,15 +39,21 @@ fn binary_path(args: &[String], binary_name: &str) -> PathBuf {
     path
 }
 
-fn write_windows_icon_resource(icon_env: &AppIconEnv, build_crate: &str) -> Result<Option<PathBuf>, String> {
+fn write_windows_icon_resource(
+    icon_env: &AppIconEnv,
+    build_crate: &str,
+) -> Result<Option<PathBuf>, String> {
     let out_dir = PathBuf::from("target/makepad-desktop/windows-res").join(build_crate);
     fs::create_dir_all(&out_dir).map_err(|e| format!("failed to create {:?}: {e}", out_dir))?;
 
     let rc_path = out_dir.join("app_icon.rc");
     let res_path = out_dir.join("app_icon.res");
     let ico = &icon_env[APP_ICON_IDX_ICO];
-    fs::write(&rc_path, format!("1 ICON \"{}\"\n", ico.replace('\\', "\\\\")))
-        .map_err(|e| format!("failed to write {:?}: {e}", rc_path))?;
+    fs::write(
+        &rc_path,
+        format!("1 ICON \"{}\"\n", ico.replace('\\', "\\\\")),
+    )
+    .map_err(|e| format!("failed to write {:?}: {e}", rc_path))?;
 
     let mut tries: Vec<(&str, Vec<String>)> = Vec::new();
     tries.push((
@@ -125,11 +131,16 @@ fn add_windows_icon_link_arg(
     Ok(())
 }
 
-fn write_macos_app_bundle(args: &[String], build_crate: &str, icon_env: &AppIconEnv) -> Result<(), String> {
+fn write_macos_app_bundle(
+    args: &[String],
+    build_crate: &str,
+    icon_env: &AppIconEnv,
+) -> Result<(), String> {
     if !is_macos_target(args) {
         return Ok(());
     }
-    let binary_name = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
+    let binary_name =
+        get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
     let bin = binary_path(args, &binary_name);
     if !bin.is_file() {
         eprintln!(
@@ -152,7 +163,8 @@ fn write_macos_app_bundle(args: &[String], build_crate: &str, icon_env: &AppIcon
         .map_err(|e| format!("failed to create {:?}: {e}", resources_dir))?;
 
     let dst_bin = macos_dir.join(&binary_name);
-    fs::copy(&bin, &dst_bin).map_err(|e| format!("failed to copy {:?} to {:?}: {e}", bin, dst_bin))?;
+    fs::copy(&bin, &dst_bin)
+        .map_err(|e| format!("failed to copy {:?} to {:?}: {e}", bin, dst_bin))?;
 
     let crate_dir = get_crate_dir(build_crate)?;
     let icns_src = crate_dir.join("resources/icon.icns");
@@ -186,16 +198,24 @@ fn write_macos_app_bundle(args: &[String], build_crate: &str, icon_env: &AppIcon
 
     println!("[cargo-makepad] macOS app bundle: {}", app_dir.display());
     println!("[cargo-makepad] macOS app binary: {}", dst_bin.display());
-    println!("[cargo-makepad] macOS app resources: {}", resources_dir.display());
+    println!(
+        "[cargo-makepad] macOS app resources: {}",
+        resources_dir.display()
+    );
     println!("[cargo-makepad] macOS info plist: {}", plist_path.display());
     Ok(())
 }
 
-fn write_linux_desktop_entry(args: &[String], build_crate: &str, icon_env: &AppIconEnv) -> Result<(), String> {
+fn write_linux_desktop_entry(
+    args: &[String],
+    build_crate: &str,
+    icon_env: &AppIconEnv,
+) -> Result<(), String> {
     if !is_linux_target(args) {
         return Ok(());
     }
-    let binary_name = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
+    let binary_name =
+        get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
     let bin = binary_path(args, &binary_name);
     if !bin.is_file() {
         eprintln!(
@@ -213,7 +233,8 @@ fn write_linux_desktop_entry(args: &[String], build_crate: &str, icon_env: &AppI
 
     let icon = Path::new(&icon_env[APP_ICON_IDX_512]);
     let icon_dst = out.join(format!("{binary_name}.png"));
-    fs::copy(icon, &icon_dst).map_err(|e| format!("failed to copy {:?} to {:?}: {e}", icon, icon_dst))?;
+    fs::copy(icon, &icon_dst)
+        .map_err(|e| format!("failed to copy {:?} to {:?}: {e}", icon, icon_dst))?;
 
     let desktop_path = out.join(format!("{binary_name}.desktop"));
     let exec_path = bin.canonicalize().unwrap_or(bin);
@@ -223,9 +244,13 @@ fn write_linux_desktop_entry(args: &[String], build_crate: &str, icon_env: &AppI
         exec_path.to_string_lossy(),
         icon_path.to_string_lossy(),
     );
-    fs::write(&desktop_path, body).map_err(|e| format!("failed to write {:?}: {e}", desktop_path))?;
+    fs::write(&desktop_path, body)
+        .map_err(|e| format!("failed to write {:?}: {e}", desktop_path))?;
 
-    println!("[cargo-makepad] Linux desktop entry: {}", desktop_path.display());
+    println!(
+        "[cargo-makepad] Linux desktop entry: {}",
+        desktop_path.display()
+    );
     println!("[cargo-makepad] Linux desktop icon: {}", icon_dst.display());
     Ok(())
 }
@@ -237,7 +262,11 @@ fn post_build_assets(args: &[String], icon_env: &AppIconEnv) -> Result<(), Strin
     Ok(())
 }
 
-fn run_cargo(subcommand: &str, args: &[String], icon_env: Option<AppIconEnv>) -> Result<(), String> {
+fn run_cargo(
+    subcommand: &str,
+    args: &[String],
+    icon_env: Option<AppIconEnv>,
+) -> Result<(), String> {
     let mut cmd = Command::new("cargo");
     cmd.arg(subcommand);
     cmd.args(args);

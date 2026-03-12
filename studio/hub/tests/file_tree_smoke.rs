@@ -1,5 +1,5 @@
 use makepad_studio_hub::{HubConfig, MountConfig, StudioHub};
-use makepad_studio_protocol::hub_protocol::{HubToClient, ClientToHub};
+use makepad_studio_protocol::hub_protocol::{ClientToHub, HubToClient};
 use std::time::Duration;
 
 #[test]

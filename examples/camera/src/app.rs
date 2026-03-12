@@ -1,5 +1,5 @@
-use makepad_widgets::*;
 use makepad_widgets::makepad_platform::video::{VideoInputsEvent, VideoPixelFormat};
+use makepad_widgets::*;
 
 app_main!(App);
 
@@ -97,14 +97,12 @@ impl App {
     }
 
     fn set_preview_mode_visible(&self, cx: &mut Cx, mode: Option<CameraHomeMode>) {
-        self.ui.view(cx, ids!(camera_native_host)).set_visible(
-            cx,
-            mode == Some(CameraHomeMode::NativePreview),
-        );
-        self.ui.view(cx, ids!(camera_texture_host)).set_visible(
-            cx,
-            mode == Some(CameraHomeMode::Texture),
-        );
+        self.ui
+            .view(cx, ids!(camera_native_host))
+            .set_visible(cx, mode == Some(CameraHomeMode::NativePreview));
+        self.ui
+            .view(cx, ids!(camera_texture_host))
+            .set_visible(cx, mode == Some(CameraHomeMode::Texture));
         self.ui
             .view(cx, ids!(camera_placeholder))
             .set_visible(cx, mode.is_none());
@@ -137,10 +135,16 @@ impl App {
         }
 
         fn is_supported(pixel_format: VideoPixelFormat) -> bool {
-            matches!(pixel_format, VideoPixelFormat::NV12 | VideoPixelFormat::YUY2 | VideoPixelFormat::YUV420)
+            matches!(
+                pixel_format,
+                VideoPixelFormat::NV12 | VideoPixelFormat::YUY2 | VideoPixelFormat::YUV420
+            )
         }
 
-        fn better(a: &makepad_widgets::makepad_platform::video::VideoFormat, b: &makepad_widgets::makepad_platform::video::VideoFormat) -> bool {
+        fn better(
+            a: &makepad_widgets::makepad_platform::video::VideoFormat,
+            b: &makepad_widgets::makepad_platform::video::VideoFormat,
+        ) -> bool {
             let a_rank = pixel_rank(a.pixel_format);
             let b_rank = pixel_rank(b.pixel_format);
             if a_rank != b_rank {
@@ -388,7 +392,9 @@ impl AppMain for App {
 
         match event {
             Event::Startup => {
-                cx.request_permission(makepad_widgets::makepad_platform::permission::Permission::Camera);
+                cx.request_permission(
+                    makepad_widgets::makepad_platform::permission::Permission::Camera,
+                );
                 cx.video_input(0, |_buf| {});
                 self.update_mode_label(cx);
                 self.update_rotation_label(cx);
@@ -431,10 +437,7 @@ impl AppMain for App {
                             self.set_status(cx, "Camera permission denied");
                         }
                         _ => {
-                            self.set_status(
-                                cx,
-                                &format!("Camera permission: {:?}", result.status),
-                            );
+                            self.set_status(cx, &format!("Camera permission: {:?}", result.status));
                         }
                     }
                 }

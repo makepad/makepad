@@ -118,6 +118,7 @@ script_mod! {
         u_spec_strength: uniform(float(0.9))
         u_env_intensity: uniform(float(1.8))
         u_camera_pos: uniform(vec3(0.0, 0.0, 5.0))
+        use_pass_camera: uniform(float(0.0))
 
         v_world: varying(vec3f)
         v_normal: varying(vec3f)
@@ -127,6 +128,13 @@ script_mod! {
 
         get_vertex_displacement: fn(uv: vec2, local_pos: vec3) {
             return vec3(0.0, 0.0, 0.0)
+        }
+
+        transform_with_camera: fn(world: vec4) {
+            if self.use_pass_camera > 0.5 {
+                return self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+            }
+            return self.projection_matrix * (self.view_matrix * world)
         }
 
         vertex: fn() {
@@ -140,7 +148,6 @@ script_mod! {
                 1.0
             );
             let local_n = vec4(self.geom.pos_nx.w, self.geom.ny_nz_uv.x, self.geom.ny_nz_uv.y, 0.0);
-
             let model_pos = self.model_matrix * local_pos;
             let model_n = self.model_matrix * local_n;
             let local_t = vec4(self.geom.tangent.x, self.geom.tangent.y, self.geom.tangent.z, 0.0);
@@ -153,7 +160,7 @@ script_mod! {
             self.v_color = self.geom.color;
 
             let world = vec4(model_pos.x, model_pos.y, model_pos.z + self.draw_call.zbias, 1.0);
-            self.vertex_pos = self.projection_matrix * (self.view_matrix * world);
+            self.vertex_pos = self.transform_with_camera(world);
         }
 
         get_base_color: fn(uv: vec2, vertex_color: vec4) {

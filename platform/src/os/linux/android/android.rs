@@ -2087,6 +2087,7 @@ fn to_android_permission(permission: crate::permission::Permission) -> &'static 
     match permission {
         crate::permission::Permission::AudioInput => "android.permission.RECORD_AUDIO",
         crate::permission::Permission::Camera => "android.permission.CAMERA",
+        crate::permission::Permission::SceneAccess => "com.oculus.permission.USE_SCENE",
     }
 }
 
@@ -2148,9 +2149,12 @@ impl Cx {
         self.windows[window_id].is_created = false;
     }
 
-    fn check_audio_permission_status(&self) -> crate::permission::PermissionStatus {
+    fn check_android_permission_status(
+        &self,
+        permission: crate::permission::Permission,
+    ) -> crate::permission::PermissionStatus {
         unsafe {
-            let status = android_jni::to_java_check_permission("android.permission.RECORD_AUDIO");
+            let status = android_jni::to_java_check_permission(to_android_permission(permission));
             match status {
                 0 => crate::permission::PermissionStatus::NotDetermined, // Never asked or permanently denied
                 1 => crate::permission::PermissionStatus::Granted,
@@ -2163,30 +2167,12 @@ impl Cx {
         }
     }
 
-    fn check_camera_permission_status(&self) -> crate::permission::PermissionStatus {
-        unsafe {
-            let status = android_jni::to_java_check_permission("android.permission.CAMERA");
-            match status {
-                0 => crate::permission::PermissionStatus::NotDetermined,
-                1 => crate::permission::PermissionStatus::Granted,
-                2 => crate::permission::PermissionStatus::DeniedCanRetry,
-                _ => {
-                    crate::log!("Unknown permission check status: {}", status);
-                    crate::permission::PermissionStatus::NotDetermined
-                }
-            }
-        }
-    }
-
     fn handle_permission_check(
         &mut self,
         permission: crate::permission::Permission,
         request_id: i32,
     ) {
-        let status = match permission {
-            crate::permission::Permission::AudioInput => self.check_audio_permission_status(),
-            crate::permission::Permission::Camera => self.check_camera_permission_status(),
-        };
+        let status = self.check_android_permission_status(permission);
 
         self.call_event_handler(&Event::PermissionResult(
             crate::permission::PermissionResult {
@@ -2202,10 +2188,7 @@ impl Cx {
         permission: crate::permission::Permission,
         request_id: i32,
     ) {
-        let status = match permission {
-            crate::permission::Permission::AudioInput => self.check_audio_permission_status(),
-            crate::permission::Permission::Camera => self.check_camera_permission_status(),
-        };
+        let status = self.check_android_permission_status(permission);
         match status {
             crate::permission::PermissionStatus::Granted => {
                 self.call_event_handler(&Event::PermissionResult(
@@ -2240,6 +2223,7 @@ fn string_to_permission(permission_str: &str) -> Option<crate::permission::Permi
     match permission_str {
         "android.permission.RECORD_AUDIO" => Some(crate::permission::Permission::AudioInput),
         "android.permission.CAMERA" => Some(crate::permission::Permission::Camera),
+        "com.oculus.permission.USE_SCENE" => Some(crate::permission::Permission::SceneAccess),
         _ => None,
     }
 }

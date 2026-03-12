@@ -909,7 +909,10 @@ impl WidgetTree {
                             root_uid,
                         ))
                 {
-                    let upgraded = inner.graph.get(&frame.uid).and_then(|node| node.widget.upgrade());
+                    let upgraded = inner
+                        .graph
+                        .get(&frame.uid)
+                        .and_then(|node| node.widget.upgrade());
                     if let Some(widget) = upgraded {
                         result = widget;
                     } else {
@@ -999,7 +1002,10 @@ impl WidgetTree {
                             root_uid,
                         ))
                 {
-                    let upgraded = inner.graph.get(&frame.uid).and_then(|node| node.widget.upgrade());
+                    let upgraded = inner
+                        .graph
+                        .get(&frame.uid)
+                        .and_then(|node| node.widget.upgrade());
                     if let Some(widget) = upgraded {
                         results.push(widget);
                     } else {
@@ -1483,7 +1489,6 @@ impl WidgetTree {
                 // Leaf node — subtree_end is already correct (idx + 1)
             }
         }
-
     }
 
     pub fn find_within_from_borrowed<F>(
@@ -1764,10 +1769,7 @@ impl WidgetTree {
                 let y = rect.pos.y.round() as i64;
                 let w = rect.size.x.round() as i64;
                 let h = rect.size.y.round() as i64;
-                if w > 0
-                    && h > 0
-                    && matches_query(mode, needle, &id_token, &ty_token)
-                {
+                if w > 0 && h > 0 && matches_query(mode, needle, &id_token, &ty_token) {
                     rects.push(format!(
                         "{} {} {} {} {} {} {}",
                         dump_index, id_token, ty_token, x, y, w, h
@@ -2091,7 +2093,12 @@ pub trait CxWidgetExt {
     fn widget_tree(&self) -> &WidgetTree;
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid);
     fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
-    fn widget_tree_insert_child_deep(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
+    fn widget_tree_insert_child_deep(
+        &mut self,
+        parent_uid: WidgetUid,
+        name: LiveId,
+        widget: WidgetRef,
+    );
 }
 
 fn get_or_init_state(cx: &mut Cx) -> &mut WidgetTreeState {
@@ -2135,7 +2142,12 @@ impl CxWidgetExt for Cx {
         state.tree.insert_child(parent_uid, name, widget);
     }
 
-    fn widget_tree_insert_child_deep(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef) {
+    fn widget_tree_insert_child_deep(
+        &mut self,
+        parent_uid: WidgetUid,
+        name: LiveId,
+        widget: WidgetRef,
+    ) {
         let state = get_or_init_state(self);
         state.tree.insert_child_deep(parent_uid, name, widget);
     }
@@ -2164,7 +2176,12 @@ impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
         state.tree.insert_child(parent_uid, name, widget);
     }
 
-    fn widget_tree_insert_child_deep(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef) {
+    fn widget_tree_insert_child_deep(
+        &mut self,
+        parent_uid: WidgetUid,
+        name: LiveId,
+        widget: WidgetRef,
+    ) {
         let cx: &mut Cx = self;
         let state = get_or_init_state(cx);
         state.tree.insert_child_deep(parent_uid, name, widget);
@@ -2194,7 +2211,12 @@ impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
         state.tree.insert_child(parent_uid, name, widget);
     }
 
-    fn widget_tree_insert_child_deep(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef) {
+    fn widget_tree_insert_child_deep(
+        &mut self,
+        parent_uid: WidgetUid,
+        name: LiveId,
+        widget: WidgetRef,
+    ) {
         let cx: &mut Cx = self;
         let state = get_or_init_state(cx);
         state.tree.insert_child_deep(parent_uid, name, widget);
@@ -2209,7 +2231,7 @@ impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
 mod tests {
     use super::*;
     use crate::widget::{DrawStepApi, WidgetRef, WidgetUid};
-    use crate::{Widget, WidgetNode, DrawStep};
+    use crate::{DrawStep, Widget, WidgetNode};
 
     // Minimal Widget impl for testing
     struct TestWidget {
@@ -2443,8 +2465,7 @@ mod tests {
         assert_eq!(found.widget_uid(), uids[4]);
 
         // Path verification: a.c.e
-        let found =
-            tree.find_within(uids[0], &[name("a"), name("c"), name("e")]);
+        let found = tree.find_within(uids[0], &[name("a"), name("c"), name("e")]);
         assert_eq!(found.widget_uid(), uids[4]);
 
         // path_to
@@ -2588,10 +2609,10 @@ mod tests {
         let target = make_widget(target_uid, vec![]);
         let left = make_widget(left_uid, vec![(name("target"), target.clone())]);
         let right = make_widget(right_uid, vec![]);
-        let root = make_widget(root_uid, vec![
-            (name("left"), left.clone()),
-            (name("right"), right.clone()),
-        ]);
+        let root = make_widget(
+            root_uid,
+            vec![(name("left"), left.clone()), (name("right"), right.clone())],
+        );
 
         tree.observe_node(root_uid, name("root"), root.clone(), None);
         tree.observe_node(left_uid, name("left"), left.clone(), Some(root_uid));
@@ -2833,7 +2854,11 @@ mod tests {
 
             // Query after every insert
             let found = tree.find_within(root_uid, &[n]);
-            assert!(!found.is_empty(), "should find child {} right after insert", i);
+            assert!(
+                !found.is_empty(),
+                "should find child {} right after insert",
+                i
+            );
             assert_eq!(found.widget_uid(), uid);
         }
     }
@@ -2963,9 +2988,9 @@ mod tests {
         let uid2 = WidgetUid::new();
         let w1 = make_widget(uid1, vec![]);
         let w2 = make_widget(uid2, vec![]);
-            tree.observe_node(uid1, name("a"), w1.clone(), None);
-            tree.observe_node(uid2, name("b"), w2.clone(), Some(uid1));
-            stabilize_graph_cache(&tree);
+        tree.observe_node(uid1, name("a"), w1.clone(), None);
+        tree.observe_node(uid2, name("b"), w2.clone(), Some(uid1));
+        stabilize_graph_cache(&tree);
 
         let found = tree.widget(uid2);
         assert!(!found.is_empty());
@@ -3098,7 +3123,12 @@ mod tests {
 
         tree.observe_node(root_uid, name("root"), root, None);
         tree.observe_node(old_item_uid, name("old_item"), old_item, Some(root_uid));
-        tree.observe_node(new_item_uid, name("new_item"), new_item.clone(), Some(root_uid));
+        tree.observe_node(
+            new_item_uid,
+            name("new_item"),
+            new_item.clone(),
+            Some(root_uid),
+        );
 
         // Baseline: clear prior global dirty state from initial graph seeding.
         {
@@ -3307,7 +3337,10 @@ mod tests {
         let second = tree.find_within_from_borrowed(root_uid, &path, |visit| {
             visit(name("branch"), branch.clone());
         });
-        assert!(second.is_empty(), "root refresh alone should not invent deep leaf");
+        assert!(
+            second.is_empty(),
+            "root refresh alone should not invent deep leaf"
+        );
 
         let _ = tree.find_within_from_borrowed(branch_uid, &[name("leaf")], |visit| {
             visit(name("leaf"), leaf.clone());

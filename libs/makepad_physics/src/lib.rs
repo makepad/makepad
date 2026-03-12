@@ -105,10 +105,30 @@ mod tests {
         let delta = Rotation::from_xyzw(hang.x, hang.y, hang.z, 1.0);
         let rapier = (delta * Rotation::from_xyzw(q.x, q.y, q.z, q.w)).normalize();
 
-        assert!((ours.x - rapier.x).abs() < 1.0e-6, "x {} vs {}", ours.x, rapier.x);
-        assert!((ours.y - rapier.y).abs() < 1.0e-6, "y {} vs {}", ours.y, rapier.y);
-        assert!((ours.z - rapier.z).abs() < 1.0e-6, "z {} vs {}", ours.z, rapier.z);
-        assert!((ours.w - rapier.w).abs() < 1.0e-6, "w {} vs {}", ours.w, rapier.w);
+        assert!(
+            (ours.x - rapier.x).abs() < 1.0e-6,
+            "x {} vs {}",
+            ours.x,
+            rapier.x
+        );
+        assert!(
+            (ours.y - rapier.y).abs() < 1.0e-6,
+            "y {} vs {}",
+            ours.y,
+            rapier.y
+        );
+        assert!(
+            (ours.z - rapier.z).abs() < 1.0e-6,
+            "z {} vs {}",
+            ours.z,
+            rapier.z
+        );
+        assert!(
+            (ours.w - rapier.w).abs() < 1.0e-6,
+            "w {} vs {}",
+            ours.w,
+            rapier.w
+        );
     }
 
     #[test]
@@ -650,11 +670,8 @@ mod tests {
             angular_velocity: Vec3f,
         ) -> (Vec3f, f32, f32) {
             if world.bodies.is_empty() {
-                let mut body = crate::rigid_body::RigidBody::new_dynamic(
-                    position,
-                    vec3f(0.5, 0.5, 0.5),
-                    1.0,
-                );
+                let mut body =
+                    crate::rigid_body::RigidBody::new_dynamic(position, vec3f(0.5, 0.5, 0.5), 1.0);
                 body.pose.orientation = orientation;
                 body.linear_velocity = linear_velocity;
                 body.angular_velocity = angular_velocity;
@@ -786,7 +803,8 @@ mod tests {
                     probe_manifolds.first().map(|m| m.num_points).unwrap_or(0),
                     probe_solver_contacts.len(),
                 );
-                if let Some(manifold) = contact_pair_before.and_then(|pair| pair.manifolds.first()) {
+                if let Some(manifold) = contact_pair_before.and_then(|pair| pair.manifolds.first())
+                {
                     for (i, point) in manifold.points.iter().enumerate() {
                         println!(
                             "  rapier_pre_contact[{}] p1=({:.6},{:.6},{:.6}) p2=({:.6},{:.6},{:.6}) dist={:.6}",
@@ -889,14 +907,22 @@ mod tests {
                 &mut our_solver_frictions,
             );
 
-            let contact_pair = narrow_phase.contact_pair(ground_collider, cube_collider).unwrap();
+            let contact_pair = narrow_phase
+                .contact_pair(ground_collider, cube_collider)
+                .unwrap();
 
             if frame == 0 {
-                let contact_pair = narrow_phase.contact_pair(ground_collider, cube_collider).unwrap();
+                let contact_pair = narrow_phase
+                    .contact_pair(ground_collider, cube_collider)
+                    .unwrap();
                 println!(
                     "frame=1 rapier manifolds={} points={} solver_contacts={}",
                     contact_pair.manifolds.len(),
-                    contact_pair.manifolds.first().map(|m| m.points.len()).unwrap_or(0),
+                    contact_pair
+                        .manifolds
+                        .first()
+                        .map(|m| m.points.len())
+                        .unwrap_or(0),
                     contact_pair
                         .manifolds
                         .first()
@@ -936,7 +962,8 @@ mod tests {
                     z: rapier_rot.z,
                     w: rapier_rot.w,
                 };
-                probe_body.linear_velocity = vec3f(rapier_linvel.x, rapier_linvel.y, rapier_linvel.z);
+                probe_body.linear_velocity =
+                    vec3f(rapier_linvel.x, rapier_linvel.y, rapier_linvel.z);
                 probe_body.angular_velocity =
                     vec3f(rapier_angvel.x, rapier_angvel.y, rapier_angvel.z);
                 let probe_bodies = [probe_body];
@@ -1203,10 +1230,7 @@ mod tests {
         }
         println!(
             "history_probe_max_error frame={} pos_err={:.6} lin_err={:.6} ang_err={:.6}",
-            max_history_frame,
-            max_history_pos_err,
-            max_history_lin_err,
-            max_history_ang_err,
+            max_history_frame, max_history_pos_err, max_history_lin_err, max_history_ang_err,
         );
     }
 

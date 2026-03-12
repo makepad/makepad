@@ -1605,6 +1605,7 @@ impl HubCore {
             self.broadcast_ui_message(HubToClient::FileChanged {
                 path: mount.clone(),
             });
+            self.maybe_revive_mount_root_splash_from_fs_fallback(&mount);
             self.reload_mount_file_tree_broadcast(&mount);
             return;
         }
@@ -1631,6 +1632,7 @@ impl HubCore {
             }
         }
         if path_is_dir {
+            self.maybe_revive_mount_root_splash_from_fs_fallback(&mount);
             self.reload_mount_file_tree_broadcast(&mount);
             return;
         }
@@ -2241,6 +2243,16 @@ impl HubCore {
                 );
             }
         }
+    }
+
+    fn maybe_revive_mount_root_splash_from_fs_fallback(&mut self, mount: &str) {
+        if self.mount_root_splash_running(mount) {
+            return;
+        }
+        if self.primary_ui_for_mount(mount).is_none() || !self.mount_has_root_splash(mount) {
+            return;
+        }
+        self.start_mount_root_splash_with_reporting(mount);
     }
 
     fn request_mount_root_splash_reload(&mut self, mount: &str) {
