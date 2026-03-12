@@ -11,7 +11,7 @@ use {
             win32_app::{encode_wide, with_win32_app, Win32App},
             win32_event::*,
         },
-        window::WindowId,
+        window::{WindowBackdrop, WindowId, WindowVisuals},
         windows::{
             core::PCWSTR,
             //core::IntoParam,
@@ -64,20 +64,21 @@ use {
                     WindowsAndMessaging::{
                         CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
                         GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, MoveWindow,
-                        PostMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CW_USEDEFAULT,
-                        GWLP_USERDATA, GWL_EXSTYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-                        HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT,
-                        HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-                        SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT,
+                        PostMessageW, SetLayeredWindowAttributes, SetWindowLongPtrW,
+                        SetWindowPos, ShowWindow, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE,
+                        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
+                        HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST,
+                        HWND_TOPMOST, LWA_ALPHA, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE,
+                        SW_MINIMIZE, SW_RESTORE, SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT,
                         WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
                         WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_IME_STARTCOMPOSITION,
                         WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
                         WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST,
                         WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
                         WM_XBUTTONDOWN, WM_XBUTTONUP, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-                        WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-                        WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX,
-                        WS_SYSMENU,
+                        WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+                        WS_EX_TOPMOST, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+                        WS_POPUP, WS_SIZEBOX, WS_SYSMENU,
                     },
                 },
             },
@@ -85,7 +86,7 @@ use {
     },
     std::{
         cell::{Cell, RefCell},
-        ffi::OsStr,
+        ffi::{c_void, OsStr},
         mem,
         os::windows::ffi::OsStrExt,
         rc::Rc,
@@ -93,6 +94,36 @@ use {
         sync::Mutex,
     },
 };
+
+#[repr(C)]
+struct AccentPolicy {
+    accent_state: u32,
+    accent_flags: u32,
+    gradient_color: u32,
+    animation_id: u32,
+}
+
+#[repr(C)]
+struct WindowCompositionAttribData {
+    attrib: u32,
+    pv_data: *mut c_void,
+    cb_data: usize,
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn SetWindowCompositionAttribute(hwnd: HWND, data: *mut WindowCompositionAttribData) -> i32;
+}
+
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmSetWindowAttribute(
+        hwnd: HWND,
+        dw_attribute: u32,
+        pv_attribute: *const c_void,
+        cb_attribute: u32,
+    ) -> i32;
+}
 /*
 // Copied from Microsoft so it refers to the right IDropTarget
 #[allow(non_snake_case)]
@@ -935,6 +966,92 @@ impl Win32Window {
                 false,
             )
             .unwrap();
+        }
+    }
+
+    pub fn apply_window_visuals(&mut self, visuals: WindowVisuals) {
+        const DWM_ATTRIBUTE_SYSTEM_BACKDROP_TYPE: u32 = 38;
+        const S_OK: i32 = 0;
+        const DWMSBT_NONE: i32 = 1;
+        const DWMSBT_MAINWINDOW: i32 = 2;
+        const DWMSBT_TRANSIENTWINDOW: i32 = 3;
+        const DWMSBT_TABBEDWINDOW: i32 = 4;
+
+        const WCA_ACCENT_POLICY: u32 = 19;
+        const ACCENT_DISABLED: u32 = 0;
+        const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
+
+        let intensity = visuals.backdrop_intensity.clamp(0.0, 1.0);
+        let accent_alpha = (intensity * 255.0).round() as u32;
+        let accent_color = accent_alpha << 24;
+
+        let backdrop = match visuals.backdrop {
+            WindowBackdrop::None => DWMSBT_NONE,
+            WindowBackdrop::Auto | WindowBackdrop::Mica => DWMSBT_MAINWINDOW,
+            WindowBackdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
+            WindowBackdrop::Vibrancy | WindowBackdrop::Blur => DWMSBT_TABBEDWINDOW,
+        };
+
+        unsafe {
+            let mut ex_style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+            if visuals.transparent {
+                ex_style |= WS_EX_LAYERED.0;
+            } else {
+                ex_style &= !WS_EX_LAYERED.0;
+            }
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex_style as isize);
+            SetLayeredWindowAttributes(self.hwnd, 0, 255, LWA_ALPHA).unwrap();
+
+            let margins = if visuals.transparent {
+                MARGINS {
+                    cxLeftWidth: -1,
+                    cxRightWidth: -1,
+                    cyTopHeight: -1,
+                    cyBottomHeight: -1,
+                }
+            } else {
+                MARGINS {
+                    cxLeftWidth: 0,
+                    cxRightWidth: 0,
+                    cyTopHeight: 0,
+                    cyBottomHeight: 0,
+                }
+            };
+            DwmExtendFrameIntoClientArea(self.hwnd, &margins).unwrap();
+        }
+
+        let hr = unsafe {
+            DwmSetWindowAttribute(
+                self.hwnd,
+                DWM_ATTRIBUTE_SYSTEM_BACKDROP_TYPE,
+                &backdrop as *const _ as *const c_void,
+                std::mem::size_of::<i32>() as u32,
+            )
+        };
+
+        let accent_state = if visuals.transparent || visuals.backdrop != WindowBackdrop::None {
+            ACCENT_ENABLE_BLURBEHIND
+        } else {
+            ACCENT_DISABLED
+        };
+        let gradient_color = if visuals.backdrop == WindowBackdrop::None {
+            0
+        } else {
+            accent_color
+        };
+        let mut accent = AccentPolicy {
+            accent_state,
+            accent_flags: if hr == S_OK { 0x20 } else { 0 },
+            gradient_color,
+            animation_id: 0,
+        };
+        let mut data = WindowCompositionAttribData {
+            attrib: WCA_ACCENT_POLICY,
+            pv_data: &mut accent as *mut _ as *mut c_void,
+            cb_data: std::mem::size_of::<AccentPolicy>(),
+        };
+        unsafe {
+            SetWindowCompositionAttribute(self.hwnd, &mut data);
         }
     }
 

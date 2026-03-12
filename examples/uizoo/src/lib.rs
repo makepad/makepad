@@ -12,6 +12,7 @@ pub mod tab_icon;
 pub mod tab_iconset;
 pub mod tab_image;
 pub mod tab_imageblend;
+pub mod tab_glasspanel;
 pub mod tab_label;
 pub mod tab_layout;
 pub mod tab_linklabel;

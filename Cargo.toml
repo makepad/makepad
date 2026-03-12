@@ -23,6 +23,7 @@ workspace.members = [
     "examples/text_selection",
     "examples/counter",
     "examples/camera",
+    "examples/windows_blur",
 #    "examples/matrix",
     "libs/gltf",
     "libs/splat",

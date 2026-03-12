@@ -39,6 +39,13 @@ use wayland_client::protocol::{wl_keyboard, wl_pointer};
 use wayland_client::{Connection, Proxy};
 use wayland_protocols::xdg::shell::client::xdg_toplevel;
 
+fn log_linux_backdrop_unsupported_once() {
+    static LOG_ONCE: std::sync::Once = std::sync::Once::new();
+    LOG_ONCE.call_once(|| {
+        crate::log!("Window backdrop requested on Linux/Wayland; compositor backdrop blur is not supported in M1 (no-op).");
+    });
+}
+
 pub fn wayland_event_loop(cx: Rc<RefCell<Cx>>) {
     WaylandCx::event_loop_impl(cx);
 }
@@ -531,6 +538,9 @@ impl WaylandCx {
                         app_id,
                         window.is_fullscreen,
                     );
+                    if cx.windows[window_id].backdrop != crate::window::WindowBackdrop::None {
+                        log_linux_backdrop_unsupported_once();
+                    }
                     state.windows.push(window);
                 }
                 CxOsOp::CreatePopupWindow {
@@ -620,6 +630,11 @@ impl WaylandCx {
                 }
                 CxOsOp::ResizeWindow(window_id, size) => {}
                 CxOsOp::RepositionWindow(window_id, size) => {}
+                CxOsOp::SetWindowVisuals(_window_id, visuals) => {
+                    if visuals.backdrop != crate::window::WindowBackdrop::None {
+                        log_linux_backdrop_unsupported_once();
+                    }
+                }
                 CxOsOp::ShowClipboardActions { .. } => {}
                 CxOsOp::CopyToClipboard(content) => {
                     if let Some(serial) = state.keyboard_serial.or(state.pointer_serial) {

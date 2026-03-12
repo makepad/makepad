@@ -43,6 +43,7 @@ script_mod! {
                 @tIconSet
                 @tImage
                 @tImageBlend
+                @tGlassPanel
                 @tLabel
                 @tLinkLabel
                 @tMarkdown
@@ -82,6 +83,7 @@ script_mod! {
         tIconSet := DockTab{name: "IconSet" template: @PermanentTab kind: @TabIconSet}
         tImage := DockTab{name: "Image" template: @PermanentTab kind: @TabImage}
         tImageBlend := DockTab{name: "ImageBlend" template: @PermanentTab kind: @TabImageBlend}
+        tGlassPanel := DockTab{name: "GlassPanel" template: @PermanentTab kind: @TabGlassPanel}
         tLabel := DockTab{name: "Label" template: @PermanentTab kind: @TabLabel}
         tLinkLabel := DockTab{name: "LinkLabel" template: @PermanentTab kind: @TabLinkLabel}
         tMarkdown := DockTab{name: "Markdown" template: @PermanentTab kind: @TabMarkdown}
@@ -111,6 +113,7 @@ script_mod! {
         TabIconSet := UIZooTab{DemoIconSet{}}
         TabImage := UIZooTab{DemoImage{}}
         TabImageBlend := UIZooTab{DemoImageBlend{}}
+        TabGlassPanel := UIZooTab{DemoGlassPanel{}}
         TabLabel := UIZooTab{DemoLabel{}}
         TabLinkLabel := UIZooTab{DemoLinkLabel{}}
         TabMarkdown := UIZooTab{DemoMarkdown{}}
@@ -344,6 +347,7 @@ impl AppMain for App {
         crate::tab_iconset::script_mod(vm);
         crate::tab_image::script_mod(vm);
         crate::tab_imageblend::script_mod(vm);
+        crate::tab_glasspanel::script_mod(vm);
         crate::tab_label::script_mod(vm);
         crate::tab_layout::script_mod(vm);
         crate::tab_linklabel::script_mod(vm);
