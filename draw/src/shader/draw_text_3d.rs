@@ -15,8 +15,6 @@ script_mod! {
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawText3d {
-    #[deref]
-    pub draw_super: DrawRotatedText,
     #[rust(Mat4f::identity())]
     pub view_matrix: Mat4f,
     #[rust(Mat4f::identity())]
@@ -35,6 +33,8 @@ pub struct DrawText3d {
     pub billboard_flag_spacing: f32,
     #[rust(0.0)]
     pub text_rotation: f32,
+    #[deref]
+    pub draw_super: DrawRotatedText,
 }
 
 impl DrawText3d {
@@ -130,7 +130,7 @@ impl DrawText3d {
         let ndc_x = clip.x * inv_w;
         let ndc_y = clip.y * inv_w;
         let ndc_z = clip.z * inv_w;
-        if ndc_z < -1.0 || ndc_z > 1.0 {
+        if !(-1.0..=1.0).contains(&ndc_z) {
             return None;
         }
 

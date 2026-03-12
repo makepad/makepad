@@ -1,3 +1,5 @@
+#![allow(clippy::result_unit_err)]
+
 use {
     crate::{
         cx_2d::Cx2d,
@@ -112,7 +114,7 @@ impl DrawListExt for DrawList {
 
     fn get_view_transform(&self, cx: &Cx) -> Mat4f {
         let cxview = &cx.draw_lists[self.id()];
-        return cxview.draw_list_uniforms.view_transform;
+        cxview.draw_list_uniforms.view_transform
     }
 
     fn redraw(&self, cx: &mut Cx) {
@@ -205,11 +207,11 @@ impl DrawList2d {
 
 impl<'a> CxDraw<'a> {
     pub fn new_draw_call(&mut self, draw_vars: &DrawVars) -> Option<&mut CxDrawItem> {
-        return self.get_draw_call(false, draw_vars);
+        self.get_draw_call(false, draw_vars)
     }
 
     pub fn append_to_draw_call(&mut self, draw_vars: &DrawVars) -> Option<&mut CxDrawItem> {
-        return self.get_draw_call(true, draw_vars);
+        self.get_draw_call(true, draw_vars)
     }
 
     pub fn get_current_draw_list_id(&self) -> Option<DrawListId> {
@@ -217,9 +219,7 @@ impl<'a> CxDraw<'a> {
     }
 
     pub fn get_draw_call(&mut self, append: bool, draw_vars: &DrawVars) -> Option<&mut CxDrawItem> {
-        if draw_vars.draw_shader_id.is_none() {
-            return None;
-        }
+        draw_vars.draw_shader_id?;
         let draw_shader = draw_vars.draw_shader_id.unwrap();
 
         let sh = &self.cx.draw_shaders[draw_shader.index];
@@ -239,9 +239,7 @@ impl<'a> CxDraw<'a> {
     pub fn begin_many_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {
         let draw_list_id = self.get_current_draw_list_id().unwrap();
         let draw_item = self.append_to_draw_call(draw_vars);
-        if draw_item.is_none() {
-            return None;
-        }
+        draw_item.as_ref()?;
         let draw_item = draw_item.unwrap();
         //let draw_call = draw_item.kind.draw_call().unwrap();
         let mut instances = None;
@@ -290,7 +288,7 @@ impl<'a> CxDraw<'a> {
         let ia = InstanceArea {
             draw_list_id,
             draw_item_id: draw_item.draw_item_id,
-            instance_count: instance_count,
+            instance_count,
             instance_offset: draw_item.instances.as_ref().unwrap().len(),
             redraw_id: draw_item.redraw_id,
         };
@@ -306,9 +304,7 @@ impl<'a> CxDraw<'a> {
 impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn begin_many_aligned_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {
         let mut li = self.begin_many_instances(draw_vars);
-        if li.is_none() {
-            return None;
-        }
+        li.as_ref()?;
         li.as_mut().unwrap().aligned = Some(self.align_list.len());
         self.align_list.push(AlignEntry::Unset);
         li
@@ -325,7 +321,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         ia.instance_count = (draw_item.instances.as_ref().unwrap().len() - ia.instance_offset)
             / draw_call.total_instance_slots;
         if let Some(aligned) = many_instances.aligned {
-            self.align_list[aligned] = AlignEntry::Area(ia.clone().into());
+            self.align_list[aligned] = AlignEntry::Area(ia.into());
         }
         ia.into()
     }
@@ -348,7 +344,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         let ia: Area = (InstanceArea {
             draw_list_id,
             draw_item_id: draw_item.draw_item_id,
-            instance_count: instance_count,
+            instance_count,
             instance_offset: draw_item.instances.as_ref().unwrap().len(),
             redraw_id: draw_item.redraw_id,
         })
@@ -358,7 +354,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             .as_mut()
             .unwrap()
             .extend_from_slice(data);
-        self.align_list.push(AlignEntry::Area(ia.clone()));
+        self.align_list.push(AlignEntry::Area(ia));
         ia
     }
 
@@ -412,16 +408,10 @@ pub trait RedrawingApi {
 
 impl RedrawingApi for Redrawing {
     fn is_redrawing(&self) -> bool {
-        match *self {
-            Result::Ok(_) => true,
-            Result::Err(_) => false,
-        }
+        (*self).is_ok()
     }
     fn is_not_redrawing(&self) -> bool {
-        match *self {
-            Result::Ok(_) => false,
-            Result::Err(_) => true,
-        }
+        (*self).is_err()
     }
     fn expect_redraw(&self) {
         if !self.is_redrawing() {

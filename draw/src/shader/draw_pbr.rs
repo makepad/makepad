@@ -8,6 +8,7 @@ use std::{collections::HashMap, f32::consts::PI, path::Path};
 const PBR_FLOATS_PER_VERTEX: usize = 16;
 
 pub type PbrMeshHandle = usize;
+type PbrMeshBuffers = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>);
 
 #[derive(Clone, Debug, Default)]
 pub struct DrawPbrTextureSet {
@@ -783,6 +784,7 @@ impl DrawPbr {
 
     /// Upload one mesh to GPU geometry and return a reusable mesh handle.
     /// Mesh data stays in local/object space and can be reused across draws.
+    #[allow(clippy::too_many_arguments)]
     pub fn upload_indexed_triangles_mesh(
         &mut self,
         cx: &mut Cx2d,
@@ -1110,8 +1112,8 @@ impl DrawPbr {
         radius: f32,
         subdivisions: usize,
     ) -> Result<(), String> {
-        let lat = subdivisions.max(4).min(96);
-        let lon = (lat * 2).max(8).min(192);
+        let lat = subdivisions.clamp(4, 96);
+        let lon = (lat * 2).clamp(8, 192);
         let mesh = self.ensure_sphere_mesh(cx, lat, lon)?;
         let scale = Mat4f::scaled_translation(radius.max(0.0001), vec3(0.0, 0.0, 0.0));
         let transform = Mat4f::mul(&self.cur_transform, &scale);
@@ -1179,7 +1181,7 @@ impl DrawPbr {
         cx: &mut Cx2d,
         subdivisions: usize,
     ) -> Result<PbrMeshHandle, String> {
-        let segments = subdivisions.max(1).min(64) as u16;
+        let segments = subdivisions.clamp(1, 64) as u16;
         let key = PbrPrimitiveMeshKey::Cube { segments };
         if let Some(handle) = self.primitive_mesh_cache.get(&key).copied() {
             return Ok(handle);
@@ -1213,8 +1215,8 @@ impl DrawPbr {
         seg_u: usize,
         seg_v: usize,
     ) -> Result<PbrMeshHandle, String> {
-        let seg_u = seg_u.max(1).min(256) as u16;
-        let seg_v = seg_v.max(1).min(256) as u16;
+        let seg_u = seg_u.clamp(1, 256) as u16;
+        let seg_v = seg_v.clamp(1, 256) as u16;
         let key = PbrPrimitiveMeshKey::Surface { seg_u, seg_v };
         if let Some(handle) = self.primitive_mesh_cache.get(&key).copied() {
             return Ok(handle);
@@ -1241,8 +1243,8 @@ impl DrawPbr {
         lat: usize,
         lon: usize,
     ) -> Result<PbrMeshHandle, String> {
-        let lat = lat.max(4).min(256) as u16;
-        let lon = lon.max(8).min(512) as u16;
+        let lat = lat.clamp(4, 256) as u16;
+        let lon = lon.clamp(8, 512) as u16;
         let key = PbrPrimitiveMeshKey::Sphere { lat, lon };
         if let Some(handle) = self.primitive_mesh_cache.get(&key).copied() {
             return Ok(handle);
@@ -1270,8 +1272,8 @@ impl DrawPbr {
         corner_segments: usize,
         radius_frac: f32,
     ) -> Result<PbrMeshHandle, String> {
-        let segments = subdivisions.max(1).min(64) as u16;
-        let cseg = corner_segments.max(1).min(32) as u16;
+        let segments = subdivisions.clamp(1, 64) as u16;
+        let cseg = corner_segments.clamp(1, 32) as u16;
         let radius_permille = (radius_frac.clamp(0.0, 1.0) * 1000.0) as u16;
         let key = PbrPrimitiveMeshKey::RoundedCube {
             segments,
@@ -1314,16 +1316,26 @@ impl DrawPbr {
         radius: f32,
         segments: usize,
         corner_segments: usize,
-    ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+    ) -> PbrMeshBuffers {
         let segments = segments.max(1);
         let cs = corner_segments.max(1);
         let radius = radius.min(half_extent).max(0.0);
         let inner = half_extent - radius; // Half-extent of the inner (flat) box
 
-        let mut positions = Vec::new();
-        let mut normals = Vec::new();
-        let mut uvs = Vec::new();
-        let mut indices = Vec::new();
+        let face_vertex_count = 6 * (segments + 1) * (segments + 1);
+        let edge_vertex_count = 12 * (segments + 1) * (cs + 1);
+        let corner_vertex_count = 8 * (cs + 1) * (cs + 1);
+        let total_vertex_count = face_vertex_count + edge_vertex_count + corner_vertex_count;
+
+        let face_index_count = 6 * segments * segments * 6;
+        let edge_index_count = 12 * segments * cs * 6;
+        let corner_index_count = 8 * cs * cs * 6;
+        let total_index_count = face_index_count + edge_index_count + corner_index_count;
+
+        let mut positions = Vec::with_capacity(total_vertex_count);
+        let mut normals = Vec::with_capacity(total_vertex_count);
+        let mut uvs = Vec::with_capacity(total_vertex_count);
+        let mut indices = Vec::with_capacity(total_index_count);
 
         // Macro to push a vertex inline (avoids borrow-checker issues with closures)
         macro_rules! push_vert {
@@ -1613,8 +1625,8 @@ impl DrawPbr {
 
     fn geometry_gen_to_pbr(
         gen: &GeometryGen,
-    ) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>), String> {
-        if gen.vertices.len() % 9 != 0 {
+    ) -> Result<PbrMeshBuffers, String> {
+        if !gen.vertices.len().is_multiple_of(9) {
             return Err(format!(
                 "expected GeometryGen vertex stride 9, got {} floats",
                 gen.vertices.len()
@@ -1635,7 +1647,7 @@ impl DrawPbr {
     fn build_surface_mesh(
         seg_u: usize,
         seg_v: usize,
-    ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+    ) -> PbrMeshBuffers {
         let seg_u = seg_u.max(1);
         let seg_v = seg_v.max(1);
         let vert_count = (seg_u + 1) * (seg_v + 1);
@@ -1673,7 +1685,7 @@ impl DrawPbr {
     fn build_uv_sphere_mesh(
         lat: usize,
         lon: usize,
-    ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+    ) -> PbrMeshBuffers {
         let lat = lat.max(4);
         let lon = lon.max(8);
         let mut positions = Vec::with_capacity((lat + 1) * (lon + 1));
@@ -1818,10 +1830,8 @@ impl DrawPbr {
         if self.acc_verts.is_empty() || self.acc_indices.is_empty() {
             return;
         }
-        let verts = std::mem::take(&mut self.acc_verts);
-        let indices = std::mem::take(&mut self.acc_indices);
         let geom = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx.cx));
-        geom.update(cx.cx.cx, indices, verts);
+        geom.update_with_recycled_buffers(cx.cx.cx, &mut self.acc_indices, &mut self.acc_verts);
         self.draw_vars.geometry_id = Some(geom.geometry_id());
         self.apply_draw_uniforms(cx);
         cx.new_draw_call(&self.draw_vars);

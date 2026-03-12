@@ -68,6 +68,9 @@ impl Shaper {
     }
 
     pub fn get_or_shape(&mut self, params: ShapeParams) -> Rc<ShapedText> {
+        if self.cache_size == 0 {
+            return Rc::new(self.shape(params));
+        }
         if let Some(result) = self.cached_results.get(&params) {
             return result.clone();
         }
@@ -75,9 +78,10 @@ impl Shaper {
             let params = self.cached_params.pop_front().unwrap();
             self.cached_results.remove(&params);
         }
-        let result = Rc::new(self.shape(params.clone()));
-        self.cached_params.push_back(params.clone());
-        self.cached_results.insert(params, result.clone());
+        let cache_key = params.clone();
+        let result = Rc::new(self.shape(params));
+        self.cached_params.push_back(cache_key.clone());
+        self.cached_results.insert(cache_key, result.clone());
         result
     }
 
@@ -117,6 +121,7 @@ impl Shaper {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn shape_recursive(
         &mut self,
         text: &str,
@@ -128,7 +133,7 @@ impl Shaper {
         out_glyphs: &mut Vec<ShapedGlyph>,
     ) {
         let (font, fonts) = fonts.split_first().unwrap();
-        let mut glyphs = self.reusable_glyphs.pop().unwrap_or(Vec::new());
+        let mut glyphs = self.reusable_glyphs.pop().unwrap_or_default();
         self.shape_step(text, font, features, direction, start, end, &mut glyphs);
         let mut glyph_groups = glyphs
             .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
@@ -136,7 +141,7 @@ impl Shaper {
         while let Some(glyph_group) = glyph_groups.next() {
             if glyph_group.iter().any(|glyph| glyph.id == 0) && !fonts.is_empty() {
                 let missing_start = glyph_group[0].cluster;
-                while glyph_groups.peek().map_or(false, |glyph_group| {
+                while glyph_groups.peek().is_some_and(|glyph_group| {
                     glyph_group.iter().any(|glyph| glyph.id == 0)
                 }) {
                     glyph_groups.next();
@@ -144,7 +149,15 @@ impl Shaper {
                 let missing_end = glyph_groups
                     .peek()
                     .map_or(end, |next_glyph_group| next_glyph_group[0].cluster);
-                self.shape_recursive(text, fonts, features, direction, missing_start, missing_end, out_glyphs);
+                self.shape_recursive(
+                    text,
+                    fonts,
+                    features,
+                    direction,
+                    missing_start,
+                    missing_end,
+                    out_glyphs,
+                );
             } else {
                 out_glyphs.extend(glyph_group.iter().cloned());
             }
@@ -154,6 +167,7 @@ impl Shaper {
         self.reusable_glyphs.push(glyphs);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn shape_step(
         &mut self,
         text: &str,
@@ -177,13 +191,16 @@ impl Shaper {
         }
         let rb_features: Vec<rustybuzz::Feature> = features
             .iter()
-            .map(|&(tag, value)| rustybuzz::Feature::new(
-                rustybuzz::ttf_parser::Tag::from_bytes(&tag.to_be_bytes()),
-                value,
-                ..,
-            ))
+            .map(|&(tag, value)| {
+                rustybuzz::Feature::new(
+                    rustybuzz::ttf_parser::Tag::from_bytes(&tag.to_be_bytes()),
+                    value,
+                    ..,
+                )
+            })
             .collect();
-        let glyph_buffer = rustybuzz::shape(font.rustybuzz_face(), &rb_features, unicode_buffer);
+        let glyph_buffer =
+            font.with_rustybuzz_face(|face| rustybuzz::shape(face, &rb_features, unicode_buffer));
         out_glyphs.extend(
             glyph_buffer
                 .glyph_infos()

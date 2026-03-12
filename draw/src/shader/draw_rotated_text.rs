@@ -108,6 +108,7 @@ pub struct PathTextPlacement {
 
 impl DrawRotatedText {
     /// Draw a single glyph at an arbitrary position with rotation.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_glyph_at(
         &mut self,
         cx: &mut Cx2d,
@@ -157,6 +158,7 @@ impl DrawRotatedText {
     /// * `baseline_shift` — vertical offset from the path centerline.
     /// * `max_glyph_turn` — maximum angle change between consecutive glyphs (radians).
     /// * `angle_blend` — smoothing factor for glyph angles (0..1).
+    #[allow(clippy::too_many_arguments)]
     pub fn place_text_along_path(
         &self,
         run: &PreparedTextRun,
@@ -295,7 +297,7 @@ fn sample_point_at_distance(points: &[Vec2d], cumulative: &[f64], distance: f64)
     let total = *cumulative.last()?;
     let d = distance.clamp(0.0, total);
 
-    let idx = match cumulative.binary_search_by(|v| v.partial_cmp(&d).unwrap()) {
+    let idx = match cumulative.binary_search_by(|v| v.total_cmp(&d)) {
         Ok(i) => return Some(points[i]),
         Err(i) => i,
     };

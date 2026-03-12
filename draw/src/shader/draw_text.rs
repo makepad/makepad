@@ -418,7 +418,7 @@ impl DrawText {
         }
 
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_rect.pos.y as f32);
-        self.draw_text(cx, origin_in_lpxs, &laidout_text);
+        self.draw_text(cx, origin_in_lpxs, laidout_text);
 
         rect(
             origin_in_lpxs.x as f64,
@@ -490,8 +490,8 @@ impl DrawText {
             ),
         });
 
-        let shift = if let Some(row) = text.rows.get(0) {
-            if let Some(glyph) = row.glyphs.get(0) {
+        let shift = if let Some(row) = text.rows.first() {
+            if let Some(glyph) = row.glyphs.first() {
                 glyph.font_size_in_lpxs * self.temp_y_shift
             } else {
                 0.0
@@ -530,6 +530,7 @@ impl DrawText {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn layout(
         &self,
         cx: &mut Cx,
@@ -559,7 +560,7 @@ impl DrawText {
                 max_width_in_lpxs,
                 wrap,
                 align: align.x as f32,
-                line_spacing_scale: self.text_style.line_spacing as f32,
+                line_spacing_scale: self.text_style.line_spacing,
             },
         })
     }
@@ -983,7 +984,8 @@ impl TextStyle {
     }
 
     pub fn ensure_fonts_loaded_for_text(&self, cx: &mut Cx, text: &str) {
-        self.font_family.ensure_fonts_loaded_for_text(cx, Some(text));
+        self.font_family
+            .ensure_fonts_loaded_for_text(cx, Some(text));
     }
 }
 

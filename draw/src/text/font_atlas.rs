@@ -51,7 +51,11 @@ impl<T> FontAtlas<T> {
         &self.image
     }
 
-    pub unsafe fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
+    pub fn take_pixels(&mut self) -> Vec<T> {
+        self.image.take_pixels()
+    }
+
+    pub fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
         self.image.replace_pixels(pixels)
     }
 

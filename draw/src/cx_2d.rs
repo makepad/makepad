@@ -42,7 +42,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         draw_call_parent_stack.push(1);
         Self {
             overlay_id: None,
-            cx: cx,
+            cx,
             turtle_clips: Vec::with_capacity(1024),
             finished_rows: Vec::with_capacity(1024),
             finished_walks: Vec::with_capacity(1024),

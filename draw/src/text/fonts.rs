@@ -9,7 +9,7 @@ use {
         rasterizer::{CompletedMsdfJob, OutlineRasterizationMode, QueuedMsdfJob, Rasterizer},
     },
     crate::makepad_platform::*,
-    std::{cell::RefCell, mem, rc::Rc},
+    std::{cell::RefCell, mem::ManuallyDrop, rc::Rc},
 };
 
 pub struct Fonts {
@@ -166,8 +166,7 @@ impl Fonts {
     fn prepare_atlas_texture(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let dirty_rect = rasterizer.color_atlas_mut().take_dirty_image().bounds();
-        let pixels: Vec<u32> =
-            unsafe { mem::transmute(rasterizer.color_atlas_mut().replace_pixels(Vec::new())) };
+        let pixels = bgra_vec_into_u32(rasterizer.color_atlas_mut().take_pixels());
         self.atlas_texture.put_back_vec_u32(
             cx,
             pixels,
@@ -189,11 +188,8 @@ impl Fonts {
     fn prepare_atlas(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let pixels = self.atlas_texture.take_vec_u32(cx);
-        unsafe {
-            rasterizer
-                .color_atlas_mut()
-                .replace_pixels(mem::transmute(pixels))
-        };
+        let pixels = u32_vec_into_bgra(pixels);
+        rasterizer.color_atlas_mut().replace_pixels(pixels);
     }
 
     fn dispatch_msdf_jobs(&mut self) {
@@ -218,4 +214,24 @@ impl Fonts {
         }
         completed
     }
+}
+
+fn bgra_vec_into_u32(vec: Vec<Bgra>) -> Vec<u32> {
+    debug_assert_eq!(std::mem::size_of::<Bgra>(), std::mem::size_of::<u32>());
+    debug_assert_eq!(std::mem::align_of::<Bgra>(), std::mem::align_of::<u32>());
+    let mut vec = ManuallyDrop::new(vec);
+    // SAFETY:
+    // `Bgra` is `#[repr(transparent)]` over `u32`, so element layout matches exactly.
+    // We preserve the same pointer/len/cap and only reinterpret the element type.
+    unsafe { Vec::from_raw_parts(vec.as_mut_ptr().cast::<u32>(), vec.len(), vec.capacity()) }
+}
+
+fn u32_vec_into_bgra(vec: Vec<u32>) -> Vec<Bgra> {
+    debug_assert_eq!(std::mem::size_of::<Bgra>(), std::mem::size_of::<u32>());
+    debug_assert_eq!(std::mem::align_of::<Bgra>(), std::mem::align_of::<u32>());
+    let mut vec = ManuallyDrop::new(vec);
+    // SAFETY:
+    // `Bgra` is `#[repr(transparent)]` over `u32`, so element layout matches exactly.
+    // We preserve the same pointer/len/cap and only reinterpret the element type.
+    unsafe { Vec::from_raw_parts(vec.as_mut_ptr().cast::<Bgra>(), vec.len(), vec.capacity()) }
 }
