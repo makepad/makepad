@@ -12,6 +12,13 @@ script_mod! {
     mod.widgets.XrSceneBase = #(XrScene::register_widget(vm))
     mod.widgets.XrScene = set_type_default() do mod.widgets.XrSceneBase{
         draw_cube +: {}
+        draw_pbr +: {
+            light_dir: vec3(0.35, 0.8, 0.45)
+            light_color: vec3(1.0, 1.0, 1.0)
+            ambient: 0.25
+            spec_strength: 0.9
+            env_intensity: 1.8
+        }
     }
 
     startup() do #(App::script_component(vm)){
@@ -128,6 +135,9 @@ pub struct XrScene {
     #[redraw]
     #[live]
     draw_cube: DrawCube,
+    #[redraw]
+    #[live]
+    draw_pbr: DrawPbr,
     #[rust]
     pulses: Vec<PulseTrail>,
     #[rust]
@@ -216,30 +226,29 @@ impl XrScene {
         self.reference_cube_pose = Some(pose);
     }
 
-    fn draw_reference_cube(&mut self, cx: &mut Cx2d) {
+    fn draw_reference_cube(&mut self, cx: &mut Cx2d, state: &XrState) {
         let Some(pose) = self.reference_cube_pose else {
             return;
         };
 
-        self.draw_pose_box(
-            cx,
-            pose,
-            vec3(0.16, 0.16, 0.16),
-            vec4(0.98, 0.24, 0.18, 1.0),
-            1.0,
-            0.06,
-            0.24,
-        );
-        self.draw_forward_box(
-            cx,
-            pose,
-            vec3(0.045, 0.045, 0.11),
-            -0.14,
-            vec4(1.0, 0.96, 0.88, 1.0),
-            1.0,
-            0.04,
-            0.18,
-        );
+        self.draw_pbr.set_use_pass_camera(true);
+        self.draw_pbr.camera_pos = state.head_pose.position;
+        self.draw_pbr.set_depth_write(true);
+        self.draw_pbr.set_depth_clip(1.0);
+        self.draw_pbr.set_base_color_texture(None);
+        self.draw_pbr.set_metal_roughness_texture(None);
+        self.draw_pbr.set_normal_texture(None);
+        self.draw_pbr.set_occlusion_texture(None);
+        self.draw_pbr.set_emissive_texture(None);
+        let env_tex = self.draw_pbr.default_env_texture(cx);
+        self.draw_pbr.set_env_texture(Some(env_tex));
+        self.draw_pbr
+            .set_base_color_factor(vec4(0.98, 0.24, 0.18, 1.0));
+        self.draw_pbr.set_metal_roughness(0.0, 0.55);
+        self.draw_pbr.set_transform(pose.to_mat4());
+        let _ = self
+            .draw_pbr
+            .draw_rounded_cube(cx, vec3(0.08, 0.08, 0.08), 0.02, 1, 4);
     }
 
     fn draw_headset(&mut self, cx: &mut Cx2d, state: &XrState) {
@@ -428,7 +437,7 @@ impl Widget for XrScene {
 
         let cx = &mut Cx2d::new(cx.cx);
 
-        self.draw_reference_cube(cx);
+        self.draw_reference_cube(cx, state);
         self.draw_headset(cx, state);
         self.draw_hand(cx, &state.left_hand, true);
         self.draw_hand(cx, &state.right_hand, false);
