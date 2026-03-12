@@ -40,7 +40,7 @@ impl Cx {
 
         if let Some(scheme_idx) = input.find("://") {
             let after_scheme = &input[(scheme_idx + 3)..];
-            input = match after_scheme.find('/') {
+            input = match after_scheme.find(['/', '?', '#']) {
                 Some(path_idx) => &after_scheme[path_idx..],
                 None => "/",
             };

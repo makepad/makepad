@@ -101,6 +101,10 @@ export class WasmWebBrowser extends WasmBridge {
             this.emit_location_change();
             this.do_wasm_pump();
         });
+        window.addEventListener("hashchange", () => {
+            this.emit_location_change();
+            this.do_wasm_pump();
+        });
         this.focus_keyboard_input();
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
@@ -174,7 +178,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmBrowserUpdateUrl(args) {
-        const next = new URL(args.url || "/", window.location.origin);
+        const next = new URL(args.url || "", window.location.href);
         const nextHref = next.pathname + next.search + next.hash;
         const currentHref = location.pathname + location.search + location.hash;
         if (nextHref === currentHref) {
