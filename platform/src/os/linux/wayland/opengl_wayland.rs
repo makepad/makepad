@@ -154,9 +154,8 @@ impl WaylandWindow {
 
         // Create anonymous shm file
         let name = std::ffi::CString::new("makepad-icon").unwrap();
-        let fd = unsafe {
-            crate::libc_sys::memfd_create(name.as_ptr(), crate::libc_sys::MFD_CLOEXEC)
-        };
+        let fd =
+            unsafe { crate::libc_sys::memfd_create(name.as_ptr(), crate::libc_sys::MFD_CLOEXEC) };
         if fd < 0 {
             return;
         }
@@ -260,7 +259,8 @@ pub(crate) struct WaylandPopupWindow {
     pub wl_egl_surface: Option<WlEglSurface>,
     pub egl_surface: EGLSurface,
     pub egl_display: egl_sys::EGLDisplay,
-    egl_destroy_surface_fn: unsafe extern "C" fn(egl_sys::EGLDisplay, EGLSurface) -> egl_sys::EGLBoolean,
+    egl_destroy_surface_fn:
+        unsafe extern "C" fn(egl_sys::EGLDisplay, EGLSurface) -> egl_sys::EGLBoolean,
     pub window_geom: WindowGeom,
     pub configured: bool,
     pub cal_size: Vec2d,
@@ -305,16 +305,20 @@ impl WaylandPopupWindow {
                 | xdg_positioner::ConstraintAdjustment::SlideY,
         );
 
-        let xdg_popup = xdg_surface.get_popup(Some(parent_xdg_surface), &positioner, qhandle, window_id);
+        let xdg_popup =
+            xdg_surface.get_popup(Some(parent_xdg_surface), &positioner, qhandle, window_id);
         // Do NOT grab the popup. Without a grab the compositor will not
         // auto-dismiss the popup on outside clicks, giving the app full
         // control over popup lifetime via explicit close.
         base_surface.commit();
         positioner.destroy();
 
-        let wl_egl_surface =
-            WlEglSurface::new(base_surface.id(), size.x.max(1.0) as i32, size.y.max(1.0) as i32)
-                .unwrap();
+        let wl_egl_surface = WlEglSurface::new(
+            base_surface.id(),
+            size.x.max(1.0) as i32,
+            size.y.max(1.0) as i32,
+        )
+        .unwrap();
         let egl_surface = unsafe {
             (opengl_cx.libegl.eglCreateWindowSurface.unwrap())(
                 opengl_cx.egl_display,
@@ -362,8 +366,7 @@ impl WaylandPopupWindow {
         if self.cal_size != cal_size {
             self.cal_size = cal_size;
             if let Some(ref wl_egl_surface) = self.wl_egl_surface {
-                wl_egl_surface
-                    .resize(cal_size.x.max(1.0) as i32, cal_size.y.max(1.0) as i32, 0, 0);
+                wl_egl_surface.resize(cal_size.x.max(1.0) as i32, cal_size.y.max(1.0) as i32, 0, 0);
             }
             true
         } else {

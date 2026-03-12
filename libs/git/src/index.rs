@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn test_parse_real_index() {
         // Create a test repo and parse its index
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         std::process::Command::new("git")
             .args(["init"])
             .current_dir(dir.path())
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_serialize_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         std::process::Command::new("git")
             .args(["init"])
             .current_dir(dir.path())

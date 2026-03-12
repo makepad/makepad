@@ -159,5 +159,3 @@ impl Drop for V4l2CameraPlayer {
         self.cleanup();
     }
 }
-
-

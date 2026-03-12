@@ -1,8 +1,10 @@
 use crate::dispatch::{HubCore, HubEvent};
 use crate::gateway::{start_http_gateway, GatewayHandle};
-use makepad_studio_protocol::hub_protocol::{ClientId, QueryId, HubToClient, ClientToHub, ClientToHubEnvelope};
 use crate::virtual_fs::VirtualFs;
 use makepad_script_std::makepad_network::ToUIReceiver;
+use makepad_studio_protocol::hub_protocol::{
+    ClientId, ClientToHub, ClientToHubEnvelope, HubToClient, QueryId,
+};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
@@ -63,7 +65,9 @@ impl HubConnection {
     /// Returns the studio address string used by child processes to connect
     /// back to the hub (e.g. `"127.0.0.1:8001"`).
     pub fn studio_addr(&self) -> Option<String> {
-        self.gateway.as_ref().map(|g| studio_addr_for_child(g.listen_address))
+        self.gateway
+            .as_ref()
+            .map(|g| studio_addr_for_child(g.listen_address))
     }
 
     pub fn send(&mut self, msg: ClientToHub) -> QueryId {

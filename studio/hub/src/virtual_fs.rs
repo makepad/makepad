@@ -1,10 +1,10 @@
 use crate::worker_pool::WorkerPool;
-use makepad_studio_protocol::hub_protocol::{
-    FileError, FileNode, FileNodeType, FileTreeData, GitCommitInfo, GitLog, GitStatus, SearchResult,
-};
 use makepad_git::{FileStatus as GitFileStatus, GitError, Repository as GitRepository};
 use makepad_rabin_karp::{search_with_limit as rabin_karp_search, RabinKarpResult};
 use makepad_regex::{ParseOptions as RegexParseOptions, Regex};
+use makepad_studio_protocol::hub_protocol::{
+    FileError, FileNode, FileNodeType, FileTreeData, GitCommitInfo, GitLog, GitStatus, SearchResult,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1019,7 +1019,12 @@ fn search_file_content(
             if remaining == 0 {
                 return true;
             }
-            rabin_karp_search(content.as_bytes(), needle.as_slice(), &mut matches, remaining);
+            rabin_karp_search(
+                content.as_bytes(),
+                needle.as_slice(),
+                &mut matches,
+                remaining,
+            );
             for matched in matches {
                 let line = matched.line + 1;
                 let column = matched.column_byte + 1;
@@ -1054,7 +1059,8 @@ fn search_file_content(
                 let match_start = search_from + start_rel;
                 let match_end = search_from + end_rel;
 
-                let result = search_result_for_byte_offset(content, &line_starts, virtual_path, match_start);
+                let result =
+                    search_result_for_byte_offset(content, &line_starts, virtual_path, match_start);
                 out.push(result);
                 if out.len() >= max_results {
                     return true;

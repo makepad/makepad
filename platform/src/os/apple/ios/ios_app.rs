@@ -306,7 +306,8 @@ impl IosApp {
             if !selection_display_cls.is_null() {
                 let interaction: ObjcId = msg_send![selection_display_cls, alloc];
                 if interaction != nil {
-                    let can_init: BOOL = msg_send![interaction, respondsToSelector: sel!(initWithTextInput:)];
+                    let can_init: BOOL =
+                        msg_send![interaction, respondsToSelector: sel!(initWithTextInput:)];
                     if can_init == YES {
                         let interaction: ObjcId =
                             msg_send![interaction, initWithTextInput: text_input_view];
@@ -323,8 +324,10 @@ impl IosApp {
             let selection_handle_start = self.create_selection_handle_view();
             let selection_handle_end = self.create_selection_handle_view();
 
-            let start_handler: ObjcId =
-                msg_send![get_ios_class_global().selection_handle_gesture_handler, alloc];
+            let start_handler: ObjcId = msg_send![
+                get_ios_class_global().selection_handle_gesture_handler,
+                alloc
+            ];
             let start_handler: ObjcId = msg_send![start_handler, init];
             (*start_handler).set_ivar::<i64>("handle_kind", 0);
             let start_pan: ObjcId = msg_send![class!(UIPanGestureRecognizer), alloc];
@@ -335,8 +338,10 @@ impl IosApp {
             ];
             let () = msg_send![selection_handle_start, addGestureRecognizer: start_pan];
 
-            let end_handler: ObjcId =
-                msg_send![get_ios_class_global().selection_handle_gesture_handler, alloc];
+            let end_handler: ObjcId = msg_send![
+                get_ios_class_global().selection_handle_gesture_handler,
+                alloc
+            ];
             let end_handler: ObjcId = msg_send![end_handler, init];
             (*end_handler).set_ivar::<i64>("handle_kind", 1);
             let end_pan: ObjcId = msg_send![class!(UIPanGestureRecognizer), alloc];

@@ -28,8 +28,8 @@ fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn make_repo() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
+fn make_repo() -> test_support::TempDir {
+    let dir = test_support::tempdir().unwrap();
     git(dir.path(), &["init"]);
     fs::write(dir.path().join("file1.txt"), "hello\n").unwrap();
     fs::write(dir.path().join("file2.txt"), "world\n").unwrap();

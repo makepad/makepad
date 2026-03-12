@@ -1,9 +1,9 @@
 use crate::*;
 use makepad_script::*;
 
+pub mod cx;
 pub mod draw;
 pub mod event;
-pub mod cx;
 pub mod res;
 pub mod script;
 pub mod std;

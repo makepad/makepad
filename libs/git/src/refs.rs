@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_read_head_symbolic() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let git_dir = dir.path();
         fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_read_head_detached() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let git_dir = dir.path();
         fs::write(
             git_dir.join("HEAD"),
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_write_and_read_ref() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let git_dir = dir.path();
         let oid = ObjectId::from_hex("552e2a0e14dd313f5f572118a18fba67ad99699c").unwrap();
 
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_packed_refs() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let git_dir = dir.path();
         fs::write(
             git_dir.join("packed-refs"),

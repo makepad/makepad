@@ -86,7 +86,6 @@ impl ScriptHook for DrawVars {
             } else if let Some(v) = depth_write_value.as_f64() {
                 self.options.depth_write = v != 0.0;
             }
-
         }
         // lets fill our values
         if self.draw_shader_id.is_some() {
@@ -323,7 +322,13 @@ impl DrawVars {
         };
 
         let sh = &cx.draw_shaders[draw_shader_id.index];
-        let Some(input) = sh.mapping.instances.inputs.iter().find(|input| input.id == inst) else {
+        let Some(input) = sh
+            .mapping
+            .instances
+            .inputs
+            .iter()
+            .find(|input| input.id == inst)
+        else {
             return false;
         };
         let Some(draw_list) = cx.draw_lists.checked_index(area.draw_list_id) else {

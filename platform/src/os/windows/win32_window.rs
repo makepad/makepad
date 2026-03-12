@@ -40,8 +40,8 @@ use {
                     Controls::{MARGINS, WM_MOUSELEAVE},
                     Input::{
                         Ime::{
-                            ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, ImmAssociateContext,
-                            CFS_POINT, COMPOSITIONFORM, HIMC,
+                            ImmAssociateContext, ImmGetContext, ImmReleaseContext,
+                            ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM, HIMC,
                         },
                         KeyboardAndMouse::{
                             GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,

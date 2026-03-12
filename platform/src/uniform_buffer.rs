@@ -33,20 +33,14 @@ impl UniformBuffer {
 
     pub fn set_struct<T: Copy>(&self, cx: &mut Cx, value: &T) {
         let bytes = unsafe {
-            std::slice::from_raw_parts(
-                value as *const T as *const u8,
-                std::mem::size_of::<T>(),
-            )
+            std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>())
         };
         self.set_bytes(cx, bytes);
     }
 
     pub fn set_struct_slice<T: Copy>(&self, cx: &mut Cx, values: &[T]) {
         let bytes = unsafe {
-            std::slice::from_raw_parts(
-                values.as_ptr() as *const u8,
-                std::mem::size_of_val(values),
-            )
+            std::slice::from_raw_parts(values.as_ptr() as *const u8, std::mem::size_of_val(values))
         };
         self.set_bytes(cx, bytes);
     }
@@ -65,9 +59,9 @@ pub struct CxUniformBufferPool(pub(crate) IdPool<CxUniformBuffer>);
 
 impl CxUniformBufferPool {
     pub fn alloc(&mut self) -> UniformBuffer {
-        let (new_id, previous_item) =
-            self.0
-                .alloc_with_reuse_filter(|_| true, CxUniformBuffer::default());
+        let (new_id, previous_item) = self
+            .0
+            .alloc_with_reuse_filter(|_| true, CxUniformBuffer::default());
         if let Some(previous_item) = previous_item {
             self.0.pool[new_id.id].item.os = previous_item.os;
         }

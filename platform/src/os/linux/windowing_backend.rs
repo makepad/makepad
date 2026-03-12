@@ -34,7 +34,6 @@ fn detect_windowing_protocol() -> WindowingProtocol {
     // Both X11 and Wayland backends support this path, so let normal
     // protocol detection proceed instead of forcing X11.
 
-
     if let Some(protocol) = forced_windowing_protocol_from_args() {
         return protocol;
     }

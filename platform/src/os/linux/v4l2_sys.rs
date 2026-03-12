@@ -10,10 +10,7 @@ const IOC_WRITE: u32 = 1;
 const IOC_READ: u32 = 2;
 
 const fn ioc(dir: u32, ty: u32, nr: u32, size: usize) -> c_ulong {
-    ((dir as c_ulong) << 30)
-        | ((ty as c_ulong) << 8)
-        | (nr as c_ulong)
-        | ((size as c_ulong) << 16)
+    ((dir as c_ulong) << 30) | ((ty as c_ulong) << 8) | (nr as c_ulong) | ((size as c_ulong) << 16)
 }
 
 // V4L2 capabilities
@@ -271,32 +268,69 @@ pub struct inotify_event {
 
 // --- ioctl constants ---
 
-pub const VIDIOC_QUERYCAP: c_ulong =
-    ioc(IOC_READ, 0x56, 0, std::mem::size_of::<v4l2_capability>());
-pub const VIDIOC_ENUM_FMT: c_ulong =
-    ioc(IOC_READ | IOC_WRITE, 0x56, 2, std::mem::size_of::<v4l2_fmtdesc>());
-pub const VIDIOC_G_FMT: c_ulong =
-    ioc(IOC_READ | IOC_WRITE, 0x56, 4, std::mem::size_of::<v4l2_format>());
-pub const VIDIOC_S_FMT: c_ulong =
-    ioc(IOC_READ | IOC_WRITE, 0x56, 5, std::mem::size_of::<v4l2_format>());
-pub const VIDIOC_REQBUFS: c_ulong =
-    ioc(IOC_READ | IOC_WRITE, 0x56, 8, std::mem::size_of::<v4l2_requestbuffers>());
-pub const VIDIOC_QUERYBUF: c_ulong =
-    ioc(IOC_READ | IOC_WRITE, 0x56, 9, std::mem::size_of::<v4l2_buffer>());
-pub const VIDIOC_QBUF: c_ulong =
-    ioc(IOC_READ | IOC_WRITE, 0x56, 15, std::mem::size_of::<v4l2_buffer>());
-pub const VIDIOC_DQBUF: c_ulong =
-    ioc(IOC_READ | IOC_WRITE, 0x56, 17, std::mem::size_of::<v4l2_buffer>());
-pub const VIDIOC_STREAMON: c_ulong =
-    ioc(IOC_WRITE, 0x56, 18, std::mem::size_of::<c_int>());
-pub const VIDIOC_STREAMOFF: c_ulong =
-    ioc(IOC_WRITE, 0x56, 19, std::mem::size_of::<c_int>());
-pub const VIDIOC_S_PARM: c_ulong =
-    ioc(IOC_READ | IOC_WRITE, 0x56, 22, std::mem::size_of::<v4l2_streamparm>());
-pub const VIDIOC_ENUM_FRAMESIZES: c_ulong =
-    ioc(IOC_READ | IOC_WRITE, 0x56, 74, std::mem::size_of::<v4l2_frmsizeenum>());
-pub const VIDIOC_ENUM_FRAMEINTERVALS: c_ulong =
-    ioc(IOC_READ | IOC_WRITE, 0x56, 75, std::mem::size_of::<v4l2_frmivalenum>());
+pub const VIDIOC_QUERYCAP: c_ulong = ioc(IOC_READ, 0x56, 0, std::mem::size_of::<v4l2_capability>());
+pub const VIDIOC_ENUM_FMT: c_ulong = ioc(
+    IOC_READ | IOC_WRITE,
+    0x56,
+    2,
+    std::mem::size_of::<v4l2_fmtdesc>(),
+);
+pub const VIDIOC_G_FMT: c_ulong = ioc(
+    IOC_READ | IOC_WRITE,
+    0x56,
+    4,
+    std::mem::size_of::<v4l2_format>(),
+);
+pub const VIDIOC_S_FMT: c_ulong = ioc(
+    IOC_READ | IOC_WRITE,
+    0x56,
+    5,
+    std::mem::size_of::<v4l2_format>(),
+);
+pub const VIDIOC_REQBUFS: c_ulong = ioc(
+    IOC_READ | IOC_WRITE,
+    0x56,
+    8,
+    std::mem::size_of::<v4l2_requestbuffers>(),
+);
+pub const VIDIOC_QUERYBUF: c_ulong = ioc(
+    IOC_READ | IOC_WRITE,
+    0x56,
+    9,
+    std::mem::size_of::<v4l2_buffer>(),
+);
+pub const VIDIOC_QBUF: c_ulong = ioc(
+    IOC_READ | IOC_WRITE,
+    0x56,
+    15,
+    std::mem::size_of::<v4l2_buffer>(),
+);
+pub const VIDIOC_DQBUF: c_ulong = ioc(
+    IOC_READ | IOC_WRITE,
+    0x56,
+    17,
+    std::mem::size_of::<v4l2_buffer>(),
+);
+pub const VIDIOC_STREAMON: c_ulong = ioc(IOC_WRITE, 0x56, 18, std::mem::size_of::<c_int>());
+pub const VIDIOC_STREAMOFF: c_ulong = ioc(IOC_WRITE, 0x56, 19, std::mem::size_of::<c_int>());
+pub const VIDIOC_S_PARM: c_ulong = ioc(
+    IOC_READ | IOC_WRITE,
+    0x56,
+    22,
+    std::mem::size_of::<v4l2_streamparm>(),
+);
+pub const VIDIOC_ENUM_FRAMESIZES: c_ulong = ioc(
+    IOC_READ | IOC_WRITE,
+    0x56,
+    74,
+    std::mem::size_of::<v4l2_frmsizeenum>(),
+);
+pub const VIDIOC_ENUM_FRAMEINTERVALS: c_ulong = ioc(
+    IOC_READ | IOC_WRITE,
+    0x56,
+    75,
+    std::mem::size_of::<v4l2_frmivalenum>(),
+);
 
 // --- extern "C" ---
 

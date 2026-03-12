@@ -130,14 +130,7 @@ impl GStreamerVideoPlayer {
         is_looping: bool,
     ) -> Self {
         Self::new_impl(
-            gst,
-            video_id,
-            texture_id,
-            yuv_ids,
-            source,
-            autoplay,
-            is_looping,
-            false,
+            gst, video_id, texture_id, yuv_ids, source, autoplay, is_looping, false,
         )
     }
 
@@ -184,7 +177,6 @@ impl GStreamerVideoPlayer {
         } else {
             VideoCapsProfile::SystemRgba
         };
-
 
         let Some((pipeline, video_sink, bus)) =
             Self::build_pipeline(gst, video_id, &uri, audio_only, caps_profile)
@@ -241,7 +233,10 @@ impl GStreamerVideoPlayer {
             let playbin_name = CString::new("playbin").unwrap();
             let pipeline = (gst.gst_element_factory_make)(playbin_name.as_ptr(), std::ptr::null());
             if pipeline.is_null() {
-                error!("Failed to create GStreamer playbin for video {:?}", video_id);
+                error!(
+                    "Failed to create GStreamer playbin for video {:?}",
+                    video_id
+                );
                 return None;
             }
 
@@ -274,7 +269,10 @@ impl GStreamerVideoPlayer {
                 let video_sink =
                     (gst.gst_element_factory_make)(appsink_type.as_ptr(), appsink_name.as_ptr());
                 if video_sink.is_null() {
-                    error!("Failed to create GStreamer appsink for video {:?}", video_id);
+                    error!(
+                        "Failed to create GStreamer appsink for video {:?}",
+                        video_id
+                    );
                     (gst.gst_object_unref)(pipeline as *mut c_void);
                     return None;
                 }
@@ -416,7 +414,9 @@ impl GStreamerVideoPlayer {
 
     /// Check if the player has finished prerolling and is ready to play.
     /// Returns `Ok(...)` with metadata when ready, `Err(msg)` on failure, `None` if still loading.
-    pub fn check_prepared(&mut self) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    pub fn check_prepared(
+        &mut self,
+    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
         if self.prepare_notified || self.pipeline.is_null() {
             return None;
         }
@@ -476,9 +476,7 @@ impl GStreamerVideoPlayer {
                 } else {
                     error!(
                         "GStreamer error id={} msg={} debug={}",
-                        self.video_id.0,
-                        err_str,
-                        debug_str
+                        self.video_id.0, err_str, debug_str
                     );
                 }
 
@@ -545,7 +543,6 @@ impl GStreamerVideoPlayer {
                     vec!["video".to_string()]
                 };
             let audio_tracks = vec!["audio".to_string()];
-
 
             Some(Ok((
                 self.video_width,
@@ -628,10 +625,9 @@ impl GStreamerVideoPlayer {
 
             // Zero-copy path: GLMemory sample already backed by a GL texture.
             if self.caps_profile.is_gl_memory() {
-                if let (Some(is_gl_memory), Some(get_gl_texture_id)) = (
-                    gst.gst_is_gl_memory,
-                    gst.gst_gl_memory_get_texture_id,
-                ) {
+                if let (Some(is_gl_memory), Some(get_gl_texture_id)) =
+                    (gst.gst_is_gl_memory, gst.gst_gl_memory_get_texture_id)
+                {
                     let memory = (gst.gst_buffer_peek_memory)(buffer, 0);
                     if !memory.is_null() && is_gl_memory(memory) != 0 {
                         let gl_texture = get_gl_texture_id(memory);
@@ -657,7 +653,9 @@ impl GStreamerVideoPlayer {
                             });
 
                             if !self.retained_gl_sample.is_null() {
-                                (gst.gst_mini_object_unref)(self.retained_gl_sample as *mut GstMiniObject);
+                                (gst.gst_mini_object_unref)(
+                                    self.retained_gl_sample as *mut GstMiniObject,
+                                );
                             }
                             self.retained_gl_sample = sample;
 

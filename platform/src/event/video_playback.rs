@@ -37,11 +37,19 @@ impl VideoYuvMetadata {
     }
 
     pub fn shader_enabled(self) -> f32 {
-        if self.enabled { 1.0 } else { 0.0 }
+        if self.enabled {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     pub fn shader_biplanar(self) -> f32 {
-        if self.biplanar { 1.0 } else { 0.0 }
+        if self.biplanar {
+            1.0
+        } else {
+            0.0
+        }
     }
 }
 

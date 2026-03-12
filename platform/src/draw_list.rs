@@ -3,8 +3,7 @@ use crate::{
     draw_pass::DrawPassId,
     draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderOptions, DrawShaderId},
     draw_vars::{
-        DrawVars, DRAW_CALL_DYN_UNIFORMS, DRAW_CALL_TEXTURE_SLOTS,
-        DRAW_CALL_UNIFORM_BUFFER_SLOTS,
+        DrawVars, DRAW_CALL_DYN_UNIFORMS, DRAW_CALL_TEXTURE_SLOTS, DRAW_CALL_UNIFORM_BUFFER_SLOTS,
     },
     geometry::GeometryId,
     id_pool::*,

@@ -39,12 +39,7 @@ unsafe extern "C" {
         data_ptr: u32,
         data_len: u32,
     );
-    fn js_network_ws_send_text(
-        socket_id_lo: u32,
-        socket_id_hi: u32,
-        data_ptr: u32,
-        data_len: u32,
-    );
+    fn js_network_ws_send_text(socket_id_lo: u32, socket_id_hi: u32, data_ptr: u32, data_len: u32);
     fn js_network_ws_close(socket_id_lo: u32, socket_id_hi: u32);
 }
 
@@ -120,12 +115,7 @@ impl WasmNetworkShimBackend {
         });
     }
 
-    fn emit_http_error(
-        &self,
-        internal_request_id: LiveId,
-        metadata_id: LiveId,
-        message: String,
-    ) {
+    fn emit_http_error(&self, internal_request_id: LiveId, metadata_id: LiveId, message: String) {
         let pending = {
             let mut state = match self.http.lock() {
                 Ok(state) => state,
@@ -457,8 +447,7 @@ pub unsafe extern "C" fn wasm_network_http_error(
     let Some(backend) = shim_backend() else {
         return;
     };
-    let message =
-        WasmDataU8::take_ownership(message_ptr, message_len, message_len).into_utf8();
+    let message = WasmDataU8::take_ownership(message_ptr, message_len, message_len).into_utf8();
     backend.emit_http_error(
         LiveId::from_lo_hi(request_id_lo, request_id_hi),
         LiveId::from_lo_hi(metadata_id_lo, metadata_id_hi),
@@ -509,8 +498,7 @@ pub unsafe extern "C" fn wasm_network_ws_error(
     let Some(backend) = shim_backend() else {
         return;
     };
-    let message =
-        WasmDataU8::take_ownership(message_ptr, message_len, message_len).into_utf8();
+    let message = WasmDataU8::take_ownership(message_ptr, message_len, message_len).into_utf8();
     backend.emit_ws_error(LiveId::from_lo_hi(socket_id_lo, socket_id_hi), message);
 }
 

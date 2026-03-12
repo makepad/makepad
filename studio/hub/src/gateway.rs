@@ -1,8 +1,8 @@
 use crate::dispatch::HubEvent;
-use makepad_studio_protocol::hub_protocol::QueryId;
 use makepad_script_std::makepad_network::{
     start_http_server, HttpServer, HttpServerRequest, HttpServerResponse, ToUISender,
 };
+use makepad_studio_protocol::hub_protocol::QueryId;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::mpsc::{self, Sender};
@@ -74,16 +74,19 @@ pub fn start_http_gateway(
                     if let Some(role) = socket_roles.remove(&web_socket_id) {
                         match role {
                             SocketRole::Client => {
-                                let _ =
-                                    event_tx.send(HubEvent::ClientDisconnected { web_socket_id: web_socket_id });
+                                let _ = event_tx.send(HubEvent::ClientDisconnected {
+                                    web_socket_id: web_socket_id,
+                                });
                             }
                             SocketRole::App => {
-                                let _ =
-                                    event_tx.send(HubEvent::AppDisconnected { web_socket_id: web_socket_id });
+                                let _ = event_tx.send(HubEvent::AppDisconnected {
+                                    web_socket_id: web_socket_id,
+                                });
                             }
                             SocketRole::BuildBox => {
-                                let _ = event_tx
-                                    .send(HubEvent::BuildBoxDisconnected { web_socket_id: web_socket_id });
+                                let _ = event_tx.send(HubEvent::BuildBoxDisconnected {
+                                    web_socket_id: web_socket_id,
+                                });
                             }
                         }
                     }

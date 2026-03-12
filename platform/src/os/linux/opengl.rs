@@ -544,8 +544,12 @@ impl Cx {
                         shgl.uniforms
                             .user_uniforms_binding
                             .bind_buffer(gl, &draw_item.os.user_uniforms);
-                        for (slot, binding) in shgl.uniforms.custom_uniforms_bindings.iter().enumerate() {
-                            if let Some(uniform_buffer) = draw_call.uniform_buffer_slots[slot].as_ref() {
+                        for (slot, binding) in
+                            shgl.uniforms.custom_uniforms_bindings.iter().enumerate()
+                        {
+                            if let Some(uniform_buffer) =
+                                draw_call.uniform_buffer_slots[slot].as_ref()
+                            {
                                 let cx_uniform_buffer =
                                     &mut self.uniform_buffers[uniform_buffer.uniform_buffer_id()];
                                 cx_uniform_buffer
@@ -991,7 +995,9 @@ impl GlShaderUniforms {
             custom_uniforms_bindings: mapping
                 .uniform_buffers
                 .iter()
-                .map(|input| GlShader::opengl_get_uniform_block_binding(gl, program, &input.block_name))
+                .map(|input| {
+                    GlShader::opengl_get_uniform_block_binding(gl, program, &input.block_name)
+                })
                 .collect(),
             live_uniforms_binding: GlShader::opengl_get_uniform_block_binding(
                 gl,
