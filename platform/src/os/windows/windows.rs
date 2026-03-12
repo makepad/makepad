@@ -30,7 +30,7 @@ use {
         texture::{Texture, TextureFormat},
         //permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
-        window::CxWindowPool,
+        window::{CxWindowPool, WindowId},
         windows::Win32::Graphics::Direct3D11::ID3D11Device,
     },
     std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant},
@@ -643,7 +643,7 @@ impl Cx {
                     if self.os.video_players.contains_key(&video_id) {
                         continue;
                     }
-                    if let Some(ref device) = self.os.d3d11_device {
+                    if let Some(device) = self.os.d3d11_device.clone() {
                         // Allocate YUV textures internally for software decode path
                         let tex_y = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
                         let tex_u = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
@@ -652,7 +652,7 @@ impl Cx {
                         let tex_u_id = tex_u.texture_id();
                         let tex_v_id = tex_v.texture_id();
                         let player = WindowsUnifiedVideoPlayer::new(
-                            device,
+                            &device,
                             video_id,
                             texture_id,
                             tex_y_id,

@@ -69,7 +69,11 @@ const TOOLCHAINS: [(&'static str, BuildTy, Platform); 16] = [
     ("x86_64-pc-windows-gnu", BuildTy::Binary, Platform::Desktop),
 ];
 
-fn check_crate(build_crate: &str, args: &[String], icon_env: Option<AppIconEnv>) -> Result<(), String> {
+fn check_crate(
+    build_crate: &str,
+    args: &[String],
+    icon_env: Option<AppIconEnv>,
+) -> Result<(), String> {
     let crate_dir = get_crate_dir(build_crate).expect("Cant find crate dir");
 
     // lets parse the toml

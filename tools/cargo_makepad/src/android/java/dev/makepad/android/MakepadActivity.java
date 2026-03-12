@@ -638,13 +638,16 @@ public class MakepadActivity
 
     // video playback
     Handler mVideoPlaybackHandler;
+    HandlerThread mVideoPlaybackThread;
     HashMap<Long, VideoPlayerRunnable> mVideoPlayerRunnables;
 
     // networking, make these static because of activity switching
+    static HandlerThread mWebSocketsThread;
     static Handler mWebSocketsHandler;
     static HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
     static HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
     static HashMap<Long, MakepadSocketStream> mActiveSocketStreams = new HashMap<>();
+    private boolean mIsSwitchingActivity = false;
 
     // clipboard actions (ActionMode for copy/paste/cut)
     private ActionMode mActionMode;
@@ -674,10 +677,11 @@ public class MakepadActivity
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        
-        HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
-        webSocketsThreadHandler.start();
-        mWebSocketsHandler = new Handler(webSocketsThreadHandler.getLooper());
+        if (mWebSocketsThread == null || !mWebSocketsThread.isAlive()) {
+            mWebSocketsThread = new HandlerThread("WebSocketsThread");
+            mWebSocketsThread.start();
+            mWebSocketsHandler = new Handler(mWebSocketsThread.getLooper());
+        }
 
         // On API 30+, Theme.NoTitleBar.Fullscreen sets FLAG_FULLSCREEN which positions
         // the window below the status bar, conflicting with the modern WindowInsetsController.
@@ -727,9 +731,9 @@ public class MakepadActivity
 
         MakepadNative.activityOnCreate(this);
 
-        HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
-        decoderThreadHandler.start(); // TODO: only start this if its needed.
-        mVideoPlaybackHandler = new Handler(decoderThreadHandler.getLooper());
+        mVideoPlaybackThread = new HandlerThread("VideoPlayerThread");
+        mVideoPlaybackThread.start(); // TODO: only start this if its needed.
+        mVideoPlaybackHandler = new Handler(mVideoPlaybackThread.getLooper());
         mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
 
@@ -795,6 +799,12 @@ public class MakepadActivity
             mSelectionHandleOverlay = null;
             mSelectionHandleStart = null;
             mSelectionHandleEnd = null;
+        }
+        cleanupVideoPlaybackState();
+        shutdownVideoPlaybackThread();
+        if (!mIsSwitchingActivity) {
+            cleanupNetworkState();
+            shutdownWebSocketsThread();
         }
         super.onDestroy();
         MakepadNative.activityOnDestroy();
@@ -931,9 +941,74 @@ public class MakepadActivity
     }
     
     public void switchActivityClass(Class c){
+        mIsSwitchingActivity = true;
         Intent intent = new Intent(getApplicationContext(), c);
         startActivity(intent);
         finish();
+    }
+
+    private void cleanupVideoPlaybackState() {
+        if (mVideoPlayerRunnables != null) {
+            ArrayList<Long> videoIds = new ArrayList<>(mVideoPlayerRunnables.keySet());
+            for (Long videoId : videoIds) {
+                cleanupVideoPlaybackResources(videoId);
+            }
+            mVideoPlayerRunnables.clear();
+        }
+        if (mVideoPlaybackHandler != null) {
+            mVideoPlaybackHandler.removeCallbacksAndMessages(null);
+        }
+    }
+
+    private void shutdownVideoPlaybackThread() {
+        if (mVideoPlaybackThread == null) {
+            mVideoPlaybackHandler = null;
+            return;
+        }
+        mVideoPlaybackThread.quitSafely();
+        try {
+            mVideoPlaybackThread.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        mVideoPlaybackThread = null;
+        mVideoPlaybackHandler = null;
+    }
+
+    private static void cleanupNetworkState() {
+        for (MakepadWebSocket socket : new ArrayList<>(mActiveWebsockets.values())) {
+            if (socket != null) {
+                socket.closeSocketAndClearCallback();
+            }
+        }
+        mActiveWebsockets.clear();
+        mActiveWebsocketsReaders.clear();
+
+        for (MakepadSocketStream socket : new ArrayList<>(mActiveSocketStreams.values())) {
+            if (socket != null) {
+                socket.close();
+            }
+        }
+        mActiveSocketStreams.clear();
+
+        if (mWebSocketsHandler != null) {
+            mWebSocketsHandler.removeCallbacksAndMessages(null);
+        }
+    }
+
+    private static void shutdownWebSocketsThread() {
+        if (mWebSocketsThread == null) {
+            mWebSocketsHandler = null;
+            return;
+        }
+        mWebSocketsThread.quitSafely();
+        try {
+            mWebSocketsThread.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        mWebSocketsThread = null;
+        mWebSocketsHandler = null;
     }
     
     // Configure keyboard settings before showing - called from Rust

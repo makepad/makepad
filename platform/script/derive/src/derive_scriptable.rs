@@ -493,7 +493,9 @@ fn derive_script_impl_inner(
         tb.add("    }");
 
         tb.add("    fn script_reload_default(vm:&mut ScriptVm)->ScriptValue{");
-        tb.add("        if vm.bx.heap.type_default_for_id(Self::script_type_id_static()).is_some(){");
+        tb.add(
+            "        if vm.bx.heap.type_default_for_id(Self::script_type_id_static()).is_some(){",
+        );
         tb.add("            Self::script_new_with_default(vm).script_to_value(vm)");
         tb.add("        } else {");
         tb.add("            NIL");

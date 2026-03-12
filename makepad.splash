@@ -1,10 +1,23 @@
 use mod.std.*
 use mod.hub;
-
 let RunItem = {
     on_run: nil,
     name: ""
     in_studio: true
+}
+
+let RunQuest = RunItem{
+    on_run: fn(){
+        let name = me.name
+        hub.run(
+            {"STUDIO": hub.studio_ip},
+            "cargo", 
+            [
+                "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"
+                "android" "--variant=quest" "--no-icon" "--small-fonts" "run" "-p" name "--release" "--message-format=json"
+            ],
+        )
+    }
 }
 
 let RunStudioRelease = RunItem{
@@ -20,5 +33,7 @@ let RunStudioRelease = RunItem{
 
 hub.set_run_items([
     RunStudioRelease{name: "makepad-example-splash"}
+    RunStudioRelease{name: "makepad-example-splat"}
     RunStudioRelease{name: "makepad-studio"}
+    RunQuest{name: "makepad-example-xr"}
 ])

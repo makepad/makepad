@@ -1,9 +1,9 @@
 use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     image_cache::*,
-    makepad_script::ScriptArrayStorage,
     makepad_derive_widget::*,
     makepad_draw::*,
+    makepad_script::ScriptArrayStorage,
     widget::*,
     widget_async::ScriptAsyncResult,
 };

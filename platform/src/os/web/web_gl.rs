@@ -471,6 +471,7 @@ impl CxOsDrawShader {
     pub fn new(in_vertex: String, in_pixel: String) -> Self {
         let vertex = format!(
             "#version 300 es
+#define VIEW_ID 0
 precision highp float;
 precision highp int;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
@@ -487,6 +488,7 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 
         let pixel = format!(
             "#version 300 es
+#define VIEW_ID 0
 precision highp float;
 precision highp int;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}

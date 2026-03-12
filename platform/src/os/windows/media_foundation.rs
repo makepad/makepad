@@ -20,7 +20,7 @@ use {
                 IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE,
             },
             Win32::Media::MediaFoundation::{
-                IMF2DBuffer, IMFActivate, IMFMediaEvent, IMFMediaSource, IMFMediaType, IMFSample,
+                IMFActivate, IMFMediaEvent, IMFMediaSource, IMFMediaType, IMFSample,
                 IMFSourceReader, IMFSourceReaderCallback, IMFSourceReaderCallback_Impl,
                 MFCreateAttributes, MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources,
                 MFVideoFormat_MJPG, MFVideoFormat_NV12, MFVideoFormat_RGB24, MFVideoFormat_YUY2,
@@ -37,6 +37,108 @@ use {
 };
 #[allow(non_upper_case_globals)]
 pub const MFVideoFormat_GRAY: GUID = GUID::from_u128(0x3030_3859_0000_0010_8000_00aa00389b71);
+
+fn camera_frame_from_media_buffer<'a>(
+    video_format: VideoFormat,
+    timestamp_ns: u64,
+    bytes: &'a [u8],
+) -> Option<CameraFrameRef<'a>> {
+    let width = video_format.width;
+    let height = video_format.height;
+
+    match video_format.pixel_format {
+        VideoPixelFormat::NV12 => {
+            let uv_height = height.div_ceil(2);
+            let total_rows = height.saturating_add(uv_height);
+            if total_rows == 0 {
+                return None;
+            }
+
+            let row_stride = if bytes.len() % total_rows == 0 {
+                (bytes.len() / total_rows).max(width)
+            } else {
+                width
+            };
+            let y_len = row_stride.saturating_mul(height);
+            let uv_len = row_stride.saturating_mul(uv_height);
+            if y_len.saturating_add(uv_len) > bytes.len() {
+                return None;
+            }
+
+            let (y_plane, rest) = bytes.split_at(y_len);
+            let uv_plane = &rest[..uv_len];
+            Some(CameraFrameRef {
+                timestamp_ns,
+                width,
+                height,
+                layout: CameraFrameLayout::NV12,
+                matrix: CameraColorMatrix::BT709,
+                plane_count: 2,
+                planes: [
+                    CameraFramePlaneRef {
+                        bytes: y_plane,
+                        row_stride,
+                        pixel_stride: 1,
+                    },
+                    CameraFramePlaneRef {
+                        bytes: uv_plane,
+                        row_stride,
+                        pixel_stride: 2,
+                    },
+                    CameraFramePlaneRef::empty(),
+                ],
+            })
+        }
+        VideoPixelFormat::YUY2 => {
+            let min_row_stride = width.saturating_mul(2);
+            let row_stride = if height != 0 && bytes.len() % height == 0 {
+                (bytes.len() / height).max(min_row_stride)
+            } else {
+                min_row_stride
+            };
+            let packed_len = row_stride.saturating_mul(height);
+            if packed_len > bytes.len() {
+                return None;
+            }
+
+            Some(CameraFrameRef {
+                timestamp_ns,
+                width,
+                height,
+                layout: CameraFrameLayout::YUY2,
+                matrix: CameraColorMatrix::BT709,
+                plane_count: 1,
+                planes: [
+                    CameraFramePlaneRef {
+                        bytes: &bytes[..packed_len],
+                        row_stride,
+                        pixel_stride: 2,
+                    },
+                    CameraFramePlaneRef::empty(),
+                    CameraFramePlaneRef::empty(),
+                ],
+            })
+        }
+        VideoPixelFormat::MJPEG => Some(CameraFrameRef {
+            timestamp_ns,
+            width,
+            height,
+            layout: CameraFrameLayout::Mjpeg,
+            matrix: CameraColorMatrix::Unknown,
+            plane_count: 1,
+            planes: [
+                CameraFramePlaneRef {
+                    bytes,
+                    row_stride: bytes.len(),
+                    pixel_stride: 1,
+                },
+                CameraFramePlaneRef::empty(),
+                CameraFramePlaneRef::empty(),
+            ],
+        }),
+        _ => None,
+    }
+}
 
 struct MfInput {
     destroy_after_update: bool,
@@ -392,169 +494,46 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback_Impl {
                 if let Ok(buffer) = sample.GetBufferByIndex(0) {
                     let config = self.config.lock().unwrap();
                     if let Some(config) = &*config {
-                        if let Some(cb) = &mut *config.callback.lock().unwrap() {
-                            let mut ptr = 0 as *mut u8;
-                            let mut len = 0;
-                            if buffer.Lock(&mut ptr, None, Some(&mut len)).is_ok() {
-                                let pts_ns = (_lltimestamp.max(0) as u64).saturating_mul(100);
+                        let mut ptr = std::ptr::null_mut();
+                        let mut len = 0;
+                        if buffer.Lock(&mut ptr, None, Some(&mut len)).is_ok() {
+                            let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize);
+                            let pts_ns = (_lltimestamp.max(0) as u64).saturating_mul(100);
 
-                                let mut frame_ref = None;
-                                let width = config.video_format.width;
-                                let height = config.video_format.height;
-
-                                if let Ok(buffer_2d) = buffer.cast::<IMF2DBuffer>() {
-                                    let mut ptr2d = std::ptr::null_mut();
-                                    let mut stride = 0i32;
-                                    if buffer_2d.Lock2D(&mut ptr2d, &mut stride).is_ok() {
-                                        let row_stride = stride.unsigned_abs() as usize;
-                                        let base_ptr = if stride < 0 {
-                                            unsafe {
-                                                (ptr2d as *const u8).add(
-                                                    row_stride
-                                                        .saturating_mul(height.saturating_sub(1)),
-                                                )
-                                            }
-                                        } else {
-                                            ptr2d as *const u8
-                                        };
-
-                                        match config.video_format.pixel_format {
-                                            VideoPixelFormat::NV12 => {
-                                                let y_len = row_stride.saturating_mul(height);
-                                                let uv_h = height.div_ceil(2);
-                                                let uv_len = row_stride.saturating_mul(uv_h);
-                                                let y = unsafe {
-                                                    std::slice::from_raw_parts(base_ptr, y_len)
-                                                };
-                                                let uv = unsafe {
-                                                    std::slice::from_raw_parts(
-                                                        base_ptr.add(y_len),
-                                                        uv_len,
-                                                    )
-                                                };
-                                                frame_ref = Some(CameraFrameRef {
-                                                    timestamp_ns: pts_ns,
-                                                    width,
-                                                    height,
-                                                    layout: CameraFrameLayout::NV12,
-                                                    matrix: CameraColorMatrix::BT709,
-                                                    plane_count: 2,
-                                                    planes: [
-                                                        CameraFramePlaneRef {
-                                                            bytes: y,
-                                                            row_stride,
-                                                            pixel_stride: 1,
-                                                        },
-                                                        CameraFramePlaneRef {
-                                                            bytes: uv,
-                                                            row_stride,
-                                                            pixel_stride: 2,
-                                                        },
-                                                        CameraFramePlaneRef::empty(),
-                                                    ],
-                                                });
-                                            }
-                                            VideoPixelFormat::YUY2 => {
-                                                let packed_len = row_stride.saturating_mul(height);
-                                                let packed = unsafe {
-                                                    std::slice::from_raw_parts(base_ptr, packed_len)
-                                                };
-                                                frame_ref = Some(CameraFrameRef {
-                                                    timestamp_ns: pts_ns,
-                                                    width,
-                                                    height,
-                                                    layout: CameraFrameLayout::YUY2,
-                                                    matrix: CameraColorMatrix::BT709,
-                                                    plane_count: 1,
-                                                    planes: [
-                                                        CameraFramePlaneRef {
-                                                            bytes: packed,
-                                                            row_stride,
-                                                            pixel_stride: 2,
-                                                        },
-                                                        CameraFramePlaneRef::empty(),
-                                                        CameraFramePlaneRef::empty(),
-                                                    ],
-                                                });
-                                            }
-                                            _ => {}
-                                        }
-
-                                        let _ = buffer_2d.Unlock2D();
-                                    }
-                                }
-
-                                if frame_ref.is_none()
-                                    && config.video_format.pixel_format == VideoPixelFormat::MJPEG
+                            if let Some(frame_ref) =
+                                camera_frame_from_media_buffer(config.video_format, pts_ns, bytes)
+                            {
+                                if let Some(frame_cb) = &mut *config.frame_callback.lock().unwrap()
                                 {
-                                    let bytes = unsafe {
-                                        std::slice::from_raw_parts(ptr as *const u8, len as usize)
-                                    };
-                                    frame_ref = Some(CameraFrameRef {
-                                        timestamp_ns: pts_ns,
-                                        width,
-                                        height,
-                                        layout: CameraFrameLayout::Mjpeg,
-                                        matrix: CameraColorMatrix::Unknown,
-                                        plane_count: 1,
-                                        planes: [
-                                            CameraFramePlaneRef {
-                                                bytes,
-                                                row_stride: len as usize,
-                                                pixel_stride: 1,
-                                            },
-                                            CameraFramePlaneRef::empty(),
-                                            CameraFramePlaneRef::empty(),
-                                        ],
-                                    });
+                                    frame_cb(frame_ref);
                                 }
-
-                                if let Some(frame_ref) = frame_ref {
-                                    if let Some(frame_cb) =
-                                        &mut *config.frame_callback.lock().unwrap()
-                                    {
-                                        frame_cb(frame_ref);
-                                    }
-                                    if let Some(enc) = &*config.video_encoder.lock().unwrap() {
-                                        enc.push_frame(frame_ref);
-                                    }
+                                if let Some(enc) = &*config.video_encoder.lock().unwrap() {
+                                    enc.push_frame(frame_ref);
                                 }
-
-                                let ptr_u32 = ptr as *mut u32;
-                                let data =
-                                    std::slice::from_raw_parts_mut(ptr_u32, len as usize >> 2);
-                                cb(VideoBufferRef {
-                                    format: config.video_format,
-                                    data: VideoBufferRefData::U32(data),
-                                });
-                                buffer.Unlock().unwrap();
                             }
-                            /*
-                            let buffer_2d:IMF2DBuffer = buffer.cast()?;
-                            let mut ptr = 0 as *mut u8;
-                            let mut stride = 0;
 
-                            if buffer_2d.Lock2D(&mut ptr, &mut stride).is_ok(){
-                                let video_format = config.video_format;
-                                let data = match video_format.pixel_format{
-                                    VideoPixelFormat::YUY2=>std::slice::from_raw_parts_mut(ptr, video_format.width * video_format.height * 2),
-                                    VideoPixelFormat::NV12=>std::slice::from_raw_parts_mut(ptr, video_format.width * video_format.height * 2),
-                                    VideoPixelFormat::GRAY=>std::slice::from_raw_parts_mut(ptr, video_format.width * video_format.height),
-                                    VideoPixelFormat::RGB24=>std::slice::from_raw_parts_mut(ptr, video_format.width * video_format.height * 3),
-                                    VideoPixelFormat::MJPEG=>std::slice::from_raw_parts_mut(ptr, stride.abs() as usize),
-                                    VideoPixelFormat::Unsupported(_)=>&mut []
-                                };
+                            if let Some(cb) = &mut *config.callback.lock().unwrap() {
+                                match config.video_format.pixel_format {
+                                    VideoPixelFormat::MJPEG => cb(VideoBufferRef {
+                                        format: config.video_format,
+                                        data: VideoBufferRefData::U8(bytes),
+                                    }),
+                                    _ => {
+                                        let data = std::slice::from_raw_parts(
+                                            ptr as *const u32,
+                                            len as usize >> 2,
+                                        );
+                                        cb(VideoBufferRef {
+                                            format: config.video_format,
+                                            data: VideoBufferRefData::U32(data),
+                                        });
+                                    }
+                                }
+                            }
 
-                                cb(VideoFrame{
-                                    flipped: stride < 0,
-                                    stride: stride.abs() as usize,
-                                    video_format,
-                                    data
-                                });
-                            }*/
+                            let _ = buffer.Unlock();
                         }
-                        buffer.Unlock().ok();
-                    };
+                    }
                 }
             }
             let _ = self

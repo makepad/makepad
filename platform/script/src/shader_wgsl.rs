@@ -142,7 +142,11 @@ fn wgsl_push_field(
         WgslPackedFormat::Float
     };
 
-    if attribute_packing && attr_format != WgslPackedFormat::Float && slots > 1 && (*offset & 3) != 0 {
+    if attribute_packing
+        && attr_format != WgslPackedFormat::Float
+        && slots > 1
+        && (*offset & 3) != 0
+    {
         *offset += 4 - (*offset & 3);
     }
 
@@ -154,7 +158,11 @@ fn wgsl_push_field(
     });
     *offset += slots;
 
-    if attribute_packing && attr_format != WgslPackedFormat::Float && slots > 1 && (*offset & 3) != 0 {
+    if attribute_packing
+        && attr_format != WgslPackedFormat::Float
+        && slots > 1
+        && (*offset & 3) != 0
+    {
         *offset += 4 - (*offset & 3);
     }
 }
@@ -375,14 +383,7 @@ fn wgsl_unpack_expr_for_field(
         data: pod_ty.clone(),
     };
     let mut scalar_index = 0usize;
-    wgsl_reconstruct_inline(
-        output,
-        vm,
-        &inline,
-        source,
-        &scalars,
-        &mut scalar_index,
-    )
+    wgsl_reconstruct_inline(output, vm, &inline, source, &scalars, &mut scalar_index)
 }
 
 fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, u32, u32, u32) {
@@ -625,8 +626,7 @@ fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, 
         writeln!(
             out,
             "    @location({}) packed_geometry_{}: vec4f,",
-            location,
-            idx
+            location, idx
         )
         .ok();
         location += 1;
@@ -635,8 +635,7 @@ fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, 
         writeln!(
             out,
             "    @location({}) packed_instance_{}: vec4f,",
-            location,
-            idx
+            location, idx
         )
         .ok();
         location += 1;

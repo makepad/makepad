@@ -711,6 +711,15 @@ impl Cx {
         self.permissions_request_id
     }
 
+    pub fn check_permission(&mut self, permission: crate::permission::Permission) -> i32 {
+        self.permissions_request_id += 1;
+        self.platform_ops.push(CxOsOp::CheckPermission {
+            request_id: self.permissions_request_id,
+            permission,
+        });
+        self.permissions_request_id
+    }
+
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f64 {
         if let Some(draw_list_id) = area.draw_list_id() {
             let draw_pass_id = self.draw_lists[draw_list_id].draw_pass_id.unwrap();

@@ -158,7 +158,12 @@ pub fn parse_profiles() -> Result<ParsedProfiles, String> {
     }
 
     // Also discover devices via ios-deploy for older iOS versions (< 17)
-    if let Ok(ios_deploy_list) = shell_env_cap(&[], &cwd, "ios-deploy", &["-c", "--timeout", "3", "--no-wifi"]) {
+    if let Ok(ios_deploy_list) = shell_env_cap(
+        &[],
+        &cwd,
+        "ios-deploy",
+        &["-c", "--timeout", "3", "--no-wifi"],
+    ) {
         for line in ios_deploy_list.split('\n') {
             if let Some(idx) = line.find("Found ") {
                 let rest = &line[idx + "Found ".len()..];
@@ -166,7 +171,9 @@ pub fn parse_profiles() -> Result<ParsedProfiles, String> {
                     let udid = rest[..end].to_string();
                     // Don't add if already present (devicectl UUID format differs from UDID)
                     if !devices.iter().any(|(_, id)| id == &udid) {
-                        let name = line.split("a.k.a. '").nth(1)
+                        let name = line
+                            .split("a.k.a. '")
+                            .nth(1)
                             .and_then(|s| s.split('\'').next())
                             .unwrap_or("iOS Device")
                             .to_string();
@@ -457,9 +464,7 @@ fn generate_app_icon_xcassets(app_dir: &Path, build_crate: &str) -> Result<bool,
     mkdir(&appiconset)?;
 
     // Copy available icon PNGs
-    let sizes: &[(&str, &str)] = &[
-        ("icon_1024.png", "icon_1024.png"),
-    ];
+    let sizes: &[(&str, &str)] = &[("icon_1024.png", "icon_1024.png")];
     for (src_name, dst_name) in sizes {
         let src = res.join(src_name);
         if src.is_file() {
@@ -651,7 +656,8 @@ pub fn build(
     apple_target: AppleTarget,
 ) -> Result<IosBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
-    let binary_name = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
+    let binary_name =
+        get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
 
     let cwd = std::env::current_dir().unwrap();
     let target_dir = cargo_target_dir(&cwd);
@@ -712,7 +718,9 @@ pub fn build(
         match generate_app_icon_xcassets(&app_dir, build_crate) {
             Ok(true) => {}
             Ok(false) => {
-                eprintln!("warning: no icon_1024.png in resources/. iOS app will use default icon.");
+                eprintln!(
+                    "warning: no icon_1024.png in resources/. iOS app will use default icon."
+                );
             }
             Err(e) => {
                 eprintln!("warning: failed to compile app icon asset catalog: {e}");
@@ -747,7 +755,8 @@ pub fn run_on_sim(
     }
 
     let build_crate = get_build_crate_from_args(args)?;
-    let default_app = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
+    let default_app =
+        get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
 
     let result = build(
         apple_args.stable,
@@ -1069,7 +1078,8 @@ pub fn run_on_device(
     let org = apple_args.org.unwrap();
 
     let build_crate = get_build_crate_from_args(args)?;
-    let default_app = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
+    let default_app =
+        get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
     let app = apple_args.app.unwrap_or(default_app);
 
     let result = build(apple_args.stable, &org, &app, args, apple_target)?;
@@ -1206,7 +1216,9 @@ pub fn run_on_device(
                         return Err(e.clone());
                     }
                     // Missing debug symbols is non-fatal — app was installed and launched
-                    println!("App installed and launched (debug symbols unavailable on this device).");
+                    println!(
+                        "App installed and launched (debug symbols unavailable on this device)."
+                    );
                 }
             }
         }

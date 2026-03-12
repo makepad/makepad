@@ -449,7 +449,8 @@ impl ShaderOutput {
             self.backend
                 .pod_struct_defs_mixed(&vm.bx.heap, &plain_structs, &packed_structs, out);
         } else {
-            self.backend.pod_struct_defs(&vm.bx.heap, &self.structs, out);
+            self.backend
+                .pod_struct_defs(&vm.bx.heap, &self.structs, out);
         }
     }
 

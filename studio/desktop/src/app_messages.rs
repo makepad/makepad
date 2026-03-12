@@ -201,6 +201,9 @@ impl App {
                     self.data
                         .build_to_mount
                         .insert(build.build_id, build.mount.clone());
+                    self.data
+                        .build_package
+                        .insert(build.build_id, build.package.clone());
                 }
                 let Some(mount) = self.data.pending_stop_all_mount.take() else {
                     return;
@@ -244,6 +247,8 @@ impl App {
                 mount,
                 package,
             } => {
+                self.data.build_to_mount.insert(build_id, mount.clone());
+                self.data.build_package.insert(build_id, package.clone());
                 if package == MAKEPAD_SPLASH_RUNNABLE {
                     return;
                 }
@@ -255,8 +260,6 @@ impl App {
                     .profiler_running_by_build
                     .entry(build_id)
                     .or_insert(true);
-                self.data.build_to_mount.insert(build_id, mount.clone());
-                self.data.build_package.insert(build_id, package.clone());
                 self.data
                     .active_log_build_by_mount
                     .insert(mount.clone(), build_id);

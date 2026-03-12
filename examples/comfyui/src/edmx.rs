@@ -1,4 +1,3 @@
-use makepad_widgets::*;
 use crate::makepad_widgets::makepad_platform::script::net::{
     socket_stream_pause_current, socket_stream_poll, socket_stream_send_bytes, SocketStreamPoll,
 };
@@ -6,6 +5,7 @@ use crate::makepad_widgets::makepad_script::{
     script_err_io, script_err_limit, script_err_type_mismatch, script_err_unexpected,
     ScriptArrayStorage,
 };
+use makepad_widgets::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::UdpSocket;
@@ -32,7 +32,9 @@ fn clear_mdc_buffer(handle: ScriptHandle) {
     });
 }
 
-fn parse_mdc_response_frame(buffer: &mut Vec<u8>) -> Result<Option<(u8, u8, bool, Vec<u8>)>, String> {
+fn parse_mdc_response_frame(
+    buffer: &mut Vec<u8>,
+) -> Result<Option<(u8, u8, bool, Vec<u8>)>, String> {
     loop {
         while !buffer.is_empty() && buffer[0] != 0xAA {
             buffer.remove(0);
@@ -91,10 +93,7 @@ fn build_mdc_frame(command_id: u8, display_id: u8, data: &[u8]) -> Result<Vec<u8
     payload.push(display_id);
     payload.push(data.len() as u8);
     payload.extend_from_slice(data);
-    let checksum = (payload
-        .iter()
-        .fold(0u32, |sum, byte| sum + *byte as u32)
-        % 256) as u8;
+    let checksum = (payload.iter().fold(0u32, |sum, byte| sum + *byte as u32) % 256) as u8;
     let mut frame = Vec::with_capacity(1 + payload.len() + 1);
     frame.push(0xAA);
     frame.extend_from_slice(&payload);
@@ -110,7 +109,8 @@ fn parse_mac_to_bytes(mac: &str) -> Result<[u8; 6], String> {
     let mut out = [0u8; 6];
     for i in 0..6 {
         let byte_str = &cleaned[i * 2..i * 2 + 2];
-        out[i] = u8::from_str_radix(byte_str, 16).map_err(|_| format!("invalid MAC byte {byte_str}"))?;
+        out[i] =
+            u8::from_str_radix(byte_str, 16).map_err(|_| format!("invalid MAC byte {byte_str}"))?;
     }
     Ok(out)
 }

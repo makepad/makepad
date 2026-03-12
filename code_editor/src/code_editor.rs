@@ -533,8 +533,12 @@ impl CodeEditor {
             let area_rect = self.scroll_bars.area().clipped_rect(cx);
             let ime_pos = self
                 .last_cursor_screen_pos
-                .map(|pos| self.viewport_rect.pos - area_rect.pos + pos + dvec2(0.0, self.cell_size.y))
-                .unwrap_or_else(|| self.viewport_rect.pos - area_rect.pos + dvec2(0.0, self.cell_size.y));
+                .map(|pos| {
+                    self.viewport_rect.pos - area_rect.pos + pos + dvec2(0.0, self.cell_size.y)
+                })
+                .unwrap_or_else(|| {
+                    self.viewport_rect.pos - area_rect.pos + dvec2(0.0, self.cell_size.y)
+                });
             cx.show_text_ime(self.scroll_bars.area(), ime_pos);
         }
 

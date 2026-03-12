@@ -1470,7 +1470,12 @@ impl Widget for Dock {
                     splitter.end(cx);
                 }
                 Some(DrawStackItem::Tabs { id }) => {
-                    if let Some(DockItem::Tabs { selected, hide_tab_bar, .. }) = self.dock_items.get(&id) {
+                    if let Some(DockItem::Tabs {
+                        selected,
+                        hide_tab_bar,
+                        ..
+                    }) = self.dock_items.get(&id)
+                    {
                         let tab_bar_template = self.tab_bar.clone();
                         let tab_bar = self.tab_bars.get_or_insert(cx, id, |cx| {
                             cx.with_vm(|vm| TabBarWrap {
@@ -1488,7 +1493,10 @@ impl Widget for Dock {
                             stack.push(DrawStackItem::TabLabel { id, index: 0 });
                         } else {
                             // Skip the tab bar entirely, go straight to content.
-                            stack.push(DrawStackItem::TabLabel { id, index: usize::MAX });
+                            stack.push(DrawStackItem::TabLabel {
+                                id,
+                                index: usize::MAX,
+                            });
                         }
                     } else {
                         panic!()

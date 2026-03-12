@@ -48,10 +48,7 @@ struct WasmHotReloadEvent {
 }
 
 enum WasmHotReloadCommand {
-    LiveChange {
-        file_name: String,
-        content: String,
-    },
+    LiveChange { file_name: String, content: String },
     Rebuild,
 }
 
@@ -1151,7 +1148,10 @@ fn collect_wasm_hot_reload_watch_plan(
             initial_script_mod_bodies
                 .entry(file_name.clone())
                 .or_insert(script_mod_bodies);
-            files_by_root.entry(mount.clone()).or_default().push(file_name);
+            files_by_root
+                .entry(mount.clone())
+                .or_default()
+                .push(file_name);
         }
     }
 
@@ -1297,12 +1297,9 @@ fn forward_hot_reload_fs_event(
             continue;
         }
         cache.insert(file_name.clone(), content.clone());
-        let next_bodies =
-            extract_script_mod_bodies_from_rust_file(&content).unwrap_or_else(|_| vec![content.clone()]);
-        let previous_bodies = body_cache
-            .get(&file_name)
-            .cloned()
-            .unwrap_or_default();
+        let next_bodies = extract_script_mod_bodies_from_rust_file(&content)
+            .unwrap_or_else(|_| vec![content.clone()]);
+        let previous_bodies = body_cache.get(&file_name).cloned().unwrap_or_default();
         body_cache.insert(file_name.clone(), next_bodies.clone());
 
         if next_bodies != previous_bodies {
@@ -1325,7 +1322,9 @@ fn broadcast_hot_reload_event(
     let payload = event.serialize_json().into_bytes();
     let stale_clients: Vec<u64> = watch_clients
         .iter()
-        .filter_map(|(web_socket_id, sender)| sender.send(payload.clone()).err().map(|_| *web_socket_id))
+        .filter_map(|(web_socket_id, sender)| {
+            sender.send(payload.clone()).err().map(|_| *web_socket_id)
+        })
         .collect();
     for web_socket_id in stale_clients {
         watch_clients.remove(&web_socket_id);
@@ -1340,7 +1339,10 @@ fn make_hot_reload_event(kind: &str) -> WasmHotReloadEvent {
     }
 }
 
-fn rebuild_wasm_app(plan: &WasmRebuildPlan, watch_clients: &mut HashMap<u64, mpsc::Sender<Vec<u8>>>) {
+fn rebuild_wasm_app(
+    plan: &WasmRebuildPlan,
+    watch_clients: &mut HashMap<u64, mpsc::Sender<Vec<u8>>>,
+) {
     broadcast_hot_reload_event(make_hot_reload_event("build_start"), watch_clients);
     println!("Wasm hot reload fallback: rebuilding app");
     match build(plan.config, &plan.args) {
@@ -1378,8 +1380,7 @@ fn should_trigger_wasm_rebuild(path: &Path) -> bool {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) => matches!(
             ext,
-            "rs"
-                | "toml"
+            "rs" | "toml"
                 | "js"
                 | "css"
                 | "html"
@@ -1581,7 +1582,9 @@ fn skip_raw_string(
     while j < bytes.len() {
         if bytes[j] == b'"'
             && j + hashes < bytes.len()
-            && bytes[j + 1..j + 1 + hashes].iter().all(|byte| *byte == b'#')
+            && bytes[j + 1..j + 1 + hashes]
+                .iter()
+                .all(|byte| *byte == b'#')
         {
             return Ok(j + 1 + hashes);
         }
@@ -2056,7 +2059,9 @@ mod tests {
 
     #[test]
     fn wasm_rebuild_filter_skips_temp_and_target_paths() {
-        assert!(should_trigger_wasm_rebuild(Path::new("/tmp/app/src/main.rs")));
+        assert!(should_trigger_wasm_rebuild(Path::new(
+            "/tmp/app/src/main.rs"
+        )));
         assert!(should_trigger_wasm_rebuild(Path::new(
             "/tmp/app/resources/theme.ron"
         )));
@@ -2066,6 +2071,8 @@ mod tests {
         assert!(!should_trigger_wasm_rebuild(Path::new(
             "/tmp/app/src/main.rs.swp"
         )));
-        assert!(!should_trigger_wasm_rebuild(Path::new("/tmp/app/.git/index")));
+        assert!(!should_trigger_wasm_rebuild(Path::new(
+            "/tmp/app/.git/index"
+        )));
     }
 }

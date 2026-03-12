@@ -195,7 +195,10 @@ fn parse_args() -> Result<Option<Options>, String> {
         ));
     }
     if output_format == OutputFormat::Png && exr_mip_chain {
-        return Err(format!("--mip is only valid with --format=exr\n{}", usage(&program)));
+        return Err(format!(
+            "--mip is only valid with --format=exr\n{}",
+            usage(&program)
+        ));
     }
     if exr_mip_chain && exr_layout != ExrLayout::Channels {
         return Err(format!(
@@ -616,7 +619,9 @@ mod tests {
                 .other_attributes
                 .iter()
                 .find(|attribute| attribute.name == MB3D_MIP_LEVEL_ATTRIBUTE_NAME)
-                .map(|attribute| i32::from_le_bytes(attribute.value.as_slice().try_into().unwrap())),
+                .map(|attribute| i32::from_le_bytes(
+                    attribute.value.as_slice().try_into().unwrap()
+                )),
             Some(1)
         );
     }
@@ -792,8 +797,8 @@ fn flatten_channels_layout_image(mut image: render::ExrLayerImage) -> FlattenedC
 
 fn build_mip_chain_parts(base: FlattenedChannelImage) -> Result<Vec<ExrPart>, String> {
     let level_shapes = mip_level_shapes(base.width, base.height);
-    let total_levels = i32::try_from(level_shapes.len())
-        .map_err(|_| "mip level count overflow".to_string())?;
+    let total_levels =
+        i32::try_from(level_shapes.len()).map_err(|_| "mip level count overflow".to_string())?;
     let mut parts = Vec::with_capacity(level_shapes.len());
 
     let mut current_width = base.width;
@@ -801,8 +806,8 @@ fn build_mip_chain_parts(base: FlattenedChannelImage) -> Result<Vec<ExrPart>, St
     let mut current_channels = base.channels;
 
     for level_shape in level_shapes {
-        let level_index = i32::try_from(level_shape.level)
-            .map_err(|_| "mip level index overflow".to_string())?;
+        let level_index =
+            i32::try_from(level_shape.level).map_err(|_| "mip level index overflow".to_string())?;
         let mut part = ExrPart::new(
             Some(format!("mip{}", level_shape.level)),
             current_width,
@@ -810,10 +815,8 @@ fn build_mip_chain_parts(base: FlattenedChannelImage) -> Result<Vec<ExrPart>, St
             base.compression,
             current_channels.clone(),
         );
-        part.other_attributes.push(int_attribute(
-            MB3D_MIP_LEVEL_ATTRIBUTE_NAME,
-            level_index,
-        ));
+        part.other_attributes
+            .push(int_attribute(MB3D_MIP_LEVEL_ATTRIBUTE_NAME, level_index));
         part.other_attributes.push(int_attribute(
             MB3D_MIP_TOTAL_LEVELS_ATTRIBUTE_NAME,
             total_levels,

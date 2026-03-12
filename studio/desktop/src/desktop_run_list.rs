@@ -182,11 +182,7 @@ impl DesktopRunList {
             return;
         };
 
-        let Some(entries) = data
-            .mounts
-            .get(active_mount)
-            .map(|mount| &mount.run_items)
-        else {
+        let Some(entries) = data.mounts.get(active_mount).map(|mount| &mount.run_items) else {
             self.draw_empty(cx, list, "Loading run targets...");
             return;
         };
@@ -288,8 +284,7 @@ impl Widget for DesktopRunList {
 impl DesktopRunListRef {
     pub fn run_requested(&self, actions: &Actions) -> Option<(String, String)> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let DesktopRunListAction::RunItem { mount, name } = item.cast()
-            {
+            if let DesktopRunListAction::RunItem { mount, name } = item.cast() {
                 return Some((mount, name));
             }
         }

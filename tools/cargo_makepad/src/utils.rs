@@ -1,7 +1,8 @@
 use crate::makepad_shell::*;
-use makepad_toml_parser::{Toml, parse_toml};
+use makepad_toml_parser::{parse_toml, Toml};
 use std::{
     collections::HashMap,
+    env,
     path::{Path, PathBuf},
 };
 
@@ -112,7 +113,9 @@ pub fn get_package_binary_name(build_crate: &str) -> Option<String> {
 
 pub fn get_build_crate_from_args(args: &[String]) -> Result<&str, String> {
     if args.is_empty() {
-        return Err("Not enough arguments to determine crate. Pass -p <crate> or --package <crate>.".into());
+        return Err(
+            "Not enough arguments to determine crate. Pass -p <crate> or --package <crate>.".into(),
+        );
     }
 
     let mut i = 0;
@@ -190,7 +193,23 @@ pub const APP_ICON_ENV_VARS: [&str; APP_ICON_COUNT] = [
     "MAKEPAD_APP_ICON_ICO",
 ];
 
+pub fn no_icon_requested() -> bool {
+    env::var_os("MAKEPAD_NO_ICON").is_some()
+}
+
+pub fn set_no_icon_requested(no_icon: bool) {
+    if no_icon {
+        env::set_var("MAKEPAD_NO_ICON", "1");
+    } else {
+        env::remove_var("MAKEPAD_NO_ICON");
+    }
+}
+
 pub fn resolve_app_icon_env(build_crate: &str) -> Result<Option<AppIconEnv>, String> {
+    if no_icon_requested() {
+        return Ok(None);
+    }
+
     let resources_dir = get_crate_dir(build_crate)?.join("resources");
     let required_paths = [
         resources_dir.join("icon_32.png"),
@@ -200,14 +219,10 @@ pub fn resolve_app_icon_env(build_crate: &str) -> Result<Option<AppIconEnv>, Str
     ];
 
     if !required_paths.iter().all(|p| p.is_file()) {
-        for path in &required_paths {
-            if !path.is_file() {
-                eprintln!(
-                    "warning: missing {}. Add this file to include a custom app icon.",
-                    path.display()
-                );
-            }
-        }
+        eprintln!(
+            "warning: missing custom app icons in {}. Add icon_32.png, icon_64.png, icon_128.png, and icon.ico, or pass --no-icon to suppress this check.",
+            resources_dir.display()
+        );
         return Ok(None);
     }
 

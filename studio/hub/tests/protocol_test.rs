@@ -1,6 +1,6 @@
 use makepad_micro_serde::{DeBin, DeJson, SerBin, SerJson};
 use makepad_studio_protocol::hub_protocol::{
-    ClientId, QueryId, HubToClient, ClientToHub, ClientToHubEnvelope,
+    ClientId, ClientToHub, ClientToHubEnvelope, HubToClient, QueryId,
 };
 
 #[test]

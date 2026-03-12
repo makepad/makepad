@@ -1,7 +1,7 @@
 mod compile;
 mod sdk;
-use compile::*;
 use crate::utils::{get_build_crate_from_args, get_package_binary_name};
+use compile::*;
 
 #[allow(dead_code)]
 #[allow(non_camel_case_types)]
@@ -120,8 +120,8 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
         }
         "build" => {
             let build_crate = get_build_crate_from_args(&args[1..])?;
-            let default_app = get_package_binary_name(build_crate)
-                .unwrap_or_else(|| build_crate.to_string());
+            let default_app =
+                get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
             let apple_target = AppleTarget::sim_target(apple_os);
             let result = compile::build(
                 stable,

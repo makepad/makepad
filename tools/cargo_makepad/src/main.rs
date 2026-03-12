@@ -152,6 +152,9 @@ fn show_help() {
         "    android [options] run <cargo args>           Run an android project on a connected android device via adb"
     );
     println!("    android [options] build <cargo args>         Build an android project");
+    println!(
+        "    android [options] adb-tcp [port]             Switch the connected adb device to tcp mode and connect to its Wi-Fi IP"
+    );
     println!();
     println!("    [options] with its default value:");
     println!();

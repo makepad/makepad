@@ -772,7 +772,6 @@ impl Widget for Video {
                     self.draw_bg.draw_vars.set_texture(2, &event.tex_y);
                     self.draw_bg.draw_vars.set_texture(3, &event.tex_u);
                     self.draw_bg.draw_vars.set_texture(4, &event.tex_v);
-
                 }
             }
             Event::VideoPlaybackPrepared(event) => {
@@ -801,8 +800,11 @@ impl Widget for Video {
                         .set_uniform(cx, id!(yuv_type), &[event.yuv.matrix]);
                     self.draw_bg
                         .set_uniform(cx, id!(yuv_biplanar), &[event.yuv.shader_biplanar()]);
-                    self.draw_bg
-                        .set_uniform(cx, id!(yuv_rotation_steps), &[event.yuv.rotation_steps]);
+                    self.draw_bg.set_uniform(
+                        cx,
+                        id!(yuv_rotation_steps),
+                        &[event.yuv.rotation_steps],
+                    );
 
                     self.redraw(cx);
                     if self.playback_state == PlaybackState::Prepared && self.autoplay {
@@ -861,7 +863,9 @@ impl ImageCacheImpl for Video {
 }
 
 impl Video {
-    fn resolve_camera_preview_mode(&self) -> makepad_platform::event::video_playback::CameraPreviewMode {
+    fn resolve_camera_preview_mode(
+        &self,
+    ) -> makepad_platform::event::video_playback::CameraPreviewMode {
         use makepad_platform::event::video_playback::CameraPreviewMode as PlatformMode;
         match self.camera_preview_mode {
             VideoCameraPreviewMode::Texture => PlatformMode::Texture,

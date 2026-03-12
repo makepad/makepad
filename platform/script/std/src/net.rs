@@ -640,7 +640,12 @@ pub fn handle_script_network_events<H: Any>(
                 }
             }
             NetworkResponse::HttpStreamComplete { response: res, .. } => {
-                if let Some(i) = std.data.http_requests.iter().position(|v| v.id == request_id) {
+                if let Some(i) = std
+                    .data
+                    .http_requests
+                    .iter()
+                    .position(|v| v.id == request_id)
+                {
                     if let Some(handler) = std.data.http_requests[i].events.on_complete.as_object()
                     {
                         vm::with_vm_and_async(host, std, script_vm, |vm| {
@@ -652,7 +657,12 @@ pub fn handle_script_network_events<H: Any>(
                 }
             }
             NetworkResponse::HttpResponse { response: res, .. } => {
-                if let Some(i) = std.data.http_requests.iter().position(|v| v.id == request_id) {
+                if let Some(i) = std
+                    .data
+                    .http_requests
+                    .iter()
+                    .position(|v| v.id == request_id)
+                {
                     if let Some(handler) = std.data.http_requests[i].events.on_response.as_object()
                     {
                         vm::with_vm_and_async(host, std, script_vm, |vm| {
@@ -664,7 +674,12 @@ pub fn handle_script_network_events<H: Any>(
                 }
             }
             NetworkResponse::HttpError { error: err, .. } => {
-                if let Some(i) = std.data.http_requests.iter().position(|v| v.id == request_id) {
+                if let Some(i) = std
+                    .data
+                    .http_requests
+                    .iter()
+                    .position(|v| v.id == request_id)
+                {
                     if let Some(handler) = std.data.http_requests[i].events.on_error.as_object() {
                         vm::with_vm_and_async(host, std, script_vm, |vm| {
                             let res = err.script_to_value(vm);
@@ -952,28 +967,33 @@ pub fn script_mod(vm: &mut ScriptVm) {
         },
     );
 
-    vm.add_handle_method(socket_stream_type, id_lut!(next), script_args_def!(), move |vm, args| {
-        let Some(handle) = script_value!(vm, args.self).as_handle() else {
-            return script_err_unexpected!(vm.trap(), "invalid socket_stream state");
-        };
-        match socket_stream_poll(vm, handle) {
-            SocketStreamPoll::Data(data) => vm.bx.heap.new_array_from_vec_u8(data).into(),
-            SocketStreamPoll::Closed(Some(err)) => script_err_io!(vm.trap(), "{err}"),
-            SocketStreamPoll::Closed(None) => NIL,
-            SocketStreamPoll::Pause => {
-                if let Err(err) = socket_stream_pause_current(vm, handle) {
-                    return script_err_io!(vm.trap(), "{err}");
+    vm.add_handle_method(
+        socket_stream_type,
+        id_lut!(next),
+        script_args_def!(),
+        move |vm, args| {
+            let Some(handle) = script_value!(vm, args.self).as_handle() else {
+                return script_err_unexpected!(vm.trap(), "invalid socket_stream state");
+            };
+            match socket_stream_poll(vm, handle) {
+                SocketStreamPoll::Data(data) => vm.bx.heap.new_array_from_vec_u8(data).into(),
+                SocketStreamPoll::Closed(Some(err)) => script_err_io!(vm.trap(), "{err}"),
+                SocketStreamPoll::Closed(None) => NIL,
+                SocketStreamPoll::Pause => {
+                    if let Err(err) = socket_stream_pause_current(vm, handle) {
+                        return script_err_io!(vm.trap(), "{err}");
+                    }
+                    NIL
                 }
-                NIL
+                SocketStreamPoll::TooManyPaused => {
+                    script_err_limit!(vm.trap(), "too many paused socket reads")
+                }
+                SocketStreamPoll::InvalidHandle => {
+                    script_err_unexpected!(vm.trap(), "invalid socket_stream state")
+                }
             }
-            SocketStreamPoll::TooManyPaused => {
-                script_err_limit!(vm.trap(), "too many paused socket reads")
-            }
-            SocketStreamPoll::InvalidHandle => {
-                script_err_unexpected!(vm.trap(), "invalid socket_stream state")
-            }
-        }
-    });
+        },
+    );
 
     vm.add_handle_method(
         socket_stream_type,
@@ -1073,7 +1093,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 options.ignore_ssl_cert,
             ) {
                 Ok(socket) => socket,
-                Err(err) => return script_err_io!(vm.trap(), "socket stream connect failed: {err}"),
+                Err(err) => {
+                    return script_err_io!(vm.trap(), "socket stream connect failed: {err}")
+                }
             };
 
             let read_timeout = if options.read_timeout_ms > 0.0 {
@@ -1112,19 +1134,25 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 streams: streams_ref,
                 handle: ScriptHandle::ZERO,
             };
-            let handle = vm.bx.heap.new_handle(socket_stream_type, Box::new(handle_gc));
+            let handle = vm
+                .bx
+                .heap
+                .new_handle(socket_stream_type, Box::new(handle_gc));
             {
                 let std = vm.std_mut::<ScriptStd>();
-                std.data.socket_streams.borrow_mut().push(ScriptSocketStream {
-                    handle,
-                    host: options.host,
-                    in_send,
-                    out_recv,
-                    recv_pause: Default::default(),
-                    pending_chunks: Default::default(),
-                    is_closed: false,
-                    last_error: None,
-                });
+                std.data
+                    .socket_streams
+                    .borrow_mut()
+                    .push(ScriptSocketStream {
+                        handle,
+                        host: options.host,
+                        in_send,
+                        out_recv,
+                        recv_pause: Default::default(),
+                        pending_chunks: Default::default(),
+                        is_closed: false,
+                        last_error: None,
+                    });
             }
 
             handle.into()
