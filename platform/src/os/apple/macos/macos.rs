@@ -9,10 +9,8 @@ use {
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
                 VideoSeekableRangesEvent, VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
-            Event, GameInputEventChannel, MouseButton, MouseUpEvent, VideoSource,
-            WindowGeom,
+            Event, GameInputEventChannel, MouseButton, MouseUpEvent, VideoSource, WindowGeom,
         },
-        texture::{Texture, TextureFormat},
         makepad_live_id::*,
         makepad_math::*,
         os::{
@@ -34,6 +32,7 @@ use {
         },
         permission::Permission,
         shared_framebuf::PollTimers,
+        texture::{Texture, TextureFormat},
         thread::SignalToUI,
         window::{CxWindowPool, WindowId},
     },
@@ -247,7 +246,8 @@ impl MacosNativeCameraPreview {
                 let () = msg_send![parent_view, addSubview: host_view];
 
                 if let Some(session) = self.session() {
-                    let preview_layer: ObjcId = msg_send![class!(AVCaptureVideoPreviewLayer), layerWithSession: session];
+                    let preview_layer: ObjcId =
+                        msg_send![class!(AVCaptureVideoPreviewLayer), layerWithSession: session];
                     if preview_layer != nil {
                         let gravity = str_to_nsstring("AVLayerVideoGravityResizeAspectFill");
                         let () = msg_send![preview_layer, setVideoGravity: gravity];
@@ -265,7 +265,13 @@ impl MacosNativeCameraPreview {
         }
     }
 
-    fn update_preview(&mut self, window_id: WindowId, parent_view: ObjcId, rect: Rect, visible: bool) {
+    fn update_preview(
+        &mut self,
+        window_id: WindowId,
+        parent_view: ObjcId,
+        rect: Rect,
+        visible: bool,
+    ) {
         self.ensure_attached(window_id, parent_view, rect);
         unsafe {
             if self.host_view != nil {
@@ -1015,7 +1021,8 @@ impl Cx {
                     let Some(window_id) = self.get_pass_window_id(draw_pass_id) else {
                         continue;
                     };
-                    let Some(metal_window) = metal_windows.iter().find(|w| w.window_id == window_id)
+                    let Some(metal_window) =
+                        metal_windows.iter().find(|w| w.window_id == window_id)
                     else {
                         continue;
                     };
@@ -1043,7 +1050,8 @@ impl Cx {
                     let Some(window_id) = self.get_pass_window_id(draw_pass_id) else {
                         continue;
                     };
-                    let Some(metal_window) = metal_windows.iter().find(|w| w.window_id == window_id)
+                    let Some(metal_window) =
+                        metal_windows.iter().find(|w| w.window_id == window_id)
                     else {
                         continue;
                     };
@@ -1115,11 +1123,8 @@ impl Cx {
                             );
                         }
                         let camera_access = self.os.media.av_capture();
-                        let mut preview = MacosNativeCameraPreview::new(
-                            input_id,
-                            format_id,
-                            camera_access,
-                        );
+                        let mut preview =
+                            MacosNativeCameraPreview::new(input_id, format_id, camera_access);
                         if let Some(Ok((
                             width,
                             height,
@@ -1165,14 +1170,12 @@ impl Cx {
                     );
                     self.os.video_players.insert(video_id, player);
                     // Notify widget so it can bind textures to shader slots
-                    self.call_event_handler(&Event::VideoYuvTexturesReady(
-                        VideoYuvTexturesReady {
-                            video_id,
-                            tex_y,
-                            tex_u,
-                            tex_v,
-                        },
-                    ));
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady {
+                        video_id,
+                        tex_y,
+                        tex_u,
+                        tex_v,
+                    }));
                     // Keep timer alive so we can poll for video frames
                     self.ensure_timer0_started();
                 }
@@ -1324,12 +1327,12 @@ impl Cx {
             Permission::Camera => self.check_camera_permission_status(),
         };
         match status {
-            crate::permission::PermissionStatus::NotDetermined => {
-                match permission {
-                    Permission::AudioInput => self.macos_request_audio_permission(permission, request_id),
-                    Permission::Camera => self.macos_request_camera_permission(permission, request_id),
+            crate::permission::PermissionStatus::NotDetermined => match permission {
+                Permission::AudioInput => {
+                    self.macos_request_audio_permission(permission, request_id)
                 }
-            }
+                Permission::Camera => self.macos_request_camera_permission(permission, request_id),
+            },
             _ => {
                 self.call_event_handler(&crate::event::Event::PermissionResult(
                     crate::permission::PermissionResult {
@@ -1391,7 +1394,7 @@ impl Cx {
             let result_clone = permission_result.clone();
 
             // Create a block that will be executed on the main thread
-            let main_thread_block = objc_block!(move | | {
+            let main_thread_block = objc_block!(move || {
                 MacosApp::do_callback(MacosEvent::PermissionResult(result_clone.clone()));
             });
 

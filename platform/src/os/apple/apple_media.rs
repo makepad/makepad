@@ -1,9 +1,8 @@
 use {
     crate::{
-        audio::*, cx::Cx, event::Event, media_api::CxMediaApi, midi::*,
-        os::apple::apple_sys::*, os::apple::audio_unit::AudioUnitAccess,
-        os::apple::av_capture::AvCaptureAccess, os::apple::core_midi::*, thread::SignalToUI,
-        video::*,
+        audio::*, cx::Cx, event::Event, media_api::CxMediaApi, midi::*, os::apple::apple_sys::*,
+        os::apple::audio_unit::AudioUnitAccess, os::apple::av_capture::AvCaptureAccess,
+        os::apple::core_midi::*, thread::SignalToUI, video::*,
     },
     std::sync::{Arc, Mutex},
 };

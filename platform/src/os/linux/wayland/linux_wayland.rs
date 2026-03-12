@@ -727,16 +727,30 @@ impl WaylandCx {
                         let tex_u_id = tex_u.texture_id();
                         let tex_v_id = tex_v.texture_id();
                         let player = V4l2CameraPlayer::new(
-                            video_id, tex_y_id, tex_u_id, tex_v_id, input_id, format_id, camera_access,
+                            video_id,
+                            tex_y_id,
+                            tex_u_id,
+                            tex_v_id,
+                            input_id,
+                            format_id,
+                            camera_access,
                         );
-                        cx.os.video_players.insert(video_id, LinuxVideoPlayer::Camera(player));
+                        cx.os
+                            .video_players
+                            .insert(video_id, LinuxVideoPlayer::Camera(player));
                         cx.call_event_handler(&Event::VideoYuvTexturesReady(
-                            VideoYuvTexturesReady { video_id, tex_y, tex_u, tex_v },
+                            VideoYuvTexturesReady {
+                                video_id,
+                                tex_y,
+                                tex_u,
+                                tex_v,
+                            },
                         ));
                         continue;
                     }
                     // Try GStreamer first, fall back to software rav1d
-                    let mut use_software = std::env::var_os("MAKEPAD_FORCE_SOFTWARE_VIDEO").is_some();
+                    let mut use_software =
+                        std::env::var_os("MAKEPAD_FORCE_SOFTWARE_VIDEO").is_some();
                     if use_software {
                         crate::log!(
                             "VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder"
@@ -938,7 +952,8 @@ impl WaylandCx {
                 CxOsOp::CheckPermission {
                     permission,
                     request_id,
-                } | CxOsOp::RequestPermission {
+                }
+                | CxOsOp::RequestPermission {
                     permission,
                     request_id,
                 } => {

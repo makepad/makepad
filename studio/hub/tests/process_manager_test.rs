@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 fn process_manager_emits_output_and_exit_for_cargo() {
     let (tx, rx) = mpsc::channel::<HubEvent>();
     let mut manager = ProcessManager::default();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = makepad_studio_hub::test_support::tempdir().unwrap();
 
     let build_id = QueryId::new(ClientId(7), 1);
     manager
@@ -66,7 +66,7 @@ fn process_manager_emits_output_and_exit_for_cargo() {
 fn process_manager_stop_build_kills_process_group() {
     let (tx, rx) = mpsc::channel::<HubEvent>();
     let mut manager = ProcessManager::default();
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = makepad_studio_hub::test_support::tempdir().unwrap();
 
     let build_id = QueryId::new(ClientId(7), 2);
     manager

@@ -1,6 +1,6 @@
+use crate::live_reload::CxLiveReloadState;
 use crate::script::res::*;
 use crate::script::timer::*;
-use crate::live_reload::CxLiveReloadState;
 use makepad_script_std::ScriptStd;
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -50,7 +50,8 @@ impl VideoEncoder {
         pixel_buffer: crate::os::apple::apple_sys::CVPixelBufferRef,
         timestamp_ns: u64,
     ) -> bool {
-        self.backend.push_apple_pixel_buffer(pixel_buffer, timestamp_ns)
+        self.backend
+            .push_apple_pixel_buffer(pixel_buffer, timestamp_ns)
     }
 
     pub fn request_keyframe(&self) -> Result<(), VideoEncodeError> {

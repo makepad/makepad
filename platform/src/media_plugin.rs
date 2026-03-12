@@ -123,7 +123,9 @@ pub trait MediaVideoEncoder: Send + Sync {
 }
 
 pub trait MediaSoftwareVideoPlayer {
-    fn check_prepared(&mut self) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>>;
+    fn check_prepared(
+        &mut self,
+    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>>;
     fn poll_frame(&mut self) -> bool;
     fn take_yuv_frame(&mut self) -> Option<YuvPlaneData>;
     fn check_eos(&mut self) -> bool;

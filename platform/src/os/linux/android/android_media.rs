@@ -244,7 +244,12 @@ impl CxMediaApi for Cx {
             .android_camera()
             .lock()
             .unwrap()
-            .video_encoder_capture_texture_frame(index, timestamp_ns, unsafe { &*gl }, &mut self.textures)
+            .video_encoder_capture_texture_frame(
+                index,
+                timestamp_ns,
+                unsafe { &*gl },
+                &mut self.textures,
+            )
     }
 
     fn video_encoder_request_keyframe(&mut self, index: usize) -> Result<(), VideoEncodeError> {

@@ -319,8 +319,7 @@ impl XlibWindow {
                 get_xlib_app_global().atoms.atom,
                 32,
                 x11_sys::PropModeReplace as i32,
-                &get_xlib_app_global().atoms.net_wm_window_type_popup_menu as *const _
-                    as *const u8,
+                &get_xlib_app_global().atoms.net_wm_window_type_popup_menu as *const _ as *const u8,
                 1,
             );
 
@@ -517,14 +516,14 @@ impl XlibWindow {
         };
         let dpi_factor = self.get_dpi_factor();
         let spot_px = x11_sys::XPoint {
-            x: (spot.x *dpi_factor) as i16,
-            y: (spot.y *dpi_factor) as i16
+            x: (spot.x * dpi_factor) as i16,
+            y: (spot.y * dpi_factor) as i16,
         };
         let area_px = x11_sys::XRectangle {
             x: spot_px.x,
             y: spot_px.y,
             width: 1,
-            height: 1
+            height: 1,
         };
         unsafe {
             let preedit_attr = x11_sys::XVaCreateNestedList(

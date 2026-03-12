@@ -1634,7 +1634,10 @@ impl Cx {
                     let dpi_factor = self.windows[CxWindowPool::id_zero()]
                         .dpi_override
                         .unwrap_or(self.os.dpi_factor);
-                    android_jni::to_java_show_selection_handles(start * dpi_factor, end * dpi_factor);
+                    android_jni::to_java_show_selection_handles(
+                        start * dpi_factor,
+                        end * dpi_factor,
+                    );
                 },
                 CxOsOp::UpdateSelectionHandles { start, end } => unsafe {
                     let dpi_factor = self.windows[CxWindowPool::id_zero()]

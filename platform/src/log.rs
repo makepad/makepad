@@ -54,7 +54,10 @@ pub(crate) fn log_with_level_makepad_platform(
             use crate::os::apple::apple_util::str_to_nsstring;
             let msg = format!(
                 "{}:{}:{} - {}",
-                file_name, line_start + 1, column_start + 1, message
+                file_name,
+                line_start + 1,
+                column_start + 1,
+                message
             );
             unsafe { NSLog(str_to_nsstring(&msg)) };
         }
@@ -133,10 +136,10 @@ pub(crate) fn log_with_level_makepad_platform(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn profile_start() -> Instant {

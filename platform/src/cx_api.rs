@@ -414,7 +414,7 @@ impl Cx {
 
     /// Get resource data intended for font parsing.
     ///
-    /// This tries mmap for local file-backed resources, then falls back to
+    /// This reads local file-backed resources directly, then falls back to
     /// already-loaded resource bytes (required for wasm/network-backed assets).
     pub fn get_resource_font_bytes(&mut self, handle: ScriptHandle) -> Option<SharedBytes> {
         let resource_path = {
@@ -1022,15 +1022,16 @@ impl Cx {
         if let VideoSource::Camera(..) = &source {
             // Auto-request camera permission before opening device
             let _request_id = self.request_permission(crate::permission::Permission::Camera);
-            self.pending_camera_playbacks.push(crate::cx::PendingCameraPlayback {
-                video_id,
-                source,
-                camera_preview_mode,
-                external_texture_id,
-                texture_id,
-                autoplay,
-                should_loop,
-            });
+            self.pending_camera_playbacks
+                .push(crate::cx::PendingCameraPlayback {
+                    video_id,
+                    source,
+                    camera_preview_mode,
+                    external_texture_id,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                });
             return;
         }
         self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
@@ -1044,7 +1045,10 @@ impl Cx {
         ));
     }
 
-    pub fn handle_camera_permission_result(&mut self, result: &crate::permission::PermissionResult) {
+    pub fn handle_camera_permission_result(
+        &mut self,
+        result: &crate::permission::PermissionResult,
+    ) {
         if result.permission != crate::permission::Permission::Camera {
             return;
         }

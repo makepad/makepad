@@ -59,7 +59,8 @@ impl XlibApp {
             let display_fd = x11_sys::XConnectionNumber(display);
             x11_sys::setlocale(x11_sys::LC_CTYPE, b"\0".as_ptr() as *const c_char);
             x11_sys::XSetLocaleModifiers(b"\0".as_ptr() as *const c_char);
-            let mut xim = x11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+            let mut xim =
+                x11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
             if xim.is_null() {
                 x11_sys::XSetLocaleModifiers(ptr::null());
                 xim = x11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
@@ -101,7 +102,9 @@ impl XlibApp {
             let mut event = mem::MaybeUninit::uninit();
             x11_sys::XNextEvent(self.display, event.as_mut_ptr());
             let mut event = event.assume_init();
-            if x11_sys::XFilterEvent(&mut event as *mut x11_sys::XEvent, x11_sys::None as c_ulong) != 0 {
+            if x11_sys::XFilterEvent(&mut event as *mut x11_sys::XEvent, x11_sys::None as c_ulong)
+                != 0
+            {
                 continue;
             }
             match event.type_ as u32 {
@@ -587,18 +590,21 @@ impl XlibApp {
                                     status.as_mut_ptr(),
                                 );
                                 let status = status.assume_init();
-                                if status == x11_sys::XLookupChars || status == x11_sys::XLookupBoth {
+                                if status == x11_sys::XLookupChars || status == x11_sys::XLookupBoth
+                                {
                                     if count > 0 && status != x11_sys::XBufferOverflow {
                                         let utf8 = std::str::from_utf8(&buffer[..count as usize])
                                             .unwrap_or("")
                                             .to_string();
                                         if !utf8.is_empty() {
-                                            self.do_callback(XlibEvent::TextInput(TextInputEvent {
-                                                input: utf8,
-                                                was_paste: false,
-                                                replace_last: false,
-                                                ..Default::default()
-                                            }));
+                                            self.do_callback(XlibEvent::TextInput(
+                                                TextInputEvent {
+                                                    input: utf8,
+                                                    was_paste: false,
+                                                    replace_last: false,
+                                                    ..Default::default()
+                                                },
+                                            ));
                                         }
                                     }
                                 }
@@ -1123,11 +1129,7 @@ impl XlibAtoms {
                     "_NET_WM_WINDOW_TYPE_POPUP_MENU\0".as_ptr() as *const _,
                     0,
                 ),
-                cardinal: x11_sys::XInternAtom(
-                    display,
-                    "CARDINAL\0".as_ptr() as *const _,
-                    0,
-                ),
+                cardinal: x11_sys::XInternAtom(display, "CARDINAL\0".as_ptr() as *const _, 0),
                 wm_delete_window: x11_sys::XInternAtom(
                     display,
                     "WM_DELETE_WINDOW\0".as_ptr() as *const _,

@@ -43,9 +43,7 @@ use wayland_protocols::{
         self,
         decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1},
         shell::client::{xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base},
-        toplevel_icon::v1::client::{
-            xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1,
-        },
+        toplevel_icon::v1::client::{xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1},
     },
 };
 
@@ -106,9 +104,12 @@ pub(crate) struct WaylandState {
     pub(crate) xkb_cx: xkb_sys::XkbContext,
     pub(crate) text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
     pub(crate) text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
-    pub(crate) primary_selection_manager: Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
-    pub(crate) primary_selection_device: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
-    pub(crate) primary_selection_source: Option<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1>,
+    pub(crate) primary_selection_manager:
+        Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
+    pub(crate) primary_selection_device:
+        Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
+    pub(crate) primary_selection_source:
+        Option<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1>,
     pub(crate) primary_selection_text: String,
     pub(crate) last_resize_edge: Option<xdg_toplevel::ResizeEdge>,
     event_callback: Option<Box<dyn FnMut(&mut WaylandState, XlibEvent)>>,
@@ -280,8 +281,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     state.viewporter = Some(viewporter);
                 }
                 "wl_shm" => {
-                    let shm =
-                        wl_registry.bind::<wl_shm::WlShm, _, _>(name, 1, qhandle, ());
+                    let shm = wl_registry.bind::<wl_shm::WlShm, _, _>(name, 1, qhandle, ());
                     state.shm = Some(shm);
                 }
                 "xdg_toplevel_icon_manager_v1" => {
@@ -493,7 +493,12 @@ impl Dispatch<xdg_popup::XdgPopup, WindowId> for WaylandState {
         _qhandle: &QueueHandle<Self>,
     ) {
         match event {
-            xdg_popup::Event::Configure { x, y, width, height } => {
+            xdg_popup::Event::Configure {
+                x,
+                y,
+                width,
+                height,
+            } => {
                 let mut geom_change = None;
                 if let Some(popup) = state
                     .popups
@@ -764,7 +769,8 @@ impl Dispatch<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1, ()> 
     ) -> Arc<dyn wayland_client::backend::ObjectData> {
         match opcode {
             zwp_primary_selection_device_v1::EVT_DATA_OFFER_OPCODE => {
-                qhandle.make_data::<zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1, ()>(())
+                qhandle
+                    .make_data::<zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1, ()>(())
             }
             _ => unreachable!(
                 "zwp_primary_selection_device_v1 created unknown child for opcode {}",
@@ -849,7 +855,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                     }
                 }
                 {
-                    let popup_ids: Vec<_> = state.popups.iter().rev().map(|p| p.window_id).collect();
+                    let popup_ids: Vec<_> =
+                        state.popups.iter().rev().map(|p| p.window_id).collect();
                     for window_id in popup_ids {
                         state.do_callback(XlibEvent::PopupDismissed(PopupDismissedEvent {
                             window_id,
@@ -1118,7 +1125,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         if state.windows.iter().any(|w| w.window_id == win_id)
                             && !state.popups.is_empty()
                         {
-                            let popup_ids: Vec<_> = state.popups.iter().rev().map(|p| p.window_id).collect();
+                            let popup_ids: Vec<_> =
+                                state.popups.iter().rev().map(|p| p.window_id).collect();
                             for popup_wid in popup_ids {
                                 state.do_callback(XlibEvent::PopupDismissed(PopupDismissedEvent {
                                     window_id: popup_wid,
@@ -1407,7 +1415,11 @@ impl WaylandState {
     }
 
     /// Flush a pending clipboard copy now that a serial is available.
-    pub(crate) fn flush_pending_clipboard_copy(&mut self, qhandle: &QueueHandle<Self>, serial: u32) {
+    pub(crate) fn flush_pending_clipboard_copy(
+        &mut self,
+        qhandle: &QueueHandle<Self>,
+        serial: u32,
+    ) {
         if let Some(text) = self.pending_clipboard_copy.take() {
             self.set_clipboard_text(qhandle, serial, text);
         }

@@ -1,9 +1,8 @@
 use crate::{
     event::{
-        KeyEvent, LongPressEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        ScrollEvent, SelectionHandleDragEvent, TextClipboardEvent, TextInputEvent,
-        TextRangeReplaceEvent, TimerEvent, TouchUpdateEvent, VirtualKeyboardEvent,
-        WindowGeomChangeEvent,
+        KeyEvent, LongPressEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
+        SelectionHandleDragEvent, TextClipboardEvent, TextInputEvent, TextRangeReplaceEvent,
+        TimerEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeomChangeEvent,
     },
     permission::PermissionResult,
     window::WindowId,

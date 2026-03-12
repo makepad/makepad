@@ -149,13 +149,15 @@ impl WindowsUnifiedVideoPlayer {
         }
     }
 
-    fn upload_yuv_to_d3d11(
-        &self,
-        textures: &mut CxTexturePool,
-        planes: &YuvPlaneData,
-    ) {
+    fn upload_yuv_to_d3d11(&self, textures: &mut CxTexturePool, planes: &YuvPlaneData) {
         let (cw, ch) = planes.layout.chroma_size(planes.width, planes.height);
-        self.upload_r8_plane_to_d3d11(textures, self.tex_y_id, &planes.y, planes.width, planes.height);
+        self.upload_r8_plane_to_d3d11(
+            textures,
+            self.tex_y_id,
+            &planes.y,
+            planes.width,
+            planes.height,
+        );
         self.upload_r8_plane_to_d3d11(textures, self.tex_u_id, &planes.u, cw, ch);
         self.upload_r8_plane_to_d3d11(textures, self.tex_v_id, &planes.v, cw, ch);
     }

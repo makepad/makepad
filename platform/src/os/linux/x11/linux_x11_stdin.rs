@@ -148,7 +148,9 @@ impl Cx {
                         }
 
                         // inform host that frame is ready
-                        Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(presentable_draw));
+                        Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(
+                            presentable_draw,
+                        ));
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {

@@ -1768,7 +1768,9 @@ impl HubCore {
             return;
         };
         if let Ok(mut cache_guard) = self.git_status_cache.lock() {
-            cache_guard.entries.retain(|path, _| !path.starts_with(&root));
+            cache_guard
+                .entries
+                .retain(|path, _| !path.starts_with(&root));
         }
     }
 
@@ -2719,7 +2721,8 @@ impl HubCore {
             exit_code,
         });
         if info.package == MAKEPAD_SPLASH_RUNNABLE {
-            self.run_items_by_mount.insert(info.mount.clone(), Vec::new());
+            self.run_items_by_mount
+                .insert(info.mount.clone(), Vec::new());
             self.broadcast_ui_message(HubToClient::RunItems {
                 mount: info.mount.clone(),
                 items: Vec::new(),
@@ -4021,7 +4024,7 @@ mod tests {
 
     #[test]
     fn ui_envelope_uses_typed_channel_for_in_process_clients() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -4077,7 +4080,7 @@ mod tests {
 
     #[test]
     fn ui_envelope_rejects_mismatched_client_id() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -4128,7 +4131,7 @@ mod tests {
 
     #[test]
     fn ui_binary_rejects_mismatched_client_id() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -4181,7 +4184,7 @@ mod tests {
 
     #[test]
     fn secondary_ui_click_is_accepted_and_visualized_for_primary_observer() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -4304,7 +4307,7 @@ mod tests {
 
     #[test]
     fn mount_fs_changed_file_path_emits_added_diff() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -4338,7 +4341,7 @@ mod tests {
 
     #[test]
     fn mount_fs_changed_file_path_ignores_mount_root_suppress_window() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -4374,7 +4377,7 @@ mod tests {
 
     #[test]
     fn mount_fs_changed_mount_root_still_honors_suppress_window() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -4401,7 +4404,7 @@ mod tests {
 
     #[test]
     fn mount_fs_changed_directory_path_triggers_full_tree_reload() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -4432,7 +4435,7 @@ mod tests {
 
     #[test]
     fn mount_fs_changed_git_metadata_path_triggers_full_tree_reload() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::create_dir_all(dir.path().join(".git")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
@@ -4456,7 +4459,7 @@ mod tests {
 
     #[test]
     fn full_file_tree_reload_payload_is_much_larger_than_single_file_diff() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let src_dir = dir.path().join("src");
         fs::create_dir_all(&src_dir).unwrap();
         for i in 0..1200usize {
@@ -4527,7 +4530,7 @@ mod tests {
 
     #[test]
     fn mount_fs_changed_removed_directory_emits_removed_diff() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src/nested")).unwrap();
         fs::write(dir.path().join("src/nested/mod.rs"), "pub fn nested() {}\n").unwrap();
 
@@ -4561,7 +4564,7 @@ mod tests {
 
     #[test]
     fn worker_deltas_batch_and_coalesce_removed_descendants() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src/nested")).unwrap();
         let (mut core, ui_rx) = test_core_with_ui(dir.path());
 
@@ -4614,7 +4617,7 @@ mod tests {
 
     #[test]
     fn worker_remove_then_add_same_path_keeps_added_state() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         let (mut core, ui_rx) = test_core_with_ui(dir.path());
 
@@ -4652,7 +4655,7 @@ mod tests {
 
     #[test]
     fn worker_delta_storm_falls_back_to_single_tree_reload() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 

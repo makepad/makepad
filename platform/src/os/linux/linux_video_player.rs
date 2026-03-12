@@ -242,5 +242,3 @@ impl LinuxVideoPlayer {
         }
     }
 }
-
-

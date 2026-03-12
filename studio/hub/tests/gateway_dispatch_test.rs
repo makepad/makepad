@@ -5,7 +5,7 @@ use makepad_script_std::makepad_network::{
 };
 use makepad_studio_hub::{HubConfig, MountConfig, StudioHub};
 use makepad_studio_protocol::hub_protocol::{
-    ClientId, QueryId, HubToClient, ClientToHub, ClientToHubEnvelope,
+    ClientId, ClientToHub, ClientToHubEnvelope, HubToClient, QueryId,
 };
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -58,7 +58,7 @@ fn wait_for_ws_binary(runtime: &NetworkRuntime, socket_id: LiveId, timeout: Dura
 
 #[test]
 fn websocket_ui_hello_and_load_file_tree_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "fn main() {}\n").unwrap();
 

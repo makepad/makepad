@@ -1,11 +1,11 @@
 #![allow(dead_code)]
-use {
-    crate::{cx::Cx, event::TimerEvent},
-    std::collections::HashMap,
-};
 pub use makepad_studio_protocol::{
     AppToStudio, PresentableDraw, PresentableImageId, SharedPresentableImage, SharedSwapchain,
     StudioToApp, SWAPCHAIN_IMAGE_COUNT,
+};
+use {
+    crate::{cx::Cx, event::TimerEvent},
+    std::collections::HashMap,
 };
 
 // HACK(eddyb) more or less `<[T; N]>::each_ref`, which is still unstable.
@@ -204,7 +204,10 @@ impl HostSwapchain {
 // macOS: IOSurface-based swapchain (for serialization)
 // ============================================================================
 #[cfg(target_os = "macos")]
-pub fn shared_swapchain_from_host_swapchain(host: &HostSwapchain, cx: &mut crate::cx::Cx) -> SharedSwapchain {
+pub fn shared_swapchain_from_host_swapchain(
+    host: &HostSwapchain,
+    cx: &mut crate::cx::Cx,
+) -> SharedSwapchain {
     SharedSwapchain {
         window_id: host.window_id,
         alloc_width: host.alloc_width,
@@ -221,7 +224,10 @@ pub fn shared_swapchain_from_host_swapchain(host: &HostSwapchain, cx: &mut crate
 // Windows: HANDLE-based swapchain
 // ============================================================================
 #[cfg(target_os = "windows")]
-pub fn shared_swapchain_from_host_swapchain(host: &HostSwapchain, cx: &mut crate::cx::Cx) -> SharedSwapchain {
+pub fn shared_swapchain_from_host_swapchain(
+    host: &HostSwapchain,
+    cx: &mut crate::cx::Cx,
+) -> SharedSwapchain {
     SharedSwapchain {
         window_id: host.window_id,
         alloc_width: host.alloc_width,
@@ -364,7 +370,9 @@ pub fn shared_swapchain_from_host_swapchain(
         std::array::from_fn(|_| None);
     let mut use_software_fallback = false;
     for i in 0..SWAPCHAIN_IMAGE_COUNT {
-        if let Some(image) = cx.share_texture_for_presentable_image(&host.presentable_images[i].texture) {
+        if let Some(image) =
+            cx.share_texture_for_presentable_image(&host.presentable_images[i].texture)
+        {
             owned_images[i] = Some(image);
         } else {
             use_software_fallback = true;
@@ -393,7 +401,8 @@ pub fn shared_swapchain_from_host_swapchain(
         }
     }
 
-    let mut presentable_images: [Option<SharedPresentableImage>; SWAPCHAIN_IMAGE_COUNT] = [None; SWAPCHAIN_IMAGE_COUNT];
+    let mut presentable_images: [Option<SharedPresentableImage>; SWAPCHAIN_IMAGE_COUNT] =
+        [None; SWAPCHAIN_IMAGE_COUNT];
     for i in 0..SWAPCHAIN_IMAGE_COUNT {
         let id = host.presentable_images[i].id;
         let image = owned_images[i].take().expect("image exported");
@@ -419,7 +428,10 @@ pub fn shared_swapchain_from_host_swapchain(
     target_os = "macos",
     target_os = "windows"
 )))]
-pub fn shared_swapchain_from_host_swapchain(host: &HostSwapchain, _cx: &mut crate::cx::Cx) -> SharedSwapchain {
+pub fn shared_swapchain_from_host_swapchain(
+    host: &HostSwapchain,
+    _cx: &mut crate::cx::Cx,
+) -> SharedSwapchain {
     SharedSwapchain {
         window_id: host.window_id,
         alloc_width: host.alloc_width,

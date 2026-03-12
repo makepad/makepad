@@ -304,14 +304,7 @@ impl IosNativeCameraPreview {
         format_id: VideoFormatId,
         camera_access: Arc<Mutex<crate::os::apple::av_capture::AvCaptureAccess>>,
     ) -> Self {
-        register_ios_camera_subscription(
-            &camera_access,
-            video_id,
-            input_id,
-            format_id,
-            None,
-            None,
-        );
+        register_ios_camera_subscription(&camera_access, video_id, input_id, format_id, None, None);
 
         let (width, height) = {
             let cam = camera_access.lock().unwrap();

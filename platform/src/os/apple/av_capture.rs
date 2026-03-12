@@ -248,7 +248,8 @@ impl CameraStreamNode {
                     for enc in &dispatch_snapshot.5 {
                         if let Ok(guard) = enc.try_lock() {
                             if let Some(enc) = &*guard {
-                                let consumed = enc.push_apple_pixel_buffer(image_buffer, timestamp_ns);
+                                let consumed =
+                                    enc.push_apple_pixel_buffer(image_buffer, timestamp_ns);
                                 if !consumed {
                                     enc.push_frame(frame_ref);
                                 }
@@ -263,7 +264,8 @@ impl CameraStreamNode {
                             let bytes_per_row = CVPixelBufferGetBytesPerRow(image_buffer);
                             let len_used = bytes_per_row.saturating_mul(height);
                             let ptr = CVPixelBufferGetBaseAddress(image_buffer);
-                            let data = std::slice::from_raw_parts_mut(ptr as *mut u32, len_used / 4);
+                            let data =
+                                std::slice::from_raw_parts_mut(ptr as *mut u32, len_used / 4);
                             cb(VideoBufferRef {
                                 format,
                                 data: VideoBufferRefData::U32(data),
@@ -390,15 +392,26 @@ impl AvCaptureAccess {
     fn key_for(&self, input_id: VideoInputId, format_id: VideoFormatId) -> Option<CameraStreamKey> {
         let input = self.inputs.iter().find(|v| v.desc.input_id == input_id)?;
         if input.desc.formats.iter().any(|f| f.format_id == format_id) {
-            Some(CameraStreamKey { input_id, format_id })
+            Some(CameraStreamKey {
+                input_id,
+                format_id,
+            })
         } else {
             None
         }
     }
 
     fn format_for_key(&self, key: CameraStreamKey) -> Option<VideoFormat> {
-        let input = self.inputs.iter().find(|v| v.desc.input_id == key.input_id)?;
-        input.desc.formats.iter().find(|f| f.format_id == key.format_id).copied()
+        let input = self
+            .inputs
+            .iter()
+            .find(|v| v.desc.input_id == key.input_id)?;
+        input
+            .desc
+            .formats
+            .iter()
+            .find(|f| f.format_id == key.format_id)
+            .copied()
     }
 
     fn input_for_key(&self, key: CameraStreamKey) -> Option<&AvVideoInput> {
@@ -464,12 +477,20 @@ impl AvCaptureAccess {
                 continue;
             }
             if self.video_input_cb[index].lock().unwrap().is_some() {
-                dispatch.video_input_cbs.push(self.video_input_cb[index].clone());
+                dispatch
+                    .video_input_cbs
+                    .push(self.video_input_cb[index].clone());
             }
             if self.camera_frame_input_cb[index].lock().unwrap().is_some() {
-                dispatch.frame_input_cbs.push(self.camera_frame_input_cb[index].clone());
+                dispatch
+                    .frame_input_cbs
+                    .push(self.camera_frame_input_cb[index].clone());
             }
-            if self.camera_pixel_buffer_input_cb[index].lock().unwrap().is_some() {
+            if self.camera_pixel_buffer_input_cb[index]
+                .lock()
+                .unwrap()
+                .is_some()
+            {
                 dispatch
                     .pixel_buffer_cbs
                     .push(self.camera_pixel_buffer_input_cb[index].clone());
@@ -521,7 +542,10 @@ impl AvCaptureAccess {
             let Some(input) = self.input_for_key(key) else {
                 continue;
             };
-            let Some(av_format) = input.av_formats.iter().find(|v| v.format_id == key.format_id)
+            let Some(av_format) = input
+                .av_formats
+                .iter()
+                .find(|v| v.format_id == key.format_id)
             else {
                 continue;
             };
@@ -629,14 +653,9 @@ impl AvCaptureAccess {
         }
     }
 
-    pub fn video_encoder_request_keyframe(
-        &mut self,
-        index: usize,
-    ) -> Result<(), VideoEncodeError> {
+    pub fn video_encoder_request_keyframe(&mut self, index: usize) -> Result<(), VideoEncodeError> {
         let guard = self.video_encoder[index].lock().unwrap();
-        let encoder = guard
-            .as_ref()
-            .ok_or(VideoEncodeError::EncoderNotStarted)?;
+        let encoder = guard.as_ref().ok_or(VideoEncodeError::EncoderNotStarted)?;
         encoder.request_keyframe()
     }
 
@@ -817,7 +836,10 @@ impl AvCaptureAccess {
     }
 
     pub fn session_for(&self, input_id: VideoInputId, format_id: VideoFormatId) -> Option<ObjcId> {
-        let key = CameraStreamKey { input_id, format_id };
+        let key = CameraStreamKey {
+            input_id,
+            format_id,
+        };
         self.streams.get(&key).map(|s| s.session.as_id())
     }
 

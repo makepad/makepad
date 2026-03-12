@@ -1,6 +1,6 @@
 use crate::makepad_network::HttpRequest;
-use crate::thread::SignalToUI;
 use crate::makepad_network::WebSocketMessage;
+use crate::thread::SignalToUI;
 use makepad_wasm_bridge::WasmDataU8;
 use std::cell::RefCell;
 use std::sync::mpsc::Sender;

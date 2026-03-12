@@ -1,12 +1,10 @@
-use {
-    crate::{
-        event::video_playback::VideoSource,
-        makepad_live_id::LiveId,
-        media_plugin::{media_plugin, MediaSoftwareVideoPlayer},
-        texture::TextureId,
-        video::VideoDecodeError,
-        video_decode::yuv::YuvPlaneData,
-    },
+use crate::{
+    event::video_playback::VideoSource,
+    makepad_live_id::LiveId,
+    media_plugin::{media_plugin, MediaSoftwareVideoPlayer},
+    texture::TextureId,
+    video::VideoDecodeError,
+    video_decode::yuv::YuvPlaneData,
 };
 
 pub struct SoftwareVideoPlayer {
@@ -25,13 +23,9 @@ impl SoftwareVideoPlayer {
         is_looping: bool,
     ) -> Self {
         let (inner, failed) = match media_plugin() {
-            Some(plugin) => match plugin.create_software_video_player(
-                video_id,
-                texture_id,
-                source,
-                autoplay,
-                is_looping,
-            ) {
+            Some(plugin) => match plugin
+                .create_software_video_player(video_id, texture_id, source, autoplay, is_looping)
+            {
                 Ok(player) => (Some(player), None),
                 Err(err) => (None, Some(format!("software video unavailable: {:?}", err))),
             },
