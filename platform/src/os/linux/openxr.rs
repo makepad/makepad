@@ -8,8 +8,14 @@ use {
         makepad_math::Mat4f,
         makepad_micro_serde::*,
         os::linux::{
-            android::android::CxAndroidDisplay, android::android_jni::*, gl_sys, gl_sys::LibGl,
-            opengl::GlShader, openxr_anchor::*, openxr_input::*, openxr_sys::*,
+            android::android::CxAndroidDisplay,
+            android::android_jni::*,
+            gl_sys,
+            gl_sys::LibGl,
+            opengl::{GlShader, SHADER_VARIANT_XR},
+            openxr_anchor::*,
+            openxr_input::*,
+            openxr_sys::*,
         },
     },
     std::ptr,
@@ -129,7 +135,7 @@ impl Cx {
 
         pass.set_dpi_factor(dpi_factor);
         pass.paint_dirty = true;
-        pass.os.shader_variant = 1;
+        pass.os.shader_variant = SHADER_VARIANT_XR;
 
         // lets set up the right matrices and bind the right framebuffers
         pass.pass_uniforms.camera_projection = frame.eyes[0].proj_mat;

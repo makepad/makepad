@@ -307,15 +307,18 @@ pub fn expand_sdk(
                     && path
                         .file_name()
                         .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("AndroidNDK") && name.ends_with(".app"))
+                        .is_some_and(|name| {
+                            name.starts_with("AndroidNDK") && name.ends_with(".app")
+                        })
             }
 
             let mut found = Vec::new();
             for entry in std::fs::read_dir(mount_point)
                 .map_err(|e| format!("failed to scan DMG mount {mount_point:?}: {e}"))?
             {
-                let entry = entry
-                    .map_err(|e| format!("failed to read DMG mount entry in {mount_point:?}: {e}"))?;
+                let entry = entry.map_err(|e| {
+                    format!("failed to read DMG mount entry in {mount_point:?}: {e}")
+                })?;
                 let path = entry.path();
                 if is_ndk_app(&path) {
                     found.push(path);
@@ -364,8 +367,7 @@ pub fn expand_sdk(
                     }
                 }
             }
-            if !source.exists()
-                && source_path.contains("/toolchains/llvm/prebuilt/darwin-aarch64/")
+            if !source.exists() && source_path.contains("/toolchains/llvm/prebuilt/darwin-aarch64/")
             {
                 // Some NDK DMGs only ship `darwin-x86_64` prebuilts.
                 let fallback_source_path = source_path.replace(

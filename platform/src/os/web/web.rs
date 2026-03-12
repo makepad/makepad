@@ -584,29 +584,49 @@ impl Cx {
                 CxOsOp::CheckPermission {
                     permission,
                     request_id,
-                } => {
-                    let permission_str = match permission {
-                        Permission::AudioInput => "microphone",
-                        Permission::Camera => "camera",
-                    };
-                    self.os.from_wasm(FromWasmCheckPermission {
-                        permission: permission_str.to_string(),
-                        request_id: request_id as u32,
-                    });
-                }
+                } => match permission {
+                    Permission::AudioInput | Permission::Camera => {
+                        let permission_str = match permission {
+                            Permission::AudioInput => "microphone",
+                            Permission::Camera => "camera",
+                            Permission::SceneAccess => unreachable!(),
+                        };
+                        self.os.from_wasm(FromWasmCheckPermission {
+                            permission: permission_str.to_string(),
+                            request_id: request_id as u32,
+                        });
+                    }
+                    Permission::SceneAccess => {
+                        self.call_event_handler(&Event::PermissionResult(PermissionResult {
+                            permission,
+                            request_id,
+                            status: PermissionStatus::DeniedPermanent,
+                        }));
+                    }
+                },
                 CxOsOp::RequestPermission {
                     permission,
                     request_id,
-                } => {
-                    let permission_str = match permission {
-                        Permission::AudioInput => "microphone",
-                        Permission::Camera => "camera",
-                    };
-                    self.os.from_wasm(FromWasmRequestPermission {
-                        permission: permission_str.to_string(),
-                        request_id: request_id as u32,
-                    });
-                }
+                } => match permission {
+                    Permission::AudioInput | Permission::Camera => {
+                        let permission_str = match permission {
+                            Permission::AudioInput => "microphone",
+                            Permission::Camera => "camera",
+                            Permission::SceneAccess => unreachable!(),
+                        };
+                        self.os.from_wasm(FromWasmRequestPermission {
+                            permission: permission_str.to_string(),
+                            request_id: request_id as u32,
+                        });
+                    }
+                    Permission::SceneAccess => {
+                        self.call_event_handler(&Event::PermissionResult(PermissionResult {
+                            permission,
+                            request_id,
+                            status: PermissionStatus::DeniedPermanent,
+                        }));
+                    }
+                },
                 CxOsOp::PrepareVideoPlayback(
                     video_id,
                     source,

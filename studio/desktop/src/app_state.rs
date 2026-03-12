@@ -256,9 +256,12 @@ impl App {
         let mount_names: Vec<String> = self.data.mounts.keys().cloned().collect();
         let valid_mounts: HashSet<String> = mount_names.iter().cloned().collect();
 
-        if let Some(dock_items) = Self::sanitize_mount_dock_items(state.mount_dock_items, &valid_mounts)
+        if let Some(dock_items) =
+            Self::sanitize_mount_dock_items(state.mount_dock_items, &valid_mounts)
         {
-            self.ui.dock(cx, ids!(mount_dock)).load_state(cx, dock_items);
+            self.ui
+                .dock(cx, ids!(mount_dock))
+                .load_state(cx, dock_items);
         }
         self.rebuild_mount_tab_bindings(cx);
         for mount in &mount_names {
@@ -369,7 +372,9 @@ impl App {
         );
         let dock_items = dock
             .clone_state()
-            .and_then(|dock_items| Self::sanitize_workspace_dock_items(dock_items, &allowed_tab_ids))
+            .and_then(|dock_items| {
+                Self::sanitize_workspace_dock_items(dock_items, &allowed_tab_ids)
+            })
             .unwrap_or_default();
 
         let mount_state = self.mount_state(mount)?;
@@ -412,7 +417,10 @@ impl App {
     }
 
     pub(super) fn save_state_if_needed(&mut self, cx: &mut Cx) {
-        let mut needs_save = self.ui.dock(cx, ids!(mount_dock)).check_and_clear_need_save();
+        let mut needs_save = self
+            .ui
+            .dock(cx, ids!(mount_dock))
+            .check_and_clear_need_save();
         let mount_names: Vec<String> = self.data.mounts.keys().cloned().collect();
         for mount in mount_names {
             let Some(tab_id) = self.mount_state(&mount).and_then(|state| state.tab_id) else {

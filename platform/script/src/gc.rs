@@ -295,46 +295,18 @@ impl ScriptHeap {
                 );
                 for (key, val) in object.map.iter() {
                     mark_value_fields!(
-                        objects,
-                        arrays,
-                        strings,
-                        pods,
-                        handles,
-                        regexes,
-                        mark_vec,
-                        *key
+                        objects, arrays, strings, pods, handles, regexes, mark_vec, *key
                     );
                     mark_value_fields!(
-                        objects,
-                        arrays,
-                        strings,
-                        pods,
-                        handles,
-                        regexes,
-                        mark_vec,
-                        val.value
+                        objects, arrays, strings, pods, handles, regexes, mark_vec, val.value
                     );
                 }
                 for kv in object.vec.iter() {
                     mark_value_fields!(
-                        objects,
-                        arrays,
-                        strings,
-                        pods,
-                        handles,
-                        regexes,
-                        mark_vec,
-                        kv.key
+                        objects, arrays, strings, pods, handles, regexes, mark_vec, kv.key
                     );
                     mark_value_fields!(
-                        objects,
-                        arrays,
-                        strings,
-                        pods,
-                        handles,
-                        regexes,
-                        mark_vec,
-                        kv.value
+                        objects, arrays, strings, pods, handles, regexes, mark_vec, kv.value
                     );
                 }
             }
@@ -357,14 +329,7 @@ impl ScriptHeap {
                     );
                     for v in values.iter() {
                         mark_value_fields!(
-                            objects,
-                            arrays,
-                            strings,
-                            pods,
-                            handles,
-                            regexes,
-                            mark_vec,
-                            *v
+                            objects, arrays, strings, pods, handles, regexes, mark_vec, *v
                         );
                     }
                 }
@@ -384,9 +349,7 @@ impl ScriptHeap {
             &mut self.regexes,
             &mut self.mark_vec,
         );
-        mark_value_fields!(
-            objects, arrays, strings, pods, handles, regexes, mark_vec, val
-        );
+        mark_value_fields!(objects, arrays, strings, pods, handles, regexes, mark_vec, val);
     }
 
     pub fn mark(&mut self, threads: &ScriptThreads, code: &ScriptCode) {

@@ -1,12 +1,15 @@
 use super::sdk::{AndroidSDKUrls, BUILD_TOOLS_DIR, PLATFORMS_DIR};
-use crate::android::{AndroidTarget, AndroidVariant, HostOs};
+use crate::android::{AndroidConfig, AndroidTarget, AndroidVariant, HostOs};
 use crate::makepad_shell::*;
 use crate::utils::*;
 use std::{
+    collections::hash_map::DefaultHasher,
     fs,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    thread,
+    time::Duration,
 };
-
 
 fn aapt_path(sdk_dir: &Path, urls: &AndroidSDKUrls) -> PathBuf {
     sdk_dir
@@ -47,6 +50,7 @@ fn android_jar_path(sdk_dir: &Path, urls: &AndroidSDKUrls) -> PathBuf {
 struct BuildPaths {
     tmp_dir: PathBuf,
     out_dir: PathBuf,
+    java_out_dir: PathBuf,
     res_dir: PathBuf,
     manifest_file: PathBuf,
     java_file: PathBuf,
@@ -59,6 +63,14 @@ pub struct BuildResult {
     dst_apk: PathBuf,
     java_url: String,
 }
+
+const SMALL_FONT_REPLACEMENTS: [(&str, &str); 5] = [
+    ("GoNotoKurrent-Bold.ttf", "IBMPlexSans-SemiBold.ttf"),
+    ("GoNotoKurrent-Regular.ttf", "IBMPlexSans-Text.ttf"),
+    ("LXGWWenKaiBold.ttf", "IBMPlexSans-Text.ttf"),
+    ("LXGWWenKaiRegular.ttf", "IBMPlexSans-Text.ttf"),
+    ("NotoColorEmoji.ttf", "IBMPlexSans-Text.ttf"),
+];
 
 fn main_java(url: &str) -> String {
     format!(
@@ -132,8 +144,7 @@ fn rewrite_relative_toml_value(line: &mut String, key: &str, crate_dir: &Path) {
             }
             let mut value_end = quote_pos + 1;
             while let Some(&ch) = line.as_bytes().get(value_end) {
-                if ch == quote && line.as_bytes().get(value_end.saturating_sub(1)) != Some(&b'\\')
-                {
+                if ch == quote && line.as_bytes().get(value_end.saturating_sub(1)) != Some(&b'\\') {
                     break;
                 }
                 value_end += 1;
@@ -163,6 +174,51 @@ fn rewrite_wrapper_manifest_paths(cargo_toml: &str, crate_dir: &Path) -> String 
     out
 }
 
+fn extract_workspace_patch_sections(workspace_manifest: &str) -> String {
+    let mut out = String::new();
+    let mut current_section: Option<String> = None;
+    let mut current_body = Vec::new();
+
+    let flush_section =
+        |out: &mut String, current_section: &mut Option<String>, current_body: &mut Vec<String>| {
+            let Some(section) = current_section.take() else {
+                current_body.clear();
+                return;
+            };
+            if !section.starts_with("[patch.") {
+                current_body.clear();
+                return;
+            }
+
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&section);
+            out.push('\n');
+            for line in current_body.iter() {
+                out.push_str(line);
+                out.push('\n');
+            }
+            current_body.clear();
+        };
+
+    for raw_line in workspace_manifest.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') && !raw_line.starts_with(' ') {
+            flush_section(&mut out, &mut current_section, &mut current_body);
+            current_section = Some(trimmed.to_string());
+            continue;
+        }
+
+        if current_section.is_some() {
+            current_body.push(raw_line.to_string());
+        }
+    }
+
+    flush_section(&mut out, &mut current_section, &mut current_body);
+    out
+}
+
 fn strip_generated_wrapper_args(args: &[String], build_crate: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut skip_next = false;
@@ -176,8 +232,7 @@ fn strip_generated_wrapper_args(args: &[String], build_crate: &str) -> Vec<Strin
 
         let skip_arg = matches!(
             arg.as_str(),
-            "-p"
-                | "--package"
+            "-p" | "--package"
                 | "--manifest-path"
                 | "--exclude"
                 | "--bin"
@@ -227,6 +282,7 @@ fn generate_android_wrapper_manifest(
     build_crate: &str,
     target_root: &Path,
 ) -> Result<Option<PathBuf>, String> {
+    let workspace_root = std::env::current_dir().unwrap();
     let crate_dir = get_crate_dir(build_crate)?;
     let cargo_toml_path = crate_dir.join("Cargo.toml");
     let cargo_toml = fs::read_to_string(&cargo_toml_path)
@@ -251,11 +307,19 @@ fn generate_android_wrapper_manifest(
 
     let mut wrapper_manifest = rewrite_wrapper_manifest_paths(&cargo_toml, &crate_dir);
     wrapper_manifest.push_str("\n[lib]\n");
-    wrapper_manifest.push_str(&format!(
-        "path = \"{}\"\n",
-        normalize_toml_path(&main_rs)
-    ));
+    wrapper_manifest.push_str(&format!("path = \"{}\"\n", normalize_toml_path(&main_rs)));
     wrapper_manifest.push_str("\n[workspace]\n");
+    wrapper_manifest.push_str("resolver = \"2\"\n");
+
+    let workspace_manifest_path = workspace_root.join("Cargo.toml");
+    if let Ok(workspace_manifest) = fs::read_to_string(&workspace_manifest_path) {
+        let workspace_patches = extract_workspace_patch_sections(&workspace_manifest);
+        if !workspace_patches.trim().is_empty() {
+            wrapper_manifest.push('\n');
+            wrapper_manifest
+                .push_str(&rewrite_wrapper_manifest_paths(&workspace_patches, &workspace_root));
+        }
+    }
 
     let wrapper_manifest_path = wrapper_dir.join("Cargo.toml");
     fs::write(&wrapper_manifest_path, wrapper_manifest)
@@ -309,8 +373,12 @@ fn rust_build(
             HostOs::MacosX64 | HostOs::MacosAarch64 | HostOs::LinuxX64 => bin_filename.to_string(),
             _ => panic!(),
         };
-        let full_clang_path = ndk_prebuilt_root.join("bin").join(bin_name(&clang_filename, "cmd"));
-        let full_llvm_ar_path = ndk_prebuilt_root.join("bin").join(bin_name("llvm-ar", "exe"));
+        let full_clang_path = ndk_prebuilt_root
+            .join("bin")
+            .join(bin_name(&clang_filename, "cmd"));
+        let full_llvm_ar_path = ndk_prebuilt_root
+            .join("bin")
+            .join(bin_name("llvm-ar", "exe"));
         let full_llvm_ranlib_path = ndk_prebuilt_root
             .join("bin")
             .join(bin_name("llvm-ranlib", "exe"));
@@ -338,49 +406,63 @@ fn rust_build(
         let target_arch_str = android_target.to_str();
         let cfg_flag = format!("--cfg android_target=\"{}\"", target_arch_str);
 
-        let makepad_env = std::env::var("MAKEPAD").unwrap_or("lines".to_string());
         let makepad_env = if let AndroidVariant::Quest = variant {
-            format!("{}+quest", makepad_env)
+            Some(match std::env::var("MAKEPAD") {
+                Ok(makepad_env) if !makepad_env.is_empty() => format!("{makepad_env}+quest"),
+                _ => "quest".to_string(),
+            })
         } else {
-            makepad_env
+            std::env::var("MAKEPAD").ok().filter(|value| !value.is_empty())
         };
 
+        let android_sdk_version = urls.sdk_version.to_string();
+        let java_home = sdk_dir.join("openjdk").to_string_lossy().to_string();
+        let mut env: Vec<(String, String)> = vec![
+            (
+                android_target.linker_env_var().to_string(),
+                full_clang_path.to_string_lossy().to_string(),
+            ),
+            ("ANDROID_HOME".to_string(), sdk_dir.to_string_lossy().to_string()),
+            (
+                "ANDROID_SDK_ROOT".to_string(),
+                sdk_dir.to_string_lossy().to_string(),
+            ),
+            (
+                "ANDROID_BUILD_TOOLS_VERSION".to_string(),
+                urls.build_tools_version.to_string(),
+            ),
+            ("ANDROID_PLATFORM".to_string(), urls.platform.to_string()),
+            ("ANDROID_SDK_VERSION".to_string(), android_sdk_version.clone()),
+            ("ANDROID_API_LEVEL".to_string(), android_sdk_version),
+            (
+                "ANDROID_SDK_EXTENSION".to_string(),
+                urls.sdk_extension.to_string(),
+            ),
+            ("JAVA_HOME".to_string(), java_home),
+            (
+                format!("CC_{toolchain}"),
+                full_clang_path.to_string_lossy().to_string(),
+            ),
+            (
+                format!("AR_{toolchain}"),
+                full_llvm_ar_path.to_string_lossy().to_string(),
+            ),
+            (
+                format!("RANLIB_{toolchain}"),
+                full_llvm_ranlib_path.to_string_lossy().to_string(),
+            ),
+            ("RUSTFLAGS".to_string(), cfg_flag.clone()),
+        ];
+        if let Some(makepad_env) = makepad_env {
+            env.push(("MAKEPAD".to_string(), makepad_env));
+        }
+        let env_refs = env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+
         shell_env(
-            &[
-                // Set the linker env var to the path of the target-specific `clang` binary.
-                (
-                    &android_target.linker_env_var(),
-                    full_clang_path.to_str().unwrap(),
-                ),
-                // We set standard Android-related env vars to allow other tools to know
-                // which version of Java, Android build tools, and Android SDK we're targeting.
-                // These environment variables are either standard in the Android ecosystem
-                // or are defined by the `android-build` crate: <https://crates.io/crates/android-build>.
-                ("ANDROID_HOME", sdk_dir.to_str().unwrap()),
-                ("ANDROID_SDK_ROOT", sdk_dir.to_str().unwrap()),
-                ("ANDROID_BUILD_TOOLS_VERSION", urls.build_tools_version),
-                ("ANDROID_PLATFORM", urls.platform),
-                ("ANDROID_SDK_VERSION", urls.sdk_version.to_string().as_str()),
-                ("ANDROID_API_LEVEL", urls.sdk_version.to_string().as_str()), // for legacy/clarity purposes
-                ("ANDROID_SDK_EXTENSION", urls.sdk_extension),
-                ("JAVA_HOME", sdk_dir.join("openjdk").to_str().unwrap()),
-                // We set these three env vars to allow native library C/C++ builds to succeed with no additional app-side config.
-                // The naming conventions of these env variable keys are established by the `cc` Rust crate.
-                (
-                    &format!("CC_{toolchain}"),
-                    full_clang_path.to_str().unwrap(),
-                ),
-                (
-                    &format!("AR_{toolchain}"),
-                    full_llvm_ar_path.to_str().unwrap(),
-                ),
-                (
-                    &format!("RANLIB_{toolchain}"),
-                    full_llvm_ranlib_path.to_str().unwrap(),
-                ),
-                ("RUSTFLAGS", &cfg_flag),
-                ("MAKEPAD", &makepad_env),
-            ],
+            &env_refs,
             &cargo_cwd,
             "rustup",
             &args_out,
@@ -432,12 +514,17 @@ fn prepare_build(
         .join("makepad-android-apk")
         .join(&underscore_build_crate)
         .join("apk");
+    let java_out_dir = target_dir
+        .join("makepad-android-apk")
+        .join(&underscore_build_crate)
+        .join("java");
     let res_dir = tmp_dir.join("res");
 
     let _ = rmdir(&tmp_dir);
     let _ = rmdir(&out_dir);
     mkdir(&tmp_dir)?;
     mkdir(&out_dir)?;
+    mkdir(&java_out_dir)?;
 
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     cp_all(&cargo_manifest_dir.join("src/android/res"), &res_dir, false)?;
@@ -458,16 +545,11 @@ fn prepare_build(
     let has_android_icon = android_icon_targets
         .iter()
         .all(|d| res_dir.join(d).join("ic_launcher.png").is_file());
-    if !has_android_icon {
-        for d in android_icon_targets {
-            let p = res_dir.join(d).join("ic_launcher.png");
-            if !p.is_file() {
-                eprintln!(
-                    "warning: missing {}. Add this file to include a custom Android launcher icon.",
-                    p.display()
-                );
-            }
-        }
+    if !has_android_icon && !no_icon_requested() {
+        eprintln!(
+            "warning: missing Android launcher icons under {}. Add mipmap-*/ic_launcher.png files, or pass --no-icon to suppress this check.",
+            res_dir.display()
+        );
     }
 
     let manifest_xml = variant.manifest_xml(
@@ -499,6 +581,7 @@ fn prepare_build(
     Ok(BuildPaths {
         tmp_dir,
         out_dir,
+        java_out_dir,
         res_dir,
         manifest_file,
         java_file,
@@ -550,6 +633,7 @@ fn compile_java(
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let java_home = sdk_dir.join("openjdk");
     let cwd = std::env::current_dir().unwrap();
+    let javac_stamp = build_paths.java_out_dir.join("javac.inputs");
 
     let r_class_path = build_paths
         .tmp_dir
@@ -558,71 +642,92 @@ fn compile_java(
     let makepad_java_classes_dir = &cargo_manifest_dir
         .join("src/android/java/")
         .join(makepad_package_path);
+    let java_sources = vec![
+        r_class_path.clone(),
+        makepad_java_classes_dir.join("MakepadNative.java"),
+        makepad_java_classes_dir.join("MakepadActivity.java"),
+        makepad_java_classes_dir.join("MakepadInputConnection.java"),
+        makepad_java_classes_dir.join("MakepadNetwork.java"),
+        makepad_java_classes_dir.join("MakepadSocketStream.java"),
+        makepad_java_classes_dir.join("MakepadWebSocket.java"),
+        makepad_java_classes_dir.join("MakepadWebSocketReader.java"),
+        makepad_java_classes_dir.join("ByteArrayMediaDataSource.java"),
+        makepad_java_classes_dir.join("VideoPlayer.java"),
+        makepad_java_classes_dir.join("VideoPlayerRunnable.java"),
+        makepad_java_classes_dir.join("H264Encoder.java"),
+        build_paths.java_file.clone(),
+        build_paths.xr_file.clone(),
+    ];
+
+    let mut hasher = DefaultHasher::new();
+    for source in &java_sources {
+        source.to_string_lossy().hash(&mut hasher);
+        fs::read(source)
+            .map_err(|e| format!("failed to read Java source {:?}: {e}", source))?
+            .hash(&mut hasher);
+    }
+    let java_inputs_hash = format!("{:016x}", hasher.finish());
+
+    let app_class_dir = build_paths
+        .java_file
+        .parent()
+        .and_then(|path| path.strip_prefix(&build_paths.tmp_dir).ok())
+        .ok_or_else(|| {
+            format!(
+                "failed to resolve Java output package for {:?}",
+                build_paths.java_file
+            )
+        })?;
+    let expected_outputs = [
+        build_paths.java_out_dir.join("dev/makepad/android/R.class"),
+        build_paths
+            .java_out_dir
+            .join("dev/makepad/android/MakepadActivity.class"),
+        build_paths
+            .java_out_dir
+            .join(app_class_dir)
+            .join("MakepadApp.class"),
+        build_paths
+            .java_out_dir
+            .join(app_class_dir)
+            .join("MakepadAppXr.class"),
+    ];
+
+    if fs::read_to_string(&javac_stamp)
+        .map(|cached| cached.trim() == java_inputs_hash)
+        .unwrap_or(false)
+        && expected_outputs.iter().all(|path| path.is_file())
+    {
+        println!("Java classes unchanged, reusing cached javac output");
+        return Ok(());
+    }
+
+    let android_jar = android_jar_path(sdk_dir, urls);
+    let _ = rmdir(&build_paths.java_out_dir);
+    mkdir(&build_paths.java_out_dir)?;
+    let mut javac_args = vec![
+        "-source",
+        "1.8",
+        "-target",
+        "1.8",
+        "-Xlint:-options",
+        "-classpath",
+        android_jar.to_str().unwrap(),
+        "-Xlint:deprecation",
+        "-d",
+        build_paths.java_out_dir.to_str().unwrap(),
+    ];
+    for source in &java_sources {
+        javac_args.push(source.to_str().unwrap());
+    }
 
     shell_env(
         &[("JAVA_HOME", (java_home.to_str().unwrap()))],
         &cwd,
         java_home.join("bin/javac").to_str().unwrap(),
-        &[
-            "-source",
-            "1.8",
-            "-target",
-            "1.8",
-            "-Xlint:-options",
-            "-classpath",
-            (android_jar_path(sdk_dir, urls).to_str().unwrap()),
-            "-Xlint:deprecation",
-            "-d",
-            (build_paths.out_dir.to_str().unwrap()),
-            (r_class_path.to_str().unwrap()),
-            (makepad_java_classes_dir
-                .join("MakepadNative.java")
-                .to_str()
-                .unwrap()),
-            (makepad_java_classes_dir
-                .join("MakepadActivity.java")
-                .to_str()
-                .unwrap()),
-            (makepad_java_classes_dir
-                .join("MakepadInputConnection.java")
-                .to_str()
-                .unwrap()),
-            (makepad_java_classes_dir
-                .join("MakepadNetwork.java")
-                .to_str()
-                .unwrap()),
-            (makepad_java_classes_dir
-                .join("MakepadSocketStream.java")
-                .to_str()
-                .unwrap()),
-            (makepad_java_classes_dir
-                .join("MakepadWebSocket.java")
-                .to_str()
-                .unwrap()),
-            (makepad_java_classes_dir
-                .join("MakepadWebSocketReader.java")
-                .to_str()
-                .unwrap()),
-            (makepad_java_classes_dir
-                .join("ByteArrayMediaDataSource.java")
-                .to_str()
-                .unwrap()),
-            (makepad_java_classes_dir
-                .join("VideoPlayer.java")
-                .to_str()
-                .unwrap()),
-            (makepad_java_classes_dir
-                .join("VideoPlayerRunnable.java")
-                .to_str()
-                .unwrap()),
-            (makepad_java_classes_dir
-                .join("H264Encoder.java")
-                .to_str()
-                .unwrap()),
-            (build_paths.java_file.to_str().unwrap()),
-            (build_paths.xr_file.to_str().unwrap()),
-        ],
+        &javac_args,
     )?;
+    write_text(&javac_stamp, &java_inputs_hash)?;
 
     Ok(())
 }
@@ -635,10 +740,10 @@ fn build_dex(
     let java_home = sdk_dir.join("openjdk");
     let cwd = std::env::current_dir().unwrap();
 
-    let mut class_files: Vec<PathBuf> = ls(&build_paths.out_dir)?
+    let mut class_files: Vec<PathBuf> = ls(&build_paths.java_out_dir)?
         .into_iter()
         .filter(|rel| rel.extension().and_then(|ext| ext.to_str()) == Some("class"))
-        .map(|rel| build_paths.out_dir.join(rel))
+        .map(|rel| build_paths.java_out_dir.join(rel))
         .collect();
 
     class_files.sort();
@@ -646,7 +751,7 @@ fn build_dex(
     if class_files.is_empty() {
         return Err(format!(
             "No compiled Java class files found in {:?}",
-            build_paths.out_dir
+            build_paths.java_out_dir
         ));
     }
 
@@ -744,7 +849,8 @@ fn resolve_ndk_prebuilt_root(
     for entry in
         std::fs::read_dir(&ndk_root).map_err(|e| format!("failed to read {:?}: {e}", ndk_root))?
     {
-        let entry = entry.map_err(|e| format!("failed to read NDK entry in {:?}: {e}", ndk_root))?;
+        let entry =
+            entry.map_err(|e| format!("failed to read NDK entry in {:?}: {e}", ndk_root))?;
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -967,6 +1073,7 @@ fn add_resources(
     build_dir: &Path,
     android_targets: &[AndroidTarget],
     variant: &AndroidVariant,
+    config: &AndroidConfig,
     urls: &AndroidSDKUrls,
 ) -> Result<(), String> {
     let mut assets_to_add: Vec<String> = Vec::new();
@@ -978,12 +1085,15 @@ fn add_resources(
         build_crate,
         &build_crate_dir.join("resources"),
         "resources",
+        config,
     )?;
     add_font_assets_dir_to_apk(
         &build_paths.out_dir,
         &mut assets_to_add,
         build_crate,
         &build_crate_dir.join("fonts"),
+        &build_crate_dir.join("resources"),
+        config,
     )?;
 
     let deps = get_crate_dep_dirs(build_crate, &build_dir, &android_targets[0].toolchain());
@@ -994,12 +1104,15 @@ fn add_resources(
             name,
             &dep_dir.join("resources"),
             "resources",
+            config,
         )?;
         add_font_assets_dir_to_apk(
             &build_paths.out_dir,
             &mut assets_to_add,
             name,
             &dep_dir.join("fonts"),
+            &dep_dir.join("resources"),
+            config,
         )?;
     }
     // FIX THIS PROPER
@@ -1044,6 +1157,7 @@ fn add_assets_dir_to_apk(
     crate_name: &str,
     source_dir: &Path,
     asset_subdir: &str,
+    config: &AndroidConfig,
 ) -> Result<(), String> {
     if !source_dir.is_dir() {
         return Ok(());
@@ -1053,6 +1167,15 @@ fn add_assets_dir_to_apk(
     let dst_dir = out_dir.join(format!("assets/makepad/{crate_name}/{asset_subdir}"));
     mkdir(&dst_dir)?;
     cp_all(source_dir, &dst_dir, false)?;
+    if config.small_fonts && asset_subdir == "resources" {
+        for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
+            let replacement = source_dir.join(replacement_name);
+            let target = dst_dir.join(target_name);
+            if replacement.is_file() && target.is_file() {
+                cp(&replacement, &target, false)?;
+            }
+        }
+    }
 
     let assets = ls(&dst_dir)?;
     for path in &assets {
@@ -1067,6 +1190,8 @@ fn add_font_assets_dir_to_apk(
     assets_to_add: &mut Vec<String>,
     crate_name: &str,
     source_dir: &Path,
+    resource_dir: &Path,
+    config: &AndroidConfig,
 ) -> Result<(), String> {
     if !source_dir.is_dir() {
         return Ok(());
@@ -1089,6 +1214,21 @@ fn add_font_assets_dir_to_apk(
         cp(&source_dir.join(path), &dst_dir.join(path), false)?;
         let path = path.display().to_string().replace("\\", "/");
         assets_to_add.push(format!("assets/makepad/{crate_name}/fonts/{path}"));
+    }
+    if config.small_fonts {
+        for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
+            let replacement = source_dir
+                .join(replacement_name)
+                .is_file()
+                .then(|| source_dir.join(replacement_name))
+                .or_else(|| resource_dir.join(replacement_name).is_file().then(|| resource_dir.join(replacement_name)));
+            let target = dst_dir.join(target_name);
+            if let Some(replacement) = replacement {
+                if target.is_file() {
+                    cp(&replacement, &target, false)?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1149,10 +1289,12 @@ pub fn build(
     args: &[String],
     android_targets: &[AndroidTarget],
     variant: &AndroidVariant,
+    config: &AndroidConfig,
     urls: &AndroidSDKUrls,
 ) -> Result<BuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
-    let binary_name = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
+    let binary_name =
+        get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
     let underscore_binary_name = binary_name.replace('-', "_");
     let underscore_build_crate = build_crate.replace('-', "_");
 
@@ -1165,7 +1307,15 @@ pub fn build(
         }
     }
 
-    rust_build(sdk_dir, host_os, build_crate, args, android_targets, variant, urls)?;
+    rust_build(
+        sdk_dir,
+        host_os,
+        build_crate,
+        args,
+        android_targets,
+        variant,
+        urls,
+    )?;
     let build_paths = prepare_build(build_crate, &java_url, &app_label, variant, urls)?;
 
     println!("Compiling APK & R.java files");
@@ -1192,6 +1342,7 @@ pub fn build(
         &build_dir,
         android_targets,
         variant,
+        config,
         urls,
     )?;
     build_zipaligned_apk(sdk_dir, &build_paths, urls)?;
@@ -1212,6 +1363,7 @@ pub fn run(
     args: &[String],
     targets: &[AndroidTarget],
     android_variant: &AndroidVariant,
+    config: &AndroidConfig,
     urls: &AndroidSDKUrls,
     devices: Vec<String>,
 ) -> Result<(), String> {
@@ -1223,6 +1375,7 @@ pub fn run(
         args,
         targets,
         android_variant,
+        config,
         urls,
     )?;
 
@@ -1330,6 +1483,162 @@ pub fn adb(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), Stri
         &args_out,
     )?;
     Ok(())
+}
+
+fn adb_path(sdk_dir: &Path) -> PathBuf {
+    sdk_dir.join("platform-tools/adb")
+}
+
+fn push_serial_args<'a>(serial: Option<&'a str>, args: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::with_capacity(args.len() + 2);
+    if let Some(serial) = serial {
+        out.push("-s");
+        out.push(serial);
+    }
+    out.extend_from_slice(args);
+    out
+}
+
+fn adb_cap(sdk_dir: &Path, serial: Option<&str>, args: &[&str]) -> Result<String, String> {
+    let cwd = std::env::current_dir().unwrap();
+    let args_out = push_serial_args(serial, args);
+    shell_env_cap(&[], &cwd, adb_path(sdk_dir).to_str().unwrap(), &args_out)
+}
+
+fn adb_run(sdk_dir: &Path, serial: Option<&str>, args: &[&str]) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap();
+    let args_out = push_serial_args(serial, args);
+    shell_env(&[], &cwd, adb_path(sdk_dir).to_str().unwrap(), &args_out)
+}
+
+fn parse_ipv4_token(token: &str) -> Option<&str> {
+    let candidate = token.trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
+    let mut parts = candidate.split('.');
+    let mut count = 0usize;
+    while let Some(part) = parts.next() {
+        if part.is_empty() || part.len() > 3 {
+            return None;
+        }
+        if part.parse::<u8>().is_err() {
+            return None;
+        }
+        count += 1;
+    }
+    if count == 4 && candidate != "0.0.0.0" && candidate != "127.0.0.1" {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn parse_ip_addr_show(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        while let Some(part) = parts.next() {
+            if part == "inet" {
+                if let Some(addr) = parts.next() {
+                    if let Some(ip) = parse_ipv4_token(addr.split('/').next().unwrap_or(addr)) {
+                        return Some(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_ip_route(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        while let Some(part) = parts.next() {
+            if part == "src" {
+                if let Some(ip) = parts.next().and_then(parse_ipv4_token) {
+                    return Some(ip.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn detect_device_ip(sdk_dir: &Path, serial: Option<&str>) -> Result<String, String> {
+    let addr_show = adb_cap(sdk_dir, serial, &["shell", "ip", "-f", "inet", "addr", "show", "scope", "global"])?;
+    if let Some(ip) = parse_ip_addr_show(&addr_show) {
+        return Ok(ip);
+    }
+
+    let route = adb_cap(sdk_dir, serial, &["shell", "ip", "route"])?;
+    if let Some(ip) = parse_ip_route(&route) {
+        return Ok(ip);
+    }
+
+    Err(format!(
+        "Could not determine device IP address over adb. `ip -f inet addr show scope global` output:\n{}\n`ip route` output:\n{}",
+        addr_show.trim(),
+        route.trim()
+    ))
+}
+
+pub fn adb_tcp(
+    sdk_dir: &Path,
+    _host_os: HostOs,
+    devices: &[String],
+    args: &[String],
+) -> Result<(), String> {
+    let port = match args {
+        [] => 5555u16,
+        [port] => port
+            .parse::<u16>()
+            .map_err(|_| format!("Invalid adb-tcp port `{port}`"))?,
+        _ => {
+            return Err(
+                "adb-tcp accepts at most one optional argument: the tcp port (default 5555)"
+                    .to_string(),
+            )
+        }
+    };
+    let port_string = port.to_string();
+
+    if devices.is_empty() {
+        let ip = detect_device_ip(sdk_dir, None)?;
+        println!("Detected device IP: {ip}");
+        adb_run(sdk_dir, None, &["tcpip", &port_string])?;
+        thread::sleep(Duration::from_secs(1));
+        let output = adb_cap(sdk_dir, None, &["connect", &format!("{ip}:{port}")])?;
+        print!("{output}");
+        return Ok(());
+    }
+
+    for device in devices {
+        let ip = detect_device_ip(sdk_dir, Some(device))?;
+        println!("Detected device IP for {device}: {ip}");
+        adb_run(sdk_dir, Some(device), &["tcpip", &port_string])?;
+        thread::sleep(Duration::from_secs(1));
+        let output = adb_cap(sdk_dir, None, &["connect", &format!("{ip}:{port}")])?;
+        print!("{output}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_ip_addr_show, parse_ip_route};
+
+    #[test]
+    fn parse_ip_addr_show_extracts_ipv4() {
+        let output = "\
+2: wlan0    inet 192.168.0.42/24 brd 192.168.0.255 scope global wlan0\n\
+   valid_lft forever preferred_lft forever\n";
+        assert_eq!(parse_ip_addr_show(output), Some("192.168.0.42".to_string()));
+    }
+
+    #[test]
+    fn parse_ip_route_prefers_src_ipv4() {
+        let output = "\
+default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.42 metric 303\n\
+192.168.0.0/24 dev wlan0 proto kernel scope link src 192.168.0.42\n";
+        assert_eq!(parse_ip_route(output), Some("192.168.0.42".to_string()));
+    }
 }
 
 pub fn java(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), String> {

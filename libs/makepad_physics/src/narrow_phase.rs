@@ -39,7 +39,8 @@ fn pack_face_feature(code: u32) -> u32 {
 fn match_contact_data(previous: &ContactManifold, current: &mut ContactManifold) {
     for point in current.points[..current.num_points].iter_mut() {
         for prev_point in previous.points[..previous.num_points].iter() {
-            if (point.feature_id_a != FEATURE_ID_UNKNOWN || point.feature_id_b != FEATURE_ID_UNKNOWN)
+            if (point.feature_id_a != FEATURE_ID_UNKNOWN
+                || point.feature_id_b != FEATURE_ID_UNKNOWN)
                 && point.feature_id_a == prev_point.feature_id_a
                 && point.feature_id_b == prev_point.feature_id_b
             {
@@ -632,8 +633,10 @@ fn generate_feature_contacts(
         projected_face2[i] = project_to_basis(vertices2_1[i], basis1, basis2);
     }
 
-    let normal2_1 =
-        Vec3f::cross(vertices2_1[2] - vertices2_1[1], vertices2_1[0] - vertices2_1[1]);
+    let normal2_1 = Vec3f::cross(
+        vertices2_1[2] - vertices2_1[1],
+        vertices2_1[0] - vertices2_1[1],
+    );
     let denom2 = normal2_1.dot(local_normal_a);
     if denom2.abs() > f32::EPSILON {
         for i in 0..feature1.num_vertices {
@@ -692,7 +695,8 @@ fn generate_feature_contacts(
                 projected_face1[i],
                 projected_face1[(i + 1) % feature1.num_vertices],
             ];
-            if let Some((bcoord1, bcoord2)) = closest_points_line2d(projected_edge1, projected_edge2)
+            if let Some((bcoord1, bcoord2)) =
+                closest_points_line2d(projected_edge1, projected_edge2)
             {
                 if bcoord1 > 0.0 && bcoord1 < 1.0 && bcoord2 > 0.0 && bcoord2 < 1.0 {
                     let edge1_a = feature1.vertices[i];

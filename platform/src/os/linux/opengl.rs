@@ -568,7 +568,7 @@ impl Cx {
 
                     // give openXR a chance to set its depth texture
                     #[cfg(target_os = "android")]
-                    if self.os.in_xr_mode {
+                    if self.os.in_xr_mode && shader_variant == SHADER_VARIANT_XR {
                         self.os.openxr.depth_texture_hook(gl, shgl, &sh.mapping)
                     };
 
@@ -698,6 +698,7 @@ impl Cx {
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
         let pass = &mut self.passes[draw_pass_id];
         pass.paint_dirty = false;
+        pass.os.shader_variant = SHADER_VARIANT_WINDOW;
 
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
             return None;
@@ -942,6 +943,8 @@ impl Cx {
     }
 }
 
+pub const SHADER_VARIANT_WINDOW: usize = 0;
+pub const SHADER_VARIANT_XR: usize = 1;
 const NUM_SHADER_VARIANTS: usize = 2;
 
 pub struct CxOsDrawShader {
@@ -1606,12 +1609,15 @@ impl CxOsDrawShader {
         let depth_clip = "
             uniform sampler2DArray xr_depth_texture;
             vec4 depth_clip(vec4 world, vec4 color, float clip){
-                vec4 cube_depth_camera_position = pass.depth_projection[VIEW_ID] * pass.depth_view[VIEW_ID] * world;
+                vec4 cube_depth_camera_position =
+                    unibuf_draw_pass.depth_projection[int(VIEW_ID)]
+                    * unibuf_draw_pass.depth_view[int(VIEW_ID)]
+                    * world;
 
                 vec3 cube_depth_camera_position_hc = cube_depth_camera_position.xyz / cube_depth_camera_position.w;
                 cube_depth_camera_position_hc = cube_depth_camera_position_hc*0.5f + 0.5f;
 
-                vec3 depth_view_coord = vec3(cube_depth_camera_position_hc.xy, VIEW_ID);
+                vec3 depth_view_coord = vec3(cube_depth_camera_position_hc.xy, float(VIEW_ID));
 
                 gl_FragDepth = cube_depth_camera_position_hc.z;
 
@@ -1648,76 +1654,61 @@ impl CxOsDrawShader {
             vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir).zyxw;}
             ";
 
-        let (version, vertex_exts, pixel_exts, vertex_defs, pixel_defs, sampler) =
-            if os_type.has_xr_mode() {
-                (
-                    "#version 300 es",
-                    // Vertex shader
-                    "
+        let vertex_window = format!(
+            "#version 300 es
             #define VIEW_ID 0
-            #extension GL_OVR_multiview2 : require
-            layout(num_views=2) in;
-            ",
-                    // Pixel shader
-                    "
-            #define VIEW_ID 0
-            #extension GL_OVR_multiview2 : require
-            ",
-                    "",
-                    "",
-                    sampler_helpers,
-                )
-            } else {
-                ("#version 300 es", "", "", "", "", sampler_helpers)
-            };
-
-        /*
-        let transpose_impl = "
-        mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-        mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-        mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-        ";
-        */
-        let vertex = format!(
-            "{version}
-            {vertex_exts}
             {tex_ext_import}
             precision highp float;
             precision highp int;
-            {sampler}
+            {sampler_helpers}
             {tex_ext_sampler}
-            {vertex_defs}
             {in_vertex}\0",
         );
-        //crate::log!("{}", vertex.replace("int mvo = 0;","int mvo = gl_ViewID_OVR==0?0:16;"));
-        let pixel = format!(
-            "{version}
-            {pixel_exts}
+        let pixel_window = format!(
+            "#version 300 es
+            #define VIEW_ID 0
             {tex_ext_import}
             #extension GL_OES_standard_derivatives : enable
             precision highp float;
             precision highp int;
-            {sampler}
+            {sampler_helpers}
             {tex_ext_sampler}
-            {pixel_defs}
             {in_pixel}
             {nop_depth_clip}
+            \0",
+        );
+        let vertex_xr = format!(
+            "#version 300 es
+            #define VIEW_ID gl_ViewID_OVR
+            #extension GL_OVR_multiview2 : require
+            layout(num_views=2) in;
+            {tex_ext_import}
+            precision highp float;
+            precision highp int;
+            {sampler_helpers}
+            {tex_ext_sampler}
+            {in_vertex}\0",
+        );
+        let pixel_xr = format!(
+            "#version 300 es
+            #define VIEW_ID gl_ViewID_OVR
+            #extension GL_OVR_multiview2 : require
+            {tex_ext_import}
+            #extension GL_OES_standard_derivatives : enable
+            precision highp float;
+            precision highp int;
+            {sampler_helpers}
+            {tex_ext_sampler}
+            {in_pixel}
+            {depth_clip}
             \0",
         );
         // lets fetch the uniform positions for our uniforms
         CxOsDrawShader {
             in_vertex: in_vertex.to_string(),
             in_pixel: in_pixel.to_string(),
-            vertex: [
-                vertex.clone(),
-                vertex.replace("#define VIEW_ID 0", "#define VIEW_ID gl_ViewID_OVR"),
-            ],
-            pixel: [
-                pixel.clone(),
-                pixel
-                    .replace("#define VIEW_ID 0", "#define VIEW_ID gl_ViewID_OVR")
-                    .replace(nop_depth_clip, depth_clip),
-            ],
+            vertex: [vertex_window, vertex_xr],
+            pixel: [pixel_window, pixel_xr],
             gl_shader: [None, None],
             //const_table_uniforms: Default::default(),
             live_uniforms: Default::default(),

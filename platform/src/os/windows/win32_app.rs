@@ -694,6 +694,16 @@ impl DpiFunctions {
             }
         }
     }
+
+    pub fn system_dpi_factor(&self) -> f32 {
+        unsafe {
+            let hdc = GetDC(None);
+            if hdc.is_invalid() {
+                return 1.0;
+            }
+            GetDeviceCaps(Some(hdc), LOGPIXELSX) as f32 / BASE_DPI as f32
+        }
+    }
     /*
     pub fn get_monitor_dpi(hmonitor: HMONITOR) -> Option<u32> {
         unsafe {

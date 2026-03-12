@@ -970,10 +970,7 @@ impl ExrLayerOutputBuffers {
                 ],
                 ExrLayerKind::Gradient => vec![ExrLayerChannel {
                     name: "Phase",
-                    samples: self
-                        .gradient
-                        .take()
-                        .expect("gradient layer buffer missing"),
+                    samples: self.gradient.take().expect("gradient layer buffer missing"),
                 }],
                 ExrLayerKind::Iterations => vec![ExrLayerChannel {
                     name: "Iterations",
@@ -984,10 +981,7 @@ impl ExrLayerOutputBuffers {
                 }],
                 ExrLayerKind::MarchSteps => vec![ExrLayerChannel {
                     name: "Steps",
-                    samples: self
-                        .march_steps
-                        .take()
-                        .expect("march steps buffer missing"),
+                    samples: self.march_steps.take().expect("march steps buffer missing"),
                 }],
                 ExrLayerKind::Normal => vec![
                     ExrLayerChannel {
@@ -1028,24 +1022,15 @@ impl ExrLayerOutputBuffers {
                 ExrLayerKind::Position => vec![
                     ExrLayerChannel {
                         name: "X",
-                        samples: self
-                            .position_x
-                            .take()
-                            .expect("position X buffer missing"),
+                        samples: self.position_x.take().expect("position X buffer missing"),
                     },
                     ExrLayerChannel {
                         name: "Y",
-                        samples: self
-                            .position_y
-                            .take()
-                            .expect("position Y buffer missing"),
+                        samples: self.position_y.take().expect("position Y buffer missing"),
                     },
                     ExrLayerChannel {
                         name: "Z",
-                        samples: self
-                            .position_z
-                            .take()
-                            .expect("position Z buffer missing"),
+                        samples: self.position_z.take().expect("position Z buffer missing"),
                     },
                 ],
                 ExrLayerKind::Roughness => vec![ExrLayerChannel {
@@ -1100,24 +1085,15 @@ impl ExrLayerOutputBuffers {
                 ExrLayerKind::SignFlips => vec![
                     ExrLayerChannel {
                         name: "X",
-                        samples: self
-                            .sign_flip_x
-                            .take()
-                            .expect("sign flip X buffer missing"),
+                        samples: self.sign_flip_x.take().expect("sign flip X buffer missing"),
                     },
                     ExrLayerChannel {
                         name: "Y",
-                        samples: self
-                            .sign_flip_y
-                            .take()
-                            .expect("sign flip Y buffer missing"),
+                        samples: self.sign_flip_y.take().expect("sign flip Y buffer missing"),
                     },
                     ExrLayerChannel {
                         name: "Z",
-                        samples: self
-                            .sign_flip_z
-                            .take()
-                            .expect("sign flip Z buffer missing"),
+                        samples: self.sign_flip_z.take().expect("sign flip Z buffer missing"),
                     },
                 ],
             };
@@ -2404,9 +2380,18 @@ fn render_exr_layers_2x2_antialias(
         .branch_outer
         .as_mut()
         .map(|buf| SharedWriteBuf::new(buf));
-    let beauty_r_writer = outputs.beauty_r.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let beauty_g_writer = outputs.beauty_g.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let beauty_b_writer = outputs.beauty_b.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let beauty_r_writer = outputs
+        .beauty_r
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let beauty_g_writer = outputs
+        .beauty_g
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let beauty_b_writer = outputs
+        .beauty_b
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
     let depth_writer = outputs.depth.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let estimator_writer = outputs
         .estimator
@@ -2415,7 +2400,10 @@ fn render_exr_layers_2x2_antialias(
     let fold_x_writer = outputs.fold_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let fold_y_writer = outputs.fold_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let fold_z_writer = outputs.fold_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let fold_any_writer = outputs.fold_any.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let fold_any_writer = outputs
+        .fold_any
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
     let gradient_writer = outputs
         .gradient
         .as_mut()
@@ -2444,7 +2432,10 @@ fn render_exr_layers_2x2_antialias(
     let orbit_y_writer = outputs.orbit_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let orbit_z_writer = outputs.orbit_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let orbit_w_writer = outputs.orbit_w.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let orbit_r2_writer = outputs.orbit_r2.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let orbit_r2_writer = outputs
+        .orbit_r2
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
     let position_x_writer = outputs
         .position_x
         .as_mut()
@@ -2501,7 +2492,8 @@ fn render_exr_layers_2x2_antialias(
     } else {
         None
     };
-    let lighting_cache = crate::lighting::LightingCache::new(lighting, &aa_params.camera, &aa_params);
+    let lighting_cache =
+        crate::lighting::LightingCache::new(lighting, &aa_params.camera, &aa_params);
     let next_pixel = AtomicUsize::new(0);
     let completed_pixels = AtomicUsize::new(0);
     let next_report = AtomicUsize::new(progress_granularity(len));
@@ -2886,37 +2878,98 @@ pub fn render_exr_layers(
     let mut outputs = ExrLayerOutputBuffers::new(len, needs, bg);
 
     let ao_writer = outputs.ao.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let branch_reciprocal_writer = outputs.branch_reciprocal
+    let branch_reciprocal_writer = outputs
+        .branch_reciprocal
         .as_mut()
         .map(|buf| SharedWriteBuf::new(buf));
-    let branch_outer_writer = outputs.branch_outer.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let beauty_r_writer = outputs.beauty_r.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let beauty_g_writer = outputs.beauty_g.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let beauty_b_writer = outputs.beauty_b.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let branch_outer_writer = outputs
+        .branch_outer
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let beauty_r_writer = outputs
+        .beauty_r
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let beauty_g_writer = outputs
+        .beauty_g
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let beauty_b_writer = outputs
+        .beauty_b
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
     let depth_writer = outputs.depth.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let estimator_writer = outputs.estimator.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let estimator_writer = outputs
+        .estimator
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
     let fold_x_writer = outputs.fold_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let fold_y_writer = outputs.fold_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let fold_z_writer = outputs.fold_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let fold_any_writer = outputs.fold_any.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let gradient_writer = outputs.gradient.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let iterations_writer = outputs.iterations.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let march_steps_writer = outputs.march_steps.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let normal_x_writer = outputs.normal_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let normal_y_writer = outputs.normal_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let normal_z_writer = outputs.normal_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let fold_any_writer = outputs
+        .fold_any
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let gradient_writer = outputs
+        .gradient
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let iterations_writer = outputs
+        .iterations
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let march_steps_writer = outputs
+        .march_steps
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let normal_x_writer = outputs
+        .normal_x
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let normal_y_writer = outputs
+        .normal_y
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let normal_z_writer = outputs
+        .normal_z
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
     let orbit_x_writer = outputs.orbit_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let orbit_y_writer = outputs.orbit_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let orbit_z_writer = outputs.orbit_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let orbit_w_writer = outputs.orbit_w.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let orbit_r2_writer = outputs.orbit_r2.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let position_x_writer = outputs.position_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let position_y_writer = outputs.position_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let position_z_writer = outputs.position_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let roughness_writer = outputs.roughness.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let sign_flip_x_writer = outputs.sign_flip_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let sign_flip_y_writer = outputs.sign_flip_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
-    let sign_flip_z_writer = outputs.sign_flip_z.as_mut().map(|buf| SharedWriteBuf::new(buf));
+    let orbit_r2_writer = outputs
+        .orbit_r2
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let position_x_writer = outputs
+        .position_x
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let position_y_writer = outputs
+        .position_y
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let position_z_writer = outputs
+        .position_z
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let roughness_writer = outputs
+        .roughness
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let sign_flip_x_writer = outputs
+        .sign_flip_x
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let sign_flip_y_writer = outputs
+        .sign_flip_y
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
+    let sign_flip_z_writer = outputs
+        .sign_flip_z
+        .as_mut()
+        .map(|buf| SharedWriteBuf::new(buf));
     let trap_x_writer = outputs.trap_x.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let trap_y_writer = outputs.trap_y.as_mut().map(|buf| SharedWriteBuf::new(buf));
     let trap_z_writer = outputs.trap_z.as_mut().map(|buf| SharedWriteBuf::new(buf));

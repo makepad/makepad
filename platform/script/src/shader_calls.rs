@@ -1430,8 +1430,12 @@ impl ShaderFnCompiler {
                                 }
                                 _ => {
                                     if let Some(lod) = lod {
-                                        write!(s, "sample2d_lod({}, {}, {})", texture_expr, coord, lod)
-                                            .ok();
+                                        write!(
+                                            s,
+                                            "sample2d_lod({}, {}, {})",
+                                            texture_expr, coord, lod
+                                        )
+                                        .ok();
                                     } else if method_id == id!(sample_as_bgra) {
                                         write!(s, "sample2d_bgra({}, {})", texture_expr, coord)
                                             .ok();

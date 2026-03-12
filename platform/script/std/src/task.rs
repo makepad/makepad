@@ -48,7 +48,10 @@ impl ScriptHandleGc for ScriptTaskGc {
     }
 }
 
-pub fn add_script_task_on_thread_completed_hook(std: &mut ScriptStd, hook: ScriptTaskOnThreadCompletedHook) {
+pub fn add_script_task_on_thread_completed_hook(
+    std: &mut ScriptStd,
+    hook: ScriptTaskOnThreadCompletedHook,
+) {
     if !std
         .data
         .tasks

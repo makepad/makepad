@@ -1776,13 +1776,25 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(slide_right_btn)).clicked(actions) {
             self.ui.slide_panel(cx, ids!(right_panel)).toggle(cx);
         }
-        if self.ui.button(cx, ids!(close_left_panel_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(close_left_panel_btn))
+            .clicked(actions)
+        {
             self.ui.slide_panel(cx, ids!(left_panel)).close(cx);
         }
-        if self.ui.button(cx, ids!(close_top_panel_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(close_top_panel_btn))
+            .clicked(actions)
+        {
             self.ui.slide_panel(cx, ids!(top_panel)).close(cx);
         }
-        if self.ui.button(cx, ids!(close_right_panel_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(close_right_panel_btn))
+            .clicked(actions)
+        {
             self.ui.slide_panel(cx, ids!(right_panel)).close(cx);
         }
     }

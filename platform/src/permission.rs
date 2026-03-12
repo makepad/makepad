@@ -10,6 +10,12 @@ pub enum Permission {
     /// Required on: iOS, Android, macOS, Web
     /// Auto-granted on: Windows, Linux
     Camera,
+    /// Permission to access Quest scene understanding data.
+    ///
+    /// Required on: Android Quest for scene data, environment depth, and passthrough occlusion.
+    /// Unsupported on: iOS, macOS, Web
+    /// Auto-granted on: Windows, Linux
+    SceneAccess,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

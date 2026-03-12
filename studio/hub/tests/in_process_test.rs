@@ -2086,6 +2086,274 @@ fn observe_mount_reload_splash_after_save() {
 }
 
 #[test]
+fn observe_mount_recovers_splash_after_error_on_followup_save() {
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.hub\nhub.set_run_items([{name:\"one\" in_studio:true on_run:fn(){}}])\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(true),
+    });
+
+    let first_started = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::BuildStarted { mount, package, .. } if mount == "repo" && package == "makepad.splash"),
+    )
+    .expect("did not receive initial BuildStarted");
+    let first_build_id = match first_started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let initial_run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.len() == 1 && items[0].name == "one"),
+    );
+    assert!(
+        initial_run_items.is_some(),
+        "did not receive initial RunItems from splash"
+    );
+
+    let _ = connection.send(ClientToHub::SaveTextFile {
+        path: "repo/makepad.splash".to_string(),
+        content: "use mod.hub\nhub.set_run_items([\n".to_string(),
+    });
+    let broken_saved = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::TextFileSaved { path, .. } if path == "repo/makepad.splash"
+        )
+    });
+    assert!(broken_saved.is_some(), "did not receive broken TextFileSaved");
+
+    let broken_started = wait_for_message(&connection, Duration::from_secs(6), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted {
+                build_id,
+                mount,
+                package,
+            } if mount == "repo" && package == "makepad.splash" && *build_id != first_build_id
+        )
+    })
+    .expect("did not receive broken splash BuildStarted");
+    let broken_build_id = match broken_started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let broken_stopped = wait_for_message(&connection, Duration::from_secs(6), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStopped { build_id, exit_code: Some(1) } if *build_id == broken_build_id
+        )
+    });
+    assert!(
+        broken_stopped.is_some(),
+        "did not receive failed BuildStopped for broken splash"
+    );
+
+    let empty_run_items = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.is_empty())
+    });
+    assert!(
+        empty_run_items.is_some(),
+        "did not receive empty RunItems after broken splash"
+    );
+
+    let _ = connection.send(ClientToHub::SaveTextFile {
+        path: "repo/makepad.splash".to_string(),
+        content: "use mod.hub\nhub.set_run_items([{name:\"two\" in_studio:true on_run:fn(){}}])\n"
+            .to_string(),
+    });
+    let fixed_saved = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::TextFileSaved { path, .. } if path == "repo/makepad.splash"
+        )
+    });
+    assert!(fixed_saved.is_some(), "did not receive fixed TextFileSaved");
+
+    let fixed_started = wait_for_message(&connection, Duration::from_secs(6), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted {
+                build_id,
+                mount,
+                package,
+            } if mount == "repo"
+                && package == "makepad.splash"
+                && *build_id != first_build_id
+                && *build_id != broken_build_id
+        )
+    })
+    .expect("did not receive recovered splash BuildStarted");
+
+    let fixed_build_id = match fixed_started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let recovered_run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(6),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.len() == 1 && items[0].name == "two"),
+    );
+    assert!(
+        recovered_run_items.is_some(),
+        "did not receive recovered RunItems after fixing splash"
+    );
+
+    let _ = connection.send(ClientToHub::StopBuild {
+        build_id: fixed_build_id,
+    });
+}
+
+#[test]
+fn external_makepad_splash_fix_restarts_failed_splash() {
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
+    let splash_path = dir.path().join("makepad.splash");
+    fs::write(
+        &splash_path,
+        "use mod.hub\nhub.set_run_items([{name:\"one\" in_studio:true on_run:fn(){}}])\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(true),
+    });
+
+    let first_started = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::BuildStarted { mount, package, .. } if mount == "repo" && package == "makepad.splash"),
+    )
+    .expect("did not receive initial BuildStarted");
+    let first_build_id = match first_started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let initial_run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.len() == 1 && items[0].name == "one"),
+    );
+    assert!(
+        initial_run_items.is_some(),
+        "did not receive initial RunItems from splash"
+    );
+
+    let _ = connection.send(ClientToHub::SaveTextFile {
+        path: "repo/makepad.splash".to_string(),
+        content: "use mod.hub\nhub.set_run_items([\n".to_string(),
+    });
+    let broken_saved = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::TextFileSaved { path, .. } if path == "repo/makepad.splash"
+        )
+    });
+    assert!(broken_saved.is_some(), "did not receive broken TextFileSaved");
+
+    let broken_started = wait_for_message(&connection, Duration::from_secs(6), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted {
+                build_id,
+                mount,
+                package,
+            } if mount == "repo" && package == "makepad.splash" && *build_id != first_build_id
+        )
+    })
+    .expect("did not receive broken splash BuildStarted");
+    let broken_build_id = match broken_started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let broken_stopped = wait_for_message(&connection, Duration::from_secs(6), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStopped { build_id, exit_code: Some(1) } if *build_id == broken_build_id
+        )
+    });
+    assert!(
+        broken_stopped.is_some(),
+        "did not receive failed BuildStopped for broken splash"
+    );
+
+    let empty_run_items = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.is_empty())
+    });
+    assert!(
+        empty_run_items.is_some(),
+        "did not receive empty RunItems after broken splash"
+    );
+
+    let fixed_tmp = dir.path().join("makepad.splash.tmp");
+    fs::write(
+        &fixed_tmp,
+        "use mod.hub\nhub.set_run_items([{name:\"two\" in_studio:true on_run:fn(){}}])\n",
+    )
+    .unwrap();
+    fs::rename(&fixed_tmp, &splash_path).unwrap();
+
+    let fixed_started = wait_for_message(&connection, Duration::from_secs(8), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted {
+                build_id,
+                mount,
+                package,
+            } if mount == "repo"
+                && package == "makepad.splash"
+                && *build_id != first_build_id
+                && *build_id != broken_build_id
+        )
+    });
+    assert!(
+        fixed_started.is_some(),
+        "did not receive recovered splash BuildStarted after external rewrite"
+    );
+
+    let recovered_run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(8),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.len() == 1 && items[0].name == "two"),
+    );
+    assert!(
+        recovered_run_items.is_some(),
+        "did not receive recovered RunItems after external splash rewrite"
+    );
+}
+
+#[test]
 fn file_watch_emits_single_path_delta_without_full_tree_reload() {
     let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();

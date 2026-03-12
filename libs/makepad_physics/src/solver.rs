@@ -309,8 +309,9 @@ pub fn prepare_contacts(
             twist_warmstart += point.warmstart_twist_impulse;
             active_count += 1;
 
-            let normal_vel =
-                is_bouncy(restitution, point.normal_impulse == 0.0) * restitution * projected_velocity;
+            let normal_vel = is_bouncy(restitution, point.normal_impulse == 0.0)
+                * restitution
+                * projected_velocity;
 
             // RHS bias (rapier formula)
             let rhs_wo_bias = normal_vel + dist.max(0.0) * inv_dt;
@@ -325,18 +326,12 @@ pub fn prepare_contacts(
             let local_p1 = if a_idx == usize::MAX {
                 effective_point
             } else {
-                bodies[a_idx]
-                    .pose
-                    .invert()
-                    .transform_vec3(&effective_point)
+                bodies[a_idx].pose.invert().transform_vec3(&effective_point)
             };
             let local_p2 = if b_idx == usize::MAX {
                 effective_point
             } else {
-                bodies[b_idx]
-                    .pose
-                    .invert()
-                    .transform_vec3(&effective_point)
+                bodies[b_idx].pose.invert().transform_vec3(&effective_point)
             };
 
             solver_contacts.push(SolverContact {
@@ -412,18 +407,12 @@ pub fn prepare_contacts(
         let local_friction_center1 = if a_idx == usize::MAX {
             friction_center
         } else {
-            bodies[a_idx]
-                .pose
-                .invert()
-                .transform_vec3(&friction_center)
+            bodies[a_idx].pose.invert().transform_vec3(&friction_center)
         };
         let local_friction_center2 = if b_idx == usize::MAX {
             friction_center
         } else {
-            bodies[b_idx]
-                .pose
-                .invert()
-                .transform_vec3(&friction_center)
+            bodies[b_idx].pose.invert().transform_vec3(&friction_center)
         };
 
         let mut solver_friction = SolverFriction {
@@ -732,9 +721,22 @@ fn apply_manifold_impulse(
     }
 }
 
-fn solve_manifold_friction(bodies: &mut [RigidBody], sf: &mut SolverFriction, limit: f32, use_bias: bool) {
-    let rhs_t1 = if use_bias { sf.rhs_tangent1 } else { sf.rhs_tangent1_wo_bias };
-    let rhs_t2 = if use_bias { sf.rhs_tangent2 } else { sf.rhs_tangent2_wo_bias };
+fn solve_manifold_friction(
+    bodies: &mut [RigidBody],
+    sf: &mut SolverFriction,
+    limit: f32,
+    use_bias: bool,
+) {
+    let rhs_t1 = if use_bias {
+        sf.rhs_tangent1
+    } else {
+        sf.rhs_tangent1_wo_bias
+    };
+    let rhs_t2 = if use_bias {
+        sf.rhs_tangent2
+    } else {
+        sf.rhs_tangent2_wo_bias
+    };
     let dvel_t1 = tangent_dvel(
         bodies,
         sf,

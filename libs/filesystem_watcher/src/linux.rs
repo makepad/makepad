@@ -262,7 +262,9 @@ fn changed_path_for_event(watched_dir: &Path, name_bytes: &[u8]) -> PathBuf {
     if name_len == 0 {
         return watched_dir.to_path_buf();
     }
-    watched_dir.join(Path::new(std::ffi::OsStr::from_bytes(&name_bytes[..name_len])))
+    watched_dir.join(Path::new(std::ffi::OsStr::from_bytes(
+        &name_bytes[..name_len],
+    )))
 }
 
 fn push_unique_change(changes: &mut Vec<(String, PathBuf)>, mount: String, path: PathBuf) {

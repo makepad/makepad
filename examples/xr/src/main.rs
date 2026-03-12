@@ -12,7 +12,7 @@ script_mod! {
     mod.widgets.XrSceneBase = #(XrScene::register_widget(vm))
     mod.widgets.XrScene = set_type_default() do mod.widgets.XrSceneBase{
         draw_pbr +: {
-            use_pass_camera: 1.0
+            use_pass_camera: uniform(1.0)
             light_dir: vec3(0.30, 0.86, 0.26)
             light_color: vec3(1.0, 0.98, 0.96)
             ambient: 0.22
