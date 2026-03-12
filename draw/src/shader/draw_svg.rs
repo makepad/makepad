@@ -215,9 +215,12 @@ impl DrawSvg {
         self.draw_super.rect_pos = rect.pos.into();
         self.draw_super.rect_size = rect.size.into();
 
-        let doc = self.svg_doc.take().unwrap();
+        let Some(doc) = self.svg_doc.take() else {
+            return;
+        };
 
         let (lw, lh) = doc.logical_size();
+        let mut use_uploaded_cache = false;
 
         if self.has_animations {
             // Animated SVGs must re-tessellate every frame
@@ -233,18 +236,8 @@ impl DrawSvg {
             self.cached_gradient_row_count = self.draw_super.gradient_row_count;
             self.cache_valid = true;
         } else {
-            // Replay cached geometry and gradient texture data
-            self.draw_super.begin();
-            self.draw_super
-                .acc_verts
-                .extend_from_slice(&self.cached_verts);
-            self.draw_super
-                .acc_indices
-                .extend_from_slice(&self.cached_indices);
-            self.draw_super
-                .gradient_texture_data
-                .extend_from_slice(&self.cached_gradient_data);
-            self.draw_super.gradient_row_count = self.cached_gradient_row_count;
+            // Static SVG geometry is already uploaded; submit it directly.
+            use_uploaded_cache = true;
         }
 
         // Compute GPU-side scale + offset from content bounds to target rect
@@ -283,7 +276,26 @@ impl DrawSvg {
             uniforms[4] = time;
         }
 
-        self.draw_super.end(cx);
+        if use_uploaded_cache {
+            if !self.draw_super.submit_existing_geometry(cx) {
+                // Geometry cache is missing (e.g. after context loss); rebuild
+                // from CPU cache and re-upload once.
+                self.draw_super.begin();
+                self.draw_super
+                    .acc_verts
+                    .extend_from_slice(&self.cached_verts);
+                self.draw_super
+                    .acc_indices
+                    .extend_from_slice(&self.cached_indices);
+                self.draw_super
+                    .gradient_texture_data
+                    .extend_from_slice(&self.cached_gradient_data);
+                self.draw_super.gradient_row_count = self.cached_gradient_row_count;
+                self.draw_super.end(cx);
+            }
+        } else {
+            self.draw_super.end(cx);
+        }
         self.svg_doc = Some(doc);
     }
 

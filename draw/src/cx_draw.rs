@@ -44,7 +44,7 @@ impl<'a> DerefMut for CxDraw<'a> {
 
 impl<'a> Drop for CxDraw<'a> {
     fn drop(&mut self) {
-        if !self.fonts.borrow_mut().prepare_textures(&mut self.cx) {
+        if !self.fonts.borrow_mut().prepare_textures(self.cx) {
             self.cx.redraw_all();
         }
     }
@@ -60,7 +60,7 @@ impl<'a> CxDraw<'a> {
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
         Self {
             fonts,
-            cx: cx,
+            cx,
             draw_event,
             pass_stack: Vec::new(),
             draw_list_stack: Vec::with_capacity(64),
@@ -102,7 +102,7 @@ impl<'a> CxDraw<'a> {
     }
 
     pub fn inside_pass(&self) -> bool {
-        self.pass_stack.len() > 0
+        !self.pass_stack.is_empty()
     }
 
     pub fn make_child_pass(&mut self, pass: &DrawPass) {

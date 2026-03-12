@@ -148,10 +148,21 @@ impl DrawVars {
     }
 
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
+        debug_assert!(
+            self.dyn_instance_start <= self.dyn_instances.len(),
+            "dyn instance start out of bounds: start={} len={}",
+            self.dyn_instance_start,
+            self.dyn_instances.len()
+        );
         unsafe {
+            // NOTE:
+            // Instance layout intentionally spans beyond `dyn_instances` into trailing
+            // live instance fields in repr(C) draw shader structs.
             std::slice::from_raw_parts(
-                (&self.dyn_instances[self.dyn_instance_start - 1] as *const _ as *const f32)
-                    .offset(1),
+                self.dyn_instances
+                    .as_ptr()
+                    .add(self.dyn_instance_start)
+                    .cast::<f32>(),
                 self.dyn_instance_slots,
             )
         }

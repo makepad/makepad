@@ -257,11 +257,11 @@ script_mod! {
         fragment: fn() {
             self.fb0 = self.pixel()
         }
-        
+
         get_color: fn(){
             self.color
         }
-        
+
         pixel: fn() {
             if self.curve_count < 0.5 {
                 return vec4(0.0, 0.0, 0.0, 0.0)
@@ -882,7 +882,7 @@ impl DrawGlyph {
                 self.curve_tex_width.max(1)
             };
             let texels = (self.curve_data.len() / 4).max(1);
-            let height = (texels + width - 1) / width;
+            let height = texels.div_ceil(width);
             let mut data = if self.curve_data.is_empty() {
                 vec![0.0f32; width * height * 4]
             } else {
@@ -905,7 +905,7 @@ impl DrawGlyph {
                 self.band_tex_width.max(1)
             };
             let texels = (self.band_data.len() / 4).max(1);
-            let height = (texels + width - 1) / width;
+            let height = texels.div_ceil(width);
             let mut data = if self.band_data.is_empty() {
                 vec![0.0f32; width * height * 4]
             } else {

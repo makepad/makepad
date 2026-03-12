@@ -298,7 +298,7 @@ impl Rasterizer {
             slot.rect
         };
 
-        return Some(RasterizedGlyph {
+        Some(RasterizedGlyph {
             atlas_kind: AtlasKind::Grayscale,
             atlas_size: self.atlas.size(),
             atlas_image_bounds,
@@ -306,7 +306,7 @@ impl Rasterizer {
             atlas_plane: slot.plane.index(),
             origin_in_dpxs: bounds_in_ems.origin * dpxs_per_em,
             dpxs_per_em,
-        });
+        })
     }
 
     fn rasterize_glyph_outline_msdf(
@@ -383,34 +383,35 @@ impl Rasterizer {
     ) -> Option<RasterizedGlyph> {
         const PADDING: usize = 2;
 
-        let raster_image = font.glyph_raster_image(glyph_id, dpxs_per_em)?;
-        let key = GlyphImageKey {
-            font_id: font.id(),
-            glyph_id,
-            size: raster_image.decode_size() + Size::from(2 * PADDING),
-            kind: GlyphImageKind::Color,
-        };
-        let (slot, allocated) = self.allocate_shared_slot(key)?;
-        let atlas_image_bounds = if !allocated {
-            slot.rect
-        } else {
-            let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
-            {
-                let size = image.size();
-                image = image.subimage_mut(Rect::from(size).unpad(PADDING));
-                raster_image.decode(&mut image);
-            }
-            slot.rect
-        };
-        return Some(RasterizedGlyph {
-            atlas_kind: AtlasKind::Color,
-            atlas_size: self.atlas.size(),
-            atlas_image_bounds,
-            atlas_image_padding: PADDING,
-            atlas_plane: AtlasPlane::R.index(),
-            origin_in_dpxs: raster_image.origin_in_dpxs(),
-            dpxs_per_em: raster_image.dpxs_per_em(),
-        });
+        font.with_glyph_raster_image(glyph_id, dpxs_per_em, |raster_image| {
+            let key = GlyphImageKey {
+                font_id: font.id(),
+                glyph_id,
+                size: raster_image.decode_size() + Size::from(2 * PADDING),
+                kind: GlyphImageKind::Color,
+            };
+            let (slot, allocated) = self.allocate_shared_slot(key)?;
+            let atlas_image_bounds = if !allocated {
+                slot.rect
+            } else {
+                let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
+                {
+                    let size = image.size();
+                    image = image.subimage_mut(Rect::from(size).unpad(PADDING));
+                    raster_image.decode(&mut image);
+                }
+                slot.rect
+            };
+            Some(RasterizedGlyph {
+                atlas_kind: AtlasKind::Color,
+                atlas_size: self.atlas.size(),
+                atlas_image_bounds,
+                atlas_image_padding: PADDING,
+                atlas_plane: AtlasPlane::R.index(),
+                origin_in_dpxs: raster_image.origin_in_dpxs(),
+                dpxs_per_em: raster_image.dpxs_per_em(),
+            })
+        })?
     }
 }
 

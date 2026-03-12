@@ -183,12 +183,12 @@ impl GeometryGen {
         self.vertices.push(y2);
         self.vertices.push(x1);
         self.vertices.push(y2);
-        self.indices.push(vertex_offset + 0);
+        self.indices.push(vertex_offset);
         self.indices.push(vertex_offset + 1);
         self.indices.push(vertex_offset + 2);
         self.indices.push(vertex_offset + 2);
         self.indices.push(vertex_offset + 3);
-        self.indices.push(vertex_offset + 0);
+        self.indices.push(vertex_offset);
     }
 
     // requires pos:vec3, id:float, normal:vec3, uv:vec2 layout
@@ -282,6 +282,7 @@ impl GeometryGen {
     }
 
     // requires pos:vec3, id:float, normal:vec3, uv:vec2 layout
+    #[allow(clippy::too_many_arguments)]
     pub fn add_plane_3d(
         &mut self,
         u: GeometryAxis,

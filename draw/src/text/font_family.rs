@@ -45,7 +45,7 @@ impl FontFamily {
 
     pub fn get_or_shape(&self, text: Substr) -> Rc<ShapedText> {
         self.shaper.borrow_mut().get_or_shape(ShapeParams {
-            text: text.into(),
+            text,
             fonts: self.fonts.clone(),
             direction: Direction::default(),
             letter_spacing: Ems(0.0),

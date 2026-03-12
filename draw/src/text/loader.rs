@@ -143,7 +143,7 @@ impl Loader {
             face.set_variations(&definition.variations);
         }
         Font::new(
-            id.clone(),
+            id,
             self.rasterizer.clone(),
             face,
             definition.ascender_fudge_in_ems,

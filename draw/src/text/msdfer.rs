@@ -293,16 +293,16 @@ fn detect_corners(contour: &Contour, corner_angle_threshold: f32) -> Vec<bool> {
         .clamp(0.0, std::f32::consts::PI)
         .sin();
     let mut corners = vec![false; edge_count];
-    for edge_index in 0..edge_count {
+    for (edge_index, is_corner_flag) in corners.iter_mut().enumerate().take(edge_count) {
         let prev_direction = contour.edges[edge_index].tangent_end().normalized();
         let next_direction = contour.edges[(edge_index + 1) % edge_count]
             .tangent_start()
             .normalized();
         if prev_direction.is_zero() || next_direction.is_zero() {
-            corners[edge_index] = true;
+            *is_corner_flag = true;
             continue;
         }
-        corners[edge_index] = is_corner(prev_direction, next_direction, cross_threshold);
+        *is_corner_flag = is_corner(prev_direction, next_direction, cross_threshold);
     }
     corners
 }
@@ -315,9 +315,9 @@ fn is_corner(prev_direction: Vec2, next_direction: Vec2, cross_threshold: f32) -
 fn colors_from_corners(edge_count: usize, corners: &[bool], start_color: usize) -> Vec<u8> {
     let mut colors = Vec::with_capacity(edge_count);
     let mut color_index = start_color;
-    for edge_index in 0..edge_count {
+    for is_corner in corners.iter().copied().take(edge_count) {
         colors.push(EDGE_COLORS[color_index]);
-        if corners[edge_index] {
+        if is_corner {
             color_index = (color_index + 1) % EDGE_COLORS.len();
         }
     }

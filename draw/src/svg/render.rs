@@ -857,6 +857,7 @@ fn emit_ellipse(dv: &mut DrawVector, cx: f32, cy: f32, rx: f32, ry: f32, xf: &Tr
 }
 
 /// Emit arc bezier segments directly to DrawVector, transforming each control point.
+#[allow(clippy::too_many_arguments)]
 fn emit_arc(
     dv: &mut DrawVector,
     cx: f32,

@@ -80,6 +80,26 @@ impl Geometry {
         cxgeom.dirty_indices = true;
     }
 
+    /// Swap geometry buffers with caller-owned buffers without cloning.
+    ///
+    /// The caller receives the previous geometry buffers (cleared), preserving
+    /// their capacity for re-use on subsequent frames.
+    pub fn update_with_recycled_buffers(
+        &self,
+        cx: &mut Cx,
+        indices: &mut Vec<u32>,
+        vertices: &mut Vec<f32>,
+    ) {
+        let cxgeom = &mut cx.geometries[self.geometry_id()];
+        std::mem::swap(&mut cxgeom.indices, indices);
+        std::mem::swap(&mut cxgeom.vertices, vertices);
+        indices.clear();
+        vertices.clear();
+        cxgeom.dirty = true;
+        cxgeom.dirty_vertices = true;
+        cxgeom.dirty_indices = true;
+    }
+
     pub fn update_indices(&self, cx: &mut Cx, indices: Vec<u32>) {
         let cxgeom = &mut cx.geometries[self.geometry_id()];
         cxgeom.indices = indices;

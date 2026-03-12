@@ -70,39 +70,43 @@ impl Font {
         self.face.data()
     }
 
-    pub(super) fn ttf_parser_face(&self) -> &ttf_parser::Face<'_> {
-        self.face.as_ttf_parser_face()
+    pub(super) fn with_ttf_parser_face<R>(&self, f: impl FnOnce(&ttf_parser::Face<'_>) -> R) -> R {
+        self.face.with_ttf_parser_face(f)
     }
 
-    pub(super) fn rustybuzz_face(&self) -> &rustybuzz::Face<'_> {
-        self.face.as_rustybuzz_face()
+    pub(super) fn with_rustybuzz_face<R>(&self, f: impl FnOnce(&rustybuzz::Face<'_>) -> R) -> R {
+        self.face.with_rustybuzz_face(f)
     }
 
     pub fn units_per_em(&self) -> f32 {
-        self.ttf_parser_face().units_per_em() as f32
+        self.with_ttf_parser_face(|face| face.units_per_em() as f32)
     }
 
     pub fn ascender_in_ems(&self) -> f32 {
-        self.ttf_parser_face().ascender() as f32 / self.units_per_em() + self.ascender_fudge_in_ems
+        self.with_ttf_parser_face(|face| {
+            face.ascender() as f32 / face.units_per_em() as f32 + self.ascender_fudge_in_ems
+        })
     }
 
     pub fn descender_in_ems(&self) -> f32 {
-        self.ttf_parser_face().descender() as f32 / self.units_per_em()
-            + self.descender_fudge_in_ems
+        self.with_ttf_parser_face(|face| {
+            face.descender() as f32 / face.units_per_em() as f32 + self.descender_fudge_in_ems
+        })
     }
 
     pub fn line_gap_in_ems(&self) -> f32 {
-        self.ttf_parser_face().line_gap() as f32 / self.units_per_em()
+        self.with_ttf_parser_face(|face| face.line_gap() as f32 / face.units_per_em() as f32)
     }
 
     pub fn glyph_outline(&self, glyph_id: GlyphId) -> Option<GlyphOutline> {
-        let face = self.ttf_parser_face();
-        let glyph_id = ttf_parser::GlyphId(glyph_id);
-        let mut builder = glyph_outline::Builder::new();
-        let bounds = face.outline_glyph(glyph_id, &mut builder)?;
-        let min = Point::new(bounds.x_min as f32, bounds.y_min as f32);
-        let max = Point::new(bounds.x_max as f32, bounds.y_max as f32);
-        Some(builder.finish(Rect::new(min, max - min), self.units_per_em()))
+        self.with_ttf_parser_face(|face| {
+            let glyph_id = ttf_parser::GlyphId(glyph_id);
+            let mut builder = glyph_outline::Builder::new();
+            let bounds = face.outline_glyph(glyph_id, &mut builder)?;
+            let min = Point::new(bounds.x_min as f32, bounds.y_min as f32);
+            let max = Point::new(bounds.x_max as f32, bounds.y_max as f32);
+            Some(builder.finish(Rect::new(min, max - min), face.units_per_em() as f32))
+        })
     }
 
     pub fn glyph_outline_bounds_in_ems(
@@ -129,15 +133,18 @@ impl Font {
         }
     }
 
-    pub fn glyph_raster_image(
+    pub fn with_glyph_raster_image<R>(
         &self,
         glyph_id: GlyphId,
         dpxs_per_em: f32,
-    ) -> Option<GlyphRasterImage<'_>> {
-        let face = self.ttf_parser_face();
-        let glyph_id = ttf_parser::GlyphId(glyph_id);
-        let image = face.glyph_raster_image(glyph_id, dpxs_per_em as u16)?;
-        GlyphRasterImage::from_raster_glyph_image(image)
+        f: impl FnOnce(GlyphRasterImage<'_>) -> R,
+    ) -> Option<R> {
+        self.with_ttf_parser_face(|face| {
+            let glyph_id = ttf_parser::GlyphId(glyph_id);
+            let image = face.glyph_raster_image(glyph_id, dpxs_per_em as u16)?;
+            let raster = GlyphRasterImage::from_raster_glyph_image(image)?;
+            Some(f(raster))
+        })
     }
 
     pub fn rasterize_glyph(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
