@@ -90,17 +90,8 @@ script_mod! {
                         }
 
                         XrRuntime := View{
-                            width: Fill
-                            height: Fill
-                            flow: Down
-                            align: Align{x: 0.5 y: 0.5}
-                            show_bg: true
-                            draw_bg.color: #x02070d
-
-                            launch_label := Label{
-                                text: "XR running. Look ahead for the debug cube."
-                                draw_text.color: #xcfe9ff
-                            }
+                            width: 0
+                            height: 0
                         }
                     }
                 }
@@ -155,6 +146,7 @@ impl XrScene {
         pose: Pose,
         size: Vec3f,
         color: Vec4f,
+        depth_clip: f32,
         _metallic: f32,
         _roughness: f32,
     ) {
@@ -162,7 +154,7 @@ impl XrScene {
         self.draw_cube.cube_pos = vec3(0.0, 0.0, 0.0);
         self.draw_cube.cube_size = size;
         self.draw_cube.color = color;
-        self.draw_cube.depth_clip = 0.0;
+        self.draw_cube.depth_clip = depth_clip;
         self.draw_cube.draw(cx);
     }
 
@@ -173,6 +165,7 @@ impl XrScene {
         size: Vec3f,
         forward_offset: f32,
         color: Vec4f,
+        depth_clip: f32,
         _metallic: f32,
         _roughness: f32,
     ) {
@@ -180,7 +173,7 @@ impl XrScene {
         self.draw_cube.cube_pos = vec3(0.0, 0.0, forward_offset);
         self.draw_cube.cube_size = size;
         self.draw_cube.color = color;
-        self.draw_cube.depth_clip = 0.0;
+        self.draw_cube.depth_clip = depth_clip;
         self.draw_cube.draw(cx);
     }
 
@@ -190,6 +183,7 @@ impl XrScene {
             Pose::new(anchor.to_quat(), anchor.left),
             vec3(0.025, 0.025, 0.025),
             vec4(0.14, 0.62, 1.0, 1.0),
+            1.0,
             0.10,
             0.42,
         );
@@ -198,6 +192,7 @@ impl XrScene {
             Pose::new(anchor.to_quat_rev(), anchor.right),
             vec3(0.025, 0.025, 0.025),
             vec4(0.20, 1.0, 0.56, 1.0),
+            1.0,
             0.10,
             0.42,
         );
@@ -231,6 +226,7 @@ impl XrScene {
             pose,
             vec3(0.16, 0.16, 0.16),
             vec4(0.98, 0.24, 0.18, 1.0),
+            1.0,
             0.06,
             0.24,
         );
@@ -240,6 +236,7 @@ impl XrScene {
             vec3(0.045, 0.045, 0.11),
             -0.14,
             vec4(1.0, 0.96, 0.88, 1.0),
+            1.0,
             0.04,
             0.18,
         );
@@ -251,6 +248,7 @@ impl XrScene {
             state.head_pose,
             vec3(0.16, 0.10, 0.12),
             vec4(0.92, 0.95, 0.98, 1.0),
+            0.0,
             0.08,
             0.56,
         );
@@ -260,6 +258,7 @@ impl XrScene {
             vec3(0.08, 0.045, 0.05),
             -0.06,
             vec4(0.12, 0.18, 0.22, 1.0),
+            0.0,
             0.04,
             0.30,
         );
@@ -287,6 +286,7 @@ impl XrScene {
                 *joint,
                 vec3(0.011, 0.011, 0.016),
                 joint_color,
+                0.0,
                 0.06,
                 0.72,
             );
@@ -303,6 +303,7 @@ impl XrScene {
                 vec3(0.007, 0.007, 0.018 + tip_len * 0.6),
                 -0.014 - tip_len * 0.3,
                 tip_color,
+                0.0,
                 0.02,
                 0.20,
             );
@@ -319,6 +320,7 @@ impl XrScene {
             controller.grip_pose,
             vec3(0.035, 0.035, 0.070),
             vec4(color.x * 0.7, color.y * 0.7, color.z * 0.7, 1.0),
+            0.0,
             0.18,
             0.44,
         );
@@ -328,6 +330,7 @@ impl XrScene {
             vec3(0.009, 0.009, 0.22),
             -0.12,
             color,
+            0.0,
             0.04,
             0.16,
         );
@@ -394,7 +397,7 @@ impl XrScene {
             self.draw_cube.cube_pos = vec3(0.0, 0.0, -0.05 - age * pulse.speed - length * 0.5);
             self.draw_cube.cube_size = vec3(radius, radius, length);
             self.draw_cube.color = color;
-            self.draw_cube.depth_clip = 0.0;
+            self.draw_cube.depth_clip = 1.0;
             self.draw_cube.draw(cx);
         }
     }
