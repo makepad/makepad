@@ -429,6 +429,8 @@ impl MacosWindow {
                     setBlendingMode: NS_VISUAL_EFFECT_BLENDING_MODE_BEHIND_WINDOW
                 ];
                 let () = msg_send![effect_view, setState: NS_VISUAL_EFFECT_STATE_ACTIVE];
+                let alpha = visuals.backdrop_intensity.clamp(0.0, 1.0) as f64;
+                let () = msg_send![effect_view, setAlphaValue: alpha];
             } else if self.visual_effect_view != nil {
                 let () = msg_send![self.visual_effect_view, removeFromSuperview];
                 self.visual_effect_view = nil;

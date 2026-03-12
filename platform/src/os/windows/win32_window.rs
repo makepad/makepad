@@ -64,20 +64,21 @@ use {
                     WindowsAndMessaging::{
                         CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
                         GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, MoveWindow,
-                        PostMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CW_USEDEFAULT,
-                        GWLP_USERDATA, GWL_EXSTYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-                        HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT,
-                        HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-                        SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT,
+                        PostMessageW, SetLayeredWindowAttributes, SetWindowLongPtrW,
+                        SetWindowPos, ShowWindow, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE,
+                        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
+                        HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST,
+                        HWND_TOPMOST, LWA_ALPHA, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE,
+                        SW_MINIMIZE, SW_RESTORE, SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT,
                         WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
                         WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_IME_STARTCOMPOSITION,
                         WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
                         WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST,
                         WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
                         WM_XBUTTONDOWN, WM_XBUTTONUP, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-                        WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-                        WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX,
-                        WS_SYSMENU,
+                        WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+                        WS_EX_TOPMOST, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+                        WS_POPUP, WS_SIZEBOX, WS_SYSMENU,
                     },
                 },
             },
@@ -980,12 +981,44 @@ impl Win32Window {
         const ACCENT_DISABLED: u32 = 0;
         const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
 
+        let intensity = visuals.backdrop_intensity.clamp(0.0, 1.0);
+        let accent_alpha = (intensity * 255.0).round() as u32;
+        let accent_color = accent_alpha << 24;
+
         let backdrop = match visuals.backdrop {
             WindowBackdrop::None => DWMSBT_NONE,
             WindowBackdrop::Auto | WindowBackdrop::Mica => DWMSBT_MAINWINDOW,
             WindowBackdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
             WindowBackdrop::Vibrancy | WindowBackdrop::Blur => DWMSBT_TABBEDWINDOW,
         };
+
+        unsafe {
+            let mut ex_style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+            if visuals.transparent {
+                ex_style |= WS_EX_LAYERED.0;
+            } else {
+                ex_style &= !WS_EX_LAYERED.0;
+            }
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex_style as isize);
+            SetLayeredWindowAttributes(self.hwnd, 0, 255, LWA_ALPHA).unwrap();
+
+            let margins = if visuals.transparent {
+                MARGINS {
+                    cxLeftWidth: -1,
+                    cxRightWidth: -1,
+                    cyTopHeight: -1,
+                    cyBottomHeight: -1,
+                }
+            } else {
+                MARGINS {
+                    cxLeftWidth: 0,
+                    cxRightWidth: 0,
+                    cyTopHeight: 0,
+                    cyBottomHeight: 0,
+                }
+            };
+            DwmExtendFrameIntoClientArea(self.hwnd, &margins).unwrap();
+        }
 
         let hr = unsafe {
             DwmSetWindowAttribute(
@@ -996,26 +1029,29 @@ impl Win32Window {
             )
         };
 
-        if hr != S_OK {
-            let accent_state = if visuals.backdrop == WindowBackdrop::None {
-                ACCENT_DISABLED
-            } else {
-                ACCENT_ENABLE_BLURBEHIND
-            };
-            let mut accent = AccentPolicy {
-                accent_state,
-                accent_flags: 0,
-                gradient_color: 0,
-                animation_id: 0,
-            };
-            let mut data = WindowCompositionAttribData {
-                attrib: WCA_ACCENT_POLICY,
-                pv_data: &mut accent as *mut _ as *mut c_void,
-                cb_data: std::mem::size_of::<AccentPolicy>(),
-            };
-            unsafe {
-                SetWindowCompositionAttribute(self.hwnd, &mut data);
-            }
+        let accent_state = if visuals.transparent || visuals.backdrop != WindowBackdrop::None {
+            ACCENT_ENABLE_BLURBEHIND
+        } else {
+            ACCENT_DISABLED
+        };
+        let gradient_color = if visuals.backdrop == WindowBackdrop::None {
+            0
+        } else {
+            accent_color
+        };
+        let mut accent = AccentPolicy {
+            accent_state,
+            accent_flags: if hr == S_OK { 0x20 } else { 0 },
+            gradient_color,
+            animation_id: 0,
+        };
+        let mut data = WindowCompositionAttribData {
+            attrib: WCA_ACCENT_POLICY,
+            pv_data: &mut accent as *mut _ as *mut c_void,
+            cb_data: std::mem::size_of::<AccentPolicy>(),
+        };
+        unsafe {
+            SetWindowCompositionAttribute(self.hwnd, &mut data);
         }
     }
 

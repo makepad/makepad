@@ -575,13 +575,14 @@ mod tests {
         window.set_backdrop(&mut cx, WindowBackdrop::Mica);
         assert!(cx.platform_ops.is_empty());
 
-        window.set_backdrop_intensity(&mut cx, 4.0);
+        window.set_backdrop_intensity(&mut cx, 0.25);
+        assert_eq!(cx.platform_ops.len(), 1);
         assert!(matches!(
             cx.platform_ops[0],
             CxOsOp::SetWindowVisuals(
                 _,
                 WindowVisuals {
-                    backdrop_intensity: 1.0,
+                    backdrop_intensity: 0.25,
                     ..
                 }
             )
