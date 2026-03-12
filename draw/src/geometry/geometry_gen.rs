@@ -63,6 +63,24 @@ pub struct PbrVertex {
     pub tangent: Vec4f, // tangent xyz + handedness
 }
 
+#[derive(Clone, Script, ScriptHook)]
+pub struct CubeVertex {
+    #[live]
+    pub geom_pos: Vec3f,
+    #[live]
+    pub geom_id: f32,
+    #[live]
+    pub geom_normal: Vec3f,
+    #[live]
+    pub geom_pad: f32,
+    #[live]
+    pub geom_uv: Vec2f,
+    #[live]
+    pub geom_tail_pad_0: f32,
+    #[live]
+    pub geom_tail_pad_1: f32,
+}
+
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     let geom = vm.new_module(id!(geom));
     // lets make a Quad geometry here
@@ -84,6 +102,13 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         .into_geometry(vm.cx_mut())
         .into_script_handle(vm);
     set_script_value!(vm, geom.PbrGeom = pgen);
+    // Cube geometry: unit cube in the old geom_pos/geom_normal/geom_uv layout.
+    set_script_value_to_pod!(vm, geom.CubeVertex);
+    let cgen = GeometryGen::from_cube_3d(1.0, 1.0, 1.0, 1, 1, 1)
+        .into_cube_vertex_pod()
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
+    set_script_value!(vm, geom.CubeGeom = cgen);
     NIL
 }
 
@@ -170,6 +195,28 @@ impl GeometryGen {
             depth_segments,
         );
         g
+    }
+
+    pub fn into_cube_vertex_pod(self) -> GeometryGen {
+        let vertex_count = self.vertices.len() / 9;
+        let mut out = GeometryGen {
+            vertices: Vec::with_capacity(vertex_count * 12),
+            indices: self.indices,
+        };
+
+        for chunk in self.vertices.chunks_exact(9) {
+            // Expand the old cube layout:
+            // pos3, id1, normal3, uv2
+            // into the POD layout the script vertex buffer expects:
+            // pos3, id1, normal3, pad1, uv2, tail_pad2
+            out.vertices.extend_from_slice(&chunk[0..7]);
+            out.vertices.push(0.0);
+            out.vertices.extend_from_slice(&chunk[7..9]);
+            out.vertices.push(0.0);
+            out.vertices.push(0.0);
+        }
+
+        out
     }
 
     // requires pos:vec2 normalized layout
