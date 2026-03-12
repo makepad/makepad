@@ -36,6 +36,13 @@ use {
     std::sync::{Arc, Mutex},
 };
 
+fn log_linux_backdrop_unsupported_once() {
+    static LOG_ONCE: std::sync::Once = std::sync::Once::new();
+    LOG_ONCE.call_once(|| {
+        crate::log!("Window backdrop requested on Linux/X11; compositor backdrop blur is not supported in M1 (no-op).");
+    });
+}
+
 pub fn x11_event_loop(cx: Rc<RefCell<Cx>>) {
     X11Cx::event_loop_impl(cx)
 }
@@ -529,6 +536,9 @@ impl X11Cx {
                     );
                     let window = &mut cx.windows[window_id];
                     window.window_geom = opengl_window.window_geom.clone();
+                    if window.backdrop != crate::window::WindowBackdrop::None {
+                        log_linux_backdrop_unsupported_once();
+                    }
                     opengl_windows.push(opengl_window);
                     window.is_created = true;
                 }
@@ -625,6 +635,11 @@ impl X11Cx {
                         opengl_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
                         window.xlib_window.set_position(size);
+                    }
+                }
+                CxOsOp::SetWindowVisuals(_window_id, visuals) => {
+                    if visuals.backdrop != crate::window::WindowBackdrop::None {
+                        log_linux_backdrop_unsupported_once();
                     }
                 }
                 CxOsOp::ShowClipboardActions { .. } => {}

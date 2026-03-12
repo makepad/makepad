@@ -16,7 +16,7 @@ use {
                 macos_event::MacosEvent,
             },
         },
-        window::WindowId,
+        window::{WindowBackdrop, WindowId, WindowVisuals},
     },
     std::{cell::Cell, os::raw::c_void, rc::Rc},
 };
@@ -31,6 +31,7 @@ pub struct MacosWindow {
     pub(crate) ime_active: bool,
     pub(crate) is_fullscreen: bool,
     pub(crate) is_popup: bool,
+    pub(crate) visual_effect_view: ObjcId,
     pub(crate) last_mouse_pos: Vec2d,
     window_delegate: ObjcId,
     live_resize_timer: ObjcId,
@@ -51,6 +52,7 @@ impl MacosWindow {
             MacosWindow {
                 is_fullscreen: false,
                 is_popup: false,
+                visual_effect_view: nil,
                 live_resize_timer: nil,
                 window_delegate: window_delegate,
                 window: window,
@@ -372,6 +374,67 @@ impl MacosWindow {
             let () = msg_send![close, setHidden: hidden];
             let () = msg_send![miniaturize, setHidden: hidden];
             let () = msg_send![zoom, setHidden: hidden];
+        }
+    }
+
+    pub fn set_window_visuals(&mut self, visuals: WindowVisuals) {
+        const NS_VIEW_WIDTH_SIZABLE: i64 = 1 << 1;
+        const NS_VIEW_HEIGHT_SIZABLE: i64 = 1 << 4;
+        const NS_VISUAL_EFFECT_MATERIAL_HUD_WINDOW: i64 = 1;
+        const NS_VISUAL_EFFECT_MATERIAL_UNDER_WINDOW_BACKGROUND: i64 = 12;
+        const NS_VISUAL_EFFECT_BLENDING_MODE_BEHIND_WINDOW: i64 = 0;
+        const NS_VISUAL_EFFECT_STATE_ACTIVE: i64 = 1;
+
+        unsafe {
+            let opaque = if visuals.transparent { NO } else { YES };
+            let () = msg_send![self.window, setOpaque: opaque];
+            let bg_color = if visuals.transparent {
+                let clear: ObjcId = msg_send![class!(NSColor), clearColor];
+                clear
+            } else {
+                let color: ObjcId = msg_send![class!(NSColor), windowBackgroundColor];
+                color
+            };
+            let () = msg_send![self.window, setBackgroundColor: bg_color];
+
+            let use_effect = visuals.backdrop != WindowBackdrop::None;
+            if use_effect {
+                let effect_view = if self.visual_effect_view == nil {
+                    let effect_view: ObjcId = msg_send![class!(NSVisualEffectView), alloc];
+                    let bounds: NSRect = msg_send![self.view, bounds];
+                    let effect_view: ObjcId = msg_send![effect_view, initWithFrame: bounds];
+                    let () = msg_send![
+                        effect_view,
+                        setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE
+                    ];
+                    let () = msg_send![self.view, addSubview: effect_view positioned: 0i64 relativeTo: nil];
+                    self.visual_effect_view = effect_view;
+                    effect_view
+                } else {
+                    self.visual_effect_view
+                };
+                let material = match visuals.backdrop {
+                    WindowBackdrop::Blur => NS_VISUAL_EFFECT_MATERIAL_HUD_WINDOW,
+                    WindowBackdrop::Auto | WindowBackdrop::Vibrancy => {
+                        NS_VISUAL_EFFECT_MATERIAL_UNDER_WINDOW_BACKGROUND
+                    }
+                    WindowBackdrop::Mica | WindowBackdrop::Acrylic => {
+                        NS_VISUAL_EFFECT_MATERIAL_UNDER_WINDOW_BACKGROUND
+                    }
+                    WindowBackdrop::None => NS_VISUAL_EFFECT_MATERIAL_UNDER_WINDOW_BACKGROUND,
+                };
+                let () = msg_send![effect_view, setMaterial: material];
+                let () = msg_send![
+                    effect_view,
+                    setBlendingMode: NS_VISUAL_EFFECT_BLENDING_MODE_BEHIND_WINDOW
+                ];
+                let () = msg_send![effect_view, setState: NS_VISUAL_EFFECT_STATE_ACTIVE];
+                let alpha = visuals.backdrop_intensity.clamp(0.0, 1.0) as f64;
+                let () = msg_send![effect_view, setAlphaValue: alpha];
+            } else if self.visual_effect_view != nil {
+                let () = msg_send![self.visual_effect_view, removeFromSuperview];
+                self.visual_effect_view = nil;
+            }
         }
     }
 

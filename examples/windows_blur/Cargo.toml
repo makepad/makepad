@@ -1,0 +1,11 @@
+[package]
+name = "makepad-example-windows-blur"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad windows blur and glass panel example"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "pZQ8bB8K2W8x6M2nV4V6R4G8hQ8="
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }

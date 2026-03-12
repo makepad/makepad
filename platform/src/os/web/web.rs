@@ -517,6 +517,7 @@ impl Cx {
                 CxOsOp::NormalizeWindow(_window_id) => {
                     self.os.from_wasm(FromWasmNormalScreen {});
                 }
+                CxOsOp::SetWindowVisuals(_, _) => {}
                 CxOsOp::XrStartPresenting => {
                     self.os.from_wasm(FromWasmXrStartPresenting {});
                 }
