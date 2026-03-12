@@ -1342,6 +1342,28 @@ pub fn type_table_builtin(
             );
             return builtins.pod_void;
         }
+        id!(depth_clip) => {
+            if args.len() != 3 {
+                script_err_invalid_args!(
+                    trap,
+                    "shader builtin 'depth_clip' requires 3 args (world, color, clip), got {}",
+                    args.len()
+                );
+                return builtins.pod_void;
+            }
+            let (t1, t2, t3) = (args[0], args[1], args[2]);
+            if t1 == vec4f_t && t2 == vec4f_t && is_float(t3) {
+                return vec4f_t;
+            }
+            script_err_type_mismatch!(
+                trap,
+                "shader builtin 'depth_clip' requires (vec4f, vec4f, float), got {}, {}, {}",
+                fmt_ty(t1),
+                fmt_ty(t2),
+                fmt_ty(t3)
+            );
+            return builtins.pod_void;
+        }
         _ => {
             script_err_wrong_value!(trap, "unknown shader builtin function {:?}", name);
             builtins.pod_void

@@ -54,7 +54,7 @@ script_mod! {
         }
 
         fragment: fn() {
-            self.fb0 = self.pixel();
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip);
         }
     }
 }

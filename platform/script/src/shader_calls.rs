@@ -1058,6 +1058,41 @@ impl ShaderFnCompiler {
             return;
         }
 
+        if name == id!(depth_clip) {
+            let mut concrete_args = Vec::new();
+            let mut formatted_args = Vec::new();
+            for (ty, s) in args {
+                concrete_args.push(ty.make_concrete(builtins).unwrap_or(builtins.pod_void));
+                formatted_args.push(s);
+            }
+
+            let mut out = self.stack.new_string();
+            match output.backend {
+                ShaderBackend::Glsl => {
+                    write!(
+                        out,
+                        "depth_clip({}, {}, {})",
+                        formatted_args[0], formatted_args[1], formatted_args[2]
+                    )
+                    .ok();
+                }
+                ShaderBackend::Metal
+                | ShaderBackend::Wgsl
+                | ShaderBackend::Hlsl
+                | ShaderBackend::Rust => {
+                    write!(out, "{}", formatted_args[1]).ok();
+                }
+            }
+
+            for s in formatted_args {
+                self.stack.free_string(s);
+            }
+
+            let ret = type_table_builtin(name, &concrete_args, builtins, self.trap.pass());
+            self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);
+            return;
+        }
+
         // Check if any arg is a float type - if so, abstract ints should be floats
         let has_float = args.iter().any(|(ty, _)| match ty {
             ShaderType::Pod(pt) => vm.bx.heap.pod_types[pt.index as usize].ty.is_float_type(),
