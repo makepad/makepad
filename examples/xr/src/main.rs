@@ -11,14 +11,7 @@ script_mod! {
 
     mod.widgets.XrSceneBase = #(XrScene::register_widget(vm))
     mod.widgets.XrScene = set_type_default() do mod.widgets.XrSceneBase{
-        draw_pbr +: {
-            use_pass_camera: uniform(1.0)
-            light_dir: vec3(0.30, 0.86, 0.26)
-            light_color: vec3(1.0, 0.98, 0.96)
-            ambient: 0.22
-            spec_strength: 0.42
-            env_intensity: 0.48
-        }
+        draw_cube +: {}
     }
 
     startup() do #(App::script_component(vm)){
@@ -143,7 +136,7 @@ pub struct XrScene {
     source: ScriptObjectRef,
     #[redraw]
     #[live]
-    draw_pbr: DrawPbr,
+    draw_cube: DrawCube,
     #[rust]
     pulses: Vec<PulseTrail>,
     #[rust]
@@ -162,14 +155,15 @@ impl XrScene {
         pose: Pose,
         size: Vec3f,
         color: Vec4f,
-        metallic: f32,
-        roughness: f32,
+        _metallic: f32,
+        _roughness: f32,
     ) {
-        self.draw_pbr.push_matrix();
-        self.draw_pbr.apply_transform(pose.to_mat4());
-        self.draw_pbr.material(color, metallic, roughness);
-        let _ = self.draw_pbr.draw_cube(cx, size, 1);
-        self.draw_pbr.pop_matrix();
+        self.draw_cube.transform = pose.to_mat4();
+        self.draw_cube.cube_pos = vec3(0.0, 0.0, 0.0);
+        self.draw_cube.cube_size = size;
+        self.draw_cube.color = color;
+        self.draw_cube.depth_clip = 0.0;
+        self.draw_cube.draw(cx);
     }
 
     fn draw_forward_box(
@@ -179,15 +173,15 @@ impl XrScene {
         size: Vec3f,
         forward_offset: f32,
         color: Vec4f,
-        metallic: f32,
-        roughness: f32,
+        _metallic: f32,
+        _roughness: f32,
     ) {
-        self.draw_pbr.push_matrix();
-        self.draw_pbr.apply_transform(pose.to_mat4());
-        self.draw_pbr.translate(0.0, 0.0, forward_offset);
-        self.draw_pbr.material(color, metallic, roughness);
-        let _ = self.draw_pbr.draw_cube(cx, size, 1);
-        self.draw_pbr.pop_matrix();
+        self.draw_cube.transform = pose.to_mat4();
+        self.draw_cube.cube_pos = vec3(0.0, 0.0, forward_offset);
+        self.draw_cube.cube_size = size;
+        self.draw_cube.color = color;
+        self.draw_cube.depth_clip = 0.0;
+        self.draw_cube.draw(cx);
     }
 
     fn draw_anchor_markers(&mut self, cx: &mut Cx2d, anchor: XrAnchor) {
@@ -396,19 +390,12 @@ impl XrScene {
                 1.0,
             );
 
-            self.draw_pbr.push_matrix();
-            self.draw_pbr.apply_transform(pulse.pose.to_mat4());
-            self.draw_pbr
-                .translate(0.0, 0.0, -0.05 - age * pulse.speed - length * 0.5);
-            self.draw_pbr.material(color, 0.02, 0.16);
-            let _ = self.draw_pbr.draw_rounded_cube(
-                cx,
-                vec3(radius, radius, length),
-                radius * 0.45,
-                1,
-                6,
-            );
-            self.draw_pbr.pop_matrix();
+            self.draw_cube.transform = pulse.pose.to_mat4();
+            self.draw_cube.cube_pos = vec3(0.0, 0.0, -0.05 - age * pulse.speed - length * 0.5);
+            self.draw_cube.cube_size = vec3(radius, radius, length);
+            self.draw_cube.color = color;
+            self.draw_cube.depth_clip = 0.0;
+            self.draw_cube.draw(cx);
         }
     }
 }
@@ -437,8 +424,6 @@ impl Widget for XrScene {
         };
 
         let cx = &mut Cx2d::new(cx.cx);
-        self.draw_pbr.reset_matrix();
-        self.draw_pbr.camera_pos = state.head_pose.position;
 
         self.draw_reference_cube(cx);
         self.draw_headset(cx, state);
