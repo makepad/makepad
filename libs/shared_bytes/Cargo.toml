@@ -1,0 +1,9 @@
+[package]
+name = "makepad-shared-bytes"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Shared owned-or-mmapped byte storage"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
