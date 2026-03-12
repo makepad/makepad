@@ -64,6 +64,7 @@ pub mod fold_button;
 pub mod fold_header;
 
 pub mod loading_spinner;
+pub mod glass_panel;
 
 pub mod bare_step;
 pub mod turtle_step;
@@ -542,6 +543,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::fold_header::script_mod(vm);
 
     crate::loading_spinner::script_mod(vm);
+    crate::glass_panel::script_mod(vm);
 
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);

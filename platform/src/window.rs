@@ -16,6 +16,41 @@ pub struct WindowHandle(PoolId);
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct WindowId(pub usize, pub u64);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook, Default)]
+pub enum WindowBackdrop {
+    #[default]
+    None,
+    Auto,
+    Mica,
+    Acrylic,
+    Vibrancy,
+    Blur,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowVisuals {
+    pub transparent: bool,
+    pub backdrop: WindowBackdrop,
+    pub backdrop_intensity: f32,
+}
+
+impl Default for WindowVisuals {
+    fn default() -> Self {
+        Self {
+            transparent: false,
+            backdrop: WindowBackdrop::None,
+            backdrop_intensity: 1.0,
+        }
+    }
+}
+
+impl WindowVisuals {
+    pub fn normalized(mut self) -> Self {
+        self.backdrop_intensity = self.backdrop_intensity.clamp(0.0, 1.0);
+        self
+    }
+}
+
 impl WindowId {
     pub fn id(&self) -> usize {
         self.0
@@ -210,6 +245,12 @@ pub struct ScriptWindowHandle {
     pub dpi_override: Option<f64>,
     #[live]
     pub topmost: bool,
+    #[live]
+    pub transparent: bool,
+    #[live(WindowBackdrop::None)]
+    pub backdrop: WindowBackdrop,
+    #[live(1.0)]
+    pub backdrop_intensity: f32,
 }
 
 impl std::ops::Deref for ScriptWindowHandle {
@@ -244,6 +285,20 @@ impl ScriptHook for ScriptWindowHandle {
         }
         if self.topmost {
             self.handle.set_topmost(cx, self.topmost);
+        }
+        let visuals = WindowVisuals {
+            transparent: self.transparent,
+            backdrop: self.backdrop,
+            backdrop_intensity: self.backdrop_intensity,
+        }
+        .normalized();
+        if cx.windows[window_id].window_visuals() != visuals {
+            cx.windows[window_id].transparent = visuals.transparent;
+            cx.windows[window_id].backdrop = visuals.backdrop;
+            cx.windows[window_id].backdrop_intensity = visuals.backdrop_intensity;
+            if cx.windows[window_id].is_created {
+                cx.push_unique_platform_op(CxOsOp::SetWindowVisuals(window_id, visuals));
+            }
         }
     }
 }
@@ -319,6 +374,37 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::SetTopmost(self.window_id(), set_topmost));
     }
 
+    pub fn set_window_visuals(&mut self, cx: &mut Cx, visuals: WindowVisuals) {
+        let visuals = visuals.normalized();
+        let window_id = self.window_id();
+        if cx.windows[window_id].window_visuals() != visuals {
+            cx.windows[window_id].transparent = visuals.transparent;
+            cx.windows[window_id].backdrop = visuals.backdrop;
+            cx.windows[window_id].backdrop_intensity = visuals.backdrop_intensity;
+            if cx.windows[window_id].is_created {
+                cx.push_unique_platform_op(CxOsOp::SetWindowVisuals(window_id, visuals));
+            }
+        }
+    }
+
+    pub fn set_transparent(&mut self, cx: &mut Cx, transparent: bool) {
+        let mut visuals = cx.windows[self.window_id()].window_visuals();
+        visuals.transparent = transparent;
+        self.set_window_visuals(cx, visuals);
+    }
+
+    pub fn set_backdrop(&mut self, cx: &mut Cx, backdrop: WindowBackdrop) {
+        let mut visuals = cx.windows[self.window_id()].window_visuals();
+        visuals.backdrop = backdrop;
+        self.set_window_visuals(cx, visuals);
+    }
+
+    pub fn set_backdrop_intensity(&mut self, cx: &mut Cx, backdrop_intensity: f32) {
+        let mut visuals = cx.windows[self.window_id()].window_visuals();
+        visuals.backdrop_intensity = backdrop_intensity;
+        self.set_window_visuals(cx, visuals);
+    }
+
     pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
         cx.push_unique_platform_op(CxOsOp::ResizeWindow(self.window_id(), size));
     }
@@ -374,6 +460,9 @@ pub struct CxWindow {
     pub popup_position: Option<Vec2d>,
     pub popup_size: Option<Vec2d>,
     pub popup_grab_keyboard: bool,
+    pub transparent: bool,
+    pub backdrop: WindowBackdrop,
+    pub backdrop_intensity: f32,
 }
 
 impl Default for CxWindow {
@@ -396,11 +485,23 @@ impl Default for CxWindow {
             popup_position: None,
             popup_size: None,
             popup_grab_keyboard: true,
+            transparent: false,
+            backdrop: WindowBackdrop::None,
+            backdrop_intensity: 1.0,
         }
     }
 }
 
 impl CxWindow {
+    pub fn window_visuals(&self) -> WindowVisuals {
+        WindowVisuals {
+            transparent: self.transparent,
+            backdrop: self.backdrop,
+            backdrop_intensity: self.backdrop_intensity,
+        }
+        .normalized()
+    }
+
     pub fn remap_dpi_override(&self, pos: Vec2d) -> Vec2d {
         if let Some(dpi_override) = self.dpi_override {
             if let Some(os_dpi_factor) = self.os_dpi_factor {
@@ -427,4 +528,64 @@ impl CxWindow {
             None
         }
     }*/
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::Event;
+
+    fn test_cx() -> Cx {
+        Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}))
+    }
+
+    #[test]
+    fn window_visuals_defaults() {
+        let mut cx = test_cx();
+        let window = WindowHandle::new(&mut cx);
+        let cx_window = &cx.windows[window.window_id()];
+        assert!(!cx_window.transparent);
+        assert_eq!(cx_window.backdrop, WindowBackdrop::None);
+        assert_eq!(cx_window.backdrop_intensity, 1.0);
+    }
+
+    #[test]
+    fn set_window_visuals_updates_and_dedups_platform_ops() {
+        let mut cx = test_cx();
+        let mut window = WindowHandle::new(&mut cx);
+        let window_id = window.window_id();
+
+        cx.windows[window_id].is_created = true;
+        cx.platform_ops.clear();
+
+        window.set_backdrop(&mut cx, WindowBackdrop::Mica);
+        assert_eq!(cx.platform_ops.len(), 1);
+        assert!(matches!(
+            cx.platform_ops[0],
+            CxOsOp::SetWindowVisuals(
+                _,
+                WindowVisuals {
+                    backdrop: WindowBackdrop::Mica,
+                    ..
+                }
+            )
+        ));
+
+        cx.platform_ops.clear();
+        window.set_backdrop(&mut cx, WindowBackdrop::Mica);
+        assert!(cx.platform_ops.is_empty());
+
+        window.set_backdrop_intensity(&mut cx, 0.25);
+        assert_eq!(cx.platform_ops.len(), 1);
+        assert!(matches!(
+            cx.platform_ops[0],
+            CxOsOp::SetWindowVisuals(
+                _,
+                WindowVisuals {
+                    backdrop_intensity: 0.25,
+                    ..
+                }
+            )
+        ));
+    }
 }

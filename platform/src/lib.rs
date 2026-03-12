@@ -198,7 +198,8 @@ pub use {
         video::*,
         web_socket::{WebSocket, WebSocketMessage},
         window::{
-            CxWindowPool, ScriptWindowHandle, WindowHandle, WindowIcon, WindowIconBuffer, WindowId,
+            CxWindowPool, ScriptWindowHandle, WindowBackdrop, WindowHandle, WindowIcon,
+            WindowIconBuffer, WindowId, WindowVisuals,
         },
     },
     app_main::*,

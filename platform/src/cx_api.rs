@@ -24,6 +24,7 @@ use {
         shared_bytes::SharedBytes,
         texture::{Texture, TextureId},
         window::WindowId,
+        window::WindowVisuals,
     },
     std::{
         any::{Any, TypeId},
@@ -111,6 +112,7 @@ pub enum CxOsOp {
     HideWindowButtons(WindowId),
     ShowWindowButtons(WindowId),
     SetTopmost(WindowId, bool),
+    SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
 
     ShowTextIME(Area, Vec2d, TextInputConfig),
@@ -241,6 +243,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::HideWindowButtons(..) => write!(f, "HideWindowButtons"),
             Self::ShowWindowButtons(..) => write!(f, "ShowWindowButtons"),
             Self::SetTopmost(..) => write!(f, "SetTopmost"),
+            Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
