@@ -1,0 +1,24 @@
+use mod.std.*
+use mod.hub;
+
+let RunItem = {
+    on_run: nil,
+    name: ""
+    in_studio: true
+}
+
+let RunStudioRelease = RunItem{
+    on_run: fn(){
+        let name = me.name
+        hub.run(
+            {"STUDIO": hub.studio_ip},
+            "cargo", 
+            ["run" "-p" name "--release" "--message-format=json" "--" "--message-format=json" "--stdin-loop"],
+        )
+    }
+}
+
+hub.set_run_items([
+    RunStudioRelease{name: "makepad-example-splash"}
+    RunStudioRelease{name: "makepad-studio"}
+])
