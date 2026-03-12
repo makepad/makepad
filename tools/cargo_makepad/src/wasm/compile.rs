@@ -609,8 +609,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     } else {
         WASM_RUSTFLAGS_SINGLE_THREADED
     };
+    let mut env = vec![("RUSTFLAGS", rustflags), ("MAKEPAD", "lines")];
+    // `profile.small` with LTO enabled miscompiles single-threaded wasm in the script VM.
+    if profile == "small" && !config.threads {
+        env.push(("CARGO_PROFILE_SMALL_LTO", "off"));
+    }
+
     shell_env(
-        &[("RUSTFLAGS", rustflags), ("MAKEPAD", "lines")],
+        &env,
         &cwd,
         "rustup",
         &args_out_refs,
@@ -1793,16 +1799,10 @@ fn start_wasm_server(
                     if path == "/" {
                         path = "/index.html";
                     }
-                    let (cache_control, cache_extra) = if path.ends_with(".wasm") {
-                        (
-                            "no-store, must-revalidate",
-                            "Pragma: no-cache\r\n\
-                            Expires: 0\r\n\
-                            ",
-                        )
-                    } else {
-                        ("max-age=86400", "")
-                    };
+                    let cache_control = "no-store, must-revalidate";
+                    let cache_extra = "Pragma: no-cache\r\n\
+                        Expires: 0\r\n\
+                        ";
 
                     // alright wasm http server
                     if path == "/$watch" || path == "/favicon.ico" {
