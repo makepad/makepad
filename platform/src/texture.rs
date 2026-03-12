@@ -777,10 +777,21 @@ impl Texture {
     /// making it safe for image sources that change resolution (e.g.
     /// animated images with varying frame sizes, or lazily-loaded images
     /// replacing a placeholder).
-    pub fn set_data_u32(&self, cx: &mut Cx, new_width: usize, new_height: usize, new_data: Vec<u32>) {
+    pub fn set_data_u32(
+        &self,
+        cx: &mut Cx,
+        new_width: usize,
+        new_height: usize,
+        new_data: Vec<u32>,
+    ) {
         let cx_texture = &mut cx.textures[self.texture_id()];
         let (width, height, data, updated) = match &mut cx_texture.format {
-            TextureFormat::VecBGRAu8_32 { width, height, data, updated } => (width, height, data, updated),
+            TextureFormat::VecBGRAu8_32 {
+                width,
+                height,
+                data,
+                updated,
+            } => (width, height, data, updated),
             _ => panic!("incorrect texture format for u32 image data"),
         };
         *width = new_width;

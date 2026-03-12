@@ -32,7 +32,7 @@ fn git(root: &Path, args: &[&str]) {
 
 #[test]
 fn resolves_mount_and_branch_paths() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "fn main() {}\n").unwrap();
     fs::create_dir_all(dir.path().join("branch/feature-ui/src")).unwrap();
@@ -79,7 +79,7 @@ fn git_statuses_are_mapped_for_tree_nodes() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::write(dir.path().join("tracked.txt"), "hello\n").unwrap();
     git(dir.path(), &["init"]);
     git(dir.path(), &["add", "."]);
@@ -115,8 +115,8 @@ fn git_statuses_are_mapped_for_tree_nodes() {
 
 #[test]
 fn load_file_tree_is_scoped_to_requested_mount() {
-    let mount_a = tempfile::tempdir().unwrap();
-    let mount_b = tempfile::tempdir().unwrap();
+    let mount_a = makepad_studio_hub::test_support::tempdir().unwrap();
+    let mount_b = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(mount_a.path().join("src")).unwrap();
     fs::create_dir_all(mount_b.path().join("src")).unwrap();
     fs::write(mount_a.path().join("src/a.rs"), "pub fn a() {}\n").unwrap();

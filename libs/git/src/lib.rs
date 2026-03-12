@@ -10,6 +10,8 @@ pub mod oid;
 pub mod pack;
 pub mod refs;
 pub mod repo;
+#[doc(hidden)]
+pub mod test_support;
 mod sha1;
 pub mod tree;
 pub mod worktree;

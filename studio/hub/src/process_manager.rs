@@ -10,8 +10,8 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -202,9 +202,7 @@ impl RunningChild {
 }
 
 enum ScriptRunCommand {
-    RunItem {
-        name: String,
-    },
+    RunItem { name: String },
 }
 
 struct ScriptRunControl {
@@ -300,7 +298,9 @@ fn script_value_to_checked_string(
 }
 
 fn script_value_to_bool(value: ScriptValue) -> Option<bool> {
-    value.as_bool().or_else(|| value.as_number().map(|number| number != 0.0))
+    value
+        .as_bool()
+        .or_else(|| value.as_number().map(|number| number != 0.0))
 }
 
 fn script_value_to_string_array(
@@ -322,10 +322,12 @@ fn script_value_to_string_array(
             continue;
         };
         let item_what = format!("{}[{}]", what, index);
-        out.push(match script_value_to_checked_string(vm, value, &item_what) {
-            Ok(value) => value,
-            Err(err) => return Err(err),
-        });
+        out.push(
+            match script_value_to_checked_string(vm, value, &item_what) {
+                Ok(value) => value,
+                Err(err) => return Err(err),
+            },
+        );
     }
     Ok(out)
 }
@@ -359,8 +361,7 @@ fn script_value_to_string_map(
             Ok(key) => key,
             Err(err) => return Err(err),
         };
-        let value = match script_value_to_checked_string(vm, value, &format!("{}[{}]", what, key))
-        {
+        let value = match script_value_to_checked_string(vm, value, &format!("{}[{}]", what, key)) {
             Ok(value) => value,
             Err(err) => return Err(err),
         };
@@ -429,28 +430,38 @@ fn parse_registered_run_item(
 fn install_hub_script_stdio(vm: &mut ScriptVm) {
     let std = vm.module(id!(std));
 
-    vm.add_method(std, id_lut!(print), script_args_def!(what = NIL), |vm, args| {
-        let what = script_value!(vm, args.what);
-        let line = script_value_to_string(vm, what);
-        vm.host
-            .downcast_mut::<ScriptBuildHost>()
-            .unwrap()
-            .emit_output(line.clone(), false);
-        print!("{line}");
-        let _ = io::stdout().flush();
-        NIL
-    });
+    vm.add_method(
+        std,
+        id_lut!(print),
+        script_args_def!(what = NIL),
+        |vm, args| {
+            let what = script_value!(vm, args.what);
+            let line = script_value_to_string(vm, what);
+            vm.host
+                .downcast_mut::<ScriptBuildHost>()
+                .unwrap()
+                .emit_output(line.clone(), false);
+            print!("{line}");
+            let _ = io::stdout().flush();
+            NIL
+        },
+    );
 
-    vm.add_method(std, id_lut!(println), script_args_def!(what = NIL), |vm, args| {
-        let what = script_value!(vm, args.what);
-        let line = script_value_to_string(vm, what);
-        vm.host
-            .downcast_mut::<ScriptBuildHost>()
-            .unwrap()
-            .emit_output(line.clone(), false);
-        println!("{line}");
-        NIL
-    });
+    vm.add_method(
+        std,
+        id_lut!(println),
+        script_args_def!(what = NIL),
+        |vm, args| {
+            let what = script_value!(vm, args.what);
+            let line = script_value_to_string(vm, what);
+            vm.host
+                .downcast_mut::<ScriptBuildHost>()
+                .unwrap()
+                .emit_output(line.clone(), false);
+            println!("{line}");
+            NIL
+        },
+    );
 }
 
 fn install_hub_script_module(vm: &mut ScriptVm) {
@@ -505,10 +516,7 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
         |vm, args| {
             let items = script_value!(vm, args.items);
             let Some(array) = items.as_array() else {
-                return script_err_type_mismatch!(
-                    vm.trap(),
-                    "hub.set_run_items expects an array"
-                );
+                return script_err_type_mismatch!(vm.trap(), "hub.set_run_items expects an array");
             };
 
             let len = vm.bx.heap.array_len(array);

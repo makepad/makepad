@@ -193,8 +193,8 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    fn make_test_repo() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
+    fn make_test_repo() -> crate::test_support::TempDir {
+        let dir = crate::test_support::tempdir().unwrap();
         Command::new("git")
             .args(["init"])
             .current_dir(dir.path())

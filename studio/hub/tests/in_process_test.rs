@@ -159,7 +159,7 @@ fn tail_lines(text: &str, n: usize) -> String {
 
 #[test]
 fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -246,7 +246,7 @@ fn in_process_connection_roundtrip_and_cargo_build_lifecycle() {
 fn terminal_large_paste_keeps_session_alive() {
     const LARGE_PASTE_BYTES: usize = 512 * 1024;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -330,7 +330,7 @@ fn terminal_resize_delivers_sigwinch_with_updated_stty_size() {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -439,7 +439,7 @@ fn terminal_bash_prompt_sticks_to_bottom_after_grow_resize() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -524,7 +524,7 @@ fn terminal_bash_grow_resize_clamps_to_top_when_history_is_insufficient() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -600,7 +600,7 @@ fn terminal_codex_prompt_sticks_to_bottom_after_resize() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -678,7 +678,7 @@ fn terminal_codex_fast_resize_roundtrip_preserves_top_and_bottom_rows() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -790,7 +790,7 @@ fn terminal_codex_fast_vs_slow_wiggle_same_final_frame() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -899,7 +899,7 @@ fn terminal_makepad_tui_fast_wiggle_preserves_framebuffer() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -1333,7 +1333,7 @@ fn terminal_makepad_tui_fast_then_slow_same_session_matches_slow_only() {
 
 #[test]
 fn file_tree_keeps_hidden_directories_for_backend() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::create_dir_all(dir.path().join(".hidden")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
@@ -1381,8 +1381,8 @@ fn file_tree_keeps_hidden_directories_for_backend() {
 
 #[test]
 fn unmount_emits_file_tree_diff_scoped_to_mount() {
-    let mount_a = tempfile::tempdir().unwrap();
-    let mount_b = tempfile::tempdir().unwrap();
+    let mount_a = makepad_studio_hub::test_support::tempdir().unwrap();
+    let mount_b = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(mount_a.path().join("src")).unwrap();
     fs::create_dir_all(mount_b.path().join("src")).unwrap();
     fs::write(mount_a.path().join("src/a.rs"), "pub fn a() {}\n").unwrap();
@@ -1440,8 +1440,8 @@ fn unmount_emits_file_tree_diff_scoped_to_mount() {
 
 #[test]
 fn run_items_are_pushed_per_mount() {
-    let mount_a = tempfile::tempdir().unwrap();
-    let mount_b = tempfile::tempdir().unwrap();
+    let mount_a = makepad_studio_hub::test_support::tempdir().unwrap();
+    let mount_b = makepad_studio_hub::test_support::tempdir().unwrap();
 
     fs::write(
         mount_a.path().join("makepad.splash"),
@@ -1510,7 +1510,7 @@ fn run_items_are_pushed_per_mount() {
 
 #[test]
 fn run_item_executes_named_on_run_callback() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::write(
         dir.path().join("makepad.splash"),
         "use mod.std\nuse mod.hub\nhub.set_run_items([{name:\"hello\" in_studio:true on_run:fn(){std.println(\"hello from item\")}}])\n",
@@ -1530,17 +1530,13 @@ fn run_item_executes_named_on_run_callback() {
         mount: "repo".to_string(),
         primary: Some(true),
     });
-    let started = wait_for_message(
-        &connection,
-        Duration::from_secs(3),
-        |msg| {
-            matches!(
-                msg,
-                HubToClient::BuildStarted { mount, package, .. }
-                    if mount == "repo" && package == "makepad.splash"
-            )
-        },
-    )
+    let started = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted { mount, package, .. }
+                if mount == "repo" && package == "makepad.splash"
+        )
+    })
     .expect("did not receive BuildStarted");
     let build_id = match started {
         HubToClient::BuildStarted { build_id, .. } => build_id,
@@ -1610,7 +1606,7 @@ fn run_item_executes_named_on_run_callback() {
 
 #[test]
 fn run_item_spawns_cargo_run_for_clicked_name() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(
         dir.path().join("Cargo.toml"),
@@ -1641,17 +1637,13 @@ fn run_item_spawns_cargo_run_for_clicked_name() {
         mount: "repo".to_string(),
         primary: Some(true),
     });
-    let splash_started = wait_for_message(
-        &connection,
-        Duration::from_secs(3),
-        |msg| {
-            matches!(
-                msg,
-                HubToClient::BuildStarted { mount, package, .. }
-                    if mount == "repo" && package == "makepad.splash"
-            )
-        },
-    )
+    let splash_started = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted { mount, package, .. }
+                if mount == "repo" && package == "makepad.splash"
+        )
+    })
     .expect("did not receive splash BuildStarted");
     let splash_build_id = match splash_started {
         HubToClient::BuildStarted { build_id, .. } => build_id,
@@ -1677,22 +1669,18 @@ fn run_item_spawns_cargo_run_for_clicked_name() {
         name: "makepad-example-splash".to_string(),
     });
 
-    let child_started = wait_for_message(
-        &connection,
-        Duration::from_secs(10),
-        |msg| {
-            matches!(
-                msg,
-                HubToClient::BuildStarted {
-                    build_id,
-                    mount,
-                    package,
-                } if *build_id != splash_build_id
-                    && mount == "repo"
-                    && package == "makepad-example-splash"
-            )
-        },
-    )
+    let child_started = wait_for_message(&connection, Duration::from_secs(10), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted {
+                build_id,
+                mount,
+                package,
+            } if *build_id != splash_build_id
+                && mount == "repo"
+                && package == "makepad-example-splash"
+        )
+    })
     .expect("did not receive child BuildStarted");
     let child_build_id = match child_started {
         HubToClient::BuildStarted { build_id, .. } => build_id,
@@ -1754,7 +1742,7 @@ fn run_item_spawns_cargo_run_for_clicked_name() {
 
 #[test]
 fn run_item_reports_script_error_in_hub_run_args() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::write(
         dir.path().join("makepad.splash"),
         "use mod.hub\nhub.set_run_items([{name:\"broken\" in_studio:true on_run:fn(){hub.run(nil, \"cargo\", [\"run\" \"-p\" self.package])}}])\n",
@@ -1774,17 +1762,13 @@ fn run_item_reports_script_error_in_hub_run_args() {
         mount: "repo".to_string(),
         primary: Some(true),
     });
-    let started = wait_for_message(
-        &connection,
-        Duration::from_secs(3),
-        |msg| {
-            matches!(
-                msg,
-                HubToClient::BuildStarted { mount, package, .. }
-                    if mount == "repo" && package == "makepad.splash"
-            )
-        },
-    )
+    let started = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted { mount, package, .. }
+                if mount == "repo" && package == "makepad.splash"
+        )
+    })
     .expect("did not receive BuildStarted");
     let build_id = match started {
         HubToClient::BuildStarted { build_id, .. } => build_id,
@@ -1828,7 +1812,7 @@ fn run_item_reports_script_error_in_hub_run_args() {
 
 #[test]
 fn splash_runnable_prints_hello() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::write(
         dir.path().join("makepad.splash"),
         "use mod.std\nstd.println(\"hello\")\n",
@@ -1912,7 +1896,7 @@ fn splash_runnable_prints_hello() {
 
 #[test]
 fn observe_mount_auto_starts_splash() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::write(
         dir.path().join("makepad.splash"),
         "use mod.std\nstd.println(\"hello\")\n",
@@ -1987,7 +1971,7 @@ fn observe_mount_auto_starts_splash() {
 
 #[test]
 fn observe_mount_reload_splash_after_save() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::write(
         dir.path().join("makepad.splash"),
         "use mod.std\nstd.println(\"one\")\n",
@@ -2103,7 +2087,7 @@ fn observe_mount_reload_splash_after_save() {
 
 #[test]
 fn file_watch_emits_single_path_delta_without_full_tree_reload() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -2166,7 +2150,7 @@ fn file_watch_emits_single_path_delta_without_full_tree_reload() {
 
 #[test]
 fn save_text_file_does_not_echo_file_changed_to_saving_client() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -2217,7 +2201,7 @@ fn save_text_file_does_not_echo_file_changed_to_saving_client() {
 
 #[test]
 fn file_watch_ignores_makepad_term_writes() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".makepad")).unwrap();
     fs::write(dir.path().join(".makepad/a.term"), "").unwrap();
 
@@ -2256,7 +2240,7 @@ fn file_watch_ignores_makepad_term_writes() {
 
 #[test]
 fn file_watch_emits_hidden_directory_writes() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
 
     let config = HubConfig {
         mounts: vec![MountConfig {
@@ -2306,7 +2290,7 @@ fn file_watch_emits_hidden_directory_writes() {
 
 #[test]
 fn file_watch_picks_up_external_new_file() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -2372,7 +2356,7 @@ fn file_watch_picks_up_external_new_file() {
 
 #[test]
 fn file_watch_emits_file_changed_for_external_write() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -2417,7 +2401,7 @@ fn file_watch_emits_file_changed_for_external_write() {
 
 #[test]
 fn read_text_file_returns_fresh_content_after_external_write() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
 
@@ -2467,7 +2451,7 @@ fn read_text_file_returns_fresh_content_after_external_write() {
 
 #[test]
 fn file_watch_picks_up_external_removed_directory() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src/nested")).unwrap();
     fs::write(dir.path().join("src/nested/mod.rs"), "pub fn nested() {}\n").unwrap();
 
@@ -2531,7 +2515,7 @@ fn file_watch_picks_up_external_removed_directory() {
 
 #[test]
 fn find_in_files_defaults_to_rs_md_toml_and_returns_concise_hits() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(
         dir.path().join("src/lib.rs"),
@@ -2596,7 +2580,7 @@ fn find_in_files_defaults_to_rs_md_toml_and_returns_concise_hits() {
 
 #[test]
 fn find_in_files_regex_respects_max_results() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(
         dir.path().join("src/lib.rs"),
@@ -2641,7 +2625,7 @@ fn find_in_files_regex_respects_max_results() {
 
 #[test]
 fn read_text_range_returns_line_window_and_total_line_count() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(
         dir.path().join("src/lib.rs"),

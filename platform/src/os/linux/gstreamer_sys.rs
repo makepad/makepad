@@ -84,18 +84,14 @@ pub struct LibGStreamer {
 
     // libgstreamer-1.0.so.0
     pub gst_init: unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char),
-    pub gst_element_factory_make: unsafe extern "C" fn(*const c_char, *const c_char) -> *mut GstElement,
+    pub gst_element_factory_make:
+        unsafe extern "C" fn(*const c_char, *const c_char) -> *mut GstElement,
     pub gst_element_set_state: unsafe extern "C" fn(*mut GstElement, c_uint) -> c_int,
-    pub gst_element_get_state: unsafe extern "C" fn(
-        *mut GstElement,
-        *mut c_uint,
-        *mut c_uint,
-        GstClockTime,
-    ) -> c_int,
+    pub gst_element_get_state:
+        unsafe extern "C" fn(*mut GstElement, *mut c_uint, *mut c_uint, GstClockTime) -> c_int,
     pub gst_element_query_position: unsafe extern "C" fn(*mut GstElement, c_int, *mut i64) -> c_int,
     pub gst_element_query_duration: unsafe extern "C" fn(*mut GstElement, c_int, *mut i64) -> c_int,
-    pub gst_element_seek_simple:
-        unsafe extern "C" fn(*mut GstElement, c_int, c_uint, i64) -> c_int,
+    pub gst_element_seek_simple: unsafe extern "C" fn(*mut GstElement, c_int, c_uint, i64) -> c_int,
     pub gst_element_seek:
         unsafe extern "C" fn(*mut GstElement, f64, c_int, c_uint, c_int, i64, c_int, i64) -> c_int,
     pub gst_element_query: unsafe extern "C" fn(*mut GstElement, *mut c_void) -> c_int,
@@ -138,12 +134,10 @@ pub struct LibGStreamer {
     // libgobject-2.0.so.0  — variadic, we load it once and cast to different signatures
     pub g_object_set_string:
         unsafe extern "C" fn(*mut GObject, *const c_char, *const c_char, *const c_void),
-    pub g_object_set_int:
-        unsafe extern "C" fn(*mut GObject, *const c_char, c_int, *const c_void),
+    pub g_object_set_int: unsafe extern "C" fn(*mut GObject, *const c_char, c_int, *const c_void),
     pub g_object_set_ptr:
         unsafe extern "C" fn(*mut GObject, *const c_char, *mut c_void, *const c_void),
-    pub g_object_set_double:
-        unsafe extern "C" fn(*mut GObject, *const c_char, f64, *const c_void),
+    pub g_object_set_double: unsafe extern "C" fn(*mut GObject, *const c_char, f64, *const c_void),
 
     // libglib-2.0.so.0
     pub g_free: unsafe extern "C" fn(*mut c_void),
@@ -171,8 +165,12 @@ impl LibGStreamer {
             gst_query_new_seeking: gst.get_symbol("gst_query_new_seeking").ok()?,
             gst_query_parse_seeking: gst.get_symbol("gst_query_parse_seeking").ok()?,
             gst_query_new_buffering: gst.get_symbol("gst_query_new_buffering").ok()?,
-            gst_query_get_n_buffering_ranges: gst.get_symbol("gst_query_get_n_buffering_ranges").ok()?,
-            gst_query_parse_nth_buffering_range: gst.get_symbol("gst_query_parse_nth_buffering_range").ok()?,
+            gst_query_get_n_buffering_ranges: gst
+                .get_symbol("gst_query_get_n_buffering_ranges")
+                .ok()?,
+            gst_query_parse_nth_buffering_range: gst
+                .get_symbol("gst_query_parse_nth_buffering_range")
+                .ok()?,
             gst_element_get_bus: gst.get_symbol("gst_element_get_bus").ok()?,
             gst_bus_pop_filtered: gst.get_symbol("gst_bus_pop_filtered").ok()?,
             gst_message_parse_error: gst.get_symbol("gst_message_parse_error").ok()?,
@@ -188,7 +186,9 @@ impl LibGStreamer {
             gst_structure_get_int: gst.get_symbol("gst_structure_get_int").ok()?,
             gst_mini_object_unref: gst.get_symbol("gst_mini_object_unref").ok()?,
 
-            gst_app_sink_try_pull_preroll: gstapp.get_symbol("gst_app_sink_try_pull_preroll").ok()?,
+            gst_app_sink_try_pull_preroll: gstapp
+                .get_symbol("gst_app_sink_try_pull_preroll")
+                .ok()?,
             gst_app_sink_try_pull_sample: gstapp.get_symbol("gst_app_sink_try_pull_sample").ok()?,
             gst_app_sink_is_eos: gstapp.get_symbol("gst_app_sink_is_eos").ok()?,
             gst_app_sink_set_caps: gstapp.get_symbol("gst_app_sink_set_caps").ok()?,

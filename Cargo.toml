@@ -33,6 +33,7 @@ workspace.members = [
     "libs/regex",
     "libs/svg",
     "libs/apple_sys",
+    "libs/shared_bytes",
     "platform/network",
     "libs/filesystem_watcher",
     "libs/live_reload_core",

@@ -242,11 +242,7 @@ impl Win32App {
     fn create_default_icons() -> (HICON, HICON) {
         let icon = crate::app_icon::window_icon();
 
-        let pick = |target: u32| {
-            icon.buffers
-                .iter()
-                .min_by_key(|b| b.width.abs_diff(target))
-        };
+        let pick = |target: u32| icon.buffers.iter().min_by_key(|b| b.width.abs_diff(target));
 
         let big = if let Some(buf) = pick(64).or_else(|| icon.buffers.first()) {
             Self::create_icon_from_rgba(buf.width, buf.height, &buf.data)

@@ -6,9 +6,7 @@ use {
     crate::{
         area::Area,
         cx::AndroidParams,
-        event::{
-            SelectionHandleKind, SelectionHandlePhase, TouchPoint, TouchState, VideoSource,
-        },
+        event::{SelectionHandleKind, SelectionHandlePhase, TouchPoint, TouchState, VideoSource},
         ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputConfig},
         makepad_live_id::*,
         makepad_math::*,
@@ -1442,12 +1440,8 @@ pub struct AndroidH264CodecProbe {
 
 pub unsafe fn to_java_query_h264_codec_support() -> Option<AndroidH264CodecProbe> {
     let env = attach_jni_env();
-    let result = ndk_utils::call_object_method!(
-        env,
-        get_activity(),
-        "queryH264CodecSupport",
-        "()[I"
-    );
+    let result =
+        ndk_utils::call_object_method!(env, get_activity(), "queryH264CodecSupport", "()[I");
     if result.is_null() {
         return None;
     }

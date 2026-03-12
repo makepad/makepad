@@ -313,7 +313,11 @@ impl Cx {
                             video_height: tw.video_height,
                             duration,
                             is_seekable: duration > 0,
-                            video_tracks: if tw.video_width > 0 && tw.video_height > 0 { vec!["video".to_string()] } else { vec![] },
+                            video_tracks: if tw.video_width > 0 && tw.video_height > 0 {
+                                vec!["video".to_string()]
+                            } else {
+                                vec![]
+                            },
                             audio_tracks: vec!["audio".to_string()],
                         },
                     ));
@@ -610,39 +614,37 @@ impl Cx {
                     texture_id,
                     autoplay,
                     should_loop,
-                ) => {
-                    match source {
-                        VideoSource::Network(url) => {
-                            self.os.from_wasm(FromWasmPrepareVideoPlayback {
-                                video_id_lo: video_id.lo(),
-                                video_id_hi: video_id.hi(),
-                                texture_id: texture_id.0,
-                                source_url: url,
-                                autoplay,
-                                should_loop,
-                            });
-                        }
-                        VideoSource::InMemory(_) => {
-                            let error = "VideoSource::InMemory is not supported on web".to_string();
-                            crate::error!("{}", error);
-                            self.call_event_handler(&Event::VideoDecodingError(
-                                VideoDecodingErrorEvent { video_id, error },
-                            ));
-                        }
-                        VideoSource::Filesystem(_) => {
-                            let error = "VideoSource::Filesystem is not supported on web".to_string();
-                            crate::error!("{}", error);
-                            self.call_event_handler(&Event::VideoDecodingError(
-                                VideoDecodingErrorEvent { video_id, error },
-                            ));
-                        }
-                        VideoSource::Camera(..) => {
-                            let error = "VideoSource::Camera is not supported on web".to_string();
-                            crate::error!("{}", error);
-                            self.call_event_handler(&Event::VideoDecodingError(
-                                VideoDecodingErrorEvent { video_id, error },
-                            ));
-                        }
+                ) => match source {
+                    VideoSource::Network(url) => {
+                        self.os.from_wasm(FromWasmPrepareVideoPlayback {
+                            video_id_lo: video_id.lo(),
+                            video_id_hi: video_id.hi(),
+                            texture_id: texture_id.0,
+                            source_url: url,
+                            autoplay,
+                            should_loop,
+                        });
+                    }
+                    VideoSource::InMemory(_) => {
+                        let error = "VideoSource::InMemory is not supported on web".to_string();
+                        crate::error!("{}", error);
+                        self.call_event_handler(&Event::VideoDecodingError(
+                            VideoDecodingErrorEvent { video_id, error },
+                        ));
+                    }
+                    VideoSource::Filesystem(_) => {
+                        let error = "VideoSource::Filesystem is not supported on web".to_string();
+                        crate::error!("{}", error);
+                        self.call_event_handler(&Event::VideoDecodingError(
+                            VideoDecodingErrorEvent { video_id, error },
+                        ));
+                    }
+                    VideoSource::Camera(..) => {
+                        let error = "VideoSource::Camera is not supported on web".to_string();
+                        crate::error!("{}", error);
+                        self.call_event_handler(&Event::VideoDecodingError(
+                            VideoDecodingErrorEvent { video_id, error },
+                        ));
                     }
                 },
                 CxOsOp::BeginVideoPlayback(video_id) => {

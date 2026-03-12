@@ -372,21 +372,26 @@ impl Cx {
                             .saturating_add((draw_call.dyn_uniforms.len() * 4 * 2) as u64);
                     }
                     for (slot, id) in shp.custom_uniform_buffer_ids.iter().enumerate() {
-                        let Some(uniform_buffer) = draw_call.uniform_buffer_slots[slot].as_ref() else {
-                            let () = msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
-                            let () = msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
+                        let Some(uniform_buffer) = draw_call.uniform_buffer_slots[slot].as_ref()
+                        else {
+                            let () =
+                                msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
+                            let () =
+                                msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
                             continue;
                         };
                         let data = &self.uniform_buffers[uniform_buffer.uniform_buffer_id()].data;
                         if data.is_empty() {
-                            let () = msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
-                            let () = msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
+                            let () =
+                                msg_send![encoder, setVertexBuffer: nil offset: 0 atIndex: *id];
+                            let () =
+                                msg_send![encoder, setFragmentBuffer: nil offset: 0 atIndex: *id];
                             continue;
                         }
                         let () = msg_send![encoder, setVertexBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 atIndex: *id];
                         let () = msg_send![encoder, setFragmentBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 atIndex: *id];
-                        uniform_bytes_uploaded = uniform_bytes_uploaded
-                            .saturating_add((data.len() * 2) as u64);
+                        uniform_bytes_uploaded =
+                            uniform_bytes_uploaded.saturating_add((data.len() * 2) as u64);
                     }
                     if let Some(id) = shp.scope_uniform_buffer_id {
                         let scope_buf = &sh.mapping.scope_uniforms_buf;
@@ -1192,7 +1197,9 @@ impl Cx {
             if let Some(os_shader_id) = found_os_shader_id {
                 cx_shader.os_shader_id = Some(os_shader_id);
             } else {
-                if let Some(shp) = CxOsDrawShader::new(metal_cx, mtlsl, &cx_shader.mapping, &bindings) {
+                if let Some(shp) =
+                    CxOsDrawShader::new(metal_cx, mtlsl, &cx_shader.mapping, &bindings)
+                {
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
@@ -1347,7 +1354,11 @@ impl MetalCx {
             let zero: [u8; 4] = [0, 0, 0, 0];
             let region = MTLRegion {
                 origin: MTLOrigin { x: 0, y: 0, z: 0 },
-                size: MTLSize { width: 1, height: 1, depth: 1 },
+                size: MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
             };
             let _: () = msg_send![
                 tex,
@@ -1837,8 +1848,9 @@ impl CxTexture {
                 }
                 _ => 1,
             };
-            let _: () =
-                unsafe { msg_send![descriptor.as_id(), setMipmapLevelCount: mip_level_count as u64] };
+            let _: () = unsafe {
+                msg_send![descriptor.as_id(), setMipmapLevelCount: mip_level_count as u64]
+            };
             let _: () = unsafe {
                 msg_send![descriptor.as_id(), setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]
             };

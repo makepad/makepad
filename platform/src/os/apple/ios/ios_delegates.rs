@@ -339,21 +339,16 @@ pub fn define_gesture_recognizer_handler() -> *const Class {
 }
 
 pub fn define_selection_handle_gesture_handler() -> *const Class {
-    let mut decl =
-        ClassDecl::new("SelectionHandlePanRecognizerHandler", class!(NSObject)).unwrap();
+    let mut decl = ClassDecl::new("SelectionHandlePanRecognizerHandler", class!(NSObject)).unwrap();
 
     decl.add_ivar::<i64>("handle_kind");
 
-    extern "C" fn handle_selection_handle_pan(
-        this: &Object,
-        _: Sel,
-        gesture_recognizer: ObjcId,
-    ) {
+    extern "C" fn handle_selection_handle_pan(this: &Object, _: Sel, gesture_recognizer: ObjcId) {
         unsafe {
             let state: i64 = msg_send![gesture_recognizer, state];
             let phase = match state {
-                1 => Some(SelectionHandlePhase::Begin),  // UIGestureRecognizerStateBegan
-                2 => Some(SelectionHandlePhase::Move),   // UIGestureRecognizerStateChanged
+                1 => Some(SelectionHandlePhase::Begin), // UIGestureRecognizerStateBegan
+                2 => Some(SelectionHandlePhase::Move),  // UIGestureRecognizerStateChanged
                 3 | 4 | 5 => Some(SelectionHandlePhase::End), // ended/cancelled/failed
                 _ => None,
             };

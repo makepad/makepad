@@ -1098,7 +1098,7 @@ mod tests {
 
     #[test]
     fn test_compute_status_untracked() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let workdir = dir.path();
         fs::write(workdir.join("new_file.txt"), "untracked\n").unwrap();
 
@@ -1116,7 +1116,7 @@ mod tests {
 
     #[test]
     fn test_compute_status_for_path_reports_untracked() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let workdir = dir.path();
         fs::write(workdir.join("new_file.txt"), "untracked\n").unwrap();
 
@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn test_compute_status_for_path_reports_staged_before_unstaged() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let workdir = dir.path();
         fs::write(workdir.join("tracked.txt"), "worktree\n").unwrap();
 
@@ -1173,7 +1173,7 @@ mod tests {
 
     #[test]
     fn test_compute_status_for_path_worktree_only_reports_deleted() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let workdir = dir.path();
 
         let index = Index {
@@ -1207,7 +1207,7 @@ mod tests {
 
     #[test]
     fn test_compute_status_worktree_only_modified_and_untracked() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let workdir = dir.path();
 
         fs::write(workdir.join("tracked.txt"), "new content\n").unwrap();
@@ -1245,7 +1245,7 @@ mod tests {
 
     #[test]
     fn test_compute_status_respects_gitignore_untracked() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let workdir = dir.path();
 
         fs::write(workdir.join(".gitignore"), "*.log\nbuild/\n").unwrap();
@@ -1277,7 +1277,7 @@ mod tests {
 
     #[test]
     fn test_compute_status_gitignore_negation() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let workdir = dir.path();
 
         fs::write(workdir.join(".gitignore"), "*.log\n!important.log\n").unwrap();
@@ -1303,7 +1303,7 @@ mod tests {
 
     #[test]
     fn test_compute_status_respects_git_info_exclude() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let workdir = dir.path();
         fs::create_dir_all(workdir.join(".git").join("info")).unwrap();
         fs::write(workdir.join(".git").join("info").join("exclude"), "*.tmp\n").unwrap();

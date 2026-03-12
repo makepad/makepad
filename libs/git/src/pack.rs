@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_read_from_pack() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         Command::new("git")
             .args(["init"])
             .current_dir(dir.path())

@@ -2,8 +2,7 @@ use crate::{
     event::{
         DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
         PopupDismissedEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
-        WindowCloseRequestedEvent,
-        WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
+        WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
     },
     window::WindowId,
 };

@@ -386,14 +386,12 @@ impl Cx {
                     state.presentable_id = Some(id);
                     id
                 };
-                write_stdout_msg(&AppToStudio::DrawCompleteAndFlip(
-                    PresentableDraw {
-                        window_id,
-                        target_id,
-                        width,
-                        height,
-                    },
-                ));
+                write_stdout_msg(&AppToStudio::DrawCompleteAndFlip(PresentableDraw {
+                    window_id,
+                    target_id,
+                    width,
+                    height,
+                }));
             } else {
                 crate::log!(
                     "headless frame written: {} ({}x{})",

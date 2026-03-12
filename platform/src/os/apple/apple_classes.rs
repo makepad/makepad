@@ -14,6 +14,10 @@ use {
         },
         macos_menu::MacosMenu,
         makepad_math::Vec2d,
+        makepad_network::backend::apple::{
+            http::{define_url_session_data_delegate, define_url_session_delegate},
+            web_socket::define_web_socket_delegate,
+        },
         makepad_objc_sys::runtime::{nil, ObjcId},
         os::{
             apple::apple_sys::*,
@@ -24,10 +28,6 @@ use {
             audio_unit::define_key_value_observing_delegate,
             av_capture::define_av_video_callback_delegate,
             cx_native::EventFlow,
-        },
-        makepad_network::backend::apple::{
-            http::{define_url_session_data_delegate, define_url_session_delegate},
-            web_socket::define_web_socket_delegate,
         },
     },
     std::{cell::RefCell, collections::HashMap, os::raw::c_void, rc::Rc, time::Instant},

@@ -14,7 +14,6 @@ use {
         },
         game_input::*,
         makepad_live_id::*,
-        texture::{Texture, TextureFormat},
         makepad_math::*,
         os::{
             cx_native::EventFlow,
@@ -28,6 +27,7 @@ use {
                 windows_video_player::WindowsUnifiedVideoPlayer,
             },
         },
+        texture::{Texture, TextureFormat},
         //permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
         window::CxWindowPool,

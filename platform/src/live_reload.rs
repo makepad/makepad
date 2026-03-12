@@ -1,13 +1,11 @@
 use crate::cx::Cx;
 use crate::makepad_script::{
-    parser::ScriptParser,
-    tokenizer::ScriptTokenizer,
-    ScriptMod,
-    ScriptModKey,
-    ScriptSource,
+    parser::ScriptParser, tokenizer::ScriptTokenizer, ScriptMod, ScriptModKey, ScriptSource,
     ScriptValue,
 };
-use makepad_live_reload_core::{normalize_path, normalize_path_string, normalize_relative_path_string};
+use makepad_live_reload_core::{
+    normalize_path, normalize_path_string, normalize_relative_path_string,
+};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -17,12 +15,8 @@ use std::rc::Rc;
 use {
     crate::thread::SignalToUI,
     makepad_live_reload_core::{
-        start_live_reload_watcher,
-        LiveReloadFileChange,
-        LiveReloadLogger,
-        LiveReloadWatchPlan,
-        LiveReloadWatcherHandle,
-        WatchRoot,
+        start_live_reload_watcher, LiveReloadFileChange, LiveReloadLogger, LiveReloadWatchPlan,
+        LiveReloadWatcherHandle, WatchRoot,
     },
     makepad_studio_protocol::StudioToApp,
     std::sync::mpsc::channel,
@@ -84,7 +78,8 @@ impl Default for CxLiveReloadState {
 
 impl CxLiveReloadState {
     pub fn queue_file_change(&mut self, file_name: String, content: String) {
-        self.pending_files.push(PendingLiveChange { file_name, content });
+        self.pending_files
+            .push(PendingLiveChange { file_name, content });
     }
 }
 
@@ -156,7 +151,10 @@ fn handle_cx_live_edit(cx: &mut Cx) -> bool {
 
     let mut latest_by_file = BTreeMap::<String, String>::new();
     for change in pending {
-        latest_by_file.insert(normalize_path_string(Path::new(&change.file_name)), change.content);
+        latest_by_file.insert(
+            normalize_path_string(Path::new(&change.file_name)),
+            change.content,
+        );
     }
 
     let Some(script_vm) = cx.script_vm.as_mut() else {
@@ -250,13 +248,14 @@ fn handle_cx_live_edit(cx: &mut Cx) -> bool {
         return false;
     }
 
-    *cx.script_data
-        .live_reload
-        .script_mod_overrides
-        .borrow_mut() = next_overrides;
+    *cx.script_data.live_reload.script_mod_overrides.borrow_mut() = next_overrides;
     crate::log!(
         "hot reload applied {} override(s) from {} file change(s)",
-        cx.script_data.live_reload.script_mod_overrides.borrow().len(),
+        cx.script_data
+            .live_reload
+            .script_mod_overrides
+            .borrow()
+            .len(),
         processed_files
     );
     true
@@ -274,7 +273,8 @@ fn collect_compiled_sites_for_file(
         let ScriptSource::Mod(script_mod) = &body.source else {
             continue;
         };
-        let Some(compiled_file_name) = resolve_matching_script_mod_file(script_mod, file_name) else {
+        let Some(compiled_file_name) = resolve_matching_script_mod_file(script_mod, file_name)
+        else {
             continue;
         };
         let key = ScriptModKey::from_script_mod(script_mod);
@@ -311,25 +311,17 @@ fn validate_extracted_script_mod(
 }
 
 fn format_script_mod_site(site: &CompiledScriptModSite) -> String {
-    format!(
-        "{}:{}:{}",
-        site.file_name, site.key.line, site.key.column
-    )
+    format!("{}:{}:{}", site.file_name, site.key.line, site.key.column)
 }
 
 fn log_live_reload_file_error(file_name: &str, message: String) {
-    crate::log::log_with_level(
-        file_name,
-        0,
-        0,
-        0,
-        0,
-        message,
-        crate::log::LogLevel::Error,
-    );
+    crate::log::log_with_level(file_name, 0, 0, 0, 0, message, crate::log::LogLevel::Error);
 }
 
-fn resolve_matching_script_mod_file(script_mod: &ScriptMod, changed_file_name: &str) -> Option<String> {
+fn resolve_matching_script_mod_file(
+    script_mod: &ScriptMod,
+    changed_file_name: &str,
+) -> Option<String> {
     let changed_file_name = normalize_path_string(Path::new(changed_file_name));
     if script_mod.file.is_empty() {
         return None;
@@ -349,11 +341,7 @@ fn resolve_matching_script_mod_file(script_mod: &ScriptMod, changed_file_name: &
 
     // `file!()` can be workspace-relative under cargo builds, so allow the
     // absolute Studio path to match a sufficiently-specific path suffix.
-    if path_has_component_suffix(
-        Path::new(&changed_file_name),
-        Path::new(&raw_file),
-        3,
-    ) {
+    if path_has_component_suffix(Path::new(&changed_file_name), Path::new(&raw_file), 3) {
         return Some(changed_file_name);
     }
 
@@ -419,7 +407,8 @@ fn collect_hot_reload_watch_plan(
         let ScriptSource::Mod(script_mod) = &body.source else {
             continue;
         };
-        let Some(root) = hot_reload_root_for_script_mod(script_mod, &excluded_manifest_paths) else {
+        let Some(root) = hot_reload_root_for_script_mod(script_mod, &excluded_manifest_paths)
+        else {
             continue;
         };
         let Some(file_name) = resolve_script_mod_file_for_watch(script_mod) else {
@@ -434,12 +423,10 @@ fn collect_hot_reload_watch_plan(
             continue;
         };
 
-        roots
-            .entry(root.clone())
-            .or_insert_with(|| WatchRoot {
-                mount: root.clone(),
-                path: PathBuf::from(&root),
-            });
+        roots.entry(root.clone()).or_insert_with(|| WatchRoot {
+            mount: root.clone(),
+            path: PathBuf::from(&root),
+        });
 
         initial_contents.entry(file_name.clone()).or_insert(content);
         files_by_root.entry(root).or_default().push(file_name);
@@ -484,11 +471,8 @@ fn hot_reload_root_for_script_mod(
     match manifest_path {
         Some(path) if excluded_manifest_paths.contains(&path) => None,
         Some(path) => Some(path),
-        None => resolve_script_mod_file_for_watch(script_mod).and_then(|path| {
-            Path::new(&path)
-                .parent()
-                .map(normalize_path_string)
-        }),
+        None => resolve_script_mod_file_for_watch(script_mod)
+            .and_then(|path| Path::new(&path).parent().map(normalize_path_string)),
     }
 }
 
@@ -531,7 +515,6 @@ fn normalized_path_components(path: &Path) -> Vec<String> {
         })
         .collect()
 }
-
 
 fn extract_script_mods_from_rust_file(
     file_name: &str,
@@ -862,7 +845,9 @@ fn skip_raw_string(
     while j < bytes.len() {
         if bytes[j] == b'"'
             && j + hashes < bytes.len()
-            && bytes[j + 1..j + 1 + hashes].iter().all(|byte| *byte == b'#')
+            && bytes[j + 1..j + 1 + hashes]
+                .iter()
+                .all(|byte| *byte == b'#')
         {
             return Ok(j + 1 + hashes);
         }
@@ -1094,9 +1079,9 @@ mod tests {
     #[test]
     fn excludes_platform_script_and_draw_manifests_from_hot_reload() {
         let excluded = excluded_hot_reload_manifest_paths();
-        assert!(excluded.contains(&normalize_path_string(Path::new(
-            env!("CARGO_MANIFEST_DIR")
-        ))));
+        assert!(excluded.contains(&normalize_path_string(Path::new(env!(
+            "CARGO_MANIFEST_DIR"
+        )))));
         assert!(excluded.contains(&normalize_path_string(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("script")
         )));

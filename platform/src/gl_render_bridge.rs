@@ -125,7 +125,11 @@ impl GlRenderBridge {
 impl Cx {
     /// Create a GL rendering bridge wrapping makepad's existing EGL context.
     pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {
-        let opengl_cx = self.os.opengl_cx.as_ref().expect("OpenGL context not initialized");
+        let opengl_cx = self
+            .os
+            .opengl_cx
+            .as_ref()
+            .expect("OpenGL context not initialized");
         GlRenderBridge {
             inner: crate::os::linux::opengl::EglRenderBridge::new(
                 opengl_cx.egl_display,
@@ -157,7 +161,11 @@ impl Cx {
     /// On macOS and Windows the bridge has a separate GL context, so
     /// `restore_gl_context` is a no-op there.
     pub fn restore_gl_context(&mut self) {
-        let opengl_cx = self.os.opengl_cx.as_ref().expect("OpenGL context not initialized");
+        let opengl_cx = self
+            .os
+            .opengl_cx
+            .as_ref()
+            .expect("OpenGL context not initialized");
         opengl_cx.make_current();
 
         let gl = self.os.gl();
@@ -184,7 +192,11 @@ impl Cx {
 impl Cx {
     /// Create a GL rendering bridge wrapping makepad's existing EGL context.
     pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {
-        let display = self.os.display.as_ref().expect("OpenGL context not initialized");
+        let display = self
+            .os
+            .display
+            .as_ref()
+            .expect("OpenGL context not initialized");
         GlRenderBridge {
             inner: crate::os::linux::opengl::EglRenderBridge::new(
                 display.egl_display,
@@ -212,7 +224,11 @@ impl Cx {
     /// On Android the GL render bridge shares makepad's EGL context, so
     /// external renderers leave GL state dirty. Same reset as Linux.
     pub fn restore_gl_context(&mut self) {
-        let display = self.os.display.as_ref().expect("OpenGL context not initialized");
+        let display = self
+            .os
+            .display
+            .as_ref()
+            .expect("OpenGL context not initialized");
         display.make_current();
 
         let gl = self.os.gl();
@@ -255,11 +271,9 @@ impl Cx {
         bridge.inner.make_current();
         let (texture, iosurface_ref, _iosurface_id) =
             self.create_iosurface_render_texture(width, height);
-        let gl_texture_id = bridge.inner.bind_iosurface_to_gl_texture(
-            iosurface_ref,
-            width,
-            height,
-        );
+        let gl_texture_id = bridge
+            .inner
+            .bind_iosurface_to_gl_texture(iosurface_ref, width, height);
         (texture, gl_texture_id)
     }
 
@@ -272,7 +286,10 @@ impl Cx {
 impl Cx {
     /// Create a GL rendering bridge via ANGLE on makepad's D3D11 device.
     pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {
-        let d3d11_device = self.os.d3d11_device.as_ref()
+        let d3d11_device = self
+            .os
+            .d3d11_device
+            .as_ref()
             .expect("D3D11 device not initialized")
             .clone();
         GlRenderBridge {
@@ -332,15 +349,17 @@ impl Cx {
         width: usize,
         height: usize,
     ) -> (Texture, u32) {
-        use crate::texture::TextureFormat;
         use crate::shared_framebuf::PresentableImageId;
+        use crate::texture::TextureFormat;
 
         bridge.inner.make_current();
 
         let metal_device = crate::os::apple::ios::ios_app::with_ios_app(|app| app.metal_device());
 
         let (gl_texture_id, metal_texture) =
-            bridge.inner.create_shared_texture(metal_device, width, height);
+            bridge
+                .inner
+                .create_shared_texture(metal_device, width, height);
 
         // Create a Makepad Texture with SharedBGRAu8 format and inject the
         // Metal texture obtained from CVMetalTextureCache.
@@ -356,11 +375,9 @@ impl Cx {
         let cxtexture = &mut self.textures[texture.texture_id()];
         // Force alloc so the texture is considered initialized.
         cxtexture.alloc_shared();
-        cxtexture.os.texture = Some(
-            crate::os::apple::apple_sys::RcObjcId::from_owned(
-                std::ptr::NonNull::new(metal_texture).expect("Metal texture is null"),
-            ),
-        );
+        cxtexture.os.texture = Some(crate::os::apple::apple_sys::RcObjcId::from_owned(
+            std::ptr::NonNull::new(metal_texture).expect("Metal texture is null"),
+        ));
 
         (texture, gl_texture_id)
     }

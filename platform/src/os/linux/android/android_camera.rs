@@ -538,7 +538,9 @@ impl AndroidCaptureSession {
     }
 
     unsafe fn stop(self) {
-        (*self.capture_context).alive.store(false, Ordering::Relaxed);
+        (*self.capture_context)
+            .alive
+            .store(false, Ordering::Relaxed);
 
         if !self.image_reader.is_null() {
             let mut image_listener = AImageReader_ImageListener {
@@ -622,14 +624,20 @@ impl AndroidCameraAccess {
     fn key_for(&self, input_id: VideoInputId, format_id: VideoFormatId) -> Option<CameraStreamKey> {
         let device = self.devices.iter().find(|d| d.desc.input_id == input_id)?;
         if device.desc.formats.iter().any(|f| f.format_id == format_id) {
-            Some(CameraStreamKey { input_id, format_id })
+            Some(CameraStreamKey {
+                input_id,
+                format_id,
+            })
         } else {
             None
         }
     }
 
     fn format_for_key(&self, key: CameraStreamKey) -> Option<VideoFormat> {
-        let device = self.devices.iter().find(|d| d.desc.input_id == key.input_id)?;
+        let device = self
+            .devices
+            .iter()
+            .find(|d| d.desc.input_id == key.input_id)?;
         device
             .desc
             .formats
@@ -639,7 +647,10 @@ impl AndroidCameraAccess {
     }
 
     fn camera_id_for_key(&self, key: CameraStreamKey) -> Option<CString> {
-        let device = self.devices.iter().find(|d| d.desc.input_id == key.input_id)?;
+        let device = self
+            .devices
+            .iter()
+            .find(|d| d.desc.input_id == key.input_id)?;
         Some(device.camera_id_str.clone())
     }
 
@@ -708,7 +719,9 @@ impl AndroidCameraAccess {
                 continue;
             }
             if self.video_input_cb[index].lock().unwrap().is_some() {
-                dispatch.video_input_cbs.push(self.video_input_cb[index].clone());
+                dispatch
+                    .video_input_cbs
+                    .push(self.video_input_cb[index].clone());
             }
             if self.camera_frame_input_cb[index].lock().unwrap().is_some() {
                 dispatch
@@ -737,7 +750,8 @@ impl AndroidCameraAccess {
     }
 
     fn restart_stream_if_needed(&mut self, key: CameraStreamKey) {
-        let (dispatch, desired_preview_window, needs_image_reader) = self.build_dispatch_for_key(key);
+        let (dispatch, desired_preview_window, needs_image_reader) =
+            self.build_dispatch_for_key(key);
 
         let Some(node) = self.streams.get_mut(&key) else {
             return;
@@ -949,14 +963,9 @@ impl AndroidCameraAccess {
         }
     }
 
-    pub fn video_encoder_request_keyframe(
-        &mut self,
-        index: usize,
-    ) -> Result<(), VideoEncodeError> {
+    pub fn video_encoder_request_keyframe(&mut self, index: usize) -> Result<(), VideoEncodeError> {
         let guard = self.video_encoder[index].lock().unwrap();
-        let encoder = guard
-            .as_ref()
-            .ok_or(VideoEncodeError::EncoderNotStarted)?;
+        let encoder = guard.as_ref().ok_or(VideoEncodeError::EncoderNotStarted)?;
         encoder.request_keyframe()
     }
 

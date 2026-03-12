@@ -142,8 +142,7 @@ fn headless_texture_info(
             data: Some(data),
             ..
         }
-        |
-        TextureFormat::VecRGBAf32 {
+        | TextureFormat::VecRGBAf32 {
             width,
             height,
             data: Some(data),
