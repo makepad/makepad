@@ -120,7 +120,9 @@ script_mod! {
         u_camera_pos: uniform(vec3(0.0, 0.0, 5.0))
         use_pass_camera: uniform(float(0.0))
 
+        v_world_clip: varying(vec4f)
         v_world: varying(vec3f)
+        v_view_pos: varying(vec3f)
         v_normal: varying(vec3f)
         v_tangent: varying(vec4f)
         v_uv: varying(vec2f)
@@ -130,11 +132,18 @@ script_mod! {
             return vec3(0.0, 0.0, 0.0)
         }
 
-        transform_with_camera: fn(world: vec4) {
+        view_with_camera: fn(world: vec4) {
             if self.use_pass_camera > 0.5 {
-                return self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+                return self.draw_pass.camera_view * world
             }
-            return self.projection_matrix * (self.view_matrix * world)
+            return self.view_matrix * world
+        }
+
+        transform_with_camera: fn(view_pos: vec4) {
+            if self.use_pass_camera > 0.5 {
+                return self.draw_pass.camera_projection * view_pos
+            }
+            return self.projection_matrix * view_pos
         }
 
         vertex: fn() {
@@ -147,11 +156,12 @@ script_mod! {
                 local_pos_src.z + displacement.z,
                 1.0
             );
+            let model_matrix = self.draw_list.view_transform * self.model_matrix;
             let local_n = vec4(self.geom.pos_nx.w, self.geom.ny_nz_uv.x, self.geom.ny_nz_uv.y, 0.0);
-            let model_pos = self.model_matrix * local_pos;
-            let model_n = self.model_matrix * local_n;
+            let model_pos = model_matrix * local_pos;
+            let model_n = model_matrix * local_n;
             let local_t = vec4(self.geom.tangent.x, self.geom.tangent.y, self.geom.tangent.z, 0.0);
-            let model_t = self.model_matrix * local_t;
+            let model_t = model_matrix * local_t;
 
             self.v_world = vec3(model_pos.x, model_pos.y, model_pos.z);
             self.v_normal = vec3(model_n.x, model_n.y, model_n.z);
@@ -160,7 +170,10 @@ script_mod! {
             self.v_color = self.geom.color;
 
             let world = vec4(model_pos.x, model_pos.y, model_pos.z + self.draw_call.zbias, 1.0);
-            self.vertex_pos = self.transform_with_camera(world);
+            self.v_world_clip = world;
+            let view_pos = self.view_with_camera(world);
+            self.v_view_pos = vec3(view_pos.x, view_pos.y, view_pos.z);
+            self.vertex_pos = self.transform_with_camera(view_pos);
         }
 
         get_base_color: fn(uv: vec2, vertex_color: vec4) {
@@ -244,7 +257,7 @@ script_mod! {
         }
 
         fragment: fn(){
-            self.fb0 = self.pixel()
+            self.fb0 = depth_clip(self.v_world_clip, self.pixel(), self.depth_clip)
         }
 
         pixel: fn() {
@@ -269,7 +282,7 @@ script_mod! {
             let n = normalize(mix(n_geom, n_tangent, clamp(self.u_has_normal_texture, 0.0, 1.0)));
 
             let l = normalize(self.u_light_dir);
-            let v = normalize(self.u_camera_pos - self.v_world);
+            let v = normalize(-self.v_view_pos);
             let h = normalize(l + v);
             let ndotl = max(dot(n, l), 0.0);
             let ndotv = max(dot(n, v), 0.0001);
@@ -417,6 +430,8 @@ pub struct DrawPbr {
     #[rust(vec3(0.0, 0.0, 5.0))]
     pub camera_pos: Vec3f,
     #[rust(0.0)]
+    pub use_pass_camera: f32,
+    #[rust(0.0)]
     pub pad1: f32,
     #[deref]
     pub draw_vars: DrawVars,
@@ -424,6 +439,8 @@ pub struct DrawPbr {
     pub model_matrix: Mat4f,
     #[live]
     pub draw_clip: Vec4f,
+    #[live(0.0)]
+    pub depth_clip: f32,
 }
 
 impl DrawPbr {
@@ -626,6 +643,14 @@ impl DrawPbr {
         self.draw_vars.options.depth_write = depth_write;
     }
 
+    pub fn set_depth_clip(&mut self, depth_clip: f32) {
+        self.depth_clip = depth_clip;
+    }
+
+    pub fn set_use_pass_camera(&mut self, use_pass_camera: bool) {
+        self.use_pass_camera = if use_pass_camera { 1.0 } else { 0.0 };
+    }
+
     pub fn set_camera_state(&mut self, view: Mat4f, projection: Mat4f, camera_pos: Vec3f) {
         self.view_matrix = view;
         self.projection_matrix = projection;
@@ -755,6 +780,8 @@ impl DrawPbr {
             live_id!(u_camera_pos),
             &[self.camera_pos.x, self.camera_pos.y, self.camera_pos.z],
         );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(use_pass_camera), &[self.use_pass_camera]);
     }
 
     pub fn add_decoded_primitive(&mut self, primitive: &DecodedPrimitive) -> Result<(), String> {
