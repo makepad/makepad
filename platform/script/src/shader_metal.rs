@@ -5,6 +5,82 @@ use makepad_live_id::{id, LiveId};
 use std::fmt::Write;
 
 impl ShaderOutput {
+    pub fn metal_create_helpers(&self, out: &mut String) {
+        writeln!(
+            out,
+            "inline float4x4 _mp_inverse(float4x4 m) {{"
+        )
+        .ok();
+        writeln!(out, "    float a00 = m[0][0];").ok();
+        writeln!(out, "    float a01 = m[0][1];").ok();
+        writeln!(out, "    float a02 = m[0][2];").ok();
+        writeln!(out, "    float a03 = m[0][3];").ok();
+        writeln!(out, "    float a10 = m[1][0];").ok();
+        writeln!(out, "    float a11 = m[1][1];").ok();
+        writeln!(out, "    float a12 = m[1][2];").ok();
+        writeln!(out, "    float a13 = m[1][3];").ok();
+        writeln!(out, "    float a20 = m[2][0];").ok();
+        writeln!(out, "    float a21 = m[2][1];").ok();
+        writeln!(out, "    float a22 = m[2][2];").ok();
+        writeln!(out, "    float a23 = m[2][3];").ok();
+        writeln!(out, "    float a30 = m[3][0];").ok();
+        writeln!(out, "    float a31 = m[3][1];").ok();
+        writeln!(out, "    float a32 = m[3][2];").ok();
+        writeln!(out, "    float a33 = m[3][3];").ok();
+        writeln!(out, "    float b00 = a00 * a11 - a01 * a10;").ok();
+        writeln!(out, "    float b01 = a00 * a12 - a02 * a10;").ok();
+        writeln!(out, "    float b02 = a00 * a13 - a03 * a10;").ok();
+        writeln!(out, "    float b03 = a01 * a12 - a02 * a11;").ok();
+        writeln!(out, "    float b04 = a01 * a13 - a03 * a11;").ok();
+        writeln!(out, "    float b05 = a02 * a13 - a03 * a12;").ok();
+        writeln!(out, "    float b06 = a20 * a31 - a21 * a30;").ok();
+        writeln!(out, "    float b07 = a20 * a32 - a22 * a30;").ok();
+        writeln!(out, "    float b08 = a20 * a33 - a23 * a30;").ok();
+        writeln!(out, "    float b09 = a21 * a32 - a22 * a31;").ok();
+        writeln!(out, "    float b10 = a21 * a33 - a23 * a31;").ok();
+        writeln!(out, "    float b11 = a22 * a33 - a23 * a32;").ok();
+        writeln!(
+            out,
+            "    float det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;"
+        )
+        .ok();
+        writeln!(out, "    if (det == 0.0) {{").ok();
+        writeln!(
+            out,
+            "        return float4x4(float4(1.0, 0.0, 0.0, 0.0), float4(0.0, 1.0, 0.0, 0.0), float4(0.0, 0.0, 1.0, 0.0), float4(0.0, 0.0, 0.0, 1.0));"
+        )
+        .ok();
+        writeln!(out, "    }}").ok();
+        writeln!(out, "    float idet = 1.0 / det;").ok();
+        writeln!(
+            out,
+            "    return float4x4("
+        )
+        .ok();
+        writeln!(
+            out,
+            "        float4((a11 * b11 - a12 * b10 + a13 * b09) * idet, (a02 * b10 - a01 * b11 - a03 * b09) * idet, (a31 * b05 - a32 * b04 + a33 * b03) * idet, (a22 * b04 - a21 * b05 - a23 * b03) * idet),"
+        )
+        .ok();
+        writeln!(
+            out,
+            "        float4((a12 * b08 - a10 * b11 - a13 * b07) * idet, (a00 * b11 - a02 * b08 + a03 * b07) * idet, (a32 * b02 - a30 * b05 - a33 * b01) * idet, (a20 * b05 - a22 * b02 + a23 * b01) * idet),"
+        )
+        .ok();
+        writeln!(
+            out,
+            "        float4((a10 * b10 - a11 * b08 + a13 * b06) * idet, (a01 * b08 - a00 * b10 - a03 * b06) * idet, (a30 * b04 - a31 * b02 + a33 * b00) * idet, (a21 * b02 - a20 * b04 - a23 * b00) * idet),"
+        )
+        .ok();
+        writeln!(
+            out,
+            "        float4((a11 * b07 - a10 * b09 - a12 * b06) * idet, (a00 * b09 - a01 * b07 + a02 * b06) * idet, (a31 * b01 - a30 * b03 - a32 * b00) * idet, (a20 * b03 - a21 * b01 + a22 * b00) * idet)"
+        )
+        .ok();
+        writeln!(out, "    );").ok();
+        writeln!(out, "}}").ok();
+    }
+
     pub fn metal_create_io_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct Io {{").ok();
         writeln!(out, "    constant IoUniform *u;").ok();

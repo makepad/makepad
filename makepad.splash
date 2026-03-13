@@ -32,6 +32,7 @@ let RunStudioRelease = RunItem{
 }
 
 hub.set_run_items([
+    RunStudioRelease{name: "makepad-example-physics"}
     RunStudioRelease{name: "makepad-example-splash"}
     RunStudioRelease{name: "makepad-example-splat"}
     RunStudioRelease{name: "makepad-studio"}

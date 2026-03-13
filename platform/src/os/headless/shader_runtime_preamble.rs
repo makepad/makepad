@@ -817,6 +817,9 @@ pub fn sqrt(x: f32) -> f32 {
 pub fn inverse_sqrt(x: f32) -> f32 {
     1.0 / x.sqrt()
 }
+pub fn inverse(m: Mat4f) -> Mat4f {
+    m.invert()
+}
 pub fn modf(x: f32, y: f32) -> f32 {
     x - y * (x / y).floor()
 }

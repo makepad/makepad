@@ -34,6 +34,7 @@ script_mod! {
             let axis_2_len = max(abs(self.geom.tangent.w), 0.000001);
             let center_world4 = self.model_matrix * vec4(center_local.x, center_local.y, center_local.z, 1.0);
             let center_world = vec3(center_world4.x, center_world4.y, center_world4.z);
+            self.v_world_clip = self.draw_list.view_transform * center_world4;
             let center_view4 = self.view_matrix * center_world4;
             let center_view = center_view4.xyz;
             if center_view.z >= -0.000001 {

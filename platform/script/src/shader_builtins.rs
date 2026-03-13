@@ -9,7 +9,7 @@ use crate::trap::*;
 use crate::value::*;
 use crate::vm::*;
 use crate::*;
-use makepad_math::{Vec2f, Vec3f, Vec4f};
+use makepad_math::{Mat4f, Vec2f, Vec3f, Vec4f};
 
 // Helper trait to add vm-based conversion methods for NumericValue
 trait NumericValueVmExt {
@@ -306,6 +306,23 @@ pub fn define_shader_builtins(
             NumericValue::from_script_value_vm(vm, x_val)
                 .map_f32(|v| v.sqrt().recip())
                 .to_script_value_vm(vm)
+        },
+    );
+    native.add_method(
+        heap,
+        math,
+        id_lut!(inverse),
+        script_args!(x = 0.0),
+        |vm, args| {
+            let x_val = vm
+                .bx
+                .heap
+                .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+            match NumericValue::from_script_value_vm(vm, x_val) {
+                NumericValue::Mat4(m) => NumericValue::Mat4(Mat4f { v: m }.invert().v)
+                    .to_script_value_vm(vm),
+                other => other.to_script_value_vm(vm),
+            }
         },
     );
     native.add_method(
@@ -1023,6 +1040,7 @@ pub fn type_table_builtin(
         | id!(exp2)
         | id!(floor)
         | id!(fract)
+        | id!(inverse)
         | id!(inverseSqrt)
         | id!(log)
         | id!(log2)
@@ -1046,6 +1064,18 @@ pub fn type_table_builtin(
                 return builtins.pod_void;
             }
             let t = args[0];
+            if name == id!(inverse) {
+                if t == builtins.pod_mat4x4f {
+                    return t;
+                }
+                script_err_type_mismatch!(
+                    trap,
+                    "shader builtin {:?} requires mat4 arg, got {}",
+                    name,
+                    fmt_ty(t)
+                );
+                return builtins.pod_void;
+            }
             if is_any_float(t) {
                 return t;
             }
