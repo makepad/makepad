@@ -560,6 +560,7 @@ export class WasmWebGL extends WasmWebBrowser {
     }
 
     gl.useProgram(shader.program);
+    gl.depthMask(!!args.depth_write);
 
     let vao = this.vaos[args.vao_id];
 
@@ -702,6 +703,7 @@ export class WasmWebGL extends WasmWebBrowser {
     }
 
     gl.bindVertexArray(null);
+    gl.depthMask(true);
   }
 
   FromWasmAllocTextureImage2D_BGRAu8_32(args) {
