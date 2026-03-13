@@ -595,6 +595,10 @@ impl WindowsVideoPlayer {
                 error!("VIDEO: Camera source not supported on Windows");
                 (vec![0], None)
             }
+            VideoSource::PlaybackSession(..) | VideoSource::Session(..) => {
+                error!("VIDEO: session sources are handled by the software video player");
+                (vec![0], None)
+            }
         }
     }
 
@@ -688,7 +692,7 @@ impl WindowsVideoPlayer {
 
     pub fn check_prepared(
         &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    ) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
@@ -728,7 +732,7 @@ impl WindowsVideoPlayer {
                 vec![]
             };
             let audio_tracks = vec!["audio".to_string()];
-            Some(Ok((
+            Some(Ok(PlaybackPrepared::new(
                 w,
                 h,
                 duration_ms,
