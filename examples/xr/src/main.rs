@@ -1,6 +1,6 @@
 pub use makepad_widgets;
 
-use makepad_physics::{PhysicsOp, PhysicsWorld, RigidBody};
+use makepad_physics::{capsule_box_contact, PhysicsOp, PhysicsWorld};
 use makepad_widgets::makepad_platform::permission::{Permission, PermissionStatus};
 use makepad_widgets::*;
 
@@ -172,16 +172,20 @@ const PLATFORM_COLOR: [f32; 3] = [0.10, 0.14, 0.18];
 const XR_GRID_SIZE: usize = 5;
 const XR_CUBE_HALF_EXTENT: f32 = 0.020;
 const XR_CUBE_SPACING: f32 = 0.046;
-const XR_CUBE_DENSITY: f32 = 900.0;
+const XR_CUBE_DENSITY: f32 = 2000.0;
 const XR_PLATFORM_HALF_WIDTH: f32 = 0.16;
 const XR_PLATFORM_HALF_HEIGHT: f32 = 0.012;
 const XR_PLATFORM_HALF_DEPTH: f32 = 0.10;
 const XR_SCENE_DISTANCE: f32 = 0.72;
 const XR_SCENE_DROP: f32 = 0.45;
 const XR_PHYSICS_DT: f32 = 1.0 / 72.0;
-const XR_HAND_IMPULSE_SCALE: f32 = 0.22;
-const XR_HAND_PUSH_SCALE: f32 = 1.8;
-const XR_HAND_MAX_BODY_IMPULSE: f32 = 0.65;
+const XR_HAND_EFFECTIVE_MASS: f32 = 0.18;
+const XR_HAND_MAX_SPEED: f32 = 1.15;
+const XR_HAND_FOLLOW_GAIN: f32 = 0.38;
+const XR_HAND_HOLD_GAIN: f32 = 0.16;
+const XR_HAND_NORMAL_BOOST: f32 = 0.18;
+const XR_HAND_MAX_BODY_IMPULSE: f32 = 0.06;
+const XR_HAND_COLLIDER_ALPHA: f32 = 0.32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum AppPhase {
@@ -192,16 +196,23 @@ enum AppPhase {
 
 #[derive(Clone, Copy, Debug)]
 struct HandCollider {
-    prev: Vec3f,
-    curr: Vec3f,
+    prev_a: Vec3f,
+    prev_b: Vec3f,
+    curr_a: Vec3f,
+    curr_b: Vec3f,
     radius: f32,
     strength: f32,
+    torque_factor: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct SphereBoxContact {
-    normal: Vec3f,
-    penetration: f32,
+impl HandCollider {
+    fn prev_center(&self) -> Vec3f {
+        (self.prev_a + self.prev_b) * 0.5
+    }
+
+    fn curr_center(&self) -> Vec3f {
+        (self.curr_a + self.curr_b) * 0.5
+    }
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -222,8 +233,6 @@ pub struct XrScene {
     pending_ops: Vec<PhysicsOp>,
     #[rust]
     scene_pose: Option<Pose>,
-    #[rust]
-    body_mesh: Option<usize>,
 }
 
 impl XrScene {
@@ -260,6 +269,253 @@ impl XrScene {
         self.draw_cube.draw(cx);
     }
 
+    fn pose_point_world(pose: Pose, local: Vec3f) -> Vec3f {
+        pose.to_mat4().transform_vec4(local.to_vec4()).to_vec3f()
+    }
+
+    fn append_capsule_collider(
+        colliders: &mut Vec<HandCollider>,
+        prev_a: Vec3f,
+        prev_b: Vec3f,
+        curr_a: Vec3f,
+        curr_b: Vec3f,
+        radius: f32,
+        strength: f32,
+        torque_factor: f32,
+    ) {
+        colliders.push(HandCollider {
+            prev_a,
+            prev_b,
+            curr_a,
+            curr_b,
+            radius,
+            strength,
+            torque_factor,
+        });
+    }
+
+    fn append_segment_colliders(
+        colliders: &mut Vec<HandCollider>,
+        prev_a: Vec3f,
+        prev_b: Vec3f,
+        curr_a: Vec3f,
+        curr_b: Vec3f,
+        radius: f32,
+        strength: f32,
+        torque_factor: f32,
+    ) {
+        Self::append_capsule_collider(
+            colliders,
+            prev_a,
+            prev_b,
+            curr_a,
+            curr_b,
+            radius,
+            strength,
+            torque_factor,
+        );
+    }
+
+    fn append_finger_chain_colliders(
+        colliders: &mut Vec<HandCollider>,
+        hand: &XrHand,
+        last_hand: &XrHand,
+        chain: &[usize],
+        tip_index: usize,
+        radius: f32,
+        strength: f32,
+    ) {
+        let last_visible = last_hand.in_view();
+        for segment in chain.windows(2) {
+            let curr_a = hand.joints[segment[0]].position;
+            let curr_b = hand.joints[segment[1]].position;
+            let (prev_a, prev_b) = if last_visible {
+                (
+                    last_hand.joints[segment[0]].position,
+                    last_hand.joints[segment[1]].position,
+                )
+            } else {
+                (curr_a, curr_b)
+            };
+            Self::append_segment_colliders(
+                colliders, prev_a, prev_b, curr_a, curr_b, radius, strength, 0.18,
+            );
+        }
+        if hand.tip_active(tip_index) {
+            let end_joint = *chain.last().unwrap_or(&XrHand::CENTER);
+            let curr_tip = Self::hand_tip_world(hand, tip_index);
+            let curr_joint = hand.joints[end_joint].position;
+            let (prev_joint, prev_tip) = if last_visible && last_hand.tip_active(tip_index) {
+                (
+                    last_hand.joints[end_joint].position,
+                    Self::hand_tip_world(last_hand, tip_index),
+                )
+            } else {
+                (curr_joint, curr_tip)
+            };
+            Self::append_segment_colliders(
+                colliders,
+                prev_joint,
+                prev_tip,
+                curr_joint,
+                curr_tip,
+                radius * 0.85,
+                strength * 1.05,
+                0.24,
+            );
+        }
+    }
+
+    fn append_local_capsule_collider(
+        colliders: &mut Vec<HandCollider>,
+        prev_pose: Pose,
+        curr_pose: Pose,
+        local_a: Vec3f,
+        local_b: Vec3f,
+        radius: f32,
+        strength: f32,
+        torque_factor: f32,
+    ) {
+        Self::append_capsule_collider(
+            colliders,
+            Self::pose_point_world(prev_pose, local_a),
+            Self::pose_point_world(prev_pose, local_b),
+            Self::pose_point_world(curr_pose, local_a),
+            Self::pose_point_world(curr_pose, local_b),
+            radius,
+            strength,
+            torque_factor,
+        );
+    }
+
+    fn draw_local_capsule_collider(
+        &mut self,
+        cx: &mut Cx2d,
+        pose: Pose,
+        local_a: Vec3f,
+        local_b: Vec3f,
+        radius: f32,
+        color: Vec4f,
+        depth_clip: f32,
+    ) {
+        self.draw_segment_collider(
+            cx,
+            Self::pose_point_world(pose, local_a),
+            Self::pose_point_world(pose, local_b),
+            radius,
+            color,
+            depth_clip,
+        );
+    }
+
+    fn draw_segment_collider(
+        &mut self,
+        cx: &mut Cx2d,
+        a: Vec3f,
+        b: Vec3f,
+        radius: f32,
+        color: Vec4f,
+        depth_clip: f32,
+    ) {
+        let delta = b - a;
+        let length = delta.length();
+        if length <= 1.0e-4 {
+            self.draw_pose_box(
+                cx,
+                Pose::new(Quat::default(), a),
+                vec3(radius * 2.0, radius * 2.0, radius * 2.0),
+                color,
+                depth_clip,
+            );
+            return;
+        }
+        let forward = delta * (1.0 / length);
+        let up = if forward.y.abs() > 0.95 {
+            vec3f(1.0, 0.0, 0.0)
+        } else {
+            vec3f(0.0, 1.0, 0.0)
+        };
+        self.draw_pose_box(
+            cx,
+            Pose::new(Quat::look_rotation(forward, up), (a + b) * 0.5),
+            vec3(radius * 2.0, radius * 2.0, length + radius * 2.0),
+            color,
+            depth_clip,
+        );
+    }
+
+    fn draw_hand_colliders(&mut self, cx: &mut Cx2d, hand: &XrHand, is_left: bool) {
+        let color = if is_left {
+            vec4(0.18, 0.72, 1.0, XR_HAND_COLLIDER_ALPHA)
+        } else {
+            vec4(1.0, 0.62, 0.20, XR_HAND_COLLIDER_ALPHA)
+        };
+        for (local_a, local_b, radius) in [
+            (vec3f(-0.032, 0.0, 0.008), vec3f(0.032, 0.0, 0.008), 0.020),
+            (vec3f(0.0, 0.0, -0.020), vec3f(0.0, 0.0, 0.028), 0.018),
+            (vec3f(-0.016, 0.0, -0.004), vec3f(0.016, 0.0, 0.018), 0.018),
+        ] {
+            self.draw_local_capsule_collider(
+                cx,
+                hand.joints[XrHand::CENTER],
+                local_a,
+                local_b,
+                radius,
+                color,
+                0.0,
+            );
+        }
+
+        for (chain, tip_index, radius) in [
+            (&[XrHand::THUMB_BASE, XrHand::THUMB_KNUCKLE1, XrHand::THUMB_KNUCKLE2][..], XrHand::THUMB_TIP, 0.015),
+            (&[
+                XrHand::INDEX_BASE,
+                XrHand::INDEX_KNUCKLE1,
+                XrHand::INDEX_KNUCKLE2,
+                XrHand::INDEX_KNUCKLE3,
+            ][..], XrHand::INDEX_TIP, 0.014),
+            (&[
+                XrHand::MIDDLE_BASE,
+                XrHand::MIDDLE_KNUCKLE1,
+                XrHand::MIDDLE_KNUCKLE2,
+                XrHand::MIDDLE_KNUCKLE3,
+            ][..], XrHand::MIDDLE_TIP, 0.015),
+            (&[
+                XrHand::RING_BASE,
+                XrHand::RING_KNUCKLE1,
+                XrHand::RING_KNUCKLE2,
+                XrHand::RING_KNUCKLE3,
+            ][..], XrHand::RING_TIP, 0.014),
+            (&[
+                XrHand::LITTLE_BASE,
+                XrHand::LITTLE_KNUCKLE1,
+                XrHand::LITTLE_KNUCKLE2,
+                XrHand::LITTLE_KNUCKLE3,
+            ][..], XrHand::LITTLE_TIP, 0.013),
+        ] {
+            for segment in chain.windows(2) {
+                self.draw_segment_collider(
+                    cx,
+                    hand.joints[segment[0]].position,
+                    hand.joints[segment[1]].position,
+                    radius,
+                    color,
+                    0.0,
+                );
+            }
+            if hand.tip_active(tip_index) {
+                self.draw_segment_collider(
+                    cx,
+                    hand.joints[*chain.last().unwrap()].position,
+                    Self::hand_tip_world(hand, tip_index),
+                    radius * 0.85,
+                    color,
+                    0.0,
+                );
+            }
+        }
+    }
+
     fn draw_hand(&mut self, cx: &mut Cx2d, hand: &XrHand, is_left: bool) {
         if !hand.in_view() {
             return;
@@ -275,6 +531,8 @@ impl XrScene {
         } else {
             vec4(1.0, 0.86, 0.44, 1.0)
         };
+
+        self.draw_hand_colliders(cx, hand, is_left);
 
         for joint in &hand.joints {
             self.draw_pose_box(cx, *joint, vec3(0.011, 0.011, 0.016), joint_color, 0.0);
@@ -360,47 +618,94 @@ impl XrScene {
         }
 
         let last_visible = last_hand.in_view();
-        for (joint_index, radius, strength) in [
-            (XrHand::CENTER, 0.045, 0.70),
-            (XrHand::WRIST, 0.032, 0.40),
-            (XrHand::THUMB_KNUCKLE2, 0.020, 0.80),
-            (XrHand::INDEX_KNUCKLE3, 0.022, 1.00),
-            (XrHand::MIDDLE_KNUCKLE3, 0.022, 0.95),
-            (XrHand::RING_KNUCKLE3, 0.020, 0.80),
-            (XrHand::LITTLE_KNUCKLE3, 0.018, 0.70),
+        let curr_palm_pose = hand.joints[XrHand::CENTER];
+        let prev_palm_pose = if last_visible {
+            last_hand.joints[XrHand::CENTER]
+        } else {
+            curr_palm_pose
+        };
+        for (local_a, local_b, radius, strength) in [
+            (vec3f(-0.032, 0.0, 0.008), vec3f(0.032, 0.0, 0.008), 0.020, 0.52),
+            (vec3f(0.0, 0.0, -0.020), vec3f(0.0, 0.0, 0.028), 0.018, 0.46),
+            (vec3f(-0.016, 0.0, -0.004), vec3f(0.016, 0.0, 0.018), 0.018, 0.48),
         ] {
-            let curr = hand.joints[joint_index].position;
-            let prev_pose = if last_visible {
-                last_hand.joints[joint_index]
-            } else {
-                hand.joints[joint_index]
-            };
-            let prev = prev_pose.position;
-            colliders.push(HandCollider {
-                prev,
-                curr,
+            Self::append_local_capsule_collider(
+                colliders,
+                prev_palm_pose,
+                curr_palm_pose,
+                local_a,
+                local_b,
                 radius,
                 strength,
-            });
+                0.0,
+            );
         }
 
-        for finger_index in 0..XrHand::END_KNUCKLES.len() {
-            if !hand.tip_active(finger_index) {
-                continue;
-            }
-            let curr = Self::hand_tip_world(hand, finger_index);
-            let prev = if last_visible && last_hand.tip_active(finger_index) {
-                Self::hand_tip_world(last_hand, finger_index)
-            } else {
-                curr
-            };
-            colliders.push(HandCollider {
-                prev,
-                curr,
-                radius: 0.018,
-                strength: 1.10,
-            });
-        }
+        Self::append_finger_chain_colliders(
+            colliders,
+            hand,
+            last_hand,
+            &[XrHand::THUMB_BASE, XrHand::THUMB_KNUCKLE1, XrHand::THUMB_KNUCKLE2],
+            XrHand::THUMB_TIP,
+            0.015,
+            0.75,
+        );
+        Self::append_finger_chain_colliders(
+            colliders,
+            hand,
+            last_hand,
+            &[
+                XrHand::INDEX_BASE,
+                XrHand::INDEX_KNUCKLE1,
+                XrHand::INDEX_KNUCKLE2,
+                XrHand::INDEX_KNUCKLE3,
+            ],
+            XrHand::INDEX_TIP,
+            0.014,
+            0.95,
+        );
+        Self::append_finger_chain_colliders(
+            colliders,
+            hand,
+            last_hand,
+            &[
+                XrHand::MIDDLE_BASE,
+                XrHand::MIDDLE_KNUCKLE1,
+                XrHand::MIDDLE_KNUCKLE2,
+                XrHand::MIDDLE_KNUCKLE3,
+            ],
+            XrHand::MIDDLE_TIP,
+            0.015,
+            0.90,
+        );
+        Self::append_finger_chain_colliders(
+            colliders,
+            hand,
+            last_hand,
+            &[
+                XrHand::RING_BASE,
+                XrHand::RING_KNUCKLE1,
+                XrHand::RING_KNUCKLE2,
+                XrHand::RING_KNUCKLE3,
+            ],
+            XrHand::RING_TIP,
+            0.014,
+            0.80,
+        );
+        Self::append_finger_chain_colliders(
+            colliders,
+            hand,
+            last_hand,
+            &[
+                XrHand::LITTLE_BASE,
+                XrHand::LITTLE_KNUCKLE1,
+                XrHand::LITTLE_KNUCKLE2,
+                XrHand::LITTLE_KNUCKLE3,
+            ],
+            XrHand::LITTLE_TIP,
+            0.013,
+            0.70,
+        );
     }
 
     fn queue_hand_impulses(&mut self, state: &XrState, last: &XrState) {
@@ -417,18 +722,59 @@ impl XrScene {
         }
 
         let mut accumulated = vec![Vec3f::default(); world.bodies.len()];
+        let mut accumulated_angular = vec![Vec3f::default(); world.bodies.len()];
         for (body_index, body) in world.bodies.iter().enumerate() {
             if !body.is_dynamic() {
                 continue;
             }
             for collider in &colliders {
-                let Some(contact) = sphere_box_contact(collider.curr, body, collider.radius) else {
+                let Some(contact) = capsule_box_contact(
+                    collider.curr_a,
+                    collider.curr_b,
+                    collider.radius,
+                    body,
+                ) else {
                     continue;
                 };
-                let hand_velocity = (collider.curr - collider.prev) / dt;
-                let mut impulse = hand_velocity * (XR_HAND_IMPULSE_SCALE * collider.strength)
-                    + contact.normal
-                        * (contact.penetration * XR_HAND_PUSH_SCALE * collider.strength);
+                let raw_hand_velocity = (collider.curr_center() - collider.prev_center()) / dt;
+                let hand_speed = raw_hand_velocity.length();
+                let hand_velocity = if hand_speed > XR_HAND_MAX_SPEED {
+                    raw_hand_velocity * (XR_HAND_MAX_SPEED / hand_speed)
+                } else {
+                    raw_hand_velocity
+                };
+
+                let body_mass = if body.inv_mass > 1.0e-6 {
+                    1.0 / body.inv_mass
+                } else {
+                    XR_HAND_EFFECTIVE_MASS
+                };
+                let reduced_mass =
+                    (XR_HAND_EFFECTIVE_MASS * body_mass) / (XR_HAND_EFFECTIVE_MASS + body_mass);
+
+                let velocity_error = hand_velocity - body.linear_velocity;
+                let mut impulse =
+                    velocity_error * (reduced_mass * XR_HAND_FOLLOW_GAIN * collider.strength);
+                let normal_speed = velocity_error.dot(contact.normal);
+                if normal_speed > 0.0 {
+                    impulse += contact.normal
+                        * (normal_speed
+                            * reduced_mass
+                            * XR_HAND_NORMAL_BOOST
+                            * collider.strength);
+                }
+
+                let hold_delta = contact.point_capsule - contact.point_box;
+                let hold_dist = hold_delta.length();
+                if hold_dist > 1.0e-4 {
+                    let hold_alpha = (hold_dist / collider.radius.max(1.0e-4)).clamp(0.0, 1.0);
+                    impulse += hold_delta
+                        * ((reduced_mass / dt)
+                            * XR_HAND_HOLD_GAIN
+                            * hold_alpha
+                            * collider.strength);
+                }
+
                 let impulse_len = impulse.length();
                 if impulse_len <= 1.0e-4 {
                     continue;
@@ -438,12 +784,18 @@ impl XrScene {
                     impulse = impulse * (max_impulse / impulse_len);
                 }
                 accumulated[body_index] += impulse;
+                if collider.torque_factor > 0.0 {
+                    let lever = contact.point_box - body.pose.position;
+                    accumulated_angular[body_index] +=
+                        Vec3f::cross(lever, impulse) * collider.torque_factor;
+                }
             }
         }
 
         for (body_index, impulse) in accumulated.into_iter().enumerate() {
             let impulse_len = impulse.length();
-            if impulse_len <= 1.0e-4 {
+            let angular_impulse = accumulated_angular[body_index];
+            if impulse_len <= 1.0e-4 && angular_impulse.length() <= 1.0e-4 {
                 continue;
             }
             let capped = if impulse_len > XR_HAND_MAX_BODY_IMPULSE {
@@ -451,9 +803,10 @@ impl XrScene {
             } else {
                 impulse
             };
-            self.pending_ops.push(PhysicsOp::ApplyImpulse {
+            self.pending_ops.push(PhysicsOp::ApplyImpulseWithAngularImpulse {
                 body: body_index,
                 impulse: capped,
+                angular_impulse,
             });
         }
     }
@@ -470,28 +823,6 @@ impl XrScene {
         self.draw_pbr.set_emissive_texture(None);
         let env_tex = self.draw_pbr.default_env_texture(cx);
         self.draw_pbr.set_env_texture(Some(env_tex));
-    }
-
-    fn ensure_body_mesh(&mut self, cx: &mut Cx2d) -> Option<usize> {
-        if let Some(mesh) = self.body_mesh {
-            return Some(mesh);
-        }
-        match self.draw_pbr.upload_uniform_rounded_cube_mesh(
-            cx,
-            XR_CUBE_HALF_EXTENT,
-            0.015,
-            1,
-            4,
-        ) {
-            Ok(mesh) => {
-                self.body_mesh = Some(mesh);
-                Some(mesh)
-            }
-            Err(err) => {
-                log!("XR rounded cube mesh upload failed: {}", err);
-                None
-            }
-        }
     }
 
     fn draw_platform(&mut self, cx: &mut Cx2d, scene_matrix: &Mat4f) {
@@ -519,23 +850,27 @@ impl XrScene {
     }
 
     fn draw_bodies(&mut self, cx: &mut Cx2d, _scene_matrix: &Mat4f) {
-        let Some(body_mesh) = self.ensure_body_mesh(cx) else {
-            return;
-        };
         let Some(world) = self.world.as_ref() else {
             return;
         };
 
-        self.draw_pbr.set_metal_roughness(0.0, 0.52);
-        for (i, body) in world.bodies.iter().enumerate() {
-            if !body.is_dynamic() {
-                continue;
-            }
+        let bodies: Vec<_> = world
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, body)| body.is_dynamic())
+            .map(|(i, body)| (i, body.pose, body.half_extents))
+            .collect();
+
+        for (i, pose, half_extents) in bodies {
             let color = CUBE_COLORS[i % CUBE_COLORS.len()];
-            self.draw_pbr.set_transform(body.pose.to_mat4());
-            self.draw_pbr
-                .set_base_color_factor(vec4(color[0], color[1], color[2], 1.0));
-            let _ = self.draw_pbr.draw_mesh(cx, body_mesh);
+            self.draw_pose_box(
+                cx,
+                pose,
+                half_extents * 2.0,
+                vec4(color[0], color[1], color[2], 1.0),
+                0.0,
+            );
         }
     }
 }
@@ -580,55 +915,6 @@ impl Widget for XrScene {
 
         DrawStep::done()
     }
-}
-
-fn sphere_box_contact(center: Vec3f, body: &RigidBody, radius: f32) -> Option<SphereBoxContact> {
-    let local_center = body
-        .pose
-        .orientation
-        .invert()
-        .rotate_vec3(&(center - body.pose.position));
-    let he = body.half_extents;
-    let closest = vec3f(
-        local_center.x.clamp(-he.x, he.x),
-        local_center.y.clamp(-he.y, he.y),
-        local_center.z.clamp(-he.z, he.z),
-    );
-    let delta = local_center - closest;
-    let dist_sq = delta.dot(delta);
-    if dist_sq > radius * radius {
-        return None;
-    }
-
-    let (normal_local, penetration) = if dist_sq > 1.0e-6 {
-        let dist = dist_sq.sqrt();
-        (delta * (1.0 / dist), radius - dist)
-    } else {
-        let dx = he.x - local_center.x.abs();
-        let dy = he.y - local_center.y.abs();
-        let dz = he.z - local_center.z.abs();
-        if dx <= dy && dx <= dz {
-            (
-                vec3f(if local_center.x >= 0.0 { 1.0 } else { -1.0 }, 0.0, 0.0),
-                radius + dx,
-            )
-        } else if dy <= dz {
-            (
-                vec3f(0.0, if local_center.y >= 0.0 { 1.0 } else { -1.0 }, 0.0),
-                radius + dy,
-            )
-        } else {
-            (
-                vec3f(0.0, 0.0, if local_center.z >= 0.0 { 1.0 } else { -1.0 }),
-                radius + dz,
-            )
-        }
-    };
-
-    Some(SphereBoxContact {
-        normal: body.pose.orientation.rotate_vec3(&normal_local).normalize(),
-        penetration: penetration.max(0.0),
-    })
 }
 
 #[derive(Script, ScriptHook)]

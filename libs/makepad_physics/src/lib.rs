@@ -132,6 +132,174 @@ mod tests {
     }
 
     #[test]
+    fn test_capsule_box_contact_matches_rapier() {
+        use rapier3d::parry::query;
+        use rapier3d::math::{Pose as RapierPose, Vector as RapierVector};
+        use rapier3d::prelude::{Capsule, Cuboid, Rotation};
+
+        #[derive(Clone, Copy)]
+        struct Case {
+            name: &'static str,
+            body_pose: makepad_math::Pose,
+            half_extents: Vec3f,
+            segment_a: Vec3f,
+            segment_b: Vec3f,
+            radius: f32,
+            compare_witness_points: bool,
+        }
+
+        fn to_rapier_pose(pose: makepad_math::Pose) -> RapierPose {
+            RapierPose::from_parts(
+                RapierVector::new(pose.position.x, pose.position.y, pose.position.z),
+                Rotation::from_xyzw(
+                    pose.orientation.x,
+                    pose.orientation.y,
+                    pose.orientation.z,
+                    pose.orientation.w,
+                )
+                .normalize(),
+            )
+        }
+
+        fn assert_close_vec3(label: &str, case: &str, ours: Vec3f, rapier: rapier3d::math::Vector) {
+            let rapier = vec3f(rapier.x, rapier.y, rapier.z);
+            let err = (ours - rapier).length();
+            assert!(
+                err < 6.0e-3,
+                "{} mismatch for {}: ours=({:.6},{:.6},{:.6}) rapier=({:.6},{:.6},{:.6}) err={:.6}",
+                label,
+                case,
+                ours.x,
+                ours.y,
+                ours.z,
+                rapier.x,
+                rapier.y,
+                rapier.z,
+                err,
+            );
+        }
+
+        let cases = [
+            Case {
+                name: "top_face_overlap",
+                body_pose: makepad_math::Pose {
+                    position: vec3f(0.0, 0.0, 0.0),
+                    orientation: Quat::default(),
+                },
+                half_extents: vec3f(0.5, 0.5, 0.5),
+                segment_a: vec3f(0.06, 0.74, 0.08),
+                segment_b: vec3f(0.06, 0.98, 0.08),
+                radius: 0.26,
+                compare_witness_points: true,
+            },
+            Case {
+                name: "side_face_overlap",
+                body_pose: makepad_math::Pose {
+                    position: vec3f(0.0, 0.0, 0.0),
+                    orientation: Quat::default(),
+                },
+                half_extents: vec3f(0.5, 0.5, 0.5),
+                segment_a: vec3f(0.72, 0.14, -0.10),
+                segment_b: vec3f(0.95, 0.22, -0.08),
+                radius: 0.24,
+                compare_witness_points: true,
+            },
+            Case {
+                name: "corner_overlap",
+                body_pose: makepad_math::Pose {
+                    position: vec3f(0.0, 0.0, 0.0),
+                    orientation: Quat::default(),
+                },
+                half_extents: vec3f(0.5, 0.5, 0.5),
+                segment_a: vec3f(0.72, 0.71, 0.70),
+                segment_b: vec3f(0.86, 0.88, 0.78),
+                radius: 0.38,
+                compare_witness_points: true,
+            },
+            Case {
+                name: "inside_near_top_face",
+                body_pose: makepad_math::Pose {
+                    position: vec3f(0.0, 0.0, 0.0),
+                    orientation: Quat::default(),
+                },
+                half_extents: vec3f(0.5, 0.5, 0.5),
+                segment_a: vec3f(0.08, 0.41, -0.04),
+                segment_b: vec3f(0.08, 0.41, -0.04),
+                radius: 0.11,
+                compare_witness_points: false,
+            },
+            Case {
+                name: "rotated_face_overlap",
+                body_pose: makepad_math::Pose {
+                    position: vec3f(0.25, 0.12, -0.18),
+                    orientation: Quat::from_axis_angle(vec3f(0.0, 0.0, 1.0), 0.47),
+                },
+                half_extents: vec3f(0.45, 0.35, 0.40),
+                segment_a: vec3f(0.56, 0.63, -0.11),
+                segment_b: vec3f(0.70, 0.87, -0.06),
+                radius: 0.23,
+                compare_witness_points: true,
+            },
+            Case {
+                name: "rotated_inside_near_face",
+                body_pose: makepad_math::Pose {
+                    position: vec3f(-0.18, 0.20, 0.31),
+                    orientation: Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), 0.39),
+                },
+                half_extents: vec3f(0.40, 0.42, 0.36),
+                segment_a: vec3f(-0.07, 0.58, 0.21),
+                segment_b: vec3f(-0.07, 0.58, 0.21),
+                radius: 0.09,
+                compare_witness_points: false,
+            },
+        ];
+
+        for case in cases {
+            let mut body = RigidBody::new_fixed(case.body_pose.position, case.half_extents);
+            body.pose.orientation = case.body_pose.orientation;
+
+            let ours = capsule_box_contact(case.segment_a, case.segment_b, case.radius, &body)
+                .unwrap_or_else(|| panic!("our contact missing for {}", case.name));
+
+            let cuboid = Cuboid::new(RapierVector::new(
+                case.half_extents.x,
+                case.half_extents.y,
+                case.half_extents.z,
+            ));
+            let capsule = Capsule::new(
+                RapierVector::new(case.segment_a.x, case.segment_a.y, case.segment_a.z),
+                RapierVector::new(case.segment_b.x, case.segment_b.y, case.segment_b.z),
+                case.radius,
+            );
+
+            let rapier = query::contact(
+                &to_rapier_pose(case.body_pose),
+                &cuboid,
+                &RapierPose::IDENTITY,
+                &capsule,
+                0.0,
+            )
+            .unwrap_or_else(|err| panic!("rapier query failed for {}: {:?}", case.name, err))
+            .unwrap_or_else(|| panic!("rapier contact missing for {}", case.name));
+
+            let penetration_err = (ours.penetration + rapier.dist).abs();
+            assert!(
+                penetration_err < 4.0e-3,
+                "penetration mismatch for {}: ours={:.6} rapier={:.6}",
+                case.name,
+                ours.penetration,
+                -rapier.dist,
+            );
+
+            if case.compare_witness_points {
+                assert_close_vec3("normal", case.name, ours.normal, rapier.normal1);
+                assert_close_vec3("point_box", case.name, ours.point_box, rapier.point1);
+                assert_close_vec3("point_capsule", case.name, ours.point_capsule, rapier.point2);
+            }
+        }
+    }
+
+    #[test]
     fn test_aabb_overlap() {
         let a = Aabb {
             min: vec3f(-1.0, -1.0, -1.0),
@@ -421,6 +589,164 @@ mod tests {
             }
         }
         ke
+    }
+
+    #[test]
+    fn test_repeated_off_center_carry_impulse_spins_small_cube() {
+        let mut world = PhysicsWorld::new(vec3f(0.0, 0.0, 0.0), 1.0 / 72.0);
+        let half = 0.02f32;
+        world.ground_y = -10.0;
+        world.step(&[PhysicsOp::SpawnDynamic {
+            position: vec3f(0.0, 1.0, 0.0),
+            half_extents: vec3f(half, half, half),
+            velocity: Vec3f::default(),
+            density: 2000.0,
+        }]);
+
+        for _ in 0..24 {
+            world.step(&[PhysicsOp::ApplyImpulseAtPoint {
+                body: 0,
+                impulse: vec3f(0.0, 0.006, 0.0),
+                point: vec3f(0.015, 1.0 - half, 0.0),
+            }]);
+        }
+
+        let ang = world.bodies[0].angular_velocity.length();
+        assert!(
+            ang > 20.0,
+            "Expected repeated off-center carry impulses to inject large spin, got {}",
+            ang
+        );
+    }
+
+    #[test]
+    fn test_repeated_linear_carry_impulse_keeps_small_cube_stable() {
+        let mut world = PhysicsWorld::new(vec3f(0.0, 0.0, 0.0), 1.0 / 72.0);
+        world.ground_y = -10.0;
+        world.step(&[PhysicsOp::SpawnDynamic {
+            position: vec3f(0.0, 1.0, 0.0),
+            half_extents: vec3f(0.02, 0.02, 0.02),
+            velocity: Vec3f::default(),
+            density: 2000.0,
+        }]);
+
+        for _ in 0..24 {
+            world.step(&[PhysicsOp::ApplyImpulseWithAngularImpulse {
+                body: 0,
+                impulse: vec3f(0.0, 0.006, 0.0),
+                angular_impulse: Vec3f::default(),
+            }]);
+        }
+
+        let ang = world.bodies[0].angular_velocity.length();
+        assert!(
+            ang < 1.0e-4,
+            "Linear-only carry should not inject spin, got {}",
+            ang
+        );
+    }
+
+    #[test]
+    fn test_rapier_kinematic_platform_carry_keeps_small_cube_stable() {
+        use rapier3d::prelude::*;
+
+        fn rvec(x: f32, y: f32, z: f32) -> rapier3d::math::Vector {
+            rapier3d::math::Vector::new(x, y, z)
+        }
+
+        let dt = 1.0 / 72.0;
+        let mut bodies = RigidBodySet::new();
+        let mut colliders = ColliderSet::new();
+        let mut impulse_joints = ImpulseJointSet::new();
+        let mut multibody_joints = MultibodyJointSet::new();
+        let mut islands = IslandManager::new();
+        let mut broad_phase = BroadPhaseBvh::new();
+        let mut narrow_phase = NarrowPhase::new();
+        let mut ccd_solver = CCDSolver::new();
+        let mut pipeline = PhysicsPipeline::new();
+        let gravity = rvec(0.0, -9.81, 0.0);
+        let integration_parameters = IntegrationParameters {
+            dt,
+            ..IntegrationParameters::default()
+        };
+
+        let platform_half = (0.085f32, 0.010f32, 0.065f32);
+        let cube_half = 0.02f32;
+
+        let platform = bodies.insert(
+            RigidBodyBuilder::kinematic_velocity_based()
+                .translation(rvec(0.0, 0.60, 0.0))
+                .build(),
+        );
+        let platform_collider = ColliderBuilder::cuboid(
+            platform_half.0,
+            platform_half.1,
+            platform_half.2,
+        )
+        .friction(1.2)
+        .restitution(0.0);
+        colliders.insert_with_parent(platform_collider, platform, &mut bodies);
+
+        let cube = bodies.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(rvec(0.0, 0.60 + platform_half.1 + cube_half, 0.0))
+                .can_sleep(false)
+                .build(),
+        );
+        let cube_collider = ColliderBuilder::cuboid(cube_half, cube_half, cube_half)
+            .density(2000.0)
+            .friction(1.2)
+            .restitution(0.0);
+        colliders.insert_with_parent(cube_collider, cube, &mut bodies);
+
+        for _ in 0..24 {
+            if let Some(platform) = bodies.get_mut(platform) {
+                platform.set_linvel(rvec(0.0, 0.0, 0.0), true);
+            }
+            pipeline.step(
+                gravity,
+                &integration_parameters,
+                &mut islands,
+                &mut broad_phase,
+                &mut narrow_phase,
+                &mut bodies,
+                &mut colliders,
+                &mut impulse_joints,
+                &mut multibody_joints,
+                &mut ccd_solver,
+                &(),
+                &(),
+            );
+        }
+
+        let mut max_ang = 0.0f32;
+        for _ in 0..48 {
+            if let Some(platform) = bodies.get_mut(platform) {
+                platform.set_linvel(rvec(0.22, 0.0, 0.0), true);
+            }
+            pipeline.step(
+                gravity,
+                &integration_parameters,
+                &mut islands,
+                &mut broad_phase,
+                &mut narrow_phase,
+                &mut bodies,
+                &mut colliders,
+                &mut impulse_joints,
+                &mut multibody_joints,
+                &mut ccd_solver,
+                &(),
+                &(),
+            );
+            let cube = bodies.get(cube).unwrap();
+            max_ang = max_ang.max(cube.angvel().length());
+        }
+
+        assert!(
+            max_ang < 2.5,
+            "Rapier kinematic platform carry produced too much spin: {}",
+            max_ang
+        );
     }
 
     #[test]
