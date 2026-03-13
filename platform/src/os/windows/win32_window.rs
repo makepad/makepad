@@ -64,22 +64,19 @@ use {
                     WindowsAndMessaging::{
                         CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
                         GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, MoveWindow,
-                        PostMessageW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-                        SetWindowPos, ShowWindow, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE,
-                        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
-                        HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST,
-                        HWND_TOPMOST, LWA_ALPHA, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE,
-                        SW_MINIMIZE, SW_RESTORE, SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT,
-                        WINDOW_EX_STYLE, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY,
-                        WM_DPICHANGED,
+                        PostMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CW_USEDEFAULT,
+                        GWLP_USERDATA, GWL_EXSTYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+                        HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT,
+                        HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
+                        SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT,
+                        WINDOW_EX_STYLE, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
                         WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_IME_STARTCOMPOSITION,
                         WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
                         WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST,
                         WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
                         WM_XBUTTONDOWN, WM_XBUTTONUP, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-                        WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST,
-                        WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX,
-                        WS_SYSMENU,
+                        WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE,
+                        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX, WS_SYSMENU,
                     },
                 },
             },
@@ -116,6 +113,12 @@ unsafe extern "system" {
     fn SetWindowCompositionAttribute(hwnd: HWND, data: *mut WindowCompositionAttribData) -> i32;
 }
 
+#[link(name = "user32")]
+unsafe extern "system" {
+    #[link_name = "SetLayeredWindowAttributes"]
+    fn SetLayeredWindowAttributesRaw(hwnd: HWND, crKey: u32, bAlpha: u8, dwFlags: u32) -> i32;
+}
+
 #[link(name = "dwmapi")]
 unsafe extern "system" {
     fn DwmSetWindowAttribute(
@@ -127,6 +130,20 @@ unsafe extern "system" {
 }
 
 const WS_EX_TOOLWINDOW_FALLBACK: WINDOW_EX_STYLE = WINDOW_EX_STYLE(0x0000_0080);
+const WS_EX_LAYERED_FALLBACK: WINDOW_EX_STYLE = WINDOW_EX_STYLE(0x0008_0000);
+const LWA_ALPHA_FALLBACK: u32 = 0x0000_0002;
+
+#[inline]
+unsafe fn SetLayeredWindowAttributes(
+    hwnd: HWND,
+    color_key: u32,
+    alpha: u8,
+    flags: u32,
+) -> crate::windows::core::Result<()> {
+    (unsafe { SetLayeredWindowAttributesRaw(hwnd, color_key, alpha, flags) } != 0)
+        .then_some(())
+        .ok_or_else(crate::windows::core::Error::from_thread)
+}
 /*
 // Copied from Microsoft so it refers to the right IDropTarget
 #[allow(non_snake_case)]
@@ -998,12 +1015,12 @@ impl Win32Window {
         unsafe {
             let mut ex_style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
             if visuals.transparent {
-                ex_style |= WS_EX_LAYERED.0;
+                ex_style |= WS_EX_LAYERED_FALLBACK.0;
             } else {
-                ex_style &= !WS_EX_LAYERED.0;
+                ex_style &= !WS_EX_LAYERED_FALLBACK.0;
             }
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex_style as isize);
-            SetLayeredWindowAttributes(self.hwnd, 0, 255, LWA_ALPHA).unwrap();
+            SetLayeredWindowAttributes(self.hwnd, 0, 255, LWA_ALPHA_FALLBACK).unwrap();
 
             let margins = if visuals.transparent {
                 MARGINS {
