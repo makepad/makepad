@@ -146,22 +146,52 @@ script_mod! {
             return self.projection_matrix * view_pos
         }
 
+        world_with_model_matrix: fn(local_pos: vec4) {
+            let model_view = self.draw_list.view_transform * self.model_matrix;
+            return model_view * local_pos
+        }
+
+        world_with_model_direction: fn(local_dir: vec4) {
+            let model_view = self.draw_list.view_transform * self.model_matrix;
+            return model_view * vec4(local_dir.x, local_dir.y, local_dir.z, 0.0)
+        }
+
         vertex: fn() {
             let local_uv = vec2(self.geom.ny_nz_uv.z, self.geom.ny_nz_uv.w);
             let local_pos_src = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z);
             let displacement = self.get_vertex_displacement(local_uv, local_pos_src);
+            let local_scale = self.local_scale;
+            let scaled_local_pos = vec3(
+                (local_pos_src.x + displacement.x) * local_scale.x,
+                (local_pos_src.y + displacement.y) * local_scale.y,
+                (local_pos_src.z + displacement.z) * local_scale.z
+            );
             let local_pos = vec4(
-                local_pos_src.x + displacement.x,
-                local_pos_src.y + displacement.y,
-                local_pos_src.z + displacement.z,
+                scaled_local_pos.x,
+                scaled_local_pos.y,
+                scaled_local_pos.z,
                 1.0
             );
-            let model_matrix = self.draw_list.view_transform * self.model_matrix;
-            let local_n = vec4(self.geom.pos_nx.w, self.geom.ny_nz_uv.x, self.geom.ny_nz_uv.y, 0.0);
-            let model_pos = model_matrix * local_pos;
-            let model_n = model_matrix * local_n;
-            let local_t = vec4(self.geom.tangent.x, self.geom.tangent.y, self.geom.tangent.z, 0.0);
-            let model_t = model_matrix * local_t;
+            let safe_scale = vec3(
+                max(abs(local_scale.x), 0.000001),
+                max(abs(local_scale.y), 0.000001),
+                max(abs(local_scale.z), 0.000001)
+            );
+            let local_n_scaled = normalize(vec3(
+                self.geom.pos_nx.w / safe_scale.x,
+                self.geom.ny_nz_uv.x / safe_scale.y,
+                self.geom.ny_nz_uv.y / safe_scale.z
+            ));
+            let local_n = vec4(local_n_scaled.x, local_n_scaled.y, local_n_scaled.z, 0.0);
+            let model_pos = self.world_with_model_matrix(local_pos);
+            let model_n = self.world_with_model_direction(local_n);
+            let local_t_scaled = normalize(vec3(
+                self.geom.tangent.x / safe_scale.x,
+                self.geom.tangent.y / safe_scale.y,
+                self.geom.tangent.z / safe_scale.z
+            ));
+            let local_t = vec4(local_t_scaled.x, local_t_scaled.y, local_t_scaled.z, 0.0);
+            let model_t = self.world_with_model_direction(local_t);
 
             self.v_world = vec3(model_pos.x, model_pos.y, model_pos.z);
             self.v_normal = vec3(model_n.x, model_n.y, model_n.z);
@@ -437,6 +467,8 @@ pub struct DrawPbr {
     pub draw_vars: DrawVars,
     #[live]
     pub model_matrix: Mat4f,
+    #[live(vec3(1.0, 1.0, 1.0))]
+    pub local_scale: Vec3f,
     #[live]
     pub draw_clip: Vec4f,
     #[live(0.0)]
@@ -456,6 +488,7 @@ impl DrawPbr {
         self.acc_verts.clear();
         self.acc_indices.clear();
         self.set_transform(Mat4f::identity());
+        self.set_local_scale(vec3(1.0, 1.0, 1.0));
         self.transform_stack.clear();
         self.cur_color = vec4(1.0, 1.0, 1.0, 1.0);
         self.base_color_factor = vec4(1.0, 1.0, 1.0, 1.0);
@@ -475,6 +508,10 @@ impl DrawPbr {
     pub fn set_transform(&mut self, transform: Mat4f) {
         self.cur_transform = transform;
         self.model_matrix = transform;
+    }
+
+    pub fn set_local_scale(&mut self, scale: Vec3f) {
+        self.local_scale = scale;
     }
 
     /// Reset the p5-style model matrix stack state to identity.
@@ -1087,6 +1124,23 @@ impl DrawPbr {
         result
     }
 
+    pub fn draw_mesh_with_transform_and_local_scale(
+        &mut self,
+        cx: &mut Cx2d,
+        mesh: PbrMeshHandle,
+        transform: Mat4f,
+        local_scale: Vec3f,
+    ) -> Result<(), String> {
+        let prev_model = self.model_matrix;
+        let prev_scale = self.local_scale;
+        self.model_matrix = transform;
+        self.local_scale = local_scale;
+        let result = self.draw_mesh(cx, mesh);
+        self.local_scale = prev_scale;
+        self.model_matrix = prev_model;
+        result
+    }
+
     /// Draw a cube using the current material/shader state.
     /// Uses cached unit-cube meshes and applies size as a transform scale.
     pub fn draw_cube(
@@ -1096,9 +1150,7 @@ impl DrawPbr {
         subdivisions: usize,
     ) -> Result<(), String> {
         let mesh = self.ensure_cube_mesh(cx, subdivisions)?;
-        let scale = Mat4f::nonuniform_scaled_translation(size, vec3(0.0, 0.0, 0.0));
-        let transform = Mat4f::mul(&self.cur_transform, &scale);
-        self.draw_mesh_with_transform(cx, mesh, transform)
+        self.draw_mesh_with_transform_and_local_scale(cx, mesh, self.cur_transform, size)
     }
 
     pub fn draw_cube_with_material(
@@ -1121,10 +1173,12 @@ impl DrawPbr {
         seg_v: usize,
     ) -> Result<(), String> {
         let mesh = self.ensure_surface_mesh(cx, seg_u, seg_v)?;
-        let scale =
-            Mat4f::nonuniform_scaled_translation(vec3(size.x, 1.0, size.y), vec3(0.0, 0.0, 0.0));
-        let transform = Mat4f::mul(&self.cur_transform, &scale);
-        self.draw_mesh_with_transform(cx, mesh, transform)
+        self.draw_mesh_with_transform_and_local_scale(
+            cx,
+            mesh,
+            self.cur_transform,
+            vec3(size.x, 1.0, size.y),
+        )
     }
 
     pub fn draw_surface_with_material(
@@ -1149,9 +1203,13 @@ impl DrawPbr {
         let lat = subdivisions.clamp(4, 96);
         let lon = (lat * 2).clamp(8, 192);
         let mesh = self.ensure_sphere_mesh(cx, lat, lon)?;
-        let scale = Mat4f::scaled_translation(radius.max(0.0001), vec3(0.0, 0.0, 0.0));
-        let transform = Mat4f::mul(&self.cur_transform, &scale);
-        self.draw_mesh_with_transform(cx, mesh, transform)
+        let radius = radius.max(0.0001);
+        self.draw_mesh_with_transform_and_local_scale(
+            cx,
+            mesh,
+            self.cur_transform,
+            vec3(radius, radius, radius),
+        )
     }
 
     pub fn draw_sphere_with_material(
@@ -1189,12 +1247,12 @@ impl DrawPbr {
             0.0
         };
         let mesh = self.ensure_rounded_cube_mesh(cx, subdivisions, corner_segments, frac)?;
-        let scale = Mat4f::nonuniform_scaled_translation(
+        self.draw_mesh_with_transform_and_local_scale(
+            cx,
+            mesh,
+            self.cur_transform,
             vec3(size.x * 2.0, size.y * 2.0, size.z * 2.0),
-            vec3(0.0, 0.0, 0.0),
-        );
-        let transform = Mat4f::mul(&self.cur_transform, &scale);
-        self.draw_mesh_with_transform(cx, mesh, transform)
+        )
     }
 
     pub fn draw_rounded_cube_with_material(
@@ -1208,6 +1266,31 @@ impl DrawPbr {
     ) -> Result<(), String> {
         self.apply_material_state(material);
         self.draw_rounded_cube(cx, size, radius, subdivisions, corner_segments)
+    }
+
+    pub fn upload_uniform_rounded_cube_mesh(
+        &mut self,
+        cx: &mut Cx2d,
+        half_extent: f32,
+        radius: f32,
+        subdivisions: usize,
+        corner_segments: usize,
+    ) -> Result<PbrMeshHandle, String> {
+        let half_extent = half_extent.max(0.0001);
+        let radius = radius.max(0.0).min(half_extent);
+        let segments = subdivisions.clamp(1, 64);
+        let cseg = corner_segments.clamp(1, 32);
+        let (positions, normals, uvs, indices) =
+            Self::build_rounded_cube_mesh(half_extent, radius, segments, cseg);
+        self.upload_indexed_triangles_mesh(
+            cx,
+            &positions,
+            Some(&normals),
+            None,
+            Some(&uvs),
+            None,
+            &indices,
+        )
     }
 
     fn ensure_cube_mesh(
@@ -1657,9 +1740,7 @@ impl DrawPbr {
         (positions, normals, uvs, indices)
     }
 
-    fn geometry_gen_to_pbr(
-        gen: &GeometryGen,
-    ) -> Result<PbrMeshBuffers, String> {
+    fn geometry_gen_to_pbr(gen: &GeometryGen) -> Result<PbrMeshBuffers, String> {
         if !gen.vertices.len().is_multiple_of(9) {
             return Err(format!(
                 "expected GeometryGen vertex stride 9, got {} floats",
@@ -1678,10 +1759,7 @@ impl DrawPbr {
         Ok((positions, normals, uvs, gen.indices.clone()))
     }
 
-    fn build_surface_mesh(
-        seg_u: usize,
-        seg_v: usize,
-    ) -> PbrMeshBuffers {
+    fn build_surface_mesh(seg_u: usize, seg_v: usize) -> PbrMeshBuffers {
         let seg_u = seg_u.max(1);
         let seg_v = seg_v.max(1);
         let vert_count = (seg_u + 1) * (seg_v + 1);
@@ -1716,10 +1794,7 @@ impl DrawPbr {
         (positions, normals, uvs, indices)
     }
 
-    fn build_uv_sphere_mesh(
-        lat: usize,
-        lon: usize,
-    ) -> PbrMeshBuffers {
+    fn build_uv_sphere_mesh(lat: usize, lon: usize) -> PbrMeshBuffers {
         let lat = lat.max(4);
         let lon = lon.max(8);
         let mut positions = Vec::with_capacity((lat + 1) * (lon + 1));
