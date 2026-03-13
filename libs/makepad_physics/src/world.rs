@@ -28,6 +28,16 @@ pub enum PhysicsOp {
         body: usize,
         impulse: Vec3f,
     },
+    ApplyImpulseAtPoint {
+        body: usize,
+        impulse: Vec3f,
+        point: Vec3f,
+    },
+    ApplyImpulseWithAngularImpulse {
+        body: usize,
+        impulse: Vec3f,
+        angular_impulse: Vec3f,
+    },
     RemoveBody {
         body: usize,
     },
@@ -274,6 +284,33 @@ impl PhysicsWorld {
                         let inv_mass = self.bodies[*body].inv_mass;
                         self.bodies[*body].linear_velocity += *impulse * inv_mass;
                         self.bodies[*body].wake_up();
+                    }
+                }
+                PhysicsOp::ApplyImpulseAtPoint {
+                    body,
+                    impulse,
+                    point,
+                } => {
+                    if *body < self.bodies.len() && self.bodies[*body].is_dynamic() {
+                        let body = &mut self.bodies[*body];
+                        body.linear_velocity += *impulse * body.inv_mass;
+                        let r = *point - body.pose.position;
+                        let angular_impulse = Vec3f::cross(r, *impulse);
+                        body.angular_velocity += body.world_inv_inertia().mul_vec3(angular_impulse);
+                        body.wake_up();
+                    }
+                }
+                PhysicsOp::ApplyImpulseWithAngularImpulse {
+                    body,
+                    impulse,
+                    angular_impulse,
+                } => {
+                    if *body < self.bodies.len() && self.bodies[*body].is_dynamic() {
+                        let body = &mut self.bodies[*body];
+                        body.linear_velocity += *impulse * body.inv_mass;
+                        body.angular_velocity +=
+                            body.world_inv_inertia().mul_vec3(*angular_impulse);
+                        body.wake_up();
                     }
                 }
                 PhysicsOp::RemoveBody { body } => {
