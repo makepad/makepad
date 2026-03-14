@@ -321,10 +321,21 @@ impl CodeEditor {
         let text = self
             .draw_text
             .layout(cx, 0.0, 0.0, None, false, Align::default(), "!");
-        let first_row = text.rows.first().unwrap();
-        let first_glyph = first_row.glyphs.first().unwrap();
-        let width_in_lpxs = first_glyph.advance_in_lpxs();
-        let height_in_lpxs = first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs();
+        let (width_in_lpxs, height_in_lpxs) = if let Some(first_glyph) = text
+            .rows
+            .first()
+            .and_then(|first_row| first_row.glyphs.first())
+        {
+            (
+                first_glyph.advance_in_lpxs(),
+                first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs(),
+            )
+        } else {
+            // On wasm the code font can still be loading on the first draw.
+            // Fall back to a reasonable monospace cell size instead of aborting.
+            let font_size = self.draw_text.text_style.font_size.max(1.0);
+            (font_size * 0.6, font_size)
+        };
         let line_spacing_in_lpxs = height_in_lpxs * self.draw_text.text_style.line_spacing;
         self.cell_size = dvec2(width_in_lpxs as f64, line_spacing_in_lpxs as f64);
         self.cell_offset_y = ((line_spacing_in_lpxs - height_in_lpxs) / 2.0) as f64;
