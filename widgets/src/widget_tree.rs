@@ -878,7 +878,6 @@ impl WidgetTree {
         }
 
         let target = path[path.len() - 1];
-        let mut result = WidgetRef::empty();
         let mut visited = HashSet::new();
         let mut stack = vec![Frame {
             uid: root_uid,
@@ -914,7 +913,7 @@ impl WidgetTree {
                         .get(&frame.uid)
                         .and_then(|node| node.widget.upgrade());
                     if let Some(widget) = upgraded {
-                        result = widget;
+                        return widget;
                     } else {
                         Self::discard_stale_cache_item(inner, frame.uid);
                         continue;
@@ -947,7 +946,7 @@ impl WidgetTree {
             });
         }
 
-        result
+        WidgetRef::empty()
     }
 
     fn collect_within_graph(
@@ -1544,10 +1543,11 @@ impl WidgetTree {
     }
 
     /// Find a widget within the subtree of `root_uid` by matching a path of LiveIds.
+    /// Returns the shallowest (first) match in the tree.
     pub fn find_within(&self, root_uid: WidgetUid, path: &[LiveId]) -> WidgetRef {
         let mut inner = self.inner.borrow_mut();
-        let mut results = Self::find_all_within_cached_graph(&mut inner, root_uid, path);
-        results.pop().unwrap_or_else(WidgetRef::empty)
+        let results = Self::find_all_within_cached_graph(&mut inner, root_uid, path);
+        results.into_iter().next().unwrap_or_else(WidgetRef::empty)
     }
 
     /// Find all widgets matching path within the subtree of `root_uid`.
