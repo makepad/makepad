@@ -153,6 +153,14 @@ impl Tooltip {
 
     pub fn show(&mut self, cx: &mut Cx) {
         self.opened = true;
+        // Redraw the overlay draw_list in addition to the View's draw_list.
+        // This is necessary because the View's `area` and `draw_list` may not
+        // yet be initialized (they are only set up when `draw_walk_all` is called
+        // with `opened == true`). Without this, the first `show()` call's
+        // `self.redraw(cx)` would be a no-op, leaving the tooltip invisible.
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
         self.redraw(cx);
     }
 
@@ -164,6 +172,9 @@ impl Tooltip {
 
     pub fn hide(&mut self, cx: &mut Cx) {
         self.opened = false;
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
         self.redraw(cx);
     }
 }
