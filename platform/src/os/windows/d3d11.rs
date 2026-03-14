@@ -47,13 +47,14 @@ use crate::{
                     D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_FLAG,
                     D3D11_CULL_NONE, D3D11_DEPTH_STENCILOP_DESC, D3D11_DEPTH_STENCIL_DESC,
                     D3D11_DEPTH_STENCIL_VIEW_DESC, D3D11_DEPTH_WRITE_MASK_ALL,
-                    D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID, D3D11_INPUT_ELEMENT_DESC,
-                    D3D11_INPUT_PER_INSTANCE_DATA, D3D11_INPUT_PER_VERTEX_DATA,
-                    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC,
-                    D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
-                    D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE, D3D11_SDK_VERSION,
-                    D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
-                    D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
+                    D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID,
+                    D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_INSTANCE_DATA,
+                    D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD,
+                    D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC,
+                    D3D11_RENDER_TARGET_BLEND_DESC, D3D11_RESOURCE_MISC_FLAG,
+                    D3D11_RESOURCE_MISC_TEXTURECUBE, D3D11_SDK_VERSION, D3D11_STENCIL_OP_REPLACE,
+                    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                    D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
                 Dxgi::{
                     Common::{
@@ -220,6 +221,20 @@ impl Cx {
                         .context
                         .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                     d3d11_cx.context.IASetInputLayout(&shp.input_layout);
+
+                    let depth_stencil_state = if draw_call.options.depth_write {
+                        self.passes[pass_id].os.depth_stencil_state_write.as_ref()
+                    } else {
+                        self.passes[pass_id]
+                            .os
+                            .depth_stencil_state_no_write
+                            .as_ref()
+                    };
+                    if let Some(depth_stencil_state) = depth_stencil_state {
+                        d3d11_cx
+                            .context
+                            .OMSetDepthStencilState(depth_stencil_state, 0);
+                    }
 
                     let geom_ibuf = geometry.os.geom_ibuf.buffer.as_ref().unwrap();
                     d3d11_cx
@@ -1468,35 +1483,40 @@ impl CxOsPass {
             self.raster_state = raster_state;
         }
 
-        if self.depth_stencil_state.is_none() {
-            let ds_desc = D3D11_DEPTH_STENCIL_DESC {
-                DepthEnable: TRUE,
-                DepthWriteMask: D3D11_DEPTH_WRITE_MASK_ALL,
-                DepthFunc: D3D11_COMPARISON_LESS_EQUAL,
-                StencilEnable: FALSE,
-                StencilReadMask: 0xff,
-                StencilWriteMask: 0xff,
-                FrontFace: D3D11_DEPTH_STENCILOP_DESC {
-                    StencilFailOp: D3D11_STENCIL_OP_REPLACE,
-                    StencilDepthFailOp: D3D11_STENCIL_OP_REPLACE,
-                    StencilPassOp: D3D11_STENCIL_OP_REPLACE,
-                    StencilFunc: D3D11_COMPARISON_ALWAYS,
-                },
-                BackFace: D3D11_DEPTH_STENCILOP_DESC {
-                    StencilFailOp: D3D11_STENCIL_OP_REPLACE,
-                    StencilDepthFailOp: D3D11_STENCIL_OP_REPLACE,
-                    StencilPassOp: D3D11_STENCIL_OP_REPLACE,
-                    StencilFunc: D3D11_COMPARISON_ALWAYS,
-                },
+        if self.depth_stencil_state_write.is_none() {
+            let mut make_depth_stencil_state = |depth_write_mask| {
+                let ds_desc = D3D11_DEPTH_STENCIL_DESC {
+                    DepthEnable: TRUE,
+                    DepthWriteMask: depth_write_mask,
+                    DepthFunc: D3D11_COMPARISON_LESS_EQUAL,
+                    StencilEnable: FALSE,
+                    StencilReadMask: 0xff,
+                    StencilWriteMask: 0xff,
+                    FrontFace: D3D11_DEPTH_STENCILOP_DESC {
+                        StencilFailOp: D3D11_STENCIL_OP_REPLACE,
+                        StencilDepthFailOp: D3D11_STENCIL_OP_REPLACE,
+                        StencilPassOp: D3D11_STENCIL_OP_REPLACE,
+                        StencilFunc: D3D11_COMPARISON_ALWAYS,
+                    },
+                    BackFace: D3D11_DEPTH_STENCILOP_DESC {
+                        StencilFailOp: D3D11_STENCIL_OP_REPLACE,
+                        StencilDepthFailOp: D3D11_STENCIL_OP_REPLACE,
+                        StencilPassOp: D3D11_STENCIL_OP_REPLACE,
+                        StencilFunc: D3D11_COMPARISON_ALWAYS,
+                    },
+                };
+                let mut depth_stencil_state = None;
+                unsafe {
+                    d3d11_cx
+                        .device
+                        .CreateDepthStencilState(&ds_desc, Some(&mut depth_stencil_state))
+                        .unwrap()
+                }
+                depth_stencil_state
             };
-            let mut depth_stencil_state = None;
-            unsafe {
-                d3d11_cx
-                    .device
-                    .CreateDepthStencilState(&ds_desc, Some(&mut depth_stencil_state))
-                    .unwrap()
-            }
-            self.depth_stencil_state = depth_stencil_state;
+            self.depth_stencil_state_write = make_depth_stencil_state(D3D11_DEPTH_WRITE_MASK_ALL);
+            self.depth_stencil_state_no_write =
+                make_depth_stencil_state(D3D11_DEPTH_WRITE_MASK_ZERO);
         }
 
         unsafe {
@@ -1509,9 +1529,11 @@ impl CxOsPass {
                 Some(&blend_factor),
                 0xffffffff,
             );
-            d3d11_cx
-                .context
-                .OMSetDepthStencilState(self.depth_stencil_state.as_ref().unwrap(), 0);
+            if let Some(depth_stencil_state) = self.depth_stencil_state_write.as_ref() {
+                d3d11_cx
+                    .context
+                    .OMSetDepthStencilState(depth_stencil_state, 0);
+            }
         }
     }
 }
@@ -1521,7 +1543,8 @@ pub struct CxOsPass {
     pass_uniforms: D3d11Buffer,
     blend_state: Option<ID3D11BlendState>,
     raster_state: Option<ID3D11RasterizerState>,
-    depth_stencil_state: Option<ID3D11DepthStencilState>,
+    depth_stencil_state_write: Option<ID3D11DepthStencilState>,
+    depth_stencil_state_no_write: Option<ID3D11DepthStencilState>,
 }
 
 #[derive(Default, Clone)]
