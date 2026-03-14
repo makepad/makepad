@@ -8,6 +8,7 @@ use {
         },
         video_decode::software_video::PlaybackSessionHandle,
         video_decode::yuv::YuvPlaneData,
+        media_plugin::PlaybackPrepared,
         windows::{
             core::Interface,
             Win32::Graphics::{

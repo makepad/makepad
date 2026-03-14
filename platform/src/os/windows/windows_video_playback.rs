@@ -24,6 +24,7 @@ use {
             },
             Win32::Media::MediaFoundation::{IMFAttributes, MFCreateAttributes},
         },
+        media_plugin::PlaybackPrepared,
     },
     std::{
         ffi::c_void,

@@ -3809,6 +3809,13 @@ impl GattDeviceService {
         let this = &windows_core::Interface::cast::<super::super::super::Foundation::IClosable>(self)?;
         unsafe { (windows_core::Interface::vtable(this).Close)(windows_core::Interface::as_raw(this)).ok() }
     }
+    pub fn Session(&self) -> windows_core::Result<GattSession> {
+        let this = &windows_core::Interface::cast::<IGattDeviceService3>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Session)(windows_core::Interface::as_raw(this), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
     pub fn FromIdAsync(deviceid: &windows_core::HSTRING) -> windows_core::Result<windows_future::IAsyncOperation<GattDeviceService>> {
         Self::IGattDeviceServiceStatics(|this| unsafe {
             let mut result__ = core::mem::zeroed();
@@ -4103,6 +4110,15 @@ unsafe impl Sync for GattReadRequest {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GattReadRequestedEventArgs(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(GattReadRequestedEventArgs, windows_core::IUnknown, windows_core::IInspectable);
+impl GattReadRequestedEventArgs {
+    pub fn Session(&self) -> windows_core::Result<GattSession> {
+        let this = self;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Session)(windows_core::Interface::as_raw(this), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    }
 impl windows_core::RuntimeType for GattReadRequestedEventArgs {
     const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<Self, IGattReadRequestedEventArgs>();
 }
@@ -4279,6 +4295,15 @@ impl windows_core::RuntimeType for GattSharingMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GattSubscribedClient(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(GattSubscribedClient, windows_core::IUnknown, windows_core::IInspectable);
+impl GattSubscribedClient {
+    pub fn Session(&self) -> windows_core::Result<GattSession> {
+        let this = self;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Session)(windows_core::Interface::as_raw(this), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    }
 impl windows_core::RuntimeType for GattSubscribedClient {
     const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<Self, IGattSubscribedClient>();
 }
@@ -4340,6 +4365,15 @@ unsafe impl Sync for GattWriteRequest {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GattWriteRequestedEventArgs(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(GattWriteRequestedEventArgs, windows_core::IUnknown, windows_core::IInspectable);
+impl GattWriteRequestedEventArgs {
+    pub fn Session(&self) -> windows_core::Result<GattSession> {
+        let this = self;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Session)(windows_core::Interface::as_raw(this), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    }
 impl windows_core::RuntimeType for GattWriteRequestedEventArgs {
     const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<Self, IGattWriteRequestedEventArgs>();
 }
@@ -22816,6 +22850,7 @@ impl Default for D3D11_DEPTH_STENCIL_VIEW_DESC_0 {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct D3D11_DEPTH_WRITE_MASK(pub i32);
 pub const D3D11_DEPTH_WRITE_MASK_ALL: D3D11_DEPTH_WRITE_MASK = D3D11_DEPTH_WRITE_MASK(1i32);
+pub const D3D11_DEPTH_WRITE_MASK_ZERO: D3D11_DEPTH_WRITE_MASK = D3D11_DEPTH_WRITE_MASK(0i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct D3D11_DEVICE_CONTEXT_TYPE(pub i32);
@@ -43885,9 +43920,6 @@ pub struct PARAMDESCEX {
     pub cBytes: u32,
     pub varDefaultValue: super::Variant::VARIANT,
 }
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PARAMFLAGS(pub u16);
 #[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43895,21 +43927,24 @@ pub struct PARAMDESC {
     pub pparamdescex: *mut PARAMDESCEX,
     pub wParamFlags: PARAMFLAGS,
 }
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PARAMFLAGS(pub u16);
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Clone for PARAMDESCEX {
     fn clone(&self) -> Self {
         unsafe { core::mem::transmute_copy(self) }
     }
 }
-impl PARAMFLAGS {
-    pub const fn contains(&self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-}
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Default for PARAMDESC {
     fn default() -> Self {
         unsafe { core::mem::zeroed() }
+    }
+}
+impl PARAMFLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
