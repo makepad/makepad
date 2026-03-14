@@ -39,6 +39,7 @@ struct PulseInputStruct {
     input_fn: Arc<Mutex<Option<AudioInputFn>>>,
     audio_buffer: AudioBuffer,
     ready_state: AtomicU32,
+    main_loop: *mut pa_threaded_mainloop,
 }
 
 impl PulseInputStream {
@@ -69,6 +70,7 @@ impl PulseInputStream {
             ready_state: AtomicU32::new(0),
             input_fn: pulse.audio_input_cb[index].clone(),
             audio_buffer: AudioBuffer::default(),
+            main_loop: pulse.main_loop,
         }));
         pa_stream_set_state_callback(
             stream,
@@ -92,26 +94,25 @@ impl PulseInputStream {
 
         pa_stream_connect_record(stream, format!("{}\0", name).as_ptr(), &buffer_attr, flags);
 
-        pa_threaded_mainloop_unlock(pulse.main_loop);
-
         loop {
             let ready_state = (*input_ptr).ready_state.load(Ordering::Relaxed);
             if ready_state == 1 {
                 break;
             }
             if ready_state == 2 {
+                pa_threaded_mainloop_unlock(pulse.main_loop);
                 panic!("STREAM CANNOT BE STARTED");
             }
             pa_threaded_mainloop_wait(pulse.main_loop);
         }
 
+        pa_threaded_mainloop_unlock(pulse.main_loop);
         Self { device_id, stream }
     }
 
     pub unsafe fn terminate(self, pulse: &PulseAudioAccess) {
         pa_threaded_mainloop_lock(pulse.main_loop);
-        pa_stream_set_write_callback(self.stream, None, std::ptr::null_mut());
-        pa_stream_set_state_callback(self.stream, None, std::ptr::null_mut());
+        pa_stream_set_read_callback(self.stream, None, std::ptr::null_mut());
         pa_stream_disconnect(self.stream);
         pa_stream_unref(self.stream);
         pa_threaded_mainloop_unlock(pulse.main_loop);
@@ -150,9 +151,9 @@ impl PulseInputStream {
 
     unsafe extern "C" fn recording_stream_state_callback(
         stream: *mut pa_stream,
-        output_ptr: *mut c_void,
+        input_ptr: *mut c_void,
     ) {
-        let input_ptr = output_ptr as *mut PulseOutputStruct;
+        let input_ptr = input_ptr as *mut PulseInputStruct;
         let state = pa_stream_get_state(stream);
         match state {
             PA_STREAM_UNCONNECTED => (),
@@ -160,10 +161,12 @@ impl PulseInputStream {
             PA_STREAM_READY => (*input_ptr).ready_state.store(1, Ordering::Relaxed),
             PA_STREAM_FAILED => (*input_ptr).ready_state.store(2, Ordering::Relaxed),
             PA_STREAM_TERMINATED => {
-                let _ = Box::from_raw(output_ptr);
+                let _ = Box::from_raw(input_ptr);
+                return;
             }
             _ => panic!(),
         }
+        pa_threaded_mainloop_signal((*input_ptr).main_loop, 0);
     }
 }
 
@@ -179,6 +182,7 @@ struct PulseOutputStruct {
     clear_on_read: bool,
     ready_state: AtomicU32,
     audio_buffer: AudioBuffer,
+    main_loop: *mut pa_threaded_mainloop,
 }
 
 impl PulseOutputStream {
@@ -212,6 +216,7 @@ impl PulseOutputStream {
             write_byte_count: 0,
             ready_state: AtomicU32::new(0),
             audio_buffer: AudioBuffer::default(),
+            main_loop: pulse.main_loop,
         }));
         pa_stream_set_state_callback(
             stream,
@@ -237,15 +242,13 @@ impl PulseOutputStream {
             std::ptr::null_mut(),
         );
 
-        pa_threaded_mainloop_unlock(pulse.main_loop);
-
         loop {
             let ready_state = (*output_ptr).ready_state.load(Ordering::Relaxed);
             if ready_state == 1 {
                 break;
             }
             if ready_state == 2 {
-                // ok here we return None
+                pa_threaded_mainloop_unlock(pulse.main_loop);
                 Self::terminate_stream(stream, pulse);
                 return None;
             }
@@ -262,10 +265,12 @@ impl PulseOutputStream {
 
         let op = pa_stream_cork(stream, 0, None, std::ptr::null_mut());
         if op == std::ptr::null_mut() {
+            pa_threaded_mainloop_unlock(pulse.main_loop);
             panic!("pa_stream_cork failed");
         }
         pa_operation_unref(op);
 
+        pa_threaded_mainloop_unlock(pulse.main_loop);
         Some(Self { device_id, stream })
     }
 
@@ -276,7 +281,6 @@ impl PulseOutputStream {
     pub unsafe fn terminate_stream(stream: *mut pa_stream, pulse: &PulseAudioAccess) {
         pa_threaded_mainloop_lock(pulse.main_loop);
         pa_stream_set_write_callback(stream, None, std::ptr::null_mut());
-        pa_stream_set_state_callback(stream, None, std::ptr::null_mut());
         pa_stream_disconnect(stream);
         pa_stream_unref(stream);
         pa_threaded_mainloop_unlock(pulse.main_loop);
@@ -340,9 +344,11 @@ impl PulseOutputStream {
             PA_STREAM_FAILED => (*output_ptr).ready_state.store(2, Ordering::Relaxed),
             PA_STREAM_TERMINATED => {
                 let _ = Box::from_raw(output_ptr);
+                return;
             }
             _ => panic!(),
         }
+        pa_threaded_mainloop_signal((*output_ptr).main_loop, 0);
     }
 }
 
@@ -534,6 +540,7 @@ impl PulseAudioAccess {
                 .unwrap()
                 .to_string(),
         );
+        pa_threaded_mainloop_signal(query.main_loop.unwrap(), 0);
     }
 
     pub fn get_updated_descs(&mut self) -> Vec<AudioDeviceDesc> {
@@ -541,6 +548,7 @@ impl PulseAudioAccess {
         unsafe {
             let mut query = PulseDeviceQuery::default();
             query.main_loop = Some(self.main_loop);
+            pa_threaded_mainloop_lock(self.main_loop);
             let sink_op = pa_context_get_sink_info_list(
                 self.context,
                 Some(Self::sink_info_callback),
@@ -565,6 +573,7 @@ impl PulseAudioAccess {
             pa_operation_unref(sink_op);
             pa_operation_unref(source_op);
             pa_operation_unref(server_op);
+            pa_threaded_mainloop_unlock(self.main_loop);
             // lets add some input/output devices
             let mut out = Vec::new();
             let mut device_descs = Vec::new();
@@ -618,7 +627,7 @@ impl PulseAudioAccess {
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
                 if self
-                    .audio_outputs
+                    .audio_inputs
                     .iter()
                     .find(|v| v.device_id == *device_id)
                     .is_none()
