@@ -18,8 +18,14 @@ use {
             //core::Result as coreResult,
             //core::HRESULT,
             Win32::{
-                Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM},
-                Graphics::{Dwm::DwmExtendFrameIntoClientArea, Gdi::ScreenToClient},
+                Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM, COLORREF},
+                Graphics::{
+                    Dwm::{
+                        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE,
+                        DWMSBT_NONE, DWMSBT_MAINWINDOW, DWMSBT_TRANSIENTWINDOW, DWMSBT_TABBEDWINDOW,
+                    }, 
+                    Gdi::ScreenToClient
+                },
                 System::{
                     DataExchange::{
                         CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard,
@@ -70,15 +76,14 @@ use {
                         HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST,
                         HWND_TOPMOST, LWA_ALPHA, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE,
                         SW_MINIMIZE, SW_RESTORE, SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT,
-                        WINDOW_EX_STYLE, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY,
-                        WM_DPICHANGED,
+                        WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
                         WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_IME_STARTCOMPOSITION,
                         WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
                         WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST,
                         WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
                         WM_XBUTTONDOWN, WM_XBUTTONUP, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
                         WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST,
-                        WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX,
+                        WS_EX_WINDOWEDGE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX,
                         WS_SYSMENU,
                     },
                 },
@@ -111,22 +116,12 @@ struct WindowCompositionAttribData {
     cb_data: usize,
 }
 
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn SetWindowCompositionAttribute(hwnd: HWND, data: *mut WindowCompositionAttribData) -> i32;
+#[inline]
+unsafe fn SetWindowCompositionAttribute(hwnd: HWND, data: *mut WindowCompositionAttribData) -> windows_core::BOOL {
+    windows_core::link!("user32.dll" "system" fn SetWindowCompositionAttribute(hwnd : HWND, data : *mut WindowCompositionAttribData) -> windows_core::BOOL);
+    unsafe { SetWindowCompositionAttribute(hwnd, data) }
 }
 
-#[link(name = "dwmapi")]
-unsafe extern "system" {
-    fn DwmSetWindowAttribute(
-        hwnd: HWND,
-        dw_attribute: u32,
-        pv_attribute: *const c_void,
-        cb_attribute: u32,
-    ) -> i32;
-}
-
-const WS_EX_TOOLWINDOW_FALLBACK: WINDOW_EX_STYLE = WINDOW_EX_STYLE(0x0000_0080);
 /*
 // Copied from Microsoft so it refers to the right IDropTarget
 #[allow(non_snake_case)]
@@ -232,7 +227,7 @@ impl Win32Window {
         let title = encode_wide("Makepad Popup");
 
         let style = WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
-        let style_ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW_FALLBACK;
+        let style_ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
 
         let dpi = with_win32_app(|app| app.dpi_functions.system_dpi_factor() as f64);
         let x = (position.x * dpi) as i32;
@@ -973,13 +968,6 @@ impl Win32Window {
     }
 
     pub fn apply_window_visuals(&mut self, visuals: WindowVisuals) {
-        const DWM_ATTRIBUTE_SYSTEM_BACKDROP_TYPE: u32 = 38;
-        const S_OK: i32 = 0;
-        const DWMSBT_NONE: i32 = 1;
-        const DWMSBT_MAINWINDOW: i32 = 2;
-        const DWMSBT_TRANSIENTWINDOW: i32 = 3;
-        const DWMSBT_TABBEDWINDOW: i32 = 4;
-
         const WCA_ACCENT_POLICY: u32 = 19;
         const ACCENT_DISABLED: u32 = 0;
         const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
@@ -1003,7 +991,7 @@ impl Win32Window {
                 ex_style &= !WS_EX_LAYERED.0;
             }
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex_style as isize);
-            SetLayeredWindowAttributes(self.hwnd, 0, 255, LWA_ALPHA).unwrap();
+            let _ = SetLayeredWindowAttributes(self.hwnd, COLORREF(0), 255, LWA_ALPHA);
 
             let margins = if visuals.transparent {
                 MARGINS {
@@ -1026,8 +1014,8 @@ impl Win32Window {
         let hr = unsafe {
             DwmSetWindowAttribute(
                 self.hwnd,
-                DWM_ATTRIBUTE_SYSTEM_BACKDROP_TYPE,
-                &backdrop as *const _ as *const c_void,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                &(backdrop.0) as *const _ as *const c_void,
                 std::mem::size_of::<i32>() as u32,
             )
         };
@@ -1044,7 +1032,7 @@ impl Win32Window {
         };
         let mut accent = AccentPolicy {
             accent_state,
-            accent_flags: if hr == S_OK { 0x20 } else { 0 },
+            accent_flags: if hr.is_ok() { 0x20 } else { 0 },
             gradient_color,
             animation_id: 0,
         };
@@ -1054,7 +1042,7 @@ impl Win32Window {
             cb_data: std::mem::size_of::<AccentPolicy>(),
         };
         unsafe {
-            SetWindowCompositionAttribute(self.hwnd, &mut data);
+            let _ = SetWindowCompositionAttribute(self.hwnd, &mut data);
         }
     }
 
