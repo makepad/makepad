@@ -530,6 +530,11 @@ impl Cx {
                     let instances = (draw_item.instances.as_ref().unwrap().len()
                         / sh.mapping.instances.total_slots)
                         as u64;
+                    (gl.glDepthMask)(if draw_call.options.depth_write {
+                        gl_sys::TRUE
+                    } else {
+                        0 as gl_sys::GLboolean
+                    });
                     // bind all uniform buffers
                     {
                         shgl.uniforms
@@ -670,6 +675,7 @@ impl Cx {
 
                     (gl.glBindVertexArray)(0);
                     (gl.glUseProgram)(0);
+                    (gl.glDepthMask)(gl_sys::TRUE);
                 }
             }
         }

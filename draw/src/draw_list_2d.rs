@@ -14,10 +14,15 @@ use {
 pub trait DrawListExt {
     fn draw_list_id(&self) -> DrawListId;
     fn set_view_transform(&self, cx: &mut Cx, mat: &Mat4f);
+    fn set_view_transform_self_only(&self, cx: &mut Cx, mat: &Mat4f);
     fn begin_always(&mut self, cx: &mut CxDraw);
     fn begin_maybe(&mut self, cx: &mut CxDraw, will_redraw: bool) -> Redrawing;
     fn end(&mut self, cx: &mut CxDraw);
     fn get_view_transform(&self, cx: &Cx) -> Mat4f;
+    fn map_point_to_local(&self, cx: &Cx, world: DVec2) -> DVec2;
+    fn map_point_from_local(&self, cx: &Cx, local: DVec2) -> DVec2;
+    fn debug_parent_draw_list_id(&self, cx: &Cx) -> Option<DrawListId>;
+    fn debug_child_draw_list_ids(&self, cx: &Cx) -> Vec<DrawListId>;
     fn redraw(&self, cx: &mut Cx);
     fn redraw_self_and_children(&self, cx: &mut Cx);
 }
@@ -49,6 +54,10 @@ impl DrawListExt for DrawList {
             }
         }
         set_view_transform_recur(self.id(), cx, mat);
+    }
+
+    fn set_view_transform_self_only(&self, cx: &mut Cx, mat: &Mat4f) {
+        cx.draw_lists[self.id()].draw_list_uniforms.view_transform = *mat;
     }
 
     fn begin_always(&mut self, cx: &mut CxDraw) {
@@ -115,6 +124,45 @@ impl DrawListExt for DrawList {
     fn get_view_transform(&self, cx: &Cx) -> Mat4f {
         let cxview = &cx.draw_lists[self.id()];
         cxview.draw_list_uniforms.view_transform
+    }
+
+    fn map_point_to_local(&self, cx: &Cx, world: DVec2) -> DVec2 {
+        let inverse = self.get_view_transform(cx).invert();
+        let mapped = inverse.transform_vec4(vec4f(world.x as f32, world.y as f32, 0.0, 1.0));
+        if mapped.w.abs() > 1e-6 {
+            dvec2((mapped.x / mapped.w) as f64, (mapped.y / mapped.w) as f64)
+        } else {
+            dvec2(mapped.x as f64, mapped.y as f64)
+        }
+    }
+
+    fn map_point_from_local(&self, cx: &Cx, local: DVec2) -> DVec2 {
+        let mapped = self
+            .get_view_transform(cx)
+            .transform_vec4(vec4f(local.x as f32, local.y as f32, 0.0, 1.0));
+        if mapped.w.abs() > 1e-6 {
+            dvec2((mapped.x / mapped.w) as f64, (mapped.y / mapped.w) as f64)
+        } else {
+            dvec2(mapped.x as f64, mapped.y as f64)
+        }
+    }
+
+    fn debug_parent_draw_list_id(&self, cx: &Cx) -> Option<DrawListId> {
+        cx.draw_lists[self.id()].codeflow_parent_id
+    }
+
+    fn debug_child_draw_list_ids(&self, cx: &Cx) -> Vec<DrawListId> {
+        let draw_list = &cx.draw_lists[self.id()];
+        let mut children = Vec::new();
+        for order_index in 0..draw_list.draw_item_order_len() {
+            let Some(draw_item_id) = draw_list.draw_item_id_at_order_index(order_index) else {
+                continue;
+            };
+            if let Some(sub_list_id) = draw_list.draw_items[draw_item_id].sub_list() {
+                children.push(sub_list_id);
+            }
+        }
+        children
     }
 
     fn redraw(&self, cx: &mut Cx) {
@@ -417,5 +465,103 @@ impl RedrawingApi for Redrawing {
         if !self.is_redrawing() {
             panic!("assume_redraw_yes it should redraw")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DrawList2d, DrawListExt};
+    use crate::makepad_platform::Cx;
+    use makepad_math::{dvec2, vec4f, Mat4f};
+
+    fn translation(tx: f32, ty: f32) -> Mat4f {
+        Mat4f {
+            v: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                tx, ty, 0.0, 1.0,
+            ],
+        }
+    }
+
+    #[test]
+    fn self_only_transform_does_not_touch_children() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawList2d::new(&mut cx);
+        let child = DrawList2d::new(&mut cx);
+
+        cx.draw_lists[parent.id()].append_sub_list(cx.redraw_id, child.id());
+        cx.draw_lists[child.id()].codeflow_parent_id = Some(parent.id());
+
+        let child_mat = translation(3.0, 4.0);
+        child.set_view_transform_self_only(&mut cx, &child_mat);
+
+        let parent_mat = translation(10.0, 20.0);
+        parent.set_view_transform_self_only(&mut cx, &parent_mat);
+
+        assert_eq!(parent.get_view_transform(&cx).v, parent_mat.v);
+        assert_eq!(child.get_view_transform(&cx).v, child_mat.v);
+    }
+
+    #[test]
+    fn recursive_transform_still_updates_children() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawList2d::new(&mut cx);
+        let child = DrawList2d::new(&mut cx);
+
+        cx.draw_lists[parent.id()].append_sub_list(cx.redraw_id, child.id());
+        cx.draw_lists[child.id()].codeflow_parent_id = Some(parent.id());
+
+        let mat = translation(7.0, 9.0);
+        parent.set_view_transform(&mut cx, &mat);
+
+        assert_eq!(parent.get_view_transform(&cx).v, mat.v);
+        assert_eq!(child.get_view_transform(&cx).v, mat.v);
+    }
+
+    #[test]
+    fn point_mapping_round_trips_translation() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let draw_list = DrawList2d::new(&mut cx);
+        draw_list.set_view_transform_self_only(&mut cx, &translation(10.0, 20.0));
+
+        let world = draw_list.map_point_from_local(&cx, dvec2(5.0, 6.0));
+        assert_eq!(world, dvec2(15.0, 26.0));
+
+        let local = draw_list.map_point_to_local(&cx, world);
+        assert_eq!(local, dvec2(5.0, 6.0));
+    }
+
+    #[test]
+    fn debug_helpers_report_parent_children_and_transform() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawList2d::new(&mut cx);
+        let child_a = DrawList2d::new(&mut cx);
+        let child_b = DrawList2d::new(&mut cx);
+
+        cx.draw_lists[parent.id()].append_sub_list(cx.redraw_id, child_a.id());
+        cx.draw_lists[parent.id()].append_sub_list(cx.redraw_id, child_b.id());
+        cx.draw_lists[child_a.id()].codeflow_parent_id = Some(parent.id());
+        cx.draw_lists[child_b.id()].codeflow_parent_id = Some(parent.id());
+
+        let mat = Mat4f {
+            v: [
+                2.0, 0.0, 0.0, 0.0,
+                0.0, 3.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                4.0, 5.0, 0.0, 1.0,
+            ],
+        };
+        parent.set_view_transform_self_only(&mut cx, &mat);
+
+        assert_eq!(parent.get_view_transform(&cx).v, mat.v);
+        assert_eq!(child_a.debug_parent_draw_list_id(&cx), Some(parent.id()));
+        assert_eq!(child_b.debug_parent_draw_list_id(&cx), Some(parent.id()));
+        assert_eq!(parent.debug_child_draw_list_ids(&cx), vec![child_a.id(), child_b.id()]);
+
+        let world = parent.map_point_from_local(&cx, dvec2(1.0, 1.0));
+        let expected = mat.transform_vec4(vec4f(1.0, 1.0, 0.0, 1.0));
+        assert_eq!(world, dvec2(expected.x as f64, expected.y as f64));
     }
 }
