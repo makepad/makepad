@@ -22,6 +22,7 @@ script_mod! {
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
+        show_caption_bar: true
         pass +: { clear_color: theme.color_bg_app }
         flow: Down
         nav_control: NavControl {}
@@ -168,6 +169,8 @@ pub struct Window {
     mouse_cursor_size: Vec2d,
     #[live]
     demo: bool,
+    #[live]
+    show_caption_bar: bool,
     #[rust]
     demo_next_frame: NextFrame,
     #[live]
@@ -261,14 +264,17 @@ impl Window {
 
         match cx.os_type() {
             OsType::Windows => {
-                self.view(cx, ids!(caption_bar)).set_visible(cx, true);
+                self.view(cx, ids!(caption_bar))
+                    .set_visible(cx, self.show_caption_bar);
                 self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
             }
             OsType::Macos => {
-                self.view(cx, ids!(caption_bar)).set_visible(cx, true);
+                self.view(cx, ids!(caption_bar))
+                    .set_visible(cx, self.show_caption_bar);
             }
             OsType::LinuxWindow(_) => {
-                self.view(cx, ids!(caption_bar)).set_visible(cx, true);
+                self.view(cx, ids!(caption_bar))
+                    .set_visible(cx, self.show_caption_bar);
                 if linux_custom_window_chrome {
                     self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
                 }
@@ -390,9 +396,17 @@ impl Window {
             .handle
             .configure_window(cx, inner_size, position, is_fullscreen, title);
     }
+
+    pub fn configure_macos_window(&mut self, cx: &mut Cx, config: MacosWindowConfig) {
+        self.window.handle.configure_macos_window(cx, config);
+    }
 }
 
 impl WindowRef {
+    pub fn window_id(&self) -> Option<WindowId> {
+        self.borrow().map(|inner| inner.window.handle.window_id())
+    }
+
     pub fn get_inner_size(&self, cx: &Cx) -> Vec2d {
         if let Some(inner) = self.borrow() {
             inner.window.handle.get_inner_size(cx)
@@ -459,6 +473,12 @@ impl WindowRef {
             inner.configure_window(cx, inner_size, position, fullscreen, title);
         }
     }
+
+    pub fn configure_macos_window(&self, cx: &mut Cx, config: MacosWindowConfig) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.configure_macos_window(cx, config);
+        }
+    }
 }
 
 impl Widget for Window {
@@ -503,7 +523,8 @@ impl Widget for Window {
                                 if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
                                     self.view(cx, ids!(caption_bar)).set_visible(cx, false);
                                 } else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
-                                    self.view(cx, ids!(caption_bar)).set_visible(cx, true);
+                                    self.view(cx, ids!(caption_bar))
+                                        .set_visible(cx, self.show_caption_bar);
                                 };
                             }
                         }

@@ -807,8 +807,10 @@ pub enum NSWindowStyleMask {
     NSClosableWindowMask = 1 << 1,
     NSMiniaturizableWindowMask = 1 << 2,
     NSResizableWindowMask = 1 << 3,
+    NSUtilityWindowMask = 1 << 4,
 
     NSTexturedBackgroundWindowMask = 1 << 8,
+    NSNonactivatingPanelWindowMask = 1 << 7,
 
     NSUnifiedTitleAndToolbarWindowMask = 1 << 12,
 
@@ -816,6 +818,14 @@ pub enum NSWindowStyleMask {
 
     NSFullSizeContentViewWindowMask = 1 << 15,
 }
+
+pub const NSWindowCollectionBehaviorCanJoinAllSpaces: u64 = 1 << 0;
+pub const NSWindowCollectionBehaviorFullScreenAuxiliary: u64 = 1 << 8;
+
+pub const NSNormalWindowLevel: i64 = 0;
+pub const NSFloatingWindowLevel: i64 = 3;
+pub const NSStatusWindowLevel: i64 = 25;
+pub const NSPopUpMenuWindowLevel: i64 = 101;
 
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq)]

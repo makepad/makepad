@@ -25,6 +25,7 @@ workspace.members = [
     "examples/counter",
     "examples/camera",
     "examples/windows_blur",
+    "examples/floating_panel",
     "examples/xr",
 #    "examples/matrix",
     "compositor",

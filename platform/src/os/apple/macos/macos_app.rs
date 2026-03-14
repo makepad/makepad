@@ -64,6 +64,7 @@ pub struct CocoaTimer {
 
 pub struct MacosClasses {
     pub window: *const Class,
+    pub panel: *const Class,
     pub window_delegate: *const Class,
     pub menu_delegate: *const Class,
     pub app_delegate: *const Class,
@@ -81,6 +82,7 @@ impl MacosClasses {
         Self {
             timer_delegate: define_macos_timer_delegate(),
             window: define_macos_window_class(),
+            panel: define_macos_panel_class(),
             window_delegate: define_macos_window_delegate(),
             //post_delegate: define_cocoa_post_delegate(),
             menu_delegate: define_menu_delegate(),
