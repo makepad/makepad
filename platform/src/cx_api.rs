@@ -50,6 +50,10 @@ pub trait CxOsApi {
 
     fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace);
 
+    fn browser_update_url(&mut self, _url: &str, _replace: bool) {}
+
+    fn browser_history_go(&mut self, _delta: i32) {}
+
     fn seconds_since_app_start(&self) -> f64;
 
     fn default_window_size(&self) -> Vec2d {
@@ -497,6 +501,15 @@ impl Cx {
     pub fn quit(&mut self) {
         self.platform_ops.push(CxOsOp::Quit);
     }
+
+    pub fn browser_update_url(&mut self, url: &str, replace: bool) {
+        <Self as CxOsApi>::browser_update_url(self, url, replace);
+    }
+
+    pub fn browser_history_go(&mut self, delta: i32) {
+        <Self as CxOsApi>::browser_history_go(self, delta);
+    }
+
     // Determines whether to show your application in the dock when it runs. The default value is true.
     // You can remove the dock icon by setting this value to false.
     pub fn show_in_dock(&mut self, show: bool) {

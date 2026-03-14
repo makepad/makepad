@@ -522,9 +522,9 @@ pub fn cp_brotli(
 
 const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
-const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
+const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
 const WASM_RUSTFLAGS_SINGLE_THREADED: &str =
-    "-C codegen-units=1 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C opt-level=z";
+    "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C opt-level=z";
 
 fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, String> {
     let target_spec_dir = if threaded {
@@ -598,7 +598,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 
     let mut args_out = base_args;
 
-    // dont allow wasm builds to be debug builds
     let profile = get_profile_from_args(&args);
     for arg in args {
         args_out.push(arg.clone());
@@ -610,8 +609,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     } else {
         WASM_RUSTFLAGS_SINGLE_THREADED
     };
+    let mut env = vec![("RUSTFLAGS", rustflags), ("MAKEPAD", "lines")];
+    // `profile.small` with LTO enabled miscompiles single-threaded wasm in the script VM.
+    if profile == "small" && !config.threads {
+        env.push(("CARGO_PROFILE_SMALL_LTO", "off"));
+    }
+
     shell_env(
-        &[("RUSTFLAGS", rustflags), ("MAKEPAD", "lines")],
+        &env,
         &cwd,
         "rustup",
         &args_out_refs,
@@ -1794,16 +1799,10 @@ fn start_wasm_server(
                     if path == "/" {
                         path = "/index.html";
                     }
-                    let (cache_control, cache_extra) = if path.ends_with(".wasm") {
-                        (
-                            "no-store, must-revalidate",
-                            "Pragma: no-cache\r\n\
-                            Expires: 0\r\n\
-                            ",
-                        )
-                    } else {
-                        ("max-age=86400", "")
-                    };
+                    let cache_control = "no-store, must-revalidate";
+                    let cache_extra = "Pragma: no-cache\r\n\
+                        Expires: 0\r\n\
+                        ";
 
                     // alright wasm http server
                     if path == "/$watch" || path == "/favicon.ico" {
@@ -1832,6 +1831,29 @@ fn start_wasm_server(
                         continue;
                     }
 
+                    if path.contains("..") || path.contains('\\') {
+                        let body = b"Bad request".to_vec();
+                        let header = format!(
+                            "HTTP/1.1 400 Bad Request\r\n\
+                            Content-Type: text/plain\r\n\
+                            Content-Length: {}\r\n\
+                            Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = response_sender.send(HttpServerResponse { header, body });
+                        continue;
+                    }
+
+                    let is_spa_route = |request_path: &str| {
+                        if request_path.starts_with("/$") || request_path == "/favicon.ico" {
+                            return false;
+                        }
+                        let trimmed = request_path.trim_end_matches('/');
+                        let last_segment = trimmed.rsplit('/').next().unwrap_or("");
+                        !last_segment.is_empty() && !last_segment.contains('.')
+                    };
+
+                    let mut spa_fallback_to_index = false;
                     let mime_type = if path.ends_with(".html") {
                         "text/html"
                     } else if path.ends_with(".wasm") {
@@ -1864,6 +1886,10 @@ fn start_wasm_server(
                         "font/woff"
                     } else if path.ends_with(".woff2") {
                         "font/woff2"
+                    } else if is_spa_route(path) {
+                        spa_fallback_to_index = true;
+                        path = "/index.html";
+                        "text/html"
                     } else {
                         println!("Wasm webserver 404 (unknown mime/path): {}", headers.path);
                         let body = b"Not found".to_vec();
@@ -1878,17 +1904,8 @@ fn start_wasm_server(
                         continue;
                     };
 
-                    if path.contains("..") || path.contains('\\') {
-                        let body = b"Bad request".to_vec();
-                        let header = format!(
-                            "HTTP/1.1 400 Bad Request\r\n\
-                            Content-Type: text/plain\r\n\
-                            Content-Length: {}\r\n\
-                            Connection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = response_sender.send(HttpServerResponse { header, body });
-                        continue;
+                    if spa_fallback_to_index {
+                        println!("Wasm webserver SPA fallback: {} -> {}", headers.path, path);
                     }
                     let path = path.strip_prefix("/").unwrap();
 

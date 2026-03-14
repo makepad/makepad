@@ -47,6 +47,14 @@ export class WasmWebBrowser extends WasmBridge {
         this.dispatch_first_msg();
     }
 
+    emit_location_change() {
+        this.to_wasm.ToWasmLocationChange({
+            pathname: location.pathname + "",
+            search: location.search + "",
+            hash: location.hash + "",
+        });
+    }
+
     install_live_reload_bridge() {
         window.makepad_wasm_live_file_change = (file_name, content) => {
             this.to_wasm.ToWasmLiveFileChange({file_name, content});
@@ -89,6 +97,14 @@ export class WasmWebBrowser extends WasmBridge {
         this.bind_mouse_and_touch();
         this.bind_keyboard();
         this.bind_screen_resize();
+        window.addEventListener("popstate", () => {
+            this.emit_location_change();
+            this.do_wasm_pump();
+        });
+        window.addEventListener("hashchange", () => {
+            this.emit_location_change();
+            this.do_wasm_pump();
+        });
         this.focus_keyboard_input();
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
@@ -158,6 +174,33 @@ export class WasmWebBrowser extends WasmBridge {
             link.href = args.url;
             link.target = "_blank";
             link.click();
+        }
+    }
+
+    FromWasmBrowserUpdateUrl(args) {
+        const next = new URL(args.url || "", window.location.href);
+        const nextHref = next.pathname + next.search + next.hash;
+        const currentHref = location.pathname + location.search + location.hash;
+        if (nextHref === currentHref) {
+            return;
+        }
+        if (args.replace) {
+            window.history.replaceState(null, "", nextHref);
+        }
+        else {
+            window.history.pushState(null, "", nextHref);
+        }
+    }
+
+    FromWasmBrowserHistoryGo(args) {
+        if (args.delta === -1) {
+            window.history.back();
+        }
+        else if (args.delta === 1) {
+            window.history.forward();
+        }
+        else {
+            window.history.go(args.delta);
         }
     }
 
