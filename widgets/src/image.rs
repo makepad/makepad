@@ -22,9 +22,24 @@ script_mod! {
         image_scale: vec2(1.0, 1.0)
         image_pan: vec2(0.0, 0.0)
         async_load: 0.0
+        rotation: 0.0
+
+        rotate_2d_from_center: fn(coord: vec2, angle_deg: float) -> vec2 {
+            let angle = angle_deg * 3.141592653589793 / 180.0
+            let cos_a = cos(-angle)
+            let sin_a = sin(-angle)
+            let centered = coord - vec2(0.5, 0.5)
+            let rotated = vec2(
+                centered.x * cos_a - centered.y * sin_a
+                centered.x * sin_a + centered.y * cos_a
+            )
+            return rotated + vec2(0.5, 0.5)
+        }
 
         get_color_scale_pan: fn(scale: vec2, pan: vec2) {
-            return self.image_texture.sample_as_bgra(self.pos * scale + pan)
+            let uv = self.pos * scale + pan
+            let rotated_uv = self.rotate_2d_from_center(uv, self.rotation)
+            return self.image_texture.sample_as_bgra(rotated_uv)
         }
 
         get_color: fn() {
@@ -58,6 +73,8 @@ pub struct DrawImage {
     pub image_pan: Vec2f,
     #[live]
     async_load: f32,
+    #[live]
+    pub rotation: f32,
 }
 
 #[derive(Copy, Clone, Debug, Default, Script, ScriptHook)]
