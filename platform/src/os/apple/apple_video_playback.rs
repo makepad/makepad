@@ -1,5 +1,6 @@
 use {
     crate::{
+        PlaybackPrepared,
         event::video_playback::VideoSource,
         makepad_error_log::*,
         makepad_live_id::LiveId,

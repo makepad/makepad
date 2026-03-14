@@ -1,5 +1,6 @@
 use {
     crate::{
+        PlaybackPrepared,
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
@@ -641,14 +642,14 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         match player.check_prepared() {
-                            Some(Ok(PlaybackPrepared::new(
+                            Some(Ok(PlaybackPrepared {
                                 width,
                                 height,
-                                duration,
+                                duration_ms: duration,
                                 is_seekable,
                                 video_tracks,
                                 audio_tracks,
-                            ))) => {
+                            })) => {
                                 video_events.push(Event::VideoPlaybackPrepared(
                                     VideoPlaybackPreparedEvent {
                                         video_id: player.video_id,
@@ -1175,14 +1176,14 @@ impl Cx {
                         let camera_access = self.os.media.av_capture();
                         let mut preview =
                             MacosNativeCameraPreview::new(input_id, format_id, camera_access);
-                        if let Some(Ok(PlaybackPrepared::new(
+                        if let Some(Ok(PlaybackPrepared {
                             width,
                             height,
-                            duration,
+                            duration_ms: duration,
                             is_seekable,
                             video_tracks,
                             audio_tracks,
-                        ))) = preview.check_prepared()
+                        })) = preview.check_prepared()
                         {
                             self.call_event_handler(&Event::VideoPlaybackPrepared(
                                 VideoPlaybackPreparedEvent {
