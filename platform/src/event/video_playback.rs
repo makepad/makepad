@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::makepad_live_id::LiveId;
 use crate::texture::Texture;
 use crate::video::{VideoFormatId, VideoInputId};
-use crate::TextureId;
+use crate::{MediaPlaybackSessionId, TextureId, VideoFrameSessionId};
 
 #[derive(Clone, Debug)]
 pub struct VideoPlaybackPreparedEvent {
@@ -73,6 +73,14 @@ pub enum VideoSource {
     Network(String),
     Filesystem(String),
     Camera(VideoInputId, VideoFormatId),
+    PlaybackSession(MediaPlaybackSessionId),
+    Session(VideoFrameSessionId),
+}
+
+impl VideoSource {
+    pub fn is_session(&self) -> bool {
+        matches!(self, Self::PlaybackSession(..) | Self::Session(..))
+    }
 }
 
 #[derive(Clone, Debug)]

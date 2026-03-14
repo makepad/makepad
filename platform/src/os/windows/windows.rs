@@ -185,14 +185,14 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_id, player) in players.iter_mut() {
                         match player.check_prepared() {
-                            Some(Ok((
+                            Some(Ok(crate::media_plugin::PlaybackPrepared {
                                 width,
                                 height,
-                                duration,
+                                duration_ms: duration,
                                 is_seekable,
                                 video_tracks,
                                 audio_tracks,
-                            ))) => {
+                            })) => {
                                 video_events.push(Event::VideoPlaybackPrepared(
                                     VideoPlaybackPreparedEvent {
                                         video_id: player.video_id,
