@@ -212,8 +212,9 @@ pub use {
         video::*,
         web_socket::{WebSocket, WebSocketMessage},
         window::{
-            CxWindowPool, ScriptWindowHandle, WindowBackdrop, WindowHandle, WindowIcon,
-            WindowIconBuffer, WindowId, WindowVisuals,
+            CxWindowPool, MacosWindowChrome, MacosWindowConfig, MacosWindowKind, MacosWindowLevel,
+            ScriptWindowHandle, WindowBackdrop, WindowHandle, WindowIcon, WindowIconBuffer,
+            WindowId, WindowVisuals,
         },
     },
     app_main::*,
