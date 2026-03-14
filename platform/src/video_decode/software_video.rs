@@ -1,20 +1,20 @@
 use crate::{
     event::video_playback::VideoSource,
     makepad_live_id::LiveId,
-    media_plugin::{media_plugin, MediaSoftwareVideoPlayer},
+    media_plugin::{media_plugin, MediaPlaybackSession, PlaybackPrepared},
     texture::TextureId,
     video::VideoDecodeError,
     video_decode::yuv::YuvPlaneData,
 };
 
-pub struct SoftwareVideoPlayer {
+pub struct PlaybackSessionHandle {
     pub video_id: LiveId,
     pub texture_id: TextureId,
-    inner: Option<Box<dyn MediaSoftwareVideoPlayer>>,
+    inner: Option<Box<dyn MediaPlaybackSession>>,
     failed: Option<String>,
 }
 
-impl SoftwareVideoPlayer {
+impl PlaybackSessionHandle {
     pub fn new(
         video_id: LiveId,
         texture_id: TextureId,
@@ -23,15 +23,19 @@ impl SoftwareVideoPlayer {
         is_looping: bool,
     ) -> Self {
         let (inner, failed) = match media_plugin() {
-            Some(plugin) => match plugin
-                .create_software_video_player(video_id, texture_id, source, autoplay, is_looping)
-            {
+            Some(plugin) => match plugin.create_playback_session(
+                video_id,
+                texture_id,
+                source,
+                autoplay,
+                is_looping,
+            ) {
                 Ok(player) => (Some(player), None),
-                Err(err) => (None, Some(format!("software video unavailable: {:?}", err))),
+                Err(err) => (None, Some(format!("playback session unavailable: {:?}", err))),
             },
             None => (
                 None,
-                Some("software video unavailable: no media plugin installed".to_string()),
+                Some("playback session unavailable: no media plugin installed".to_string()),
             ),
         };
 
@@ -45,7 +49,7 @@ impl SoftwareVideoPlayer {
 
     pub fn check_prepared(
         &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    ) -> Option<Result<PlaybackPrepared, String>> {
         if let Some(inner) = &mut self.inner {
             return inner.check_prepared();
         }

@@ -10,9 +10,16 @@ use {
     std::sync::{Arc, Mutex},
 };
 
+fn pulse_audio_enabled() -> bool {
+    std::env::var_os("MAKEPAD_DISABLE_PULSE_AUDIO").is_none()
+}
+
 impl Cx {
     pub(crate) fn handle_media_signals(&mut self) {
-        if self.os.media.audio_change.check_and_clear() {
+        let pulse_enabled = pulse_audio_enabled();
+        let audio_first = self.os.media.alsa_audio.is_none()
+            || (pulse_enabled && self.os.media.pulse_audio.is_none());
+        if audio_first || self.os.media.audio_change.check_and_clear() {
             // alright so. if we 'failed' opening a device here
             // what do we do. we could flag our device as 'failed' on the desc
             let mut descs = self
@@ -22,14 +29,16 @@ impl Cx {
                 .lock()
                 .unwrap()
                 .get_updated_descs();
-            let descs2 = self
-                .os
-                .media
-                .pulse_audio()
-                .lock()
-                .unwrap()
-                .get_updated_descs();
-            descs.extend(descs2);
+            if pulse_enabled {
+                let descs2 = self
+                    .os
+                    .media
+                    .pulse_audio()
+                    .lock()
+                    .unwrap()
+                    .get_updated_descs();
+                descs.extend(descs2);
+            }
             self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent { descs }));
         }
         if self.os.media.alsa_midi_change.check_and_clear() {
@@ -143,12 +152,14 @@ impl CxMediaApi for Cx {
             .lock()
             .unwrap()
             .use_audio_inputs(devices);
-        self.os
-            .media
-            .pulse_audio()
-            .lock()
-            .unwrap()
-            .use_audio_inputs(devices);
+        if pulse_audio_enabled() {
+            self.os
+                .media
+                .pulse_audio()
+                .lock()
+                .unwrap()
+                .use_audio_inputs(devices);
+        }
     }
 
     fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
@@ -158,12 +169,14 @@ impl CxMediaApi for Cx {
             .lock()
             .unwrap()
             .use_audio_outputs(devices);
-        self.os
-            .media
-            .pulse_audio()
-            .lock()
-            .unwrap()
-            .use_audio_outputs(devices);
+        if pulse_audio_enabled() {
+            self.os
+                .media
+                .pulse_audio()
+                .lock()
+                .unwrap()
+                .use_audio_outputs(devices);
+        }
     }
 
     fn audio_output_box(&mut self, index: usize, f: AudioOutputFn) {
@@ -202,10 +215,6 @@ impl CxMediaApi for Cx {
         config: VideoEncoderConfig,
         f: VideoOutputFn,
     ) -> Result<(), VideoEncodeError> {
-        if config.codec != VideoCodec::Av1 {
-            return Err(VideoEncodeError::UnsupportedCodec);
-        }
-
         match config.source {
             VideoEncodeSource::Camera { .. } => {
                 let camera = self.os.media.v4l2_camera();

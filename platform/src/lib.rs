@@ -61,6 +61,8 @@ pub mod file_dialogs;
 mod media_api;
 mod media_host;
 mod media_plugin;
+mod playback_session;
+mod video_session;
 
 pub mod ui_runner;
 
@@ -181,9 +183,21 @@ pub use {
         media_host::{MediaControlBridge, MediaEventBridge, MediaTextureBridge, MediaTextureInfo},
         media_plugin::{
             media_plugin, media_video_capabilities, merge_video_capabilities,
-            register_media_plugin, FrameDecoderCodec, FrameDecoderConfig, MediaPlugin,
-            MediaSoftwareVideoPlayer, MediaVideoEncoder, MseAppendResult, MseDecodedFrame,
-            MsePlayer, VideoFrameDecoder,
+            register_media_plugin, FrameDecoderCodec, FrameDecoderConfig,
+            MediaPlaybackSession, MediaPlugin, MediaVideoEncoder, MseAudioTrackInfo,
+            MseDecodedAudioFrame, MseDecodedFrame, MseEngineOutput, MseInitMetadata,
+            MsePlaybackEngine, MseVideoTrackInfo, PlaybackPrepared, VideoFrameDecoder,
+        },
+        playback_session::{
+            mix_active_media_audio, register_active_media_audio,
+            register_media_playback_session, take_registered_media_playback_session,
+            unregister_active_media_audio, unregister_media_playback_session,
+            MediaPlaybackSessionId,
+        },
+        video_session::{
+            register_video_frame_session, take_registered_video_frame_session,
+            unregister_video_frame_session, VideoFrameSession, VideoFrameSessionId,
+            VideoSessionState,
         },
         midi::*,
         os::*,

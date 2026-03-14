@@ -31,6 +31,7 @@ impl YuvLayout {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct YuvPlaneData {
     pub y: Vec<u8>,
     pub u: Vec<u8>,

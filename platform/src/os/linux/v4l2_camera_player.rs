@@ -6,6 +6,7 @@ use {
     super::v4l2_camera::V4l2CameraAccess,
     crate::{
         makepad_live_id::LiveId,
+        media_plugin::PlaybackPrepared,
         texture::{CxTexturePool, TextureId},
         video::*,
     },
@@ -84,7 +85,7 @@ impl V4l2CameraPlayer {
 
     pub fn check_prepared(
         &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    ) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
@@ -95,7 +96,7 @@ impl V4l2CameraPlayer {
         self.prepared = true;
         self.prepare_notified = true;
         pool.publish_latest(frame);
-        Some(Ok((
+        Some(Ok(PlaybackPrepared::new(
             self.width,
             self.height,
             0,

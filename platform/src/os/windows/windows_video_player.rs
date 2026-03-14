@@ -6,7 +6,7 @@ use {
         texture::{
             CxTexturePool, TextureAlloc, TextureCategory, TextureFormat, TextureId, TexturePixel,
         },
-        video_decode::software_video::SoftwareVideoPlayer,
+        video_decode::software_video::PlaybackSessionHandle,
         video_decode::yuv::YuvPlaneData,
         windows::{
             core::Interface,
@@ -38,7 +38,7 @@ pub struct WindowsUnifiedVideoPlayer {
 
 enum WindowsPlayerMode {
     Native(WindowsVideoPlayer),
-    Software(SoftwareVideoPlayer),
+    Software(PlaybackSessionHandle),
 }
 
 impl WindowsUnifiedVideoPlayer {
@@ -56,7 +56,7 @@ impl WindowsUnifiedVideoPlayer {
         let force_software = std::env::var_os("MAKEPAD_FORCE_SOFTWARE_VIDEO").is_some();
         let mode = if force_software {
             crate::log!("VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder");
-            WindowsPlayerMode::Software(SoftwareVideoPlayer::new(
+            WindowsPlayerMode::Software(PlaybackSessionHandle::new(
                 video_id,
                 texture_id,
                 source.clone(),
@@ -74,7 +74,7 @@ impl WindowsUnifiedVideoPlayer {
             WindowsPlayerMode::Native(native)
         } else {
             crate::log!("VIDEO: Windows native playback unavailable, using software video decoder");
-            WindowsPlayerMode::Software(SoftwareVideoPlayer::new(
+            WindowsPlayerMode::Software(PlaybackSessionHandle::new(
                 video_id,
                 texture_id,
                 source.clone(),
@@ -103,7 +103,7 @@ impl WindowsUnifiedVideoPlayer {
             "VIDEO: Windows native playback failed, falling back to software video decoder: {}",
             reason
         );
-        self.mode = WindowsPlayerMode::Software(SoftwareVideoPlayer::new(
+        self.mode = WindowsPlayerMode::Software(PlaybackSessionHandle::new(
             self.video_id,
             self.texture_id,
             self.source.clone(),
@@ -114,7 +114,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn check_prepared(
         &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    ) -> Option<Result<PlaybackPrepared, String>> {
         match &mut self.mode {
             WindowsPlayerMode::Native(player) => match player.check_prepared() {
                 Some(Err(err)) => {

@@ -1509,6 +1509,10 @@ pub unsafe fn to_java_prepare_video_playback(
             crate::error!("VIDEO: Camera source not supported on Android");
             return;
         }
+        VideoSource::PlaybackSession(..) | VideoSource::Session(..) => {
+            crate::error!("VIDEO: session sources are handled by the software video player");
+            return;
+        }
     };
 
     ndk_utils::call_void_method!(

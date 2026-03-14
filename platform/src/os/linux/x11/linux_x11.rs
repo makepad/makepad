@@ -324,14 +324,14 @@ impl X11Cx {
                         let mut video_events = Vec::new();
                         for (_video_id, player) in players.iter_mut() {
                             match player.check_prepared() {
-                                Some(Ok((
+                                Some(Ok(crate::media_plugin::PlaybackPrepared {
                                     width,
                                     height,
-                                    duration,
+                                    duration_ms: duration,
                                     is_seekable,
                                     video_tracks,
                                     audio_tracks,
-                                ))) => {
+                                })) => {
                                     video_events.push(Event::VideoPlaybackPrepared(
                                         VideoPlaybackPreparedEvent {
                                             video_id: player.video_id(),
@@ -788,12 +788,15 @@ impl X11Cx {
                         continue;
                     }
                     // Try GStreamer first, fall back to software rav1d
-                    let mut use_software =
+                    let force_software_env =
                         std::env::var_os("MAKEPAD_FORCE_SOFTWARE_VIDEO").is_some();
-                    if use_software {
+                    let mut use_software = force_software_env || source.is_session();
+                    if force_software_env {
                         crate::log!(
                             "VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder"
                         );
+                    } else if source.is_session() {
+                        crate::log!("VIDEO: session source uses software video decoder");
                     }
                     if cx.os.gstreamer.is_none() {
                         match LibGStreamer::try_load() {
@@ -856,7 +859,7 @@ impl X11Cx {
                             cx.textures.alloc(TextureFormat::VideoYuvPlane),
                             cx.textures.alloc(TextureFormat::VideoYuvPlane),
                         );
-                        let player = crate::video_decode::software_video::SoftwareVideoPlayer::new(
+                        let player = crate::video_decode::software_video::PlaybackSessionHandle::new(
                             video_id,
                             texture_id,
                             source,

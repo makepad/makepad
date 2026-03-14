@@ -50,11 +50,21 @@ impl V4l2CaptureSession {
             let path_cstr = std::ffi::CString::new(device_path).ok()?;
             let fd = libc_sys::open(path_cstr.as_ptr() as *const _, libc_sys::O_RDWR);
             if fd < 0 {
-                crate::log!("V4L2: failed to open {}", device_path);
+                crate::log!("V4L2: failed to open {}: {}", device_path, std::io::Error::last_os_error());
                 return None;
             }
 
-            // Set format
+            // Negotiate format: query device capabilities and find a compatible setting
+            let format = match Self::negotiate_format(fd, &format) {
+                Some(f) => f,
+                None => {
+                    crate::log!("V4L2: no compatible format for {} (requested {}x{} {:?})", device_path, format.width, format.height, format.pixel_format);
+                    libc_sys::close(fd);
+                    return None;
+                }
+            };
+
+            // Set the negotiated format
             let mut fmt: v4l2_format = std::mem::zeroed();
             fmt.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             fmt.fmt.pix.width = format.width as u32;
@@ -62,10 +72,19 @@ impl V4l2CaptureSession {
             fmt.fmt.pix.pixelformat = video_pixel_format_to_fourcc(format.pixel_format);
             fmt.fmt.pix.field = V4L2_FIELD_ANY;
             if ioctl(fd, VIDIOC_S_FMT, &mut fmt as *mut _ as *mut c_void) < 0 {
-                crate::log!("V4L2: VIDIOC_S_FMT failed for {}", device_path);
+                crate::log!("V4L2: VIDIOC_S_FMT failed for {} ({}x{} {:?}): {}", device_path, format.width, format.height, format.pixel_format, std::io::Error::last_os_error());
                 libc_sys::close(fd);
                 return None;
             }
+
+            // Read back what the driver actually accepted
+            let format = VideoFormat {
+                format_id: format.format_id,
+                width: fmt.fmt.pix.width as usize,
+                height: fmt.fmt.pix.height as usize,
+                pixel_format: fourcc_to_video_pixel_format(fmt.fmt.pix.pixelformat),
+                frame_rate: format.frame_rate,
+            };
 
             // Set frame rate if specified
             if let Some(fps) = format.frame_rate {
@@ -86,7 +105,7 @@ impl V4l2CaptureSession {
             req.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             req.memory = V4L2_MEMORY_MMAP;
             if ioctl(fd, VIDIOC_REQBUFS, &mut req as *mut _ as *mut c_void) < 0 {
-                crate::log!("V4L2: VIDIOC_REQBUFS failed for {}", device_path);
+                crate::log!("V4L2: VIDIOC_REQBUFS failed for {}: {}", device_path, std::io::Error::last_os_error());
                 libc_sys::close(fd);
                 return None;
             }
@@ -101,7 +120,7 @@ impl V4l2CaptureSession {
                 buf.memory = V4L2_MEMORY_MMAP;
                 buf.index = i as u32;
                 if ioctl(fd, VIDIOC_QUERYBUF, &mut buf as *mut _ as *mut c_void) < 0 {
-                    crate::log!("V4L2: VIDIOC_QUERYBUF failed for buffer {}", i);
+                    crate::log!("V4L2: VIDIOC_QUERYBUF failed for buffer {}: {}", i, std::io::Error::last_os_error());
                     for b in &buffers {
                         libc_sys::munmap(b.ptr as *mut c_void, b.length);
                     }
@@ -118,7 +137,7 @@ impl V4l2CaptureSession {
                     buf.m.offset as libc_sys::off_t,
                 );
                 if ptr == libc_sys::MAP_FAILED {
-                    crate::log!("V4L2: mmap failed for buffer {}", i);
+                    crate::log!("V4L2: mmap failed for buffer {}: {}", i, std::io::Error::last_os_error());
                     for b in &buffers {
                         libc_sys::munmap(b.ptr as *mut c_void, b.length);
                     }
@@ -146,7 +165,7 @@ impl V4l2CaptureSession {
             // Stream on
             let mut buf_type: c_int = V4L2_BUF_TYPE_VIDEO_CAPTURE as c_int;
             if ioctl(fd, VIDIOC_STREAMON, &mut buf_type as *mut _ as *mut c_void) < 0 {
-                crate::log!("V4L2: VIDIOC_STREAMON failed for {}", device_path);
+                crate::log!("V4L2: VIDIOC_STREAMON failed for {}: {}", device_path, std::io::Error::last_os_error());
                 for b in &buffers {
                     libc_sys::munmap(b.ptr as *mut c_void, b.length);
                 }
@@ -180,6 +199,133 @@ impl V4l2CaptureSession {
                 buffers,
             })
         }
+    }
+
+    /// Query device for supported formats/resolutions and pick the best match.
+    /// Tries the requested format first, then falls back to device-supported alternatives.
+    unsafe fn negotiate_format(fd: c_int, requested: &VideoFormat) -> Option<VideoFormat> {
+        // Enumerate all supported (pixelformat, width, height) tuples
+        let mut supported: Vec<(u32, u32, u32)> = Vec::new();
+        let mut fmt_index = 0u32;
+        loop {
+            let mut fmtdesc: v4l2_fmtdesc = std::mem::zeroed();
+            fmtdesc.index = fmt_index;
+            fmtdesc.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if ioctl(fd, VIDIOC_ENUM_FMT, &mut fmtdesc as *mut _ as *mut c_void) < 0 {
+                break;
+            }
+            let pixfmt = fmtdesc.pixelformat;
+
+            let mut size_index = 0u32;
+            loop {
+                let mut frmsize: v4l2_frmsizeenum = std::mem::zeroed();
+                frmsize.index = size_index;
+                frmsize.pixel_format = pixfmt;
+                if ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &mut frmsize as *mut _ as *mut c_void) < 0 {
+                    break;
+                }
+                if frmsize.type_ == V4L2_FRMSIZE_TYPE_DISCRETE {
+                    let w = frmsize.u.discrete.width;
+                    let h = frmsize.u.discrete.height;
+                    supported.push((pixfmt, w, h));
+                }
+                size_index += 1;
+            }
+
+            // Device reports format but no discrete sizes: accept any resolution
+            if size_index == 0 {
+                supported.push((pixfmt, 0, 0));
+            }
+
+            fmt_index += 1;
+        }
+
+        // If enumeration returned nothing, let the driver decide via G_FMT
+        if supported.is_empty() {
+            crate::log!("V4L2: no formats enumerated, trying G_FMT fallback");
+            let mut fmt: v4l2_format = std::mem::zeroed();
+            fmt.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if ioctl(fd, VIDIOC_G_FMT, &mut fmt as *mut _ as *mut c_void) >= 0 {
+                let pf = fourcc_to_video_pixel_format(fmt.fmt.pix.pixelformat);
+                if !matches!(pf, VideoPixelFormat::Unsupported(_)) {
+                    return Some(VideoFormat {
+                        format_id: requested.format_id,
+                        width: fmt.fmt.pix.width as usize,
+                        height: fmt.fmt.pix.height as usize,
+                        pixel_format: pf,
+                        frame_rate: requested.frame_rate,
+                    });
+                }
+            }
+            return None;
+        }
+
+        let req_fourcc = video_pixel_format_to_fourcc(requested.pixel_format);
+        let req_w = requested.width as u32;
+        let req_h = requested.height as u32;
+
+        // 1. Exact match (format + resolution)
+        if supported.iter().any(|&(f, w, h)| f == req_fourcc && (w == req_w && h == req_h || w == 0)) {
+            return Some(*requested);
+        }
+
+        // 2. Same pixel format, different resolution — pick closest
+        if let Some(fmt) = Self::pick_closest_resolution(&supported, req_fourcc, req_w, req_h) {
+            return Some(VideoFormat {
+                format_id: requested.format_id,
+                width: fmt.1 as usize,
+                height: fmt.2 as usize,
+                pixel_format: requested.pixel_format,
+                frame_rate: requested.frame_rate,
+            });
+        }
+
+        // 3. Different pixel format — prefer YUYV, MJPEG, NV12, YUV420 in order
+        let preferred = [V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_YUV420];
+        for &pf in &preferred {
+            if let Some(fmt) = Self::pick_closest_resolution(&supported, pf, req_w, req_h) {
+                return Some(VideoFormat {
+                    format_id: requested.format_id,
+                    width: fmt.1 as usize,
+                    height: fmt.2 as usize,
+                    pixel_format: fourcc_to_video_pixel_format(pf),
+                    frame_rate: requested.frame_rate,
+                });
+            }
+        }
+
+        // 4. Take whatever the device offers first
+        let (pf, w, h) = supported[0];
+        let pixel_format = fourcc_to_video_pixel_format(pf);
+        let (w, h) = if w == 0 { (req_w, req_h) } else { (w, h) };
+        Some(VideoFormat {
+            format_id: requested.format_id,
+            width: w as usize,
+            height: h as usize,
+            pixel_format,
+            frame_rate: requested.frame_rate,
+        })
+    }
+
+    /// From entries matching `pixfmt`, return the one closest to (target_w, target_h).
+    fn pick_closest_resolution(
+        supported: &[(u32, u32, u32)],
+        pixfmt: u32,
+        target_w: u32,
+        target_h: u32,
+    ) -> Option<(u32, u32, u32)> {
+        supported
+            .iter()
+            .filter(|&&(f, _, _)| f == pixfmt)
+            .min_by_key(|&&(_, w, h)| {
+                if w == 0 { return 0i64; } // wildcard size — perfect match
+                let dw = w as i64 - target_w as i64;
+                let dh = h as i64 - target_h as i64;
+                dw * dw + dh * dh
+            })
+            .map(|&entry| {
+                if entry.1 == 0 { (entry.0, target_w, target_h) } else { entry }
+            })
     }
 
     fn capture_loop(
@@ -445,7 +591,7 @@ impl V4l2CameraAccess {
                             format_id: *format_id,
                         };
                         let output_cb = self.video_output_cb[index].clone();
-                        *self.video_encoder[index].lock().unwrap() = VideoEncoder::start(
+                        let encoder = VideoEncoder::start(
                             config,
                             Box::new(move |packet| {
                                 if let Some(cb) = &mut *output_cb.lock().unwrap() {
@@ -453,6 +599,10 @@ impl V4l2CameraAccess {
                                 }
                             }),
                         );
+                        if encoder.is_none() {
+                            crate::error!("linux camera video encoder unavailable for slot {}", index);
+                        }
+                        *self.video_encoder[index].lock().unwrap() = encoder;
                     }
 
                     if let Some(session) = V4l2CaptureSession::start(

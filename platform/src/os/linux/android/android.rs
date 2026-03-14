@@ -67,7 +67,7 @@ use {
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
         video::{VideoEncodeError, MAX_VIDEO_DEVICE_INDEX},
-        video_decode::software_video::SoftwareVideoPlayer,
+        video_decode::software_video::PlaybackSessionHandle,
         web_socket::WebSocketMessage,
         //web_socket::WebSocket,
         window::CxWindowPool,
@@ -642,7 +642,7 @@ impl Cx {
                             error
                         );
                         let asp = AndroidSoftwarePlayer {
-                            player: SoftwareVideoPlayer::new(
+                            player: PlaybackSessionHandle::new(
                                 live_id,
                                 config.texture_id,
                                 config.source,
@@ -1013,7 +1013,14 @@ impl Cx {
 
         for (_video_id, player) in players.iter_mut() {
             match player.check_prepared() {
-                Some(Ok((width, height, duration, is_seekable, video_tracks, audio_tracks))) => {
+                Some(Ok(crate::media_plugin::PlaybackPrepared {
+                    width,
+                    height,
+                    duration_ms: duration,
+                    is_seekable,
+                    video_tracks,
+                    audio_tracks,
+                })) => {
                     events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
                         video_id: player.video_id,
                         video_width: width,
@@ -1066,7 +1073,14 @@ impl Cx {
 
         for (_video_id, asp) in players.iter_mut() {
             match asp.player.check_prepared() {
-                Some(Ok((width, height, duration, is_seekable, video_tracks, audio_tracks))) => {
+                Some(Ok(crate::media_plugin::PlaybackPrepared {
+                    width,
+                    height,
+                    duration_ms: duration,
+                    is_seekable,
+                    video_tracks,
+                    audio_tracks,
+                })) => {
                     events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
                         video_id: asp.player.video_id,
                         video_width: width,
@@ -1802,15 +1816,20 @@ impl Cx {
                         },
                     );
 
-                    let force_software = force_software_video();
+                    let force_software_env = force_software_video();
+                    let force_software = force_software_env || source.is_session();
                     if force_software {
-                        crate::log!(
-                            "VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder"
-                        );
+                        if force_software_env {
+                            crate::log!(
+                                "VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder"
+                            );
+                        } else if source.is_session() {
+                            crate::log!("VIDEO: session source uses software video decoder");
+                        }
                         self.os.software_video_players.insert(
                             video_id,
                             AndroidSoftwarePlayer {
-                                player: SoftwareVideoPlayer::new(
+                                player: PlaybackSessionHandle::new(
                                     video_id,
                                     texture_id,
                                     source,
@@ -2271,7 +2290,7 @@ pub struct CxAndroidDisplay {
 }
 
 pub(crate) struct AndroidSoftwarePlayer {
-    pub player: SoftwareVideoPlayer,
+    pub player: PlaybackSessionHandle,
     pub tex_y_id: TextureId,
     pub tex_u_id: TextureId,
     pub tex_v_id: TextureId,

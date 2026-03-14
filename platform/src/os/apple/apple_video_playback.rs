@@ -161,6 +161,13 @@ impl AppleVideoPlayer {
                 let _: () = msg_send![ns_string, release];
                 (url, None)
             }
+            VideoSource::PlaybackSession(..) | VideoSource::Session(..) => {
+                error!("VIDEO: session sources are handled by the software video player");
+                let ns_string = Self::to_nsstring("about:blank");
+                let url: ObjcId = msg_send![class!(NSURL), URLWithString: ns_string];
+                let _: () = msg_send![ns_string, release];
+                (url, None)
+            }
         }
     }
 
@@ -201,7 +208,7 @@ impl AppleVideoPlayer {
     /// Returns `Ok(...)` with metadata when ready, `Err(msg)` on failure, `None` if still loading.
     pub fn check_prepared(
         &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    ) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
@@ -266,7 +273,7 @@ impl AppleVideoPlayer {
                     vec![]
                 };
 
-                return Some(Ok((
+                return Some(Ok(PlaybackPrepared::new(
                     width,
                     height,
                     duration_ms,
