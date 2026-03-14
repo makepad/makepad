@@ -8,8 +8,9 @@ use {
     super::v4l2_camera_player::V4l2CameraPlayer,
     crate::{
         makepad_live_id::LiveId,
+        media_plugin::PlaybackPrepared,
         texture::{CxTexturePool, Texture},
-        video_decode::software_video::SoftwareVideoPlayer,
+        video_decode::software_video::PlaybackSessionHandle,
     },
 };
 
@@ -42,7 +43,7 @@ pub enum LinuxVideoPlayer {
         yuv: Option<YuvTextureSet>,
     },
     Software {
-        player: SoftwareVideoPlayer,
+        player: PlaybackSessionHandle,
         yuv: YuvTextureSet,
         yuv_matrix: f32,
     },
@@ -60,7 +61,7 @@ impl LinuxVideoPlayer {
 
     pub fn check_prepared(
         &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    ) -> Option<Result<PlaybackPrepared, String>> {
         match self {
             LinuxVideoPlayer::GStreamer { player: p, .. } => p.check_prepared(),
             LinuxVideoPlayer::Software { player: p, .. } => p.check_prepared(),

@@ -91,14 +91,14 @@ impl AndroidCameraPlayer {
 
     pub fn check_prepared(
         &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    ) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
 
         if self.native_preview && self.prepared {
             self.prepare_notified = true;
-            return Some(Ok((
+            return Some(Ok(PlaybackPrepared::new(
                 self.width,
                 self.height,
                 0,
@@ -121,7 +121,7 @@ impl AndroidCameraPlayer {
         self.height = height;
         self.prepared = true;
         self.prepare_notified = true;
-        Some(Ok((
+        Some(Ok(PlaybackPrepared::new(
             self.width,
             self.height,
             0,

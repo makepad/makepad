@@ -5,6 +5,10 @@ use crate::{
     makepad_draw::*,
     makepad_platform::event::video_playback::*,
     makepad_platform::video::{VideoFormatId, VideoInputId},
+    makepad_platform::{
+        VideoFrameSession, VideoFrameSessionId, register_video_frame_session,
+        unregister_video_frame_session,
+    },
     widget::*,
 };
 use std::rc::Rc;
@@ -400,6 +404,10 @@ pub struct Video {
     #[rust]
     in_memory_source: Option<Rc<Vec<u8>>>,
     #[rust]
+    session_source_id: Option<VideoFrameSessionId>,
+    #[rust]
+    has_session_source: bool,
+    #[rust]
     video_texture: Option<Texture>,
     #[rust]
     video_texture_handle: Option<u32>,
@@ -589,6 +597,7 @@ impl VideoRef {
     ) {
         if let Some(mut inner) = self.borrow_mut() {
             if inner.playback_state == PlaybackState::Unprepared {
+                inner.clear_session_source_registration();
                 inner.source = VideoDataSource::Camera {
                     input_id: input_id.0,
                     format_id: format_id.0,
@@ -604,6 +613,26 @@ impl VideoRef {
     pub fn set_source_in_memory(&self, data: Rc<Vec<u8>>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_source_in_memory(data);
+        }
+    }
+
+    /// Sets an app-owned decoded-frame session as the source for this video.
+    ///
+    /// The session is consumed by the next playback preparation and is rendered
+    /// through the normal widget YUV path.
+    pub fn set_source_session<S>(&self, session: S)
+    where
+        S: VideoFrameSession + 'static,
+    {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_source_session(Box::new(session));
+        }
+    }
+
+    /// Sets an app-owned decoded-frame session as the source for this video.
+    pub fn set_boxed_source_session(&self, session: Box<dyn VideoFrameSession>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_source_session(session);
         }
     }
 
@@ -852,6 +881,12 @@ impl Widget for Video {
     }
 }
 
+impl Drop for Video {
+    fn drop(&mut self) {
+        self.clear_session_source_registration();
+    }
+}
+
 impl ImageCacheImpl for Video {
     fn get_texture(&self, _id: usize) -> &Option<Texture> {
         &self.thumbnail_texture
@@ -919,7 +954,17 @@ impl Video {
         cx.update_camera_native_preview(self.id, area, visible);
     }
 
+    fn clear_session_source_registration(&mut self) {
+        if let Some(session_id) = self.session_source_id.take() {
+            let _ = unregister_video_frame_session(session_id);
+        }
+        self.has_session_source = false;
+    }
+
     fn infer_source_mode(&self) -> VideoSourceMode {
+        if self.has_session_source {
+            return VideoSourceMode::YuvPlanes;
+        }
         if self.in_memory_source.is_some() {
             return VideoSourceMode::ExternalTexture;
         }
@@ -1001,7 +1046,15 @@ impl Video {
                 return;
             }
 
-            let source = if let Some(data) = self.in_memory_source.clone() {
+            let source = if self.has_session_source {
+                match self.session_source_id.take() {
+                    Some(session_id) => VideoSource::Session(session_id),
+                    None => {
+                        error!("Attempted to prepare playback: session source already consumed");
+                        return;
+                    }
+                }
+            } else if let Some(data) = self.in_memory_source.clone() {
                 VideoSource::InMemory(data)
             } else {
                 match &self.source {
@@ -1347,6 +1400,7 @@ impl Video {
 
     fn set_source(&mut self, source: VideoDataSource) {
         if self.playback_state == PlaybackState::Unprepared {
+            self.clear_session_source_registration();
             self.in_memory_source = None;
             self.source_mode = match source {
                 VideoDataSource::Camera { .. } => VideoSourceMode::YuvPlanes,
@@ -1375,8 +1429,24 @@ impl Video {
 
     fn set_source_in_memory(&mut self, data: Rc<Vec<u8>>) {
         if self.playback_state == PlaybackState::Unprepared {
+            self.clear_session_source_registration();
             self.source_mode = VideoSourceMode::ExternalTexture;
             self.in_memory_source = Some(data);
+        } else {
+            error!(
+                "Attempted to set source while player {} state is: {:?}",
+                self.id.0, self.playback_state
+            );
+        }
+    }
+
+    fn set_source_session(&mut self, session: Box<dyn VideoFrameSession>) {
+        if self.playback_state == PlaybackState::Unprepared {
+            self.clear_session_source_registration();
+            self.in_memory_source = None;
+            self.session_source_id = Some(register_video_frame_session(session));
+            self.has_session_source = true;
+            self.source_mode = VideoSourceMode::YuvPlanes;
         } else {
             error!(
                 "Attempted to set source while player {} state is: {:?}",
@@ -1798,7 +1868,9 @@ impl Video {
     }
 }
 
-/// The source of the video data.
+/// The script-facing source of the video data.
+///
+/// For app-owned live sessions, use [`VideoRef::set_source_session`].
 ///
 /// [`Dependency`]: A resource handle (loaded with `crate_resource("self:path/to/video.mp4")`).
 ///

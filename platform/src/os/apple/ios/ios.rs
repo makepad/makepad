@@ -157,7 +157,7 @@ impl IosCameraPlayer {
 
     fn check_prepared(
         &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    ) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
@@ -167,7 +167,7 @@ impl IosCameraPlayer {
             self.height = frame.height as u32;
             self.prepared = true;
             self.prepare_notified = true;
-            return Some(Ok((
+            return Some(Ok(PlaybackPrepared::new(
                 self.width,
                 self.height,
                 0,
@@ -190,7 +190,7 @@ impl IosCameraPlayer {
         self.prepared = true;
         self.prepare_notified = true;
 
-        Some(Ok((
+        Some(Ok(PlaybackPrepared::new(
             self.width,
             self.height,
             0,
@@ -324,12 +324,12 @@ impl IosNativeCameraPreview {
 
     fn check_prepared(
         &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    ) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
         self.prepare_notified = true;
-        Some(Ok((
+        Some(Ok(PlaybackPrepared::new(
             self.width,
             self.height,
             0,
@@ -582,7 +582,7 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         match player.check_prepared() {
-                            Some(Ok((
+                            Some(Ok(PlaybackPrepared::new(
                                 width,
                                 height,
                                 duration,
@@ -654,7 +654,7 @@ impl Cx {
                     let mut camera_events = Vec::new();
                     for (_video_id, player) in self.os.camera_players.iter_mut() {
                         match player.check_prepared() {
-                            Some(Ok((
+                            Some(Ok(PlaybackPrepared::new(
                                 width,
                                 height,
                                 duration,
@@ -970,7 +970,7 @@ impl Cx {
                                 format_id,
                                 camera_access,
                             );
-                            if let Some(Ok((
+                            if let Some(Ok(PlaybackPrepared::new(
                                 width,
                                 height,
                                 duration,

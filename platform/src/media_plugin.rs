@@ -1,5 +1,6 @@
 use {
     crate::{
+        AudioBuffer, AudioInfo,
         event::video_playback::VideoSource,
         makepad_live_id::LiveId,
         texture::TextureId,
@@ -17,45 +18,83 @@ use crate::video_decode::yuv::YuvPlaneData;
 pub struct YuvPlaneData;
 
 // ---------------------------------------------------------------------------
-// MSE (Media Source Extensions) player trait
+// Custom MSE (Media Source Extensions) playback engine
 // ---------------------------------------------------------------------------
 
-/// Result of an `MsePlayer::append_data()` call.
-pub struct MseAppendResult {
-    /// True when an init segment (ftyp+moov) was successfully parsed.
-    pub init_segment_parsed: bool,
-    /// Video width from init segment (0 until parsed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MseAudioTrackInfo {
+    pub track_id: u32,
+    pub codec: String,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub config: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MseVideoTrackInfo {
+    pub track_id: u32,
+    pub codec: String,
     pub width: u32,
-    /// Video height from init segment (0 until parsed).
     pub height: u32,
-    /// Duration in milliseconds from the init segment (0 if unknown/live).
+    pub config: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MseInitMetadata {
     pub duration_ms: u128,
-    /// Newly decoded frames ready for display.
-    pub new_frames: Vec<MseDecodedFrame>,
-    /// Updated buffered time ranges (seconds).
-    pub buffered_ranges: Vec<(f64, f64)>,
+    pub audio_tracks: Vec<MseAudioTrackInfo>,
+    pub video_tracks: Vec<MseVideoTrackInfo>,
+}
+
+/// A single decoded audio frame from the MSE pipeline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MseDecodedAudioFrame {
+    pub track_id: u32,
+    pub pts_ms: u64,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Interleaved PCM samples in channel order.
+    pub samples: Vec<f32>,
 }
 
 /// A single decoded video frame from the MSE pipeline.
+#[derive(Clone, Debug, PartialEq)]
 pub struct MseDecodedFrame {
+    /// Track identifier from the init segment.
+    pub track_id: u32,
     /// Presentation timestamp in milliseconds.
     pub pts_ms: u64,
     /// YUV plane data for texture upload.
     pub yuv: YuvPlaneData,
 }
 
-/// Push-based video player for MSE (Media Source Extensions).
+/// Batch output from the append/decode engine.
+#[derive(Default)]
+pub struct MseEngineOutput {
+    /// Init metadata produced by this append, if any.
+    pub init: Option<MseInitMetadata>,
+    /// Newly decoded audio frames ready for session-side queueing.
+    pub audio_frames: Vec<MseDecodedAudioFrame>,
+    /// Newly decoded video frames ready for session-side scheduling.
+    pub video_frames: Vec<MseDecodedFrame>,
+    /// Updated buffered time ranges (seconds).
+    pub buffered_ranges: Vec<(f64, f64)>,
+    /// True once end-of-stream has been reached for the engine.
+    pub reached_eos: bool,
+}
+
+/// Push-based custom playback engine for MSE (Media Source Extensions).
 ///
-/// Accepts incremental fMP4 data (init segments + media segments) and
-/// produces decoded YUV frames. Codec selection is handled internally
-/// based on the init segment: dav1d for AV1, platform decoders for H.264.
-pub trait MsePlayer: Send {
+/// This is the append-buffer/custom-transport path. It owns demux, decode
+/// orchestration, and timing policy for media that is not delegated to native
+/// platform players.
+pub trait MsePlaybackEngine: Send {
     /// Push fMP4 data (init segment or media segment bytes).
-    /// Returns decoded frames and metadata updates.
-    fn append_data(&mut self, data: &[u8]) -> Result<MseAppendResult, String>;
+    /// Returns decoded output and metadata updates.
+    fn append_data(&mut self, data: &[u8]) -> Result<MseEngineOutput, String>;
 
     /// Signal end of stream. Flushes any buffered decoder output.
-    fn end_of_stream(&mut self) -> Result<Vec<MseDecodedFrame>, String>;
+    fn end_of_stream(&mut self) -> Result<MseEngineOutput, String>;
 
     /// Remove buffered data in a time range (seconds).
     fn remove(&mut self, start: f64, end: f64);
@@ -69,6 +108,7 @@ pub trait MsePlayer: Send {
     /// Clean up resources.
     fn cleanup(&mut self);
 }
+
 
 // ---------------------------------------------------------------------------
 // Platform video frame decoder (H.264 etc.)
@@ -122,10 +162,43 @@ pub trait MediaVideoEncoder: Send + Sync {
     fn stop(&self);
 }
 
-pub trait MediaSoftwareVideoPlayer {
-    fn check_prepared(
-        &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>>;
+/// Metadata reported when a playback session becomes ready.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaybackPrepared {
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: u128,
+    pub is_seekable: bool,
+    pub video_tracks: Vec<String>,
+    pub audio_tracks: Vec<String>,
+}
+
+impl PlaybackPrepared {
+    pub fn new(
+        width: u32,
+        height: u32,
+        duration_ms: u128,
+        is_seekable: bool,
+        video_tracks: Vec<String>,
+        audio_tracks: Vec<String>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            duration_ms,
+            is_seekable,
+            video_tracks,
+            audio_tracks,
+        }
+    }
+}
+
+/// High-level playback session abstraction.
+///
+/// This is the shared control surface above two distinct playback paths:
+/// native delegated playback and custom MSE-backed playback.
+pub trait MediaPlaybackSession {
+    fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>>;
     fn poll_frame(&mut self) -> bool;
     fn take_yuv_frame(&mut self) -> Option<YuvPlaneData>;
     fn check_eos(&mut self) -> bool;
@@ -141,9 +214,11 @@ pub trait MediaSoftwareVideoPlayer {
     fn set_playback_rate(&self, rate: f64);
     fn seekable_ranges(&self) -> Vec<(f64, f64)>;
     fn buffered_ranges(&self) -> Vec<(f64, f64)>;
+    fn fill_audio_output(&mut self, _info: AudioInfo, _output: &mut AudioBuffer) {}
     fn is_active(&self) -> bool;
     fn cleanup(&mut self);
 }
+
 
 pub trait MediaPlugin: Send + Sync {
     fn create_video_encoder(
@@ -154,16 +229,17 @@ pub trait MediaPlugin: Send + Sync {
         None
     }
 
-    fn create_software_video_player(
+    fn create_playback_session(
         &self,
         _video_id: LiveId,
         _texture_id: TextureId,
         _source: VideoSource,
         _autoplay: bool,
         _is_looping: bool,
-    ) -> Result<Box<dyn MediaSoftwareVideoPlayer>, VideoDecodeError> {
+    ) -> Result<Box<dyn MediaPlaybackSession>, VideoDecodeError> {
         Err(VideoDecodeError::UnsupportedCodec)
     }
+
 
     fn video_capabilities(&self) -> crate::video::VideoCapabilities {
         crate::video::VideoCapabilities::default()
@@ -173,11 +249,16 @@ pub trait MediaPlugin: Send + Sync {
 
     fn on_android_h264_error(&self, _encoder_id: u64, _message: String) {}
 
-    /// Create an MSE player for the given MIME type (e.g. `video/mp4; codecs="av01.0.04M.08"`).
+    /// Create a custom MSE playback engine for the given MIME type
+    /// (e.g. `video/mp4; codecs="av01.0.04M.08"`).
     /// Returns `Err` if the MIME type is unsupported.
-    fn create_mse_player(&self, _mime: &str) -> Result<Box<dyn MsePlayer>, String> {
+    fn create_mse_playback_engine(
+        &self,
+        _mime: &str,
+    ) -> Result<Box<dyn MsePlaybackEngine>, String> {
         Err("MSE not supported by this media plugin".into())
     }
+
 
     /// Create a platform video frame decoder for the given codec.
     /// Used by MSE player to decode H.264 via GStreamer/VideoToolbox/MediaCodec.

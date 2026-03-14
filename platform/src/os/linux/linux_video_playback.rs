@@ -13,6 +13,7 @@ use {
         event::video_playback::VideoSource,
         makepad_error_log::*,
         makepad_live_id::LiveId,
+        media_plugin::PlaybackPrepared,
         texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel},
     },
     std::{
@@ -385,6 +386,10 @@ impl GStreamerVideoPlayer {
                 // Camera sources are handled by V4l2CameraPlayer, not GStreamer.
                 ("".to_string(), None)
             }
+            VideoSource::PlaybackSession(..) | VideoSource::Session(..) => {
+                crate::error!("VIDEO: session sources are handled by the software video player");
+                ("".to_string(), None)
+            }
         }
     }
 
@@ -414,9 +419,7 @@ impl GStreamerVideoPlayer {
 
     /// Check if the player has finished prerolling and is ready to play.
     /// Returns `Ok(...)` with metadata when ready, `Err(msg)` on failure, `None` if still loading.
-    pub fn check_prepared(
-        &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified || self.pipeline.is_null() {
             return None;
         }
@@ -544,7 +547,7 @@ impl GStreamerVideoPlayer {
                 };
             let audio_tracks = vec!["audio".to_string()];
 
-            Some(Ok((
+            Some(Ok(PlaybackPrepared::new(
                 self.video_width,
                 self.video_height,
                 duration_ms,

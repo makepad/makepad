@@ -6,7 +6,7 @@ use {
         event::video_playback::VideoSource,
         makepad_live_id::LiveId,
         texture::{CxTexturePool, TextureId},
-        video_decode::software_video::SoftwareVideoPlayer,
+        video_decode::software_video::PlaybackSessionHandle,
         video_decode::yuv::{YuvColorMatrix, YuvPlaneData},
     },
 };
@@ -28,7 +28,7 @@ pub struct AppleUnifiedVideoPlayer {
 
 enum ApplePlayerMode {
     Native(AppleVideoPlayer),
-    Software(SoftwareVideoPlayer),
+    Software(PlaybackSessionHandle),
 }
 
 impl AppleUnifiedVideoPlayer {
@@ -45,10 +45,15 @@ impl AppleUnifiedVideoPlayer {
     ) -> Self {
         let yuv_metal = AppleYuvMetal::new(metal_device, "apple unified player");
 
-        let force_software = std::env::var_os("MAKEPAD_FORCE_SOFTWARE_VIDEO").is_some();
+        let force_software_env = std::env::var_os("MAKEPAD_FORCE_SOFTWARE_VIDEO").is_some();
+        let force_software = force_software_env || source.is_session();
         let mode = if force_software {
-            crate::log!("VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder");
-            ApplePlayerMode::Software(SoftwareVideoPlayer::new(
+            if force_software_env {
+                crate::log!("VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder");
+            } else if source.is_session() {
+                crate::log!("VIDEO: session source uses software video decoder");
+            }
+            ApplePlayerMode::Software(PlaybackSessionHandle::new(
                 video_id,
                 texture_id,
                 source.clone(),
@@ -87,7 +92,7 @@ impl AppleUnifiedVideoPlayer {
             "VIDEO: Apple native playback failed, falling back to software video decoder: {}",
             reason
         );
-        self.mode = ApplePlayerMode::Software(SoftwareVideoPlayer::new(
+        self.mode = ApplePlayerMode::Software(PlaybackSessionHandle::new(
             self.video_id,
             self.texture_id,
             self.source.clone(),
@@ -98,7 +103,7 @@ impl AppleUnifiedVideoPlayer {
 
     pub fn check_prepared(
         &mut self,
-    ) -> Option<Result<(u32, u32, u128, bool, Vec<String>, Vec<String>), String>> {
+    ) -> Option<Result<PlaybackPrepared, String>> {
         match &mut self.mode {
             ApplePlayerMode::Native(player) => match player.check_prepared() {
                 Some(Err(err)) => {
