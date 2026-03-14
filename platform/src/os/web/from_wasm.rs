@@ -84,6 +84,17 @@ pub struct FromWasmOpenUrl {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmBrowserUpdateUrl {
+    pub url: String,
+    pub replace: bool,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmBrowserHistoryGo {
+    pub delta: f64,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmShowTextIME {
     pub x: f64,
     pub y: f64,

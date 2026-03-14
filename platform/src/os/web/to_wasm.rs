@@ -133,6 +133,13 @@ pub struct ToWasmLiveFileChange {
     pub content: String,
 }
 
+#[derive(ToWasm)]
+pub struct ToWasmLocationChange {
+    pub pathname: String,
+    pub search: String,
+    pub hash: String,
+}
+
 // Touch API
 
 #[derive(ToWasm, Clone, Debug)]
