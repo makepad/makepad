@@ -358,6 +358,26 @@ pub fn define_macos_window_class() -> *const Class {
     return decl.register();
 }
 
+pub fn define_macos_panel_class() -> *const Class {
+    extern "C" fn yes(_: &Object, _: Sel) -> BOOL {
+        YES
+    }
+
+    let panel_superclass = class!(NSPanel);
+    let mut decl = ClassDecl::new("RenderPanel", panel_superclass).unwrap();
+    unsafe {
+        decl.add_method(
+            sel!(canBecomeMainWindow),
+            yes as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(canBecomeKeyWindow),
+            yes as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+    }
+    decl.register()
+}
+
 pub fn define_cocoa_view_class() -> *const Class {
     extern "C" fn dealloc(this: &Object, _sel: Sel) {
         unsafe {
@@ -389,6 +409,15 @@ pub fn define_cocoa_view_class() -> *const Class {
             }
 
             this
+        }
+    }
+
+    extern "C" fn needs_panel_to_become_key(this: &Object, _sel: Sel) -> BOOL {
+        let cw = get_cocoa_window(this);
+        if cw.needs_panel_to_become_key() {
+            YES
+        } else {
+            NO
         }
     }
 
@@ -970,6 +999,10 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(
             sel!(wantsKeyDownForEvent:),
             yes_function as extern "C" fn(&Object, Sel, ObjcId) -> BOOL,
+        );
+        decl.add_method(
+            sel!(needsPanelToBecomeKey),
+            needs_panel_to_become_key as extern "C" fn(&Object, Sel) -> BOOL,
         );
         decl.add_method(
             sel!(acceptsFirstResponder:),

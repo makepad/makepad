@@ -16,7 +16,10 @@ use {
                 macos_event::MacosEvent,
             },
         },
-        window::{WindowBackdrop, WindowId, WindowVisuals},
+        window::{
+            MacosWindowChrome, MacosWindowConfig, MacosWindowKind, MacosWindowLevel,
+            WindowBackdrop, WindowId, WindowVisuals,
+        },
     },
     std::{cell::Cell, os::raw::c_void, rc::Rc},
 };
@@ -31,6 +34,7 @@ pub struct MacosWindow {
     pub(crate) ime_active: bool,
     pub(crate) is_fullscreen: bool,
     pub(crate) is_popup: bool,
+    pub(crate) macos_config: MacosWindowConfig,
     pub(crate) visual_effect_view: ObjcId,
     pub(crate) last_mouse_pos: Vec2d,
     window_delegate: ObjcId,
@@ -39,11 +43,11 @@ pub struct MacosWindow {
 }
 
 impl MacosWindow {
-    pub fn new(window_id: WindowId) -> MacosWindow {
+    fn alloc_window(window_class: *const Class, window_id: WindowId) -> MacosWindow {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
 
-            let window: ObjcId = msg_send![get_macos_class_global().window, alloc];
+            let window: ObjcId = msg_send![window_class, alloc];
             let window_delegate: ObjcId = msg_send![get_macos_class_global().window_delegate, new];
             let view: ObjcId = msg_send![get_macos_class_global().view, alloc];
 
@@ -52,6 +56,7 @@ impl MacosWindow {
             MacosWindow {
                 is_fullscreen: false,
                 is_popup: false,
+                macos_config: MacosWindowConfig::default(),
                 visual_effect_view: nil,
                 live_resize_timer: nil,
                 window_delegate: window_delegate,
@@ -66,8 +71,107 @@ impl MacosWindow {
         }
     }
 
+    pub fn new(window_id: WindowId, macos_config: MacosWindowConfig) -> MacosWindow {
+        let window_class = match macos_config.kind {
+            MacosWindowKind::Standard => get_macos_class_global().window,
+            MacosWindowKind::FloatingPanel => get_macos_class_global().panel,
+        };
+        let mut window = Self::alloc_window(window_class, window_id);
+        window.macos_config = macos_config.normalized();
+        window
+    }
+
+    pub fn new_popup(window_id: WindowId) -> MacosWindow {
+        Self::alloc_window(get_macos_class_global().window, window_id)
+    }
+
+    fn style_mask_for_config(config: MacosWindowConfig) -> u64 {
+        let mut style_mask = NSWindowStyleMask::NSFullSizeContentViewWindowMask as u64;
+
+        match config.chrome {
+            MacosWindowChrome::Borderless => {
+                style_mask |= NSWindowStyleMask::NSBorderlessWindowMask as u64;
+            }
+            MacosWindowChrome::Titled => {
+                style_mask |= NSWindowStyleMask::NSTitledWindowMask as u64;
+                if config.closable {
+                    style_mask |= NSWindowStyleMask::NSClosableWindowMask as u64;
+                }
+                if config.miniaturizable {
+                    style_mask |= NSWindowStyleMask::NSMiniaturizableWindowMask as u64;
+                }
+                if config.resizable {
+                    style_mask |= NSWindowStyleMask::NSResizableWindowMask as u64;
+                }
+            }
+        }
+
+        if config.kind == MacosWindowKind::FloatingPanel && config.non_activating {
+            style_mask |= NSWindowStyleMask::NSNonactivatingPanelWindowMask as u64;
+        }
+
+        style_mask
+    }
+
+    fn collection_behavior_for_config(config: MacosWindowConfig) -> u64 {
+        let mut collection_behavior = 0;
+        if config.join_all_spaces {
+            collection_behavior |= NSWindowCollectionBehaviorCanJoinAllSpaces;
+        }
+        if config.full_screen_auxiliary {
+            collection_behavior |= NSWindowCollectionBehaviorFullScreenAuxiliary;
+        }
+        collection_behavior
+    }
+
+    fn level_to_native(level: MacosWindowLevel) -> i64 {
+        match level {
+            MacosWindowLevel::Normal => NSNormalWindowLevel,
+            MacosWindowLevel::Floating => NSFloatingWindowLevel,
+            MacosWindowLevel::StatusBar => NSStatusWindowLevel,
+        }
+    }
+
+    pub fn set_window_level(&mut self, level: MacosWindowLevel) {
+        unsafe {
+            let () = msg_send![self.window, setLevel: Self::level_to_native(level)];
+        }
+    }
+
+    pub fn set_topmost(&mut self, topmost: bool) {
+        let level = if topmost {
+            MacosWindowLevel::Floating
+        } else {
+            MacosWindowLevel::Normal
+        };
+        self.set_window_level(level);
+        self.send_change_event();
+    }
+
+    fn is_topmost(&self) -> bool {
+        let level: i64 = unsafe { msg_send![self.window, level] };
+        level > NSNormalWindowLevel
+    }
+
+    pub fn is_nonactivating_panel(&self) -> bool {
+        self.macos_config.kind == MacosWindowKind::FloatingPanel && self.macos_config.non_activating
+    }
+
+    pub fn needs_panel_to_become_key(&self) -> bool {
+        self.macos_config.kind == MacosWindowKind::FloatingPanel
+            && self.macos_config.becomes_key_only_if_needed
+    }
+
     // complete window initialization with pointers to self
-    pub fn init(&mut self, title: &str, size: Vec2d, position: Option<Vec2d>, is_fullscreen: bool) {
+    pub fn init(
+        &mut self,
+        title: &str,
+        size: Vec2d,
+        position: Option<Vec2d>,
+        is_fullscreen: bool,
+        macos_config: MacosWindowConfig,
+    ) {
+        self.macos_config = macos_config.normalized();
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
 
@@ -91,11 +195,7 @@ impl MacosWindow {
                 origin: left_top,
                 size: ns_size,
             };
-            let window_masks = NSWindowStyleMask::NSClosableWindowMask as u64
-                | NSWindowStyleMask::NSMiniaturizableWindowMask as u64
-                | NSWindowStyleMask::NSResizableWindowMask as u64
-                | NSWindowStyleMask::NSTitledWindowMask as u64
-                | NSWindowStyleMask::NSFullSizeContentViewWindowMask as u64;
+            let window_masks = Self::style_mask_for_config(self.macos_config);
 
             let () = msg_send![
                 self.window,
@@ -112,16 +212,36 @@ impl MacosWindow {
             let () = msg_send![self.window, setTitle: title];
             let () = msg_send![self.window, setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden];
             let () = msg_send![self.window, setTitlebarAppearsTransparent: YES];
+            let () = msg_send![
+                self.window,
+                setCollectionBehavior: Self::collection_behavior_for_config(self.macos_config)
+            ];
+            self.set_window_level(self.macos_config.level);
 
-            //let subviews:id = msg_send![self.window, getSubviews];
-            //println!("{}", subviews as u64);
+            if self.macos_config.kind == MacosWindowKind::FloatingPanel {
+                let becomes_key_only_if_needed = if self.macos_config.becomes_key_only_if_needed {
+                    YES
+                } else {
+                    NO
+                };
+                let () = msg_send![self.window, setHidesOnDeactivate: NO];
+                let () = msg_send![
+                    self.window,
+                    setBecomesKeyOnlyIfNeeded: becomes_key_only_if_needed
+                ];
+            }
+
             let () = msg_send![self.window, setAcceptsMouseMovedEvents: YES];
 
-            let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2]; //duringViewResize
+            let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2];
 
             let () = msg_send![self.window, setContentView: self.view];
             let () = msg_send![self.window, makeFirstResponder: self.view];
-            let () = msg_send![self.window, makeKeyAndOrderFront: nil];
+            if self.is_nonactivating_panel() {
+                let () = msg_send![self.window, orderFront: nil];
+            } else {
+                let () = msg_send![self.window, makeKeyAndOrderFront: nil];
+            }
 
             let rect = NSRect {
                 origin: NSPoint { x: 0., y: 0. },
@@ -151,13 +271,13 @@ impl MacosWindow {
                 self.maximize();
             }
 
-            // Set application icon from default icon
             Self::set_application_icon();
 
             let () = msg_send![pool, drain];
         }
     }
 
+    // complete window initialization with pointers to self
     /// Initialize as a popup window (borderless NSPanel at popup menu level).
     /// `position` is in screen coordinates. `parent_window` is the parent NSWindow for coordinate conversion.
     pub fn init_popup(&mut self, size: Vec2d, position: Vec2d, parent_window: ObjcId) {
@@ -208,8 +328,7 @@ impl MacosWindow {
             let () = msg_send![self.window, setDelegate: self.window_delegate];
             let () = msg_send![self.window, setReleasedWhenClosed: NO];
 
-            // NSPopUpMenuWindowLevel = 101
-            let () = msg_send![self.window, setLevel: 101i64];
+            let () = msg_send![self.window, setLevel: NSPopUpMenuWindowLevel];
             let () = msg_send![self.window, setHasShadow: YES];
 
             let () = msg_send![self.window, setAcceptsMouseMovedEvents: YES];
@@ -445,7 +564,7 @@ impl MacosWindow {
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
             xr_is_presenting: false,
-            is_topmost: false,
+            is_topmost: self.is_topmost(),
             is_fullscreen: self.is_fullscreen,
             can_fullscreen: false,
             inner_size: self.get_inner_size(),
@@ -598,7 +717,9 @@ impl MacosWindow {
     pub fn send_mouse_move(&mut self, _event: ObjcId, pos: Vec2d, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
 
-        with_macos_app(|app| app.startup_focus_hack());
+        if !self.is_nonactivating_panel() {
+            with_macos_app(|app| app.startup_focus_hack());
+        }
 
         self.do_callback(MacosEvent::MouseMove(MouseMoveEvent {
             window_id: self.window_id,

@@ -34,7 +34,7 @@ use {
         shared_framebuf::PollTimers,
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
-        window::{CxWindowPool, WindowId},
+        window::{CxWindowPool, MacosWindowConfig, WindowId},
     },
     makepad_objc_sys::{msg_send, objc_block, sel, sel_impl},
     std::{
@@ -64,12 +64,13 @@ impl MetalWindow {
         position: Option<Vec2d>,
         title: &str,
         is_fullscreen: bool,
+        macos_config: MacosWindowConfig,
     ) -> MetalWindow {
         let ca_layer: ObjcId = unsafe { msg_send![class!(CAMetalLayer), new] };
 
-        let mut cocoa_window = Box::new(MacosWindow::new(window_id));
+        let mut cocoa_window = Box::new(MacosWindow::new(window_id, macos_config));
 
-        cocoa_window.init(title, inner_size, position, is_fullscreen);
+        cocoa_window.init(title, inner_size, position, is_fullscreen, macos_config);
         unsafe {
             let () = msg_send![ca_layer, setDevice: metal_cx.device];
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
@@ -108,7 +109,7 @@ impl MetalWindow {
     ) -> MetalWindow {
         let ca_layer: ObjcId = unsafe { msg_send![class!(CAMetalLayer), new] };
 
-        let mut cocoa_window = Box::new(MacosWindow::new(window_id));
+        let mut cocoa_window = Box::new(MacosWindow::new_popup(window_id));
 
         cocoa_window.init_popup(size, position, parent_window);
         unsafe {
@@ -166,6 +167,11 @@ impl MetalWindow {
             false
         }
     }
+}
+
+fn defer_platform_op(platform_ops: &mut Vec<CxOsOp>, op: CxOsOp) -> bool {
+    platform_ops.insert(0, op);
+    platform_ops.len() > 1
 }
 
 pub(crate) struct MacosNativeCameraPreview {
@@ -846,6 +852,7 @@ impl Cx {
                         window.create_position,
                         &window.create_title,
                         window.is_fullscreen,
+                        window.macos,
                     );
                     let visuals = window.window_visuals();
                     metal_window.cocoa_window.set_window_visuals(visuals);
@@ -967,6 +974,24 @@ impl Cx {
                         metal_window.cocoa_window.set_window_buttons_visible(true);
                     }
                 }
+                CxOsOp::SetTopmost(window_id, is_topmost) => {
+                    if metal_windows.is_empty() {
+                        if defer_platform_op(
+                            &mut self.platform_ops,
+                            CxOsOp::SetTopmost(window_id, is_topmost),
+                        ) {
+                            continue;
+                        }
+                        break;
+                    }
+                    if let Some(metal_window) =
+                        metal_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        metal_window.cocoa_window.set_topmost(is_topmost);
+                        self.windows[window_id].window_geom =
+                            metal_window.cocoa_window.get_window_geom();
+                    }
+                }
                 CxOsOp::SetWindowVisuals(window_id, visuals) => {
                     if let Some(metal_window) =
                         metal_windows.iter_mut().find(|w| w.window_id == window_id)
@@ -974,7 +999,8 @@ impl Cx {
                         metal_window.cocoa_window.set_window_visuals(visuals);
                         let layer_opaque = if visuals.transparent { NO } else { YES };
                         let layer_alpha = if visuals.transparent { 0.0 } else { 1.0 };
-                        let () = unsafe { msg_send![metal_window.ca_layer, setOpaque: layer_opaque] };
+                        let () =
+                            unsafe { msg_send![metal_window.ca_layer, setOpaque: layer_opaque] };
                         let () = unsafe {
                             msg_send![metal_window.ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, layer_alpha)]
                         };
@@ -1431,6 +1457,38 @@ impl Cx {
                 msg_send![class!(NSBlockOperation), blockOperationWithBlock: &main_thread_block];
             let () = msg_send![main_queue, addOperation: block_operation];
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defer_platform_op_breaks_when_requeued_op_is_alone() {
+        let window_id = WindowId(0, 0);
+        let mut platform_ops = Vec::new();
+
+        assert!(!defer_platform_op(
+            &mut platform_ops,
+            CxOsOp::SetTopmost(window_id, true),
+        ));
+        assert_eq!(platform_ops, vec![CxOsOp::SetTopmost(window_id, true)]);
+    }
+
+    #[test]
+    fn defer_platform_op_continues_when_other_ops_are_pending() {
+        let window_id = WindowId(0, 0);
+        let mut platform_ops = vec![CxOsOp::CreateWindow(window_id)];
+
+        assert!(defer_platform_op(
+            &mut platform_ops,
+            CxOsOp::SetTopmost(window_id, true),
+        ));
+        assert_eq!(
+            platform_ops,
+            vec![CxOsOp::SetTopmost(window_id, true), CxOsOp::CreateWindow(window_id)]
+        );
     }
 }
 
