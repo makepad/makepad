@@ -618,7 +618,7 @@ impl PulseAudioAccess {
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
                 if self
-                    .audio_outputs
+                    .audio_inputs
                     .iter()
                     .find(|v| v.device_id == *device_id)
                     .is_none()
