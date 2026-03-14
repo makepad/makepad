@@ -57,10 +57,13 @@ script_mod! {
                 let step = (end - start) / 4.0;
                 let mut y = start + step * 0.5;
                 let mut value = 0.0;
-                for i in 0..4{
-                    value += rounded_box_shadow_x(point.x, point.y - y, sigma, corner, half_size) * gaussian(y, sigma) * step;
-                    y += step;
-                }
+                value += rounded_box_shadow_x(point.x, point.y - y, sigma, corner, half_size) * gaussian(y, sigma) * step;
+                y += step;
+                value += rounded_box_shadow_x(point.x, point.y - y, sigma, corner, half_size) * gaussian(y, sigma) * step;
+                y += step;
+                value += rounded_box_shadow_x(point.x, point.y - y, sigma, corner, half_size) * gaussian(y, sigma) * step;
+                y += step;
+                value += rounded_box_shadow_x(point.x, point.y - y, sigma, corner, half_size) * gaussian(y, sigma) * step;
 
                 return value;
             }

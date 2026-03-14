@@ -73,7 +73,8 @@ struct FrameResources {
 }
 
 struct VulkanPipeline {
-    pipeline: vk::Pipeline,
+    pipeline_write: vk::Pipeline,
+    pipeline_no_write: vk::Pipeline,
     layout: vk::PipelineLayout,
     descriptor_set_layout: vk::DescriptorSetLayout,
     has_descriptors: bool,
@@ -83,6 +84,7 @@ struct VulkanPipeline {
 struct VulkanDrawPacket {
     shader_index: usize,
     geometry_id: GeometryId,
+    depth_write: bool,
     instances: Vec<f32>,
     draw_call_uniforms: Vec<f32>,
     dyn_uniforms: Vec<f32>,
@@ -1646,6 +1648,7 @@ impl CxVulkan {
                 VulkanDrawPacket {
                     shader_index: draw_call.draw_shader_id.index,
                     geometry_id,
+                    depth_write: draw_call.options.depth_write,
                     instances,
                     draw_call_uniforms: draw_call.draw_call_uniforms.as_slice().to_vec(),
                     dyn_uniforms: draw_call.dyn_uniforms[..sh
@@ -1711,7 +1714,11 @@ impl CxVulkan {
                 format!("missing Vulkan pipeline for shader {}", packet.shader_index)
             })?;
             (
-                pipeline.pipeline,
+                if packet.depth_write {
+                    pipeline.pipeline_write
+                } else {
+                    pipeline.pipeline_no_write
+                },
                 pipeline.layout,
                 pipeline.descriptor_set_layout,
                 pipeline.has_descriptors,
@@ -2241,23 +2248,40 @@ impl CxVulkan {
         let color_blend_attachments = [color_blend_attachment];
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
-        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(true)
-            .depth_write_enable(true)
-            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
-            .depth_bounds_test_enable(false)
-            .stencil_test_enable(false);
+        let make_depth_stencil = |depth_write| {
+            vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(true)
+                .depth_write_enable(depth_write)
+                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+                .depth_bounds_test_enable(false)
+                .stencil_test_enable(false)
+        };
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-        let create_info = vk::GraphicsPipelineCreateInfo::default()
+        let depth_stencil_write = make_depth_stencil(true);
+        let depth_stencil_no_write = make_depth_stencil(false);
+        let create_info_write = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vertex_input)
             .input_assembly_state(&input_assembly)
             .viewport_state(&viewport_state)
             .rasterization_state(&rasterization)
             .multisample_state(&multisample)
-            .depth_stencil_state(&depth_stencil)
+            .depth_stencil_state(&depth_stencil_write)
+            .color_blend_state(&color_blend)
+            .dynamic_state(&dynamic)
+            .layout(pipeline_layout)
+            .render_pass(self.render_pass)
+            .subpass(0);
+        let create_info_no_write = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization)
+            .multisample_state(&multisample)
+            .depth_stencil_state(&depth_stencil_no_write)
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic)
             .layout(pipeline_layout)
@@ -2265,18 +2289,35 @@ impl CxVulkan {
             .subpass(0);
 
         let pipeline_result = unsafe {
-            self.device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
+            self.device.create_graphics_pipelines(
+                vk::PipelineCache::null(),
+                &[create_info_write, create_info_no_write],
+                None,
+            )
         };
 
         unsafe {
             self.device.destroy_shader_module(vs_module, None);
             self.device.destroy_shader_module(fs_module, None);
         }
-        let pipeline = match pipeline_result {
-            Ok(pipelines) => pipelines[0],
-            Err(e) => {
+        let (pipeline_write, pipeline_no_write) = match pipeline_result {
+            Ok(pipelines) if pipelines.len() >= 2 => (pipelines[0], pipelines[1]),
+            Ok(pipelines) => {
                 unsafe {
+                    for pipeline in pipelines {
+                        self.device.destroy_pipeline(pipeline, None);
+                    }
+                    self.device.destroy_pipeline_layout(pipeline_layout, None);
+                    self.device
+                        .destroy_descriptor_set_layout(descriptor_set_layout, None);
+                }
+                return Err("create_graphics_pipelines returned fewer than 2 pipelines".to_string());
+            }
+            Err((pipelines, e)) => {
+                unsafe {
+                    for pipeline in pipelines {
+                        self.device.destroy_pipeline(pipeline, None);
+                    }
                     self.device.destroy_pipeline_layout(pipeline_layout, None);
                     self.device
                         .destroy_descriptor_set_layout(descriptor_set_layout, None);
@@ -2345,7 +2386,8 @@ impl CxVulkan {
         self.pipelines.insert(
             shader_index,
             VulkanPipeline {
-                pipeline,
+                pipeline_write,
+                pipeline_no_write,
                 layout: pipeline_layout,
                 descriptor_set_layout,
                 has_descriptors,
@@ -2837,7 +2879,9 @@ impl CxVulkan {
                 for sampler in pipeline.sampler_handles {
                     self.device.destroy_sampler(sampler, None);
                 }
-                self.device.destroy_pipeline(pipeline.pipeline, None);
+                self.device.destroy_pipeline(pipeline.pipeline_write, None);
+                self.device
+                    .destroy_pipeline(pipeline.pipeline_no_write, None);
                 self.device.destroy_pipeline_layout(pipeline.layout, None);
                 self.device
                     .destroy_descriptor_set_layout(pipeline.descriptor_set_layout, None);

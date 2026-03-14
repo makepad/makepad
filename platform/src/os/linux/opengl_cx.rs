@@ -329,6 +329,36 @@ impl Cx {
             );
         }
 
+        // Runtime PNG readback for deterministic local validation.
+        if let Some(path) = std::env::var_os("MAKEPAD_WRITE_FRAMEBUFFER_PNG") {
+            let w = pix_width.floor() as u32;
+            let h = pix_height.floor() as u32;
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            unsafe {
+                let gl = self.os.gl();
+                (gl.glReadPixels)(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
+                    pixels.as_mut_ptr() as *mut _,
+                );
+            }
+            let stride = (w * 4) as usize;
+            for y in 0..(h as usize / 2) {
+                let top = y * stride;
+                let bot = ((h as usize) - 1 - y) * stride;
+                for x in 0..stride {
+                    pixels.swap(top + x, bot + x);
+                }
+            }
+            if let Ok(png) = Self::encode_rgba_as_png(w, h, &pixels) {
+                let _ = std::fs::write(path, png);
+            }
+        }
+
         // Studio screenshot readback: read framebuffer pixels before swap.
         let request_ids = self.take_studio_screenshot_request_ids(0);
         if !request_ids.is_empty() {
