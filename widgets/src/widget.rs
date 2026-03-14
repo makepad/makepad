@@ -731,8 +731,10 @@ impl WidgetRef {
     }
 
     pub fn area(&self) -> Area {
-        if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget.area();
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                return inner.widget.area();
+            }
         }
         Area::Empty
     }
