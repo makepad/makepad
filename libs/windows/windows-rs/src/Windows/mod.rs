@@ -43881,13 +43881,6 @@ impl IRecordInfo_Vtbl {
 impl windows_core::RuntimeName for IRecordInfo {}
 #[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PARAMDESC {
-    pub pparamdescex: *mut PARAMDESCEX,
-    pub wParamFlags: PARAMFLAGS,
-}
-#[repr(C)]
-#[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 pub struct PARAMDESCEX {
     pub cBytes: u32,
     pub varDefaultValue: super::Variant::VARIANT,
@@ -43895,11 +43888,12 @@ pub struct PARAMDESCEX {
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PARAMFLAGS(pub u16);
+#[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-impl Default for PARAMDESC {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PARAMDESC {
+    pub pparamdescex: *mut PARAMDESCEX,
+    pub wParamFlags: PARAMFLAGS,
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Clone for PARAMDESCEX {
@@ -43910,6 +43904,12 @@ impl Clone for PARAMDESCEX {
 impl PARAMFLAGS {
     pub const fn contains(&self, other: Self) -> bool {
         self.0 & other.0 == other.0
+    }
+}
+#[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
+impl Default for PARAMDESC {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
@@ -45614,6 +45614,7 @@ pub const WS_CLIPSIBLINGS: WINDOW_STYLE = WINDOW_STYLE(67108864u32);
 pub const WS_EX_ACCEPTFILES: WINDOW_EX_STYLE = WINDOW_EX_STYLE(16u32);
 pub const WS_EX_APPWINDOW: WINDOW_EX_STYLE = WINDOW_EX_STYLE(262144u32);
 pub const WS_EX_LAYERED: WINDOW_EX_STYLE = WINDOW_EX_STYLE(524288u32);
+pub const WS_EX_TOOLWINDOW: WINDOW_EX_STYLE = WINDOW_EX_STYLE(128u32);
 pub const WS_EX_TOPMOST: WINDOW_EX_STYLE = WINDOW_EX_STYLE(8u32);
 pub const WS_EX_WINDOWEDGE: WINDOW_EX_STYLE = WINDOW_EX_STYLE(256u32);
 pub const WS_MAXIMIZEBOX: WINDOW_STYLE = WINDOW_STYLE(65536u32);
