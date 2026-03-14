@@ -150,9 +150,9 @@ impl PulseInputStream {
 
     unsafe extern "C" fn recording_stream_state_callback(
         stream: *mut pa_stream,
-        output_ptr: *mut c_void,
+        input_ptr: *mut c_void,
     ) {
-        let input_ptr = output_ptr as *mut PulseOutputStruct;
+        let input_ptr = input_ptr as *mut PulseInputStruct;
         let state = pa_stream_get_state(stream);
         match state {
             PA_STREAM_UNCONNECTED => (),
@@ -160,7 +160,7 @@ impl PulseInputStream {
             PA_STREAM_READY => (*input_ptr).ready_state.store(1, Ordering::Relaxed),
             PA_STREAM_FAILED => (*input_ptr).ready_state.store(2, Ordering::Relaxed),
             PA_STREAM_TERMINATED => {
-                let _ = Box::from_raw(output_ptr);
+                let _ = Box::from_raw(input_ptr);
             }
             _ => panic!(),
         }
