@@ -156,9 +156,7 @@ impl IosCameraPlayer {
         }
     }
 
-    fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
@@ -323,9 +321,7 @@ impl IosNativeCameraPreview {
         }
     }
 
-    fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
@@ -973,8 +969,7 @@ impl Cx {
                                 format_id,
                                 camera_access,
                             );
-                            if let Some(Ok(prepared)) = preview.check_prepared()
-                            {
+                            if let Some(Ok(prepared)) = preview.check_prepared() {
                                 let PlaybackPrepared {
                                     width,
                                     height,

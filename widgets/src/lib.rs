@@ -63,8 +63,8 @@ pub mod splitter;
 pub mod fold_button;
 pub mod fold_header;
 
-pub mod loading_spinner;
 pub mod glass_panel;
+pub mod loading_spinner;
 
 pub mod bare_step;
 pub mod turtle_step;

@@ -6,8 +6,8 @@ use crate::{
     makepad_platform::event::video_playback::*,
     makepad_platform::video::{VideoFormatId, VideoInputId},
     makepad_platform::{
-        VideoFrameSession, VideoFrameSessionId, register_video_frame_session,
-        unregister_video_frame_session,
+        register_video_frame_session, unregister_video_frame_session, VideoFrameSession,
+        VideoFrameSessionId,
     },
     widget::*,
 };

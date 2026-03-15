@@ -9,6 +9,7 @@ use {
         makepad_live_id::LiveId,
         texture::{CxTexturePool, TextureId},
         video::*,
+        PlaybackPrepared,
     },
     std::sync::{Arc, Mutex},
 };
@@ -89,9 +90,7 @@ impl AndroidCameraPlayer {
         self.yuv_rotation_steps
     }
 
-    pub fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }

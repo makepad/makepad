@@ -1,4 +1,9 @@
-use makepad_physics::{PhysicsOp, PhysicsWorld};
+use ::rapier3d::prelude::{
+    BroadPhaseBvh, CCDSolver, ColliderBuilder, ColliderSet, ImpulseJointSet, IntegrationParameters,
+    IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryFilter, Ray as RapierRay,
+    Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
+    Rotation as RapierRotation, SharedShape, Vector as RapierVector,
+};
 use makepad_widgets::*;
 
 script_mod! {
@@ -38,8 +43,258 @@ const CUBE_COLORS: &[[f32; 3]] = &[
 ];
 
 const GROUND_COLOR: [f32; 3] = [0.35, 0.38, 0.42];
-const KICK_IMPULSE_MAGNITUDE: f32 = 20.0;
+const PLATFORM_COLOR: [f32; 3] = [0.10, 0.14, 0.18];
+const KICK_IMPULSE_MAGNITUDE: f32 = 0.01;
 const KICK_UP_BIAS: f32 = 0.35;
+const BODY_LINEAR_DAMPING: f32 = 1.5;
+const BODY_ANGULAR_DAMPING: f32 = 6.0;
+const BODY_ADDITIONAL_SOLVER_ITERATIONS: usize = 4;
+const BODY_SLEEP_ANGULAR_THRESHOLD: f32 = 2.0;
+const BODY_SLEEP_TIME: f32 = 0.35;
+const BODY_SNAP_SLEEP_LINEAR_SPEED: f32 = 0.03;
+const BODY_SNAP_SLEEP_ANGULAR_SPEED: f32 = 1.0;
+const CUBE_HALF_EXTENT: f32 = 0.020;
+const PLATFORM_HALF_WIDTH: f32 = 0.64;
+const PLATFORM_HALF_HEIGHT: f32 = 0.012;
+const PLATFORM_HALF_DEPTH: f32 = 0.16;
+const PLATFORM_TOP_Y: f32 = 0.45;
+const WALL_BRICK_HALF_WIDTH: f32 = CUBE_HALF_EXTENT * 2.0;
+const WALL_BRICK_HALF_HEIGHT: f32 = CUBE_HALF_EXTENT;
+const WALL_BRICK_HALF_DEPTH: f32 = CUBE_HALF_EXTENT;
+const WALL_FULL_ROW_BRICKS: usize = 12;
+const WALL_SHORT_ROW_BRICKS: usize = 11;
+const WALL_ROWS: usize = 12;
+const WALL_SPAWN_GAP: f32 = 0.0;
+const CUBE_ROUND_RADIUS: f32 = 0.0032;
+const PLATFORM_ROUND_RADIUS: f32 = 0.005;
+const PBR_FACE_SUBDIVISIONS: usize = 1;
+const PBR_CORNER_SEGMENTS: usize = 3;
+
+#[derive(Clone, Copy)]
+struct PhysicsCube {
+    body: RigidBodyHandle,
+    collider: ::rapier3d::prelude::ColliderHandle,
+    half_extents: Vec3f,
+    color_index: usize,
+}
+
+struct RapierScene {
+    gravity: RapierVector,
+    integration_parameters: IntegrationParameters,
+    pipeline: PhysicsPipeline,
+    islands: IslandManager,
+    broad_phase: BroadPhaseBvh,
+    narrow_phase: NarrowPhase,
+    bodies: RigidBodySet,
+    colliders: ColliderSet,
+    impulse_joints: ImpulseJointSet,
+    multibody_joints: MultibodyJointSet,
+    ccd_solver: CCDSolver,
+    cubes: Vec<PhysicsCube>,
+    platform_pose: Pose,
+}
+
+impl RapierScene {
+    fn spawn_dynamic_box(&mut self, center: RapierVector, half_extents: Vec3f) {
+        let body = self.bodies.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(center)
+                .linear_damping(BODY_LINEAR_DAMPING)
+                .angular_damping(BODY_ANGULAR_DAMPING)
+                .additional_solver_iterations(BODY_ADDITIONAL_SOLVER_ITERATIONS),
+        );
+        if let Some(rigid_body) = self.bodies.get_mut(body) {
+            let activation = rigid_body.activation_mut();
+            activation.angular_threshold = BODY_SLEEP_ANGULAR_THRESHOLD;
+            activation.time_until_sleep = BODY_SLEEP_TIME;
+        }
+        let collider = self.colliders.insert_with_parent(
+            ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
+                .density(1.0)
+                .friction(0.8)
+                .restitution(0.0),
+            body,
+            &mut self.bodies,
+        );
+        self.cubes.push(PhysicsCube {
+            body,
+            collider,
+            half_extents,
+            color_index: self.cubes.len() % CUBE_COLORS.len(),
+        });
+    }
+
+    fn new() -> Self {
+        let mut scene = Self {
+            gravity: RapierVector::new(0.0, -9.81, 0.0),
+            integration_parameters: IntegrationParameters {
+                dt: 1.0 / 120.0,
+                ..IntegrationParameters::default()
+            },
+            pipeline: PhysicsPipeline::new(),
+            islands: IslandManager::new(),
+            broad_phase: BroadPhaseBvh::new(),
+            narrow_phase: NarrowPhase::new(),
+            bodies: RigidBodySet::new(),
+            colliders: ColliderSet::new(),
+            impulse_joints: ImpulseJointSet::new(),
+            multibody_joints: MultibodyJointSet::new(),
+            ccd_solver: CCDSolver::new(),
+            cubes: Vec::new(),
+            platform_pose: Pose::new(
+                Quat::default(),
+                vec3f(0.0, PLATFORM_TOP_Y - PLATFORM_HALF_HEIGHT, 0.0),
+            ),
+        };
+
+        let ground = scene.bodies.insert(RigidBodyBuilder::fixed().build());
+        scene.colliders.insert_with_parent(
+            ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
+                .friction(0.9),
+            ground,
+            &mut scene.bodies,
+        );
+
+        let platform =
+            scene
+                .bodies
+                .insert(RigidBodyBuilder::fixed().translation(RapierVector::new(
+                    0.0,
+                    PLATFORM_TOP_Y - PLATFORM_HALF_HEIGHT,
+                    0.0,
+                )));
+        scene.colliders.insert_with_parent(
+            ColliderBuilder::cuboid(
+                PLATFORM_HALF_WIDTH,
+                PLATFORM_HALF_HEIGHT,
+                PLATFORM_HALF_DEPTH,
+            )
+            .friction(0.9),
+            platform,
+            &mut scene.bodies,
+        );
+
+        let brick_half_extents = vec3f(
+            WALL_BRICK_HALF_WIDTH,
+            WALL_BRICK_HALF_HEIGHT,
+            WALL_BRICK_HALF_DEPTH,
+        );
+        let brick_width = WALL_BRICK_HALF_WIDTH * 2.0 + WALL_SPAWN_GAP;
+        let brick_height = WALL_BRICK_HALF_HEIGHT * 2.0 + WALL_SPAWN_GAP;
+        for row in 0..WALL_ROWS {
+            let bricks_in_row = if row % 2 == 0 {
+                WALL_FULL_ROW_BRICKS
+            } else {
+                WALL_SHORT_ROW_BRICKS
+            };
+            let row_center_offset = (bricks_in_row as f32 - 1.0) * 0.5;
+            for brick in 0..bricks_in_row {
+                let center = RapierVector::new(
+                    (brick as f32 - row_center_offset) * brick_width,
+                    PLATFORM_TOP_Y
+                        + WALL_BRICK_HALF_HEIGHT
+                        + WALL_SPAWN_GAP
+                        + row as f32 * brick_height,
+                    0.0,
+                );
+                scene.spawn_dynamic_box(center, brick_half_extents);
+            }
+        }
+
+        // Prime the broad-phase/query structures so picking works on the first frame.
+        scene.step();
+        scene
+    }
+
+    fn step(&mut self) {
+        self.pipeline.step(
+            self.gravity,
+            &self.integration_parameters,
+            &mut self.islands,
+            &mut self.broad_phase,
+            &mut self.narrow_phase,
+            &mut self.bodies,
+            &mut self.colliders,
+            &mut self.impulse_joints,
+            &mut self.multibody_joints,
+            &mut self.ccd_solver,
+            &(),
+            &(),
+        );
+        self.settle_resting_bodies();
+    }
+
+    fn settle_resting_bodies(&mut self) {
+        let linear_speed_sq = BODY_SNAP_SLEEP_LINEAR_SPEED * BODY_SNAP_SLEEP_LINEAR_SPEED;
+        let angular_speed_sq = BODY_SNAP_SLEEP_ANGULAR_SPEED * BODY_SNAP_SLEEP_ANGULAR_SPEED;
+        let mut to_sleep = Vec::new();
+
+        for cube in &self.cubes {
+            let has_active_contact = self
+                .narrow_phase
+                .contact_pairs_with(cube.collider)
+                .any(|pair| pair.has_any_active_contact());
+            if !has_active_contact {
+                continue;
+            }
+
+            let Some(body) = self.bodies.get(cube.body) else {
+                continue;
+            };
+            if body.is_sleeping() {
+                continue;
+            }
+
+            let linvel = body.linvel();
+            let angvel = body.angvel();
+            let linvel_sq = linvel.x * linvel.x + linvel.y * linvel.y + linvel.z * linvel.z;
+            let angvel_sq = angvel.x * angvel.x + angvel.y * angvel.y + angvel.z * angvel.z;
+            if linvel_sq <= linear_speed_sq && angvel_sq <= angular_speed_sq {
+                to_sleep.push(cube.body);
+            }
+        }
+
+        for handle in to_sleep {
+            if let Some(body) = self.bodies.get_mut(handle) {
+                body.set_linvel(RapierVector::ZERO, false);
+                body.set_angvel(RapierVector::ZERO, false);
+            }
+        }
+    }
+
+    fn apply_kick(&mut self, ray_origin: Vec3f, ray_dir: Vec3f, time: f64) -> bool {
+        let hit_body = {
+            let query_pipeline = self.broad_phase.as_query_pipeline(
+                self.narrow_phase.query_dispatcher(),
+                &self.bodies,
+                &self.colliders,
+                QueryFilter::only_dynamic().exclude_sensors(),
+            );
+            let ray = RapierRay::new(rapier_vec3(ray_origin), rapier_vec3(ray_dir.normalize()));
+
+            query_pipeline
+                .cast_ray(&ray, RapierReal::MAX, true)
+                .and_then(|(collider_handle, _)| {
+                    self.colliders
+                        .get(collider_handle)
+                        .and_then(|collider| collider.parent())
+                })
+        };
+
+        if let Some(body_handle) = hit_body {
+            let seed = (time * 1000.0) as u32 ^ (body_handle.into_raw_parts().0 * 2654435761);
+            let rx = ((seed & 0xFF) as f32 / 127.5) - 1.0;
+            let rz = (((seed >> 8) & 0xFF) as f32 / 127.5) - 1.0;
+            let kick_dir = vec3f(rx, KICK_UP_BIAS + 0.5, rz).normalize();
+            if let Some(body) = self.bodies.get_mut(body_handle) {
+                body.apply_impulse(rapier_vec3(kick_dir * KICK_IMPULSE_MAGNITUDE), true);
+                return true;
+            }
+        }
+
+        false
+    }
+}
 
 // --- PhysicsView widget ---
 
@@ -61,11 +316,11 @@ pub struct PhysicsView {
     draw_list_3d: DrawList2d,
     #[live(45.0)]
     camera_fov_y: f32,
-    #[live(18.0)]
+    #[live(1.7)]
     camera_distance: f32,
-    #[live(1.0)]
+    #[live(0.25)]
     camera_distance_min: f32,
-    #[live(80.0)]
+    #[live(8.0)]
     camera_distance_max: f32,
     #[live(0.1)]
     wheel_zoom_step: f32,
@@ -80,7 +335,7 @@ pub struct PhysicsView {
     #[rust]
     ground_mesh: Option<usize>,
     #[rust]
-    world: Option<PhysicsWorld>,
+    scene: Option<RapierScene>,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -93,8 +348,6 @@ pub struct PhysicsView {
     orbit_pitch: f32,
     #[rust]
     drag_last_abs: Option<DVec2>,
-    #[rust]
-    pending_ops: Vec<PhysicsOp>,
     #[rust]
     initialized: bool,
 }
@@ -121,31 +374,7 @@ impl PhysicsView {
             Err(e) => log!("Failed to upload ground mesh: {}", e),
         }
 
-        // Create physics world and spawn cubes
-        let mut world = PhysicsWorld::new(vec3f(0.0, -9.81, 0.0), 1.0 / 60.0);
-
-        let mut ops = Vec::new();
-        let grid = 5;
-        let half = 0.5f32;
-        let spacing = 1.1f32;
-        for y in 0..grid * 2 {
-            for x in 0..grid {
-                for z in 0..grid {
-                    ops.push(PhysicsOp::SpawnDynamic {
-                        position: vec3f(
-                            (x as f32 - grid as f32 / 2.0 + 0.5) * spacing,
-                            2.0 + y as f32 * spacing,
-                            (z as f32 - grid as f32 / 2.0 + 0.5) * spacing,
-                        ),
-                        half_extents: vec3f(half, half, half),
-                        velocity: Vec3f::default(),
-                        density: 1.0,
-                    });
-                }
-            }
-        }
-        world.step(&ops);
-        self.world = Some(world);
+        self.scene = Some(RapierScene::new());
     }
 
     fn camera_setup(&self, rect: Rect) -> (Vec3f, Vec3f, Mat4f, Mat4f) {
@@ -155,7 +384,8 @@ impl PhysicsView {
         let far = self.camera_far.max(near + 0.001);
         let projection = Mat4f::perspective(fov, aspect, near, far);
 
-        let camera_target = vec3(0.0, 3.0, 0.0);
+        let wall_height = WALL_ROWS as f32 * (WALL_BRICK_HALF_HEIGHT * 2.0 + WALL_SPAWN_GAP) * 0.5;
+        let camera_target = vec3(0.0, PLATFORM_TOP_Y + wall_height, 0.0);
         let distance = self.camera_distance.max(0.001);
         let yaw = self.orbit_yaw;
         let pitch = self.orbit_pitch.clamp(-1.45, 1.45);
@@ -199,45 +429,10 @@ impl PhysicsView {
         let Some((ray_origin, ray_dir)) = self.ray_from_screen(abs, rect) else {
             return false;
         };
-        let Some(world) = self.world.as_ref() else {
+        let Some(scene) = self.scene.as_mut() else {
             return false;
         };
-
-        let mut best_body = None;
-        let mut best_t = f32::INFINITY;
-        for (body_index, body) in world.bodies.iter().enumerate() {
-            if !body.is_dynamic() {
-                continue;
-            }
-            if let Some(t) = ray_intersects_oriented_box(
-                ray_origin,
-                ray_dir,
-                body.pose.position,
-                body.pose.orientation,
-                body.half_extents,
-            ) {
-                if t < best_t {
-                    best_t = t;
-                    best_body = Some(body_index);
-                }
-            }
-        }
-
-        if let Some(body_index) = best_body {
-            // Random-ish direction based on body index and time
-            let seed = (self.time * 1000.0) as u32 ^ (body_index as u32 * 2654435761);
-            let rx = ((seed & 0xFF) as f32 / 127.5) - 1.0;
-            let rz = (((seed >> 8) & 0xFF) as f32 / 127.5) - 1.0;
-            let kick_dir = vec3f(rx, KICK_UP_BIAS + 0.5, rz).normalize();
-            let impulse = kick_dir * KICK_IMPULSE_MAGNITUDE;
-            self.pending_ops.push(PhysicsOp::ApplyImpulse {
-                body: body_index,
-                impulse,
-            });
-            return true;
-        }
-
-        false
+        scene.apply_kick(ray_origin, ray_dir, self.time)
     }
 
     fn draw_scene(&mut self, cx: &mut Cx2d, rect: Rect) {
@@ -291,19 +486,52 @@ impl PhysicsView {
             let _ = self.draw_pbr.draw_mesh(cx, ground_mesh);
         }
 
+        if let Some(scene) = &self.scene {
+            self.draw_pbr.set_transform(pose_scaled_model(
+                &scene.platform_pose,
+                vec3f(1.0, 1.0, 1.0),
+            ));
+            self.draw_pbr.set_base_color_factor(vec4(
+                PLATFORM_COLOR[0],
+                PLATFORM_COLOR[1],
+                PLATFORM_COLOR[2],
+                1.0,
+            ));
+            self.draw_pbr.set_metal_roughness(0.0, 0.55);
+            let _ = self.draw_pbr.draw_rounded_cube(
+                cx,
+                vec3f(
+                    PLATFORM_HALF_WIDTH,
+                    PLATFORM_HALF_HEIGHT,
+                    PLATFORM_HALF_DEPTH,
+                ),
+                PLATFORM_ROUND_RADIUS,
+                PBR_FACE_SUBDIVISIONS,
+                PBR_CORNER_SEGMENTS,
+            );
+        }
+
         // Draw physics bodies as rounded cubes
         self.draw_pbr.set_metal_roughness(0.0, 0.55);
 
-        if let Some(world) = &self.world {
-            for (i, body) in world.bodies.iter().enumerate() {
-                let color = CUBE_COLORS[i % CUBE_COLORS.len()];
-                let he = body.half_extents;
-                let model = pose_scaled_model(&body.pose, vec3(1.0, 1.0, 1.0));
+        if let Some(scene) = &self.scene {
+            for cube in &scene.cubes {
+                if let Some(body) = scene.bodies.get(cube.body) {
+                    let color = CUBE_COLORS[cube.color_index];
+                    let pose = makepad_pose_from_rapier(body.translation(), *body.rotation());
+                    let model = pose_scaled_model(&pose, vec3(1.0, 1.0, 1.0));
 
-                self.draw_pbr.set_transform(model);
-                self.draw_pbr
-                    .set_base_color_factor(vec4(color[0], color[1], color[2], 1.0));
-                let _ = self.draw_pbr.draw_rounded_cube(cx, he, 0.08, 1, 4);
+                    self.draw_pbr.set_transform(model);
+                    self.draw_pbr
+                        .set_base_color_factor(vec4(color[0], color[1], color[2], 1.0));
+                    let _ = self.draw_pbr.draw_rounded_cube(
+                        cx,
+                        cube.half_extents,
+                        CUBE_ROUND_RADIUS,
+                        PBR_FACE_SUBDIVISIONS,
+                        PBR_CORNER_SEGMENTS,
+                    );
+                }
             }
         }
     }
@@ -374,11 +602,9 @@ impl Widget for PhysicsView {
         // Step physics and redraw every frame
         if let Event::NextFrame(ne) = event {
             self.time = ne.time;
-            let pending_ops = self.pending_ops.as_slice();
-            if let Some(world) = &mut self.world {
-                world.step(pending_ops);
+            if let Some(scene) = &mut self.scene {
+                scene.step();
             }
-            self.pending_ops.clear();
             self.area.redraw(cx);
             self.next_frame = cx.new_next_frame();
         }
@@ -449,58 +675,19 @@ fn pose_scaled_model(pose: &Pose, scale: Vec3f) -> Mat4f {
     }
 }
 
-fn ray_intersects_oriented_box(
-    ray_origin: Vec3f,
-    ray_direction: Vec3f,
-    box_center: Vec3f,
-    box_orientation: Quat,
-    half_extents: Vec3f,
-) -> Option<f32> {
-    let inv_rot = box_orientation.invert();
-    let local_origin = inv_rot.rotate_vec3(&(ray_origin - box_center));
-    let local_direction = inv_rot.rotate_vec3(&ray_direction);
+fn rapier_vec3(v: Vec3f) -> RapierVector {
+    RapierVector::new(v.x, v.y, v.z)
+}
 
-    let origin = [local_origin.x, local_origin.y, local_origin.z];
-    let direction = [local_direction.x, local_direction.y, local_direction.z];
-    let extents = [half_extents.x, half_extents.y, half_extents.z];
-
-    let mut t_min = -f32::INFINITY;
-    let mut t_max = f32::INFINITY;
-
-    for axis in 0..3 {
-        let o = origin[axis];
-        let d = direction[axis];
-        let e = extents[axis];
-
-        if d.abs() < 1.0e-6 {
-            if o < -e || o > e {
-                return None;
-            }
-            continue;
-        }
-
-        let inv_d = 1.0 / d;
-        let mut t1 = (-e - o) * inv_d;
-        let mut t2 = (e - o) * inv_d;
-        if t1 > t2 {
-            std::mem::swap(&mut t1, &mut t2);
-        }
-
-        t_min = t_min.max(t1);
-        t_max = t_max.min(t2);
-        if t_min > t_max {
-            return None;
-        }
-    }
-
-    if t_max < 0.0 {
-        return None;
-    }
-
-    if t_min >= 0.0 {
-        Some(t_min)
-    } else {
-        Some(t_max)
+fn makepad_pose_from_rapier(translation: RapierVector, rotation: RapierRotation) -> Pose {
+    Pose {
+        orientation: Quat {
+            x: rotation.x,
+            y: rotation.y,
+            z: rotation.z,
+            w: rotation.w,
+        },
+        position: vec3f(translation.x, translation.y, translation.z),
     }
 }
 

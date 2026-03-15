@@ -170,7 +170,7 @@ class MakepadSurface
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
-        Log.i("SAPP", "surfaceCreated");
+        Log.i("Makepad", "MakepadSurface: surfaceCreated");
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceCreated(surface);
@@ -178,7 +178,7 @@ class MakepadSurface
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
-        Log.i("SAPP", "surfaceDestroyed");
+        Log.i("Makepad", "MakepadSurface: surfaceDestroyed");
         Surface surface = holder.getSurface();
         MakepadNative.surfaceOnSurfaceDestroyed(surface);
     }
@@ -188,7 +188,7 @@ class MakepadSurface
                                int format,
                                int width,
                                int height) {
-        Log.i("SAPP", "surfaceChanged");
+        Log.i("Makepad", "MakepadSurface: surfaceChanged width=" + width + " height=" + height + " format=" + format);
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
@@ -631,6 +631,7 @@ public class MakepadActivity
     extends Activity
     implements MidiManager.OnDeviceOpenedListener
 {
+    private static final String LOG_TAG = "Makepad";
     //% MAIN_ACTIVITY_BODY
 
     private MakepadSurface view;
@@ -675,8 +676,13 @@ public class MakepadActivity
         System.loadLibrary("makepad");
     }
 
+    private void logLifecycle(String message) {
+        Log.i(LOG_TAG, getClass().getSimpleName() + ": " + message);
+    }
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        logLifecycle("onCreate begin");
         if (mWebSocketsThread == null || !mWebSocketsThread.isAlive()) {
             mWebSocketsThread = new HandlerThread("WebSocketsThread");
             mWebSocketsThread.start();
@@ -691,6 +697,7 @@ public class MakepadActivity
         }
         
         super.onCreate(savedInstanceState);
+        logLifecycle("onCreate after super");
         
         this.requestWindowFeature(Window.FEATURE_NO_TITLE);
 
@@ -729,7 +736,9 @@ public class MakepadActivity
 
         setContentView(mRootLayout);
 
+        logLifecycle("calling MakepadNative.activityOnCreate");
         MakepadNative.activityOnCreate(this);
+        logLifecycle("returned from MakepadNative.activityOnCreate");
 
         mVideoPlaybackThread = new HandlerThread("VideoPlayerThread");
         mVideoPlaybackThread.start(); // TODO: only start this if its needed.
@@ -754,6 +763,7 @@ public class MakepadActivity
 
         float refreshRate = getDeviceRefreshRate();
         MakepadNative.initChoreographer(refreshRate, sdkVersion);
+        logLifecycle("onCreate complete");
         //% MAIN_ACTIVITY_ON_CREATE
         
     }
@@ -761,12 +771,14 @@ public class MakepadActivity
     @Override
     protected void onStart() {
         super.onStart();
+        logLifecycle("onStart");
         MakepadNative.activityOnStart();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        logLifecycle("onResume");
         MakepadNative.activityOnResume();
 
         //% MAIN_ACTIVITY_ON_RESUME
@@ -774,6 +786,7 @@ public class MakepadActivity
     @Override
     protected void onPause() {
         super.onPause();
+        logLifecycle("onPause");
         MakepadNative.activityOnPause();
 
         //% MAIN_ACTIVITY_ON_PAUSE
@@ -782,11 +795,13 @@ public class MakepadActivity
     @Override
     protected void onStop() {
         super.onStop();
+        logLifecycle("onStop");
         MakepadNative.activityOnStop();
     }
 
     @Override
     protected void onDestroy() {
+        logLifecycle("onDestroy begin switching=" + mIsSwitchingActivity);
         if (mCameraPreviewOverlay != null) {
             for (Long videoId : mCameraPreviewViews.keySet()) {
                 MakepadNative.onCameraPreviewSurfaceDestroyed(videoId);
@@ -808,6 +823,7 @@ public class MakepadActivity
         }
         super.onDestroy();
         MakepadNative.activityOnDestroy();
+        logLifecycle("onDestroy complete");
     }
 
     @Override
@@ -941,9 +957,12 @@ public class MakepadActivity
     }
     
     public void switchActivityClass(Class c){
+        logLifecycle("switchActivityClass -> " + c.getSimpleName() + " begin");
         mIsSwitchingActivity = true;
         Intent intent = new Intent(getApplicationContext(), c);
         startActivity(intent);
+        logLifecycle("switchActivityClass -> " + c.getSimpleName() + " started");
+        logLifecycle("switchActivityClass -> " + c.getSimpleName() + " finishing current activity");
         finish();
     }
 

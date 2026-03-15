@@ -319,8 +319,9 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             match NumericValue::from_script_value_vm(vm, x_val) {
-                NumericValue::Mat4(m) => NumericValue::Mat4(Mat4f { v: m }.invert().v)
-                    .to_script_value_vm(vm),
+                NumericValue::Mat4(m) => {
+                    NumericValue::Mat4(Mat4f { v: m }.invert().v).to_script_value_vm(vm)
+                }
                 other => other.to_script_value_vm(vm),
             }
         },

@@ -123,7 +123,8 @@ impl<'a> CxDraw<'a> {
             }
             None
         }
-        iterate_nav_stops(cx, &mut scroll_stack, nav_tree, root, &mut callback).map(|area| (area, scroll_stack))
+        iterate_nav_stops(cx, &mut scroll_stack, nav_tree, root, &mut callback)
+            .map(|area| (area, scroll_stack))
     }
 
     pub fn nav_list_clear(&mut self, draw_list_id: DrawListId) {

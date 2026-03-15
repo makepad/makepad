@@ -1,7 +1,10 @@
 use crate::media_plugin::MediaPlaybackSession;
 use crate::{AudioBuffer, AudioInfo};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+};
 
 /// Opaque handle for a registered custom playback session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -11,27 +14,28 @@ type SendPlaybackSession = Box<dyn MediaPlaybackSession + Send>;
 type SharedPlaybackSession = Arc<Mutex<SendPlaybackSession>>;
 
 static MEDIA_PLAYBACK_SESSION_IDS: AtomicU64 = AtomicU64::new(1);
-static MEDIA_PLAYBACK_SESSIONS: OnceLock<Mutex<HashMap<MediaPlaybackSessionId, SendPlaybackSession>>> =
-    OnceLock::new();
+static MEDIA_PLAYBACK_SESSIONS: OnceLock<
+    Mutex<HashMap<MediaPlaybackSessionId, SendPlaybackSession>>,
+> = OnceLock::new();
 static ACTIVE_MEDIA_AUDIO: OnceLock<Mutex<HashMap<MediaPlaybackSessionId, SharedPlaybackSession>>> =
     OnceLock::new();
 
-fn media_playback_sessions(
-) -> &'static Mutex<HashMap<MediaPlaybackSessionId, SendPlaybackSession>> {
+fn media_playback_sessions() -> &'static Mutex<HashMap<MediaPlaybackSessionId, SendPlaybackSession>>
+{
     MEDIA_PLAYBACK_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn active_media_audio(
-) -> &'static Mutex<HashMap<MediaPlaybackSessionId, SharedPlaybackSession>> {
+fn active_media_audio() -> &'static Mutex<HashMap<MediaPlaybackSessionId, SharedPlaybackSession>> {
     ACTIVE_MEDIA_AUDIO.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Register a custom playback session for later handoff into Makepad playback.
-pub fn register_media_playback_session(
-    session: SendPlaybackSession,
-) -> MediaPlaybackSessionId {
+pub fn register_media_playback_session(session: SendPlaybackSession) -> MediaPlaybackSessionId {
     let id = MediaPlaybackSessionId(MEDIA_PLAYBACK_SESSION_IDS.fetch_add(1, Ordering::Relaxed));
-    media_playback_sessions().lock().unwrap().insert(id, session);
+    media_playback_sessions()
+        .lock()
+        .unwrap()
+        .insert(id, session);
     id
 }
 
@@ -51,10 +55,7 @@ pub fn take_registered_media_playback_session(
 }
 
 /// Register an active custom session for Makepad audio output mixing.
-pub fn register_active_media_audio(
-    id: MediaPlaybackSessionId,
-    session: SharedPlaybackSession,
-) {
+pub fn register_active_media_audio(id: MediaPlaybackSessionId, session: SharedPlaybackSession) {
     active_media_audio().lock().unwrap().insert(id, session);
 }
 
@@ -94,28 +95,44 @@ mod tests {
             Some(Ok(PlaybackPrepared::new(1, 1, 0, false, vec![], vec![])))
         }
 
-        fn poll_frame(&mut self) -> bool { false }
-        fn take_yuv_frame(&mut self) -> Option<YuvPlaneData> { None }
-        fn check_eos(&mut self) -> bool { false }
+        fn poll_frame(&mut self) -> bool {
+            false
+        }
+        fn take_yuv_frame(&mut self) -> Option<YuvPlaneData> {
+            None
+        }
+        fn check_eos(&mut self) -> bool {
+            false
+        }
         fn play(&mut self) {}
         fn pause(&mut self) {}
         fn resume(&mut self) {}
-        fn is_playing(&self) -> bool { true }
+        fn is_playing(&self) -> bool {
+            true
+        }
         fn seek_to(&mut self, _position_ms: u64) {}
         fn set_volume(&self, _volume: f64) {}
-        fn current_position_ms(&self) -> u128 { 0 }
+        fn current_position_ms(&self) -> u128 {
+            0
+        }
         fn mute(&self) {}
         fn unmute(&self) {}
         fn set_playback_rate(&self, _rate: f64) {}
-        fn seekable_ranges(&self) -> Vec<(f64, f64)> { Vec::new() }
-        fn buffered_ranges(&self) -> Vec<(f64, f64)> { Vec::new() }
+        fn seekable_ranges(&self) -> Vec<(f64, f64)> {
+            Vec::new()
+        }
+        fn buffered_ranges(&self) -> Vec<(f64, f64)> {
+            Vec::new()
+        }
         fn fill_audio_output(&mut self, _info: AudioInfo, output: &mut AudioBuffer) {
             self.audio_calls += 1;
             if let Some(sample) = output.data.first_mut() {
                 *sample += 0.5;
             }
         }
-        fn is_active(&self) -> bool { true }
+        fn is_active(&self) -> bool {
+            true
+        }
         fn cleanup(&mut self) {}
     }
 
@@ -130,7 +147,8 @@ mod tests {
     #[test]
     fn active_audio_mix_calls_registered_sessions() {
         let id = MediaPlaybackSessionId(999_001);
-        let session: SharedPlaybackSession = Arc::new(Mutex::new(Box::new(StubSession { audio_calls: 0 })));
+        let session: SharedPlaybackSession =
+            Arc::new(Mutex::new(Box::new(StubSession { audio_calls: 0 })));
         register_active_media_audio(id, session.clone());
 
         let mut output = AudioBuffer::new_with_size(16, 2);

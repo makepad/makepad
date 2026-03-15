@@ -2,8 +2,8 @@ use crate::media_plugin::MseDecodedFrame;
 use std::{
     collections::HashMap,
     sync::{
-        Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
     },
 };
 
@@ -41,11 +41,12 @@ pub trait VideoFrameSession: Send {
 pub struct VideoFrameSessionId(pub u64);
 
 static VIDEO_FRAME_SESSION_IDS: AtomicU64 = AtomicU64::new(1);
-static VIDEO_FRAME_SESSIONS: OnceLock<Mutex<HashMap<VideoFrameSessionId, Box<dyn VideoFrameSession>>>> =
-    OnceLock::new();
+static VIDEO_FRAME_SESSIONS: OnceLock<
+    Mutex<HashMap<VideoFrameSessionId, Box<dyn VideoFrameSession>>>,
+> = OnceLock::new();
 
-fn video_frame_sessions(
-) -> &'static Mutex<HashMap<VideoFrameSessionId, Box<dyn VideoFrameSession>>> {
+fn video_frame_sessions() -> &'static Mutex<HashMap<VideoFrameSessionId, Box<dyn VideoFrameSession>>>
+{
     VIDEO_FRAME_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -57,7 +58,9 @@ pub fn register_video_frame_session(session: Box<dyn VideoFrameSession>) -> Vide
 }
 
 /// Remove a registered video frame session that has not yet been consumed.
-pub fn unregister_video_frame_session(id: VideoFrameSessionId) -> Option<Box<dyn VideoFrameSession>> {
+pub fn unregister_video_frame_session(
+    id: VideoFrameSessionId,
+) -> Option<Box<dyn VideoFrameSession>> {
     video_frame_sessions().lock().unwrap().remove(&id)
 }
 

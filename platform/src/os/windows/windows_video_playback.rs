@@ -9,6 +9,7 @@ use {
         event::video_playback::VideoSource,
         makepad_error_log::*,
         makepad_live_id::LiveId,
+        media_plugin::PlaybackPrepared,
         texture::{
             CxTexturePool, TextureAlloc, TextureCategory, TextureFormat, TextureId, TexturePixel,
         },
@@ -24,7 +25,6 @@ use {
             },
             Win32::Media::MediaFoundation::{IMFAttributes, MFCreateAttributes},
         },
-        media_plugin::PlaybackPrepared,
     },
     std::{
         ffi::c_void,
@@ -691,9 +691,7 @@ impl WindowsVideoPlayer {
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
-    pub fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }

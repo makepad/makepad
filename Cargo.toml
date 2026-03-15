@@ -31,7 +31,7 @@ workspace.members = [
     "compositor",
     "libs/gltf",
     "libs/splat",
-    "libs/makepad_physics",
+    # "libs/makepad_physics",
     "libs/latex_math",
     "libs/mbtile_reader",
     "libs/pdf_parse",
@@ -95,6 +95,7 @@ workspace.exclude = [
     "libs/zune/zune-inflate",
     "libs/zune/zune-jpeg",
     "libs/zune/zune-png",
+    "libs/rapier",
     # platform-specific libs
     "libs/windows/windows-collections",
     "libs/windows/windows-core",

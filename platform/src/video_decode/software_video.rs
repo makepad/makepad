@@ -23,15 +23,14 @@ impl PlaybackSessionHandle {
         is_looping: bool,
     ) -> Self {
         let (inner, failed) = match media_plugin() {
-            Some(plugin) => match plugin.create_playback_session(
-                video_id,
-                texture_id,
-                source,
-                autoplay,
-                is_looping,
-            ) {
+            Some(plugin) => match plugin
+                .create_playback_session(video_id, texture_id, source, autoplay, is_looping)
+            {
                 Ok(player) => (Some(player), None),
-                Err(err) => (None, Some(format!("playback session unavailable: {:?}", err))),
+                Err(err) => (
+                    None,
+                    Some(format!("playback session unavailable: {:?}", err)),
+                ),
             },
             None => (
                 None,
@@ -47,9 +46,7 @@ impl PlaybackSessionHandle {
         }
     }
 
-    pub fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         if let Some(inner) = &mut self.inner {
             return inner.check_prepared();
         }
