@@ -133,9 +133,11 @@ const XR_PLATFORM_HALF_WIDTH: f32 = 0.64;
 const XR_PLATFORM_HALF_HEIGHT: f32 = 0.006;
 const XR_PLATFORM_HALF_DEPTH: f32 = 0.16;
 const XR_SCENE_FORWARD_OFFSET: f32 = 0.55;
-const XR_SCENE_VERTICAL_OFFSET: f32 = 0.0;
+const XR_SCENE_VERTICAL_OFFSET: f32 = 0.30;
+const XR_SCENE_HEAD_HEIGHT_SCALE: f32 = 0.5;
 const XR_SIMULATION_DT: f32 = 1.0 / 120.0;
 const XR_ENABLE_HAND_PHYSICS: bool = true;
+const XR_RENDER_HAND_GEOMETRY: bool = false;
 const XR_HAND_COLLIDER_SLOTS_PER_HAND: usize = 25;
 const XR_HAND_COLLIDER_FRICTION: f32 = 0.8;
 const XR_HAND_PLATE_HALF_WIDTH: f32 = 0.045;
@@ -157,6 +159,7 @@ const XR_WALL_BRICK_HALF_DEPTH: f32 = XR_CUBE_HALF_EXTENT;
 const XR_WALL_FULL_ROW_BRICKS: usize = 12;
 const XR_WALL_SHORT_ROW_BRICKS: usize = 11;
 const XR_WALL_ROWS: usize = 12;
+const XR_WALL_ROTATION_Y: f32 = std::f32::consts::FRAC_PI_2;
 const XR_PLATFORM_ROUND_RADIUS: f32 = 0.005;
 const XR_PBR_FACE_SUBDIVISIONS: usize = 1;
 const XR_PBR_CORNER_SEGMENTS: usize = 3;
@@ -252,10 +255,10 @@ fn capsule_pose(a: Vec3f, b: Vec3f) -> (RapierPose, RapierReal) {
 }
 
 impl RapierScene {
-    fn spawn_dynamic_box(&mut self, center: Vec3f, half_extents: Vec3f) {
+    fn spawn_dynamic_box(&mut self, pose: Pose, half_extents: Vec3f) {
         let body = self.bodies.insert(
             RigidBodyBuilder::dynamic()
-                .translation(rapier_vec3(center))
+                .pose(rapier_pose(pose))
                 .linear_damping(XR_BODY_LINEAR_DAMPING)
                 .angular_damping(XR_BODY_ANGULAR_DAMPING)
                 .additional_solver_iterations(XR_BODY_ADDITIONAL_SOLVER_ITERATIONS),
@@ -282,6 +285,8 @@ impl RapierScene {
     }
 
     fn new(center: Vec3f) -> Self {
+        let scene_rotation = Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), XR_WALL_ROTATION_Y);
+        let platform_center = center + vec3f(0.0, -XR_PLATFORM_HALF_HEIGHT, 0.0);
         let mut scene = Self {
             gravity: RapierVector::new(0.0, -9.81, 0.0),
             integration_parameters: IntegrationParameters {
@@ -300,17 +305,12 @@ impl RapierScene {
             cubes: Vec::new(),
             left_hand: Vec::new(),
             right_hand: Vec::new(),
-            platform_pose: Pose::new(
-                Quat::default(),
-                center + vec3f(0.0, -XR_PLATFORM_HALF_HEIGHT, 0.0),
-            ),
+            platform_pose: Pose::new(scene_rotation, platform_center),
         };
 
         let platform = scene
             .bodies
-            .insert(RigidBodyBuilder::fixed().translation(rapier_vec3(
-                center + vec3f(0.0, -XR_PLATFORM_HALF_HEIGHT, 0.0),
-            )));
+            .insert(RigidBodyBuilder::fixed().pose(rapier_pose(scene.platform_pose)));
         scene.colliders.insert_with_parent(
             ColliderBuilder::cuboid(
                 XR_PLATFORM_HALF_WIDTH,
@@ -339,7 +339,8 @@ impl RapierScene {
         let brick_width = XR_WALL_BRICK_HALF_WIDTH * 2.0 + XR_PLATFORM_SPAWN_GAP;
         let brick_height = XR_WALL_BRICK_HALF_HEIGHT * 2.0 + XR_PLATFORM_SPAWN_GAP;
         let wall_origin = center;
-        let row_axis = vec3f(1.0, 0.0, 0.0);
+        let row_axis = vec3f(0.0, 0.0, 1.0);
+        let brick_rotation = scene_rotation;
         for row in 0..XR_WALL_ROWS {
             let bricks_in_row = if row % 2 == 0 {
                 XR_WALL_FULL_ROW_BRICKS
@@ -357,7 +358,7 @@ impl RapierScene {
                             + row as f32 * brick_height,
                         0.0,
                     );
-                scene.spawn_dynamic_box(brick_center, brick_half_extents);
+                scene.spawn_dynamic_box(Pose::new(brick_rotation, brick_center), brick_half_extents);
             }
         }
 
@@ -860,7 +861,7 @@ impl XrScene {
         physics_colliders: Option<&[HandCollider]>,
         is_left: bool,
     ) {
-        if !hand.in_view() {
+        if !XR_RENDER_HAND_GEOMETRY || !hand.in_view() {
             return;
         }
 
@@ -878,9 +879,11 @@ impl XrScene {
         };
         self.draw_hand_shapes(cx, colliders, is_left);
 
+        self.draw_cube.begin_many_instances(cx);
         for joint in &hand.joints {
             self.draw_pose_box(cx, *joint, vec3(0.011, 0.011, 0.016), joint_color, 0.0);
         }
+        self.draw_cube.end_many_instances(cx);
     }
 
     fn ensure_scene(&mut self, state: &XrState) -> bool {
@@ -897,7 +900,7 @@ impl XrScene {
         }
         let center = vec3f(
             state.head_pose.position.x,
-            state.head_pose.position.y,
+            state.head_pose.position.y * XR_SCENE_HEAD_HEIGHT_SCALE,
             state.head_pose.position.z,
         ) + forward * XR_SCENE_FORWARD_OFFSET
             + vec3f(0.0, XR_SCENE_VERTICAL_OFFSET, 0.0);
@@ -975,6 +978,7 @@ impl XrScene {
             })
             .collect();
 
+        self.draw_cube.begin_many_instances(cx);
         for (pose, half_extents, color_index) in cubes {
             let color = CUBE_COLORS[color_index];
             self.draw_pose_box(
@@ -986,9 +990,10 @@ impl XrScene {
                     half_extents.z * 2.0 * XR_BRICK_VISUAL_SCALE,
                 ),
                 vec4(color[0], color[1], color[2], 1.0),
-                0.0,
+                1.0,
             );
         }
+        self.draw_cube.end_many_instances(cx);
     }
 }
 
@@ -1027,7 +1032,7 @@ impl Widget for XrScene {
 
         let cx = &mut Cx2d::new(cx.cx);
         self.ensure_scene(state);
-        let (left_physics, right_physics) = if XR_ENABLE_HAND_PHYSICS {
+        let (left_physics, right_physics) = if XR_RENDER_HAND_GEOMETRY && XR_ENABLE_HAND_PHYSICS {
             if let Some(scene) = self.scene.as_ref() {
                 (
                     Some(Self::collect_live_hand_colliders(scene, &scene.left_hand)),
@@ -1040,8 +1045,10 @@ impl Widget for XrScene {
             (None, None)
         };
         self.prepare_pbr(cx);
-        self.draw_hand(cx, &state.left_hand, left_physics.as_deref(), true);
-        self.draw_hand(cx, &state.right_hand, right_physics.as_deref(), false);
+        if XR_RENDER_HAND_GEOMETRY {
+            self.draw_hand(cx, &state.left_hand, left_physics.as_deref(), true);
+            self.draw_hand(cx, &state.right_hand, right_physics.as_deref(), false);
+        }
         self.draw_platform(cx);
         self.draw_bodies(cx);
 

@@ -42,11 +42,18 @@ script_mod! {
                 0.0
             );
             let normal = normalize(normal4.xyz);
-            let dp = max(dot(normal, normalize(vec3(0.0, 1.0, 1.0))), 0.0);
-
-            self.lit_color = self.get_color(dp);
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0);
-            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world);
+            let view_pos = self.draw_pass.camera_view * self.world;
+            let view_normal4 = self.draw_pass.camera_view * vec4(normal.x, normal.y, normal.z, 0.0);
+            let view_normal = normalize(view_normal4.xyz);
+            if dot(view_normal, -view_pos.xyz) <= 0.0 {
+                self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
+                return
+            }
+
+            let dp = max(dot(normal, normalize(vec3(0.0, 1.0, 1.0))), 0.0);
+            self.lit_color = self.get_color(dp);
+            self.vertex_pos = self.draw_pass.camera_projection * view_pos;
         }
 
         pixel: fn() {
