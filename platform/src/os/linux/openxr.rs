@@ -972,6 +972,11 @@ impl CxOpenXrFrame {
         // TODO compute depth image matrices to go into makepad world
         let mut eyes = [CxOpenXrEye::default(); 2];
 
+        #[cfg(use_vulkan)]
+        let screen_near_z = 0.05;
+        #[cfg(not(use_vulkan))]
+        let screen_near_z = 0.1;
+
         for eye in 0..2 {
             let head_from_eye = projections[eye].pose;
             let local_from_head = local_from_head.pose;
@@ -997,7 +1002,8 @@ impl CxOpenXrFrame {
             }
             let eye_from_local = local_from_eye.invert();
             eyes[eye].view_mat = eye_from_local.to_mat4();
-            eyes[eye].proj_mat = Mat4f::from_camera_fov(&projections[eye].fov, 0.1, 100.0);
+            eyes[eye].proj_mat =
+                Mat4f::from_camera_fov(&projections[eye].fov, screen_near_z, 100.0);
         }
 
         Ok(CxOpenXrFrame {
@@ -1007,7 +1013,7 @@ impl CxOpenXrFrame {
             depth_image,
             eyes,
             swap_chain_index,
-            screen_near_z: 0.1,
+            screen_near_z,
             screen_far_z: 10.0,
         })
         //projection_info
