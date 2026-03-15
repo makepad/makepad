@@ -1,14 +1,14 @@
-use crate::dynamics::solver::SolverVel;
 use crate::dynamics::solver::joint_constraint::JointConstraintHelper;
+use crate::dynamics::solver::SolverVel;
 use crate::dynamics::{
     GenericJoint, IntegrationParameters, JointAxesMask, JointGraphEdge, JointIndex,
 };
-use crate::math::{DIM, Real, SPATIAL_DIM};
+use crate::math::{Real, DIM, SPATIAL_DIM};
 use crate::utils::{ComponentMul, DotProduct, ScalarType, SimdRealCopy};
 
 use crate::dynamics::solver::solver_body::SolverBodies;
 #[cfg(feature = "simd-is-enabled")]
-use crate::math::{SIMD_WIDTH, SimdReal};
+use crate::math::{SimdReal, SIMD_WIDTH};
 #[cfg(feature = "simd-is-enabled")]
 use na::SimdValue;
 use parry::math::Pose;

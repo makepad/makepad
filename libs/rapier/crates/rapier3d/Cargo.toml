@@ -34,7 +34,7 @@ simd-nightly = [
 # enabled with the "simd-stable" or "simd-nightly" feature.
 simd-is-enabled = []
 serde-serialize = []
-enhanced-determinism = ["simba/libm_force", "parry3d/enhanced-determinism"]
+enhanced-determinism = ["simba/libm_force", "parry3d/enhanced-determinism", "makepad-sparse-voxels/enhanced-determinism"]
 debug-render = []
 profiler = []
 
@@ -58,3 +58,4 @@ parry3d = { version = "0.26.0", default-features = false, features = ["alloc", "
 simba = { version = "0.9.1", path = "../../vendor/simba" }
 bitflags = { version = "2", path = "../../../../libs/bitflags" }
 static_assertions = { version = "1", path = "../../vendor/static_assertions" }
+makepad-sparse-voxels = { version = "0.1.0", path = "../../../../libs/sparse_voxels" }

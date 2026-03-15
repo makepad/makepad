@@ -222,11 +222,7 @@ impl LibOpenXr {
             xrGetSystem: get_proc_addr!(gipa, instance, TxrGetSystem)?,
             xrGetSystemProperties: get_proc_addr!(gipa, instance, TxrGetSystemProperties)?,
             #[cfg(use_vulkan)]
-            xrCreateVulkanInstanceKHR: get_proc_addr!(
-                gipa,
-                instance,
-                TxrCreateVulkanInstanceKHR
-            )?,
+            xrCreateVulkanInstanceKHR: get_proc_addr!(gipa, instance, TxrCreateVulkanInstanceKHR)?,
             #[cfg(use_vulkan)]
             xrCreateVulkanDeviceKHR: get_proc_addr!(gipa, instance, TxrCreateVulkanDeviceKHR)?,
             #[cfg(use_vulkan)]

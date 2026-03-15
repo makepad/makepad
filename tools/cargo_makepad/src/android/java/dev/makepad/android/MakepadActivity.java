@@ -170,7 +170,6 @@ class MakepadSurface
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
-        Log.i("Makepad", "MakepadSurface: surfaceCreated");
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceCreated(surface);
@@ -178,7 +177,6 @@ class MakepadSurface
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
-        Log.i("Makepad", "MakepadSurface: surfaceDestroyed");
         Surface surface = holder.getSurface();
         MakepadNative.surfaceOnSurfaceDestroyed(surface);
     }
@@ -188,7 +186,6 @@ class MakepadSurface
                                int format,
                                int width,
                                int height) {
-        Log.i("Makepad", "MakepadSurface: surfaceChanged width=" + width + " height=" + height + " format=" + format);
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
@@ -677,7 +674,6 @@ public class MakepadActivity
     }
 
     private void logLifecycle(String message) {
-        Log.i(LOG_TAG, getClass().getSimpleName() + ": " + message);
     }
 
     @Override
@@ -957,12 +953,9 @@ public class MakepadActivity
     }
     
     public void switchActivityClass(Class c){
-        logLifecycle("switchActivityClass -> " + c.getSimpleName() + " begin");
         mIsSwitchingActivity = true;
         Intent intent = new Intent(getApplicationContext(), c);
         startActivity(intent);
-        logLifecycle("switchActivityClass -> " + c.getSimpleName() + " started");
-        logLifecycle("switchActivityClass -> " + c.getSimpleName() + " finishing current activity");
         finish();
     }
 

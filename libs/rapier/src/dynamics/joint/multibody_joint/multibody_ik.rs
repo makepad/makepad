@@ -1,5 +1,5 @@
 use crate::dynamics::{JointAxesMask, Multibody, MultibodyLink, RigidBodySet};
-use crate::math::{ANG_DIM, DIM, DVector, Jacobian, Pose, Real, SPATIAL_DIM};
+use crate::math::{DVector, Jacobian, Pose, Real, ANG_DIM, DIM, SPATIAL_DIM};
 use na::{self, SMatrix, SVector};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -136,7 +136,7 @@ impl Multibody {
                 delta_lin.z,
                 delta_ang.x,
                 delta_ang.y,
-                delta_ang.z
+                delta_ang.z,
             );
 
             if !options.constrained_axes.contains(JointAxesMask::LIN_X) {

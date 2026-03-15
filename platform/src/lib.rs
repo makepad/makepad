@@ -51,6 +51,8 @@ pub mod permission;
 mod texture;
 mod uniform_buffer;
 mod window;
+mod xr_depth_mesh;
+mod xr_depth_voxels;
 
 pub mod web_socket;
 
@@ -85,7 +87,9 @@ pub use ::windows;
 pub use makepad_futures;
 pub use makepad_script_std::makepad_network;
 pub use makepad_script_std::makepad_script;
+pub use makepad_sparse_voxels as sparse_voxels;
 pub use makepad_studio_protocol as studio;
+pub use parry3d;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
 pub use makepad_script_std::makepad_script::trap;
@@ -214,6 +218,12 @@ pub use {
             CxWindowPool, MacosWindowChrome, MacosWindowConfig, MacosWindowKind, MacosWindowLevel,
             ScriptWindowHandle, WindowBackdrop, WindowHandle, WindowIcon, WindowIconBuffer,
             WindowId, WindowVisuals,
+        },
+        xr_depth_mesh::{XrDepthMesh, XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore},
+        xr_depth_voxels::{
+            XrDepthEvidenceChunk, XrDepthEvidenceStorage, XrDepthPhysicsBox, XrDepthPhysicsChunk,
+            XrDepthPhysicsChunkKey, XrDepthVoxels, XrDepthVoxelsState, XrDepthVoxelsStats,
+            XrDepthVoxelsStore,
         },
     },
     app_main::*,
