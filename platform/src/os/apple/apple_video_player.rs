@@ -50,7 +50,9 @@ impl AppleUnifiedVideoPlayer {
         let force_software = force_software_env || source.is_session();
         let mode = if force_software {
             if force_software_env {
-                crate::log!("VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder");
+                crate::log!(
+                    "VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder"
+                );
             } else if source.is_session() {
                 crate::log!("VIDEO: session source uses software video decoder");
             }
@@ -102,9 +104,7 @@ impl AppleUnifiedVideoPlayer {
         ));
     }
 
-    pub fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         match &mut self.mode {
             ApplePlayerMode::Native(player) => match player.check_prepared() {
                 Some(Err(err)) => {

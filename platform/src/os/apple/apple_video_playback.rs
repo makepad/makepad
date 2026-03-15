@@ -207,9 +207,7 @@ impl AppleVideoPlayer {
 
     /// Check if the player item has become ready to play or has failed.
     /// Returns `Ok(...)` with metadata when ready, `Err(msg)` on failure, `None` if still loading.
-    pub fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }

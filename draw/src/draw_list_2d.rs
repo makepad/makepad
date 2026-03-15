@@ -137,9 +137,12 @@ impl DrawListExt for DrawList {
     }
 
     fn map_point_from_local(&self, cx: &Cx, local: DVec2) -> DVec2 {
-        let mapped = self
-            .get_view_transform(cx)
-            .transform_vec4(vec4f(local.x as f32, local.y as f32, 0.0, 1.0));
+        let mapped = self.get_view_transform(cx).transform_vec4(vec4f(
+            local.x as f32,
+            local.y as f32,
+            0.0,
+            1.0,
+        ));
         if mapped.w.abs() > 1e-6 {
             dvec2((mapped.x / mapped.w) as f64, (mapped.y / mapped.w) as f64)
         } else {
@@ -477,10 +480,7 @@ mod tests {
     fn translation(tx: f32, ty: f32) -> Mat4f {
         Mat4f {
             v: [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                tx, ty, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0,
             ],
         }
     }
@@ -547,10 +547,7 @@ mod tests {
 
         let mat = Mat4f {
             v: [
-                2.0, 0.0, 0.0, 0.0,
-                0.0, 3.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                4.0, 5.0, 0.0, 1.0,
+                2.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 4.0, 5.0, 0.0, 1.0,
             ],
         };
         parent.set_view_transform_self_only(&mut cx, &mat);
@@ -558,7 +555,10 @@ mod tests {
         assert_eq!(parent.get_view_transform(&cx).v, mat.v);
         assert_eq!(child_a.debug_parent_draw_list_id(&cx), Some(parent.id()));
         assert_eq!(child_b.debug_parent_draw_list_id(&cx), Some(parent.id()));
-        assert_eq!(parent.debug_child_draw_list_ids(&cx), vec![child_a.id(), child_b.id()]);
+        assert_eq!(
+            parent.debug_child_draw_list_ids(&cx),
+            vec![child_a.id(), child_b.id()]
+        );
 
         let world = parent.map_point_from_local(&cx, dvec2(1.0, 1.0));
         let expected = mat.transform_vec4(vec4f(1.0, 1.0, 0.0, 1.0));

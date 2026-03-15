@@ -83,9 +83,7 @@ impl V4l2CameraPlayer {
         self.active
     }
 
-    pub fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }

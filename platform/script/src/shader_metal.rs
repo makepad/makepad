@@ -6,11 +6,7 @@ use std::fmt::Write;
 
 impl ShaderOutput {
     pub fn metal_create_helpers(&self, out: &mut String) {
-        writeln!(
-            out,
-            "inline float4x4 _mp_inverse(float4x4 m) {{"
-        )
-        .ok();
+        writeln!(out, "inline float4x4 _mp_inverse(float4x4 m) {{").ok();
         writeln!(out, "    float a00 = m[0][0];").ok();
         writeln!(out, "    float a01 = m[0][1];").ok();
         writeln!(out, "    float a02 = m[0][2];").ok();
@@ -52,11 +48,7 @@ impl ShaderOutput {
         .ok();
         writeln!(out, "    }}").ok();
         writeln!(out, "    float idet = 1.0 / det;").ok();
-        writeln!(
-            out,
-            "    return float4x4("
-        )
-        .ok();
+        writeln!(out, "    return float4x4(").ok();
         writeln!(
             out,
             "        float4((a11 * b11 - a12 * b10 + a13 * b09) * idet, (a02 * b10 - a01 * b11 - a03 * b09) * idet, (a31 * b05 - a32 * b04 + a33 * b03) * idet, (a22 * b04 - a21 * b05 - a23 * b03) * idet),"

@@ -132,7 +132,8 @@ impl DrawProjectedQuad {
         self.draw_super.draw_vars.append_group_id = cx.draw_call_group_background().0;
         if self.draw_super.draw_vars.can_instance() {
             let new_area = cx.add_instance(&self.draw_super.draw_vars);
-            self.draw_super.draw_vars.area = cx.update_area_refs(self.draw_super.draw_vars.area, new_area);
+            self.draw_super.draw_vars.area =
+                cx.update_area_refs(self.draw_super.draw_vars.area, new_area);
         }
     }
 }
@@ -164,8 +165,15 @@ impl MpCompositor {
         self.draw_quad.opacity = quad.opacity.clamp(0.0, 1.0);
         self.draw_quad.premultiplied = if quad.premultiplied { 1.0 } else { 0.0 };
         self.draw_quad.draw_super.draw_vars.options.depth_write = quad.depth_write;
-        self.draw_quad.draw_super.draw_vars.set_texture(0, &quad.texture);
-        set_clip_planes(cx, &mut self.draw_quad.draw_super.draw_vars, &quad.clip_planes);
+        self.draw_quad
+            .draw_super
+            .draw_vars
+            .set_texture(0, &quad.texture);
+        set_clip_planes(
+            cx,
+            &mut self.draw_quad.draw_super.draw_vars,
+            &quad.clip_planes,
+        );
         self.draw_quad.draw(cx);
     }
 
@@ -202,9 +210,14 @@ fn current_view_projection(cx: &Cx2d) -> Option<(Mat4f, Mat4f)> {
     let draw_list = &cx.draw_lists[draw_list_id];
     let pass_id = draw_list.draw_pass_id?;
     let pass = &cx.passes[pass_id];
-    let pass_view_projection =
-        Mat4f::mul(&pass.pass_uniforms.camera_projection, &pass.pass_uniforms.camera_view);
-    Some((pass_view_projection, draw_list.draw_list_uniforms.view_transform))
+    let pass_view_projection = Mat4f::mul(
+        &pass.pass_uniforms.camera_projection,
+        &pass.pass_uniforms.camera_view,
+    );
+    Some((
+        pass_view_projection,
+        draw_list.draw_list_uniforms.view_transform,
+    ))
 }
 
 fn is_backface_culled(cx: &Cx2d, quad: &MpCompositedQuad) -> bool {
@@ -269,7 +282,10 @@ mod tests {
 
         assert!(reference_area.abs() > 0.0);
         assert!(flipped_area.abs() > 0.0);
-        assert_ne!(reference_area.is_sign_positive(), flipped_area.is_sign_positive());
+        assert_ne!(
+            reference_area.is_sign_positive(),
+            flipped_area.is_sign_positive()
+        );
     }
 
     #[test]

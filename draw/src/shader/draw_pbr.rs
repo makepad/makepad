@@ -50,6 +50,11 @@ enum PbrPrimitiveMeshKey {
     Cube {
         segments: u16,
     },
+    Capsule {
+        lat: u16,
+        lon: u16,
+        half_height_permille: u16,
+    },
     Surface {
         seg_u: u16,
         seg_v: u16,
@@ -199,7 +204,7 @@ script_mod! {
             self.v_uv = local_uv;
             self.v_color = self.geom.color;
 
-            let world = vec4(model_pos.x, model_pos.y, model_pos.z + self.draw_call.zbias, 1.0);
+            let world = vec4(model_pos.x, model_pos.y, model_pos.z, 1.0);
             self.v_world_clip = world;
             let view_pos = self.view_with_camera(world);
             self.v_view_pos = vec3(view_pos.x, view_pos.y, view_pos.z);
@@ -1223,6 +1228,48 @@ impl DrawPbr {
         self.draw_sphere(cx, radius, subdivisions)
     }
 
+    /// Draw a capsule (pill) aligned with the local Y axis using current material/shader state.
+    ///
+    /// * `radius` - Capsule radius.
+    /// * `half_height` - Half of the cylindrical middle section length, excluding the hemispherical caps.
+    /// * `subdivisions` - Controls tessellation density for the hemispheres.
+    pub fn draw_capsule(
+        &mut self,
+        cx: &mut Cx2d,
+        radius: f32,
+        half_height: f32,
+        subdivisions: usize,
+    ) -> Result<(), String> {
+        let radius = radius.max(0.0001);
+        let half_height = half_height.max(0.0);
+        if half_height <= 0.0001 {
+            return self.draw_sphere(cx, radius, subdivisions);
+        }
+
+        let lat = subdivisions.clamp(4, 96);
+        let lon = (lat * 2).clamp(8, 192);
+        let ratio = (half_height / radius).clamp(0.0, 64.0);
+        let mesh = self.ensure_capsule_mesh(cx, lat, lon, ratio)?;
+        self.draw_mesh_with_transform_and_local_scale(
+            cx,
+            mesh,
+            self.cur_transform,
+            vec3(radius, radius, radius),
+        )
+    }
+
+    pub fn draw_capsule_with_material(
+        &mut self,
+        cx: &mut Cx2d,
+        radius: f32,
+        half_height: f32,
+        subdivisions: usize,
+        material: &DrawPbrMaterialState,
+    ) -> Result<(), String> {
+        self.apply_material_state(material);
+        self.draw_capsule(cx, radius, half_height, subdivisions)
+    }
+
     /// Draw a rounded cube (box with smooth rounded edges and corners).
     ///
     /// * `size` — half-extents along each axis (the full box spans ±size on each axis before rounding).
@@ -1313,6 +1360,40 @@ impl DrawPbr {
             segments as usize,
         );
         let (positions, normals, uvs, indices) = Self::geometry_gen_to_pbr(&gen)?;
+        let handle = self.upload_indexed_triangles_mesh(
+            cx,
+            &positions,
+            Some(&normals),
+            None,
+            Some(&uvs),
+            None,
+            &indices,
+        )?;
+        self.primitive_mesh_cache.insert(key, handle);
+        Ok(handle)
+    }
+
+    fn ensure_capsule_mesh(
+        &mut self,
+        cx: &mut Cx2d,
+        lat: usize,
+        lon: usize,
+        half_height_ratio: f32,
+    ) -> Result<PbrMeshHandle, String> {
+        let lat = lat.clamp(4, 256) as u16;
+        let lon = lon.clamp(8, 512) as u16;
+        let half_height_permille = (half_height_ratio.clamp(0.0, 64.0) * 1000.0) as u16;
+        let key = PbrPrimitiveMeshKey::Capsule {
+            lat,
+            lon,
+            half_height_permille,
+        };
+        if let Some(handle) = self.primitive_mesh_cache.get(&key).copied() {
+            return Ok(handle);
+        }
+
+        let (positions, normals, uvs, indices) =
+            Self::build_capsule_mesh(lat as usize, lon as usize, half_height_ratio);
         let handle = self.upload_indexed_triangles_mesh(
             cx,
             &positions,
@@ -1837,6 +1918,80 @@ impl DrawPbr {
                 if y != lat - 1 {
                     indices.extend_from_slice(&[i1, i2, i3]);
                 }
+            }
+        }
+
+        (positions, normals, uvs, indices)
+    }
+
+    fn build_capsule_mesh(lat: usize, lon: usize, half_height: f32) -> PbrMeshBuffers {
+        let lat = lat.max(4);
+        let lon = lon.max(8);
+        let half_height = half_height.max(0.0);
+        let cyl_segments = (half_height * lat as f32).ceil() as usize;
+        let ring_count = (lat + 1) + cyl_segments.saturating_sub(1) + lat;
+        let mut positions = Vec::with_capacity(ring_count * (lon + 1));
+        let mut normals = Vec::with_capacity(ring_count * (lon + 1));
+        let mut uvs = Vec::with_capacity(ring_count * (lon + 1));
+        let mut indices = Vec::with_capacity(ring_count.saturating_sub(1) * lon * 6);
+        let total_half_height = half_height + 1.0;
+
+        let mut push_ring = |y: f32, ring_radius: f32, normal_y: f32, normal_radius: f32| {
+            let v = 1.0 - ((y + total_half_height) / (2.0 * total_half_height));
+            for x in 0..=lon {
+                let u = x as f32 / lon as f32;
+                let phi = u * 2.0 * PI;
+                let sin_phi = phi.sin();
+                let cos_phi = phi.cos();
+                let px = ring_radius * cos_phi;
+                let pz = ring_radius * sin_phi;
+                let nx = normal_radius * cos_phi;
+                let nz = normal_radius * sin_phi;
+
+                positions.push([px, y, pz]);
+                normals.push([nx, normal_y, nz]);
+                uvs.push([u, v]);
+            }
+        };
+
+        for y in 0..=lat {
+            let v = y as f32 / lat as f32;
+            let angle = -0.5 * PI + v * 0.5 * PI;
+            push_ring(
+                -half_height + angle.sin(),
+                angle.cos(),
+                angle.sin(),
+                angle.cos(),
+            );
+        }
+
+        if cyl_segments > 1 {
+            for segment in 1..cyl_segments {
+                let t = segment as f32 / cyl_segments as f32;
+                push_ring(-half_height + t * (2.0 * half_height), 1.0, 0.0, 1.0);
+            }
+        }
+
+        for y in 1..=lat {
+            let v = y as f32 / lat as f32;
+            let angle = v * 0.5 * PI;
+            push_ring(
+                half_height + angle.sin(),
+                angle.cos(),
+                angle.sin(),
+                angle.cos(),
+            );
+        }
+
+        let stride = lon + 1;
+        let rows = positions.len() / stride;
+        for y in 0..rows.saturating_sub(1) {
+            for x in 0..lon {
+                let i0 = (y * stride + x) as u32;
+                let i1 = i0 + 1;
+                let i2 = i0 + stride as u32;
+                let i3 = i2 + 1;
+                indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
             }
         }
 

@@ -35,8 +35,8 @@ repository = "https://github.com/contain-rs/bit-vec"
 
 [package.metadata.docs.rs]
 features = [
-    "borsh",
-    "serde",
+    "borsh_std",
+    "serde_std",
     "miniserde",
     "nanoserde",
 ]
@@ -49,32 +49,11 @@ path = "src/lib.rs"
 name = "bench"
 path = "benches/bench.rs"
 
-[dependencies.borsh]
-version = "1.5"
-features = ["derive"]
-optional = true
-default-features = false
-
-[dependencies.miniserde]
-version = "0.1"
-optional = true
-
-[dependencies.nanoserde]
-version = "0.1"
-optional = true
-
-[dependencies.serde]
-version = "1.0"
-features = ["derive"]
-optional = true
-default-features = false
-
 [features]
-borsh_std = ["borsh/std"]
+borsh_std = []
 default = ["std"]
-serde_no_std = ["serde/alloc"]
-serde_std = [
-    "std",
-    "serde/std",
-]
+miniserde = []
+nanoserde = []
+serde_no_std = []
+serde_std = []
 std = []

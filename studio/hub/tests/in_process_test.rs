@@ -2139,7 +2139,10 @@ fn observe_mount_recovers_splash_after_error_on_followup_save() {
             HubToClient::TextFileSaved { path, .. } if path == "repo/makepad.splash"
         )
     });
-    assert!(broken_saved.is_some(), "did not receive broken TextFileSaved");
+    assert!(
+        broken_saved.is_some(),
+        "did not receive broken TextFileSaved"
+    );
 
     let broken_started = wait_for_message(&connection, Duration::from_secs(6), |msg| {
         matches!(
@@ -2168,9 +2171,11 @@ fn observe_mount_recovers_splash_after_error_on_followup_save() {
         "did not receive failed BuildStopped for broken splash"
     );
 
-    let empty_run_items = wait_for_message(&connection, Duration::from_secs(3), |msg| {
-        matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.is_empty())
-    });
+    let empty_run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.is_empty()),
+    );
     assert!(
         empty_run_items.is_some(),
         "did not receive empty RunItems after broken splash"
@@ -2279,7 +2284,10 @@ fn external_makepad_splash_fix_restarts_failed_splash() {
             HubToClient::TextFileSaved { path, .. } if path == "repo/makepad.splash"
         )
     });
-    assert!(broken_saved.is_some(), "did not receive broken TextFileSaved");
+    assert!(
+        broken_saved.is_some(),
+        "did not receive broken TextFileSaved"
+    );
 
     let broken_started = wait_for_message(&connection, Duration::from_secs(6), |msg| {
         matches!(
@@ -2308,9 +2316,11 @@ fn external_makepad_splash_fix_restarts_failed_splash() {
         "did not receive failed BuildStopped for broken splash"
     );
 
-    let empty_run_items = wait_for_message(&connection, Duration::from_secs(3), |msg| {
-        matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.is_empty())
-    });
+    let empty_run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.is_empty()),
+    );
     assert!(
         empty_run_items.is_some(),
         "did not receive empty RunItems after broken splash"

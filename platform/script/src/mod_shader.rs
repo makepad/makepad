@@ -46,10 +46,11 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         shader,
         id_lut!(depth_clip),
         script_args!(world = NIL, color = NIL, clip = 0.0),
-        |vm, args| vm
-            .bx
-            .heap
-            .value(args, id!(color).into(), vm.bx.threads.cur_ref().trap.pass()),
+        |vm, args| {
+            vm.bx
+                .heap
+                .value(args, id!(color).into(), vm.bx.threads.cur_ref().trap.pass())
+        },
     );
 
     native.add_method(

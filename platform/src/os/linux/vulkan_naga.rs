@@ -13,6 +13,7 @@ pub struct CxVulkanShaderBinary {
     pub dyn_uniform_binding: u32,
     pub texture_binding_base: u32,
     pub sampler_binding_base: u32,
+    pub xr_depth_binding: u32,
     pub geometry_slots: usize,
     pub instance_slots: usize,
 }
@@ -135,6 +136,7 @@ pub(crate) fn compile_draw_shader_wgsl_to_spirv(
         dyn_uniform_binding: wgsl_source.dyn_uniform_binding,
         texture_binding_base: wgsl_source.texture_binding_base,
         sampler_binding_base: wgsl_source.sampler_binding_base,
+        xr_depth_binding: wgsl_source.xr_depth_binding,
         geometry_slots: wgsl_source.geometry_slots,
         instance_slots: wgsl_source.instance_slots,
     })

@@ -18,13 +18,16 @@ use {
             //core::Result as coreResult,
             //core::HRESULT,
             Win32::{
-                Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM, COLORREF},
+                Foundation::{
+                    COLORREF, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM,
+                },
                 Graphics::{
                     Dwm::{
-                        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE,
-                        DWMSBT_NONE, DWMSBT_MAINWINDOW, DWMSBT_TRANSIENTWINDOW, DWMSBT_TABBEDWINDOW,
-                    }, 
-                    Gdi::ScreenToClient
+                        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW,
+                        DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW,
+                        DWMWA_SYSTEMBACKDROP_TYPE,
+                    },
+                    Gdi::ScreenToClient,
                 },
                 System::{
                     DataExchange::{
@@ -70,21 +73,20 @@ use {
                     WindowsAndMessaging::{
                         CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
                         GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, MoveWindow,
-                        PostMessageW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-                        SetWindowPos, ShowWindow, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE,
-                        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
-                        HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST,
-                        HWND_TOPMOST, LWA_ALPHA, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE,
-                        SW_MINIMIZE, SW_RESTORE, SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT,
-                        WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-                        WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_IME_STARTCOMPOSITION,
-                        WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-                        WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST,
-                        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
-                        WM_XBUTTONDOWN, WM_XBUTTONUP, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-                        WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST,
-                        WS_EX_WINDOWEDGE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX,
-                        WS_SYSMENU,
+                        PostMessageW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+                        ShowWindow, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, HTBOTTOM,
+                        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT,
+                        HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST,
+                        LWA_ALPHA, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+                        SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
+                        WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+                        WM_EXITSIZEMOVE, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
+                        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+                        WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP,
+                        WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+                        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW,
+                        WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE,
+                        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX, WS_SYSMENU,
                     },
                 },
             },
@@ -117,7 +119,10 @@ struct WindowCompositionAttribData {
 }
 
 #[inline]
-unsafe fn SetWindowCompositionAttribute(hwnd: HWND, data: *mut WindowCompositionAttribData) -> windows_core::BOOL {
+unsafe fn SetWindowCompositionAttribute(
+    hwnd: HWND,
+    data: *mut WindowCompositionAttribData,
+) -> windows_core::BOOL {
     windows_core::link!("user32.dll" "system" fn SetWindowCompositionAttribute(hwnd : HWND, data : *mut WindowCompositionAttribData) -> windows_core::BOOL);
     unsafe { SetWindowCompositionAttribute(hwnd, data) }
 }

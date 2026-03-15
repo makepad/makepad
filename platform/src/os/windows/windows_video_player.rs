@@ -3,12 +3,12 @@ use {
     crate::{
         event::video_playback::VideoSource,
         makepad_live_id::LiveId,
+        media_plugin::PlaybackPrepared,
         texture::{
             CxTexturePool, TextureAlloc, TextureCategory, TextureFormat, TextureId, TexturePixel,
         },
         video_decode::software_video::PlaybackSessionHandle,
         video_decode::yuv::YuvPlaneData,
-        media_plugin::PlaybackPrepared,
         windows::{
             core::Interface,
             Win32::Graphics::{
@@ -113,9 +113,7 @@ impl WindowsUnifiedVideoPlayer {
         ));
     }
 
-    pub fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         match &mut self.mode {
             WindowsPlayerMode::Native(player) => match player.check_prepared() {
                 Some(Err(err)) => {

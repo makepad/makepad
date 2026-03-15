@@ -637,7 +637,7 @@ impl ScriptHook for HtmlLink {
                         self.url = attr.into();
                         break;
                     }
-                    _ => { }
+                    _ => {}
                 }
             }
         }

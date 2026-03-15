@@ -692,7 +692,8 @@ impl ShaderFnCompiler {
                                         vm.bx.heap.pod_types[pod_ty.index as usize].ty,
                                         crate::pod::ScriptPodTy::Struct { .. }
                                     );
-                                let field_name = output.backend.map_field_name_typed(field_id, is_vec);
+                                let field_name =
+                                    output.backend.map_field_name_typed(field_id, is_vec);
                                 write!(s, "{}.{}", instance_s, field_name).ok();
                                 self.stack
                                     .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);

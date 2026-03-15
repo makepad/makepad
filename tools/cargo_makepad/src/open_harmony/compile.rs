@@ -328,7 +328,9 @@ pub fn rust_build(
         for arg in args {
             args_out.push(arg);
         }
-        let makepad_env = std::env::var("MAKEPAD").ok().filter(|value| !value.is_empty());
+        let makepad_env = std::env::var("MAKEPAD")
+            .ok()
+            .filter(|value| !value.is_empty());
         let mut env: Vec<(String, String)> = vec![
             (
                 format!("CC_{toolchain}"),
@@ -358,12 +360,7 @@ pub fn rust_build(
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        shell_env(
-            &env_refs,
-            &cwd,
-            "rustup",
-            &args_out,
-        )?;
+        shell_env(&env_refs, &cwd, "rustup", &args_out)?;
     }
     Ok(())
 }
