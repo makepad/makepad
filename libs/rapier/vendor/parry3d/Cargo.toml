@@ -1,0 +1,143 @@
+[package]
+edition = "2021"
+name = "parry3d"
+version = "0.26.0"
+authors = ["Sébastien Crozet <developer@crozet.re>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "3 dimensional collision detection library in Rust."
+homepage = "https://parry.rs"
+documentation = "https://parry.rs/docs"
+readme = "README.md"
+keywords = [
+    "collision",
+    "geometry",
+    "distance",
+    "ray",
+    "convex",
+]
+categories = [
+    "science",
+    "game-development",
+    "mathematics",
+    "wasm",
+]
+license = "Apache-2.0"
+repository = "https://github.com/dimforge/parry"
+
+[features]
+alloc = []
+bytemuck-serialize = [
+    "bytemuck",
+    "glamx/bytemuck",
+]
+default = [
+    "required-features",
+    "std",
+    "enhanced-determinism",
+]
+dim2 = []
+dim3 = []
+encase = [    "glamx/encase",
+]
+enhanced-determinism = [
+    "simba/libm_force",
+    "indexmap",
+    "glamx/libm",
+]
+f32 = []
+f64 = []
+improved_fixed_point_support = []
+parallel = []
+required-features = [
+    "dim3",
+    "f32",
+]
+rkyv = [    "glamx/rkyv",
+]
+serde = ["serde-serialize"]
+serde-serialize = []
+simd-is-enabled = []
+simd-nightly = [
+    "simd-is-enabled",
+]
+simd-stable = [
+    "simd-is-enabled",
+]
+spade = []
+std = [
+    "glamx/std",
+    "simba/std",
+    "arrayvec/std",
+    "ena",
+]
+wavefront = []
+
+[lib]
+name = "parry3d"
+path = "src/lib.rs"
+required-features = ["required-features"]
+
+[dependencies.approx]
+version = "0.5"
+default-features = false
+path = "../approx"
+[dependencies.arrayvec]
+version = "0.7"
+default-features = false
+path = "../../../../libs/vulkan/arrayvec"
+[dependencies.bitflags]
+version = "2.3"
+path = "../../../../libs/bitflags"
+[dependencies.bytemuck]
+version = "1"
+features = ["derive"]
+optional = true
+path = "../../../../libs/bytemuck"
+[dependencies.downcast-rs]
+version = "2"
+features = ["sync"]
+default-features = false
+path = "../downcast-rs"
+[dependencies.either]
+version = "1"
+default-features = false
+path = "../either"
+[dependencies.ena]
+version = "0.14.3"
+optional = true
+default-features = false
+path = "../ena"
+[dependencies.glamx]
+version = "0.1.2"
+features = [
+    "nostd-libm",
+    "approx",
+]
+default-features = false
+path = "../glamx"
+[dependencies.indexmap]
+version = "2"
+optional = true
+path = "../../../../libs/vulkan/indexmap"
+[dependencies.log]
+package = "makepad-error-log"
+path = "../../../../libs/error_log"
+[dependencies.num-traits]
+version = "0.2"
+default-features = false
+path = "../num-traits"
+[dependencies.simba]
+version = "0.9"
+default-features = false
+path = "../simba"
+[dependencies.smallvec]
+version = "1"
+path = "../../../../libs/smallvec"
+[dependencies.static_assertions]
+version = "1"
+path = "../static_assertions"
