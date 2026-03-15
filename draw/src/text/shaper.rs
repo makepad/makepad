@@ -141,9 +141,10 @@ impl Shaper {
         while let Some(glyph_group) = glyph_groups.next() {
             if glyph_group.iter().any(|glyph| glyph.id == 0) && !fonts.is_empty() {
                 let missing_start = glyph_group[0].cluster;
-                while glyph_groups.peek().is_some_and(|glyph_group| {
-                    glyph_group.iter().any(|glyph| glyph.id == 0)
-                }) {
+                while glyph_groups
+                    .peek()
+                    .is_some_and(|glyph_group| glyph_group.iter().any(|glyph| glyph.id == 0))
+                {
                     glyph_groups.next();
                 }
                 let missing_end = glyph_groups

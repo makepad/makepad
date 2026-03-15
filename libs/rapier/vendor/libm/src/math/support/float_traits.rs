@@ -245,7 +245,7 @@ macro_rules! float_impl {
             const BITS: u32 = $bits;
             const SIG_BITS: u32 = $significand_bits;
 
-            const SIGN_MASK: Self::Int = 1 << (Self::BITS - 1);
+            const SIGN_MASK: Self::Int = 1 << (<$ty as Float>::BITS - 1);
             const SIG_MASK: Self::Int = (1 << Self::SIG_BITS) - 1;
             const EXP_MASK: Self::Int = !(Self::SIGN_MASK | Self::SIG_MASK);
             const IMPLICIT_BIT: Self::Int = 1 << Self::SIG_BITS;

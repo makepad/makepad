@@ -161,10 +161,31 @@ unsafe impl Send for FromJavaMessage {}
 
 static MESSAGES_TX: Mutex<Option<mpsc::Sender<FromJavaMessage>>> = Mutex::new(None);
 
+fn from_java_message_name(message: &FromJavaMessage) -> Option<&'static str> {
+    match message {
+        FromJavaMessage::SwitchedActivity(_, _) => Some("SwitchedActivity"),
+        FromJavaMessage::SurfaceChanged { .. } => Some("SurfaceChanged"),
+        FromJavaMessage::SurfaceCreated { .. } => Some("SurfaceCreated"),
+        FromJavaMessage::SurfaceDestroyed => Some("SurfaceDestroyed"),
+        FromJavaMessage::CameraPreviewSurfaceReady { .. } => Some("CameraPreviewSurfaceReady"),
+        FromJavaMessage::CameraPreviewSurfaceDestroyed { .. } => {
+            Some("CameraPreviewSurfaceDestroyed")
+        }
+        _ => None,
+    }
+}
+
 pub fn send_from_java_message(message: FromJavaMessage) {
+    let message_name = from_java_message_name(&message);
     if let Ok(mut tx) = MESSAGES_TX.lock() {
         if let Some(tx) = tx.as_mut() {
+            if let Some(message_name) = message_name {
+                crate::log!("Android JNI: queueing {message_name}");
+            }
             tx.send(message).ok();
+            if let Some(message_name) = message_name {
+                crate::log!("Android JNI: queued {message_name}");
+            }
         } else {
             crate::log!(
                 "Receiving message from java whilst already shutdown {:?}",
@@ -226,6 +247,13 @@ pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
 unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANativeWindow {
     let env = attach_jni_env();
 
+    create_native_window_with_env(env, surface)
+}
+
+unsafe fn create_native_window_with_env(
+    env: *mut jni_sys::JNIEnv,
+    surface: jni_sys::jobject,
+) -> *mut ndk_sys::ANativeWindow {
     ndk_sys::ANativeWindow_fromSurface(env, surface)
 }
 
@@ -426,12 +454,18 @@ unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnWindowFocu
 
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceCreated(
-    _: *mut jni_sys::JNIEnv,
+    env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     surface: jni_sys::jobject,
 ) {
-    let window = unsafe { create_native_window(surface) };
+    crate::log!(
+        "Android JNI: surfaceOnSurfaceCreated begin surface={:?}",
+        surface
+    );
+    let window = unsafe { create_native_window_with_env(env, surface) };
+    crate::log!("Android JNI: surfaceOnSurfaceCreated window={:?}", window);
     send_from_java_message(FromJavaMessage::SurfaceCreated { window });
+    crate::log!("Android JNI: surfaceOnSurfaceCreated return");
 }
 
 #[no_mangle]
@@ -439,24 +473,34 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceDestroyed(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
 ) {
+    crate::log!("Android JNI: surfaceOnSurfaceDestroyed begin");
     send_from_java_message(FromJavaMessage::SurfaceDestroyed);
+    crate::log!("Android JNI: surfaceOnSurfaceDestroyed return");
 }
 
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceChanged(
-    _: *mut jni_sys::JNIEnv,
+    env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     surface: jni_sys::jobject,
     width: jni_sys::jint,
     height: jni_sys::jint,
 ) {
-    let window = unsafe { create_native_window(surface) };
+    crate::log!(
+        "Android JNI: surfaceOnSurfaceChanged begin surface={:?} size={}x{}",
+        surface,
+        width,
+        height
+    );
+    let window = unsafe { create_native_window_with_env(env, surface) };
+    crate::log!("Android JNI: surfaceOnSurfaceChanged window={:?}", window);
 
     send_from_java_message(FromJavaMessage::SurfaceChanged {
         window,
         width: width as _,
         height: height as _,
     });
+    crate::log!("Android JNI: surfaceOnSurfaceChanged return");
 }
 
 #[no_mangle]

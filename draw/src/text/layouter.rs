@@ -738,10 +738,10 @@ impl LaidoutText {
             if cursor.index < row.text.end_in_parent() {
                 return row_index;
             }
-            if cursor.index == row.text.end_in_parent()
-                && (row.newline || !cursor.prefer_next_row) {
-                    return row_index;
-                }
+            if cursor.index == row.text.end_in_parent() && (row.newline || !cursor.prefer_next_row)
+            {
+                return row_index;
+            }
         }
         self.rows.len() - 1
     }

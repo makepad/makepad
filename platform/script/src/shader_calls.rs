@@ -1076,10 +1076,15 @@ impl ShaderFnCompiler {
                     )
                     .ok();
                 }
-                ShaderBackend::Metal
-                | ShaderBackend::Wgsl
-                | ShaderBackend::Hlsl
-                | ShaderBackend::Rust => {
+                ShaderBackend::Wgsl => {
+                    write!(
+                        out,
+                        "depth_clip({}, {}, {})",
+                        formatted_args[0], formatted_args[1], formatted_args[2]
+                    )
+                    .ok();
+                }
+                ShaderBackend::Metal | ShaderBackend::Hlsl | ShaderBackend::Rust => {
                     write!(out, "{}", formatted_args[1]).ok();
                 }
             }

@@ -3,14 +3,15 @@ use mod.hub;
 let RunItem = {
     on_run: nil,
     name: ""
+    package_name: ""
     in_studio: true
 }
 
 let RunQuest = RunItem{
     on_run: fn(){
-        let name = me.name
+        let name = me.package_name
         hub.run(
-            {"STUDIO": hub.studio_ip},
+            {"STUDIO": hub.studio_ip, "MAKEPAD": "vulkan"},
             "cargo", 
             [
                 "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"
@@ -32,9 +33,10 @@ let RunStudioRelease = RunItem{
 }
 
 hub.set_run_items([
+    RunStudioRelease{name: "makepad-example-automate"}
     RunStudioRelease{name: "makepad-example-physics"}
     RunStudioRelease{name: "makepad-example-splash"}
     RunStudioRelease{name: "makepad-example-splat"}
     RunStudioRelease{name: "makepad-studio"}
-    RunQuest{name: "makepad-example-xr"}
+    RunQuest{name: "makepad-example-xr" package_name: "makepad-example-xr"}
 ])

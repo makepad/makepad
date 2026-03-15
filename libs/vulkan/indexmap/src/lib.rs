@@ -34,8 +34,6 @@
 //!   [`map::serde_seq`] module.
 //! * `arbitrary`: Adds implementations for the [`arbitrary::Arbitrary`] trait
 //!   to [`IndexMap`] and [`IndexSet`].
-//! * `quickcheck`: Adds implementations for the [`quickcheck::Arbitrary`] trait
-//!   to [`IndexMap`] and [`IndexSet`].
 //! * `borsh` (**deprecated**): Adds implementations for [`BorshSerialize`] and
 //!   [`BorshDeserialize`] to [`IndexMap`] and [`IndexSet`]. Due to a cyclic
 //!   dependency that arose between [`borsh`] and `indexmap`, `borsh v1.5.6`
@@ -52,8 +50,6 @@
 //! [`BorshDeserialize`]: `::borsh::BorshDeserialize`
 //! [`borsh`]: `::borsh`
 //! [`arbitrary::Arbitrary`]: `::arbitrary::Arbitrary`
-//! [`quickcheck::Arbitrary`]: `::quickcheck::Arbitrary`
-//!
 //! ### Alternate Hashers
 //!
 //! [`IndexMap`] and [`IndexSet`] have a default hasher type

@@ -8,4 +8,4 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
-makepad-physics = { path = "../../libs/makepad_physics" }
+rapier3d = { path = "../../libs/rapier/crates/rapier3d", default-features = false, features = ["dim3", "f32", "enhanced-determinism"] }

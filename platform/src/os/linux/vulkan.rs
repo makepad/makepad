@@ -8,10 +8,17 @@ use crate::{
     geometry::GeometryId,
     makepad_live_id::*,
     makepad_script::shader::TextureType,
-    os::linux::android::ndk_sys,
+    os::linux::{
+        android::ndk_sys,
+        openxr_sys::{
+            LibOpenXr, VkDeviceCreateInfo, VkInstanceCreateInfo, XrInstance, XrResult, XrSystemId,
+            XrVulkanDeviceCreateInfoKHR, XrVulkanGraphicsDeviceGetInfoKHR,
+            XrVulkanInstanceCreateInfoKHR,
+        },
+    },
     texture::{TextureFormat, TextureId, TextureUpdated},
 };
-use ash::vk;
+use ash::vk::{self, Handle};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
@@ -119,6 +126,27 @@ struct VulkanTextureUpload {
 
 type VulkanTextureKey = usize;
 
+pub(crate) struct CxVulkanOpenXrEyeTarget {
+    framebuffer: vk::Framebuffer,
+    color_view: vk::ImageView,
+    depth_target: VulkanTextureResource,
+}
+
+pub(crate) struct CxVulkanOpenXrSwapchainImage {
+    eyes: [CxVulkanOpenXrEyeTarget; 2],
+}
+
+pub(crate) struct CxVulkanOpenXrDepthImage {
+    views: [vk::ImageView; 2],
+}
+
+pub(crate) struct CxVulkanOpenXrSessionData {
+    width: u32,
+    height: u32,
+    color_images: Vec<CxVulkanOpenXrSwapchainImage>,
+    depth_images: Vec<CxVulkanOpenXrDepthImage>,
+}
+
 #[derive(Default)]
 struct VulkanDrawStats {
     draw_items: usize,
@@ -155,6 +183,7 @@ pub struct CxVulkan {
     depth_format: vk::Format,
     swapchain_extent: vk::Extent2D,
     render_pass: vk::RenderPass,
+    xr_render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
     pipelines: HashMap<usize, VulkanPipeline>,
     textures: HashMap<VulkanTextureKey, VulkanTextureResource>,
@@ -172,6 +201,7 @@ pub struct CxVulkan {
     debug_utils_enabled: bool,
     debug_utils_loader: Option<ash::ext::debug_utils::Instance>,
     debug_messenger: vk::DebugUtilsMessengerEXT,
+    xr_depth_dummy: Option<VulkanTextureResource>,
 }
 
 impl CxVulkan {
@@ -437,6 +467,7 @@ impl CxVulkan {
                 height: 0,
             },
             render_pass: vk::RenderPass::null(),
+            xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
             textures: HashMap::new(),
@@ -454,11 +485,395 @@ impl CxVulkan {
             debug_utils_enabled: has_debug_utils_ext,
             debug_utils_loader: None,
             debug_messenger: vk::DebugUtilsMessengerEXT::null(),
+            xr_depth_dummy: None,
         };
 
         if let Err(err) = vulkan.recreate_swapchain() {
             return Err(format!(
                 "Android Vulkan init failed: recreate_swapchain: {err}"
+            ));
+        }
+
+        vulkan.try_enable_debug_messenger(&entry);
+
+        Ok(vulkan)
+    }
+
+    pub fn new_from_openxr(
+        xr: &LibOpenXr,
+        xr_instance: XrInstance,
+        xr_system_id: XrSystemId,
+        window: *mut ndk_sys::ANativeWindow,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        if window.is_null() {
+            return Err("Android Vulkan XR init failed: null ANativeWindow".to_string());
+        }
+
+        let entry = unsafe { ash::Entry::load() }
+            .map_err(|e| format!("Android Vulkan XR init failed: Entry::load: {e:?}"))?;
+
+        let available_layers = unsafe { entry.enumerate_instance_layer_properties() }
+            .map_err(|e| format!("Android Vulkan XR init failed: enumerate layers: {e:?}"))?;
+        let has_validation_layer = available_layers.iter().any(|layer| {
+            let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
+            name.to_bytes() == b"VK_LAYER_KHRONOS_validation"
+        });
+        if has_validation_layer {
+            crate::log!("Android Vulkan: VK_LAYER_KHRONOS_validation available");
+        } else {
+            crate::warning!("Android Vulkan: VK_LAYER_KHRONOS_validation not available");
+        }
+
+        let available_exts = unsafe { entry.enumerate_instance_extension_properties(None) }
+            .map_err(|e| format!("Android Vulkan XR init failed: enumerate extensions: {e:?}"))?;
+        let has_debug_utils_ext = available_exts.iter().any(|ext| {
+            let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
+            name.to_bytes() == vk::EXT_DEBUG_UTILS_NAME.to_bytes()
+        });
+        if has_debug_utils_ext {
+            crate::log!("Android Vulkan: VK_EXT_debug_utils available");
+        } else {
+            crate::warning!("Android Vulkan: VK_EXT_debug_utils not available");
+        }
+
+        let mut instance_extensions = vec![
+            vk::KHR_SURFACE_NAME.as_ptr(),
+            vk::KHR_ANDROID_SURFACE_NAME.as_ptr(),
+        ];
+        if has_debug_utils_ext {
+            instance_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr());
+        }
+        let validation_layer_name = b"VK_LAYER_KHRONOS_validation\0";
+        let enabled_layers: Vec<*const c_char> = if has_validation_layer {
+            vec![validation_layer_name.as_ptr() as *const c_char]
+        } else {
+            Vec::new()
+        };
+
+        let app_info = vk::ApplicationInfo {
+            api_version: vk::API_VERSION_1_1,
+            ..Default::default()
+        };
+        let mut instance_create_info = vk::InstanceCreateInfo::default()
+            .application_info(&app_info)
+            .enabled_extension_names(&instance_extensions)
+            .enabled_layer_names(&enabled_layers);
+        let mut debug_create_info = vulkan_debug_messenger_create_info();
+        if has_debug_utils_ext {
+            instance_create_info = instance_create_info.push_next(&mut debug_create_info);
+        }
+
+        crate::log!("Android Vulkan XR: requesting OpenXR-owned Vulkan instance");
+        let mut xr_vk_instance = std::ptr::null();
+        let mut xr_vk_instance_result = 0;
+        let xr_instance_create_info = XrVulkanInstanceCreateInfoKHR {
+            system_id: xr_system_id,
+            pfn_get_instance_proc_addr: Some(unsafe {
+                std::mem::transmute(entry.static_fn().get_instance_proc_addr)
+            }),
+            vulkan_create_info: &instance_create_info as *const _ as *const VkInstanceCreateInfo,
+            ..Default::default()
+        };
+        unsafe {
+            (xr.xrCreateVulkanInstanceKHR)(
+                xr_instance,
+                &xr_instance_create_info,
+                &mut xr_vk_instance,
+                &mut xr_vk_instance_result,
+            )
+        }
+        .to_result("xrCreateVulkanInstanceKHR")?;
+        let xr_vk_instance_result = vk::Result::from_raw(xr_vk_instance_result);
+        if xr_vk_instance_result != vk::Result::SUCCESS {
+            return Err(format!(
+                "Android Vulkan XR init failed: xrCreateVulkanInstanceKHR returned Vulkan error {xr_vk_instance_result:?}"
+            ));
+        }
+        crate::log!("Android Vulkan XR: OpenXR created Vulkan instance");
+
+        let instance = unsafe {
+            ash::Instance::load(entry.static_fn(), vk::Instance::from_raw(xr_vk_instance as _))
+        };
+        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+        let android_surface_loader = ash::khr::android_surface::Instance::new(&entry, &instance);
+
+        unsafe { ANativeWindow_acquire(window) };
+
+        let create_surface_result = Self::create_surface(&android_surface_loader, window);
+        let surface = match create_surface_result {
+            Ok(surface) => surface,
+            Err(err) => {
+                unsafe { ndk_sys::ANativeWindow_release(window) };
+                unsafe { instance.destroy_instance(None) };
+                return Err(err);
+            }
+        };
+
+        crate::log!(
+            "Android Vulkan XR: querying runtime Vulkan physical device2 using XR-created instance"
+        );
+        let get_info = XrVulkanGraphicsDeviceGetInfoKHR {
+            system_id: xr_system_id,
+            vulkan_instance: xr_vk_instance,
+            ..Default::default()
+        };
+        let mut runtime_physical_device = std::ptr::null();
+        let xr_get_device_result = unsafe {
+            (xr.xrGetVulkanGraphicsDevice2KHR)(
+                xr_instance,
+                &get_info,
+                &mut runtime_physical_device,
+            )
+        };
+        if xr_get_device_result != XrResult::SUCCESS {
+            unsafe {
+                surface_loader.destroy_surface(surface, None);
+                ndk_sys::ANativeWindow_release(window);
+                instance.destroy_instance(None);
+            }
+            return Err(format!(
+                "OpenXR error in xrGetVulkanGraphicsDevice2KHR: {}",
+                xr_get_device_result
+            ));
+        }
+        crate::log!("Android Vulkan XR: runtime Vulkan physical device acquired");
+        let physical_device = vk::PhysicalDevice::from_raw(runtime_physical_device as _);
+
+        let queue_family_index = match Self::pick_queue_family_for_device(
+            &instance,
+            &surface_loader,
+            surface,
+            physical_device,
+        ) {
+            Ok(index) => index,
+            Err(err) => {
+                unsafe {
+                    surface_loader.destroy_surface(surface, None);
+                    ndk_sys::ANativeWindow_release(window);
+                    instance.destroy_instance(None);
+                }
+                return Err(err);
+            }
+        };
+
+        let props = unsafe { instance.get_physical_device_properties(physical_device) };
+        let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        crate::log!(
+            "Android Vulkan device: name='{}' vendor=0x{:04X} device=0x{:04X} api={}.{}.{} driver=0x{:X} queue_family={}",
+            device_name,
+            props.vendor_id,
+            props.device_id,
+            vk::api_version_major(props.api_version),
+            vk::api_version_minor(props.api_version),
+            vk::api_version_patch(props.api_version),
+            props.driver_version,
+            queue_family_index
+        );
+        if device_name.contains("SwiftShader") || props.vendor_id == 0x1AE0 {
+            crate::warning!(
+                "Android Vulkan: SwiftShader/software device detected; expect very low performance"
+            );
+        }
+
+        let queue_priorities = [1.0f32];
+        let queue_info = [vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(queue_family_index)
+            .queue_priorities(&queue_priorities)];
+        let device_extensions = [vk::KHR_SWAPCHAIN_NAME.as_ptr()];
+        let device_create_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(&queue_info)
+            .enabled_extension_names(&device_extensions);
+
+        crate::log!("Android Vulkan XR: requesting OpenXR-owned Vulkan device");
+        let mut xr_vk_device = std::ptr::null();
+        let mut xr_vk_device_result = 0;
+        let xr_device_create_info = XrVulkanDeviceCreateInfoKHR {
+            system_id: xr_system_id,
+            pfn_get_instance_proc_addr: Some(unsafe {
+                std::mem::transmute(entry.static_fn().get_instance_proc_addr)
+            }),
+            vulkan_physical_device: runtime_physical_device,
+            vulkan_create_info: &device_create_info as *const _ as *const VkDeviceCreateInfo,
+            ..Default::default()
+        };
+        unsafe {
+            (xr.xrCreateVulkanDeviceKHR)(
+                xr_instance,
+                &xr_device_create_info,
+                &mut xr_vk_device,
+                &mut xr_vk_device_result,
+            )
+        }
+        .to_result("xrCreateVulkanDeviceKHR")?;
+        let xr_vk_device_result = vk::Result::from_raw(xr_vk_device_result);
+        if xr_vk_device_result != vk::Result::SUCCESS {
+            unsafe {
+                surface_loader.destroy_surface(surface, None);
+                ndk_sys::ANativeWindow_release(window);
+                instance.destroy_instance(None);
+            }
+            return Err(format!(
+                "Android Vulkan XR init failed: xrCreateVulkanDeviceKHR returned Vulkan error {xr_vk_device_result:?}"
+            ));
+        }
+        crate::log!("Android Vulkan XR: OpenXR created Vulkan device");
+
+        let device = unsafe {
+            ash::Device::load(instance.fp_v1_0(), vk::Device::from_raw(xr_vk_device as _))
+        };
+        let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
+
+        let command_pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(queue_family_index)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let command_pool = match unsafe { device.create_command_pool(&command_pool_info, None) } {
+            Ok(pool) => pool,
+            Err(err) => {
+                unsafe {
+                    device.destroy_device(None);
+                    surface_loader.destroy_surface(surface, None);
+                    ndk_sys::ANativeWindow_release(window);
+                    instance.destroy_instance(None);
+                }
+                return Err(format!(
+                    "Android Vulkan XR init failed: create_command_pool: {err:?}"
+                ));
+            }
+        };
+
+        let command_buffer_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let command_buffer = match unsafe { device.allocate_command_buffers(&command_buffer_info) }
+        {
+            Ok(cmds) => cmds[0],
+            Err(err) => {
+                unsafe {
+                    device.destroy_command_pool(command_pool, None);
+                    device.destroy_device(None);
+                    surface_loader.destroy_surface(surface, None);
+                    ndk_sys::ANativeWindow_release(window);
+                    instance.destroy_instance(None);
+                }
+                return Err(format!(
+                    "Android Vulkan XR init failed: allocate_command_buffers: {err:?}"
+                ));
+            }
+        };
+
+        let semaphore_info = vk::SemaphoreCreateInfo::default();
+        let image_available_semaphore =
+            match unsafe { device.create_semaphore(&semaphore_info, None) } {
+                Ok(semaphore) => semaphore,
+                Err(err) => {
+                    unsafe {
+                        device.free_command_buffers(command_pool, &[command_buffer]);
+                        device.destroy_command_pool(command_pool, None);
+                        device.destroy_device(None);
+                        surface_loader.destroy_surface(surface, None);
+                        ndk_sys::ANativeWindow_release(window);
+                        instance.destroy_instance(None);
+                    }
+                    return Err(format!(
+                        "Android Vulkan XR init failed: create image semaphore: {err:?}"
+                    ));
+                }
+            };
+
+        let render_finished_semaphore =
+            match unsafe { device.create_semaphore(&semaphore_info, None) } {
+                Ok(semaphore) => semaphore,
+                Err(err) => {
+                    unsafe {
+                        device.destroy_semaphore(image_available_semaphore, None);
+                        device.free_command_buffers(command_pool, &[command_buffer]);
+                        device.destroy_command_pool(command_pool, None);
+                        device.destroy_device(None);
+                        surface_loader.destroy_surface(surface, None);
+                        ndk_sys::ANativeWindow_release(window);
+                        instance.destroy_instance(None);
+                    }
+                    return Err(format!(
+                        "Android Vulkan XR init failed: create render semaphore: {err:?}"
+                    ));
+                }
+            };
+
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        let in_flight_fence = match unsafe { device.create_fence(&fence_info, None) } {
+            Ok(fence) => fence,
+            Err(err) => {
+                unsafe {
+                    device.destroy_semaphore(render_finished_semaphore, None);
+                    device.destroy_semaphore(image_available_semaphore, None);
+                    device.free_command_buffers(command_pool, &[command_buffer]);
+                    device.destroy_command_pool(command_pool, None);
+                    device.destroy_device(None);
+                    surface_loader.destroy_surface(surface, None);
+                    ndk_sys::ANativeWindow_release(window);
+                    instance.destroy_instance(None);
+                }
+                return Err(format!(
+                    "Android Vulkan XR init failed: create_fence: {err:?}"
+                ));
+            }
+        };
+
+        let mut vulkan = Self {
+            instance,
+            surface_loader,
+            android_surface_loader,
+            surface,
+            physical_device,
+            queue_family_index,
+            min_uniform_buffer_offset_alignment: props
+                .limits
+                .min_uniform_buffer_offset_alignment
+                .max(4),
+            device,
+            queue,
+            swapchain_loader,
+            swapchain: vk::SwapchainKHR::null(),
+            swapchain_images: Vec::new(),
+            swapchain_image_views: Vec::new(),
+            swapchain_depth_targets: Vec::new(),
+            swapchain_format: vk::Format::UNDEFINED,
+            depth_format: vk::Format::UNDEFINED,
+            swapchain_extent: vk::Extent2D {
+                width: 0,
+                height: 0,
+            },
+            render_pass: vk::RenderPass::null(),
+            xr_render_pass: vk::RenderPass::null(),
+            framebuffers: Vec::new(),
+            pipelines: HashMap::new(),
+            textures: HashMap::new(),
+            frame_resources: FrameResources::default(),
+            command_pool,
+            command_buffer,
+            image_available_semaphore,
+            render_finished_semaphore,
+            in_flight_fence,
+            window,
+            requested_width: width.max(1),
+            requested_height: height.max(1),
+            texture_upload_count_this_frame: 0,
+            texture_upload_bytes_this_frame: 0,
+            debug_utils_enabled: has_debug_utils_ext,
+            debug_utils_loader: None,
+            debug_messenger: vk::DebugUtilsMessengerEXT::null(),
+            xr_depth_dummy: None,
+        };
+
+        if let Err(err) = vulkan.recreate_swapchain() {
+            return Err(format!(
+                "Android Vulkan XR init failed: recreate_swapchain: {err}"
             ));
         }
 
@@ -523,6 +938,367 @@ impl CxVulkan {
             unsafe { ndk_sys::ANativeWindow_release(self.window) };
             self.window = std::ptr::null_mut();
         }
+    }
+
+    pub(crate) fn swapchain_format(&self) -> vk::Format {
+        self.swapchain_format
+    }
+
+    pub(crate) fn instance_handle(&self) -> vk::Instance {
+        self.instance.handle()
+    }
+
+    pub(crate) fn physical_device_handle(&self) -> vk::PhysicalDevice {
+        self.physical_device
+    }
+
+    pub(crate) fn device_handle(&self) -> vk::Device {
+        self.device.handle()
+    }
+
+    pub(crate) fn queue_family_index(&self) -> u32 {
+        self.queue_family_index
+    }
+
+    pub(crate) fn create_openxr_session_data(
+        &mut self,
+        color_images: &[vk::Image],
+        depth_images: &[vk::Image],
+        color_format: vk::Format,
+        width: u32,
+        height: u32,
+    ) -> Result<CxVulkanOpenXrSessionData, String> {
+        if self.xr_render_pass == vk::RenderPass::null() {
+            return Err("Android Vulkan XR init failed: render pass is not ready".to_string());
+        }
+        if self.swapchain_format != color_format {
+            return Err(format!(
+                "Android Vulkan XR init failed: XR swapchain format {:?} does not match window render pass format {:?}",
+                color_format, self.swapchain_format
+            ));
+        }
+
+        self.ensure_xr_depth_dummy()?;
+
+        let mut xr_color_images = Vec::with_capacity(color_images.len());
+        for &image in color_images {
+            let eyes = [
+                self.create_openxr_eye_target(image, 0, color_format, width, height)?,
+                self.create_openxr_eye_target(image, 1, color_format, width, height)?,
+            ];
+            xr_color_images.push(CxVulkanOpenXrSwapchainImage { eyes });
+        }
+
+        let mut xr_depth_images = Vec::with_capacity(depth_images.len());
+        let mut depth_view_error: Option<String> = None;
+        for &image in depth_images {
+            let views = match (
+                self.create_openxr_depth_view(image, 0, vk::Format::D16_UNORM),
+                self.create_openxr_depth_view(image, 1, vk::Format::D16_UNORM),
+            ) {
+                (Ok(left), Ok(right)) => [left, right],
+                (left, right) => {
+                    if let Ok(view) = left {
+                        unsafe {
+                            self.device.destroy_image_view(view, None);
+                        }
+                    }
+                    if let Ok(view) = right {
+                        unsafe {
+                            self.device.destroy_image_view(view, None);
+                        }
+                    }
+                    depth_view_error = Some(match (left.err(), right.err()) {
+                        (Some(left_err), Some(right_err)) => {
+                            format!("{left_err}; {right_err}")
+                        }
+                        (Some(err), None) | (None, Some(err)) => err,
+                        (None, None) => "unknown depth-view creation failure".to_string(),
+                    });
+                    break;
+                }
+            };
+            xr_depth_images.push(CxVulkanOpenXrDepthImage { views });
+        }
+        if let Some(err) = depth_view_error {
+            crate::warning!(
+                "OpenXR Vulkan: environment depth image views unavailable, disabling XR depth sampling: {}",
+                err
+            );
+        }
+
+        Ok(CxVulkanOpenXrSessionData {
+            width: width.max(1),
+            height: height.max(1),
+            color_images: xr_color_images,
+            depth_images: xr_depth_images,
+        })
+    }
+
+    fn create_openxr_eye_target(
+        &self,
+        image: vk::Image,
+        eye: usize,
+        color_format: vk::Format,
+        width: u32,
+        height: u32,
+    ) -> Result<CxVulkanOpenXrEyeTarget, String> {
+        let color_view = unsafe {
+            self.device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(color_format)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(eye as u32)
+                            .layer_count(1),
+                    ),
+                None,
+            )
+        }
+        .map_err(|e| format!("create_image_view(openxr color eye {eye}) failed: {e:?}"))?;
+
+        let depth_target = match self.create_depth_target(width, height, self.depth_format) {
+            Ok(depth_target) => depth_target,
+            Err(err) => {
+                unsafe {
+                    self.device.destroy_image_view(color_view, None);
+                }
+                return Err(format!(
+                    "create_depth_target(openxr eye {eye}) failed: {err}"
+                ));
+            }
+        };
+
+        let attachments = [color_view, depth_target.view];
+        let framebuffer = match unsafe {
+            self.device.create_framebuffer(
+                &vk::FramebufferCreateInfo::default()
+                    .render_pass(self.xr_render_pass)
+                    .width(width.max(1))
+                    .height(height.max(1))
+                    .layers(1)
+                    .attachments(&attachments),
+                None,
+            )
+        } {
+            Ok(framebuffer) => framebuffer,
+            Err(e) => {
+                unsafe {
+                    self.device.destroy_image_view(color_view, None);
+                }
+                self.destroy_texture_resource(depth_target);
+                return Err(format!(
+                    "create_framebuffer(openxr eye {eye}) failed: {e:?}"
+                ));
+            }
+        };
+
+        Ok(CxVulkanOpenXrEyeTarget {
+            framebuffer,
+            color_view,
+            depth_target,
+        })
+    }
+
+    fn create_openxr_depth_view(
+        &self,
+        image: vk::Image,
+        eye: usize,
+        format: vk::Format,
+    ) -> Result<vk::ImageView, String> {
+        unsafe {
+            self.device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(eye as u32)
+                            .layer_count(1),
+                    ),
+                None,
+            )
+        }
+        .map_err(|e| format!("create_image_view(openxr depth eye {eye}) failed: {e:?}"))
+    }
+
+    pub(crate) fn destroy_openxr_session_data(&mut self, session: CxVulkanOpenXrSessionData) {
+        for image in session.color_images {
+            for eye in image.eyes {
+                unsafe {
+                    if eye.framebuffer != vk::Framebuffer::null() {
+                        self.device.destroy_framebuffer(eye.framebuffer, None);
+                    }
+                    if eye.color_view != vk::ImageView::null() {
+                        self.device.destroy_image_view(eye.color_view, None);
+                    }
+                }
+                self.destroy_texture_resource(eye.depth_target);
+            }
+        }
+        for image in session.depth_images {
+            for view in image.views {
+                unsafe {
+                    if view != vk::ImageView::null() {
+                        self.device.destroy_image_view(view, None);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn draw_openxr_view(
+        &mut self,
+        cx: &mut Cx,
+        draw_pass_id: DrawPassId,
+        draw_list_id: DrawListId,
+        session: &CxVulkanOpenXrSessionData,
+        color_image_index: usize,
+        eye_index: usize,
+        depth_image_index: Option<usize>,
+    ) -> Result<(), String> {
+        let color_target = session
+            .color_images
+            .get(color_image_index)
+            .ok_or_else(|| format!("invalid OpenXR color image index {color_image_index}"))?;
+        let xr_depth_view = depth_image_index
+            .and_then(|index| session.depth_images.get(index))
+            .map(|image| image.views[eye_index])
+            .unwrap_or(self.ensure_xr_depth_dummy()?);
+
+        unsafe {
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(openxr) failed: {e:?}"))?;
+            self.device
+                .reset_fences(&[self.in_flight_fence])
+                .map_err(|e| format!("reset_fences(openxr) failed: {e:?}"))?;
+        }
+
+        self.destroy_frame_resources();
+        unsafe {
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| format!("reset_command_buffer(openxr) failed: {e:?}"))?;
+            self.device
+                .begin_command_buffer(
+                    self.command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(|e| format!("begin_command_buffer(openxr) failed: {e:?}"))?;
+        }
+
+        self.texture_upload_count_this_frame = 0;
+        self.texture_upload_bytes_this_frame = 0;
+        self.prepare_draw_list_textures(cx, draw_list_id)?;
+
+        let clear_color = if cx.passes[draw_pass_id].color_textures.is_empty() {
+            cx.passes[draw_pass_id].clear_color
+        } else {
+            match cx.passes[draw_pass_id].color_textures[0].clear_color {
+                DrawPassClearColor::InitWith(color) => color,
+                DrawPassClearColor::ClearWith(color) => color,
+            }
+        };
+        let clear_depth = match cx.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::InitWith(depth) | DrawPassClearDepth::ClearWith(depth) => depth,
+        };
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [clear_color.x, clear_color.y, clear_color.z, clear_color.w],
+                },
+            },
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: clear_depth,
+                    stencil: 0,
+                },
+            },
+        ];
+
+        unsafe {
+            self.device.cmd_begin_render_pass(
+                self.command_buffer,
+                &vk::RenderPassBeginInfo::default()
+                    .render_pass(self.xr_render_pass)
+                    .framebuffer(color_target.eyes[eye_index].framebuffer)
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: vk::Extent2D {
+                            width: session.width,
+                            height: session.height,
+                        },
+                    })
+                    .clear_values(&clear_values),
+                vk::SubpassContents::INLINE,
+            );
+            self.device.cmd_set_viewport(
+                self.command_buffer,
+                0,
+                &[vk::Viewport {
+                    x: 0.0,
+                    y: session.height as f32,
+                    width: session.width as f32,
+                    height: -(session.height as f32),
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }],
+            );
+            self.device.cmd_set_scissor(
+                self.command_buffer,
+                0,
+                &[vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: vk::Extent2D {
+                        width: session.width,
+                        height: session.height,
+                    },
+                }],
+            );
+        }
+
+        let mut zbias = 0.0f32;
+        let zbias_step = cx.passes[draw_pass_id].zbias_step;
+        let mut draw_stats = VulkanDrawStats::default();
+        self.record_draw_list(
+            cx,
+            draw_pass_id,
+            draw_list_id,
+            &mut zbias,
+            zbias_step,
+            &mut draw_stats,
+            xr_depth_view,
+        )?;
+
+        unsafe {
+            self.device.cmd_end_render_pass(self.command_buffer);
+            self.device
+                .end_command_buffer(self.command_buffer)
+                .map_err(|e| format!("end_command_buffer(openxr) failed: {e:?}"))?;
+            self.device
+                .queue_submit(
+                    self.queue,
+                    &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])],
+                    self.in_flight_fence,
+                )
+                .map_err(|e| format!("queue_submit(openxr) failed: {e:?}"))?;
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(openxr submit) failed: {e:?}"))?;
+        }
+
+        Ok(())
     }
 
     pub fn draw_pass_and_present(
@@ -675,6 +1451,7 @@ impl CxVulkan {
             );
         }
 
+        let xr_depth_view = self.ensure_xr_depth_dummy()?;
         self.record_draw_list(
             cx,
             draw_pass_id,
@@ -682,6 +1459,7 @@ impl CxVulkan {
             &mut zbias,
             zbias_step,
             &mut draw_stats,
+            xr_depth_view,
         )?;
 
         unsafe {
@@ -1309,6 +2087,106 @@ impl CxVulkan {
         })
     }
 
+    fn create_sampled_depth_resource(
+        &self,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+    ) -> Result<VulkanTextureResource, String> {
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: width.max(1),
+                height: height.max(1),
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let image = unsafe { self.device.create_image(&image_info, None) }
+            .map_err(|e| format!("create_image(sampled_depth) failed: {e:?}"))?;
+        let memory_req = unsafe { self.device.get_image_memory_requirements(image) };
+        let memory_type_index = self
+            .find_memory_type(
+                memory_req.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .or_else(|_| {
+                self.find_memory_type(
+                    memory_req.memory_type_bits,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )
+            })?;
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(memory_req.size)
+            .memory_type_index(memory_type_index);
+        let memory = match unsafe { self.device.allocate_memory(&alloc_info, None) } {
+            Ok(memory) => memory,
+            Err(e) => {
+                unsafe {
+                    self.device.destroy_image(image, None);
+                }
+                return Err(format!("allocate_memory(sampled_depth) failed: {e:?}"));
+            }
+        };
+        unsafe {
+            if let Err(e) = self.device.bind_image_memory(image, memory, 0) {
+                self.device.free_memory(memory, None);
+                self.device.destroy_image(image, None);
+                return Err(format!("bind_image_memory(sampled_depth) failed: {e:?}"));
+            }
+        }
+
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let view = match unsafe { self.device.create_image_view(&view_info, None) } {
+            Ok(view) => view,
+            Err(e) => {
+                unsafe {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_image(image, None);
+                }
+                return Err(format!("create_image_view(sampled_depth) failed: {e:?}"));
+            }
+        };
+
+        Ok(VulkanTextureResource {
+            image,
+            memory,
+            view,
+            width: width.max(1),
+            height: height.max(1),
+            layers: 1,
+            is_cube: false,
+            format,
+            layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+        })
+    }
+
+    fn ensure_xr_depth_dummy(&mut self) -> Result<vk::ImageView, String> {
+        if self.xr_depth_dummy.is_none() {
+            self.xr_depth_dummy =
+                Some(self.create_sampled_depth_resource(1, 1, vk::Format::D16_UNORM)?);
+        }
+        Ok(self.xr_depth_dummy.as_ref().unwrap().view)
+    }
+
     fn destroy_texture_resource(&self, resource: VulkanTextureResource) {
         unsafe {
             if resource.view != vk::ImageView::null() {
@@ -1537,6 +2415,7 @@ impl CxVulkan {
         zbias: &mut f32,
         zbias_step: f32,
         draw_stats: &mut VulkanDrawStats,
+        xr_depth_view: vk::ImageView,
     ) -> Result<(), String> {
         let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
         for order_index in 0..draw_order_len {
@@ -1559,6 +2438,7 @@ impl CxVulkan {
                     zbias,
                     zbias_step,
                     draw_stats,
+                    xr_depth_view,
                 )?;
                 continue;
             }
@@ -1687,6 +2567,7 @@ impl CxVulkan {
                 &geometry.indices,
                 &pass_uniforms,
                 &draw_list_uniforms,
+                xr_depth_view,
             )?;
             draw_stats.packets_recorded += 1;
         }
@@ -1701,6 +2582,7 @@ impl CxVulkan {
         geometry_indices: &[u32],
         pass_uniforms: &[f32],
         draw_list_uniforms: &[f32],
+        xr_depth_view: vk::ImageView,
     ) -> Result<(), String> {
         self.ensure_pipeline(cx, packet.shader_index)?;
         let (
@@ -1916,6 +2798,10 @@ impl CxVulkan {
             sampler_infos.push(vk::DescriptorImageInfo::default().sampler(*sampler));
         }
 
+        let xr_depth_info = vk::DescriptorImageInfo::default()
+            .image_view(xr_depth_view)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+
         let descriptor_set = if pipeline_has_descriptors {
             if uniform_uploads.is_empty() && texture_infos.is_empty() && sampler_infos.is_empty() {
                 return Err(format!(
@@ -1966,6 +2852,13 @@ impl CxVulkan {
                         .image_info(std::slice::from_ref(&sampler_infos[index])),
                 );
             }
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(vk_shader.xr_depth_binding)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(std::slice::from_ref(&xr_depth_info)),
+            );
             unsafe {
                 self.device.update_descriptor_sets(&writes, &[]);
             }
@@ -2051,7 +2944,8 @@ impl CxVulkan {
             || !sh.mapping.dyn_uniforms.inputs.is_empty()
             || !sh.mapping.scope_uniforms.inputs.is_empty()
             || !sh.mapping.textures.is_empty()
-            || !sh.mapping.samplers.is_empty();
+            || !sh.mapping.samplers.is_empty()
+            || vk_shader.xr_depth_binding != 0;
 
         let mut descriptor_bindings: Vec<(u32, vk::DescriptorType)> = Vec::new();
         for (_, idx) in &sh.mapping.uniform_buffer_bindings.bindings {
@@ -2084,6 +2978,10 @@ impl CxVulkan {
                 vk::DescriptorType::SAMPLER,
             ));
         }
+        descriptor_bindings.push((
+            vk_shader.xr_depth_binding,
+            vk::DescriptorType::SAMPLED_IMAGE,
+        ));
         descriptor_bindings.sort_by_key(|(binding, _)| *binding);
         descriptor_bindings.dedup_by_key(|(binding, _)| *binding);
 
@@ -2159,14 +3057,10 @@ impl CxVulkan {
                 .name(&fs_entry),
         ];
 
-        let geometry_formats = Self::collect_attribute_chunk_formats(
-            sh.mapping.geometries.total_slots,
-            &sh.mapping.geometries.inputs,
-        );
-        let instance_formats = Self::collect_attribute_chunk_formats(
-            sh.mapping.instances.total_slots,
-            &sh.mapping.instances.inputs,
-        );
+        let geometry_formats =
+            Self::collect_attribute_chunk_formats(sh.mapping.geometries.total_slots);
+        let instance_formats =
+            Self::collect_attribute_chunk_formats(sh.mapping.instances.total_slots);
 
         let mut vertex_bindings = Vec::new();
         vertex_bindings.push(
@@ -2372,7 +3266,8 @@ impl CxVulkan {
                         for sampler in sampler_handles.drain(..) {
                             self.device.destroy_sampler(sampler, None);
                         }
-                        self.device.destroy_pipeline(pipeline, None);
+                        self.device.destroy_pipeline(pipeline_write, None);
+                        self.device.destroy_pipeline(pipeline_no_write, None);
                         self.device.destroy_pipeline_layout(pipeline_layout, None);
                         self.device
                             .destroy_descriptor_set_layout(descriptor_set_layout, None);
@@ -2598,27 +3493,44 @@ impl CxVulkan {
             .map_err(|e| format!("enumerate_physical_devices failed: {e:?}"))?;
 
         for physical_device in physical_devices {
-            let queue_families =
-                unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
-            for (index, family) in queue_families.iter().enumerate() {
-                if !family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
-                    continue;
-                }
-                let supports_surface = unsafe {
-                    surface_loader.get_physical_device_surface_support(
-                        physical_device,
-                        index as u32,
-                        surface,
-                    )
-                }
-                .map_err(|e| format!("get_physical_device_surface_support failed: {e:?}"))?;
-                if supports_surface {
-                    return Ok((physical_device, index as u32));
-                }
+            if let Ok(queue_family_index) = Self::pick_queue_family_for_device(
+                instance,
+                surface_loader,
+                surface,
+                physical_device,
+            ) {
+                return Ok((physical_device, queue_family_index));
             }
         }
 
         Err("No Vulkan physical device with graphics+present support found".to_string())
+    }
+
+    fn pick_queue_family_for_device(
+        instance: &ash::Instance,
+        surface_loader: &ash::khr::surface::Instance,
+        surface: vk::SurfaceKHR,
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<u32, String> {
+        let queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        for (index, family) in queue_families.iter().enumerate() {
+            if !family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                continue;
+            }
+            let supports_surface = unsafe {
+                surface_loader.get_physical_device_surface_support(
+                    physical_device,
+                    index as u32,
+                    surface,
+                )
+            }
+            .map_err(|e| format!("get_physical_device_surface_support failed: {e:?}"))?;
+            if supports_surface {
+                return Ok(index as u32);
+            }
+        }
+        Err("No Vulkan queue family with graphics+present support found".to_string())
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), String> {
@@ -2810,6 +3722,15 @@ impl CxVulkan {
             .dependencies(&dependencies);
         self.render_pass = unsafe { self.device.create_render_pass(&render_pass_info, None) }
             .map_err(|e| format!("create_render_pass failed: {e:?}"))?;
+        let xr_color_attachment =
+            color_attachment.final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        let xr_attachments = [xr_color_attachment, depth_attachment];
+        let xr_render_pass_info = vk::RenderPassCreateInfo::default()
+            .attachments(&xr_attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+        self.xr_render_pass = unsafe { self.device.create_render_pass(&xr_render_pass_info, None) }
+            .map_err(|e| format!("create_render_pass(openxr) failed: {e:?}"))?;
 
         for image in &self.swapchain_images {
             let view_info = vk::ImageViewCreateInfo::default()
@@ -2906,6 +3827,10 @@ impl CxVulkan {
                 self.device.destroy_render_pass(self.render_pass, None);
                 self.render_pass = vk::RenderPass::null();
             }
+            if self.xr_render_pass != vk::RenderPass::null() {
+                self.device.destroy_render_pass(self.xr_render_pass, None);
+                self.xr_render_pass = vk::RenderPass::null();
+            }
             self.depth_format = vk::Format::UNDEFINED;
         }
     }
@@ -2927,6 +3852,9 @@ impl CxVulkan {
     fn destroy_texture_resources(&mut self) {
         let resources: Vec<VulkanTextureResource> = self.textures.drain().map(|(_, r)| r).collect();
         for resource in resources {
+            self.destroy_texture_resource(resource);
+        }
+        if let Some(resource) = self.xr_depth_dummy.take() {
             self.destroy_texture_resource(resource);
         }
     }

@@ -1,12 +1,12 @@
 use {
     crate::{
-        AudioBuffer, AudioInfo,
         event::video_playback::VideoSource,
         makepad_live_id::LiveId,
         texture::TextureId,
         video::{
             CameraFrameRef, VideoDecodeError, VideoEncodeError, VideoEncoderConfig, VideoOutputFn,
         },
+        AudioBuffer, AudioInfo,
     },
     std::sync::{Arc, OnceLock},
 };
@@ -108,7 +108,6 @@ pub trait MsePlaybackEngine: Send {
     /// Clean up resources.
     fn cleanup(&mut self);
 }
-
 
 // ---------------------------------------------------------------------------
 // Platform video frame decoder (H.264 etc.)
@@ -219,7 +218,6 @@ pub trait MediaPlaybackSession {
     fn cleanup(&mut self);
 }
 
-
 pub trait MediaPlugin: Send + Sync {
     fn create_video_encoder(
         &self,
@@ -240,7 +238,6 @@ pub trait MediaPlugin: Send + Sync {
         Err(VideoDecodeError::UnsupportedCodec)
     }
 
-
     fn video_capabilities(&self) -> crate::video::VideoCapabilities {
         crate::video::VideoCapabilities::default()
     }
@@ -258,7 +255,6 @@ pub trait MediaPlugin: Send + Sync {
     ) -> Result<Box<dyn MsePlaybackEngine>, String> {
         Err("MSE not supported by this media plugin".into())
     }
-
 
     /// Create a platform video frame decoder for the given codec.
     /// Used by MSE player to decode H.264 via GStreamer/VideoToolbox/MediaCodec.

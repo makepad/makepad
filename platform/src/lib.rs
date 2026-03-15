@@ -183,24 +183,18 @@ pub use {
         media_host::{MediaControlBridge, MediaEventBridge, MediaTextureBridge, MediaTextureInfo},
         media_plugin::{
             media_plugin, media_video_capabilities, merge_video_capabilities,
-            register_media_plugin, FrameDecoderCodec, FrameDecoderConfig,
-            MediaPlaybackSession, MediaPlugin, MediaVideoEncoder, MseAudioTrackInfo,
-            MseDecodedAudioFrame, MseDecodedFrame, MseEngineOutput, MseInitMetadata,
-            MsePlaybackEngine, MseVideoTrackInfo, PlaybackPrepared, VideoFrameDecoder,
-        },
-        playback_session::{
-            mix_active_media_audio, register_active_media_audio,
-            register_media_playback_session, take_registered_media_playback_session,
-            unregister_active_media_audio, unregister_media_playback_session,
-            MediaPlaybackSessionId,
-        },
-        video_session::{
-            register_video_frame_session, take_registered_video_frame_session,
-            unregister_video_frame_session, VideoFrameSession, VideoFrameSessionId,
-            VideoSessionState,
+            register_media_plugin, FrameDecoderCodec, FrameDecoderConfig, MediaPlaybackSession,
+            MediaPlugin, MediaVideoEncoder, MseAudioTrackInfo, MseDecodedAudioFrame,
+            MseDecodedFrame, MseEngineOutput, MseInitMetadata, MsePlaybackEngine,
+            MseVideoTrackInfo, PlaybackPrepared, VideoFrameDecoder,
         },
         midi::*,
         os::*,
+        playback_session::{
+            mix_active_media_audio, register_active_media_audio, register_media_playback_session,
+            take_registered_media_playback_session, unregister_active_media_audio,
+            unregister_media_playback_session, MediaPlaybackSessionId,
+        },
         script::vm::*,
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         texture::{
@@ -210,6 +204,11 @@ pub use {
         ui_runner::*,
         uniform_buffer::{UniformBuffer, UniformBufferId},
         video::*,
+        video_session::{
+            register_video_frame_session, take_registered_video_frame_session,
+            unregister_video_frame_session, VideoFrameSession, VideoFrameSessionId,
+            VideoSessionState,
+        },
         web_socket::{WebSocket, WebSocketMessage},
         window::{
             CxWindowPool, MacosWindowChrome, MacosWindowConfig, MacosWindowKind, MacosWindowLevel,

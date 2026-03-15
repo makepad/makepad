@@ -140,18 +140,37 @@ impl Cx {
                 }
             }
         }
-        self.os
-            .openxr
-            .destroy_instance(&self.os.display.as_ref().unwrap().libgl)
-            .ok();
+        #[cfg(use_vulkan)]
+        {
+            let mut vulkan = self.os.vulkan.take();
+            self.os
+                .openxr
+                .destroy_instance(&self.os.display.as_ref().unwrap().libgl, vulkan.as_mut())
+                .ok();
+            self.os.vulkan = vulkan;
+        }
+
+        #[cfg(not(use_vulkan))]
+        {
+            self.os
+                .openxr
+                .destroy_instance(&self.os.display.as_ref().unwrap().libgl)
+                .ok();
+        }
         from_java_messages_clear()
     }
 
     pub(crate) fn handle_message(&mut self, msg: FromJavaMessage) {
         match msg {
             FromJavaMessage::SwitchedActivity(activity_handle, activity_thread_id) => {
+                crate::log!(
+                    "Android XR: SwitchedActivity received, in_xr_mode={}, activity_thread_id={}",
+                    self.os.in_xr_mode,
+                    activity_thread_id
+                );
                 self.os.activity_thread_id = Some(activity_thread_id);
                 if self.os.in_xr_mode {
+                    crate::log!("Android XR: creating OpenXR instance after activity switch");
                     if let Err(e) = self.os.openxr.create_instance(activity_handle) {
                         crate::error!("OpenXR init failed: {}", e);
                     }
@@ -173,15 +192,24 @@ impl Cx {
 
                 #[cfg(use_vulkan)]
                 {
+                    crate::log!(
+                        "Android XR: SurfaceCreated window={:?} in_xr_mode={}",
+                        window,
+                        self.os.in_xr_mode
+                    );
                     if let Some(display) = self.os.display.as_mut() {
                         unsafe {
-                            if !display.window.is_null() {
+                            if !display.window.is_null() && display.window != window {
                                 ndk_sys::ANativeWindow_release(display.window);
                             }
                         }
                         display.window = window;
                     }
-                    if let Some(vulkan) = self.os.vulkan.as_mut() {
+                    if self.os.in_xr_mode {
+                        crate::log!(
+                            "Android XR: deferring Vulkan surface update until SurfaceChanged"
+                        );
+                    } else if let Some(vulkan) = self.os.vulkan.as_mut() {
                         let width = self.os.display_size.x.max(1.0) as u32;
                         let height = self.os.display_size.y.max(1.0) as u32;
                         if let Err(err) = vulkan.update_surface(window, width, height) {
@@ -216,21 +244,101 @@ impl Cx {
                 width,
                 height,
             } => {
+                crate::log!(
+                    "Android XR: SurfaceChanged window={:?} size={}x{} in_xr_mode={} has_session={}",
+                    window,
+                    width,
+                    height,
+                    self.os.in_xr_mode,
+                    self.os.openxr.session.is_some()
+                );
                 if self.os.in_xr_mode && self.os.openxr.session.is_none() {
                     if self.os.openxr.libxr.is_none() {
                         let activity_handle = makepad_android_state::get_activity();
-                        self.os.openxr.create_instance(activity_handle).ok();
+                        crate::log!("Android XR: SurfaceChanged creating missing OpenXR instance");
+                        match self.os.openxr.create_instance(activity_handle) {
+                            Ok(()) => {
+                                crate::log!(
+                                    "Android XR: SurfaceChanged created missing OpenXR instance"
+                                );
+                            }
+                            Err(err) => {
+                                crate::error!(
+                                    "Android XR: SurfaceChanged create_instance failed: {err}"
+                                );
+                                return;
+                            }
+                        }
                     }
-                    if let Err(e) = self.os.openxr.create_session(
-                        self.os.display.as_ref().unwrap(),
-                        CxOpenXrOptions {
-                            buffer_scale: 1.5,
-                            multisamples: 4,
-                            remove_hands_from_depth: false,
-                        },
-                        &self.os_type,
-                    ) {
-                        crate::error!("OpenXR create_xr_session failed: {}", e);
+                    if self.os.openxr.libxr.is_none() {
+                        crate::warning!(
+                            "Android XR: OpenXR instance still unavailable after SurfaceChanged; deferring session creation"
+                        );
+                        return;
+                    }
+                    #[cfg(use_vulkan)]
+                    {
+                        crate::log!("Android XR: SurfaceChanged creating Vulkan XR session");
+                        let width_u32 = width.max(1) as u32;
+                        let height_u32 = height.max(1) as u32;
+
+                        if let Some(mut old_vulkan) = self.os.vulkan.take() {
+                            crate::warning!(
+                                "Android XR: dropping startup Vulkan backend before XR session create"
+                            );
+                            old_vulkan.suspend_surface();
+                            drop(old_vulkan);
+                        }
+
+                        match self
+                            .os
+                            .openxr
+                            .create_vulkan_backend(window, width_u32, height_u32)
+                        {
+                            Ok(vulkan) => {
+                                crate::log!(
+                                    "Android XR: fresh Vulkan backend initialized for XR session"
+                                );
+                                self.os.vulkan = Some(vulkan);
+                            }
+                            Err(err) => {
+                                crate::error!(
+                                    "Android XR: fresh Vulkan backend init failed before XR session: {err}"
+                                );
+                            }
+                        }
+
+                        let mut vulkan = self.os.vulkan.take();
+                        let result = self.os.openxr.create_session(
+                            self.os.display.as_ref().unwrap(),
+                            vulkan.as_mut(),
+                            CxOpenXrOptions {
+                                buffer_scale: 1.5,
+                                multisamples: 4,
+                                remove_hands_from_depth: false,
+                            },
+                            &self.os_type,
+                        );
+                        self.os.vulkan = vulkan;
+                        if let Err(e) = result {
+                            crate::error!("OpenXR create_xr_session failed: {}", e);
+                        }
+                    }
+
+                    #[cfg(not(use_vulkan))]
+                    {
+                        crate::log!("Android XR: SurfaceChanged creating GLES XR session");
+                        if let Err(e) = self.os.openxr.create_session(
+                            self.os.display.as_ref().unwrap(),
+                            CxOpenXrOptions {
+                                buffer_scale: 1.5,
+                                multisamples: 4,
+                                remove_hands_from_depth: false,
+                            },
+                            &self.os_type,
+                        ) {
+                            crate::error!("OpenXR create_xr_session failed: {}", e);
+                        }
                     }
                 }
 
@@ -865,7 +973,7 @@ impl Cx {
         }
     }
 
-    fn compile_shaders_for_active_backend(&mut self) {
+    pub(crate) fn compile_shaders_for_active_backend(&mut self) {
         #[cfg(use_vulkan)]
         {
             // Vulkan mode is currently a staged path:
@@ -2014,20 +2122,28 @@ impl Cx {
                 CxOsOp::XrStartPresenting => {
                     self.os.ignore_destroy = true;
                     if !self.os.in_xr_mode {
+                        crate::log!("Android XR: XrStartPresenting requested");
                         self.os.in_xr_mode = true;
                         unsafe {
                             let env = attach_jni_env();
+                            crate::log!("Android XR: calling to_java_switch_activity for XR start");
                             android_jni::to_java_switch_activity(env);
+                            crate::log!(
+                                "Android XR: to_java_switch_activity returned for XR start"
+                            );
                         }
                     }
                 }
                 CxOsOp::XrStopPresenting => {
                     self.os.ignore_destroy = true;
                     if self.os.in_xr_mode {
+                        crate::log!("Android XR: XrStopPresenting requested");
                         self.os.in_xr_mode = false;
                         unsafe {
                             let env = attach_jni_env();
+                            crate::log!("Android XR: calling to_java_switch_activity for XR stop");
                             android_jni::to_java_switch_activity(env);
+                            crate::log!("Android XR: to_java_switch_activity returned for XR stop");
                         }
                     }
                 }
