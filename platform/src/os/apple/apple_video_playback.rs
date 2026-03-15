@@ -5,6 +5,7 @@ use {
         makepad_live_id::LiveId,
         os::apple::apple_sys::*,
         texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel},
+        PlaybackPrepared,
     },
     std::{ffi::c_void, ptr::NonNull},
 };

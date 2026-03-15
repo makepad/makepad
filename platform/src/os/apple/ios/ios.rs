@@ -38,6 +38,7 @@ use {
             VideoFormatId, VideoInputId, MAX_VIDEO_DEVICE_INDEX,
         },
         window::CxWindowPool,
+        PlaybackPrepared,
         DVec2, Rect,
     },
     std::{
@@ -582,14 +583,15 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         match player.check_prepared() {
-                            Some(Ok(PlaybackPrepared::new(
-                                width,
-                                height,
-                                duration,
-                                is_seekable,
-                                video_tracks,
-                                audio_tracks,
-                            ))) => {
+                            Some(Ok(prepared)) => {
+                                let PlaybackPrepared {
+                                    width,
+                                    height,
+                                    duration_ms: duration,
+                                    is_seekable,
+                                    video_tracks,
+                                    audio_tracks,
+                                } = prepared;
                                 video_events.push(Event::VideoPlaybackPrepared(
                                     VideoPlaybackPreparedEvent {
                                         video_id: player.video_id,
@@ -654,14 +656,15 @@ impl Cx {
                     let mut camera_events = Vec::new();
                     for (_video_id, player) in self.os.camera_players.iter_mut() {
                         match player.check_prepared() {
-                            Some(Ok(PlaybackPrepared::new(
-                                width,
-                                height,
-                                duration,
-                                is_seekable,
-                                video_tracks,
-                                audio_tracks,
-                            ))) => {
+                            Some(Ok(prepared)) => {
+                                let PlaybackPrepared {
+                                    width,
+                                    height,
+                                    duration_ms: duration,
+                                    is_seekable,
+                                    video_tracks,
+                                    audio_tracks,
+                                } = prepared;
                                 camera_events.push(Event::VideoPlaybackPrepared(
                                     VideoPlaybackPreparedEvent {
                                         video_id: player.video_id,
@@ -970,15 +973,16 @@ impl Cx {
                                 format_id,
                                 camera_access,
                             );
-                            if let Some(Ok(PlaybackPrepared::new(
-                                width,
-                                height,
-                                duration,
-                                is_seekable,
-                                video_tracks,
-                                audio_tracks,
-                            ))) = preview.check_prepared()
+                            if let Some(Ok(prepared)) = preview.check_prepared()
                             {
+                                let PlaybackPrepared {
+                                    width,
+                                    height,
+                                    duration_ms: duration,
+                                    is_seekable,
+                                    video_tracks,
+                                    audio_tracks,
+                                } = prepared;
                                 self.call_event_handler(&Event::VideoPlaybackPrepared(
                                     VideoPlaybackPreparedEvent {
                                         video_id,
