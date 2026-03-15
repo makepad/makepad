@@ -285,9 +285,13 @@ impl RapierScene {
         chunk.key.hash(&mut hasher);
         chunk.boxes.len().hash(&mut hasher);
         for physics_box in &chunk.boxes {
-            physics_box.center.x.to_bits().hash(&mut hasher);
-            physics_box.center.y.to_bits().hash(&mut hasher);
-            physics_box.center.z.to_bits().hash(&mut hasher);
+            physics_box.pose.position.x.to_bits().hash(&mut hasher);
+            physics_box.pose.position.y.to_bits().hash(&mut hasher);
+            physics_box.pose.position.z.to_bits().hash(&mut hasher);
+            physics_box.pose.orientation.x.to_bits().hash(&mut hasher);
+            physics_box.pose.orientation.y.to_bits().hash(&mut hasher);
+            physics_box.pose.orientation.z.to_bits().hash(&mut hasher);
+            physics_box.pose.orientation.w.to_bits().hash(&mut hasher);
             physics_box.half_extents.x.to_bits().hash(&mut hasher);
             physics_box.half_extents.y.to_bits().hash(&mut hasher);
             physics_box.half_extents.z.to_bits().hash(&mut hasher);
@@ -650,6 +654,22 @@ impl XrScene {
         self.draw_cube.color = color;
         self.draw_cube.depth_clip = depth_clip;
         self.draw_cube.draw(cx);
+    }
+
+    fn draw_depth_pose_box(
+        &mut self,
+        cx: &mut Cx2d,
+        pose: Pose,
+        size: Vec3f,
+        color: Vec4f,
+        depth_clip: f32,
+    ) {
+        self.draw_depth_box.transform = pose.to_mat4();
+        self.draw_depth_box.cube_pos = vec3(0.0, 0.0, 0.0);
+        self.draw_depth_box.cube_size = size;
+        self.draw_depth_box.color = color;
+        self.draw_depth_box.depth_clip = depth_clip;
+        self.draw_depth_box.draw(cx);
     }
 
     fn prepare_pbr(&mut self, cx: &mut Cx2d) {
@@ -1185,24 +1205,23 @@ impl XrScene {
             return;
         }
 
-        let draw = &mut self.draw_depth_box;
-        draw.transform = Mat4f::identity();
-        draw.begin_many_instances(cx);
-        for physics_box in &self.depth_debug_boxes {
-            draw.cube_pos = vec3(
-                physics_box.center.x,
-                physics_box.center.y,
-                physics_box.center.z,
+        self.draw_depth_box.transform = Mat4f::identity();
+        self.draw_depth_box.begin_many_instances(cx);
+        let debug_boxes = self.depth_debug_boxes.clone();
+        for physics_box in debug_boxes {
+            self.draw_depth_pose_box(
+                cx,
+                physics_box.pose,
+                vec3(
+                    physics_box.half_extents.x * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
+                    physics_box.half_extents.y * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
+                    physics_box.half_extents.z * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
+                ),
+                vec4(0.18, 0.92, 0.98, XR_DEPTH_BOX_DEBUG_ALPHA),
+                0.0,
             );
-            draw.cube_size = vec3(
-                physics_box.half_extents.x * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
-                physics_box.half_extents.y * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
-                physics_box.half_extents.z * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
-            );
-            draw.color = vec4(0.18, 0.92, 0.98, XR_DEPTH_BOX_DEBUG_ALPHA);
-            draw.draw(cx);
         }
-        draw.end_many_instances(cx);
+        self.draw_depth_box.end_many_instances(cx);
     }
 }
 
