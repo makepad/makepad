@@ -48,6 +48,7 @@ enhanced-determinism = [
     "simba/libm_force",
     "indexmap",
     "glamx/libm",
+    "makepad-sparse-voxels/enhanced-determinism",
 ]
 f32 = []
 f64 = []
@@ -127,6 +128,9 @@ path = "../../../../libs/vulkan/indexmap"
 [dependencies.log]
 package = "makepad-error-log"
 path = "../../../../libs/error_log"
+[dependencies.makepad-sparse-voxels]
+version = "0.1.0"
+path = "../../../../libs/sparse_voxels"
 [dependencies.num-traits]
 version = "0.2"
 default-features = false

@@ -14,7 +14,11 @@ pub trait SimdSelect<N: ScalarType> {
 impl SimdSelect<Real> for Vector {
     #[inline]
     fn select(self, condition: bool, if_false: Self) -> Self {
-        if condition { self } else { if_false }
+        if condition {
+            self
+        } else {
+            if_false
+        }
     }
 }
 

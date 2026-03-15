@@ -425,7 +425,7 @@ impl MultibodyJointSet {
             .flat_map(move |link| self.connectivity_graph.interactions_with(link.graph_id))
             .map(|inter| {
                 // NOTE: the joint handle is always equal to the handle of the second rigid-body.
-                (inter.0, inter.1, MultibodyJointHandle(inter.1.0))
+                (inter.0, inter.1, MultibodyJointHandle(inter.1 .0))
             })
     }
 

@@ -1,19 +1,19 @@
 use crate::dynamics::solver::GenericJointConstraint;
 use crate::dynamics::{
-    FixedJointBuilder, GenericJoint, IntegrationParameters, Multibody, MultibodyLink,
-    RigidBodyVelocity, joint,
+    joint, FixedJointBuilder, GenericJoint, IntegrationParameters, Multibody, MultibodyLink,
+    RigidBodyVelocity,
 };
 use crate::math::{
-    ANG_DIM, DIM, DVector, JacobianViewMut, Pose, Real, Rotation, SPATIAL_DIM, SpatialVector,
-    Vector,
+    DVector, JacobianViewMut, Pose, Real, Rotation, SpatialVector, Vector, ANG_DIM, DIM,
+    SPATIAL_DIM,
 };
 use parry::math::VectorExt;
 
 #[cfg(feature = "dim2")]
 use crate::math::rotation_from_angle;
+use crate::utils::vect_to_na;
 #[cfg(feature = "dim3")]
 use crate::utils::RotationOps;
-use crate::utils::vect_to_na;
 use na::DVectorViewMut;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]

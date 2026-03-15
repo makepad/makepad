@@ -6,7 +6,7 @@ use crate::geometry::{
     ColliderParent, ColliderPosition, ColliderShape, ColliderType, InteractionGroups,
     MeshConverter, MeshConverterError, SharedShape,
 };
-use crate::math::{AngVector, DIM, IVector, Pose, Real, Rotation, Vector, rotation_from_angle};
+use crate::math::{rotation_from_angle, AngVector, IVector, Pose, Real, Rotation, Vector, DIM};
 use crate::parry::transformation::vhacd::VHACDParameters;
 use crate::pipeline::{ActiveEvents, ActiveHooks};
 use crate::prelude::{ColliderEnabled, IntegrationParameters};

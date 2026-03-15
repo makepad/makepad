@@ -110,7 +110,11 @@ pub(crate) fn simd_inv<N: SimdRealCopy>(val: N) -> N {
 }
 
 pub(crate) fn select_other<T: PartialEq>(pair: (T, T), elt: T) -> T {
-    if pair.0 == elt { pair.1 } else { pair.0 }
+    if pair.0 == elt {
+        pair.1
+    } else {
+        pair.0
+    }
 }
 
 /// Calculate the difference with smallest absolute value between the two given values.

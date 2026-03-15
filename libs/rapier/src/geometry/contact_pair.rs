@@ -7,7 +7,7 @@ use crate::math::{Real, TangentImpulse, Vector};
 use crate::pipeline::EventHandler;
 use crate::prelude::CollisionEventFlags;
 use crate::utils::ScalarType;
-use parry::math::{SIMD_WIDTH, SimdReal};
+use parry::math::{SimdReal, SIMD_WIDTH};
 use parry::query::ContactManifoldsWorkspace;
 
 bitflags::bitflags! {
