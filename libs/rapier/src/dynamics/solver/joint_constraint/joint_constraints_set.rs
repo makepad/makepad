@@ -1,7 +1,7 @@
 use crate::dynamics::solver::categorization::categorize_joints;
 use crate::dynamics::solver::{
-    AnyJointConstraintMut, GenericJointConstraint, JointGenericExternalConstraintBuilder,
-    JointGenericInternalConstraintBuilder, reset_buffer,
+    reset_buffer, AnyJointConstraintMut, GenericJointConstraint,
+    JointGenericExternalConstraintBuilder, JointGenericInternalConstraintBuilder,
 };
 use crate::dynamics::{
     IntegrationParameters, IslandManager, JointGraphEdge, JointIndex, MultibodyJointSet,
@@ -18,7 +18,7 @@ use crate::dynamics::solver::solver_body::SolverBodies;
 #[cfg(feature = "simd-is-enabled")]
 use {
     crate::dynamics::solver::joint_constraint::joint_constraint_builder::JointConstraintBuilderSimd,
-    crate::math::{SIMD_WIDTH, SimdReal},
+    crate::math::{SimdReal, SIMD_WIDTH},
 };
 
 pub struct JointConstraintsSet {

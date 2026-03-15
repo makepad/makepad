@@ -13,6 +13,7 @@ metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
 makepad-shared-bytes = { path = "../libs/shared_bytes", version = "1.0.0" }
+makepad-sparse-voxels = { path = "../libs/sparse_voxels", version = "0.1.0" }
 makepad-script-std = { path = "./script/std", version = "1.0.0" }
 makepad-network = { path = "./network", version = "1.0.0", features = ["script"] }
 makepad-script = { path="./script", version="1.0.0"}
@@ -20,6 +21,7 @@ makepad-live-reload-core = { path = "../libs/live_reload_core", version = "0.1.0
 makepad-zune-png = { path = "../libs/zune/zune-png", version = "0.5.1" }
 smallvec = { version = "1.15", path = "../libs/smallvec" }
 bitflags = { version = "2.10", path = "../libs/bitflags" }
+parry3d = { path = "../libs/rapier/vendor/parry3d", default-features = false, features = ["alloc", "dim3", "f32", "required-features", "std", "enhanced-determinism"] }
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }

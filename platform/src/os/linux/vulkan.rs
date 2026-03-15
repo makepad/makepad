@@ -137,14 +137,18 @@ pub(crate) struct CxVulkanOpenXrSwapchainImage {
 }
 
 pub(crate) struct CxVulkanOpenXrDepthImage {
+    image: vk::Image,
     views: [vk::ImageView; 2],
 }
 
 pub(crate) struct CxVulkanOpenXrSessionData {
     width: u32,
     height: u32,
+    pub(crate) depth_width: u32,
+    pub(crate) depth_height: u32,
     color_images: Vec<CxVulkanOpenXrSwapchainImage>,
     depth_images: Vec<CxVulkanOpenXrDepthImage>,
+    depth_readback_buffer: Option<VulkanBuffer>,
 }
 
 #[derive(Default)]
@@ -594,7 +598,10 @@ impl CxVulkan {
         crate::log!("Android Vulkan XR: OpenXR created Vulkan instance");
 
         let instance = unsafe {
-            ash::Instance::load(entry.static_fn(), vk::Instance::from_raw(xr_vk_instance as _))
+            ash::Instance::load(
+                entry.static_fn(),
+                vk::Instance::from_raw(xr_vk_instance as _),
+            )
         };
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
         let android_surface_loader = ash::khr::android_surface::Instance::new(&entry, &instance);
@@ -621,11 +628,7 @@ impl CxVulkan {
         };
         let mut runtime_physical_device = std::ptr::null();
         let xr_get_device_result = unsafe {
-            (xr.xrGetVulkanGraphicsDevice2KHR)(
-                xr_instance,
-                &get_info,
-                &mut runtime_physical_device,
-            )
+            (xr.xrGetVulkanGraphicsDevice2KHR)(xr_instance, &get_info, &mut runtime_physical_device)
         };
         if xr_get_device_result != XrResult::SUCCESS {
             unsafe {
@@ -967,6 +970,8 @@ impl CxVulkan {
         color_format: vk::Format,
         width: u32,
         height: u32,
+        depth_width: u32,
+        depth_height: u32,
     ) -> Result<CxVulkanOpenXrSessionData, String> {
         if self.xr_render_pass == vk::RenderPass::null() {
             return Err("Android Vulkan XR init failed: render pass is not ready".to_string());
@@ -979,6 +984,15 @@ impl CxVulkan {
         }
 
         self.ensure_xr_depth_dummy()?;
+
+        let depth_readback_buffer = if depth_width > 0 && depth_height > 0 {
+            let byte_len = depth_width as vk::DeviceSize
+                * depth_height as vk::DeviceSize
+                * std::mem::size_of::<u16>() as vk::DeviceSize;
+            Some(self.create_host_buffer(vk::BufferUsageFlags::TRANSFER_DST, byte_len)?)
+        } else {
+            None
+        };
 
         let mut xr_color_images = Vec::with_capacity(color_images.len());
         for &image in color_images {
@@ -1018,7 +1032,7 @@ impl CxVulkan {
                     break;
                 }
             };
-            xr_depth_images.push(CxVulkanOpenXrDepthImage { views });
+            xr_depth_images.push(CxVulkanOpenXrDepthImage { image, views });
         }
         if let Some(err) = depth_view_error {
             crate::warning!(
@@ -1030,8 +1044,11 @@ impl CxVulkan {
         Ok(CxVulkanOpenXrSessionData {
             width: width.max(1),
             height: height.max(1),
+            depth_width,
+            depth_height,
             color_images: xr_color_images,
             depth_images: xr_depth_images,
+            depth_readback_buffer,
         })
     }
 
@@ -1154,6 +1171,166 @@ impl CxVulkan {
                 }
             }
         }
+        if let Some(buffer) = session.depth_readback_buffer {
+            unsafe {
+                if buffer.buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(buffer.buffer, None);
+                }
+                if buffer.memory != vk::DeviceMemory::null() {
+                    self.device.free_memory(buffer.memory, None);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn read_openxr_depth_image(
+        &mut self,
+        session: &CxVulkanOpenXrSessionData,
+        depth_image_index: usize,
+        eye_index: usize,
+    ) -> Result<Vec<u16>, String> {
+        let depth_image = session
+            .depth_images
+            .get(depth_image_index)
+            .ok_or_else(|| format!("invalid OpenXR depth image index {depth_image_index}"))?;
+        let staging = session
+            .depth_readback_buffer
+            .ok_or_else(|| "OpenXR depth readback buffer unavailable".to_string())?;
+        if session.depth_width == 0 || session.depth_height == 0 {
+            return Err("OpenXR depth swapchain has invalid dimensions".to_string());
+        }
+
+        let pixel_count = session.depth_width as usize * session.depth_height as usize;
+        let byte_len = pixel_count as vk::DeviceSize * std::mem::size_of::<u16>() as vk::DeviceSize;
+
+        unsafe {
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(depth readback) failed: {e:?}"))?;
+            self.device
+                .reset_fences(&[self.in_flight_fence])
+                .map_err(|e| format!("reset_fences(depth readback) failed: {e:?}"))?;
+        }
+
+        self.destroy_frame_resources();
+
+        unsafe {
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| format!("reset_command_buffer(depth readback) failed: {e:?}"))?;
+            self.device
+                .begin_command_buffer(
+                    self.command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(|e| format!("begin_command_buffer(depth readback) failed: {e:?}"))?;
+        }
+
+        let to_transfer = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_READ)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .old_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .image(depth_image.image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(eye_index as u32)
+                    .layer_count(1),
+            );
+        let copy_region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .mip_level(0)
+                    .base_array_layer(eye_index as u32)
+                    .layer_count(1),
+            )
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: session.depth_width,
+                height: session.depth_height,
+                depth: 1,
+            });
+        let to_read_only = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .new_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+            .image(depth_image.image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(eye_index as u32)
+                    .layer_count(1),
+            );
+        let buffer_ready = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::HOST_READ)
+            .buffer(staging.buffer)
+            .offset(0)
+            .size(byte_len);
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_transfer],
+            );
+            self.device.cmd_copy_image_to_buffer(
+                self.command_buffer,
+                depth_image.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                staging.buffer,
+                &[copy_region],
+            );
+            self.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[buffer_ready],
+                &[to_read_only],
+            );
+            self.device
+                .end_command_buffer(self.command_buffer)
+                .map_err(|e| format!("end_command_buffer(depth readback) failed: {e:?}"))?;
+            self.device
+                .queue_submit(
+                    self.queue,
+                    &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])],
+                    self.in_flight_fence,
+                )
+                .map_err(|e| format!("queue_submit(depth readback) failed: {e:?}"))?;
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(depth readback submit) failed: {e:?}"))?;
+        }
+
+        let depth = unsafe {
+            let mapped = self
+                .device
+                .map_memory(staging.memory, 0, byte_len, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("map_memory(depth readback) failed: {e:?}"))?;
+            let data = std::slice::from_raw_parts(mapped as *const u16, pixel_count).to_vec();
+            self.device.unmap_memory(staging.memory);
+            data
+        };
+
+        Ok(depth)
     }
 
     pub(crate) fn draw_openxr_view(

@@ -6,7 +6,7 @@ use crate::dynamics::solver::MotorParameters;
 use crate::dynamics::{
     FixedJoint, MotorModel, PrismaticJoint, RevoluteJoint, RigidBody, RopeJoint,
 };
-use crate::math::{Pose, Real, Rotation, SPATIAL_DIM, Vector};
+use crate::math::{Pose, Real, Rotation, Vector, SPATIAL_DIM};
 use crate::utils::{OrthonormalBasis, SimdRealCopy};
 use parry::math::Matrix;
 

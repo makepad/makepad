@@ -17,8 +17,8 @@ use parry::math::SimdReal;
 use crate::dynamics::solver::contact_constraint::any_contact_constraint::AnyContactConstraintMut;
 #[cfg(feature = "dim3")]
 use crate::dynamics::{
-    FrictionModel,
     solver::contact_constraint::{ContactWithTwistFriction, ContactWithTwistFrictionBuilder},
+    FrictionModel,
 };
 
 #[derive(Debug)]

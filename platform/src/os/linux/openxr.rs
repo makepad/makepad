@@ -169,21 +169,27 @@ impl Cx {
     }
 
     pub(crate) fn openxr_handle_drawing(&mut self) {
-        let openxr = &mut self.os.openxr;
-        if let Ok(frame) = CxOpenXrFrame::begin_frame(
-            openxr.libxr.as_ref().unwrap(),
-            openxr.session.as_ref().unwrap(),
-        ) {
-            let session = openxr.session.as_mut().unwrap();
-            session.depth_swap_chain_index = frame
-                .depth_image
-                .map(|v| v.swapchain_index as usize)
-                .unwrap_or(0);
-            session.frame_state = frame.frame_state;
-
-            // lets send in the state
-            let event = session.new_xr_update_event(openxr.libxr.as_ref().unwrap(), &frame);
-            let last_state = openxr.session.as_ref().unwrap().inputs.last_state.clone();
+        let frame = {
+            let openxr = &mut self.os.openxr;
+            CxOpenXrFrame::begin_frame(
+                openxr.libxr.as_ref().unwrap(),
+                openxr.session.as_ref().unwrap(),
+            )
+        };
+        if let Ok(frame) = frame {
+            let (event, last_state) = {
+                let openxr = &mut self.os.openxr;
+                let session = openxr.session.as_mut().unwrap();
+                session.depth_swap_chain_index = frame
+                    .depth_image
+                    .map(|v| v.swapchain_index as usize)
+                    .unwrap_or(0);
+                session.frame_state = frame.frame_state;
+                (
+                    session.new_xr_update_event(openxr.libxr.as_ref().unwrap(), &frame),
+                    session.inputs.last_state.clone(),
+                )
+            };
             if let Some(event) = event {
                 self.call_event_handler(&Event::XrUpdate(event));
             }
@@ -198,15 +204,29 @@ impl Cx {
                 self.compile_shaders_for_active_backend();
             }
 
-            // copy on the depth image
-
             self.openxr_handle_repaint(&frame);
 
-            let openxr = &mut self.os.openxr;
-            frame.end_frame(
-                openxr.libxr.as_ref().unwrap(),
-                openxr.session.as_mut().unwrap(),
-            );
+            #[cfg(use_vulkan)]
+            if let Some(depth_image_index) = frame.depth_image.map(|v| v.swapchain_index as usize) {
+                let (openxr, vulkan) = (&mut self.os.openxr, &mut self.os.vulkan);
+                if let (Some(session), Some(vulkan)) = (openxr.session.as_mut(), vulkan.as_mut()) {
+                    if let Some(vulkan_session) = session.vulkan.as_mut() {
+                        if let Err(err) =
+                            vulkan_session.submit_depth_voxel_job(vulkan, &frame, depth_image_index)
+                        {
+                            crate::warning!("OpenXR depth voxel update failed: {err}");
+                        }
+                    }
+                }
+            }
+
+            {
+                let openxr = &mut self.os.openxr;
+                frame.end_frame(
+                    openxr.libxr.as_ref().unwrap(),
+                    openxr.session.as_mut().unwrap(),
+                );
+            }
         }
     }
 }
@@ -223,7 +243,6 @@ pub struct CxOpenXr {
 impl CxOpenXr {
     pub fn create_instance(&mut self, activity_handle: jni_sys::jobject) -> Result<(), String> {
         if self.instance.is_some() && self.libxr.is_some() && self.system_id.is_some() {
-            crate::log!("OpenXR create_instance called after successful initialization");
             return Ok(());
         }
 
@@ -280,7 +299,6 @@ impl CxOpenXr {
                         .to_string(),
                 );
             }
-            crate::log!("OpenXR Vulkan: enabling XR_KHR_vulkan_enable2");
             exts_needed.insert(0, "XR_KHR_vulkan_enable2\0");
         }
 
@@ -305,12 +323,6 @@ impl CxOpenXr {
             "XR_FB_spatial_entity\0",
             "XR_FB_spatial_entity_query\0",
         ];
-
-        for &ext_needed in &exts_needed {
-            if !has_extension(ext_needed) {
-                crate::log!("Needed extension {} not found", ext_needed);
-            }
-        }
 
         let ext_name_ptrs: Vec<*const std::os::raw::c_char> = exts_needed
             .iter()
@@ -461,7 +473,6 @@ impl CxOpenXr {
         os_type: &OsType,
     ) -> Result<(), String> {
         if self.libxr.is_none() {
-            crate::log!("create session called before libxr load?");
             return Err("create session called before libxr load?".into());
         }
         self.session = Some(CxOpenXrSession::create_session(

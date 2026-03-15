@@ -216,8 +216,8 @@ pub(crate) use self::narrow_phase::ContactManifoldIndex;
 pub use parry::shape::*;
 
 #[cfg(feature = "serde-serialize")]
-pub(crate) fn default_persistent_query_dispatcher()
--> std::sync::Arc<dyn parry::query::PersistentQueryDispatcher<ContactManifoldData, ContactData>> {
+pub(crate) fn default_persistent_query_dispatcher(
+) -> std::sync::Arc<dyn parry::query::PersistentQueryDispatcher<ContactManifoldData, ContactData>> {
     std::sync::Arc::new(parry::query::DefaultQueryDispatcher)
 }
 
