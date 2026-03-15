@@ -314,6 +314,13 @@ pub trait Widget: WidgetNode {
         cx.has_key_focus(self.area())
     }
 
+    fn controls(&self) -> (String, bool) { (String::new(), true) }
+
+    fn control(&mut self, cx: &mut Cx, op: &str, arg: &str) -> String {
+        let _ = (cx, op, arg);
+        String::new()
+    }
+
     fn set_disabled(&mut self, _cx: &mut Cx, _disabled: bool) {}
 
     fn disabled(&self, _cx: &Cx) -> bool {
@@ -1094,6 +1101,22 @@ impl WidgetRef {
     pub fn set_key_focus(&self, cx: &mut Cx) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.set_key_focus(cx)
+        }
+    }
+
+    pub fn controls(&self) -> (String, bool) {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.controls()
+        } else {
+            (String::new(), true)
+        }
+    }
+
+    pub fn control(&self, cx: &mut Cx, op: &str, arg: &str) -> String {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.control(cx, op, arg)
+        } else {
+            String::new()
         }
     }
 

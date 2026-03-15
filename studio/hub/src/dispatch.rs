@@ -2682,7 +2682,8 @@ impl HubCore {
             | AppToStudio::TweakHits(_)
             | AppToStudio::BeforeStartup
             | AppToStudio::RequestAnimationFrame
-            | AppToStudio::SetClipboard(_) => {}
+            | AppToStudio::SetClipboard(_)
+            | AppToStudio::WidgetResponse(_) => {}
         }
     }
 

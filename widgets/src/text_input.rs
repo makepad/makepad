@@ -1357,6 +1357,25 @@ impl Widget for TextInput {
         self.text.clone()
     }
 
+    fn controls(&self) -> (String, bool) {
+        ("get,set,focus".into(), true)
+    }
+
+    fn control(&mut self, cx: &mut Cx, op: &str, arg: &str) -> String {
+        match op {
+            "get" => self.text.clone(),
+            "set" => {
+                self.set_text(cx, arg);
+                String::new()
+            }
+            "focus" => {
+                cx.set_key_focus(self.draw_bg.area());
+                String::new()
+            }
+            _ => String::new(),
+        }
+    }
+
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
         self.text = self.filter_input(text, true);
         self.set_selection(

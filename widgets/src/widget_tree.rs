@@ -1834,7 +1834,7 @@ impl WidgetTree {
         rects
     }
 
-    pub fn compact_dump(&self, cx: &Cx) -> String {
+    pub fn compact_dump(&self, cx: &mut Cx) -> String {
         self.sync_dirty();
         let inner = self.inner.borrow();
 
@@ -1892,6 +1892,7 @@ impl WidgetTree {
             y: i64,
             w: i64,
             h: i64,
+            ctl: String,
         }
 
         #[derive(Clone)]
@@ -1922,6 +1923,7 @@ impl WidgetTree {
         let mut dump_nodes = Vec::new();
         let mut dock_tabs_rows = Vec::<DockTabsRow>::new();
         let mut dock_tab_rows = Vec::<DockTabRow>::new();
+        let mut suppress_set = HashSet::new();
         for (index, node) in inner.nodes.iter().enumerate() {
             let Some(widget) = node.widget.upgrade() else {
                 continue;
@@ -1941,6 +1943,10 @@ impl WidgetTree {
                 if w > 0 && h > 0 {
                     let id_token = live_id_token(id);
                     let ty_token = live_id_token(ty);
+                    let (ctl, show_children) = widget.controls();
+                    if !show_children {
+                        suppress_set.insert(index);
+                    }
                     dump_nodes.push(DumpNode {
                         index,
                         parent: node.parent,
@@ -1950,6 +1956,7 @@ impl WidgetTree {
                         y,
                         w,
                         h,
+                        ctl,
                     });
                 }
             }
@@ -2002,6 +2009,20 @@ impl WidgetTree {
             }
         }
 
+        for node in &mut dump_nodes {
+            if node.ctl.is_empty() {
+                continue;
+            }
+            let mut parent = node.parent;
+            while parent != NONE {
+                if suppress_set.contains(&(parent as usize)) {
+                    node.ctl.clear();
+                    break;
+                }
+                parent = inner.nodes[parent as usize].parent;
+            }
+        }
+
         let mut old_to_new = HashMap::<usize, usize>::new();
         for (new_index, node) in dump_nodes.iter().enumerate() {
             old_to_new.insert(node.index, new_index);
@@ -2019,11 +2040,19 @@ impl WidgetTree {
                 }
                 parent = inner.nodes[parent as usize].parent;
             }
-            let _ = writeln!(
-                &mut out,
-                "{} {} {} {} {} {} {} {}",
-                new_index, parent_index, node.id, node.ty, node.x, node.y, node.w, node.h
-            );
+            if node.ctl.is_empty() {
+                let _ = writeln!(
+                    &mut out,
+                    "{} {} {} {} {} {} {} {}",
+                    new_index, parent_index, node.id, node.ty, node.x, node.y, node.w, node.h
+                );
+            } else {
+                let _ = writeln!(
+                    &mut out,
+                    "{} {} {} {} {} {} {} {} {}",
+                    new_index, parent_index, node.id, node.ty, node.x, node.y, node.w, node.h, node.ctl
+                );
+            }
         }
         if !dock_tabs_rows.is_empty() || !dock_tab_rows.is_empty() {
             let _ = writeln!(
@@ -2105,12 +2134,30 @@ fn get_or_init_state(cx: &mut Cx) -> &mut WidgetTreeState {
     WidgetTreeState::get_or_init(cx)
 }
 
-fn compact_widget_tree_dump_callback(cx: &Cx) -> String {
-    cx.widget_tree().compact_dump(cx)
+fn compact_widget_tree_dump_callback(cx: &mut Cx) -> String {
+    let tree_ptr = cx.widget_tree() as *const WidgetTree;
+    let tree = unsafe { &*tree_ptr };
+    tree.compact_dump(cx)
 }
 
 fn widget_query_callback(cx: &Cx, query: &str) -> Vec<String> {
     cx.widget_tree().query_rects(cx, query)
+}
+
+fn widget_control_callback(cx: &mut Cx, id: &str, op: &str, arg: &str) -> Option<String> {
+    use makepad_live_id::LiveId;
+    let live_id = LiveId::from_str_with_lut(id).unwrap_or(LiveId(0));
+    if live_id == LiveId(0) {
+        return None;
+    }
+    let tree_ptr = cx.widget_tree() as *const WidgetTree;
+    let tree = unsafe { &*tree_ptr };
+    let root_uid = tree.root_uid();
+    let widget = tree.find_within(root_uid, &[live_id]);
+    if widget.is_empty() {
+        return None;
+    }
+    Some(widget.control(cx, op, arg))
 }
 
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
@@ -2118,6 +2165,7 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     state.tree.set_root_widget(ui.clone());
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
     cx.widget_query_callback = Some(widget_query_callback);
+    cx.widget_control_callback = Some(widget_control_callback);
     let root_uid = ui.widget_uid();
     update_global_ui_handle(cx, root_uid);
 }

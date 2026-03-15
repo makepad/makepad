@@ -144,8 +144,9 @@ pub struct Cx {
     pub widget_query_invalidation_event: Option<u64>,
 
     pub widget_tree_ptr: *mut (),
-    pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
+    pub widget_tree_dump_callback: Option<fn(&mut Cx) -> String>,
     pub widget_query_callback: Option<fn(&Cx, &str) -> Vec<String>>,
+    pub widget_control_callback: Option<fn(&mut Cx, &str, &str, &str) -> Option<String>>,
 
     pub net: Arc<NetworkRuntime>,
 }
@@ -421,6 +422,7 @@ impl Cx {
             widget_tree_ptr: std::ptr::null_mut(),
             widget_tree_dump_callback: None,
             widget_query_callback: None,
+            widget_control_callback: None,
             net,
 
             script_data: CxScriptData {

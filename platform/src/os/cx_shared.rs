@@ -13,7 +13,7 @@ use {
     },
     makepad_studio_protocol::{
         AppToStudio, EventSample, ScreenshotResponse, StudioToApp, WidgetQueryResponse,
-        WidgetTreeDumpResponse,
+        WidgetResponse, WidgetTreeDumpResponse,
     },
     std::cell::{Cell, RefCell},
     std::collections::{HashMap, HashSet},
@@ -335,6 +335,29 @@ impl Cx {
             }
             StudioToApp::WidgetQuery(request) => {
                 self.send_studio_widget_query_response(request.request_id, request.query);
+            }
+            StudioToApp::WidgetControl(req) => {
+                let result = if let Some(callback) = self.widget_control_callback {
+                    callback(self, &req.id, &req.op, &req.arg)
+                } else {
+                    None
+                };
+                match result {
+                    Some(out) => {
+                        Cx::send_studio_message(AppToStudio::WidgetResponse(WidgetResponse {
+                            request_id: req.request_id,
+                            ok: true,
+                            out,
+                        }));
+                    }
+                    None => {
+                        Cx::send_studio_message(AppToStudio::WidgetResponse(WidgetResponse {
+                            request_id: req.request_id,
+                            ok: false,
+                            out: String::new(),
+                        }));
+                    }
+                }
             }
             StudioToApp::Kill => {
                 self.call_event_handler(&Event::Shutdown);
