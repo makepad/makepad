@@ -1,0 +1,62 @@
+[package]
+edition = "2018"
+name = "simba"
+version = "0.9.1"
+authors = ["sebcrozet <developer@crozet.re>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "SIMD algebra for Rust"
+documentation = "https://docs.rs/simba"
+readme = "README.md"
+keywords = [
+    "algebra",
+    "simd",
+    "math",
+]
+categories = [
+    "science",
+    "mathematics",
+    "wasm",
+    "no-std",
+]
+license = "Apache-2.0"
+repository = "https://github.com/dimforge/simba"
+
+[features]
+decimal = []
+default = ["std"]
+libm = ["num-traits/libm"]
+partial_fixed_point_support = []
+portable_simd = ["std"]
+rand = []
+rkyv = ["rkyv-serialize"]
+rkyv-serialize = []
+serde_serialize = []
+std = []
+wide = []
+
+[lib]
+name = "simba"
+path = "src/lib.rs"
+
+[dependencies.approx]
+version = "0.5"
+default-features = false
+path = "../approx"
+[dependencies.libm_force]
+version = "0.2"
+optional = true
+package = "libm"
+path = "../libm"
+[dependencies.num-complex]
+version = "0.4"
+default-features = false
+path = "../num-complex"
+[dependencies.num-traits]
+version = "0.2.11"
+default-features = false
+path = "../num-traits"

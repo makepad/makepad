@@ -1,0 +1,60 @@
+[package]
+name = "rapier3d"
+version = "0.32.0"
+authors = ["Sébastien Crozet <sebcrozet@dimforge.com>"]
+description = "3-dimensional physics engine in Rust."
+documentation = "https://docs.rs/rapier3d"
+homepage = "https://rapier.rs"
+repository = "https://github.com/dimforge/rapier"
+readme = "README.md"
+categories = [
+    "science",
+    "game-development",
+    "mathematics",
+    "simulation",
+    "wasm",
+]
+keywords = ["physics", "dynamics", "rigid", "real-time", "impulse_joints"]
+license = "Apache-2.0"
+rust-version = "1.86"
+edition = "2024"
+
+[features]
+default = ["dim3", "f32", "enhanced-determinism"]
+dim2 = []
+dim3 = []
+f32 = []
+f64 = []
+parallel = []
+simd-stable = ["simd-is-enabled"]
+simd-nightly = [
+    "simd-is-enabled",
+]
+# Do not enable this feature directly. It is automatically
+# enabled with the "simd-stable" or "simd-nightly" feature.
+simd-is-enabled = []
+serde-serialize = []
+enhanced-determinism = ["simba/libm_force", "parry3d/enhanced-determinism"]
+debug-render = []
+profiler = []
+
+# Feature used for debugging only.
+debug-disable-legitimate-fe-exceptions = []
+
+# Feature used for development and debugging only.
+# Do not enable this unless you are working on the engine internals.
+dev-remove-slow-accessors = []
+
+[lib]
+name = "rapier3d"
+path = "../../src/lib.rs"
+required-features = ["dim3", "f32"]
+
+[dependencies]
+vec_map = { version = "0.8", path = "../../vendor/vec_map" }
+num-traits = { version = "0.2", path = "../../vendor/num-traits" }
+nalgebra = { version = "0.34", default-features = false, features = ["std"], path = "../../vendor/nalgebra" }
+parry3d = { version = "0.26.0", default-features = false, features = ["alloc", "dim3", "f32", "required-features", "std", "enhanced-determinism"], path = "../../vendor/parry3d" }
+simba = { version = "0.9.1", path = "../../vendor/simba" }
+bitflags = { version = "2", path = "../../../../libs/bitflags" }
+static_assertions = { version = "1", path = "../../vendor/static_assertions" }

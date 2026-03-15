@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/rapier3d"]
+resolver = "2"
+
+[patch.crates-io]
+approx = { path = "vendor/approx" }
+glam = { path = "vendor/glam" }
+glamx = { path = "vendor/glamx" }
+libm = { path = "vendor/libm" }
+matrixmultiply = { path = "vendor/matrixmultiply" }
+nalgebra = { path = "vendor/nalgebra" }
+num-complex = { path = "vendor/num-complex" }
+num-traits = { path = "vendor/num-traits" }
+parry3d = { path = "vendor/parry3d" }
+simba = { path = "vendor/simba" }
+typenum = { path = "vendor/typenum" }
