@@ -2,7 +2,7 @@ use crate::*;
 use makepad_script::{ScriptMod, ScriptThreadId, ScriptValue};
 use makepad_script_std::{ScriptStd, ScriptTaskOnThreadCompletedHook, ScriptTaskPumpHook};
 
-pub use makepad_script_std::{fs, run};
+pub use makepad_script_std::{fs, net, run};
 
 pub type CxScriptTaskOnThreadCompletedHook = ScriptTaskOnThreadCompletedHook;
 pub type CxScriptTaskPumpHook = ScriptTaskPumpHook;
