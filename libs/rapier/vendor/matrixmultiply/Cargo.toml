@@ -1,0 +1,45 @@
+[package]
+edition = "2018"
+name = "matrixmultiply"
+version = "0.3.10"
+authors = [
+    "bluss",
+    "R. Janis Goldschmidt",
+]
+build = "build.rs"
+exclude = ["docs/*"]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = """
+General matrix multiplication for f32 and f64 matrices. Operates on matrices with general layout (they can use arbitrary row and column stride). Detects and uses AVX or SSE2 on x86 platforms transparently for higher performance. Uses a microkernel strategy, so that the implementation is easy to parallelize and optimize.
+
+Supports multithreading."""
+documentation = "https://docs.rs/matrixmultiply/"
+readme = false
+keywords = [
+    "matrix",
+    "sgemm",
+    "dgemm",
+]
+categories = ["science"]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/bluss/matrixmultiply/"
+
+[package.metadata.release]
+no-dev-version = true
+tag-name = "{{version}}"
+
+[features]
+cgemm = []
+constconf = []
+default = ["std"]
+std = []
+threading = ["std"]
+
+[lib]
+name = "matrixmultiply"
+path = "src/lib.rs"
+bench = false

@@ -1,0 +1,45 @@
+[package]
+edition = "2021"
+rust-version = "1.63.0"
+name = "either"
+version = "1.15.0"
+authors = ["bluss"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = """
+The enum `Either` with variants `Left` and `Right` is a general purpose sum type with two cases.
+"""
+documentation = "https://docs.rs/either/1/"
+readme = "README-crates.io.md"
+keywords = [
+    "data-structure",
+    "no_std",
+]
+categories = [
+    "data-structures",
+    "no-std",
+]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rayon-rs/either"
+
+[package.metadata.playground]
+features = ["serde"]
+
+[package.metadata.release]
+allow-branch = ["main"]
+sign-tag = true
+tag-name = "{{version}}"
+
+[features]
+default = ["std"]
+serde = []
+std = []
+use_std = ["std"]
+
+[lib]
+name = "either"
+path = "src/lib.rs"
