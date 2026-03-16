@@ -25,8 +25,7 @@ impl Voxels {
             //            We should instead be smarter and detect if left/right are in the same chunk
             //            to only look it up once.
             if let Some(left_id) = self.linear_index(left) {
-                let left_state =
-                    &mut self.storage.chunks[left_id.chunk_id].states[left_id.id_in_chunk];
+                let left_state = &mut self.chunks[left_id.chunk_id].states[left_id.id_in_chunk];
                 if !left_state.is_empty() {
                     if center_is_empty {
                         left_state.0 &= !(1 << (k * 2));
@@ -38,8 +37,7 @@ impl Voxels {
             }
 
             if let Some(right_id) = self.linear_index(right) {
-                let right_state =
-                    &mut self.storage.chunks[right_id.chunk_id].states[right_id.id_in_chunk];
+                let right_state = &mut self.chunks[right_id.chunk_id].states[right_id.id_in_chunk];
                 if !right_state.is_empty() {
                     if center_is_empty {
                         right_state.0 &= !(1 << (k * 2 + 1));
@@ -59,10 +57,10 @@ impl Voxels {
     }
 
     pub(super) fn recompute_all_voxels_states(&mut self) {
-        for (chunk_key, chunk_header) in self.storage.chunk_headers.iter() {
+        for (chunk_key, chunk_header) in self.chunk_headers.iter() {
             for id_in_chunk in 0..VoxelsChunk::VOXELS_PER_CHUNK {
                 let voxel_key = VoxelsChunk::voxel_key_at_id(*chunk_key, id_in_chunk as u32);
-                self.storage.chunks[chunk_header.id].states[id_in_chunk] =
+                self.chunks[chunk_header.id].states[id_in_chunk] =
                     self.compute_voxel_state(voxel_key);
             }
         }
@@ -73,7 +71,7 @@ impl Voxels {
             return VoxelState::EMPTY;
         };
 
-        if self.storage.chunks[id.chunk_id].states[id.id_in_chunk].is_empty() {
+        if self.chunks[id.chunk_id].states[id.id_in_chunk].is_empty() {
             return VoxelState::EMPTY;
         }
 
@@ -89,12 +87,12 @@ impl Voxels {
             next[k] += 1;
 
             if let Some(next_id) = self.linear_index(next) {
-                if !self.storage.chunks[next_id.chunk_id].states[next_id.id_in_chunk].is_empty() {
+                if !self.chunks[next_id.chunk_id].states[next_id.id_in_chunk].is_empty() {
                     occupied_faces |= 1 << (k * 2);
                 }
             }
             if let Some(prev_id) = self.linear_index(prev) {
-                if !self.storage.chunks[prev_id.chunk_id].states[prev_id.id_in_chunk].is_empty() {
+                if !self.chunks[prev_id.chunk_id].states[prev_id.id_in_chunk].is_empty() {
                     occupied_faces |= 1 << (k * 2 + 1);
                 }
             }
@@ -124,7 +122,7 @@ impl Voxels {
             other.update_neighbors_state(voxel - origin_shift, center_is_empty);
 
         if let Some(vid) = self.linear_index(voxel) {
-            self.storage.chunks[vid.chunk_id].states[vid.id_in_chunk].0 |= center_state_delta.0;
+            self.chunks[vid.chunk_id].states[vid.id_in_chunk].0 |= center_state_delta.0;
         }
     }
 
@@ -143,7 +141,7 @@ impl Voxels {
         let one = IVector::splat(1);
         let origin_shift_worldspace = ivect_to_vect(origin_shift) * self.voxel_size;
 
-        for chunk_key in &self.storage.chunk_keys {
+        for chunk_key in &self.chunk_keys {
             let mut aabb = VoxelsChunk::aabb(chunk_key, self.voxel_size);
             // Enlarge by one-half voxel so we detect cases where we also detect neighbor chunks from `other`.
             aabb.mins -= self.voxel_size / 2.0;
@@ -178,15 +176,11 @@ impl Voxels {
                             let key1 = key0 - origin_shift;
                             let vox0 = self
                                 .linear_index(key0)
-                                .map(|id| {
-                                    &mut self.storage.chunks[id.chunk_id].states[id.id_in_chunk]
-                                })
+                                .map(|id| &mut self.chunks[id.chunk_id].states[id.id_in_chunk])
                                 .filter(|state| !state.is_empty());
                             let vox1 = other
                                 .linear_index(key1)
-                                .map(|id| {
-                                    &mut other.storage.chunks[id.chunk_id].states[id.id_in_chunk]
-                                })
+                                .map(|id| &mut other.chunks[id.chunk_id].states[id.id_in_chunk])
                                 .filter(|state| !state.is_empty());
 
                             match (vox0, vox1) {

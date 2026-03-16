@@ -321,10 +321,6 @@ impl Cx {
         crate::xr_depth_mesh::xr_depth_mesh_store()
     }
 
-    pub fn xr_depth_voxels(&self) -> crate::xr_depth_voxels::XrDepthVoxelsStore {
-        crate::xr_depth_voxels::xr_depth_voxels_store()
-    }
-
     pub fn get_ref(&self) -> CxRef {
         CxRef(self.self_ref.clone().unwrap())
     }

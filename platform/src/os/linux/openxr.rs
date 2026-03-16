@@ -212,9 +212,9 @@ impl Cx {
                 if let (Some(session), Some(vulkan)) = (openxr.session.as_mut(), vulkan.as_mut()) {
                     if let Some(vulkan_session) = session.vulkan.as_mut() {
                         if let Err(err) =
-                            vulkan_session.submit_depth_voxel_job(vulkan, &frame, depth_image_index)
+                            vulkan_session.submit_depth_mesh_job(vulkan, &frame, depth_image_index)
                         {
-                            crate::warning!("OpenXR depth voxel update failed: {err}");
+                            crate::warning!("OpenXR depth mesh update failed: {err}");
                         }
                     }
                 }
@@ -833,7 +833,7 @@ impl CxOpenXrSession {
             (xr.xrPerfSettingsSetPerformanceLevelEXT)(
                 self.handle,
                 XrPerfSettingsDomainEXT::GPU,
-                XrPerfSettingsLevelEXT::BOOST,
+                XrPerfSettingsLevelEXT::SUSTAINED_HIGH,
             )
         }
         .log_error("xrPerfSettingsSetPerformanceLevelEXT GPU");

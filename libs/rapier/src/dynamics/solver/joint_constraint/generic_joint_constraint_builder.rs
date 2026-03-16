@@ -1,18 +1,18 @@
+use crate::dynamics::solver::MotorParameters;
 use crate::dynamics::solver::joint_constraint::generic_joint_constraint::GenericJointConstraint;
 use crate::dynamics::solver::joint_constraint::joint_velocity_constraint::WritebackId;
 use crate::dynamics::solver::joint_constraint::{JointConstraintHelper, JointSolverBody};
-use crate::dynamics::solver::MotorParameters;
 use crate::dynamics::{
     GenericJoint, ImpulseJoint, IntegrationParameters, JointIndex, Multibody, MultibodyJointSet,
     MultibodyLinkId, RigidBodySet,
 };
-use crate::math::{DVector, Real, Vector, ANG_DIM, DIM, SPATIAL_DIM};
+use crate::math::{ANG_DIM, DIM, DVector, Real, SPATIAL_DIM, Vector};
 use crate::utils;
 use crate::utils::{ComponentMul, IndexMut2, MatrixColumn};
 
 use crate::dynamics::integration_parameters::SpringCoefficients;
-use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::solver::ConstraintsCounts;
+use crate::dynamics::solver::solver_body::SolverBodies;
 #[cfg(feature = "dim3")]
 use crate::utils::AngularInertiaOps;
 use parry::math::{AngVector, Pose};

@@ -8,7 +8,7 @@ use crate::dynamics::{
 use crate::geometry::{
     ColliderHandle, ColliderMassProps, ColliderParent, ColliderPosition, ColliderSet, ColliderShape,
 };
-use crate::math::{rotation_from_angle, AngVector, Pose, Real, Rotation, Vector};
+use crate::math::{AngVector, Pose, Real, Rotation, Vector, rotation_from_angle};
 use crate::utils::CrossProduct;
 
 #[cfg(feature = "dim2")]
