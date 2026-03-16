@@ -218,7 +218,8 @@ pub use {
             WindowId, WindowVisuals,
         },
         xr_depth_mesh::{
-            XrDepthMesh, XrDepthMeshChunk, XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore,
+            XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery, XrDepthMeshQueryHit,
+            XrDepthMeshQueryResult, XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore,
         },
     },
     app_main::*,
