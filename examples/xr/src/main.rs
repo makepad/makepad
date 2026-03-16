@@ -8,7 +8,10 @@ use rapier3d::prelude::{
     Pose as RapierPose, Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
     Rotation as RapierRotation, SharedShape, Vector as RapierVector,
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    hash::{Hash, Hasher},
+};
 
 app_main!(App);
 
@@ -243,7 +246,8 @@ const XR_DEPTH_QUERY_MAX_DISTANCE: f32 = 0.12;
 const XR_DEPTH_QUERY_FRICTION: f32 = 0.9;
 const XR_DEPTH_QUERY_LOOKAHEAD_SECONDS: f32 = 0.18;
 const XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE: f32 = 0.32;
-const XR_DEPTH_QUERY_MISS_TOLERANCE: u64 = 2;
+const XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE: usize = 24;
+const XR_DEPTH_QUERY_FINGERPRINT_QUANTIZATION_METERS: f32 = 0.01;
 const XR_HAND_COLLIDER_SLOTS_PER_HAND: usize = 25;
 const XR_HAND_COLLIDER_FRICTION: f32 = 0.8;
 const XR_HAND_PLATE_HALF_WIDTH: f32 = 0.045;
@@ -375,8 +379,13 @@ struct DepthSurfaceMeshChunkHandle {
 #[derive(Clone, Copy)]
 struct DepthQuerySurfaceCollider {
     collider: ColliderHandle,
-    last_result_version: u64,
-    miss_count: u64,
+    fingerprint: u64,
+}
+
+#[derive(Clone, Copy)]
+struct DepthQuerySurfaceTarget {
+    triangle: [Vec3f; 3],
+    fingerprint: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -443,6 +452,63 @@ fn capsule_pose(a: Vec3f, b: Vec3f) -> (RapierPose, RapierReal) {
         RapierPose::from_parts(rapier_vec3((a + b) * 0.5), rotation),
         (length * 0.5).max(0.0005),
     )
+}
+
+fn quantize_depth_query_value(value: f32) -> i32 {
+    (value / XR_DEPTH_QUERY_FINGERPRINT_QUANTIZATION_METERS).round() as i32
+}
+
+fn depth_query_triangle_fingerprint(triangle: [Vec3f; 3]) -> u64 {
+    let mut vertices = triangle.map(|vertex| {
+        [
+            quantize_depth_query_value(vertex.x),
+            quantize_depth_query_value(vertex.y),
+            quantize_depth_query_value(vertex.z),
+        ]
+    });
+    vertices.sort_unstable();
+    let mut hasher = DefaultHasher::new();
+    vertices.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn build_depth_query_surface_targets(
+    results: &[XrDepthMeshQueryResult],
+) -> Vec<DepthQuerySurfaceTarget> {
+    let mut hits = results
+        .iter()
+        .filter_map(|result| match result {
+            XrDepthMeshQueryResult::Hit(hit) => Some(hit),
+            XrDepthMeshQueryResult::Miss { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    hits.sort_by(|a, b| {
+        b.from_planar_patch
+            .cmp(&a.from_planar_patch)
+            .then_with(|| {
+                a.distance
+                    .partial_cmp(&b.distance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.key.cmp(&b.key))
+    });
+
+    let mut seen = HashSet::new();
+    let mut targets = Vec::with_capacity(XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE);
+    for hit in hits {
+        let fingerprint = depth_query_triangle_fingerprint(hit.triangle);
+        if !seen.insert(fingerprint) {
+            continue;
+        }
+        targets.push(DepthQuerySurfaceTarget {
+            triangle: hit.triangle,
+            fingerprint,
+        });
+        if targets.len() >= XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE {
+            break;
+        }
+    }
+    targets
 }
 
 impl RapierScene {
@@ -557,7 +623,7 @@ impl RapierScene {
         }
 
         if XR_ENABLE_DEPTH_QUERY_PHYSICS {
-            scene.depth_query_surfaces = (0..scene.cubes.len())
+            scene.depth_query_surfaces = (0..XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE)
                 .map(|_| scene.spawn_depth_query_surface())
                 .collect();
         }
@@ -607,8 +673,7 @@ impl RapierScene {
         }
         DepthQuerySurfaceCollider {
             collider,
-            last_result_version: 0,
-            miss_count: 0,
+            fingerprint: 0,
         }
     }
 
@@ -755,46 +820,36 @@ impl RapierScene {
         index as u64 + 1
     }
 
-    fn clear_depth_query_surface(&mut self, index: usize) {
-        let Some(surface) = self.depth_query_surfaces.get_mut(index) else {
-            return;
-        };
-        if let Some(collider) = self.colliders.get_mut(surface.collider) {
-            collider.set_enabled(false);
+    fn clear_depth_query_surfaces(&mut self) {
+        for surface in &mut self.depth_query_surfaces {
+            if let Some(collider) = self.colliders.get_mut(surface.collider) {
+                collider.set_enabled(false);
+            }
+            surface.fingerprint = 0;
         }
-        surface.last_result_version = 0;
-        surface.miss_count = 0;
     }
 
-    fn update_depth_query_surface(&mut self, index: usize, result: &XrDepthMeshQueryResult) {
-        let Some(surface) = self.depth_query_surfaces.get_mut(index) else {
-            return;
-        };
-        if result.version() <= surface.last_result_version {
-            return;
-        }
-        surface.last_result_version = result.version();
-        match result {
-            XrDepthMeshQueryResult::Hit(hit) => {
-                surface.miss_count = 0;
+    fn sync_depth_query_surface_pool(&mut self, targets: &[DepthQuerySurfaceTarget]) {
+        for (surface, target) in self.depth_query_surfaces.iter_mut().zip(targets.iter()) {
+            if surface.fingerprint != target.fingerprint {
                 if let Some(collider) = self.colliders.get_mut(surface.collider) {
                     collider.set_shape(SharedShape::triangle(
-                        rapier_vec3(hit.triangle[0]),
-                        rapier_vec3(hit.triangle[1]),
-                        rapier_vec3(hit.triangle[2]),
+                        rapier_vec3(target.triangle[0]),
+                        rapier_vec3(target.triangle[1]),
+                        rapier_vec3(target.triangle[2]),
                     ));
-                    collider.set_enabled(true);
                 }
+                surface.fingerprint = target.fingerprint;
             }
-            XrDepthMeshQueryResult::Miss { .. } => {
-                surface.miss_count = surface.miss_count.saturating_add(1);
-                if surface.miss_count < XR_DEPTH_QUERY_MISS_TOLERANCE {
-                    return;
-                }
-                if let Some(collider) = self.colliders.get_mut(surface.collider) {
-                    collider.set_enabled(false);
-                }
+            if let Some(collider) = self.colliders.get_mut(surface.collider) {
+                collider.set_enabled(true);
             }
+        }
+        for surface in self.depth_query_surfaces.iter_mut().skip(targets.len()) {
+            if let Some(collider) = self.colliders.get_mut(surface.collider) {
+                collider.set_enabled(false);
+            }
+            surface.fingerprint = 0;
         }
     }
 }
@@ -1304,6 +1359,9 @@ impl XrScene {
             self.clear_depth_surface_mesh();
         }
         if XR_ENABLE_DEPTH_QUERY_PHYSICS {
+            if let Some(scene) = &mut self.scene {
+                scene.clear_depth_query_surfaces();
+            }
             if let Some(scene) = &self.scene {
                 let depth_mesh = cx.xr_depth_mesh();
                 for index in 0..scene.cubes.len() {
@@ -1345,18 +1403,18 @@ impl XrScene {
             return;
         };
         let depth_mesh = cx.xr_depth_mesh();
-        let mut clear_indices = Vec::new();
+        let mut clear_keys = Vec::new();
         let mut query_requests = Vec::new();
         let mut query_results = Vec::new();
 
         for (index, cube) in scene.cubes.iter().enumerate() {
             let key = RapierScene::depth_query_key(index);
             let Some(body) = scene.bodies.get(cube.body) else {
-                clear_indices.push(index);
+                clear_keys.push(key);
                 continue;
             };
             if body.is_sleeping() {
-                clear_indices.push(index);
+                clear_keys.push(key);
                 continue;
             }
 
@@ -1387,22 +1445,20 @@ impl XrScene {
                 include_planar_patches: false,
             });
             if let Some(result) = depth_mesh.latest_query_result(key) {
-                query_results.push((index, result));
+                query_results.push(result);
             }
         }
 
-        for index in clear_indices {
-            depth_mesh.clear_query(RapierScene::depth_query_key(index));
-            scene.clear_depth_query_surface(index);
+        for key in clear_keys {
+            depth_mesh.clear_query(key);
         }
 
         for query in query_requests {
             let _ = depth_mesh.submit_query(query);
         }
 
-        for (index, result) in query_results {
-            scene.update_depth_query_surface(index, &result);
-        }
+        let targets = build_depth_query_surface_targets(&query_results);
+        scene.sync_depth_query_surface_pool(&targets);
     }
 
     fn sync_depth_plane_physics(&mut self, cx: &mut Cx) {
