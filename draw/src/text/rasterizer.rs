@@ -257,7 +257,11 @@ impl Rasterizer {
             self.sdfer.settings().padding,
             self.msdfer.settings().padding
         );
-        dpxs_per_em = dpxs_per_em.max(self.msdf_resolution.min_dpxs_per_em);
+        dpxs_per_em = resolve_outline_dpxs_per_em(
+            self.msdf_resolution,
+            dpxs_per_em,
+            self.msdf_resolution.min_dpxs_per_em,
+        );
         let mut outline = None;
         let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
         let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
@@ -326,7 +330,11 @@ impl Rasterizer {
         if !is_msdf_complexity_acceptable(self.msdf_complexity, complexity) {
             return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
         }
-        let dpxs_per_em = dpxs_per_em.max(self.msdf_resolution.min_dpxs_per_em);
+        let dpxs_per_em = resolve_outline_dpxs_per_em(
+            self.msdf_resolution,
+            dpxs_per_em,
+            self.msdf_resolution.base_dpxs_per_em,
+        );
         let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
         let atlas_image_padding = self.msdfer.settings().padding;
         let key = GlyphImageKey {
@@ -845,6 +853,20 @@ fn glyph_outline_image_size(size_in_ems: Size<f32>, dpxs_per_em: f32) -> Size<us
     )
 }
 
+fn resolve_outline_dpxs_per_em(
+    settings: MsdfResolutionSettings,
+    requested_dpxs_per_em: f32,
+    min_target_dpxs_per_em: f32,
+) -> f32 {
+    let mut dpxs_per_em = requested_dpxs_per_em
+        .max(settings.min_dpxs_per_em)
+        .max(min_target_dpxs_per_em);
+    if settings.dpx_quantum > 0.0 {
+        dpxs_per_em = (dpxs_per_em / settings.dpx_quantum).ceil() * settings.dpx_quantum;
+    }
+    dpxs_per_em.min(settings.max_dpxs_per_em)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct OutlineComplexity {
     outline_commands: usize,
@@ -882,4 +904,53 @@ fn is_msdf_complexity_acceptable(
 ) -> bool {
     complexity.outline_commands <= settings.max_outline_commands
         && complexity.estimated_segments <= settings.max_estimated_segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_outline_dpxs_per_em, MsdfResolutionSettings};
+
+    fn settings() -> MsdfResolutionSettings {
+        MsdfResolutionSettings {
+            min_request_dpxs_per_em: 20.0,
+            min_dpxs_per_em: 32.0,
+            base_dpxs_per_em: 64.0,
+            max_dpxs_per_em: 128.0,
+            target_feature_texels: 1.75,
+            dpx_quantum: 8.0,
+            min_feature_floor_ems: 1.0 / 1024.0,
+        }
+    }
+
+    #[test]
+    fn clamps_large_outline_requests_to_atlas_safe_resolution() {
+        assert_eq!(
+            resolve_outline_dpxs_per_em(settings(), 1066.0, settings().base_dpxs_per_em),
+            128.0
+        );
+    }
+
+    #[test]
+    fn keeps_small_sdf_requests_at_minimum_resolution() {
+        assert_eq!(
+            resolve_outline_dpxs_per_em(settings(), 14.0, settings().min_dpxs_per_em),
+            32.0
+        );
+    }
+
+    #[test]
+    fn floors_msdf_requests_to_base_resolution() {
+        assert_eq!(
+            resolve_outline_dpxs_per_em(settings(), 24.0, settings().base_dpxs_per_em),
+            64.0
+        );
+    }
+
+    #[test]
+    fn quantizes_outline_requests_before_capping() {
+        assert_eq!(
+            resolve_outline_dpxs_per_em(settings(), 73.0, settings().base_dpxs_per_em),
+            80.0
+        );
+    }
 }
