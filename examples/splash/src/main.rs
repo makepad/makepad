@@ -1225,15 +1225,15 @@ script_mod! {
             View{width: Fill height: Fit flow: Right spacing: 15 align: Align{y: 0.5}}
             Svg{
                 width: 32 height: 32
-                draw_svg +: { svg: crate_resource("self:../../widgets2/resources/icons/icon_file.svg") }
+                draw_svg +: { svg: crate_resource("self:../../widgets/resources/icons/icon_file.svg") }
             }
             Svg{
                 width: 32 height: 32
-                draw_svg +: { svg: crate_resource("self:../../widgets2/resources/icons/icon_folder.svg") }
+                draw_svg +: { svg: crate_resource("self:../../widgets/resources/icons/icon_folder.svg") }
             }
             Svg{
                 width: 32 height: 32
-                draw_svg +: { svg: crate_resource("self:../../widgets2/resources/icons/icon_select.svg") }
+                draw_svg +: { svg: crate_resource("self:../../widgets/resources/icons/icon_select.svg") }
             }
 
             Hr{}
