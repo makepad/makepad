@@ -482,6 +482,7 @@ impl Cx {
         metal_windows: &mut Vec<MetalWindow>,
     ) -> EventFlow {
         if let EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx) {
+            crate::os::unix_single_instance::cleanup();
             self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit;
         }
@@ -516,6 +517,10 @@ impl Cx {
                         self.handle_media_signals();
                         self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
+                        let items = crate::single_instance::drain_app_open_items();
+                        if !items.is_empty() {
+                            self.call_event_handler(&Event::AppOpen(items));
+                        }
                         needs_timer = true;
                     }
 
@@ -1499,6 +1504,10 @@ impl CxOsApi for Cx {
     fn pre_start() -> bool {
         init_apple_classes_global();
         false
+    }
+
+    fn enable_single_instance(app_id: &str, items: &[&str]) -> crate::single_instance::SingleInstanceResult {
+        crate::os::unix_single_instance::enable(app_id, items)
     }
 
     fn init_cx_os(&mut self) {

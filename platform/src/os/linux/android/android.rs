@@ -903,6 +903,9 @@ impl Cx {
                 let e = Event::ImeAction(ImeActionEvent { action });
                 self.call_event_handler(&e);
             }
+            FromJavaMessage::AppOpen { item } => {
+                self.call_event_handler(&Event::AppOpen(vec![item]));
+            }
             FromJavaMessage::Init(_) => {}
         }
     }

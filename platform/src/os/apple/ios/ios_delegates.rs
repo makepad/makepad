@@ -5,6 +5,7 @@ use crate::{
         apple::apple_sys::*,
         apple::ios_app::IosApp,
         apple::ios_app::{with_ios_app, IOS_APP},
+        apple::apple_util::{nsstring_to_string, str_to_nsstring},
     },
 };
 use std::ffi::c_void;
@@ -72,9 +73,36 @@ pub fn define_ios_app_delegate() -> *const Class {
         _: &Object,
         _: Sel,
         _: ObjcId,
-        _: ObjcId,
+        options: ObjcId,
     ) -> BOOL {
+        unsafe {
+            if options != nil {
+                let key = str_to_nsstring("UIApplicationLaunchOptionsURLKey");
+                let url: ObjcId = msg_send![options, objectForKey: key];
+                if url != nil {
+                    let abs_string: ObjcId = msg_send![url, absoluteString];
+                    if abs_string != nil {
+                        let s = nsstring_to_string(abs_string);
+                        crate::single_instance::push_app_open_item(s);
+                    }
+                }
+            }
+        }
         with_ios_app(|app| app.did_finish_launching_with_options());
+        YES
+    }
+
+    extern "C" fn application_open_url(
+        _: &Object, _: Sel, _app: ObjcId, url: ObjcId, _options: ObjcId,
+    ) -> BOOL {
+        unsafe {
+            let abs_string: ObjcId = msg_send![url, absoluteString];
+            if abs_string != nil {
+                let s = nsstring_to_string(abs_string);
+                crate::single_instance::push_app_open_item(s);
+                crate::thread::SignalToUI::set_ui_signal();
+            }
+        }
         YES
     }
 
@@ -83,6 +111,10 @@ pub fn define_ios_app_delegate() -> *const Class {
             sel!(application: didFinishLaunchingWithOptions:),
             did_finish_launching_with_options
                 as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> BOOL,
+        );
+        decl.add_method(
+            sel!(application:openURL:options:),
+            application_open_url as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId) -> BOOL,
         );
     }
 

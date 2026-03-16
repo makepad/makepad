@@ -66,6 +66,7 @@ mod media_plugin;
 mod playback_session;
 mod video_session;
 
+pub mod single_instance;
 pub mod ui_runner;
 
 pub mod display_context;
@@ -74,6 +75,7 @@ pub mod display_context;
 mod app_main;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
 pub use crate::cx_api::can_play_type;
+pub use crate::single_instance::SingleInstanceResult;
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;

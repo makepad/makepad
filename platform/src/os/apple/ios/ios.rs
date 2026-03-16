@@ -533,6 +533,10 @@ impl Cx {
                         self.handle_media_signals();
                         self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
+                        let items = crate::single_instance::drain_app_open_items();
+                        if !items.is_empty() {
+                            self.call_event_handler(&Event::AppOpen(items));
+                        }
                     }
                     if SignalToUI::check_and_clear_action_signal() {
                         self.handle_action_receiver();
