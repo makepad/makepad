@@ -307,17 +307,6 @@ impl CxVulkan {
         let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
             .to_string_lossy()
             .into_owned();
-        crate::log!(
-            "Android Vulkan device: name='{}' vendor=0x{:04X} device=0x{:04X} api={}.{}.{} driver=0x{:X} queue_family={}",
-            device_name,
-            props.vendor_id,
-            props.device_id,
-            vk::api_version_major(props.api_version),
-            vk::api_version_minor(props.api_version),
-            vk::api_version_patch(props.api_version),
-            props.driver_version,
-            queue_family_index
-        );
         if device_name.contains("SwiftShader") || props.vendor_id == 0x1AE0 {
             crate::warning!(
                 "Android Vulkan: SwiftShader/software device detected; expect very low performance"
@@ -569,7 +558,6 @@ impl CxVulkan {
             instance_create_info = instance_create_info.push_next(&mut debug_create_info);
         }
 
-        crate::log!("Android Vulkan XR: requesting OpenXR-owned Vulkan instance");
         let mut xr_vk_instance = std::ptr::null();
         let mut xr_vk_instance_result = 0;
         let xr_instance_create_info = XrVulkanInstanceCreateInfoKHR {
@@ -595,8 +583,6 @@ impl CxVulkan {
                 "Android Vulkan XR init failed: xrCreateVulkanInstanceKHR returned Vulkan error {xr_vk_instance_result:?}"
             ));
         }
-        crate::log!("Android Vulkan XR: OpenXR created Vulkan instance");
-
         let instance = unsafe {
             ash::Instance::load(
                 entry.static_fn(),
@@ -618,9 +604,6 @@ impl CxVulkan {
             }
         };
 
-        crate::log!(
-            "Android Vulkan XR: querying runtime Vulkan physical device2 using XR-created instance"
-        );
         let get_info = XrVulkanGraphicsDeviceGetInfoKHR {
             system_id: xr_system_id,
             vulkan_instance: xr_vk_instance,
@@ -641,7 +624,6 @@ impl CxVulkan {
                 xr_get_device_result
             ));
         }
-        crate::log!("Android Vulkan XR: runtime Vulkan physical device acquired");
         let physical_device = vk::PhysicalDevice::from_raw(runtime_physical_device as _);
 
         let queue_family_index = match Self::pick_queue_family_for_device(
@@ -665,17 +647,6 @@ impl CxVulkan {
         let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
             .to_string_lossy()
             .into_owned();
-        crate::log!(
-            "Android Vulkan device: name='{}' vendor=0x{:04X} device=0x{:04X} api={}.{}.{} driver=0x{:X} queue_family={}",
-            device_name,
-            props.vendor_id,
-            props.device_id,
-            vk::api_version_major(props.api_version),
-            vk::api_version_minor(props.api_version),
-            vk::api_version_patch(props.api_version),
-            props.driver_version,
-            queue_family_index
-        );
         if device_name.contains("SwiftShader") || props.vendor_id == 0x1AE0 {
             crate::warning!(
                 "Android Vulkan: SwiftShader/software device detected; expect very low performance"
@@ -691,7 +662,6 @@ impl CxVulkan {
             .queue_create_infos(&queue_info)
             .enabled_extension_names(&device_extensions);
 
-        crate::log!("Android Vulkan XR: requesting OpenXR-owned Vulkan device");
         let mut xr_vk_device = std::ptr::null();
         let mut xr_vk_device_result = 0;
         let xr_device_create_info = XrVulkanDeviceCreateInfoKHR {
@@ -723,8 +693,6 @@ impl CxVulkan {
                 "Android Vulkan XR init failed: xrCreateVulkanDeviceKHR returned Vulkan error {xr_vk_device_result:?}"
             ));
         }
-        crate::log!("Android Vulkan XR: OpenXR created Vulkan device");
-
         let device = unsafe {
             ash::Device::load(instance.fp_v1_0(), vk::Device::from_raw(xr_vk_device as _))
         };
@@ -895,7 +863,6 @@ impl CxVulkan {
             Ok(messenger) => {
                 self.debug_utils_loader = Some(debug_loader);
                 self.debug_messenger = messenger;
-                crate::log!("Android Vulkan: debug messenger enabled");
             }
             Err(err) => {
                 crate::warning!("Android Vulkan: failed to create debug messenger: {err:?}");
@@ -3836,16 +3803,6 @@ impl CxVulkan {
         self.swapchain_format = format.format;
         self.depth_format = self.pick_depth_format()?;
         self.swapchain_extent = extent;
-
-        crate::log!(
-            "Android Vulkan swapchain: format={:?} color_space={:?} extent={}x{} images={} present_mode={:?}",
-            format.format,
-            format.color_space,
-            extent.width,
-            extent.height,
-            self.swapchain_images.len(),
-            present_mode
-        );
 
         let color_attachment = vk::AttachmentDescription::default()
             .format(self.swapchain_format)
