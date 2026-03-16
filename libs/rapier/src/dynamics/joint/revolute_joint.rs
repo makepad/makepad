@@ -338,9 +338,9 @@ impl From<RevoluteJointBuilder> for GenericJoint {
 mod test {
     #[test]
     fn test_revolute_joint_angle() {
-        use crate::math::{rotation_from_angle, Real};
         #[cfg(feature = "dim3")]
         use crate::math::{AngVector, Vector};
+        use crate::math::{Real, rotation_from_angle};
         use crate::na::RealField;
 
         #[cfg(feature = "dim2")]

@@ -1,4 +1,5 @@
 use crate::makepad_math::{vec3, Vec3f};
+use parry3d::math::IVector;
 use std::sync::{Arc, OnceLock, RwLock};
 
 #[derive(Clone, Debug, Default)]
@@ -9,31 +10,46 @@ pub struct XrDepthMeshStats {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct XrDepthMeshChunk {
+    pub generation: u64,
+    pub chunk_key: IVector,
+    pub fingerprint: u64,
+    pub bounds_min: Vec3f,
+    pub bounds_max: Vec3f,
+    pub vertices: Vec<Vec3f>,
+    pub normals: Vec<Vec3f>,
+    pub indices: Vec<u32>,
+}
+
+impl XrDepthMeshChunk {
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct XrDepthMesh {
     pub generation: u64,
+    pub latest_topology_generation: u64,
+    pub update_sequence: u64,
     pub eye_index: usize,
     pub image_width: u32,
     pub image_height: u32,
     pub sample_step: u32,
+    pub voxel_size_meters: f32,
     pub bounds_min: Vec3f,
     pub bounds_max: Vec3f,
-    pub vertices: Vec<Vec3f>,
-    pub indices: Vec<u32>,
+    pub mesh_chunks: Vec<XrDepthMeshChunk>,
+    pub dirty_chunk_keys: Vec<IVector>,
+    pub removed_chunk_keys: Vec<IVector>,
+    pub mesh_generation: u64,
+    pub mesh_vertex_count: usize,
+    pub mesh_triangle_count: usize,
 }
 
 impl XrDepthMesh {
     pub fn triangle_count(&self) -> usize {
-        self.indices.len() / 3
-    }
-
-    pub fn write_position_buffer(&self, out: &mut Vec<f32>) {
-        out.clear();
-        out.reserve(self.vertices.len() * 3);
-        for vertex in &self.vertices {
-            out.push(vertex.x);
-            out.push(vertex.y);
-            out.push(vertex.z);
-        }
+        self.mesh_triangle_count
     }
 }
 

@@ -1,20 +1,14 @@
 pub use makepad_widgets;
 
-use ::rapier3d::prelude::{
+use makepad_widgets::makepad_platform::permission::{Permission, PermissionStatus};
+use makepad_widgets::*;
+use rapier3d::prelude::{
     BroadPhaseBvh, CCDSolver, ColliderBuilder, ColliderHandle, ColliderSet, ImpulseJointSet,
     IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
     Pose as RapierPose, Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
     Rotation as RapierRotation, SharedShape, Vector as RapierVector,
 };
-use makepad_widgets::makepad_platform::{
-    permission::{Permission, PermissionStatus},
-    XrDepthPhysicsBox, XrDepthPhysicsChunk, XrDepthPhysicsChunkKey, XrDepthVoxels,
-};
-use makepad_widgets::*;
-use std::{
-    collections::{hash_map::DefaultHasher, HashMap, HashSet},
-    hash::{Hash, Hasher},
-};
+use std::collections::{HashMap, HashSet};
 
 app_main!(App);
 
@@ -28,9 +22,53 @@ script_mod! {
     use mod.widgets.*
 
     mod.widgets.XrSceneBase = #(XrScene::register_widget(vm))
+    set_type_default() do #(DrawDepthMeshBasic::script_shader(vm)){
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
+
+        v_world: varying(vec3f)
+        v_normal: varying(vec3f)
+
+        vertex: fn() {
+            let world = vec4(
+                self.geom.pos_nx.x,
+                self.geom.pos_nx.y,
+                self.geom.pos_nx.z,
+                1.0
+            );
+            self.v_world = world.xyz;
+            self.v_normal = normalize(vec3(
+                self.geom.pos_nx.w,
+                self.geom.ny_nz_uv.x,
+                self.geom.ny_nz_uv.y
+            ));
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world);
+        }
+
+        pixel: fn() {
+            let n = normalize(self.v_normal);
+            let l = normalize(self.light_dir);
+            let diffuse = max(dot(n, l), 0.0);
+            let lit = self.ambient + diffuse * (1.0 - self.ambient);
+            return vec4(self.base_color.xyz * lit, self.base_color.w);
+        }
+
+        fragment: fn() {
+            self.fb0 = self.pixel();
+        }
+    }
+
     mod.widgets.XrScene = set_type_default() do mod.widgets.XrSceneBase{
         draw_cube +: {}
-        draw_depth_box +: {}
+        draw_depth_mesh +: {
+            light_dir: vec3(0.28, 0.86, 0.42)
+            ambient: 0.26
+            base_color: vec4(0.76, 0.88, 0.98, 1.0)
+        }
         draw_pbr +: {
             light_dir: vec3(0.35, 0.8, 0.45)
             light_color: vec3(1.0, 1.0, 1.0)
@@ -180,8 +218,6 @@ const XR_PBR_CORNER_SEGMENTS: usize = 3;
 const XR_PBR_HAND_CAPSULE_SUBDIVISIONS: usize = 8;
 const XR_PBR_HAND_SPHERE_SUBDIVISIONS: usize = 8;
 const XR_BRICK_VISUAL_SCALE: f32 = 0.98;
-const XR_DEPTH_BOX_DEBUG_SCALE: f32 = 0.98;
-const XR_DEPTH_BOX_DEBUG_ALPHA: f32 = 0.16;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum AppPhase {
@@ -211,9 +247,33 @@ struct HandColliderBody {
     collider: ColliderHandle,
 }
 
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawDepthMeshBasic {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub base_color: Vec4f,
+    #[live]
+    pub light_dir: Vec3f,
+    #[live(0.26)]
+    pub ambient: f32,
+}
+
+impl DrawDepthMeshBasic {
+    fn draw_geometry(&mut self, cx: &mut Cx2d, geometry_id: GeometryId) {
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
+        self.draw_vars.geometry_id = Some(geometry_id);
+        if cx.new_draw_call(&self.draw_vars).is_some() && self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
-struct DepthChunkCollider {
-    collider: ColliderHandle,
+struct DepthSurfaceMeshChunkHandle {
+    geometry_id: GeometryId,
     fingerprint: u64,
 }
 
@@ -233,9 +293,6 @@ struct RapierScene {
     left_hand: Vec<HandColliderBody>,
     right_hand: Vec<HandColliderBody>,
     platform_pose: Pose,
-    depth_body: RigidBodyHandle,
-    depth_chunk_colliders: HashMap<XrDepthPhysicsChunkKey, DepthChunkCollider>,
-    depth_physics_generation: u64,
 }
 
 fn rapier_vec3(v: Vec3f) -> RapierVector {
@@ -280,25 +337,6 @@ fn capsule_pose(a: Vec3f, b: Vec3f) -> (RapierPose, RapierReal) {
 }
 
 impl RapierScene {
-    fn physics_chunk_fingerprint(chunk: &XrDepthPhysicsChunk) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        chunk.key.hash(&mut hasher);
-        chunk.boxes.len().hash(&mut hasher);
-        for physics_box in &chunk.boxes {
-            physics_box.pose.position.x.to_bits().hash(&mut hasher);
-            physics_box.pose.position.y.to_bits().hash(&mut hasher);
-            physics_box.pose.position.z.to_bits().hash(&mut hasher);
-            physics_box.pose.orientation.x.to_bits().hash(&mut hasher);
-            physics_box.pose.orientation.y.to_bits().hash(&mut hasher);
-            physics_box.pose.orientation.z.to_bits().hash(&mut hasher);
-            physics_box.pose.orientation.w.to_bits().hash(&mut hasher);
-            physics_box.half_extents.x.to_bits().hash(&mut hasher);
-            physics_box.half_extents.y.to_bits().hash(&mut hasher);
-            physics_box.half_extents.z.to_bits().hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-
     fn spawn_dynamic_box(&mut self, pose: Pose, half_extents: Vec3f) {
         let body = self.bodies.insert(
             RigidBodyBuilder::dynamic()
@@ -350,9 +388,6 @@ impl RapierScene {
             left_hand: Vec::new(),
             right_hand: Vec::new(),
             platform_pose: Pose::new(scene_rotation, platform_center),
-            depth_body: RigidBodyHandle::invalid(),
-            depth_chunk_colliders: HashMap::new(),
-            depth_physics_generation: 0,
         };
 
         let platform = scene
@@ -377,9 +412,6 @@ impl RapierScene {
             floor,
             &mut scene.bodies,
         );
-
-        scene.depth_body = scene.bodies.insert(RigidBodyBuilder::fixed().build());
-
         let brick_half_extents = vec3f(
             XR_WALL_BRICK_HALF_WIDTH,
             XR_WALL_BRICK_HALF_HEIGHT,
@@ -540,74 +572,6 @@ impl RapierScene {
             }
         }
     }
-
-    fn sync_depth_physics_chunks(
-        &mut self,
-        generation: u64,
-        chunks: &[XrDepthPhysicsChunk],
-    ) -> bool {
-        if self.depth_physics_generation == generation {
-            return false;
-        }
-
-        self.depth_physics_generation = generation;
-        let live_keys: HashSet<_> = chunks.iter().map(|chunk| chunk.key).collect();
-        let stale_keys: Vec<_> = self
-            .depth_chunk_colliders
-            .keys()
-            .copied()
-            .filter(|key| !live_keys.contains(key))
-            .collect();
-
-        let mut changed = false;
-        for key in stale_keys {
-            if let Some(chunk) = self.depth_chunk_colliders.remove(&key) {
-                self.colliders
-                    .remove(chunk.collider, &mut self.islands, &mut self.bodies, false);
-                changed = true;
-            }
-        }
-
-        for physics_chunk in chunks {
-            let fingerprint = Self::physics_chunk_fingerprint(physics_chunk);
-            if let Some(existing) = self.depth_chunk_colliders.get_mut(&physics_chunk.key) {
-                if existing.fingerprint != fingerprint {
-                    if let Some(collider) = self.colliders.get_mut(existing.collider) {
-                        collider.set_shape(physics_chunk.shape.clone());
-                        collider.set_enabled(true);
-                    }
-                    existing.fingerprint = fingerprint;
-                    changed = true;
-                }
-                continue;
-            }
-
-            let collider = self.colliders.insert_with_parent(
-                ColliderBuilder::new(physics_chunk.shape.clone())
-                    .friction(0.9)
-                    .restitution(0.0),
-                self.depth_body,
-                &mut self.bodies,
-            );
-            self.depth_chunk_colliders.insert(
-                physics_chunk.key,
-                DepthChunkCollider {
-                    collider,
-                    fingerprint,
-                },
-            );
-            changed = true;
-        }
-
-        if changed {
-            for cube in &self.cubes {
-                if let Some(body) = self.bodies.get_mut(cube.body) {
-                    body.wake_up(true);
-                }
-            }
-        }
-        changed
-    }
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -624,20 +588,22 @@ pub struct XrScene {
     draw_pbr: DrawPbr,
     #[redraw]
     #[live]
-    draw_depth_box: DrawCube,
+    draw_depth_mesh: DrawDepthMeshBasic,
     #[rust]
     scene: Option<RapierScene>,
     #[rust]
-    depth_box_generation: u64,
+    depth_surface_mesh_generation: u64,
     #[rust]
-    depth_debug_boxes: Vec<XrDepthPhysicsBox>,
+    depth_surface_mesh_update_sequence: u64,
     #[rust]
-    depth_debug_hidden: bool,
+    depth_surface_mesh_chunks: HashMap<(i32, i32, i32), (Geometry, DepthSurfaceMeshChunkHandle)>,
+    #[rust]
+    depth_surface_mesh_upload_count: usize,
 }
 
 impl XrScene {
     fn depth_debug_enabled(&self) -> bool {
-        XR_RENDER_DEPTH_DEBUG && !self.depth_debug_hidden
+        XR_RENDER_DEPTH_DEBUG
     }
 
     fn draw_pose_box(
@@ -656,20 +622,43 @@ impl XrScene {
         self.draw_cube.draw(cx);
     }
 
-    fn draw_depth_pose_box(
-        &mut self,
-        cx: &mut Cx2d,
-        pose: Pose,
-        size: Vec3f,
-        color: Vec4f,
-        depth_clip: f32,
-    ) {
-        self.draw_depth_box.transform = pose.to_mat4();
-        self.draw_depth_box.cube_pos = vec3(0.0, 0.0, 0.0);
-        self.draw_depth_box.cube_size = size;
-        self.draw_depth_box.color = color;
-        self.draw_depth_box.depth_clip = depth_clip;
-        self.draw_depth_box.draw(cx);
+    fn clear_depth_surface_mesh(&mut self) {
+        self.depth_surface_mesh_generation = 0;
+        self.depth_surface_mesh_update_sequence = 0;
+        self.depth_surface_mesh_chunks.clear();
+        self.depth_surface_mesh_upload_count = 0;
+    }
+
+    fn upsert_depth_surface_mesh_chunk(&mut self, cx: &mut Cx2d, chunk: &XrDepthMeshChunk) {
+        let key = (chunk.chunk_key.x, chunk.chunk_key.y, chunk.chunk_key.z);
+        if self
+            .depth_surface_mesh_chunks
+            .get(&key)
+            .map(|gpu_chunk| gpu_chunk.1.fingerprint == chunk.fingerprint)
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let vertices = pack_depth_mesh_vertices(chunk);
+        if let Some((geometry, handle)) = self.depth_surface_mesh_chunks.get_mut(&key) {
+            geometry.update(cx.cx.cx, chunk.indices.clone(), vertices);
+            *handle = DepthSurfaceMeshChunkHandle {
+                geometry_id: geometry.geometry_id(),
+                fingerprint: chunk.fingerprint,
+            };
+        } else {
+            let geometry = Geometry::new(cx.cx.cx);
+            geometry.update(cx.cx.cx, chunk.indices.clone(), vertices);
+            let handle = DepthSurfaceMeshChunkHandle {
+                geometry_id: geometry.geometry_id(),
+                fingerprint: chunk.fingerprint,
+            };
+            self.depth_surface_mesh_chunks
+                .insert(key, (geometry, handle));
+            self.depth_surface_mesh_upload_count =
+                self.depth_surface_mesh_upload_count.saturating_add(1);
+        }
     }
 
     fn prepare_pbr(&mut self, cx: &mut Cx2d) {
@@ -685,9 +674,9 @@ impl XrScene {
         self.draw_pbr.set_env_texture(Some(env_tex));
     }
 
-    fn prepare_depth_boxes(&mut self) {
-        self.draw_depth_box.draw_vars.options.depth_write = false;
-        self.draw_depth_box.depth_clip = 0.0;
+    fn prepare_depth_mesh(&mut self, cx: &mut Cx2d) {
+        self.draw_depth_mesh.draw_vars.options.depth_write = true;
+        let _ = cx;
     }
 
     fn draw_pbr_rounded_cube(
@@ -1067,8 +1056,8 @@ impl XrScene {
         true
     }
 
-    fn reset_scene(&mut self, state: &XrState) {
-        self.scene = None;
+    fn reset_scene(&mut self, _cx: &mut Cx, state: &XrState) {
+        let _ = self.scene.take();
         self.ensure_scene(state);
     }
 
@@ -1094,18 +1083,64 @@ impl XrScene {
         RapierScene::sync_hand_bodies(right_hand, &right, bodies, colliders);
     }
 
-    fn sync_depth_physics(&mut self, cx: &mut Cx) {
-        let Some(scene) = self.scene.as_mut() else {
+    fn sync_depth_surface_mesh(&mut self, cx: &mut Cx2d) {
+        if !self.depth_debug_enabled() {
+            self.clear_depth_surface_mesh();
+            return;
+        }
+
+        let Some(depth_mesh) = cx.cx.xr_depth_mesh().latest_mesh() else {
+            self.clear_depth_surface_mesh();
             return;
         };
-        let Some(volume) = cx.xr_depth_voxels().latest_voxels() else {
-            let _ = scene.sync_depth_physics_chunks(0, &[]);
+        let previous_mesh_generation = self.depth_surface_mesh_generation;
+        let previous_update_sequence = self.depth_surface_mesh_update_sequence;
+        if self.depth_surface_mesh_generation == depth_mesh.mesh_generation
+            && self.depth_surface_mesh_update_sequence == depth_mesh.update_sequence
+        {
             return;
-        };
-        let Ok(volume) = volume.read() else {
+        }
+
+        self.depth_surface_mesh_generation = depth_mesh.mesh_generation;
+        self.depth_surface_mesh_update_sequence = depth_mesh.update_sequence;
+        if depth_mesh.mesh_chunks.is_empty() {
+            self.clear_depth_surface_mesh();
             return;
-        };
-        let _ = scene.sync_depth_physics_chunks(volume.physics_generation, &volume.physics_chunks);
+        }
+
+        let active_chunk_count = depth_mesh.mesh_chunks.len();
+        if self.depth_surface_mesh_upload_count > active_chunk_count.saturating_mul(3) + 64 {
+            self.clear_depth_surface_mesh();
+        }
+
+        let needs_full_resync = previous_mesh_generation == 0
+            || self.depth_surface_mesh_chunks.is_empty()
+            || depth_mesh.update_sequence != previous_update_sequence.saturating_add(1);
+
+        if needs_full_resync {
+            let mut desired_keys = HashSet::with_capacity(depth_mesh.mesh_chunks.len());
+            for chunk in &depth_mesh.mesh_chunks {
+                desired_keys.insert((chunk.chunk_key.x, chunk.chunk_key.y, chunk.chunk_key.z));
+                self.upsert_depth_surface_mesh_chunk(cx, chunk);
+            }
+            self.depth_surface_mesh_chunks
+                .retain(|key, _| desired_keys.contains(key));
+            return;
+        }
+
+        for key in &depth_mesh.removed_chunk_keys {
+            self.depth_surface_mesh_chunks
+                .remove(&(key.x, key.y, key.z));
+        }
+        for key in &depth_mesh.dirty_chunk_keys {
+            if let Some(chunk) = depth_mesh
+                .mesh_chunks
+                .iter()
+                .find(|chunk| chunk.chunk_key == *key)
+            {
+                self.upsert_depth_surface_mesh_chunk(cx, chunk);
+            }
+        }
     }
 
     fn draw_platform(&mut self, cx: &mut Cx2d) {
@@ -1162,88 +1197,47 @@ impl XrScene {
         self.draw_cube.end_many_instances(cx);
     }
 
-    fn rebuild_depth_debug_boxes(&mut self, voxels: &XrDepthVoxels) {
-        self.depth_debug_boxes.clear();
-        let total_boxes: usize = voxels
-            .physics_chunks
-            .iter()
-            .map(|chunk| chunk.boxes.len())
-            .sum();
-        self.depth_debug_boxes.reserve(total_boxes);
-        for physics_chunk in &voxels.physics_chunks {
-            self.depth_debug_boxes
-                .extend_from_slice(&physics_chunk.boxes);
-        }
-    }
-
-    fn clear_depth_debug_boxes(&mut self) {
-        self.depth_box_generation = 0;
-        self.depth_debug_boxes.clear();
-    }
-
-    fn sync_depth_debug_boxes(&mut self, cx: &mut Cx2d) {
+    fn draw_depth_surface_mesh(&mut self, cx: &mut Cx2d) {
         if !self.depth_debug_enabled() {
-            self.clear_depth_debug_boxes();
             return;
         }
-        let Some(voxels) = cx.xr_depth_voxels().latest_voxels() else {
-            self.clear_depth_debug_boxes();
-            return;
-        };
-        let Ok(voxels) = voxels.read() else {
-            return;
-        };
-        if self.depth_box_generation == voxels.physics_generation {
+        if self.depth_surface_mesh_chunks.is_empty() {
             return;
         }
-        self.depth_box_generation = voxels.physics_generation;
-        self.rebuild_depth_debug_boxes(&voxels);
+        self.draw_depth_mesh.base_color = vec4(0.76, 0.88, 0.98, 1.0);
+        let mut chunk_handles: Vec<_> = self
+            .depth_surface_mesh_chunks
+            .iter()
+            .map(|(key, chunk)| (*key, chunk.1.geometry_id))
+            .collect();
+        chunk_handles.sort_by_key(|(key, _)| *key);
+        for (_, geometry_id) in chunk_handles {
+            self.draw_depth_mesh.draw_geometry(cx, geometry_id);
+        }
     }
+}
 
-    fn draw_depth_debug_boxes(&mut self, cx: &mut Cx2d) {
-        if !self.depth_debug_enabled() || self.depth_debug_boxes.is_empty() {
-            return;
-        }
-
-        self.draw_depth_box.transform = Mat4f::identity();
-        self.draw_depth_box.begin_many_instances(cx);
-        let debug_boxes = self.depth_debug_boxes.clone();
-        for physics_box in debug_boxes {
-            self.draw_depth_pose_box(
-                cx,
-                physics_box.pose,
-                vec3(
-                    physics_box.half_extents.x * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
-                    physics_box.half_extents.y * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
-                    physics_box.half_extents.z * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
-                ),
-                vec4(0.18, 0.92, 0.98, XR_DEPTH_BOX_DEBUG_ALPHA),
-                0.0,
-            );
-        }
-        self.draw_depth_box.end_many_instances(cx);
+fn pack_depth_mesh_vertices(chunk: &XrDepthMeshChunk) -> Vec<f32> {
+    const FLOATS_PER_VERTEX: usize = 16;
+    let mut vertices = Vec::with_capacity(chunk.vertices.len() * FLOATS_PER_VERTEX);
+    for (position, normal) in chunk.vertices.iter().zip(chunk.normals.iter()) {
+        vertices.extend_from_slice(&[
+            position.x, position.y, position.z, normal.x, normal.y, normal.z, 0.0, 0.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, 0.0, 0.0, 1.0,
+        ]);
     }
+    vertices
 }
 
 impl Widget for XrScene {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::XrUpdate(e) = event {
-            if e.menu_pressed() {
-                self.depth_debug_hidden = !self.depth_debug_hidden;
-                if self.depth_debug_hidden {
-                    self.clear_depth_debug_boxes();
-                    log!("XR depth debug hidden");
-                } else {
-                    log!("XR depth debug shown");
-                }
-            }
-            let scene_reset = if e.clicked_menu() {
-                self.reset_scene(&e.state);
+            let scene_reset = if e.clicked_menu() || e.menu_pressed() {
+                self.reset_scene(cx, &e.state);
                 true
             } else {
                 self.ensure_scene(&e.state)
             };
-            self.sync_depth_physics(cx);
             self.sync_hands(&e.state);
             if !scene_reset {
                 if let Some(scene) = &mut self.scene {
@@ -1270,7 +1264,7 @@ impl Widget for XrScene {
 
         let cx = &mut Cx2d::new(cx.cx);
         self.ensure_scene(state);
-        self.sync_depth_debug_boxes(cx);
+        self.sync_depth_surface_mesh(cx);
         let (left_physics, right_physics) = if XR_RENDER_HAND_GEOMETRY && XR_ENABLE_HAND_PHYSICS {
             if let Some(scene) = self.scene.as_ref() {
                 (
@@ -1290,8 +1284,8 @@ impl Widget for XrScene {
         }
         self.draw_platform(cx);
         self.draw_bodies(cx);
-        self.prepare_depth_boxes();
-        self.draw_depth_debug_boxes(cx);
+        self.prepare_depth_mesh(cx);
+        self.draw_depth_surface_mesh(cx);
 
         DrawStep::done()
     }
@@ -1430,7 +1424,10 @@ impl App {
     }
 
     fn begin_scene_access_check(&mut self, cx: &mut Cx) {
-        if !Self::is_android_preflight() || self.pending_scene_access_check.is_some() {
+        if self.phase != AppPhase::Preflight
+            || !Self::is_android_preflight()
+            || self.pending_scene_access_check.is_some()
+        {
             return;
         }
         self.pending_scene_access_check = Some(cx.check_permission(Permission::SceneAccess));
@@ -1438,7 +1435,8 @@ impl App {
     }
 
     fn request_scene_access(&mut self, cx: &mut Cx) {
-        if !Self::is_android_preflight()
+        if self.phase != AppPhase::Preflight
+            || !Self::is_android_preflight()
             || self.pending_scene_access_check.is_some()
             || self.pending_scene_access_request.is_some()
         {
@@ -1533,7 +1531,10 @@ impl AppMain for App {
                 }
             }
             Event::Resume => {
-                if Self::is_android_preflight() && self.pending_scene_access_request.is_none() {
+                if self.phase == AppPhase::Preflight
+                    && Self::is_android_preflight()
+                    && self.pending_scene_access_request.is_none()
+                {
                     self.begin_scene_access_check(cx);
                 }
             }

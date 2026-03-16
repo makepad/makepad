@@ -2,7 +2,7 @@
 
 use crate::dynamics::{RigidBody, RigidBodyHandle, RigidBodySet};
 use crate::geometry::{ColliderHandle, ColliderSet, Ray};
-use crate::math::{rotation_from_angle, Real, Vector, VectorExt};
+use crate::math::{Real, Vector, VectorExt, rotation_from_angle};
 use crate::pipeline::QueryPipeline;
 use crate::prelude::QueryPipelineMut;
 use crate::utils::{CrossProduct, DotProduct};

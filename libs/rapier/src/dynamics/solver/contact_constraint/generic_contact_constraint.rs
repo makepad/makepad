@@ -1,12 +1,12 @@
 use crate::dynamics::solver::GenericRhs;
 use crate::dynamics::{IntegrationParameters, MultibodyJointSet, RigidBodySet};
 use crate::geometry::{ContactManifold, ContactManifoldIndex};
-use crate::math::{DVector, Real, DIM, MAX_MANIFOLD_POINTS};
+use crate::math::{DIM, DVector, MAX_MANIFOLD_POINTS, Real};
 use crate::utils::{AngularInertiaOps, CrossProduct, DotProduct};
 
 use super::{ContactConstraintNormalPart, ContactConstraintTangentPart};
-use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::solver::CoulombContactPointInfos;
+use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::prelude::RigidBodyHandle;
 #[cfg(feature = "dim2")]
 use crate::utils::OrthonormalBasis;

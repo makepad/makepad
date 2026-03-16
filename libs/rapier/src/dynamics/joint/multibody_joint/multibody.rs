@@ -2,14 +2,15 @@ use super::multibody_link::{MultibodyLink, MultibodyLinkVec};
 use super::multibody_workspace::MultibodyWorkspace;
 use crate::dynamics::{RigidBodyHandle, RigidBodySet, RigidBodyType, RigidBodyVelocity};
 use crate::math::{
-    AngDim, AngVector, DVector, Dim, Jacobian, Pose, Real, Vector, ANG_DIM, DIM, SPATIAL_DIM,
+    ANG_DIM, AngDim, AngVector, DIM, DVector, Dim, Jacobian, Pose, Real, SPATIAL_DIM,
+    Vector,
 };
 use crate::prelude::MultibodyJoint;
 #[cfg(feature = "dim3")]
 use crate::utils::mat_to_na;
-use crate::utils::{vect_to_na, AngularInertiaOps, CrossProduct, CrossProductMatrix, IndexMut2};
+use crate::utils::{AngularInertiaOps, CrossProduct, CrossProductMatrix, IndexMut2, vect_to_na};
 use na::{
-    self, DMatrix, DVectorView, DVectorViewMut, Dyn, OMatrix, SMatrix, SVector, StorageMut, LU,
+    self, DMatrix, DVectorView, DVectorViewMut, Dyn, LU, OMatrix, SMatrix, SVector, StorageMut,
 };
 
 #[cfg(doc)]

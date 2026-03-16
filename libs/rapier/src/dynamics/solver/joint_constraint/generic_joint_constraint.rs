@@ -3,7 +3,7 @@ use crate::dynamics::solver::joint_constraint::joint_velocity_constraint::Writeb
 use crate::dynamics::solver::joint_constraint::{JointConstraintHelper, JointSolverBody};
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::{GenericJoint, IntegrationParameters, JointGraphEdge, JointIndex};
-use crate::math::{DVector, Real, DIM, SPATIAL_DIM};
+use crate::math::{DIM, DVector, Real, SPATIAL_DIM};
 use na::{DVectorView, DVectorViewMut};
 use parry::math::Pose;
 

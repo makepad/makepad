@@ -1,13 +1,13 @@
-use super::{outlines, DebugColor, DebugRenderBackend};
+use super::{DebugColor, DebugRenderBackend, outlines};
 use crate::dynamics::{
     GenericJoint, ImpulseJointSet, MultibodyJointSet, RigidBodySet, RigidBodyType,
 };
 use crate::geometry::{Ball, ColliderSet, Cuboid, NarrowPhase, Shape, TypedShape};
 #[cfg(feature = "dim3")]
 use crate::geometry::{Cone, Cylinder};
-use crate::math::{Matrix, Pose, Vector, DIM};
-use crate::pipeline::debug_render_pipeline::debug_render_backend::DebugRenderObject;
+use crate::math::{DIM, Matrix, Pose, Vector};
 use crate::pipeline::debug_render_pipeline::DebugRenderStyle;
+use crate::pipeline::debug_render_pipeline::debug_render_backend::DebugRenderObject;
 use crate::utils::OrthonormalBasis;
 use parry::utils::PoseOpt;
 use std::any::TypeId;

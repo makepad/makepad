@@ -54,7 +54,6 @@ workspace.members = [
     "libs/openexr",
     "libs/git",
     "libs/fast_inflate",
-    "libs/sparse_voxels",
 ]
 
 workspace.exclude = [

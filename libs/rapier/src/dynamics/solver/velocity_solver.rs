@@ -1,9 +1,9 @@
+use crate::dynamics::solver::JointConstraintsSet;
 use crate::dynamics::solver::contact_constraint::ContactConstraintsSet;
 use crate::dynamics::solver::solver_body::SolverBodies;
-use crate::dynamics::solver::JointConstraintsSet;
 use crate::dynamics::{
-    solver::SolverVel, IntegrationParameters, IslandManager, JointGraphEdge, JointIndex,
-    MultibodyJointSet, MultibodyLinkId, RigidBodySet, RigidBodyType,
+    IntegrationParameters, IslandManager, JointGraphEdge, JointIndex, MultibodyJointSet,
+    MultibodyLinkId, RigidBodySet, RigidBodyType, solver::SolverVel,
 };
 use crate::geometry::{ContactManifold, ContactManifoldIndex};
 use crate::math::{DVector, Real};
