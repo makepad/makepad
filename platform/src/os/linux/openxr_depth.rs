@@ -6,7 +6,8 @@ use crate::{
     },
     thread::SignalToUI,
     xr_depth_mesh::{
-        empty_bounds, xr_depth_mesh_store, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshStore,
+        empty_bounds, xr_depth_mesh_store, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery,
+        XrDepthMeshQueryHit, XrDepthMeshQueryResult, XrDepthMeshStore,
     },
 };
 use parry3d::math::IVector;
@@ -53,7 +54,14 @@ const DEPTH_PLAYER_EXCLUDE_BOTTOM_METERS: f32 = 1.30;
 const DEPTH_MESH_UPDATE_DISTANCE_METERS: f32 = 4.0;
 const DEPTH_SURFACE_MESH_CHUNKS_PER_TICK: usize = 1;
 const DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS: u64 = 8;
-const DEPTH_DEBUG_LOG_CHUNK_MESH_TIMING: bool = true;
+const DEPTH_QUERY_BATCH_PER_TICK: usize = 8;
+const DEPTH_DEBUG_LOG_CHUNK_MESH_TIMING: bool = false;
+const DEPTH_QUERY_PATCH_RADIUS_METERS: f32 = 0.24;
+const DEPTH_QUERY_PATCH_PLANE_TOLERANCE_METERS: f32 = 0.035;
+const DEPTH_QUERY_PATCH_NORMAL_DOT: f32 = 0.93;
+const DEPTH_QUERY_PATCH_MARGIN_METERS: f32 = 0.025;
+const DEPTH_QUERY_PATCH_MIN_HALF_EXTENT_METERS: f32 = 0.05;
+const DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT: f32 = 0.2;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct VoxelCoord {
@@ -834,7 +842,8 @@ fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: 
             &mut worker_state,
             DEPTH_SURFACE_MESH_CHUNKS_PER_TICK,
         );
-        if applied_update || mesh_changed {
+        let query_changed = process_geometry_queries(&volume, &store, DEPTH_QUERY_BATCH_PER_TICK);
+        if applied_update || mesh_changed || query_changed {
             store.publish(volume.snapshot());
             SignalToUI::set_ui_signal();
         }
@@ -1629,6 +1638,469 @@ fn update_incremental_mesh_chunk(
         }
         (None, None) => MeshChunkUpdate::Unchanged,
     }
+}
+
+fn process_geometry_queries(
+    volume: &DepthMeshVolume,
+    store: &XrDepthMeshStore,
+    max_queries: usize,
+) -> bool {
+    let pending = store.drain_pending_queries(max_queries);
+    if pending.is_empty() {
+        return false;
+    }
+
+    let mut results = Vec::with_capacity(pending.len());
+    for pending_query in pending {
+        results.push(evaluate_geometry_query(
+            volume,
+            pending_query.query,
+            pending_query.version,
+        ));
+    }
+    store.publish_query_results(results);
+    true
+}
+
+fn evaluate_geometry_query(
+    volume: &DepthMeshVolume,
+    query: XrDepthMeshQuery,
+    version: u64,
+) -> XrDepthMeshQueryResult {
+    let travel = query.predicted_center - query.center;
+    let travel_distance = travel.length();
+    let motion_dir = if travel_distance > 1.0e-4 {
+        travel.scale(1.0 / travel_distance)
+    } else {
+        vec3f(0.0, 0.0, 0.0)
+    };
+    let max_search_distance = (query.radius + query.max_distance + travel_distance).max(0.0);
+    let max_search_distance_sq = max_search_distance * max_search_distance;
+    let sweep_bounds_min = vec3f(
+        query.center.x.min(query.predicted_center.x),
+        query.center.y.min(query.predicted_center.y),
+        query.center.z.min(query.predicted_center.z),
+    );
+    let sweep_bounds_max = vec3f(
+        query.center.x.max(query.predicted_center.x),
+        query.center.y.max(query.predicted_center.y),
+        query.center.z.max(query.predicted_center.z),
+    );
+    let mut best_hit: Option<XrDepthMeshQueryHit> = None;
+    let mut best_hit_score = f32::INFINITY;
+    let mid_point = query.center + travel.scale(0.5);
+    let sweep_radius = query.radius + query.max_distance;
+    let sweep_radius_sq = sweep_radius * sweep_radius;
+
+    for chunk in &volume.mesh_chunks {
+        if aabb_aabb_distance_sq(sweep_bounds_min, sweep_bounds_max, chunk.bounds_min, chunk.bounds_max)
+            > max_search_distance_sq
+        {
+            continue;
+        }
+        for triangle in chunk.indices.chunks_exact(3) {
+            let a = chunk.vertices[triangle[0] as usize];
+            let b = chunk.vertices[triangle[1] as usize];
+            let c = chunk.vertices[triangle[2] as usize];
+            let raw_normal = Vec3f::cross(b - a, c - a);
+            if raw_normal.length() <= 1.0e-6 {
+                continue;
+            }
+            let mut best_sample_progress = 0.0;
+            let mut best_sample_score = f32::INFINITY;
+            let mut best_closest = vec3f(0.0, 0.0, 0.0);
+            let mut best_distance_sq = f32::INFINITY;
+
+            for (sample_point, progress) in [
+                (query.center, 0.0f32),
+                (mid_point, 0.5f32),
+                (query.predicted_center, 1.0f32),
+            ] {
+                let closest = closest_point_on_triangle(sample_point, a, b, c);
+                let delta = closest - sample_point;
+                let distance_sq = delta.dot(delta);
+                if distance_sq > max_search_distance_sq {
+                    continue;
+                }
+                let lateral_sq = point_segment_distance_sq(closest, query.center, query.predicted_center);
+                if lateral_sq > sweep_radius_sq {
+                    continue;
+                }
+                let distance = distance_sq.sqrt();
+                let mut score = distance;
+                if travel_distance > 1.0e-4 {
+                    let forward = (closest - query.center).dot(motion_dir);
+                    if forward < -query.radius || forward > travel_distance + query.radius {
+                        continue;
+                    }
+
+                    let mut candidate_normal = raw_normal.normalize();
+                    if candidate_normal.dot(sample_point - closest) < 0.0 {
+                        candidate_normal = candidate_normal.scale(-1.0);
+                    }
+                    let opposing = candidate_normal.dot(-motion_dir);
+                    if opposing <= DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT {
+                        continue;
+                    }
+                    score -= progress * travel_distance * 0.35;
+                    score -= forward.clamp(0.0, travel_distance) * 0.15;
+                    score -= opposing * 0.08;
+                    score += lateral_sq.sqrt() * 0.2;
+                }
+                if score < best_sample_score {
+                    best_sample_score = score;
+                    best_sample_progress = progress;
+                    best_closest = closest;
+                    best_distance_sq = distance_sq;
+                }
+            }
+
+            if !best_distance_sq.is_finite() {
+                continue;
+            }
+
+            let mut normal = raw_normal.normalize();
+            if normal.length() <= 1.0e-6 {
+                continue;
+            }
+            let mut hit_triangle = [a, b, c];
+            let facing_point = query.center + travel.scale(best_sample_progress);
+            if normal.dot(facing_point - best_closest) < 0.0 {
+                normal = normal.scale(-1.0);
+                hit_triangle.swap(1, 2);
+            }
+            if best_sample_score < best_hit_score {
+                best_hit_score = best_sample_score;
+                best_hit = Some(XrDepthMeshQueryHit {
+                    key: query.key,
+                    version,
+                    mesh_generation: volume.mesh_generation,
+                    distance: best_distance_sq.sqrt(),
+                    point: best_closest,
+                    normal,
+                    triangle: hit_triangle,
+                    patch: [best_closest; 4],
+                    chunk_key: chunk.chunk_key,
+                });
+            }
+        }
+    }
+
+    if let Some(mut hit) = best_hit {
+        hit.patch = fit_support_patch(volume, &query, &hit);
+        hit.triangle = fit_support_triangle(&query, &hit);
+        XrDepthMeshQueryResult::Hit(hit)
+    } else {
+        XrDepthMeshQueryResult::Miss {
+            key: query.key,
+            version,
+            mesh_generation: volume.mesh_generation,
+        }
+    }
+}
+
+fn fit_support_patch(
+    volume: &DepthMeshVolume,
+    query: &XrDepthMeshQuery,
+    hit: &XrDepthMeshQueryHit,
+) -> [Vec3f; 4] {
+    let travel_distance = (query.predicted_center - query.center).length();
+    let patch_radius = (DEPTH_QUERY_PATCH_RADIUS_METERS + travel_distance * 0.5)
+        .max(query.radius * 2.5 + query.max_distance)
+        .min(0.42);
+    let search_radius = patch_radius + DEPTH_QUERY_PATCH_PLANE_TOLERANCE_METERS;
+    let search_radius_sq = search_radius * search_radius;
+
+    let mut points = Vec::with_capacity(48);
+    let mut normal_sum = hit.normal;
+
+    for chunk in &volume.mesh_chunks {
+        if point_aabb_distance_sq(hit.point, chunk.bounds_min, chunk.bounds_max) > search_radius_sq {
+            continue;
+        }
+        for triangle in chunk.indices.chunks_exact(3) {
+            let a = chunk.vertices[triangle[0] as usize];
+            let b = chunk.vertices[triangle[1] as usize];
+            let c = chunk.vertices[triangle[2] as usize];
+            let mut tri_normal = Vec3f::cross(b - a, c - a);
+            let tri_normal_len = tri_normal.length();
+            if tri_normal_len <= 1.0e-6 {
+                continue;
+            }
+            tri_normal = tri_normal.scale(1.0 / tri_normal_len);
+            let alignment = tri_normal.dot(hit.normal);
+            if alignment.abs() < DEPTH_QUERY_PATCH_NORMAL_DOT {
+                continue;
+            }
+            if alignment < 0.0 {
+                tri_normal = tri_normal.scale(-1.0);
+            }
+
+            let centroid = (a + b + c).scale(1.0 / 3.0);
+            let centroid_offset = centroid - hit.point;
+            let plane_distance = centroid_offset.dot(hit.normal).abs();
+            if plane_distance > DEPTH_QUERY_PATCH_PLANE_TOLERANCE_METERS {
+                continue;
+            }
+
+            let planar_offset =
+                centroid_offset - hit.normal.scale(centroid_offset.dot(hit.normal));
+            if planar_offset.dot(planar_offset) > patch_radius * patch_radius {
+                continue;
+            }
+
+            points.push(a);
+            points.push(b);
+            points.push(c);
+            normal_sum = normal_sum + tri_normal;
+        }
+    }
+
+    if points.is_empty() {
+        points.extend_from_slice(&hit.triangle);
+    }
+
+    let fitted_normal = if normal_sum.length() > 1.0e-6 {
+        normal_sum.normalize()
+    } else {
+        hit.normal
+    };
+    let preferred_tangent = if query.velocity.length() > 1.0e-4 {
+        query.velocity
+    } else {
+        hit.triangle[1] - hit.triangle[0]
+    };
+    let (tangent, bitangent) = plane_basis(fitted_normal, preferred_tangent);
+
+    let mut min_u = f32::INFINITY;
+    let mut max_u = f32::NEG_INFINITY;
+    let mut min_v = f32::INFINITY;
+    let mut max_v = f32::NEG_INFINITY;
+    for point in &points {
+        let offset = *point - hit.point;
+        let plane_offset = offset - fitted_normal.scale(offset.dot(fitted_normal));
+        let u = plane_offset.dot(tangent);
+        let v = plane_offset.dot(bitangent);
+        min_u = min_u.min(u);
+        max_u = max_u.max(u);
+        min_v = min_v.min(v);
+        max_v = max_v.max(v);
+    }
+
+    if !min_u.is_finite() || !max_u.is_finite() || !min_v.is_finite() || !max_v.is_finite() {
+        return fallback_support_patch(hit.point, tangent, bitangent, query.radius);
+    }
+
+    let travel_along_tangent = query.velocity.dot(tangent).abs() * 0.12;
+    let travel_along_bitangent = query.velocity.dot(bitangent).abs() * 0.12;
+    let min_half_extent = DEPTH_QUERY_PATCH_MIN_HALF_EXTENT_METERS.max(query.radius * 1.5);
+    let min_half_extent_u = min_half_extent + travel_along_tangent;
+    let min_half_extent_v = min_half_extent + travel_along_bitangent;
+
+    min_u = (min_u - DEPTH_QUERY_PATCH_MARGIN_METERS).min(-min_half_extent_u);
+    max_u = (max_u + DEPTH_QUERY_PATCH_MARGIN_METERS).max(min_half_extent_u);
+    min_v = (min_v - DEPTH_QUERY_PATCH_MARGIN_METERS).min(-min_half_extent_v);
+    max_v = (max_v + DEPTH_QUERY_PATCH_MARGIN_METERS).max(min_half_extent_v);
+
+    [
+        hit.point + tangent.scale(min_u) + bitangent.scale(min_v),
+        hit.point + tangent.scale(max_u) + bitangent.scale(min_v),
+        hit.point + tangent.scale(max_u) + bitangent.scale(max_v),
+        hit.point + tangent.scale(min_u) + bitangent.scale(max_v),
+    ]
+}
+
+fn fallback_support_patch(
+    point: Vec3f,
+    tangent: Vec3f,
+    bitangent: Vec3f,
+    radius: f32,
+) -> [Vec3f; 4] {
+    let half_extent = DEPTH_QUERY_PATCH_MIN_HALF_EXTENT_METERS.max(radius * 1.75)
+        + DEPTH_QUERY_PATCH_MARGIN_METERS;
+    [
+        point + tangent.scale(-half_extent) + bitangent.scale(-half_extent),
+        point + tangent.scale(half_extent) + bitangent.scale(-half_extent),
+        point + tangent.scale(half_extent) + bitangent.scale(half_extent),
+        point + tangent.scale(-half_extent) + bitangent.scale(half_extent),
+    ]
+}
+
+fn fit_support_triangle(query: &XrDepthMeshQuery, hit: &XrDepthMeshQueryHit) -> [Vec3f; 3] {
+    let preferred_forward = if query.velocity.length() > 1.0e-4 {
+        query.velocity
+    } else {
+        hit.patch[1] - hit.patch[0]
+    };
+    let (forward, lateral) = plane_basis(hit.normal, preferred_forward);
+    let center = hit.point;
+
+    let mut min_forward = f32::INFINITY;
+    let mut max_forward = f32::NEG_INFINITY;
+    let mut min_lateral = f32::INFINITY;
+    let mut max_lateral = f32::NEG_INFINITY;
+    for corner in hit.patch {
+        let offset = corner - center;
+        let plane_offset = offset - hit.normal.scale(offset.dot(hit.normal));
+        let f = plane_offset.dot(forward);
+        let l = plane_offset.dot(lateral);
+        min_forward = min_forward.min(f);
+        max_forward = max_forward.max(f);
+        min_lateral = min_lateral.min(l);
+        max_lateral = max_lateral.max(l);
+    }
+
+    let min_extent = DEPTH_QUERY_PATCH_MIN_HALF_EXTENT_METERS.max(query.radius * 1.2);
+    let velocity_boost = query.velocity.length() * 0.08;
+    let front_extent =
+        (max_forward + DEPTH_QUERY_PATCH_MARGIN_METERS + velocity_boost).max(min_extent);
+    let back_extent = ((-min_forward) + DEPTH_QUERY_PATCH_MARGIN_METERS).max(min_extent);
+    let side_extent = (max_lateral.abs().max(min_lateral.abs()) + DEPTH_QUERY_PATCH_MARGIN_METERS)
+        .max(min_extent);
+
+    let mut triangle = [
+        center + forward.scale(front_extent),
+        center - forward.scale(back_extent) + lateral.scale(side_extent),
+        center - forward.scale(back_extent) - lateral.scale(side_extent),
+    ];
+    let tri_normal = Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]);
+    if tri_normal.dot(hit.normal) < 0.0 {
+        triangle.swap(1, 2);
+    }
+    triangle
+}
+
+fn plane_basis(normal: Vec3f, preferred_tangent: Vec3f) -> (Vec3f, Vec3f) {
+    let projected_tangent = preferred_tangent - normal.scale(preferred_tangent.dot(normal));
+    let tangent = if projected_tangent.length() > 1.0e-5 {
+        projected_tangent.normalize()
+    } else {
+        let fallback_axis = if normal.y.abs() < 0.9 {
+            vec3f(0.0, 1.0, 0.0)
+        } else {
+            vec3f(1.0, 0.0, 0.0)
+        };
+        Vec3f::cross(fallback_axis, normal).normalize()
+    };
+    let bitangent = Vec3f::cross(normal, tangent).normalize();
+    (tangent, bitangent)
+}
+
+fn point_aabb_distance_sq(point: Vec3f, bounds_min: Vec3f, bounds_max: Vec3f) -> f32 {
+    let dx = if point.x < bounds_min.x {
+        bounds_min.x - point.x
+    } else if point.x > bounds_max.x {
+        point.x - bounds_max.x
+    } else {
+        0.0
+    };
+    let dy = if point.y < bounds_min.y {
+        bounds_min.y - point.y
+    } else if point.y > bounds_max.y {
+        point.y - bounds_max.y
+    } else {
+        0.0
+    };
+    let dz = if point.z < bounds_min.z {
+        bounds_min.z - point.z
+    } else if point.z > bounds_max.z {
+        point.z - bounds_max.z
+    } else {
+        0.0
+    };
+    dx * dx + dy * dy + dz * dz
+}
+
+fn aabb_aabb_distance_sq(
+    a_min: Vec3f,
+    a_max: Vec3f,
+    b_min: Vec3f,
+    b_max: Vec3f,
+) -> f32 {
+    let dx = if a_max.x < b_min.x {
+        b_min.x - a_max.x
+    } else if b_max.x < a_min.x {
+        a_min.x - b_max.x
+    } else {
+        0.0
+    };
+    let dy = if a_max.y < b_min.y {
+        b_min.y - a_max.y
+    } else if b_max.y < a_min.y {
+        a_min.y - b_max.y
+    } else {
+        0.0
+    };
+    let dz = if a_max.z < b_min.z {
+        b_min.z - a_max.z
+    } else if b_max.z < a_min.z {
+        a_min.z - b_max.z
+    } else {
+        0.0
+    };
+    dx * dx + dy * dy + dz * dz
+}
+
+fn point_segment_distance_sq(point: Vec3f, start: Vec3f, end: Vec3f) -> f32 {
+    let segment = end - start;
+    let segment_length_sq = segment.dot(segment);
+    if segment_length_sq <= 1.0e-8 {
+        let delta = point - start;
+        return delta.dot(delta);
+    }
+    let t = ((point - start).dot(segment) / segment_length_sq).clamp(0.0, 1.0);
+    let closest = start + segment.scale(t);
+    let delta = point - closest;
+    delta.dot(delta)
+}
+
+fn closest_point_on_triangle(point: Vec3f, a: Vec3f, b: Vec3f, c: Vec3f) -> Vec3f {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = point - a;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+
+    let bp = point - b;
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3).max(f32::EPSILON);
+        return a + ab.scale(v);
+    }
+
+    let cp = point - c;
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6).max(f32::EPSILON);
+        return a + ac.scale(w);
+    }
+
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let edge = c - b;
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6)).max(f32::EPSILON);
+        return b + edge.scale(w);
+    }
+
+    let denom = (va + vb + vc).max(f32::EPSILON);
+    let v = vb / denom;
+    let w = vc / denom;
+    a + ab.scale(v) + ac.scale(w)
 }
 
 fn depth_mesh_chunk_from_surface_mesh(
