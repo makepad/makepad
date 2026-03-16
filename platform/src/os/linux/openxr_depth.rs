@@ -63,15 +63,17 @@ const DEPTH_QUERY_PATCH_NORMAL_DOT: f32 = 0.93;
 const DEPTH_QUERY_PATCH_MARGIN_METERS: f32 = 0.025;
 const DEPTH_QUERY_PATCH_MIN_HALF_EXTENT_METERS: f32 = 0.05;
 const DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT: f32 = 0.2;
+const DEPTH_QUERY_TRIANGLE_DILATION: f32 = 1.5;
 const DEPTH_PLANE_REBUILD_INTERVAL_MILLIS: u64 = 250;
 const DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN: f32 = 0.82;
 const DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX: f32 = 0.35;
-const DEPTH_PLANE_DISTANCE_BIN_METERS: f32 = 0.08;
 const DEPTH_PLANE_VERTEX_LINK_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 0.75;
+const DEPTH_PLANE_SIMPLIFY_REGION_NORMAL_DOT: f32 = 0.95;
+const DEPTH_PLANE_SIMPLIFY_REGION_DISTANCE_METERS: f32 = 0.10;
+const DEPTH_PLANE_SIMPLIFY_MIN_AREA_METERS2: f32 = 0.12;
 const DEPTH_PLANE_MIN_AREA_METERS2: f32 = 0.35;
 const DEPTH_PLANE_MIN_DIM_METERS: f32 = 0.30;
 const DEPTH_PLANE_MAX_PATCHES: usize = 24;
-const DEPTH_PLANE_WALL_YAW_BINS: i32 = 32;
 const DEPTH_PLANE_REGION_VERTICAL_NORMAL_DOT: f32 = 0.94;
 const DEPTH_PLANE_TRACK_MATCH_NORMAL_DOT: f32 = 0.95;
 const DEPTH_PLANE_TRACK_MATCH_CENTER_DISTANCE_METERS: f32 = 0.45;
@@ -97,6 +99,9 @@ const DEPTH_PLANE_SUPPORT_GROW_WEIGHT: u8 = 4;
 const DEPTH_PLANE_SUPPORT_DECAY_WEIGHT: u8 = 1;
 const DEPTH_PLANE_SUPPORT_MAX_WEIGHT: u8 = 10;
 const DEPTH_PLANE_SUPPORT_OCCUPIED_WEIGHT: u8 = 2;
+const DEPTH_MESH_PLANAR_SIMPLIFY_MIN_AREA_METERS2: f32 = 0.45;
+const DEPTH_MESH_PLANAR_SIMPLIFY_MIN_RECT_AREA_METERS2: f32 = 0.12;
+const DEPTH_MESH_PLANAR_SIMPLIFY_MAX_RECTS_PER_REGION: usize = 24;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct VoxelCoord {
@@ -276,6 +281,12 @@ pub struct SparseTsdGrid {
     chunk_volume: usize,
     chunks: HashMap<VoxelCoord, SparseTsdChunk>,
     active_value_count: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ReducedSurfaceMesh {
+    mesh: SurfaceMesh32,
+    planar_patches: Vec<XrDepthPlanePatch>,
 }
 
 impl SparseTsdGrid {
@@ -527,9 +538,6 @@ struct DepthMeshVolume {
     mesh_triangle_count: usize,
     plane_generation: u64,
     plane_patches: Vec<XrDepthPlanePatch>,
-    tracked_plane_patches: Vec<TrackedPlanePatch>,
-    next_plane_stable_id: u64,
-    last_plane_rebuild_at: Instant,
     pending_mesh_dirty_chunks: HashSet<IVector>,
     pending_mesh_chunk_queue: VecDeque<IVector>,
 }
@@ -562,9 +570,6 @@ impl DepthMeshVolume {
             mesh_triangle_count: 0,
             plane_generation: 0,
             plane_patches: Vec::new(),
-            tracked_plane_patches: Vec::new(),
-            next_plane_stable_id: 1,
-            last_plane_rebuild_at: Instant::now(),
             pending_mesh_dirty_chunks: HashSet::new(),
             pending_mesh_chunk_queue: VecDeque::new(),
         }
@@ -582,7 +587,6 @@ impl DepthMeshVolume {
             self.plane_patches.clear();
             self.plane_generation = self.plane_generation.saturating_add(1);
         }
-        self.tracked_plane_patches.clear();
         self.pending_mesh_dirty_chunks.clear();
         self.pending_mesh_chunk_queue.clear();
     }
@@ -894,7 +898,11 @@ fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: 
             &mut worker_state,
             DEPTH_SURFACE_MESH_CHUNKS_PER_TICK,
         );
-        let plane_changed = maybe_rebuild_plane_patches(&mut volume, mesh_changed);
+        let plane_changed = if mesh_changed {
+            rebuild_reduced_planar_patches(&mut volume)
+        } else {
+            false
+        };
         let query_changed = process_geometry_queries(&volume, &store, DEPTH_QUERY_BATCH_PER_TICK);
         if applied_update || mesh_changed || plane_changed || query_changed {
             store.publish(volume.snapshot());
@@ -1700,15 +1708,10 @@ enum ExtractedPlaneGroup {
     Vertical,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct ExtractedPlaneBucketKey {
-    group: ExtractedPlaneGroup,
-    normal_bin: i32,
-    distance_bin: i32,
-}
-
 #[derive(Clone, Debug)]
 struct ExtractedPlaneTriangle {
+    source_triangle_index: usize,
+    group: ExtractedPlaneGroup,
     area: f32,
     normal: Vec3f,
     centroid: Vec3f,
@@ -1716,15 +1719,16 @@ struct ExtractedPlaneTriangle {
 }
 
 #[derive(Clone, Debug)]
-struct ExtractedPlaneBucket {
-    group: ExtractedPlaneGroup,
-    triangles: Vec<ExtractedPlaneTriangle>,
-}
-
-#[derive(Clone, Debug)]
 struct ExtractedPlanePatchCandidate {
     patch: XrDepthPlanePatch,
     support_triangles_world: Vec<[Vec3f; 3]>,
+}
+
+#[derive(Clone, Debug)]
+struct SimplifiedPlaneRegion {
+    group: ExtractedPlaneGroup,
+    source_triangle_indices: Vec<usize>,
+    triangles: Vec<ExtractedPlaneTriangle>,
 }
 
 #[derive(Clone, Debug)]
@@ -1778,53 +1782,182 @@ struct PlaneSupportComponent {
     contains_anchor: bool,
 }
 
-fn maybe_rebuild_plane_patches(volume: &mut DepthMeshVolume, mesh_changed: bool) -> bool {
-    if volume.mesh_chunks.is_empty() {
-        if volume.plane_patches.is_empty() && volume.tracked_plane_patches.is_empty() {
-            return false;
-        }
-        volume.plane_patches.clear();
-        volume.tracked_plane_patches.clear();
-        volume.plane_generation = volume.plane_generation.saturating_add(1);
-        volume.update_sequence = volume.update_sequence.saturating_add(1);
-        volume.last_plane_rebuild_at = Instant::now();
-        return true;
-    }
+fn rebuild_reduced_planar_patches(volume: &mut DepthMeshVolume) -> bool {
+    let mut candidates = volume
+        .mesh_chunks
+        .iter()
+        .flat_map(|chunk| {
+            chunk.planar_patches.iter().cloned().map(|patch| ExtractedPlanePatchCandidate {
+                patch,
+                support_triangles_world: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+    classify_plane_patch_kinds(&mut candidates);
+    let mut plane_patches = candidates.into_iter().map(|candidate| candidate.patch).collect::<Vec<_>>();
+    plane_patches.sort_by(|a, b| {
+        b.area
+            .partial_cmp(&a.area)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    plane_patches.truncate(DEPTH_PLANE_MAX_PATCHES);
 
-    let now = Instant::now();
-    let due = volume.plane_patches.is_empty()
-        || now.duration_since(volume.last_plane_rebuild_at)
-            >= Duration::from_millis(DEPTH_PLANE_REBUILD_INTERVAL_MILLIS);
-    if !mesh_changed || !due {
+    let changed = plane_patches.len() != volume.plane_patches.len()
+        || plane_patches
+            .iter()
+            .zip(volume.plane_patches.iter())
+            .any(|(next, current)| {
+                next.kind != current.kind
+                    || (next.center - current.center).length() > 1.0e-4
+                    || next.normal.dot(current.normal) < 0.999
+                    || (next.half_extent_tangent - current.half_extent_tangent).abs() > 1.0e-4
+                    || (next.half_extent_bitangent - current.half_extent_bitangent).abs() > 1.0e-4
+            });
+    if !changed {
         return false;
     }
 
-    let plane_patches = rebuild_plane_patches_from_mesh(&volume.mesh_chunks);
     let next_generation = volume.plane_generation.saturating_add(1);
-    volume.tracked_plane_patches = track_plane_patches(
-        core::mem::take(&mut volume.tracked_plane_patches),
-        plane_patches,
-        &mut volume.next_plane_stable_id,
-    );
-    volume.plane_patches = volume
-        .tracked_plane_patches
-        .iter()
-        .filter(|tracked| tracked.hit_count >= DEPTH_PLANE_TRACK_STABLE_HITS || tracked.miss_count == 0)
-        .map(|tracked| {
-            let mut patch = tracked.patch.clone();
-            patch.generation = next_generation;
-            patch
-        })
-        .collect();
+    for patch in &mut plane_patches {
+        patch.generation = next_generation;
+    }
+    volume.plane_patches = plane_patches;
     volume.plane_generation = next_generation;
     volume.update_sequence = volume.update_sequence.saturating_add(1);
-    volume.last_plane_rebuild_at = now;
     true
 }
 
 fn rebuild_plane_patches_from_mesh(mesh_chunks: &[XrDepthMeshChunk]) -> Vec<ExtractedPlanePatchCandidate> {
-    let mut buckets = HashMap::<ExtractedPlaneBucketKey, ExtractedPlaneBucket>::new();
+    let simplified_regions = simplify_plane_mesh_regions(mesh_chunks);
+    let mut patches = Vec::new();
+    for region in simplified_regions {
+        let region_indices: Vec<usize> = (0..region.triangles.len()).collect();
+        let Some(mut patch) =
+            fit_plane_patch_from_region(region.group, &region.triangles, &region_indices)
+        else {
+            continue;
+        };
+        patch.support_triangles = region.triangles.len();
+        let kind = match region.group {
+            ExtractedPlaneGroup::HorizontalUp => XrDepthPlaneKind::Unknown,
+            ExtractedPlaneGroup::HorizontalDown => XrDepthPlaneKind::Ceiling,
+            ExtractedPlaneGroup::Vertical => XrDepthPlaneKind::Wall,
+        };
+        patch.kind = kind;
+        patches.push(ExtractedPlanePatchCandidate {
+            patch,
+            support_triangles_world: region
+                .triangles
+                .iter()
+                .map(|triangle| triangle.vertices)
+                .collect(),
+        });
+    }
+    classify_plane_patch_kinds(&mut patches);
+    patches.sort_by(|a, b| {
+        b.patch
+            .area
+            .partial_cmp(&a.patch.area)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    patches.truncate(DEPTH_PLANE_MAX_PATCHES);
+    patches
+}
 
+fn simplify_plane_mesh_regions(mesh_chunks: &[XrDepthMeshChunk]) -> Vec<SimplifiedPlaneRegion> {
+    simplify_plane_regions(collect_classified_plane_triangles(mesh_chunks))
+}
+
+fn simplify_plane_regions(triangles: Vec<ExtractedPlaneTriangle>) -> Vec<SimplifiedPlaneRegion> {
+    if triangles.is_empty() {
+        return Vec::new();
+    }
+
+    let mut vertex_links = HashMap::<ExtractedPlaneVertexKey, Vec<usize>>::new();
+    for (index, triangle) in triangles.iter().enumerate() {
+        for &vertex in &triangle.vertices {
+            vertex_links
+                .entry(quantize_plane_vertex(vertex))
+                .or_default()
+                .push(index);
+        }
+    }
+
+    let mut visited = vec![false; triangles.len()];
+    let mut regions = Vec::new();
+
+    for start_index in 0..triangles.len() {
+        if visited[start_index] {
+            continue;
+        }
+        let group = triangles[start_index].group;
+        let mut queue = VecDeque::from([start_index]);
+        let mut region_indices = Vec::new();
+        let mut normal_sum = triangles[start_index]
+            .normal
+            .scale(triangles[start_index].area.max(0.001));
+        let mut centroid_sum = triangles[start_index]
+            .centroid
+            .scale(triangles[start_index].area.max(0.001));
+        let mut area_sum = triangles[start_index].area.max(0.001);
+
+        while let Some(triangle_index) = queue.pop_front() {
+            if visited[triangle_index] {
+                continue;
+            }
+            let triangle = &triangles[triangle_index];
+            if triangle.group != group {
+                continue;
+            }
+            if !planar_region_accepts_triangle(
+                group,
+                triangle,
+                normal_sum,
+                centroid_sum,
+                area_sum,
+            ) {
+                continue;
+            }
+
+            visited[triangle_index] = true;
+            region_indices.push(triangle_index);
+
+            let reference_normal = if normal_sum.length() > 1.0e-5 {
+                normal_sum.normalize()
+            } else {
+                triangle.normal
+            };
+            let aligned_normal = align_direction(reference_normal, triangle.normal);
+            normal_sum += aligned_normal.scale(triangle.area.max(0.001));
+            centroid_sum += triangle.centroid.scale(triangle.area.max(0.001));
+            area_sum += triangle.area.max(0.001);
+
+            for &vertex in &triangle.vertices {
+                if let Some(neighbors) = vertex_links.get(&quantize_plane_vertex(vertex)) {
+                    for &neighbor_index in neighbors {
+                        if !visited[neighbor_index] {
+                            queue.push_back(neighbor_index);
+                        }
+                    }
+                }
+            }
+        }
+
+        if region_indices.is_empty() {
+            continue;
+        }
+
+        if let Some(region) = build_simplified_plane_region(group, &triangles, &region_indices) {
+            regions.push(region);
+        }
+    }
+
+    regions
+}
+
+fn collect_classified_plane_triangles(mesh_chunks: &[XrDepthMeshChunk]) -> Vec<ExtractedPlaneTriangle> {
+    let mut triangles = Vec::new();
+    let mut source_triangle_index = 0usize;
     for chunk in mesh_chunks {
         for triangle in chunk.indices.chunks_exact(3) {
             let a = chunk.vertices[triangle[0] as usize];
@@ -1841,170 +1974,210 @@ fn rebuild_plane_patches_from_mesh(mesh_chunks: &[XrDepthMeshChunk]) -> Vec<Extr
             }
             let normal = normal_area.scale(1.0 / area_twice);
             let centroid = (a + b + c).scale(1.0 / 3.0);
-
-            let classified = if normal.y >= DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
-                Some((
-                    ExtractedPlaneBucketKey {
-                        group: ExtractedPlaneGroup::HorizontalUp,
-                        normal_bin: 0,
-                        distance_bin: (centroid.y / DEPTH_PLANE_DISTANCE_BIN_METERS).round() as i32,
-                    },
-                    ExtractedPlaneGroup::HorizontalUp,
-                ))
+            let group = if normal.y >= DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
+                Some(ExtractedPlaneGroup::HorizontalUp)
             } else if normal.y <= -DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
-                Some((
-                    ExtractedPlaneBucketKey {
-                        group: ExtractedPlaneGroup::HorizontalDown,
-                        normal_bin: 0,
-                        distance_bin: (centroid.y / DEPTH_PLANE_DISTANCE_BIN_METERS).round() as i32,
-                    },
-                    ExtractedPlaneGroup::HorizontalDown,
-                ))
+                Some(ExtractedPlaneGroup::HorizontalDown)
             } else if normal.y.abs() <= DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX {
-                let horizontal = vec3f(normal.x, 0.0, normal.z);
-                let horizontal_len = horizontal.length();
-                if horizontal_len <= 1.0e-5 {
-                    None
-                } else {
-                    let yaw = horizontal.z.atan2(horizontal.x);
-                    let yaw_step = std::f32::consts::TAU / DEPTH_PLANE_WALL_YAW_BINS as f32;
-                    let yaw_bin = (yaw / yaw_step).round() as i32;
-                    let snapped_yaw = yaw_bin as f32 * yaw_step;
-                    let bucket_normal = vec3f(snapped_yaw.cos(), 0.0, snapped_yaw.sin());
-                    let distance = centroid.dot(bucket_normal);
-                    Some((
-                        ExtractedPlaneBucketKey {
-                            group: ExtractedPlaneGroup::Vertical,
-                            normal_bin: yaw_bin,
-                            distance_bin: (distance / DEPTH_PLANE_DISTANCE_BIN_METERS).round()
-                                as i32,
-                        },
-                        ExtractedPlaneGroup::Vertical,
-                    ))
-                }
+                Some(ExtractedPlaneGroup::Vertical)
             } else {
                 None
             };
-
-            let Some((key, group)) = classified else {
+            let Some(group) = group else {
+                source_triangle_index += 1;
                 continue;
             };
-
-            let bucket = buckets.entry(key).or_insert_with(|| ExtractedPlaneBucket {
+            triangles.push(ExtractedPlaneTriangle {
+                source_triangle_index,
                 group,
-                triangles: Vec::new(),
-            });
-            bucket.triangles.push(ExtractedPlaneTriangle {
                 area,
                 normal,
                 centroid,
                 vertices: [a, b, c],
             });
+            source_triangle_index += 1;
         }
     }
-
-    let mut patches = Vec::new();
-    for bucket in buckets.into_values() {
-        patches.extend(extract_plane_patches_from_bucket(bucket));
-    }
-    classify_plane_patch_kinds(&mut patches);
-    patches.sort_by(|a, b| {
-        b.patch
-            .area
-            .partial_cmp(&a.patch.area)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    patches.truncate(DEPTH_PLANE_MAX_PATCHES);
-    patches
+    triangles
 }
 
-fn extract_plane_patches_from_bucket(bucket: ExtractedPlaneBucket) -> Vec<ExtractedPlanePatchCandidate> {
-    let mut vertex_links = HashMap::<ExtractedPlaneVertexKey, Vec<usize>>::new();
-    for (index, triangle) in bucket.triangles.iter().enumerate() {
-        for &vertex in &triangle.vertices {
-            vertex_links
-                .entry(quantize_plane_vertex(vertex))
-                .or_default()
-                .push(index);
+fn collect_classified_plane_triangles_from_surface_mesh(mesh: &SurfaceMesh32) -> Vec<ExtractedPlaneTriangle> {
+    let mut triangles = Vec::new();
+    for (source_triangle_index, triangle) in mesh.indices.chunks_exact(3).enumerate() {
+        let a = vec3f(
+            mesh.positions[triangle[0] as usize][0],
+            mesh.positions[triangle[0] as usize][1],
+            mesh.positions[triangle[0] as usize][2],
+        );
+        let b = vec3f(
+            mesh.positions[triangle[1] as usize][0],
+            mesh.positions[triangle[1] as usize][1],
+            mesh.positions[triangle[1] as usize][2],
+        );
+        let c = vec3f(
+            mesh.positions[triangle[2] as usize][0],
+            mesh.positions[triangle[2] as usize][1],
+            mesh.positions[triangle[2] as usize][2],
+        );
+        let normal_area = Vec3f::cross(b - a, c - a);
+        let area_twice = normal_area.length();
+        if area_twice <= 1.0e-5 {
+            continue;
         }
+        let area = area_twice * 0.5;
+        if area <= 0.0025 {
+            continue;
+        }
+        let normal = normal_area.scale(1.0 / area_twice);
+        let centroid = (a + b + c).scale(1.0 / 3.0);
+        let group = if normal.y >= DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
+            Some(ExtractedPlaneGroup::HorizontalUp)
+        } else if normal.y <= -DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
+            Some(ExtractedPlaneGroup::HorizontalDown)
+        } else if normal.y.abs() <= DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX {
+            Some(ExtractedPlaneGroup::Vertical)
+        } else {
+            None
+        };
+        let Some(group) = group else {
+            continue;
+        };
+        triangles.push(ExtractedPlaneTriangle {
+            source_triangle_index,
+            group,
+            area,
+            normal,
+            centroid,
+            vertices: [a, b, c],
+        });
+    }
+    triangles
+}
+
+fn planar_region_accepts_triangle(
+    group: ExtractedPlaneGroup,
+    triangle: &ExtractedPlaneTriangle,
+    normal_sum: Vec3f,
+    centroid_sum: Vec3f,
+    area_sum: f32,
+) -> bool {
+    if area_sum <= 1.0e-5 || normal_sum.length() <= 1.0e-5 {
+        return true;
     }
 
-    let mut visited = vec![false; bucket.triangles.len()];
-    let mut result = Vec::new();
+    let region_normal = simplified_region_normal(group, normal_sum);
+    let aligned_normal = align_direction(region_normal, triangle.normal);
+    let min_normal_dot = if group == ExtractedPlaneGroup::Vertical {
+        DEPTH_PLANE_REGION_VERTICAL_NORMAL_DOT
+    } else {
+        DEPTH_PLANE_SIMPLIFY_REGION_NORMAL_DOT
+    };
+    if aligned_normal.dot(region_normal) < min_normal_dot {
+        return false;
+    }
 
-    for start_index in 0..bucket.triangles.len() {
-        if visited[start_index] {
-            continue;
-        }
+    let region_center = centroid_sum.scale(1.0 / area_sum.max(f32::EPSILON));
+    let plane_distance = region_center.dot(region_normal);
+    let centroid_distance = (triangle.centroid.dot(region_normal) - plane_distance).abs();
+    centroid_distance <= DEPTH_PLANE_SIMPLIFY_REGION_DISTANCE_METERS
+}
 
-        let mut stack = vec![start_index];
-        let mut region_triangle_indices = Vec::new();
-        let seed_vertical_normal = bucket.triangles[start_index].normal;
-        while let Some(triangle_index) = stack.pop() {
-            if visited[triangle_index] {
-                continue;
-            }
-            let triangle = &bucket.triangles[triangle_index];
-            if bucket.group == ExtractedPlaneGroup::Vertical {
-                let current_vertical_normal = align_direction(seed_vertical_normal, triangle.normal);
-                if seed_vertical_normal.length() > 1.0e-5
-                    && current_vertical_normal.length() > 1.0e-5
-                    && seed_vertical_normal
-                        .normalize()
-                        .dot(current_vertical_normal.normalize())
-                        < DEPTH_PLANE_REGION_VERTICAL_NORMAL_DOT
-                {
-                    continue;
-                }
-            }
-
-            visited[triangle_index] = true;
-            region_triangle_indices.push(triangle_index);
-            for &vertex in &triangle.vertices {
-                if let Some(neighbors) = vertex_links.get(&quantize_plane_vertex(vertex)) {
-                    for &neighbor_index in neighbors {
-                        if !visited[neighbor_index] {
-                            stack.push(neighbor_index);
-                        }
-                    }
-                }
-            }
-        }
-
-        if region_triangle_indices.is_empty() {
-            continue;
-        }
-
-        if let Some(patch) =
-            fit_plane_patch_from_region(bucket.group, &bucket.triangles, &region_triangle_indices)
-        {
-            let kind = match bucket.group {
-                ExtractedPlaneGroup::HorizontalUp => XrDepthPlaneKind::Unknown,
-                ExtractedPlaneGroup::HorizontalDown => XrDepthPlaneKind::Ceiling,
-                ExtractedPlaneGroup::Vertical => XrDepthPlaneKind::Wall,
+fn simplified_region_normal(group: ExtractedPlaneGroup, normal_sum: Vec3f) -> Vec3f {
+    match group {
+        ExtractedPlaneGroup::HorizontalUp => vec3f(0.0, 1.0, 0.0),
+        ExtractedPlaneGroup::HorizontalDown => vec3f(0.0, -1.0, 0.0),
+        ExtractedPlaneGroup::Vertical => {
+            let normal = if normal_sum.length() > 1.0e-5 {
+                normal_sum.normalize()
+            } else {
+                vec3f(1.0, 0.0, 0.0)
             };
-            result.push(ExtractedPlanePatchCandidate {
-                patch: XrDepthPlanePatch {
-                    generation: 0,
-                    kind,
-                    center: patch.center,
-                    normal: patch.normal,
-                    tangent: patch.tangent,
-                    bitangent: patch.bitangent,
-                    half_extent_tangent: patch.half_extent_tangent,
-                    half_extent_bitangent: patch.half_extent_bitangent,
-                    area: patch.area,
-                    support_triangles: patch.support_triangles,
-                },
-                support_triangles_world: region_triangle_indices
-                    .iter()
-                    .map(|&triangle_index| bucket.triangles[triangle_index].vertices)
-                    .collect(),
-            });
+            normal.normalize()
         }
     }
+}
 
-    result
+fn build_simplified_plane_region(
+    group: ExtractedPlaneGroup,
+    triangles: &[ExtractedPlaneTriangle],
+    region_indices: &[usize],
+) -> Option<SimplifiedPlaneRegion> {
+    let mut normal_sum = Vec3f::default();
+    let mut centroid_sum = Vec3f::default();
+    let mut area_sum = 0.0f32;
+
+    for &triangle_index in region_indices {
+        let triangle = &triangles[triangle_index];
+        let reference = if normal_sum.length() > 1.0e-5 {
+            normal_sum.normalize()
+        } else {
+            triangle.normal
+        };
+        let aligned_normal = align_direction(reference, triangle.normal);
+        normal_sum += aligned_normal.scale(triangle.area.max(0.001));
+        centroid_sum += triangle.centroid.scale(triangle.area.max(0.001));
+        area_sum += triangle.area.max(0.001);
+    }
+
+    if area_sum < DEPTH_PLANE_SIMPLIFY_MIN_AREA_METERS2 {
+        return Some(SimplifiedPlaneRegion {
+            group,
+            source_triangle_indices: region_indices
+                .iter()
+                .map(|&triangle_index| triangles[triangle_index].source_triangle_index)
+                .collect(),
+            triangles: region_indices
+                .iter()
+                .map(|&triangle_index| triangles[triangle_index].clone())
+                .collect(),
+        });
+    }
+
+    let normal = simplified_region_normal(group, normal_sum);
+    let centroid = centroid_sum.scale(1.0 / area_sum.max(f32::EPSILON));
+    let plane_distance = centroid.dot(normal);
+    let mut simplified_triangles = Vec::with_capacity(region_indices.len());
+
+    for &triangle_index in region_indices {
+        let triangle = &triangles[triangle_index];
+        let projected = [
+            project_point_onto_plane(triangle.vertices[0], normal, plane_distance),
+            project_point_onto_plane(triangle.vertices[1], normal, plane_distance),
+            project_point_onto_plane(triangle.vertices[2], normal, plane_distance),
+        ];
+        let projected_normal_area =
+            Vec3f::cross(projected[1] - projected[0], projected[2] - projected[0]);
+        let projected_area_twice = projected_normal_area.length();
+        if projected_area_twice <= 1.0e-5 {
+            continue;
+        }
+        let projected_area = projected_area_twice * 0.5;
+        simplified_triangles.push(ExtractedPlaneTriangle {
+            source_triangle_index: triangle.source_triangle_index,
+            group,
+            area: projected_area,
+            normal,
+            centroid: (projected[0] + projected[1] + projected[2]).scale(1.0 / 3.0),
+            vertices: projected,
+        });
+    }
+
+    if simplified_triangles.is_empty() {
+        return None;
+    }
+
+    Some(SimplifiedPlaneRegion {
+        group,
+        source_triangle_indices: region_indices
+            .iter()
+            .map(|&triangle_index| triangles[triangle_index].source_triangle_index)
+            .collect(),
+        triangles: simplified_triangles,
+    })
+}
+
+fn project_point_onto_plane(point: Vec3f, normal: Vec3f, plane_distance: f32) -> Vec3f {
+    point - normal.scale(point.dot(normal) - plane_distance)
 }
 
 fn fit_plane_patch_from_region(
@@ -2406,6 +2579,7 @@ fn create_tracked_plane_patch(
     stable_id: u64,
     incoming: ExtractedPlanePatchCandidate,
 ) -> TrackedPlanePatch {
+    let kind = incoming.patch.kind;
     let mut support_mask = PlaneSupportMask::default();
     rasterize_support_triangles_into_mask(
         &mut support_mask,
@@ -2416,11 +2590,11 @@ fn create_tracked_plane_patch(
     let center_u = incoming.patch.center.dot(incoming.patch.tangent);
     let center_v = incoming.patch.center.dot(incoming.patch.bitangent);
     let anchor = quantize_plane_support_cell(center_u, center_v);
-    let patch = select_plane_support_component(&support_mask, anchor, center_u, center_v)
+    let patch = select_plane_support_component(kind, &support_mask, anchor, center_u, center_v)
         .and_then(|component| {
-            retain_plane_support_component(&mut support_mask, &component);
+            retain_plane_support_component(kind, &mut support_mask, &component);
             fit_patch_from_support_component(
-                incoming.patch.kind,
+                kind,
                 incoming.patch.normal,
                 incoming.patch.tangent,
                 incoming.patch.bitangent,
@@ -2506,6 +2680,7 @@ fn update_tracked_plane_patch(
     }
 
     let next_patch = if let Some(component) = select_plane_support_component(
+        kind,
         &support_mask,
         anchor,
         current_center_u,
@@ -2525,7 +2700,7 @@ fn update_tracked_plane_patch(
             current.patch.kind,
             stable,
         );
-        retain_plane_support_component(&mut support_mask, &component);
+        retain_plane_support_component(kind, &mut support_mask, &component);
         fit_patch_from_support_component(
             kind,
             model_normal,
@@ -2690,6 +2865,7 @@ fn quantize_plane_support_cell(u: f32, v: f32) -> PlaneSupportCellKey {
 }
 
 fn select_plane_support_component(
+    kind: XrDepthPlaneKind,
     mask: &PlaneSupportMask,
     anchor: PlaneSupportCellKey,
     anchor_u: f32,
@@ -2742,18 +2918,13 @@ fn select_plane_support_component(
             weighted_u_sum += (cell.u as f32 + 0.5) * DEPTH_PLANE_SUPPORT_CELL_METERS * weight as f32;
             weighted_v_sum += (cell.v as f32 + 0.5) * DEPTH_PLANE_SUPPORT_CELL_METERS * weight as f32;
 
-            for du in -1..=1 {
-                for dv in -1..=1 {
-                    if du == 0 && dv == 0 {
-                        continue;
-                    }
-                    let neighbor = PlaneSupportCellKey {
-                        u: cell.u + du,
-                        v: cell.v + dv,
-                    };
-                    if occupied.contains_key(&neighbor) && visited.insert(neighbor) {
-                        queue.push_back(neighbor);
-                    }
+            for (du, dv) in plane_support_neighbor_offsets(kind) {
+                let neighbor = PlaneSupportCellKey {
+                    u: cell.u + du,
+                    v: cell.v + dv,
+                };
+                if occupied.contains_key(&neighbor) && visited.insert(neighbor) {
+                    queue.push_back(neighbor);
                 }
             }
         }
@@ -2782,11 +2953,19 @@ fn select_plane_support_component(
     best
 }
 
-fn retain_plane_support_component(mask: &mut PlaneSupportMask, component: &PlaneSupportComponent) {
+fn retain_plane_support_component(
+    kind: XrDepthPlaneKind,
+    mask: &mut PlaneSupportMask,
+    component: &PlaneSupportComponent,
+) {
     let mut keep = HashSet::new();
+    let dilation_radius = plane_support_dilation_radius(kind, component);
     for &cell in &component.cells {
-        for du in -1..=1 {
-            for dv in -1..=1 {
+        for du in -dilation_radius..=dilation_radius {
+            for dv in -dilation_radius..=dilation_radius {
+                if dilation_radius == 0 && (du != 0 || dv != 0) {
+                    continue;
+                }
                 keep.insert(PlaneSupportCellKey {
                     u: cell.u + du,
                     v: cell.v + dv,
@@ -2795,6 +2974,33 @@ fn retain_plane_support_component(mask: &mut PlaneSupportMask, component: &Plane
         }
     }
     mask.cells.retain(|key, _| keep.contains(key));
+}
+
+fn plane_support_neighbor_offsets(kind: XrDepthPlaneKind) -> &'static [(i32, i32)] {
+    const CARDINAL: &[(i32, i32)] = &[(1, 0), (-1, 0), (0, 1), (0, -1)];
+    const EIGHT_CONNECTED: &[(i32, i32)] = &[
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
+    if kind == XrDepthPlaneKind::Table {
+        CARDINAL
+    } else {
+        EIGHT_CONNECTED
+    }
+}
+
+fn plane_support_dilation_radius(kind: XrDepthPlaneKind, component: &PlaneSupportComponent) -> i32 {
+    if kind == XrDepthPlaneKind::Table || component.cells.len() <= 16 {
+        0
+    } else {
+        1
+    }
 }
 
 fn plane_distance_for_component(
@@ -3503,12 +3709,111 @@ fn evaluate_geometry_query(
     let sweep_radius = query.radius + query.max_distance;
     let sweep_radius_sq = sweep_radius * sweep_radius;
 
+    if query.include_planar_patches {
+        for patch in &volume.plane_patches {
+            let patch_corners = plane_patch_corners(patch);
+            let mut patch_bounds_min = patch_corners[0];
+            let mut patch_bounds_max = patch_corners[0];
+            for &corner in &patch_corners[1..] {
+                patch_bounds_min = Vec3f::min_componentwise(patch_bounds_min, corner);
+                patch_bounds_max = Vec3f::max_componentwise(patch_bounds_max, corner);
+            }
+            if aabb_aabb_distance_sq(
+                sweep_bounds_min,
+                sweep_bounds_max,
+                patch_bounds_min,
+                patch_bounds_max,
+            ) > max_search_distance_sq
+            {
+                continue;
+            }
+
+            let mut best_sample_progress = 0.0;
+            let mut best_sample_score = f32::INFINITY;
+            let mut best_closest = vec3f(0.0, 0.0, 0.0);
+            let mut best_distance_sq = f32::INFINITY;
+
+            for (sample_point, progress) in [
+                (query.center, 0.0f32),
+                (mid_point, 0.5f32),
+                (query.predicted_center, 1.0f32),
+            ] {
+                let closest = closest_point_on_plane_patch(sample_point, patch);
+                let delta = closest - sample_point;
+                let distance_sq = delta.dot(delta);
+                if distance_sq > max_search_distance_sq {
+                    continue;
+                }
+                let lateral_sq =
+                    point_segment_distance_sq(closest, query.center, query.predicted_center);
+                if lateral_sq > sweep_radius_sq {
+                    continue;
+                }
+
+                let distance = distance_sq.sqrt();
+                let mut score = distance;
+                if travel_distance > 1.0e-4 {
+                    let forward = (closest - query.center).dot(motion_dir);
+                    if forward < -query.radius || forward > travel_distance + query.radius {
+                        continue;
+                    }
+
+                    let mut candidate_normal = patch.normal;
+                    if candidate_normal.dot(sample_point - closest) < 0.0 {
+                        candidate_normal = candidate_normal.scale(-1.0);
+                    }
+                    let opposing = candidate_normal.dot(-motion_dir);
+                    if opposing <= DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT {
+                        continue;
+                    }
+                    score -= progress * travel_distance * 0.35;
+                    score -= forward.clamp(0.0, travel_distance) * 0.15;
+                    score -= opposing * 0.08;
+                    score += lateral_sq.sqrt() * 0.2;
+                }
+                if score < best_sample_score {
+                    best_sample_score = score;
+                    best_sample_progress = progress;
+                    best_closest = closest;
+                    best_distance_sq = distance_sq;
+                }
+            }
+
+            if !best_distance_sq.is_finite() {
+                continue;
+            }
+
+            let mut normal = patch.normal;
+            let facing_point = query.center + travel.scale(best_sample_progress);
+            if normal.dot(facing_point - best_closest) < 0.0 {
+                normal = normal.scale(-1.0);
+            }
+
+            if best_sample_score < best_hit_score {
+                best_hit_score = best_sample_score;
+                best_hit = Some(XrDepthMeshQueryHit {
+                    key: query.key,
+                    version,
+                    mesh_generation: volume.mesh_generation,
+                    distance: best_distance_sq.sqrt(),
+                    point: best_closest,
+                    normal,
+                    from_planar_patch: true,
+                    triangle: [patch_corners[0], patch_corners[1], patch_corners[2]],
+                    patch: patch_corners,
+                    chunk_key: IVector::new(0, 0, 0),
+                });
+            }
+        }
+    }
+
     for chunk in &volume.mesh_chunks {
         if aabb_aabb_distance_sq(sweep_bounds_min, sweep_bounds_max, chunk.bounds_min, chunk.bounds_max)
             > max_search_distance_sq
         {
             continue;
         }
+
         for triangle in chunk.indices.chunks_exact(3) {
             let a = chunk.vertices[triangle[0] as usize];
             let b = chunk.vertices[triangle[1] as usize];
@@ -3581,6 +3886,11 @@ fn evaluate_geometry_query(
                 hit_triangle.swap(1, 2);
             }
             if best_sample_score < best_hit_score {
+                let from_reduced_planar_patch = triangle_matches_reduced_planar_patch(
+                    hit_triangle,
+                    normal,
+                    &chunk.planar_patches,
+                );
                 best_hit_score = best_sample_score;
                 best_hit = Some(XrDepthMeshQueryHit {
                     key: query.key,
@@ -3589,6 +3899,7 @@ fn evaluate_geometry_query(
                     distance: best_distance_sq.sqrt(),
                     point: best_closest,
                     normal,
+                    from_planar_patch: from_reduced_planar_patch,
                     triangle: hit_triangle,
                     patch: [best_closest; 4],
                     chunk_key: chunk.chunk_key,
@@ -3598,8 +3909,12 @@ fn evaluate_geometry_query(
     }
 
     if let Some(mut hit) = best_hit {
-        hit.patch = fit_support_patch(volume, &query, &hit);
-        hit.triangle = fit_support_triangle(&query, &hit);
+        if !hit.from_planar_patch && support_patch_is_placeholder(&hit.patch) {
+            hit.patch = fit_support_patch(volume, &query, &hit);
+        }
+        if !hit.from_planar_patch {
+            hit.triangle = fit_support_triangle(&query, &hit);
+        }
         XrDepthMeshQueryResult::Hit(hit)
     } else {
         XrDepthMeshQueryResult::Miss {
@@ -3608,6 +3923,49 @@ fn evaluate_geometry_query(
             mesh_generation: volume.mesh_generation,
         }
     }
+}
+
+fn closest_point_on_plane_patch(point: Vec3f, patch: &XrDepthPlanePatch) -> Vec3f {
+    let offset = point - patch.center;
+    let u = offset
+        .dot(patch.tangent)
+        .clamp(-patch.half_extent_tangent, patch.half_extent_tangent);
+    let v = offset
+        .dot(patch.bitangent)
+        .clamp(-patch.half_extent_bitangent, patch.half_extent_bitangent);
+    patch.center + patch.tangent.scale(u) + patch.bitangent.scale(v)
+}
+
+fn triangle_matches_reduced_planar_patch(
+    triangle: [Vec3f; 3],
+    normal: Vec3f,
+    patches: &[XrDepthPlanePatch],
+) -> bool {
+    let centroid = (triangle[0] + triangle[1] + triangle[2]).scale(1.0 / 3.0);
+    patches.iter().any(|patch| {
+        if normal.dot(patch.normal).abs() < 0.995 {
+            return false;
+        }
+        if (centroid - patch.center).dot(patch.normal).abs() > 0.01 {
+            return false;
+        }
+        triangle.iter().all(|vertex| {
+            let offset = *vertex - patch.center;
+            if offset.dot(patch.normal).abs() > 0.015 {
+                return false;
+            }
+            let u = offset.dot(patch.tangent);
+            let v = offset.dot(patch.bitangent);
+            u.abs() <= patch.half_extent_tangent + 0.02
+                && v.abs() <= patch.half_extent_bitangent + 0.02
+        })
+    })
+}
+
+fn support_patch_is_placeholder(patch: &[Vec3f; 4]) -> bool {
+    (patch[1] - patch[0]).length() <= 1.0e-5
+        && (patch[2] - patch[0]).length() <= 1.0e-5
+        && (patch[3] - patch[0]).length() <= 1.0e-5
 }
 
 fn fit_support_patch(
@@ -3763,11 +4121,19 @@ fn fit_support_triangle(query: &XrDepthMeshQuery, hit: &XrDepthMeshQueryHit) -> 
 
     let min_extent = DEPTH_QUERY_PATCH_MIN_HALF_EXTENT_METERS.max(query.radius * 1.2);
     let velocity_boost = query.velocity.length() * 0.08;
+    let dilation = if hit.from_planar_patch {
+        1.0
+    } else {
+        DEPTH_QUERY_TRIANGLE_DILATION
+    };
     let front_extent =
-        (max_forward + DEPTH_QUERY_PATCH_MARGIN_METERS + velocity_boost).max(min_extent);
-    let back_extent = ((-min_forward) + DEPTH_QUERY_PATCH_MARGIN_METERS).max(min_extent);
+        (max_forward + DEPTH_QUERY_PATCH_MARGIN_METERS + velocity_boost).max(min_extent)
+            * dilation;
+    let back_extent = ((-min_forward) + DEPTH_QUERY_PATCH_MARGIN_METERS).max(min_extent)
+        * dilation;
     let side_extent = (max_lateral.abs().max(min_lateral.abs()) + DEPTH_QUERY_PATCH_MARGIN_METERS)
-        .max(min_extent);
+        .max(min_extent)
+        * dilation;
 
     let mut triangle = [
         center + forward.scale(front_extent),
@@ -3914,11 +4280,327 @@ fn closest_point_on_triangle(point: Vec3f, a: Vec3f, b: Vec3f, c: Vec3f) -> Vec3
     a + ab.scale(v) + ac.scale(w)
 }
 
+fn simplify_surface_mesh_planar_regions(mesh: SurfaceMesh32) -> ReducedSurfaceMesh {
+    let regions = simplify_plane_regions(collect_classified_plane_triangles_from_surface_mesh(&mesh));
+    if regions.is_empty() {
+        return ReducedSurfaceMesh {
+            mesh,
+            planar_patches: Vec::new(),
+        };
+    }
+
+    let mut consumed_triangles = HashSet::new();
+    let mut positions = Vec::<[f32; 3]>::new();
+    let mut normals = Vec::<[f32; 3]>::new();
+    let mut indices = Vec::<u32>::new();
+    let mut planar_patches = Vec::<XrDepthPlanePatch>::new();
+
+    for region in &regions {
+        let region_area: f32 = region.triangles.iter().map(|triangle| triangle.area).sum();
+        if region_area < DEPTH_MESH_PLANAR_SIMPLIFY_MIN_AREA_METERS2 {
+            continue;
+        }
+        if emit_planar_region_rect_mesh(
+            region,
+            &mut positions,
+            &mut normals,
+            &mut indices,
+            &mut planar_patches,
+        ) {
+            consumed_triangles.extend(region.source_triangle_indices.iter().copied());
+        }
+    }
+
+    if consumed_triangles.is_empty() {
+        return ReducedSurfaceMesh {
+            mesh,
+            planar_patches: Vec::new(),
+        };
+    }
+
+    for (triangle_index, triangle) in mesh.indices.chunks_exact(3).enumerate() {
+        if consumed_triangles.contains(&triangle_index) {
+            continue;
+        }
+        let vertices = [
+            vec3f(
+                mesh.positions[triangle[0] as usize][0],
+                mesh.positions[triangle[0] as usize][1],
+                mesh.positions[triangle[0] as usize][2],
+            ),
+            vec3f(
+                mesh.positions[triangle[1] as usize][0],
+                mesh.positions[triangle[1] as usize][1],
+                mesh.positions[triangle[1] as usize][2],
+            ),
+            vec3f(
+                mesh.positions[triangle[2] as usize][0],
+                mesh.positions[triangle[2] as usize][1],
+                mesh.positions[triangle[2] as usize][2],
+            ),
+        ];
+        append_surface_mesh_triangle(&mut positions, &mut normals, &mut indices, vertices);
+    }
+
+    ReducedSurfaceMesh {
+        mesh: SurfaceMesh32 {
+            positions,
+            normals,
+            indices,
+        },
+        planar_patches,
+    }
+}
+
+fn emit_planar_region_rect_mesh(
+    region: &SimplifiedPlaneRegion,
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+    planar_patches: &mut Vec<XrDepthPlanePatch>,
+) -> bool {
+    let region_indices: Vec<usize> = (0..region.triangles.len()).collect();
+    let Some(patch) = fit_plane_patch_from_region(region.group, &region.triangles, &region_indices)
+    else {
+        return false;
+    };
+
+    let mut support_mask = PlaneSupportMask::default();
+    let support_triangles = region
+        .triangles
+        .iter()
+        .map(|triangle| triangle.vertices)
+        .collect::<Vec<_>>();
+    rasterize_support_triangles_into_mask(
+        &mut support_mask,
+        &support_triangles,
+        patch.tangent,
+        patch.bitangent,
+    );
+
+    let plane_distance = patch.center.dot(patch.normal);
+    let mut emitted = false;
+    let mut emitted_rects = 0usize;
+    for mut component in decompose_support_mask_components(&support_mask) {
+        loop {
+            if emitted_rects >= DEPTH_MESH_PLANAR_SIMPLIFY_MAX_RECTS_PER_REGION {
+                break;
+            }
+            let Some((min_u, max_u, min_v, max_v)) = largest_supported_rectangle(&component) else {
+                break;
+            };
+            let width = (max_u - min_u + 1) as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
+            let height = (max_v - min_v + 1) as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
+            if width * height < DEPTH_MESH_PLANAR_SIMPLIFY_MIN_RECT_AREA_METERS2 {
+                break;
+            }
+            append_surface_mesh_quad_rect(
+                positions,
+                normals,
+                indices,
+                planar_patches,
+                patch.normal,
+                patch.tangent,
+                patch.bitangent,
+                plane_distance,
+                min_u,
+                max_u,
+                min_v,
+                max_v,
+            );
+            emitted = true;
+            emitted_rects += 1;
+            remove_rect_from_support_component(&mut component, min_u, max_u, min_v, max_v);
+            if component.cells.is_empty() {
+                break;
+            }
+        }
+    }
+
+    emitted
+}
+
+fn decompose_support_mask_components(mask: &PlaneSupportMask) -> Vec<PlaneSupportComponent> {
+    let occupied = mask
+        .cells
+        .iter()
+        .filter_map(|(&key, &weight)| {
+            (weight >= DEPTH_PLANE_SUPPORT_OCCUPIED_WEIGHT).then_some(key)
+        })
+        .collect::<HashSet<_>>();
+    if occupied.is_empty() {
+        return Vec::new();
+    }
+
+    let mut visited = HashSet::new();
+    let mut components = Vec::new();
+    for &start in &occupied {
+        if !visited.insert(start) {
+            continue;
+        }
+        let mut queue = VecDeque::from([start]);
+        let mut cells = Vec::new();
+        while let Some(cell) = queue.pop_front() {
+            cells.push(cell);
+            for (du, dv) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let neighbor = PlaneSupportCellKey {
+                    u: cell.u + du,
+                    v: cell.v + dv,
+                };
+                if occupied.contains(&neighbor) && visited.insert(neighbor) {
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+        if let Some(component) = rebuild_support_component_from_cells(cells) {
+            components.push(component);
+        }
+    }
+    components
+}
+
+fn rebuild_support_component_from_cells(cells: Vec<PlaneSupportCellKey>) -> Option<PlaneSupportComponent> {
+    let first = *cells.first()?;
+    let mut component = PlaneSupportComponent {
+        cells,
+        min_u: first.u,
+        max_u: first.u,
+        min_v: first.v,
+        max_v: first.v,
+        total_weight: 0,
+        centroid_u: 0.0,
+        centroid_v: 0.0,
+        contains_anchor: false,
+    };
+    let mut centroid_u_sum = 0.0f32;
+    let mut centroid_v_sum = 0.0f32;
+    for cell in &component.cells {
+        component.min_u = component.min_u.min(cell.u);
+        component.max_u = component.max_u.max(cell.u);
+        component.min_v = component.min_v.min(cell.v);
+        component.max_v = component.max_v.max(cell.v);
+        component.total_weight += 1;
+        centroid_u_sum += (cell.u as f32 + 0.5) * DEPTH_PLANE_SUPPORT_CELL_METERS;
+        centroid_v_sum += (cell.v as f32 + 0.5) * DEPTH_PLANE_SUPPORT_CELL_METERS;
+    }
+    component.centroid_u = centroid_u_sum / component.total_weight.max(1) as f32;
+    component.centroid_v = centroid_v_sum / component.total_weight.max(1) as f32;
+    Some(component)
+}
+
+fn remove_rect_from_support_component(
+    component: &mut PlaneSupportComponent,
+    min_u: i32,
+    max_u: i32,
+    min_v: i32,
+    max_v: i32,
+) {
+    let remaining = component
+        .cells
+        .iter()
+        .copied()
+        .filter(|cell| {
+            cell.u < min_u || cell.u > max_u || cell.v < min_v || cell.v > max_v
+        })
+        .collect::<Vec<_>>();
+    if let Some(rebuilt) = rebuild_support_component_from_cells(remaining) {
+        *component = rebuilt;
+    } else {
+        component.cells.clear();
+    }
+}
+
+fn append_surface_mesh_quad_rect(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+    planar_patches: &mut Vec<XrDepthPlanePatch>,
+    normal: Vec3f,
+    tangent: Vec3f,
+    bitangent: Vec3f,
+    plane_distance: f32,
+    min_u_cell: i32,
+    max_u_cell: i32,
+    min_v_cell: i32,
+    max_v_cell: i32,
+) {
+    let min_u = min_u_cell as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
+    let max_u = (max_u_cell + 1) as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
+    let min_v = min_v_cell as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
+    let max_v = (max_v_cell + 1) as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
+    let center_u = (min_u + max_u) * 0.5;
+    let center_v = (min_v + max_v) * 0.5;
+    let center = normal.scale(plane_distance) + tangent.scale(center_u) + bitangent.scale(center_v);
+    let quad = [
+        center + tangent.scale(min_u - center_u) + bitangent.scale(min_v - center_v),
+        center + tangent.scale(max_u - center_u) + bitangent.scale(min_v - center_v),
+        center + tangent.scale(max_u - center_u) + bitangent.scale(max_v - center_v),
+        center + tangent.scale(min_u - center_u) + bitangent.scale(max_v - center_v),
+    ];
+    append_surface_mesh_quad(positions, normals, indices, quad, normal);
+    planar_patches.push(XrDepthPlanePatch {
+        generation: 0,
+        kind: classify_planar_patch_kind_from_normal(normal),
+        center,
+        normal,
+        tangent,
+        bitangent,
+        half_extent_tangent: (max_u - min_u) * 0.5,
+        half_extent_bitangent: (max_v - min_v) * 0.5,
+        area: (max_u - min_u) * (max_v - min_v),
+        support_triangles: 2,
+    });
+}
+
+fn classify_planar_patch_kind_from_normal(normal: Vec3f) -> XrDepthPlaneKind {
+    if normal.y >= DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
+        XrDepthPlaneKind::Unknown
+    } else if normal.y <= -DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
+        XrDepthPlaneKind::Ceiling
+    } else if normal.y.abs() <= DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX {
+        XrDepthPlaneKind::Wall
+    } else {
+        XrDepthPlaneKind::Unknown
+    }
+}
+
+fn append_surface_mesh_quad(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+    quad: [Vec3f; 4],
+    normal: Vec3f,
+) {
+    let base = positions.len() as u32;
+    for vertex in quad {
+        positions.push([vertex.x, vertex.y, vertex.z]);
+        normals.push([normal.x, normal.y, normal.z]);
+    }
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn append_surface_mesh_triangle(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+    triangle: [Vec3f; 3],
+) {
+    let base = positions.len() as u32;
+    let normal = Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]).normalize();
+    for vertex in triangle {
+        positions.push([vertex.x, vertex.y, vertex.z]);
+        normals.push([normal.x, normal.y, normal.z]);
+    }
+    indices.extend_from_slice(&[base, base + 1, base + 2]);
+}
+
 fn depth_mesh_chunk_from_surface_mesh(
     chunk_key: IVector,
     generation: u64,
     mesh: SurfaceMesh32,
 ) -> Option<XrDepthMeshChunk> {
+    let reduced = simplify_surface_mesh_planar_regions(mesh);
+    let mesh = reduced.mesh;
     if mesh.positions.is_empty() || mesh.indices.is_empty() {
         return None;
     }
@@ -3955,6 +4637,7 @@ fn depth_mesh_chunk_from_surface_mesh(
         vertices,
         normals,
         indices: mesh.indices,
+        planar_patches: reduced.planar_patches,
     })
 }
 
@@ -4207,5 +4890,467 @@ fn lasertag_tris_for_axis(
         indices.extend_from_slice(&[c, b, a, d, c, a]);
     } else {
         indices.extend_from_slice(&[a, c, d, a, b, c]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quad_vertices(center: Vec3f, axis_u: Vec3f, axis_v: Vec3f, half_u: f32, half_v: f32) -> [Vec3f; 4] {
+        let du = axis_u.normalize().scale(half_u);
+        let dv = axis_v.normalize().scale(half_v);
+        [
+            center - du - dv,
+            center + du - dv,
+            center + du + dv,
+            center - du + dv,
+        ]
+    }
+
+    fn push_quad(
+        vertices: &mut Vec<Vec3f>,
+        normals: &mut Vec<Vec3f>,
+        indices: &mut Vec<u32>,
+        quad: [Vec3f; 4],
+    ) {
+        let base = vertices.len() as u32;
+        let normal = Vec3f::cross(quad[1] - quad[0], quad[2] - quad[0]).normalize();
+        vertices.extend_from_slice(&quad);
+        normals.extend_from_slice(&[normal; 4]);
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    fn make_mesh_chunk(quads: &[[Vec3f; 4]]) -> XrDepthMeshChunk {
+        let mut vertices = Vec::new();
+        let mut normals = Vec::new();
+        let mut indices = Vec::new();
+        let mut bounds_min = vec3f(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        let mut bounds_max = vec3f(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+
+        for quad in quads {
+            for vertex in quad {
+                bounds_min = Vec3f::min_componentwise(bounds_min, *vertex);
+                bounds_max = Vec3f::max_componentwise(bounds_max, *vertex);
+            }
+            push_quad(&mut vertices, &mut normals, &mut indices, *quad);
+        }
+
+        XrDepthMeshChunk {
+            generation: 1,
+            chunk_key: IVector::new(0, 0, 0),
+            fingerprint: 1,
+            bounds_min,
+            bounds_max,
+            vertices,
+            normals,
+            indices,
+            planar_patches: Vec::new(),
+        }
+    }
+
+    fn make_triangle_chunk(triangle: [Vec3f; 3]) -> XrDepthMeshChunk {
+        let normal = Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]).normalize();
+        let mut bounds_min = triangle[0];
+        let mut bounds_max = triangle[0];
+        for vertex in &triangle[1..] {
+            bounds_min = Vec3f::min_componentwise(bounds_min, *vertex);
+            bounds_max = Vec3f::max_componentwise(bounds_max, *vertex);
+        }
+
+        XrDepthMeshChunk {
+            generation: 1,
+            chunk_key: IVector::new(0, 0, 0),
+            fingerprint: 1,
+            bounds_min,
+            bounds_max,
+            vertices: triangle.to_vec(),
+            normals: vec![normal; 3],
+            indices: vec![0, 1, 2],
+            planar_patches: Vec::new(),
+        }
+    }
+
+    fn make_surface_mesh(quads: &[[Vec3f; 4]]) -> SurfaceMesh32 {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut indices = Vec::new();
+        for quad in quads {
+            let base = positions.len() as u32;
+            let normal = Vec3f::cross(quad[1] - quad[0], quad[2] - quad[0]).normalize();
+            for vertex in quad {
+                positions.push([vertex.x, vertex.y, vertex.z]);
+                normals.push([normal.x, normal.y, normal.z]);
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        SurfaceMesh32 {
+            positions,
+            normals,
+            indices,
+        }
+    }
+
+    fn find_largest_wall_patch(
+        patches: &[ExtractedPlanePatchCandidate],
+    ) -> Option<&ExtractedPlanePatchCandidate> {
+        patches
+            .iter()
+            .filter(|patch| patch.patch.kind == XrDepthPlaneKind::Wall)
+            .max_by(|a, b| {
+                a.patch
+                    .area
+                    .partial_cmp(&b.patch.area)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
+    fn horizontal_patch_areas(patches: &[ExtractedPlanePatchCandidate]) -> Vec<f32> {
+        let mut areas = patches
+            .iter()
+            .filter(|patch| {
+                matches!(
+                    patch.patch.kind,
+                    XrDepthPlaneKind::Floor
+                        | XrDepthPlaneKind::Table
+                        | XrDepthPlaneKind::Unknown
+                )
+            })
+            .map(|patch| patch.patch.area)
+            .collect::<Vec<_>>();
+        areas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        areas
+    }
+
+    #[test]
+    fn planar_simplification_straightens_a_bumpy_wall() {
+        let mut quads = Vec::new();
+        for y in 0..2 {
+            for z in 0..2 {
+                let y0 = y as f32;
+                let y1 = y0 + 1.0;
+                let z0 = z as f32;
+                let z1 = z0 + 1.0;
+                let x00 = 2.0 + if (y + z) % 2 == 0 { 0.03 } else { -0.02 };
+                let x10 = 2.0 + if (y + z + 1) % 2 == 0 { 0.03 } else { -0.02 };
+                let x11 = 2.0 + if (y + z + 2) % 2 == 0 { 0.03 } else { -0.02 };
+                let x01 = 2.0 + if (y + z + 3) % 2 == 0 { 0.03 } else { -0.02 };
+                quads.push([
+                    vec3f(x00, y0, z0),
+                    vec3f(x10, y0, z1),
+                    vec3f(x11, y1, z1),
+                    vec3f(x01, y1, z0),
+                ]);
+            }
+        }
+
+        let patches = rebuild_plane_patches_from_mesh(&[make_mesh_chunk(&quads)]);
+        let wall = find_largest_wall_patch(&patches).expect("expected a wall patch");
+        assert!(wall.patch.area > 3.5, "wall area too small: {}", wall.patch.area);
+        assert!(wall.patch.normal.x.abs() > 0.97, "wall normal not straight enough: {:?}", wall.patch.normal);
+        assert!((wall.patch.center.x - 2.0).abs() < 0.05, "wall center drifted too far: {:?}", wall.patch.center);
+    }
+
+    #[test]
+    fn planar_simplification_keeps_rotated_wall_orientation() {
+        let yaw = 32.0f32.to_radians();
+        let wall_normal = vec3f(yaw.cos(), 0.0, yaw.sin()).normalize();
+        let wall_tangent = vec3f(0.0, 1.0, 0.0);
+        let wall_bitangent = Vec3f::cross(wall_normal, wall_tangent).normalize();
+        let quad = quad_vertices(
+            wall_normal.scale(1.8) + wall_tangent.scale(1.0),
+            wall_tangent,
+            wall_bitangent,
+            1.0,
+            0.9,
+        );
+        let patches = rebuild_plane_patches_from_mesh(&[make_mesh_chunk(&[quad])]);
+        let wall = find_largest_wall_patch(&patches).expect("expected a rotated wall patch");
+        assert!(
+            wall.patch.normal.dot(wall_normal).abs() > 0.98,
+            "wall normal snapped away from the source wall: expected {:?}, got {:?}",
+            wall_normal,
+            wall.patch.normal
+        );
+    }
+
+    #[test]
+    fn planar_simplification_does_not_merge_table_with_disconnected_chair() {
+        let table = quad_vertices(
+            vec3f(0.0, 0.76, 0.0),
+            vec3f(0.0, 0.0, 1.0),
+            vec3f(1.0, 0.0, 0.0),
+            0.6,
+            0.35,
+        );
+        let chair = quad_vertices(
+            vec3f(1.1, 0.76, 0.0),
+            vec3f(0.0, 0.0, 1.0),
+            vec3f(1.0, 0.0, 0.0),
+            0.30,
+            0.30,
+        );
+        let patches = rebuild_plane_patches_from_mesh(&[make_mesh_chunk(&[table, chair])]);
+        let areas = horizontal_patch_areas(&patches);
+        assert!(areas.len() >= 2, "expected separate horizontal patches, got {:?}", areas);
+        let largest = *areas.last().unwrap_or(&0.0);
+        assert!(largest < 1.1, "table patch expanded too far: {}", largest);
+    }
+
+    #[test]
+    fn table_support_component_uses_four_connected_neighbors() {
+        let mut mask = PlaneSupportMask::default();
+        mask.cells.insert(PlaneSupportCellKey { u: 0, v: 0 }, DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
+        mask.cells.insert(PlaneSupportCellKey { u: 1, v: 1 }, DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
+        let component = select_plane_support_component(
+            XrDepthPlaneKind::Table,
+            &mask,
+            PlaneSupportCellKey { u: 0, v: 0 },
+            0.06,
+            0.06,
+        )
+        .expect("expected a component");
+        assert_eq!(component.cells.len(), 1, "diagonal cells should not merge for tables");
+    }
+
+    #[test]
+    fn table_support_retention_does_not_dilate_small_components() {
+        let mut mask = PlaneSupportMask::default();
+        mask.cells.insert(PlaneSupportCellKey { u: 0, v: 0 }, DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
+        mask.cells.insert(PlaneSupportCellKey { u: 1, v: 0 }, DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
+        mask.cells.insert(PlaneSupportCellKey { u: 4, v: 4 }, DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
+        let component = PlaneSupportComponent {
+            cells: vec![PlaneSupportCellKey { u: 0, v: 0 }, PlaneSupportCellKey { u: 1, v: 0 }],
+            min_u: 0,
+            max_u: 1,
+            min_v: 0,
+            max_v: 0,
+            total_weight: 8,
+            centroid_u: 0.12,
+            centroid_v: 0.06,
+            contains_anchor: true,
+        };
+        retain_plane_support_component(XrDepthPlaneKind::Table, &mut mask, &component);
+        assert_eq!(mask.cells.len(), 2, "small table support should not dilate");
+        assert!(!mask.cells.contains_key(&PlaneSupportCellKey { u: 4, v: 4 }));
+    }
+
+    #[test]
+    fn planar_surface_mesh_reduction_collapses_bumpy_wall() {
+        let mut quads = Vec::new();
+        for y in 0..3 {
+            for z in 0..3 {
+                let y0 = y as f32 * 0.6;
+                let y1 = y0 + 0.6;
+                let z0 = z as f32 * 0.6;
+                let z1 = z0 + 0.6;
+                let x00 = 2.0 + if (y + z) % 2 == 0 { 0.03 } else { -0.02 };
+                let x10 = 2.0 + if (y + z + 1) % 2 == 0 { 0.03 } else { -0.02 };
+                let x11 = 2.0 + if (y + z + 2) % 2 == 0 { 0.03 } else { -0.02 };
+                let x01 = 2.0 + if (y + z + 3) % 2 == 0 { 0.03 } else { -0.02 };
+                quads.push([
+                    vec3f(x00, y0, z0),
+                    vec3f(x10, y0, z1),
+                    vec3f(x11, y1, z1),
+                    vec3f(x01, y1, z0),
+                ]);
+            }
+        }
+        let raw = make_surface_mesh(&quads);
+        let simplified = simplify_surface_mesh_planar_regions(raw.clone());
+        assert!(
+            simplified.mesh.indices.len() < raw.indices.len(),
+            "expected fewer triangles after planar reduction: raw={} simplified={}",
+            raw.indices.len() / 3,
+            simplified.mesh.indices.len() / 3
+        );
+        assert!(
+            simplified.mesh.indices.len() / 3 <= 4,
+            "bumpy wall should collapse close to one quad, got {} triangles",
+            simplified.mesh.indices.len() / 3
+        );
+    }
+
+    #[test]
+    fn planar_surface_mesh_reduction_keeps_doorway_gap() {
+        let mut quads = Vec::new();
+        for y in 0..4 {
+            let y0 = y as f32 * 0.5;
+            let y1 = y0 + 0.5;
+            quads.push([
+                vec3f(0.0, y0, 0.0),
+                vec3f(0.0, y0, 0.8),
+                vec3f(0.0, y1, 0.8),
+                vec3f(0.0, y1, 0.0),
+            ]);
+            quads.push([
+                vec3f(0.0, y0, 1.6),
+                vec3f(0.0, y0, 2.4),
+                vec3f(0.0, y1, 2.4),
+                vec3f(0.0, y1, 1.6),
+            ]);
+        }
+        for z in 0..2 {
+            let z0 = 0.8 + z as f32 * 0.4;
+            let z1 = z0 + 0.4;
+            quads.push([
+                vec3f(0.0, 2.0, z0),
+                vec3f(0.0, 2.0, z1),
+                vec3f(0.0, 2.4, z1),
+                vec3f(0.0, 2.4, z0),
+            ]);
+        }
+        let raw = make_surface_mesh(&quads);
+        let simplified = simplify_surface_mesh_planar_regions(raw.clone());
+        let simplified_triangles = simplified.mesh.indices.len() / 3;
+        assert!(
+            simplified_triangles < raw.indices.len() / 3,
+            "expected doorway wall to simplify: raw={} simplified={}",
+            raw.indices.len() / 3,
+            simplified_triangles
+        );
+        assert!(
+            simplified_triangles >= 6,
+            "doorway should stay split into multiple wall quads, got {} triangles",
+            simplified_triangles
+        );
+    }
+
+    #[test]
+    fn geometry_query_skips_planar_patches_when_requested() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.mesh_generation = 7;
+        volume.plane_patches.push(XrDepthPlanePatch {
+            generation: 1,
+            kind: XrDepthPlaneKind::Table,
+            center: vec3f(0.0, 0.75, 0.0),
+            normal: vec3f(0.0, 1.0, 0.0),
+            tangent: vec3f(1.0, 0.0, 0.0),
+            bitangent: vec3f(0.0, 0.0, 1.0),
+            half_extent_tangent: 0.4,
+            half_extent_bitangent: 0.3,
+            area: 0.48,
+            support_triangles: 2,
+        });
+
+        let planar_query = XrDepthMeshQuery {
+            key: 1,
+            center: vec3f(0.0, 0.83, 0.0),
+            predicted_center: vec3f(0.0, 0.83, 0.0),
+            velocity: vec3f(0.0, 0.0, 0.0),
+            radius: 0.02,
+            max_distance: 0.15,
+            include_planar_patches: false,
+        };
+        assert!(
+            matches!(
+                evaluate_geometry_query(&volume, planar_query, 1),
+                XrDepthMeshQueryResult::Miss { .. }
+            ),
+            "planar query should miss when planar patches are disabled"
+        );
+
+        let planar_hit = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                include_planar_patches: true,
+                ..planar_query
+            },
+            2,
+        );
+        match planar_hit {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                assert!(hit.from_planar_patch, "expected a planar patch hit");
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected a planar hit when planar patches are enabled");
+            }
+        }
+
+        volume.mesh_chunks.push(make_triangle_chunk([
+            vec3f(0.0, 0.4, 0.0),
+            vec3f(0.2, 0.4, 0.0),
+            vec3f(0.0, 0.4, 0.2),
+        ]));
+        let mesh_hit = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 2,
+                center: vec3f(0.05, 0.5, 0.05),
+                predicted_center: vec3f(0.05, 0.5, 0.05),
+                velocity: vec3f(0.0, 0.0, 0.0),
+                radius: 0.02,
+                max_distance: 0.15,
+                include_planar_patches: false,
+            },
+            3,
+        );
+        match mesh_hit {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                assert!(!hit.from_planar_patch, "expected raw mesh fallback hit");
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected a raw mesh hit with planar patches disabled");
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_query_preserves_exact_reduced_planar_mesh_triangle() {
+        let triangle = [
+            vec3f(-0.25, 0.75, -0.20),
+            vec3f(0.25, 0.75, -0.20),
+            vec3f(-0.25, 0.75, 0.20),
+        ];
+        let mut chunk = make_triangle_chunk(triangle);
+        chunk.planar_patches.push(XrDepthPlanePatch {
+            generation: 1,
+            kind: XrDepthPlaneKind::Table,
+            center: vec3f(0.0, 0.75, 0.0),
+            normal: vec3f(0.0, 1.0, 0.0),
+            tangent: vec3f(1.0, 0.0, 0.0),
+            bitangent: vec3f(0.0, 0.0, 1.0),
+            half_extent_tangent: 0.25,
+            half_extent_bitangent: 0.20,
+            area: 0.20,
+            support_triangles: 2,
+        });
+
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.mesh_generation = 9;
+        volume.mesh_chunks.push(chunk);
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 7,
+                center: vec3f(-0.05, 0.82, -0.05),
+                predicted_center: vec3f(-0.05, 0.82, -0.05),
+                velocity: vec3f(0.0, 0.0, 0.0),
+                radius: 0.02,
+                max_distance: 0.15,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        match result {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                assert!(hit.from_planar_patch, "expected reduced planar mesh classification");
+                for expected in &triangle {
+                    assert!(
+                        hit.triangle
+                            .iter()
+                            .any(|got| (*got - *expected).length() < 1.0e-4),
+                        "expected exact triangle preservation: got {:?}, expected vertex {:?}",
+                        hit.triangle,
+                        expected
+                    );
+                }
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected reduced planar mesh hit");
+            }
+        }
     }
 }

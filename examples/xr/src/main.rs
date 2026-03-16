@@ -234,11 +234,9 @@ const XR_SCENE_VERTICAL_OFFSET: f32 = 0.30;
 const XR_SCENE_HEAD_HEIGHT_SCALE: f32 = 0.5;
 const XR_SIMULATION_DT: f32 = 1.0 / 120.0;
 const XR_ENABLE_HAND_PHYSICS: bool = true;
-const XR_ENABLE_DEPTH_QUERY_PHYSICS: bool = false;
-const XR_ENABLE_DEPTH_PLANE_PHYSICS: bool = true;
+const XR_ENABLE_DEPTH_QUERY_PHYSICS: bool = true;
+const XR_ENABLE_DEPTH_PLANE_PHYSICS: bool = false;
 const XR_RENDER_HAND_GEOMETRY: bool = false;
-const XR_DEPTH_PLANE_DEBUG_OFFSET: f32 = 0.0;
-const XR_DEPTH_PLANE_DEBUG_COLOR: [f32; 4] = [0.70, 0.76, 0.88, 0.02];
 const XR_DEPTH_PLANE_PHYSICS_THICKNESS: f32 = 0.05;
 const XR_DEPTH_PLANE_PHYSICS_FRICTION: f32 = 0.9;
 const XR_DEPTH_QUERY_MAX_DISTANCE: f32 = 0.12;
@@ -286,16 +284,14 @@ enum AppPhase {
 enum XrDepthDebugMode {
     #[default]
     Mesh,
-    Planes,
-    CubesOnly,
+    Off,
 }
 
 impl XrDepthDebugMode {
     fn next(self) -> Self {
         match self {
-            Self::Mesh => Self::Planes,
-            Self::Planes => Self::CubesOnly,
-            Self::CubesOnly => Self::Mesh,
+            Self::Mesh => Self::Off,
+            Self::Off => Self::Mesh,
         }
     }
 }
@@ -368,30 +364,6 @@ pub struct DrawDepthPlaneQuad {
     pub ambient: f32,
     #[live(0.004)]
     pub normal_offset: f32,
-}
-
-impl DrawDepthPlaneQuad {
-    fn draw(&mut self, cx: &mut Cx2d) {
-        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
-        if let Some(mi) = &mut self.many_instances {
-            mi.instances.extend_from_slice(self.draw_vars.as_slice());
-        } else if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
-            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
-        }
-    }
-
-    fn begin_many_instances(&mut self, cx: &mut Cx2d) {
-        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
-        self.many_instances = cx.begin_many_aligned_instances(&self.draw_vars);
-    }
-
-    fn end_many_instances(&mut self, cx: &mut Cx2d) {
-        if let Some(mi) = self.many_instances.take() {
-            let new_area = cx.end_many_instances(mi);
-            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -868,10 +840,6 @@ pub struct XrScene {
 impl XrScene {
     fn depth_debug_enabled(&self) -> bool {
         self.depth_debug_mode == XrDepthDebugMode::Mesh
-    }
-
-    fn depth_plane_debug_enabled(&self) -> bool {
-        self.depth_debug_mode == XrDepthDebugMode::Planes
     }
 
     fn draw_pose_box(
@@ -1416,6 +1384,7 @@ impl XrScene {
                 velocity,
                 radius,
                 max_distance: XR_DEPTH_QUERY_MAX_DISTANCE,
+                include_planar_patches: false,
             });
             if let Some(result) = depth_mesh.latest_query_result(key) {
                 query_results.push((index, result));
@@ -1437,12 +1406,14 @@ impl XrScene {
     }
 
     fn sync_depth_plane_physics(&mut self, cx: &mut Cx) {
-        if !XR_ENABLE_DEPTH_PLANE_PHYSICS {
-            return;
-        }
         let Some(scene) = self.scene.as_mut() else {
             return;
         };
+        if !XR_ENABLE_DEPTH_PLANE_PHYSICS {
+            scene.clear_depth_plane_surfaces();
+            self.clear_depth_plane_cache();
+            return;
+        }
         let Some(depth_mesh) = cx.xr_depth_mesh().latest_mesh() else {
             scene.clear_depth_plane_surfaces();
             self.clear_depth_plane_cache();
@@ -1591,37 +1562,6 @@ impl XrScene {
         }
     }
 
-    fn draw_depth_plane_patches(&mut self, cx: &mut Cx2d) {
-        if !self.depth_plane_debug_enabled() || self.depth_plane_patches.is_empty() {
-            return;
-        }
-
-        let patches = self.depth_plane_patches.clone();
-        let previous_depth_write = self.draw_depth_plane.draw_vars.options.depth_write;
-        self.draw_depth_plane.draw_vars.options.depth_write = false;
-        self.draw_depth_plane.begin_many_instances(cx);
-        for patch in &patches {
-            self.draw_depth_plane.transform = Pose::new(
-                Quat::look_rotation(patch.normal, patch.tangent),
-                patch.center + patch.normal.scale(XR_DEPTH_PLANE_DEBUG_OFFSET),
-            )
-            .to_mat4();
-            self.draw_depth_plane.plane_size = vec2f(
-                patch.half_extent_bitangent * 2.0,
-                patch.half_extent_tangent * 2.0,
-            );
-            self.draw_depth_plane.normal = patch.normal;
-            self.draw_depth_plane.base_color = vec4(
-                XR_DEPTH_PLANE_DEBUG_COLOR[0],
-                XR_DEPTH_PLANE_DEBUG_COLOR[1],
-                XR_DEPTH_PLANE_DEBUG_COLOR[2],
-                XR_DEPTH_PLANE_DEBUG_COLOR[3],
-            );
-            self.draw_depth_plane.draw(cx);
-        }
-        self.draw_depth_plane.end_many_instances(cx);
-        self.draw_depth_plane.draw_vars.options.depth_write = previous_depth_write;
-    }
 }
 
 fn pack_depth_mesh_vertices(chunk: &XrDepthMeshChunk) -> Vec<f32> {
@@ -1695,7 +1635,6 @@ impl Widget for XrScene {
         self.draw_bodies(cx);
         self.prepare_depth_mesh(cx);
         self.draw_depth_surface_mesh(cx);
-        self.draw_depth_plane_patches(cx);
 
         DrawStep::done()
     }
