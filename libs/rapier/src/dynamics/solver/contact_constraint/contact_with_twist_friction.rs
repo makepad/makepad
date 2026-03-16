@@ -4,7 +4,7 @@ use super::{
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::{IntegrationParameters, MultibodyJointSet, RigidBodySet};
 use crate::geometry::{ContactManifold, ContactManifoldIndex, SimdSolverContact};
-use crate::math::{Real, SimdReal, DIM, MAX_MANIFOLD_POINTS, SIMD_WIDTH};
+use crate::math::{DIM, MAX_MANIFOLD_POINTS, Real, SIMD_WIDTH, SimdReal};
 #[cfg(not(feature = "simd-is-enabled"))]
 use crate::utils::ComponentMul;
 use crate::utils::{self, AngularInertiaOps, CrossProduct, DotProduct, ScalarType, SimdLength};

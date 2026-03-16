@@ -1,7 +1,7 @@
 use super::{JointConstraintsSet, VelocitySolver};
 use crate::counters::Counters;
-use crate::dynamics::solver::contact_constraint::ContactConstraintsSet;
 use crate::dynamics::IslandManager;
+use crate::dynamics::solver::contact_constraint::ContactConstraintsSet;
 use crate::dynamics::{IntegrationParameters, JointGraphEdge, JointIndex, RigidBodySet};
 use crate::geometry::{ContactManifold, ContactManifoldIndex};
 use crate::prelude::MultibodyJointSet;

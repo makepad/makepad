@@ -7,10 +7,10 @@ use crate::bounding_volume::{Aabb, BoundingVolume};
 use crate::math::ComplexField;
 use crate::math::{ivect_to_vect, vect_to_ivect, IVector, Int, Vector};
 use crate::partitioning::{Bvh, BvhBuildStrategy, BvhNode};
-use crate::shape::voxels::voxels_chunk::VoxelsChunk;
+use crate::shape::voxels::voxels_chunk::{VoxelsChunk, VoxelsChunkHeader};
 use crate::shape::VoxelsChunkRef;
-use alloc::vec::Vec;
-use makepad_sparse_voxels::SparseChunkStorage;
+use crate::utils::hashmap::HashMap;
+use alloc::{vec, vec::Vec};
 
 /// Categorization of a voxel based on its neighbors.
 ///
@@ -502,12 +502,12 @@ pub struct Voxels {
     /// The bounding boxes are the ones of the chunk’s voxels **keys**. This is equivalent to a bvh
     /// of the chunks with a uniform voxel size of 1.
     pub(super) chunk_bvh: Bvh,
-    pub(super) storage: VoxelsStorage,
+    pub(super) chunk_headers: HashMap<IVector, VoxelsChunkHeader>,
+    pub(super) chunk_keys: Vec<IVector>,
+    pub(super) chunks: Vec<VoxelsChunk>,
+    pub(super) free_chunks: Vec<usize>,
     pub(super) voxel_size: Vector,
 }
-
-/// The sparse chunk backing store used by [`Voxels`].
-pub type VoxelsStorage = SparseChunkStorage<IVector, VoxelsChunk>;
 
 impl Voxels {
     /// Initializes a voxel shape from grid coordinates.
@@ -572,48 +572,36 @@ impl Voxels {
     /// # }
     /// ```
     pub fn new(voxel_size: Vector, grid_coordinates: &[IVector]) -> Self {
-        let mut storage = VoxelsStorage::new(VoxelsChunk::INVALID_CHUNK_KEY);
+        let mut result = Self {
+            chunk_bvh: Bvh::new(),
+            chunk_headers: HashMap::default(),
+            chunk_keys: vec![],
+            chunks: vec![],
+            free_chunks: vec![],
+            voxel_size,
+        };
 
         for vox in grid_coordinates {
             let (chunk_key, id_in_chunk) = Self::chunk_key_and_id_in_chunk(*vox);
-            let chunk_id = {
-                let (chunk_header, _) =
-                    storage.header_or_insert_with(chunk_key, VoxelsChunk::default);
-                chunk_header.len += 1;
-                chunk_header.id
-            };
-            storage.chunks[chunk_id].states[id_in_chunk] = VoxelState::INTERIOR;
+            let chunk_header = result.chunk_headers.entry(chunk_key).or_insert_with(|| {
+                let id = result.chunks.len();
+                result.chunks.push(VoxelsChunk::default());
+                result.chunk_keys.push(chunk_key);
+                VoxelsChunkHeader { id, len: 0 }
+            });
+            chunk_header.len += 1;
+            result.chunks[chunk_header.id].states[id_in_chunk] = VoxelState::INTERIOR;
         }
 
-        Self::from_storage(voxel_size, storage)
-    }
-
-    /// Builds a voxel shape from a sparse chunk store, rebuilding the chunk BVH and
-    /// voxel neighborhood state in place.
-    pub fn from_storage(voxel_size: Vector, storage: VoxelsStorage) -> Self {
-        let chunk_bvh = Bvh::from_iter(
+        result.chunk_bvh = Bvh::from_iter(
             BvhBuildStrategy::Ploc,
-            storage
-                .chunk_headers
-                .iter()
-                .map(|(chunk_key, chunk_header)| {
-                    (chunk_header.id, VoxelsChunk::aabb(chunk_key, voxel_size))
-                }),
+            result.chunk_headers.iter().map(|(chunk_key, chunk_id)| {
+                (chunk_id.id, VoxelsChunk::aabb(chunk_key, result.voxel_size))
+            }),
         );
 
-        let mut result = Self::from_raw_parts(voxel_size, chunk_bvh, storage);
         result.recompute_all_voxels_states();
         result
-    }
-
-    /// Builds a voxel shape from a prebuilt chunk store and chunk BVH without
-    /// recomputing any additional indexing.
-    pub fn from_raw_parts(voxel_size: Vector, chunk_bvh: Bvh, storage: VoxelsStorage) -> Self {
-        Self {
-            chunk_bvh,
-            storage,
-            voxel_size,
-        }
     }
 
     /// Computes a voxel shape from a set of world-space points.
@@ -692,21 +680,6 @@ impl Voxels {
         Self::new(voxel_size, &voxels)
     }
 
-    /// The sparse chunk backing store for this voxel shape.
-    pub fn storage(&self) -> &VoxelsStorage {
-        &self.storage
-    }
-
-    /// Consumes this voxel shape and returns its sparse chunk backing store.
-    pub fn into_storage(self) -> VoxelsStorage {
-        self.storage
-    }
-
-    /// Consumes this voxel shape and returns its voxel size, chunk BVH, and sparse storage.
-    pub fn into_raw_parts(self) -> (Vector, Bvh, VoxelsStorage) {
-        (self.voxel_size, self.chunk_bvh, self.storage)
-    }
-
     pub(crate) fn chunk_bvh(&self) -> &Bvh {
         &self.chunk_bvh
     }
@@ -783,8 +756,8 @@ impl Voxels {
         VoxelsChunkRef {
             my_id: chunk_id as usize,
             parent: self,
-            states: &self.storage.chunks[chunk_id as usize].states,
-            key: &self.storage.chunk_keys[chunk_id as usize],
+            states: &self.chunks[chunk_id as usize].states,
+            key: &self.chunk_keys[chunk_id as usize],
         }
     }
 
@@ -825,7 +798,7 @@ impl Voxels {
     /// ```
     pub fn voxel_state(&self, key: IVector) -> Option<VoxelState> {
         let vid = self.linear_index(key)?;
-        Some(self.storage.chunks[vid.chunk_id].states[vid.id_in_chunk])
+        Some(self.chunks[vid.chunk_id].states[vid.id_in_chunk])
     }
 
     /// Calculates the grid coordinates of the voxel containing the given world-space point.
@@ -878,7 +851,7 @@ impl Voxels {
     /// Gets the voxel at the given flat voxel index.
     pub fn voxel_at_flat_id(&self, id: u32) -> Option<IVector> {
         let vid = VoxelIndex::from_flat_id(id as usize);
-        let chunk_key = self.storage.chunk_keys.get(vid.chunk_id)?;
+        let chunk_key = self.chunk_keys.get(vid.chunk_id)?;
         if *chunk_key == VoxelsChunk::INVALID_CHUNK_KEY {
             return None;
         }
@@ -964,8 +937,7 @@ impl Voxels {
             })
     }
 
-    /// Returns the chunk-space key of the chunk containing `voxel_key`.
-    pub fn voxel_to_chunk_key(voxel_key: IVector) -> IVector {
+    fn voxel_to_chunk_key(voxel_key: IVector) -> IVector {
         fn div_floor(a: Int, b: usize) -> Int {
             let sign = (a < 0) as Int;
             (a + sign) / b as Int - sign
@@ -991,7 +963,7 @@ impl Voxels {
     /// Given a voxel key, returns the key of the voxel chunk that contains it, as well as the
     /// linear index of the voxel within that chunk.
     #[cfg(feature = "dim2")]
-    pub fn chunk_key_and_id_in_chunk(voxel_key: IVector) -> (IVector, usize) {
+    pub(super) fn chunk_key_and_id_in_chunk(voxel_key: IVector) -> (IVector, usize) {
         let chunk_key = Self::voxel_to_chunk_key(voxel_key);
         // NOTE: always positive since we subtracted the smallest possible key on that chunk.
         let voxel_key_in_chunk = voxel_key - chunk_key * VoxelsChunk::VOXELS_PER_CHUNK_DIM as Int;
@@ -1004,7 +976,7 @@ impl Voxels {
     /// Given a voxel key, returns the key of the voxel chunk that contains it, as well as the
     /// linear index of the voxel within that chunk.
     #[cfg(feature = "dim3")]
-    pub fn chunk_key_and_id_in_chunk(voxel_key: IVector) -> (IVector, usize) {
+    pub(super) fn chunk_key_and_id_in_chunk(voxel_key: IVector) -> (IVector, usize) {
         let chunk_key = Self::voxel_to_chunk_key(voxel_key);
         // NOTE: always positive since we subtracted the smallest possible key on that chunk.
         let voxel_key_in_chunk = voxel_key - chunk_key * VoxelsChunk::VOXELS_PER_CHUNK_DIM as Int;
@@ -1019,7 +991,7 @@ impl Voxels {
     /// The linearized index associated to the given voxel key.
     pub fn linear_index(&self, voxel_key: IVector) -> Option<VoxelIndex> {
         let (chunk_key, id_in_chunk) = Self::chunk_key_and_id_in_chunk(voxel_key);
-        let chunk_id = self.storage.chunk_headers.get(&chunk_key)?.id;
+        let chunk_id = self.chunk_headers.get(&chunk_key)?.id;
         Some(VoxelIndex {
             chunk_id,
             id_in_chunk,

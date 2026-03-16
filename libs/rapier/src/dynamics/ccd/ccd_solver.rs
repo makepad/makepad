@@ -227,11 +227,7 @@ impl CCDSolver {
             }
         }
 
-        if min_toi < dt {
-            Some(min_toi)
-        } else {
-            None
-        }
+        if min_toi < dt { Some(min_toi) } else { None }
     }
 
     /// Outputs the set of bodies as well as their first time-of-impact event.

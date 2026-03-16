@@ -4,7 +4,7 @@
 use crate::math::SimdReal;
 #[cfg(feature = "dim3")]
 use crate::math::{Matrix, Real, Vector};
-use crate::utils::{simd_inv, SimdRealCopy};
+use crate::utils::{SimdRealCopy, simd_inv};
 #[cfg(feature = "dim3")]
 use parry::utils::SdpMatrix3;
 

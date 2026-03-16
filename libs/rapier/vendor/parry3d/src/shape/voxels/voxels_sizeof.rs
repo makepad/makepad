@@ -14,14 +14,16 @@ impl Voxels {
         // NOTE: if a new field is added to `Self`, adjust this function result.
         let Self {
             chunk_bvh,
-            storage,
+            chunk_headers,
+            chunks,
+            free_chunks,
+            chunk_keys,
             voxel_size: _,
         } = self;
-        storage.chunks.capacity() * size_of::<VoxelsChunk>()
-            + storage.free_chunks.capacity() * size_of::<usize>()
-            + storage.chunk_keys.capacity() * size_of::<IVector>()
-            + storage.chunk_headers.capacity()
-                * (size_of::<VoxelsChunkHeader>() + size_of::<IVector>())
+        chunks.capacity() * size_of::<VoxelsChunk>()
+            + free_chunks.capacity() * size_of::<usize>()
+            + chunk_keys.capacity() * size_of::<IVector>()
+            + chunk_headers.capacity() * (size_of::<VoxelsChunkHeader>() + size_of::<IVector>())
             + chunk_bvh.heap_memory_size()
     }
 }

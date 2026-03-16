@@ -140,6 +140,10 @@ impl AndroidVariant {
                     android:debuggable="true"
                     android:largeHeap="true"
                     tools:targetApi="{sdk_version}">
+                    <!-- Quest 3-only CPU/GPU trade: prefer one extra CPU level over one GPU level. -->
+                    <meta-data
+                        android:name="com.oculus.trade_cpu_for_gpu_amount"
+                        android:value="-1" />
                     <activity
                         android:name=".{class_name}"
                         android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
