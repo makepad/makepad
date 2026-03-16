@@ -277,7 +277,7 @@ impl Cx {
                             CxOpenXrOptions {
                                 buffer_scale: 1.5,
                                 multisamples: 4,
-                                remove_hands_from_depth: true,
+                                remove_hands_from_depth: false,
                             },
                             &self.os_type,
                         );
@@ -294,7 +294,7 @@ impl Cx {
                             CxOpenXrOptions {
                                 buffer_scale: 1.5,
                                 multisamples: 4,
-                                remove_hands_from_depth: true,
+                                remove_hands_from_depth: false,
                             },
                             &self.os_type,
                         ) {
