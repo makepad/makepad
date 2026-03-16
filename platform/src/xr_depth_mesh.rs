@@ -24,6 +24,7 @@ pub struct XrDepthMeshChunk {
     pub vertices: Vec<Vec3f>,
     pub normals: Vec<Vec3f>,
     pub indices: Vec<u32>,
+    pub planar_patches: Vec<XrDepthPlanePatch>,
 }
 
 impl XrDepthMeshChunk {
@@ -99,6 +100,7 @@ pub struct XrDepthMeshQuery {
     pub velocity: Vec3f,
     pub radius: f32,
     pub max_distance: f32,
+    pub include_planar_patches: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +111,7 @@ pub struct XrDepthMeshQueryHit {
     pub distance: f32,
     pub point: Vec3f,
     pub normal: Vec3f,
+    pub from_planar_patch: bool,
     pub triangle: [Vec3f; 3],
     pub patch: [Vec3f; 4],
     pub chunk_key: IVector,
