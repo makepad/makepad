@@ -9,6 +9,7 @@ use {
         texture::{CxTexturePool, TextureId},
         video_decode::software_video::PlaybackSessionHandle,
         video_decode::yuv::{YuvColorMatrix, YuvPlaneData},
+        PlaybackPrepared,
     },
 };
 

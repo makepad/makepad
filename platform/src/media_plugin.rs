@@ -15,6 +15,7 @@ use {
 use crate::video_decode::yuv::YuvPlaneData;
 
 #[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct YuvPlaneData;
 
 // ---------------------------------------------------------------------------
