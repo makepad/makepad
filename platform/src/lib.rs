@@ -52,7 +52,6 @@ mod texture;
 mod uniform_buffer;
 mod window;
 mod xr_depth_mesh;
-mod xr_depth_voxels;
 
 pub mod web_socket;
 
@@ -87,7 +86,6 @@ pub use ::windows;
 pub use makepad_futures;
 pub use makepad_script_std::makepad_network;
 pub use makepad_script_std::makepad_script;
-pub use makepad_sparse_voxels as sparse_voxels;
 pub use makepad_studio_protocol as studio;
 pub use parry3d;
 
@@ -219,11 +217,8 @@ pub use {
             ScriptWindowHandle, WindowBackdrop, WindowHandle, WindowIcon, WindowIconBuffer,
             WindowId, WindowVisuals,
         },
-        xr_depth_mesh::{XrDepthMesh, XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore},
-        xr_depth_voxels::{
-            XrDepthEvidenceChunk, XrDepthEvidenceStorage, XrDepthPhysicsBox, XrDepthPhysicsChunk,
-            XrDepthPhysicsChunkKey, XrDepthVoxels, XrDepthVoxelsState, XrDepthVoxelsStats,
-            XrDepthVoxelsStore,
+        xr_depth_mesh::{
+            XrDepthMesh, XrDepthMeshChunk, XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore,
         },
     },
     app_main::*,

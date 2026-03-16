@@ -251,11 +251,7 @@ impl IntegrationParameters {
     /// This is zero if `self.dt` is zero.
     #[inline]
     pub fn inv_dt(&self) -> Real {
-        if self.dt == 0.0 {
-            0.0
-        } else {
-            1.0 / self.dt
-        }
+        if self.dt == 0.0 { 0.0 } else { 1.0 / self.dt }
     }
 
     /// Sets the time-stepping length.

@@ -1,7 +1,8 @@
 use crate::bounding_volume::Aabb;
 use crate::math::{IVector, Vector, DIM};
-use crate::shape::voxels::voxels_chunk::VoxelsChunk;
+use crate::shape::voxels::voxels_chunk::{VoxelsChunk, VoxelsChunkHeader};
 use crate::shape::{VoxelState, Voxels};
+use crate::utils::hashmap::Entry;
 use alloc::vec;
 
 impl Voxels {
@@ -116,47 +117,53 @@ impl Voxels {
     /// ```
     pub fn set_voxel(&mut self, key: IVector, is_filled: bool) -> VoxelState {
         let (chunk_key, id_in_chunk) = Self::chunk_key_and_id_in_chunk(key);
-        if !is_filled && !self.storage.chunk_headers.contains_key(&chunk_key) {
+        let header_entry = self.chunk_headers.entry(chunk_key);
+
+        if !is_filled && matches!(header_entry, Entry::Vacant(_)) {
             // The voxel is already empty (it doesn’t exist at all).
             // Nothing more to do.
             return VoxelState::EMPTY;
         }
 
-        let (chunk_id, inserted_chunk) = {
-            let (chunk_header, inserted_chunk) = self
-                .storage
-                .header_or_insert_with(chunk_key, VoxelsChunk::default);
-            (chunk_header.id, inserted_chunk)
-        };
+        let chunk_header = header_entry.or_insert_with(|| {
+            let id = self.free_chunks.pop().unwrap_or_else(|| {
+                self.chunks.push(VoxelsChunk::default());
+                self.chunk_keys.push(chunk_key);
+                self.chunks.len() - 1
+            });
 
-        if inserted_chunk {
-            self.chunk_bvh.insert(
-                VoxelsChunk::aabb(&chunk_key, self.voxel_size),
-                chunk_id as u32,
-            );
-        }
+            self.chunk_keys[id] = chunk_key;
+            self.chunk_bvh
+                .insert(VoxelsChunk::aabb(&chunk_key, self.voxel_size), id as u32);
+            VoxelsChunkHeader { id, len: 0 }
+        });
+        let chunk_id = chunk_header.id;
 
-        let prev = self.storage.chunks[chunk_id].states[id_in_chunk];
+        let prev = self.chunks[chunk_id].states[id_in_chunk];
         let new_is_empty = !is_filled;
 
         if prev.is_empty() ^ new_is_empty {
-            let can_remove_chunk = {
-                let chunk_header = self.storage.chunk_headers.get_mut(&chunk_key).unwrap();
-                if new_is_empty {
-                    chunk_header.len -= 1;
-                    chunk_header.len == 0
-                } else {
-                    chunk_header.len += 1;
-                    false
-                }
+            let can_remove_chunk = if new_is_empty {
+                chunk_header.len -= 1;
+                chunk_header.len == 0
+            } else {
+                chunk_header.len += 1;
+                false
             };
 
-            self.storage.chunks[chunk_id].states[id_in_chunk] =
+            self.chunks[chunk_id].states[id_in_chunk] =
                 self.update_neighbors_state(key, new_is_empty);
 
             if can_remove_chunk {
                 self.chunk_bvh.remove(chunk_id as u32);
-                let _ = self.storage.remove_chunk(&chunk_key);
+
+                #[cfg(feature = "enhanced-determinism")]
+                let _ = self.chunk_headers.swap_remove(&chunk_key);
+                #[cfg(not(feature = "enhanced-determinism"))]
+                let _ = self.chunk_headers.remove(&chunk_key);
+
+                self.free_chunks.push(chunk_id);
+                self.chunk_keys[chunk_id] = VoxelsChunk::INVALID_CHUNK_KEY;
             }
         }
 

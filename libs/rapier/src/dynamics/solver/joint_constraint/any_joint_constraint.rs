@@ -1,10 +1,10 @@
+use crate::dynamics::JointGraphEdge;
 use crate::dynamics::solver::joint_constraint::generic_joint_constraint::GenericJointConstraint;
 use crate::dynamics::solver::joint_constraint::joint_velocity_constraint::JointConstraint;
-use crate::dynamics::JointGraphEdge;
 use crate::math::{DVector, Real};
 
 #[cfg(feature = "simd-is-enabled")]
-use crate::math::{SimdReal, SIMD_WIDTH};
+use crate::math::{SIMD_WIDTH, SimdReal};
 
 use crate::dynamics::solver::solver_body::SolverBodies;
 

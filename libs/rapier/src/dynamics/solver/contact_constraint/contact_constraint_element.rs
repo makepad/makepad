@@ -1,5 +1,5 @@
 use crate::dynamics::solver::SolverVel;
-use crate::math::{TangentImpulse, DIM};
+use crate::math::{DIM, TangentImpulse};
 use crate::utils::{ComponentMul, DotProduct, ScalarType};
 use na::Vector2;
 use simba::simd::SimdValue;

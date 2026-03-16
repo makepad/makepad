@@ -3,8 +3,8 @@ use parry::utils::hashset::HashSet;
 use super::ImpulseJoint;
 use crate::geometry::{InteractionGraph, RigidBodyGraphIndex, TemporaryInteractionIndex};
 
-use crate::data::arena::Arena;
 use crate::data::Coarena;
+use crate::data::arena::Arena;
 use crate::dynamics::{GenericJoint, IslandManager, RigidBodyHandle, RigidBodySet};
 
 /// The unique identifier of a joint added to the joint set.
