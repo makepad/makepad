@@ -47,6 +47,8 @@ const DEPTH_TSD_MIN_MESH_CONFIDENCE: u8 = 3;
 const DEPTH_TSD_RECENT_MESH_CONFIDENCE: u8 = 1;
 const DEPTH_TSD_RECENT_MESH_GENERATIONS: u64 = 6;
 const DEPTH_TSD_RECENT_MESH_MAX_ABS_DISTANCE: f32 = 0.6;
+const DEPTH_TSD_DENSE_HOLE_FILL_MAX_PASSES: usize = 2;
+const DEPTH_TSD_DENSE_HOLE_FILL_MIN_AXIS_PAIRS: usize = 2;
 const DEPTH_TSD_STABLE_CONFIDENCE: u8 = 8;
 const DEPTH_PLAYER_CLEAR_MAX_CONFIDENCE: u8 = 2;
 const DEPTH_PLAYER_EXCLUDE_RADIUS_METERS: f32 = 0.32;
@@ -55,16 +57,9 @@ const DEPTH_PLAYER_EXCLUDE_BOTTOM_METERS: f32 = 1.30;
 const DEPTH_MESH_UPDATE_DISTANCE_METERS: f32 = 4.0;
 const DEPTH_SURFACE_MESH_CHUNKS_PER_TICK: usize = 1;
 const DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS: u64 = 8;
-const DEPTH_QUERY_BATCH_PER_TICK: usize = 8;
+const DEPTH_QUERY_BATCH_PER_TICK: usize = 24;
 const DEPTH_DEBUG_LOG_CHUNK_MESH_TIMING: bool = false;
-const DEPTH_QUERY_PATCH_RADIUS_METERS: f32 = 0.24;
-const DEPTH_QUERY_PATCH_PLANE_TOLERANCE_METERS: f32 = 0.035;
-const DEPTH_QUERY_PATCH_NORMAL_DOT: f32 = 0.93;
-const DEPTH_QUERY_PATCH_MARGIN_METERS: f32 = 0.025;
-const DEPTH_QUERY_PATCH_MIN_HALF_EXTENT_METERS: f32 = 0.05;
 const DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT: f32 = 0.2;
-const DEPTH_QUERY_TRIANGLE_DILATION: f32 = 1.5;
-const DEPTH_PLANE_REBUILD_INTERVAL_MILLIS: u64 = 250;
 const DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN: f32 = 0.82;
 const DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX: f32 = 0.35;
 const DEPTH_PLANE_VERTEX_LINK_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 0.75;
@@ -75,28 +70,8 @@ const DEPTH_PLANE_MIN_AREA_METERS2: f32 = 0.35;
 const DEPTH_PLANE_MIN_DIM_METERS: f32 = 0.30;
 const DEPTH_PLANE_MAX_PATCHES: usize = 24;
 const DEPTH_PLANE_REGION_VERTICAL_NORMAL_DOT: f32 = 0.94;
-const DEPTH_PLANE_TRACK_MATCH_NORMAL_DOT: f32 = 0.95;
-const DEPTH_PLANE_TRACK_MATCH_CENTER_DISTANCE_METERS: f32 = 0.45;
-const DEPTH_PLANE_TRACK_MATCH_PLANE_DISTANCE_METERS: f32 = 0.20;
-const DEPTH_PLANE_TRACK_MAX_MISSES: u32 = 10;
-const DEPTH_PLANE_TRACK_STABLE_HORIZONTAL_MAX_MISSES: u32 = 30;
-const DEPTH_PLANE_TRACK_STABLE_HITS: u32 = 2;
-const DEPTH_PLANE_TRACK_WALL_MATCH_NORMAL_DOT: f32 = 0.93;
-const DEPTH_PLANE_TRACK_WALL_MATCH_CENTER_DISTANCE_METERS: f32 = 0.65;
-const DEPTH_PLANE_TRACK_WALL_MATCH_PLANE_DISTANCE_METERS: f32 = 0.25;
-const DEPTH_PLANE_TRACK_MODEL_ALPHA: f32 = 0.18;
-const DEPTH_PLANE_TRACK_STABLE_MODEL_ALPHA: f32 = 0.06;
-const DEPTH_PLANE_TRACK_STABLE_HORIZONTAL_DISTANCE_STEP_METERS: f32 = 0.02;
-const DEPTH_PLANE_TRACK_STABLE_WALL_DISTANCE_STEP_METERS: f32 = 0.05;
-const DEPTH_PLANE_TRACK_HORIZONTAL_EXPAND_ALPHA: f32 = 0.30;
-const DEPTH_PLANE_TRACK_HORIZONTAL_SHRINK_ALPHA: f32 = 0.08;
-const DEPTH_PLANE_TRACK_HORIZONTAL_STABLE_SHRINK_ALPHA: f32 = 0.02;
-const DEPTH_PLANE_TRACK_CENTER_ALPHA: f32 = 0.18;
-const DEPTH_PLANE_TRACK_STABLE_CENTER_ALPHA: f32 = 0.07;
-const DEPTH_PLANE_PATCH_MERGE_GAP_METERS: f32 = 0.35;
 const DEPTH_PLANE_SUPPORT_CELL_METERS: f32 = 0.12;
 const DEPTH_PLANE_SUPPORT_GROW_WEIGHT: u8 = 4;
-const DEPTH_PLANE_SUPPORT_DECAY_WEIGHT: u8 = 1;
 const DEPTH_PLANE_SUPPORT_MAX_WEIGHT: u8 = 10;
 const DEPTH_PLANE_SUPPORT_OCCUPIED_WEIGHT: u8 = 2;
 const DEPTH_MESH_PLANAR_SIMPLIFY_MIN_AREA_METERS2: f32 = 0.45;
@@ -425,6 +400,7 @@ impl SparseTsdGrid {
         config: SparseVoxelMeshingConfig,
         current_generation: u64,
         dense: &mut Vec<f32>,
+        fill_scratch: &mut Vec<f32>,
     ) -> Option<SurfaceMesh32> {
         let edge = config.mesh_chunk_edge_voxels();
         let overlap = config.mesh_chunk_overlap_voxels();
@@ -440,6 +416,7 @@ impl SparseTsdGrid {
             align_extent(extent.z, stride),
         );
         self.extract_dense_region_into(start, dense_size, current_generation, dense);
+        repair_dense_meshing_holes(dense, fill_scratch, dense_size);
         lasertag_surface_net_mesh_from_dense(dense, dense_size, self.voxel_size, start, stride)
     }
 
@@ -513,6 +490,78 @@ impl SparseTsdGrid {
         let edge = self.chunk_edge as usize;
         let id = lx + ly * edge + lz * edge * edge;
         (VoxelCoord::new(cx, cy, cz), id)
+    }
+}
+
+fn repair_dense_meshing_holes(dense: &mut Vec<f32>, scratch: &mut Vec<f32>, extent: VoxelCoord) {
+    let sx = extent.x.max(0) as usize;
+    let sy = extent.y.max(0) as usize;
+    let sz = extent.z.max(0) as usize;
+    if sx < 3 || sy < 3 || sz < 3 || dense.len() != sx * sy * sz {
+        return;
+    }
+
+    scratch.clear();
+    scratch.resize(dense.len(), f32::NEG_INFINITY);
+
+    for _ in 0..DEPTH_TSD_DENSE_HOLE_FILL_MAX_PASSES {
+        scratch.as_mut_slice().copy_from_slice(dense.as_slice());
+        let mut changed = false;
+
+        for z in 1..(sz - 1) {
+            for y in 1..(sy - 1) {
+                for x in 1..(sx - 1) {
+                    let coord = VoxelCoord::new(x as i32, y as i32, z as i32);
+                    let index = flatten_coord(coord, extent);
+                    if dense[index].is_finite() {
+                        continue;
+                    }
+
+                    let mut pair_sum = 0.0f32;
+                    let mut pair_count = 0usize;
+                    let mut sign_vote = 0i32;
+
+                    for axis in [
+                        VoxelCoord::new(1, 0, 0),
+                        VoxelCoord::new(0, 1, 0),
+                        VoxelCoord::new(0, 0, 1),
+                    ] {
+                        let a = dense[flatten_coord(coord - axis, extent)];
+                        let b = dense[flatten_coord(coord + axis, extent)];
+                        if !a.is_finite() || !b.is_finite() {
+                            continue;
+                        }
+                        pair_sum += (a + b) * 0.5;
+                        pair_count += 1;
+                        let a_sign = a < 0.0;
+                        let b_sign = b < 0.0;
+                        if a_sign == b_sign {
+                            sign_vote += if a_sign { -1 } else { 1 };
+                        }
+                    }
+
+                    if pair_count < DEPTH_TSD_DENSE_HOLE_FILL_MIN_AXIS_PAIRS {
+                        continue;
+                    }
+
+                    let mut fill = pair_sum / pair_count as f32;
+                    if fill.abs() <= 1.0e-4 && sign_vote != 0 {
+                        fill = if sign_vote < 0 { -0.02 } else { 0.02 };
+                    }
+                    if !fill.is_finite() {
+                        continue;
+                    }
+
+                    scratch[index] = fill;
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+        dense.as_mut_slice().copy_from_slice(scratch.as_slice());
     }
 }
 
@@ -850,6 +899,7 @@ struct DepthPreprocessWorkerState {
 #[derive(Default)]
 struct DepthMesherWorkerState {
     mesh_scratch: Vec<f32>,
+    mesh_fill_scratch: Vec<f32>,
 }
 
 fn depth_preprocess_worker(
@@ -893,6 +943,7 @@ fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: 
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
+        let query_changed = process_geometry_queries(&volume, &store, DEPTH_QUERY_BATCH_PER_TICK);
         let mesh_changed = process_incremental_surface_mesh(
             &mut volume,
             &mut worker_state,
@@ -903,7 +954,6 @@ fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: 
         } else {
             false
         };
-        let query_changed = process_geometry_queries(&volume, &store, DEPTH_QUERY_BATCH_PER_TICK);
         if applied_update || mesh_changed || plane_changed || query_changed {
             store.publish(volume.snapshot());
             SignalToUI::set_ui_signal();
@@ -1612,6 +1662,7 @@ fn process_incremental_surface_mesh(
                 volume.mesh_config,
                 volume.generation,
                 &mut worker_state.mesh_scratch,
+                &mut worker_state.mesh_fill_scratch,
             );
         if DEPTH_DEBUG_LOG_CHUNK_MESH_TIMING {
             let elapsed = started.elapsed().as_secs_f32() * 1000.0;
@@ -1719,27 +1770,10 @@ struct ExtractedPlaneTriangle {
 }
 
 #[derive(Clone, Debug)]
-struct ExtractedPlanePatchCandidate {
-    patch: XrDepthPlanePatch,
-    support_triangles_world: Vec<[Vec3f; 3]>,
-}
-
-#[derive(Clone, Debug)]
 struct SimplifiedPlaneRegion {
     group: ExtractedPlaneGroup,
     source_triangle_indices: Vec<usize>,
     triangles: Vec<ExtractedPlaneTriangle>,
-}
-
-#[derive(Clone, Debug)]
-struct TrackedPlanePatch {
-    stable_id: u64,
-    patch: XrDepthPlanePatch,
-    model_normal: Vec3f,
-    model_distance: f32,
-    hit_count: u32,
-    miss_count: u32,
-    support_mask: PlaneSupportMask,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1756,6 +1790,21 @@ struct OrientedRect2 {
     axis_v: Vec2f,
     half_u: f32,
     half_v: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PlanarRectCoverage {
+    min_u: f32,
+    max_u: f32,
+    min_v: f32,
+    max_v: f32,
+}
+
+#[derive(Clone, Debug)]
+struct EmittedPlanarRegion {
+    tangent: Vec3f,
+    bitangent: Vec3f,
+    rects: Vec<PlanarRectCoverage>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1776,25 +1825,15 @@ struct PlaneSupportComponent {
     max_u: i32,
     min_v: i32,
     max_v: i32,
-    total_weight: u32,
-    centroid_u: f32,
-    centroid_v: f32,
-    contains_anchor: bool,
 }
 
 fn rebuild_reduced_planar_patches(volume: &mut DepthMeshVolume) -> bool {
-    let mut candidates = volume
+    let mut plane_patches = volume
         .mesh_chunks
         .iter()
-        .flat_map(|chunk| {
-            chunk.planar_patches.iter().cloned().map(|patch| ExtractedPlanePatchCandidate {
-                patch,
-                support_triangles_world: Vec::new(),
-            })
-        })
+        .flat_map(|chunk| chunk.planar_patches.iter().cloned())
         .collect::<Vec<_>>();
-    classify_plane_patch_kinds(&mut candidates);
-    let mut plane_patches = candidates.into_iter().map(|candidate| candidate.patch).collect::<Vec<_>>();
+    classify_plane_patch_kinds(&mut plane_patches);
     plane_patches.sort_by(|a, b| {
         b.area
             .partial_cmp(&a.area)
@@ -1825,47 +1864,6 @@ fn rebuild_reduced_planar_patches(volume: &mut DepthMeshVolume) -> bool {
     volume.plane_generation = next_generation;
     volume.update_sequence = volume.update_sequence.saturating_add(1);
     true
-}
-
-fn rebuild_plane_patches_from_mesh(mesh_chunks: &[XrDepthMeshChunk]) -> Vec<ExtractedPlanePatchCandidate> {
-    let simplified_regions = simplify_plane_mesh_regions(mesh_chunks);
-    let mut patches = Vec::new();
-    for region in simplified_regions {
-        let region_indices: Vec<usize> = (0..region.triangles.len()).collect();
-        let Some(mut patch) =
-            fit_plane_patch_from_region(region.group, &region.triangles, &region_indices)
-        else {
-            continue;
-        };
-        patch.support_triangles = region.triangles.len();
-        let kind = match region.group {
-            ExtractedPlaneGroup::HorizontalUp => XrDepthPlaneKind::Unknown,
-            ExtractedPlaneGroup::HorizontalDown => XrDepthPlaneKind::Ceiling,
-            ExtractedPlaneGroup::Vertical => XrDepthPlaneKind::Wall,
-        };
-        patch.kind = kind;
-        patches.push(ExtractedPlanePatchCandidate {
-            patch,
-            support_triangles_world: region
-                .triangles
-                .iter()
-                .map(|triangle| triangle.vertices)
-                .collect(),
-        });
-    }
-    classify_plane_patch_kinds(&mut patches);
-    patches.sort_by(|a, b| {
-        b.patch
-            .area
-            .partial_cmp(&a.patch.area)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    patches.truncate(DEPTH_PLANE_MAX_PATCHES);
-    patches
-}
-
-fn simplify_plane_mesh_regions(mesh_chunks: &[XrDepthMeshChunk]) -> Vec<SimplifiedPlaneRegion> {
-    simplify_plane_regions(collect_classified_plane_triangles(mesh_chunks))
 }
 
 fn simplify_plane_regions(triangles: Vec<ExtractedPlaneTriangle>) -> Vec<SimplifiedPlaneRegion> {
@@ -1953,52 +1951,6 @@ fn simplify_plane_regions(triangles: Vec<ExtractedPlaneTriangle>) -> Vec<Simplif
     }
 
     regions
-}
-
-fn collect_classified_plane_triangles(mesh_chunks: &[XrDepthMeshChunk]) -> Vec<ExtractedPlaneTriangle> {
-    let mut triangles = Vec::new();
-    let mut source_triangle_index = 0usize;
-    for chunk in mesh_chunks {
-        for triangle in chunk.indices.chunks_exact(3) {
-            let a = chunk.vertices[triangle[0] as usize];
-            let b = chunk.vertices[triangle[1] as usize];
-            let c = chunk.vertices[triangle[2] as usize];
-            let normal_area = Vec3f::cross(b - a, c - a);
-            let area_twice = normal_area.length();
-            if area_twice <= 1.0e-5 {
-                continue;
-            }
-            let area = area_twice * 0.5;
-            if area <= 0.0025 {
-                continue;
-            }
-            let normal = normal_area.scale(1.0 / area_twice);
-            let centroid = (a + b + c).scale(1.0 / 3.0);
-            let group = if normal.y >= DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
-                Some(ExtractedPlaneGroup::HorizontalUp)
-            } else if normal.y <= -DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
-                Some(ExtractedPlaneGroup::HorizontalDown)
-            } else if normal.y.abs() <= DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX {
-                Some(ExtractedPlaneGroup::Vertical)
-            } else {
-                None
-            };
-            let Some(group) = group else {
-                source_triangle_index += 1;
-                continue;
-            };
-            triangles.push(ExtractedPlaneTriangle {
-                source_triangle_index,
-                group,
-                area,
-                normal,
-                centroid,
-                vertices: [a, b, c],
-            });
-            source_triangle_index += 1;
-        }
-    }
-    triangles
 }
 
 fn collect_classified_plane_triangles_from_surface_mesh(mesh: &SurfaceMesh32) -> Vec<ExtractedPlaneTriangle> {
@@ -2447,362 +2399,43 @@ fn orient2(a: Vec2f, b: Vec2f, c: Vec2f) -> f32 {
     cross2(b - a, c - a)
 }
 
-fn classify_plane_patch_kinds(patches: &mut [ExtractedPlanePatchCandidate]) {
+fn classify_plane_patch_kinds(patches: &mut [XrDepthPlanePatch]) {
     let mut floor_y = None;
     let mut floor_area = 0.0f32;
     let mut min_up_y = f32::INFINITY;
     for patch in patches.iter() {
-        if patch.patch.normal.y > DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
-            min_up_y = min_up_y.min(patch.patch.center.y);
+        if patch.normal.y > DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
+            min_up_y = min_up_y.min(patch.center.y);
         }
     }
     for patch in patches.iter() {
-        if patch.patch.normal.y > DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN
-            && patch.patch.center.y <= min_up_y + 0.25
-            && patch.patch.area > floor_area
+        if patch.normal.y > DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN
+            && patch.center.y <= min_up_y + 0.25
+            && patch.area > floor_area
         {
-            floor_area = patch.patch.area;
-            floor_y = Some(patch.patch.center.y);
+            floor_area = patch.area;
+            floor_y = Some(patch.center.y);
         }
     }
 
     for patch in patches.iter_mut() {
-        if patch.patch.normal.y > DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
-            patch.patch.kind = if floor_y
-                .map(|y| patch.patch.center.y <= y + 0.18)
+        if patch.normal.y > DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
+            patch.kind = if floor_y
+                .map(|y| patch.center.y <= y + 0.18)
                 .unwrap_or(false)
             {
                 XrDepthPlaneKind::Floor
             } else {
                 XrDepthPlaneKind::Table
             };
-        } else if patch.patch.normal.y < -DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
-            patch.patch.kind = XrDepthPlaneKind::Ceiling;
-        } else if patch.patch.normal.y.abs() <= DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX {
-            patch.patch.kind = XrDepthPlaneKind::Wall;
+        } else if patch.normal.y < -DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
+            patch.kind = XrDepthPlaneKind::Ceiling;
+        } else if patch.normal.y.abs() <= DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX {
+            patch.kind = XrDepthPlaneKind::Wall;
         } else {
-            patch.patch.kind = XrDepthPlaneKind::Unknown;
+            patch.kind = XrDepthPlaneKind::Unknown;
         }
     }
-}
-
-fn track_plane_patches(
-    existing: Vec<TrackedPlanePatch>,
-    incoming: Vec<ExtractedPlanePatchCandidate>,
-    next_plane_stable_id: &mut u64,
-) -> Vec<TrackedPlanePatch> {
-    let mut horizontal_incoming = Vec::new();
-    let mut wall_incoming = Vec::new();
-    for patch in incoming {
-        if patch.patch.kind == XrDepthPlaneKind::Wall {
-            wall_incoming.push(patch);
-        } else {
-            horizontal_incoming.push(patch);
-        }
-    }
-    let mut incoming = horizontal_incoming;
-    incoming.extend(merge_coplanar_patches(wall_incoming));
-
-    let mut matched_existing = vec![false; existing.len()];
-    let mut tracked = Vec::with_capacity(existing.len().max(incoming.len()));
-    let mut grouped_incoming = vec![Vec::<ExtractedPlanePatchCandidate>::new(); existing.len()];
-    let mut unmatched_incoming = Vec::new();
-
-    for patch in incoming {
-        let mut best_index = None;
-        let mut best_score = f32::INFINITY;
-        for (index, current) in existing.iter().enumerate() {
-            let Some(score) = plane_patch_match_score(&current.patch, &patch.patch) else {
-                continue;
-            };
-            if score < best_score {
-                best_score = score;
-                best_index = Some(index);
-            }
-        }
-
-        if let Some(index) = best_index {
-            matched_existing[index] = true;
-            grouped_incoming[index].push(patch);
-        } else {
-            unmatched_incoming.push(patch);
-        }
-    }
-
-    for (index, current) in existing.into_iter().enumerate() {
-        if matched_existing[index] {
-            tracked.push(update_tracked_plane_patch(&current, &grouped_incoming[index]));
-            continue;
-        }
-        let miss_count = current.miss_count.saturating_add(1);
-        let max_misses = if is_horizontal_plane_kind(current.patch.kind)
-            && current.hit_count >= DEPTH_PLANE_TRACK_STABLE_HITS
-        {
-            DEPTH_PLANE_TRACK_STABLE_HORIZONTAL_MAX_MISSES
-        } else {
-            DEPTH_PLANE_TRACK_MAX_MISSES
-        };
-        if miss_count > max_misses {
-            continue;
-        }
-        if current.hit_count < DEPTH_PLANE_TRACK_STABLE_HITS {
-            continue;
-        }
-        tracked.push(TrackedPlanePatch {
-            stable_id: current.stable_id,
-            patch: current.patch,
-            model_normal: current.model_normal,
-            model_distance: current.model_distance,
-            hit_count: current.hit_count,
-            miss_count,
-            support_mask: current.support_mask,
-        });
-    }
-
-    for patch in unmatched_incoming {
-        tracked.push(create_tracked_plane_patch(*next_plane_stable_id, patch));
-        *next_plane_stable_id = next_plane_stable_id.saturating_add(1);
-    }
-
-    tracked.sort_by(|a, b| {
-        b.patch
-            .area
-            .partial_cmp(&a.patch.area)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.stable_id.cmp(&b.stable_id))
-    });
-    tracked.truncate(DEPTH_PLANE_MAX_PATCHES.saturating_mul(2));
-    tracked
-}
-
-fn create_tracked_plane_patch(
-    stable_id: u64,
-    incoming: ExtractedPlanePatchCandidate,
-) -> TrackedPlanePatch {
-    let kind = incoming.patch.kind;
-    let mut support_mask = PlaneSupportMask::default();
-    rasterize_support_triangles_into_mask(
-        &mut support_mask,
-        &incoming.support_triangles_world,
-        incoming.patch.tangent,
-        incoming.patch.bitangent,
-    );
-    let center_u = incoming.patch.center.dot(incoming.patch.tangent);
-    let center_v = incoming.patch.center.dot(incoming.patch.bitangent);
-    let anchor = quantize_plane_support_cell(center_u, center_v);
-    let patch = select_plane_support_component(kind, &support_mask, anchor, center_u, center_v)
-        .and_then(|component| {
-            retain_plane_support_component(kind, &mut support_mask, &component);
-            fit_patch_from_support_component(
-                kind,
-                incoming.patch.normal,
-                incoming.patch.tangent,
-                incoming.patch.bitangent,
-                incoming.patch.center.dot(incoming.patch.normal),
-                &component,
-                incoming.patch.support_triangles,
-            )
-        })
-        .unwrap_or(incoming.patch);
-    let model_normal = patch.normal;
-    let model_distance = patch.center.dot(model_normal);
-    TrackedPlanePatch {
-        stable_id,
-        patch,
-        model_normal,
-        model_distance,
-        hit_count: 1,
-        miss_count: 0,
-        support_mask,
-    }
-}
-
-fn update_tracked_plane_patch(
-    current: &TrackedPlanePatch,
-    incoming_group: &[ExtractedPlanePatchCandidate],
-) -> TrackedPlanePatch {
-    if incoming_group.is_empty() {
-        return current.clone();
-    }
-
-    let (observed_normal, tangent, bitangent) = tracked_plane_basis(current, incoming_group);
-    let mut support_mask = current.support_mask.clone();
-    if current.patch.kind == XrDepthPlaneKind::Wall
-        || current.hit_count < DEPTH_PLANE_TRACK_STABLE_HITS
-    {
-        decay_plane_support_mask(&mut support_mask);
-    }
-
-    let mut support_triangles = current.patch.support_triangles;
-    let mut kind = current.patch.kind;
-    let mut fallback = None::<XrDepthPlanePatch>;
-
-    for incoming in incoming_group {
-        let reframed =
-            reframe_patch_onto_basis(&incoming.patch, observed_normal, tangent, bitangent);
-        support_triangles = support_triangles.max(incoming.patch.support_triangles);
-        kind = choose_plane_kind(kind, incoming.patch.kind);
-        rasterize_support_triangles_into_mask(
-            &mut support_mask,
-            &incoming.support_triangles_world,
-            tangent,
-            bitangent,
-        );
-        fallback = Some(match fallback {
-            Some(existing) => {
-                if kind == XrDepthPlaneKind::Wall {
-                    merge_vertical_patch_pair(&existing, &reframed)
-                } else {
-                    merge_reframed_horizontal_patches(
-                        &existing,
-                        &reframed,
-                        observed_normal,
-                        tangent,
-                        bitangent,
-                    )
-                }
-            }
-            None => reframed,
-        });
-    }
-
-    let current_center_u = current.patch.center.dot(tangent);
-    let current_center_v = current.patch.center.dot(bitangent);
-    let anchor = quantize_plane_support_cell(current_center_u, current_center_v);
-    let stable = current.hit_count >= DEPTH_PLANE_TRACK_STABLE_HITS;
-    let mut model_normal = if current.patch.kind == XrDepthPlaneKind::Wall {
-        blend_tracked_model_normal(current.model_normal, observed_normal, stable)
-    } else {
-        current.model_normal
-    };
-    if model_normal.length() <= 1.0e-5 {
-        model_normal = current.model_normal;
-    }
-
-    let next_patch = if let Some(component) = select_plane_support_component(
-        kind,
-        &support_mask,
-        anchor,
-        current_center_u,
-        current_center_v,
-    ) {
-        let observed_distance = plane_distance_for_component(
-            current,
-            incoming_group,
-            model_normal,
-            tangent,
-            bitangent,
-            &component,
-        );
-        let model_distance = blend_tracked_model_distance(
-            current.model_distance,
-            observed_distance,
-            current.patch.kind,
-            stable,
-        );
-        retain_plane_support_component(kind, &mut support_mask, &component);
-        fit_patch_from_support_component(
-            kind,
-            model_normal,
-            tangent,
-            bitangent,
-            model_distance,
-            &component,
-            support_triangles,
-        )
-        .or(fallback)
-        .unwrap_or_else(|| current.patch.clone())
-    } else {
-        fallback.unwrap_or_else(|| current.patch.clone())
-    };
-
-    TrackedPlanePatch {
-        stable_id: current.stable_id,
-        patch: blend_tracked_plane_patch(current, &next_patch),
-        model_normal,
-        model_distance: next_patch.center.dot(model_normal),
-        hit_count: current.hit_count.saturating_add(1),
-        miss_count: 0,
-        support_mask,
-    }
-}
-
-fn tracked_plane_basis(
-    current: &TrackedPlanePatch,
-    incoming_group: &[ExtractedPlanePatchCandidate],
-) -> (Vec3f, Vec3f, Vec3f) {
-    if current.patch.kind != XrDepthPlaneKind::Wall {
-        return (
-            current.model_normal,
-            current.patch.tangent,
-            current.patch.bitangent,
-        );
-    }
-
-    let mut normal_sum = current
-        .model_normal
-        .scale(current.patch.area.max(0.001));
-    for incoming in incoming_group {
-        let aligned = align_direction(current.model_normal, incoming.patch.normal);
-        normal_sum += aligned.scale(incoming.patch.area.max(0.001));
-    }
-    let normal = if normal_sum.length() > 1.0e-5 {
-        normal_sum.normalize()
-    } else {
-        current.model_normal
-    };
-    let mut tangent = current.patch.tangent - normal.scale(current.patch.tangent.dot(normal));
-    if tangent.length() <= 1.0e-5 {
-        tangent = (vec3f(0.0, 1.0, 0.0) - normal.scale(normal.y)).normalize();
-    } else {
-        tangent = tangent.normalize();
-    }
-    if tangent.length() <= 1.0e-5 {
-        tangent = orthogonal_tangent(normal);
-    }
-    let mut bitangent = Vec3f::cross(normal, tangent).normalize();
-    if bitangent.length() <= 1.0e-5 {
-        bitangent = current.patch.bitangent;
-    }
-    (normal, tangent, bitangent)
-}
-
-fn blend_tracked_model_normal(current: Vec3f, observed: Vec3f, stable: bool) -> Vec3f {
-    let alpha = if stable {
-        DEPTH_PLANE_TRACK_STABLE_MODEL_ALPHA
-    } else {
-        DEPTH_PLANE_TRACK_MODEL_ALPHA
-    };
-    blend_direction(current, observed, alpha)
-}
-
-fn blend_tracked_model_distance(
-    current: f32,
-    observed: f32,
-    kind: XrDepthPlaneKind,
-    stable: bool,
-) -> f32 {
-    let alpha = if stable {
-        DEPTH_PLANE_TRACK_STABLE_MODEL_ALPHA
-    } else {
-        DEPTH_PLANE_TRACK_MODEL_ALPHA
-    };
-    let max_step = if stable && is_horizontal_plane_kind(kind) {
-        DEPTH_PLANE_TRACK_STABLE_HORIZONTAL_DISTANCE_STEP_METERS
-    } else if stable && kind == XrDepthPlaneKind::Wall {
-        DEPTH_PLANE_TRACK_STABLE_WALL_DISTANCE_STEP_METERS
-    } else {
-        f32::INFINITY
-    };
-    let clamped_observed = current + (observed - current).clamp(-max_step, max_step);
-    current * (1.0 - alpha) + clamped_observed * alpha
-}
-
-fn decay_plane_support_mask(mask: &mut PlaneSupportMask) {
-    mask.cells.retain(|_, weight| {
-        *weight = weight.saturating_sub(DEPTH_PLANE_SUPPORT_DECAY_WEIGHT);
-        *weight > 0
-    });
 }
 
 fn rasterize_support_triangles_into_mask(
@@ -2862,241 +2495,6 @@ fn quantize_plane_support_cell(u: f32, v: f32) -> PlaneSupportCellKey {
         u: (u * inv).floor() as i32,
         v: (v * inv).floor() as i32,
     }
-}
-
-fn select_plane_support_component(
-    kind: XrDepthPlaneKind,
-    mask: &PlaneSupportMask,
-    anchor: PlaneSupportCellKey,
-    anchor_u: f32,
-    anchor_v: f32,
-) -> Option<PlaneSupportComponent> {
-    let occupied: HashMap<PlaneSupportCellKey, u8> = mask
-        .cells
-        .iter()
-        .filter_map(|(&key, &weight)| {
-            (weight >= DEPTH_PLANE_SUPPORT_OCCUPIED_WEIGHT).then_some((key, weight))
-        })
-        .collect();
-    if occupied.is_empty() {
-        return None;
-    }
-
-    let mut visited = HashSet::new();
-    let mut best = None::<PlaneSupportComponent>;
-    let mut best_anchor = false;
-    let mut best_weight = 0u32;
-    let mut best_distance = f32::INFINITY;
-
-    for &start in occupied.keys() {
-        if !visited.insert(start) {
-            continue;
-        }
-
-        let mut queue = VecDeque::from([start]);
-        let mut component = PlaneSupportComponent {
-            min_u: start.u,
-            max_u: start.u,
-            min_v: start.v,
-            max_v: start.v,
-            ..PlaneSupportComponent::default()
-        };
-        let mut weighted_u_sum = 0.0f32;
-        let mut weighted_v_sum = 0.0f32;
-
-        while let Some(cell) = queue.pop_front() {
-            component.cells.push(cell);
-            component.min_u = component.min_u.min(cell.u);
-            component.max_u = component.max_u.max(cell.u);
-            component.min_v = component.min_v.min(cell.v);
-            component.max_v = component.max_v.max(cell.v);
-            if cell == anchor {
-                component.contains_anchor = true;
-            }
-            let weight = *occupied.get(&cell).unwrap_or(&0) as u32;
-            component.total_weight += weight;
-            weighted_u_sum += (cell.u as f32 + 0.5) * DEPTH_PLANE_SUPPORT_CELL_METERS * weight as f32;
-            weighted_v_sum += (cell.v as f32 + 0.5) * DEPTH_PLANE_SUPPORT_CELL_METERS * weight as f32;
-
-            for (du, dv) in plane_support_neighbor_offsets(kind) {
-                let neighbor = PlaneSupportCellKey {
-                    u: cell.u + du,
-                    v: cell.v + dv,
-                };
-                if occupied.contains_key(&neighbor) && visited.insert(neighbor) {
-                    queue.push_back(neighbor);
-                }
-            }
-        }
-
-        if component.total_weight == 0 {
-            continue;
-        }
-        component.centroid_u = weighted_u_sum / component.total_weight as f32;
-        component.centroid_v = weighted_v_sum / component.total_weight as f32;
-
-        let anchor_distance = ((component.centroid_u - anchor_u).powi(2)
-            + (component.centroid_v - anchor_v).powi(2))
-        .sqrt();
-        if component.contains_anchor && !best_anchor
-            || component.contains_anchor == best_anchor
-                && (component.total_weight > best_weight
-                    || component.total_weight == best_weight && anchor_distance < best_distance)
-        {
-            best_anchor = component.contains_anchor;
-            best_weight = component.total_weight;
-            best_distance = anchor_distance;
-            best = Some(component);
-        }
-    }
-
-    best
-}
-
-fn retain_plane_support_component(
-    kind: XrDepthPlaneKind,
-    mask: &mut PlaneSupportMask,
-    component: &PlaneSupportComponent,
-) {
-    let mut keep = HashSet::new();
-    let dilation_radius = plane_support_dilation_radius(kind, component);
-    for &cell in &component.cells {
-        for du in -dilation_radius..=dilation_radius {
-            for dv in -dilation_radius..=dilation_radius {
-                if dilation_radius == 0 && (du != 0 || dv != 0) {
-                    continue;
-                }
-                keep.insert(PlaneSupportCellKey {
-                    u: cell.u + du,
-                    v: cell.v + dv,
-                });
-            }
-        }
-    }
-    mask.cells.retain(|key, _| keep.contains(key));
-}
-
-fn plane_support_neighbor_offsets(kind: XrDepthPlaneKind) -> &'static [(i32, i32)] {
-    const CARDINAL: &[(i32, i32)] = &[(1, 0), (-1, 0), (0, 1), (0, -1)];
-    const EIGHT_CONNECTED: &[(i32, i32)] = &[
-        (1, 0),
-        (-1, 0),
-        (0, 1),
-        (0, -1),
-        (1, 1),
-        (1, -1),
-        (-1, 1),
-        (-1, -1),
-    ];
-    if kind == XrDepthPlaneKind::Table {
-        CARDINAL
-    } else {
-        EIGHT_CONNECTED
-    }
-}
-
-fn plane_support_dilation_radius(kind: XrDepthPlaneKind, component: &PlaneSupportComponent) -> i32 {
-    if kind == XrDepthPlaneKind::Table || component.cells.len() <= 16 {
-        0
-    } else {
-        1
-    }
-}
-
-fn plane_distance_for_component(
-    current: &TrackedPlanePatch,
-    incoming_group: &[ExtractedPlanePatchCandidate],
-    normal: Vec3f,
-    tangent: Vec3f,
-    bitangent: Vec3f,
-    component: &PlaneSupportComponent,
-) -> f32 {
-    let mut distance_sum = 0.0f32;
-    let mut weight_sum = 0.0f32;
-    for incoming in incoming_group {
-        for triangle in &incoming.support_triangles_world {
-            let centroid = (triangle[0] + triangle[1] + triangle[2]).scale(1.0 / 3.0);
-            let cell = quantize_plane_support_cell(
-                centroid.dot(tangent),
-                centroid.dot(bitangent),
-            );
-            if cell.u < component.min_u
-                || cell.u > component.max_u
-                || cell.v < component.min_v
-                || cell.v > component.max_v
-            {
-                continue;
-            }
-            let triangle_normal =
-                Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]);
-            let area_twice = triangle_normal.length();
-            if area_twice <= 1.0e-6 {
-                continue;
-            }
-            let area = area_twice * 0.5;
-            let aligned_normal = align_direction(normal, triangle_normal.scale(1.0 / area_twice));
-            if aligned_normal.dot(normal) < 0.85 {
-                continue;
-            }
-            distance_sum += centroid.dot(normal) * area;
-            weight_sum += area;
-        }
-    }
-    if weight_sum > 0.0 {
-        distance_sum / weight_sum
-    } else {
-        current.model_distance
-    }
-}
-
-fn fit_patch_from_support_component(
-    kind: XrDepthPlaneKind,
-    normal: Vec3f,
-    tangent: Vec3f,
-    bitangent: Vec3f,
-    plane_distance: f32,
-    component: &PlaneSupportComponent,
-    support_triangles: usize,
-) -> Option<XrDepthPlanePatch> {
-    let (min_u_cell, max_u_cell, min_v_cell, max_v_cell) = if kind == XrDepthPlaneKind::Table {
-        largest_supported_rectangle(component).unwrap_or((
-            component.min_u,
-            component.max_u,
-            component.min_v,
-            component.max_v,
-        ))
-    } else {
-        (
-            component.min_u,
-            component.max_u,
-            component.min_v,
-            component.max_v,
-        )
-    };
-    let min_u = min_u_cell as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
-    let max_u = (max_u_cell + 1) as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
-    let min_v = min_v_cell as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
-    let max_v = (max_v_cell + 1) as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
-    let width = max_u - min_u;
-    let height = max_v - min_v;
-    if width < DEPTH_PLANE_MIN_DIM_METERS || height < DEPTH_PLANE_MIN_DIM_METERS {
-        return None;
-    }
-
-    let center_u = (min_u + max_u) * 0.5;
-    let center_v = (min_v + max_v) * 0.5;
-    Some(XrDepthPlanePatch {
-        generation: 0,
-        kind,
-        center: normal.scale(plane_distance) + tangent.scale(center_u) + bitangent.scale(center_v),
-        normal,
-        tangent,
-        bitangent,
-        half_extent_tangent: width * 0.5,
-        half_extent_bitangent: height * 0.5,
-        area: width * height,
-        support_triangles,
-    })
 }
 
 fn largest_supported_rectangle(
@@ -3173,344 +2571,6 @@ fn point_segment_distance_2d(p: Vec2f, a: Vec2f, b: Vec2f) -> f32 {
     (p - projected).length()
 }
 
-fn plane_patch_match_score(existing: &XrDepthPlanePatch, incoming: &XrDepthPlanePatch) -> Option<f32> {
-    if !plane_kinds_match(existing.kind, incoming.kind) {
-        return None;
-    }
-
-    let is_wall = existing.kind == XrDepthPlaneKind::Wall || incoming.kind == XrDepthPlaneKind::Wall;
-    let min_normal_dot = if is_wall {
-        DEPTH_PLANE_TRACK_WALL_MATCH_NORMAL_DOT
-    } else {
-        DEPTH_PLANE_TRACK_MATCH_NORMAL_DOT
-    };
-    let base_center_distance = if is_wall {
-        DEPTH_PLANE_TRACK_WALL_MATCH_CENTER_DISTANCE_METERS
-    } else {
-        DEPTH_PLANE_TRACK_MATCH_CENTER_DISTANCE_METERS
-    };
-    let max_plane_distance = if is_wall {
-        DEPTH_PLANE_TRACK_WALL_MATCH_PLANE_DISTANCE_METERS
-    } else {
-        DEPTH_PLANE_TRACK_MATCH_PLANE_DISTANCE_METERS
-    };
-
-    let dynamic_center_distance = existing
-        .half_extent_tangent
-        .max(existing.half_extent_bitangent)
-        + incoming
-            .half_extent_tangent
-            .max(incoming.half_extent_bitangent)
-        + 0.35;
-    let max_center_distance = base_center_distance.max(dynamic_center_distance);
-
-    let normal_dot = existing.normal.dot(incoming.normal);
-    if normal_dot < min_normal_dot {
-        return None;
-    }
-
-    let center_delta = incoming.center - existing.center;
-    let center_distance = center_delta.length();
-    let overlap_ratio = plane_patch_overlap_ratio(existing, incoming);
-    if center_distance > max_center_distance && overlap_ratio < 0.05 {
-        return None;
-    }
-
-    let plane_distance = center_delta.dot(existing.normal).abs();
-    if plane_distance > max_plane_distance {
-        return None;
-    }
-
-    let lateral_distance = (center_delta - existing.normal.scale(center_delta.dot(existing.normal)))
-        .length();
-    let lateral_limit = existing
-        .half_extent_tangent
-        .max(existing.half_extent_bitangent)
-        .max(incoming.half_extent_tangent.max(incoming.half_extent_bitangent))
-        + 0.25;
-    if lateral_distance > lateral_limit {
-        return None;
-    }
-
-    let extent_delta = (existing.half_extent_tangent - incoming.half_extent_tangent).abs()
-        + (existing.half_extent_bitangent - incoming.half_extent_bitangent).abs();
-    Some(
-        plane_distance * 2.0
-            + lateral_distance * 0.75
-            + extent_delta * 0.25
-            + (1.0 - overlap_ratio).max(0.0) * 0.2
-            + (1.0 - normal_dot) * 2.0,
-    )
-}
-
-fn plane_patch_overlap_ratio(existing: &XrDepthPlanePatch, incoming: &XrDepthPlanePatch) -> f32 {
-    let reframed = reframe_patch_onto_basis(
-        incoming,
-        existing.normal,
-        existing.tangent,
-        existing.bitangent,
-    );
-    let existing_center_u = existing.center.dot(existing.tangent);
-    let existing_center_v = existing.center.dot(existing.bitangent);
-    let incoming_center_u = reframed.center.dot(existing.tangent);
-    let incoming_center_v = reframed.center.dot(existing.bitangent);
-    let overlap_u = overlap_extent(
-        existing_center_u - existing.half_extent_tangent,
-        existing_center_u + existing.half_extent_tangent,
-        incoming_center_u - reframed.half_extent_tangent,
-        incoming_center_u + reframed.half_extent_tangent,
-    );
-    let overlap_v = overlap_extent(
-        existing_center_v - existing.half_extent_bitangent,
-        existing_center_v + existing.half_extent_bitangent,
-        incoming_center_v - reframed.half_extent_bitangent,
-        incoming_center_v + reframed.half_extent_bitangent,
-    );
-    if overlap_u <= 0.0 || overlap_v <= 0.0 {
-        return 0.0;
-    }
-    let overlap_area = overlap_u * overlap_v;
-    let min_area = existing.area.min(reframed.area).max(1.0e-4);
-    (overlap_area / min_area).clamp(0.0, 1.0)
-}
-
-fn overlap_extent(a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
-    (a1.min(b1) - a0.max(b0)).max(0.0)
-}
-
-fn plane_kinds_match(a: XrDepthPlaneKind, b: XrDepthPlaneKind) -> bool {
-    if a == b {
-        return true;
-    }
-    matches!(
-        (a, b),
-        (XrDepthPlaneKind::Floor, XrDepthPlaneKind::Table)
-            | (XrDepthPlaneKind::Table, XrDepthPlaneKind::Floor)
-            | (XrDepthPlaneKind::Floor, XrDepthPlaneKind::Unknown)
-            | (XrDepthPlaneKind::Unknown, XrDepthPlaneKind::Floor)
-            | (XrDepthPlaneKind::Table, XrDepthPlaneKind::Unknown)
-            | (XrDepthPlaneKind::Unknown, XrDepthPlaneKind::Table)
-    )
-}
-
-fn merge_coplanar_patches(
-    mut patches: Vec<ExtractedPlanePatchCandidate>,
-) -> Vec<ExtractedPlanePatchCandidate> {
-    let mut merged = true;
-    while merged {
-        merged = false;
-        'outer: for i in 0..patches.len() {
-            for j in (i + 1)..patches.len() {
-                if !can_merge_plane_patches(&patches[i].patch, &patches[j].patch) {
-                    continue;
-                }
-                let merged_patch =
-                    merge_plane_patch_candidate_pair(&patches[i], &patches[j]);
-                patches[i] = merged_patch;
-                patches.swap_remove(j);
-                merged = true;
-                break 'outer;
-            }
-        }
-    }
-    patches
-}
-
-fn merge_plane_patch_candidate_pair(
-    a: &ExtractedPlanePatchCandidate,
-    b: &ExtractedPlanePatchCandidate,
-) -> ExtractedPlanePatchCandidate {
-    let mut support_triangles_world =
-        Vec::with_capacity(a.support_triangles_world.len() + b.support_triangles_world.len());
-    support_triangles_world.extend_from_slice(&a.support_triangles_world);
-    support_triangles_world.extend_from_slice(&b.support_triangles_world);
-    ExtractedPlanePatchCandidate {
-        patch: merge_plane_patch_pair(&a.patch, &b.patch),
-        support_triangles_world,
-    }
-}
-
-fn can_merge_plane_patches(a: &XrDepthPlanePatch, b: &XrDepthPlanePatch) -> bool {
-    if !plane_kinds_match(a.kind, b.kind) {
-        return false;
-    }
-
-    let normal_dot = a.normal.dot(b.normal);
-    let min_normal_dot = if a.kind == XrDepthPlaneKind::Wall || b.kind == XrDepthPlaneKind::Wall {
-        DEPTH_PLANE_TRACK_WALL_MATCH_NORMAL_DOT
-    } else {
-        DEPTH_PLANE_TRACK_MATCH_NORMAL_DOT
-    };
-    if normal_dot < min_normal_dot {
-        return false;
-    }
-
-    let center_delta = b.center - a.center;
-    let plane_distance = center_delta.dot(a.normal).abs();
-    if plane_distance
-        > if a.kind == XrDepthPlaneKind::Wall || b.kind == XrDepthPlaneKind::Wall {
-            DEPTH_PLANE_TRACK_WALL_MATCH_PLANE_DISTANCE_METERS
-        } else {
-            DEPTH_PLANE_TRACK_MATCH_PLANE_DISTANCE_METERS
-        }
-    {
-        return false;
-    }
-
-    let lateral_distance = (center_delta - a.normal.scale(center_delta.dot(a.normal))).length();
-    let lateral_limit = a
-        .half_extent_tangent
-        .max(a.half_extent_bitangent)
-        + b.half_extent_tangent.max(b.half_extent_bitangent)
-        + DEPTH_PLANE_PATCH_MERGE_GAP_METERS;
-    lateral_distance <= lateral_limit
-}
-
-fn merge_plane_patch_pair(a: &XrDepthPlanePatch, b: &XrDepthPlanePatch) -> XrDepthPlanePatch {
-    if a.kind == XrDepthPlaneKind::Wall || b.kind == XrDepthPlaneKind::Wall {
-        merge_vertical_patch_pair(a, b)
-    } else {
-        let reference = if a.area >= b.area { a } else { b };
-        let reframed_a = reframe_patch_onto_basis(a, reference.normal, reference.tangent, reference.bitangent);
-        let reframed_b = reframe_patch_onto_basis(b, reference.normal, reference.tangent, reference.bitangent);
-        merge_reframed_horizontal_patches(&reframed_a, &reframed_b, reference.normal, reference.tangent, reference.bitangent)
-    }
-}
-
-fn reframe_patch_onto_basis(
-    patch: &XrDepthPlanePatch,
-    normal: Vec3f,
-    tangent: Vec3f,
-    bitangent: Vec3f,
-) -> XrDepthPlanePatch {
-    let corners = plane_patch_corners(patch);
-    let mut min_u = f32::INFINITY;
-    let mut max_u = f32::NEG_INFINITY;
-    let mut min_v = f32::INFINITY;
-    let mut max_v = f32::NEG_INFINITY;
-    let mut plane_distance_sum = 0.0;
-    for corner in corners {
-        let u = corner.dot(tangent);
-        let v = corner.dot(bitangent);
-        min_u = min_u.min(u);
-        max_u = max_u.max(u);
-        min_v = min_v.min(v);
-        max_v = max_v.max(v);
-        plane_distance_sum += corner.dot(normal);
-    }
-    let center_u = (min_u + max_u) * 0.5;
-    let center_v = (min_v + max_v) * 0.5;
-    let plane_distance = plane_distance_sum * 0.25;
-    XrDepthPlanePatch {
-        generation: patch.generation,
-        kind: patch.kind,
-        center: normal.scale(plane_distance) + tangent.scale(center_u) + bitangent.scale(center_v),
-        normal,
-        tangent,
-        bitangent,
-        half_extent_tangent: (max_u - min_u) * 0.5,
-        half_extent_bitangent: (max_v - min_v) * 0.5,
-        area: (max_u - min_u) * (max_v - min_v),
-        support_triangles: patch.support_triangles,
-    }
-}
-
-fn merge_reframed_horizontal_patches(
-    a: &XrDepthPlanePatch,
-    b: &XrDepthPlanePatch,
-    normal: Vec3f,
-    tangent: Vec3f,
-    bitangent: Vec3f,
-) -> XrDepthPlanePatch {
-    let mut min_u = f32::INFINITY;
-    let mut max_u = f32::NEG_INFINITY;
-    let mut min_v = f32::INFINITY;
-    let mut max_v = f32::NEG_INFINITY;
-    let mut y_sum = 0.0;
-    let mut weight_sum = 0.0;
-    for patch in [a, b] {
-        let center_u = patch.center.dot(tangent);
-        let center_v = patch.center.dot(bitangent);
-        min_u = min_u.min(center_u - patch.half_extent_tangent);
-        max_u = max_u.max(center_u + patch.half_extent_tangent);
-        min_v = min_v.min(center_v - patch.half_extent_bitangent);
-        max_v = max_v.max(center_v + patch.half_extent_bitangent);
-        y_sum += patch.center.y * patch.area.max(0.001);
-        weight_sum += patch.area.max(0.001);
-    }
-    let center_u = (min_u + max_u) * 0.5;
-    let center_v = (min_v + max_v) * 0.5;
-    let center_y = y_sum / weight_sum.max(f32::EPSILON);
-    XrDepthPlanePatch {
-        generation: a.generation.max(b.generation),
-        kind: choose_plane_kind(a.kind, b.kind),
-        center: vec3f(
-            tangent.x * center_u + bitangent.x * center_v,
-            center_y,
-            tangent.z * center_u + bitangent.z * center_v,
-        ),
-        normal,
-        tangent,
-        bitangent,
-        half_extent_tangent: (max_u - min_u) * 0.5,
-        half_extent_bitangent: (max_v - min_v) * 0.5,
-        area: (max_u - min_u) * (max_v - min_v),
-        support_triangles: a.support_triangles + b.support_triangles,
-    }
-}
-
-fn merge_vertical_patch_pair(a: &XrDepthPlanePatch, b: &XrDepthPlanePatch) -> XrDepthPlanePatch {
-    let normal = blend_direction(a.normal, b.normal, 0.5);
-    let mut tangent = (vec3f(0.0, 1.0, 0.0) - normal.scale(normal.y)).normalize();
-    if tangent.length() <= 1.0e-5 {
-        tangent = orthogonal_tangent(normal);
-    }
-    let bitangent = Vec3f::cross(normal, tangent).normalize();
-    let reframed_a = reframe_patch_onto_basis(a, normal, tangent, bitangent);
-    let reframed_b = reframe_patch_onto_basis(b, normal, tangent, bitangent);
-    let mut min_u = f32::INFINITY;
-    let mut max_u = f32::NEG_INFINITY;
-    let mut min_v = f32::INFINITY;
-    let mut max_v = f32::NEG_INFINITY;
-    let mut plane_distance_sum = 0.0;
-    let mut weight_sum = 0.0;
-    for patch in [&reframed_a, &reframed_b] {
-        let center_u = patch.center.dot(bitangent);
-        let center_v = patch.center.dot(tangent);
-        min_u = min_u.min(center_u - patch.half_extent_bitangent);
-        max_u = max_u.max(center_u + patch.half_extent_bitangent);
-        min_v = min_v.min(center_v - patch.half_extent_tangent);
-        max_v = max_v.max(center_v + patch.half_extent_tangent);
-        plane_distance_sum += patch.center.dot(normal) * patch.area.max(0.001);
-        weight_sum += patch.area.max(0.001);
-    }
-    let center_u = (min_u + max_u) * 0.5;
-    let center_v = (min_v + max_v) * 0.5;
-    let plane_distance = plane_distance_sum / weight_sum.max(f32::EPSILON);
-    XrDepthPlanePatch {
-        generation: a.generation.max(b.generation),
-        kind: XrDepthPlaneKind::Wall,
-        center: normal.scale(plane_distance) + bitangent.scale(center_u) + tangent.scale(center_v),
-        normal,
-        tangent,
-        bitangent,
-        half_extent_tangent: (max_v - min_v) * 0.5,
-        half_extent_bitangent: (max_u - min_u) * 0.5,
-        area: (max_u - min_u) * (max_v - min_v),
-        support_triangles: a.support_triangles + b.support_triangles,
-    }
-}
-
-fn choose_plane_kind(a: XrDepthPlaneKind, b: XrDepthPlaneKind) -> XrDepthPlaneKind {
-    match (a, b) {
-        (XrDepthPlaneKind::Floor, _) | (_, XrDepthPlaneKind::Floor) => XrDepthPlaneKind::Floor,
-        (XrDepthPlaneKind::Ceiling, _) | (_, XrDepthPlaneKind::Ceiling) => XrDepthPlaneKind::Ceiling,
-        (XrDepthPlaneKind::Table, _) | (_, XrDepthPlaneKind::Table) => XrDepthPlaneKind::Table,
-        (XrDepthPlaneKind::Wall, _) | (_, XrDepthPlaneKind::Wall) => XrDepthPlaneKind::Wall,
-        _ => a,
-    }
-}
-
 fn plane_patch_corners(patch: &XrDepthPlanePatch) -> [Vec3f; 4] {
     let du = patch.tangent.scale(patch.half_extent_tangent);
     let dv = patch.bitangent.scale(patch.half_extent_bitangent);
@@ -3520,124 +2580,6 @@ fn plane_patch_corners(patch: &XrDepthPlanePatch) -> [Vec3f; 4] {
         patch.center + du + dv,
         patch.center + du - dv,
     ]
-}
-
-fn blend_tracked_plane_patch(current: &TrackedPlanePatch, incoming: &XrDepthPlanePatch) -> XrDepthPlanePatch {
-    if current.patch.kind != XrDepthPlaneKind::Wall && incoming.kind != XrDepthPlaneKind::Wall {
-        return blend_horizontal_tracked_plane_patch(current, incoming);
-    }
-
-    let alpha = if current.patch.kind == XrDepthPlaneKind::Wall || incoming.kind == XrDepthPlaneKind::Wall {
-        if current.hit_count < DEPTH_PLANE_TRACK_STABLE_HITS {
-            0.28
-        } else {
-            0.12
-        }
-    } else {
-        if current.hit_count < DEPTH_PLANE_TRACK_STABLE_HITS {
-            0.45
-        } else {
-            0.22
-        }
-    };
-    let one_minus_alpha = 1.0 - alpha;
-
-    let normal = blend_direction(current.patch.normal, incoming.normal, alpha);
-    let mut tangent = blend_direction(current.patch.tangent, incoming.tangent, alpha);
-    tangent = (tangent - normal.scale(tangent.dot(normal))).normalize();
-    if tangent.length() <= 1.0e-5 {
-        tangent = orthogonal_tangent(normal);
-    }
-    let mut bitangent = Vec3f::cross(normal, tangent).normalize();
-    let aligned_incoming_bitangent = align_direction(current.patch.bitangent, incoming.bitangent);
-    if bitangent.dot(aligned_incoming_bitangent) < 0.0 {
-        tangent = tangent.scale(-1.0);
-        bitangent = bitangent.scale(-1.0);
-    }
-
-    XrDepthPlanePatch {
-        generation: incoming.generation,
-        kind: incoming.kind,
-        center: current.patch.center.scale(one_minus_alpha) + incoming.center.scale(alpha),
-        normal,
-        tangent,
-        bitangent,
-        half_extent_tangent: current.patch.half_extent_tangent * one_minus_alpha
-            + incoming.half_extent_tangent * alpha,
-        half_extent_bitangent: current.patch.half_extent_bitangent * one_minus_alpha
-            + incoming.half_extent_bitangent * alpha,
-        area: current.patch.area * one_minus_alpha + incoming.area * alpha,
-        support_triangles: current.patch.support_triangles.max(incoming.support_triangles),
-    }
-}
-
-fn blend_horizontal_tracked_plane_patch(
-    current: &TrackedPlanePatch,
-    incoming: &XrDepthPlanePatch,
-) -> XrDepthPlanePatch {
-    let target = reframe_patch_onto_basis(
-        incoming,
-        current.patch.normal,
-        current.patch.tangent,
-        current.patch.bitangent,
-    );
-    let stable = current.hit_count >= DEPTH_PLANE_TRACK_STABLE_HITS;
-    let center_alpha = if !stable {
-        DEPTH_PLANE_TRACK_CENTER_ALPHA * 1.5
-    } else {
-        DEPTH_PLANE_TRACK_STABLE_CENTER_ALPHA
-    };
-    let target_center = current.patch.center.scale(1.0 - center_alpha) + target.center.scale(center_alpha);
-    let next_half_tangent = blend_extent_hysteretic(
-        current.patch.half_extent_tangent,
-        target.half_extent_tangent,
-        stable,
-    );
-    let next_half_bitangent = blend_extent_hysteretic(
-        current.patch.half_extent_bitangent,
-        target.half_extent_bitangent,
-        stable,
-    );
-
-    XrDepthPlanePatch {
-        generation: incoming.generation,
-        kind: if stable && is_horizontal_plane_kind(current.patch.kind) {
-            current.patch.kind
-        } else {
-            choose_plane_kind(current.patch.kind, incoming.kind)
-        },
-        center: target_center,
-        normal: current.patch.normal,
-        tangent: current.patch.tangent,
-        bitangent: current.patch.bitangent,
-        half_extent_tangent: next_half_tangent,
-        half_extent_bitangent: next_half_bitangent,
-        area: (next_half_tangent * 2.0) * (next_half_bitangent * 2.0),
-        support_triangles: current.patch.support_triangles.max(incoming.support_triangles),
-    }
-}
-
-fn blend_extent_hysteretic(current: f32, target: f32, stable: bool) -> f32 {
-    let alpha = if target >= current {
-        DEPTH_PLANE_TRACK_HORIZONTAL_EXPAND_ALPHA
-    } else if stable {
-        DEPTH_PLANE_TRACK_HORIZONTAL_STABLE_SHRINK_ALPHA
-    } else {
-        DEPTH_PLANE_TRACK_HORIZONTAL_SHRINK_ALPHA
-    };
-    current * (1.0 - alpha) + target * alpha
-}
-
-fn is_horizontal_plane_kind(kind: XrDepthPlaneKind) -> bool {
-    matches!(
-        kind,
-        XrDepthPlaneKind::Floor | XrDepthPlaneKind::Table | XrDepthPlaneKind::Ceiling
-    )
-}
-
-fn blend_direction(current: Vec3f, incoming: Vec3f, alpha: f32) -> Vec3f {
-    let incoming = align_direction(current, incoming);
-    (current.scale(1.0 - alpha) + incoming.scale(alpha)).normalize()
 }
 
 fn align_direction(reference: Vec3f, candidate: Vec3f) -> Vec3f {
@@ -3886,7 +2828,7 @@ fn evaluate_geometry_query(
                 hit_triangle.swap(1, 2);
             }
             if best_sample_score < best_hit_score {
-                let from_reduced_planar_patch = triangle_matches_reduced_planar_patch(
+                let matched_planar_patch = matching_reduced_planar_patch(
                     hit_triangle,
                     normal,
                     &chunk.planar_patches,
@@ -3899,22 +2841,18 @@ fn evaluate_geometry_query(
                     distance: best_distance_sq.sqrt(),
                     point: best_closest,
                     normal,
-                    from_planar_patch: from_reduced_planar_patch,
+                    from_planar_patch: matched_planar_patch.is_some(),
                     triangle: hit_triangle,
-                    patch: [best_closest; 4],
+                    patch: matched_planar_patch
+                        .map(|patch| plane_patch_corners(patch))
+                        .unwrap_or([best_closest; 4]),
                     chunk_key: chunk.chunk_key,
                 });
             }
         }
     }
 
-    if let Some(mut hit) = best_hit {
-        if !hit.from_planar_patch && support_patch_is_placeholder(&hit.patch) {
-            hit.patch = fit_support_patch(volume, &query, &hit);
-        }
-        if !hit.from_planar_patch {
-            hit.triangle = fit_support_triangle(&query, &hit);
-        }
+    if let Some(hit) = best_hit {
         XrDepthMeshQueryResult::Hit(hit)
     } else {
         XrDepthMeshQueryResult::Miss {
@@ -3936,13 +2874,13 @@ fn closest_point_on_plane_patch(point: Vec3f, patch: &XrDepthPlanePatch) -> Vec3
     patch.center + patch.tangent.scale(u) + patch.bitangent.scale(v)
 }
 
-fn triangle_matches_reduced_planar_patch(
+fn matching_reduced_planar_patch(
     triangle: [Vec3f; 3],
     normal: Vec3f,
     patches: &[XrDepthPlanePatch],
-) -> bool {
+) -> Option<&XrDepthPlanePatch> {
     let centroid = (triangle[0] + triangle[1] + triangle[2]).scale(1.0 / 3.0);
-    patches.iter().any(|patch| {
+    patches.iter().find(|patch| {
         if normal.dot(patch.normal).abs() < 0.995 {
             return false;
         }
@@ -3960,232 +2898,6 @@ fn triangle_matches_reduced_planar_patch(
                 && v.abs() <= patch.half_extent_bitangent + 0.02
         })
     })
-}
-
-fn support_patch_is_placeholder(patch: &[Vec3f; 4]) -> bool {
-    (patch[1] - patch[0]).length() <= 1.0e-5
-        && (patch[2] - patch[0]).length() <= 1.0e-5
-        && (patch[3] - patch[0]).length() <= 1.0e-5
-}
-
-fn fit_support_patch(
-    volume: &DepthMeshVolume,
-    query: &XrDepthMeshQuery,
-    hit: &XrDepthMeshQueryHit,
-) -> [Vec3f; 4] {
-    let travel_distance = (query.predicted_center - query.center).length();
-    let patch_radius = (DEPTH_QUERY_PATCH_RADIUS_METERS + travel_distance * 0.5)
-        .max(query.radius * 2.5 + query.max_distance)
-        .min(0.42);
-    let search_radius = patch_radius + DEPTH_QUERY_PATCH_PLANE_TOLERANCE_METERS;
-    let search_radius_sq = search_radius * search_radius;
-
-    let mut points = Vec::with_capacity(48);
-    let mut normal_sum = hit.normal;
-
-    for chunk in &volume.mesh_chunks {
-        if point_aabb_distance_sq(hit.point, chunk.bounds_min, chunk.bounds_max) > search_radius_sq {
-            continue;
-        }
-        for triangle in chunk.indices.chunks_exact(3) {
-            let a = chunk.vertices[triangle[0] as usize];
-            let b = chunk.vertices[triangle[1] as usize];
-            let c = chunk.vertices[triangle[2] as usize];
-            let mut tri_normal = Vec3f::cross(b - a, c - a);
-            let tri_normal_len = tri_normal.length();
-            if tri_normal_len <= 1.0e-6 {
-                continue;
-            }
-            tri_normal = tri_normal.scale(1.0 / tri_normal_len);
-            let alignment = tri_normal.dot(hit.normal);
-            if alignment.abs() < DEPTH_QUERY_PATCH_NORMAL_DOT {
-                continue;
-            }
-            if alignment < 0.0 {
-                tri_normal = tri_normal.scale(-1.0);
-            }
-
-            let centroid = (a + b + c).scale(1.0 / 3.0);
-            let centroid_offset = centroid - hit.point;
-            let plane_distance = centroid_offset.dot(hit.normal).abs();
-            if plane_distance > DEPTH_QUERY_PATCH_PLANE_TOLERANCE_METERS {
-                continue;
-            }
-
-            let planar_offset =
-                centroid_offset - hit.normal.scale(centroid_offset.dot(hit.normal));
-            if planar_offset.dot(planar_offset) > patch_radius * patch_radius {
-                continue;
-            }
-
-            points.push(a);
-            points.push(b);
-            points.push(c);
-            normal_sum = normal_sum + tri_normal;
-        }
-    }
-
-    if points.is_empty() {
-        points.extend_from_slice(&hit.triangle);
-    }
-
-    let fitted_normal = if normal_sum.length() > 1.0e-6 {
-        normal_sum.normalize()
-    } else {
-        hit.normal
-    };
-    let preferred_tangent = if query.velocity.length() > 1.0e-4 {
-        query.velocity
-    } else {
-        hit.triangle[1] - hit.triangle[0]
-    };
-    let (tangent, bitangent) = plane_basis(fitted_normal, preferred_tangent);
-
-    let mut min_u = f32::INFINITY;
-    let mut max_u = f32::NEG_INFINITY;
-    let mut min_v = f32::INFINITY;
-    let mut max_v = f32::NEG_INFINITY;
-    for point in &points {
-        let offset = *point - hit.point;
-        let plane_offset = offset - fitted_normal.scale(offset.dot(fitted_normal));
-        let u = plane_offset.dot(tangent);
-        let v = plane_offset.dot(bitangent);
-        min_u = min_u.min(u);
-        max_u = max_u.max(u);
-        min_v = min_v.min(v);
-        max_v = max_v.max(v);
-    }
-
-    if !min_u.is_finite() || !max_u.is_finite() || !min_v.is_finite() || !max_v.is_finite() {
-        return fallback_support_patch(hit.point, tangent, bitangent, query.radius);
-    }
-
-    let travel_along_tangent = query.velocity.dot(tangent).abs() * 0.12;
-    let travel_along_bitangent = query.velocity.dot(bitangent).abs() * 0.12;
-    let min_half_extent = DEPTH_QUERY_PATCH_MIN_HALF_EXTENT_METERS.max(query.radius * 1.5);
-    let min_half_extent_u = min_half_extent + travel_along_tangent;
-    let min_half_extent_v = min_half_extent + travel_along_bitangent;
-
-    min_u = (min_u - DEPTH_QUERY_PATCH_MARGIN_METERS).min(-min_half_extent_u);
-    max_u = (max_u + DEPTH_QUERY_PATCH_MARGIN_METERS).max(min_half_extent_u);
-    min_v = (min_v - DEPTH_QUERY_PATCH_MARGIN_METERS).min(-min_half_extent_v);
-    max_v = (max_v + DEPTH_QUERY_PATCH_MARGIN_METERS).max(min_half_extent_v);
-
-    [
-        hit.point + tangent.scale(min_u) + bitangent.scale(min_v),
-        hit.point + tangent.scale(max_u) + bitangent.scale(min_v),
-        hit.point + tangent.scale(max_u) + bitangent.scale(max_v),
-        hit.point + tangent.scale(min_u) + bitangent.scale(max_v),
-    ]
-}
-
-fn fallback_support_patch(
-    point: Vec3f,
-    tangent: Vec3f,
-    bitangent: Vec3f,
-    radius: f32,
-) -> [Vec3f; 4] {
-    let half_extent = DEPTH_QUERY_PATCH_MIN_HALF_EXTENT_METERS.max(radius * 1.75)
-        + DEPTH_QUERY_PATCH_MARGIN_METERS;
-    [
-        point + tangent.scale(-half_extent) + bitangent.scale(-half_extent),
-        point + tangent.scale(half_extent) + bitangent.scale(-half_extent),
-        point + tangent.scale(half_extent) + bitangent.scale(half_extent),
-        point + tangent.scale(-half_extent) + bitangent.scale(half_extent),
-    ]
-}
-
-fn fit_support_triangle(query: &XrDepthMeshQuery, hit: &XrDepthMeshQueryHit) -> [Vec3f; 3] {
-    let preferred_forward = if query.velocity.length() > 1.0e-4 {
-        query.velocity
-    } else {
-        hit.patch[1] - hit.patch[0]
-    };
-    let (forward, lateral) = plane_basis(hit.normal, preferred_forward);
-    let center = hit.point;
-
-    let mut min_forward = f32::INFINITY;
-    let mut max_forward = f32::NEG_INFINITY;
-    let mut min_lateral = f32::INFINITY;
-    let mut max_lateral = f32::NEG_INFINITY;
-    for corner in hit.patch {
-        let offset = corner - center;
-        let plane_offset = offset - hit.normal.scale(offset.dot(hit.normal));
-        let f = plane_offset.dot(forward);
-        let l = plane_offset.dot(lateral);
-        min_forward = min_forward.min(f);
-        max_forward = max_forward.max(f);
-        min_lateral = min_lateral.min(l);
-        max_lateral = max_lateral.max(l);
-    }
-
-    let min_extent = DEPTH_QUERY_PATCH_MIN_HALF_EXTENT_METERS.max(query.radius * 1.2);
-    let velocity_boost = query.velocity.length() * 0.08;
-    let dilation = if hit.from_planar_patch {
-        1.0
-    } else {
-        DEPTH_QUERY_TRIANGLE_DILATION
-    };
-    let front_extent =
-        (max_forward + DEPTH_QUERY_PATCH_MARGIN_METERS + velocity_boost).max(min_extent)
-            * dilation;
-    let back_extent = ((-min_forward) + DEPTH_QUERY_PATCH_MARGIN_METERS).max(min_extent)
-        * dilation;
-    let side_extent = (max_lateral.abs().max(min_lateral.abs()) + DEPTH_QUERY_PATCH_MARGIN_METERS)
-        .max(min_extent)
-        * dilation;
-
-    let mut triangle = [
-        center + forward.scale(front_extent),
-        center - forward.scale(back_extent) + lateral.scale(side_extent),
-        center - forward.scale(back_extent) - lateral.scale(side_extent),
-    ];
-    let tri_normal = Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]);
-    if tri_normal.dot(hit.normal) < 0.0 {
-        triangle.swap(1, 2);
-    }
-    triangle
-}
-
-fn plane_basis(normal: Vec3f, preferred_tangent: Vec3f) -> (Vec3f, Vec3f) {
-    let projected_tangent = preferred_tangent - normal.scale(preferred_tangent.dot(normal));
-    let tangent = if projected_tangent.length() > 1.0e-5 {
-        projected_tangent.normalize()
-    } else {
-        let fallback_axis = if normal.y.abs() < 0.9 {
-            vec3f(0.0, 1.0, 0.0)
-        } else {
-            vec3f(1.0, 0.0, 0.0)
-        };
-        Vec3f::cross(fallback_axis, normal).normalize()
-    };
-    let bitangent = Vec3f::cross(normal, tangent).normalize();
-    (tangent, bitangent)
-}
-
-fn point_aabb_distance_sq(point: Vec3f, bounds_min: Vec3f, bounds_max: Vec3f) -> f32 {
-    let dx = if point.x < bounds_min.x {
-        bounds_min.x - point.x
-    } else if point.x > bounds_max.x {
-        point.x - bounds_max.x
-    } else {
-        0.0
-    };
-    let dy = if point.y < bounds_min.y {
-        bounds_min.y - point.y
-    } else if point.y > bounds_max.y {
-        point.y - bounds_max.y
-    } else {
-        0.0
-    };
-    let dz = if point.z < bounds_min.z {
-        bounds_min.z - point.z
-    } else if point.z > bounds_max.z {
-        point.z - bounds_max.z
-    } else {
-        0.0
-    };
-    dx * dx + dy * dy + dz * dz
 }
 
 fn aabb_aabb_distance_sq(
@@ -4300,14 +3012,16 @@ fn simplify_surface_mesh_planar_regions(mesh: SurfaceMesh32) -> ReducedSurfaceMe
         if region_area < DEPTH_MESH_PLANAR_SIMPLIFY_MIN_AREA_METERS2 {
             continue;
         }
-        if emit_planar_region_rect_mesh(
+        if let Some(emitted) = emit_planar_region_rect_mesh(
             region,
             &mut positions,
             &mut normals,
             &mut indices,
             &mut planar_patches,
         ) {
-            consumed_triangles.extend(region.source_triangle_indices.iter().copied());
+            consumed_triangles.extend(
+                covered_planar_region_triangles(region, &emitted).into_iter(),
+            );
         }
     }
 
@@ -4358,11 +3072,11 @@ fn emit_planar_region_rect_mesh(
     normals: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
     planar_patches: &mut Vec<XrDepthPlanePatch>,
-) -> bool {
+) -> Option<EmittedPlanarRegion> {
     let region_indices: Vec<usize> = (0..region.triangles.len()).collect();
     let Some(patch) = fit_plane_patch_from_region(region.group, &region.triangles, &region_indices)
     else {
-        return false;
+        return None;
     };
 
     let mut support_mask = PlaneSupportMask::default();
@@ -4379,7 +3093,7 @@ fn emit_planar_region_rect_mesh(
     );
 
     let plane_distance = patch.center.dot(patch.normal);
-    let mut emitted = false;
+    let mut rects = Vec::new();
     let mut emitted_rects = 0usize;
     for mut component in decompose_support_mask_components(&support_mask) {
         loop {
@@ -4408,7 +3122,12 @@ fn emit_planar_region_rect_mesh(
                 min_v,
                 max_v,
             );
-            emitted = true;
+            rects.push(PlanarRectCoverage {
+                min_u: min_u as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS,
+                max_u: (max_u + 1) as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS,
+                min_v: min_v as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS,
+                max_v: (max_v + 1) as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS,
+            });
             emitted_rects += 1;
             remove_rect_from_support_component(&mut component, min_u, max_u, min_v, max_v);
             if component.cells.is_empty() {
@@ -4417,7 +3136,38 @@ fn emit_planar_region_rect_mesh(
         }
     }
 
-    emitted
+    (!rects.is_empty()).then_some(EmittedPlanarRegion {
+        tangent: patch.tangent,
+        bitangent: patch.bitangent,
+        rects,
+    })
+}
+
+fn covered_planar_region_triangles(
+    region: &SimplifiedPlaneRegion,
+    emitted: &EmittedPlanarRegion,
+) -> HashSet<usize> {
+    let mut covered = HashSet::new();
+    for (index, triangle) in region.triangles.iter().enumerate() {
+        let centroid_u = triangle.centroid.dot(emitted.tangent);
+        let centroid_v = triangle.centroid.dot(emitted.bitangent);
+        if emitted
+            .rects
+            .iter()
+            .any(|rect| planar_rect_contains_uv(*rect, centroid_u, centroid_v))
+        {
+            covered.insert(region.source_triangle_indices[index]);
+        }
+    }
+    covered
+}
+
+fn planar_rect_contains_uv(rect: PlanarRectCoverage, u: f32, v: f32) -> bool {
+    let epsilon = DEPTH_PLANE_SUPPORT_CELL_METERS * 0.25;
+    u >= rect.min_u - epsilon
+        && u <= rect.max_u + epsilon
+        && v >= rect.min_v - epsilon
+        && v <= rect.max_v + epsilon
 }
 
 fn decompose_support_mask_components(mask: &PlaneSupportMask) -> Vec<PlaneSupportComponent> {
@@ -4467,24 +3217,13 @@ fn rebuild_support_component_from_cells(cells: Vec<PlaneSupportCellKey>) -> Opti
         max_u: first.u,
         min_v: first.v,
         max_v: first.v,
-        total_weight: 0,
-        centroid_u: 0.0,
-        centroid_v: 0.0,
-        contains_anchor: false,
     };
-    let mut centroid_u_sum = 0.0f32;
-    let mut centroid_v_sum = 0.0f32;
     for cell in &component.cells {
         component.min_u = component.min_u.min(cell.u);
         component.max_u = component.max_u.max(cell.u);
         component.min_v = component.min_v.min(cell.v);
         component.max_v = component.max_v.max(cell.v);
-        component.total_weight += 1;
-        centroid_u_sum += (cell.u as f32 + 0.5) * DEPTH_PLANE_SUPPORT_CELL_METERS;
-        centroid_v_sum += (cell.v as f32 + 0.5) * DEPTH_PLANE_SUPPORT_CELL_METERS;
     }
-    component.centroid_u = centroid_u_sum / component.total_weight.max(1) as f32;
-    component.centroid_v = centroid_v_sum / component.total_weight.max(1) as f32;
     Some(component)
 }
 
@@ -4921,34 +3660,6 @@ mod tests {
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
-    fn make_mesh_chunk(quads: &[[Vec3f; 4]]) -> XrDepthMeshChunk {
-        let mut vertices = Vec::new();
-        let mut normals = Vec::new();
-        let mut indices = Vec::new();
-        let mut bounds_min = vec3f(f32::INFINITY, f32::INFINITY, f32::INFINITY);
-        let mut bounds_max = vec3f(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-
-        for quad in quads {
-            for vertex in quad {
-                bounds_min = Vec3f::min_componentwise(bounds_min, *vertex);
-                bounds_max = Vec3f::max_componentwise(bounds_max, *vertex);
-            }
-            push_quad(&mut vertices, &mut normals, &mut indices, *quad);
-        }
-
-        XrDepthMeshChunk {
-            generation: 1,
-            chunk_key: IVector::new(0, 0, 0),
-            fingerprint: 1,
-            bounds_min,
-            bounds_max,
-            vertices,
-            normals,
-            indices,
-            planar_patches: Vec::new(),
-        }
-    }
-
     fn make_triangle_chunk(triangle: [Vec3f; 3]) -> XrDepthMeshChunk {
         let normal = Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]).normalize();
         let mut bounds_min = triangle[0];
@@ -4991,148 +3702,17 @@ mod tests {
         }
     }
 
-    fn find_largest_wall_patch(
-        patches: &[ExtractedPlanePatchCandidate],
-    ) -> Option<&ExtractedPlanePatchCandidate> {
-        patches
-            .iter()
-            .filter(|patch| patch.patch.kind == XrDepthPlaneKind::Wall)
-            .max_by(|a, b| {
-                a.patch
-                    .area
-                    .partial_cmp(&b.patch.area)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-    }
-
-    fn horizontal_patch_areas(patches: &[ExtractedPlanePatchCandidate]) -> Vec<f32> {
-        let mut areas = patches
-            .iter()
-            .filter(|patch| {
-                matches!(
-                    patch.patch.kind,
-                    XrDepthPlaneKind::Floor
-                        | XrDepthPlaneKind::Table
-                        | XrDepthPlaneKind::Unknown
-                )
-            })
-            .map(|patch| patch.patch.area)
-            .collect::<Vec<_>>();
-        areas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        areas
-    }
-
-    #[test]
-    fn planar_simplification_straightens_a_bumpy_wall() {
-        let mut quads = Vec::new();
-        for y in 0..2 {
-            for z in 0..2 {
-                let y0 = y as f32;
-                let y1 = y0 + 1.0;
-                let z0 = z as f32;
-                let z1 = z0 + 1.0;
-                let x00 = 2.0 + if (y + z) % 2 == 0 { 0.03 } else { -0.02 };
-                let x10 = 2.0 + if (y + z + 1) % 2 == 0 { 0.03 } else { -0.02 };
-                let x11 = 2.0 + if (y + z + 2) % 2 == 0 { 0.03 } else { -0.02 };
-                let x01 = 2.0 + if (y + z + 3) % 2 == 0 { 0.03 } else { -0.02 };
-                quads.push([
-                    vec3f(x00, y0, z0),
-                    vec3f(x10, y0, z1),
-                    vec3f(x11, y1, z1),
-                    vec3f(x01, y1, z0),
-                ]);
+    fn plane_dense_field(size: VoxelCoord, y_plane: f32) -> Vec<f32> {
+        let mut dense = vec![0.0; (size.x * size.y * size.z) as usize];
+        for z in 0..size.z {
+            for y in 0..size.y {
+                for x in 0..size.x {
+                    let coord = VoxelCoord::new(x, y, z);
+                    dense[flatten_coord(coord, size)] = y as f32 - y_plane;
+                }
             }
         }
-
-        let patches = rebuild_plane_patches_from_mesh(&[make_mesh_chunk(&quads)]);
-        let wall = find_largest_wall_patch(&patches).expect("expected a wall patch");
-        assert!(wall.patch.area > 3.5, "wall area too small: {}", wall.patch.area);
-        assert!(wall.patch.normal.x.abs() > 0.97, "wall normal not straight enough: {:?}", wall.patch.normal);
-        assert!((wall.patch.center.x - 2.0).abs() < 0.05, "wall center drifted too far: {:?}", wall.patch.center);
-    }
-
-    #[test]
-    fn planar_simplification_keeps_rotated_wall_orientation() {
-        let yaw = 32.0f32.to_radians();
-        let wall_normal = vec3f(yaw.cos(), 0.0, yaw.sin()).normalize();
-        let wall_tangent = vec3f(0.0, 1.0, 0.0);
-        let wall_bitangent = Vec3f::cross(wall_normal, wall_tangent).normalize();
-        let quad = quad_vertices(
-            wall_normal.scale(1.8) + wall_tangent.scale(1.0),
-            wall_tangent,
-            wall_bitangent,
-            1.0,
-            0.9,
-        );
-        let patches = rebuild_plane_patches_from_mesh(&[make_mesh_chunk(&[quad])]);
-        let wall = find_largest_wall_patch(&patches).expect("expected a rotated wall patch");
-        assert!(
-            wall.patch.normal.dot(wall_normal).abs() > 0.98,
-            "wall normal snapped away from the source wall: expected {:?}, got {:?}",
-            wall_normal,
-            wall.patch.normal
-        );
-    }
-
-    #[test]
-    fn planar_simplification_does_not_merge_table_with_disconnected_chair() {
-        let table = quad_vertices(
-            vec3f(0.0, 0.76, 0.0),
-            vec3f(0.0, 0.0, 1.0),
-            vec3f(1.0, 0.0, 0.0),
-            0.6,
-            0.35,
-        );
-        let chair = quad_vertices(
-            vec3f(1.1, 0.76, 0.0),
-            vec3f(0.0, 0.0, 1.0),
-            vec3f(1.0, 0.0, 0.0),
-            0.30,
-            0.30,
-        );
-        let patches = rebuild_plane_patches_from_mesh(&[make_mesh_chunk(&[table, chair])]);
-        let areas = horizontal_patch_areas(&patches);
-        assert!(areas.len() >= 2, "expected separate horizontal patches, got {:?}", areas);
-        let largest = *areas.last().unwrap_or(&0.0);
-        assert!(largest < 1.1, "table patch expanded too far: {}", largest);
-    }
-
-    #[test]
-    fn table_support_component_uses_four_connected_neighbors() {
-        let mut mask = PlaneSupportMask::default();
-        mask.cells.insert(PlaneSupportCellKey { u: 0, v: 0 }, DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
-        mask.cells.insert(PlaneSupportCellKey { u: 1, v: 1 }, DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
-        let component = select_plane_support_component(
-            XrDepthPlaneKind::Table,
-            &mask,
-            PlaneSupportCellKey { u: 0, v: 0 },
-            0.06,
-            0.06,
-        )
-        .expect("expected a component");
-        assert_eq!(component.cells.len(), 1, "diagonal cells should not merge for tables");
-    }
-
-    #[test]
-    fn table_support_retention_does_not_dilate_small_components() {
-        let mut mask = PlaneSupportMask::default();
-        mask.cells.insert(PlaneSupportCellKey { u: 0, v: 0 }, DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
-        mask.cells.insert(PlaneSupportCellKey { u: 1, v: 0 }, DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
-        mask.cells.insert(PlaneSupportCellKey { u: 4, v: 4 }, DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
-        let component = PlaneSupportComponent {
-            cells: vec![PlaneSupportCellKey { u: 0, v: 0 }, PlaneSupportCellKey { u: 1, v: 0 }],
-            min_u: 0,
-            max_u: 1,
-            min_v: 0,
-            max_v: 0,
-            total_weight: 8,
-            centroid_u: 0.12,
-            centroid_v: 0.06,
-            contains_anchor: true,
-        };
-        retain_plane_support_component(XrDepthPlaneKind::Table, &mut mask, &component);
-        assert_eq!(mask.cells.len(), 2, "small table support should not dilate");
-        assert!(!mask.cells.contains_key(&PlaneSupportCellKey { u: 4, v: 4 }));
+        dense
     }
 
     #[test]
@@ -5213,6 +3793,77 @@ mod tests {
             simplified_triangles >= 6,
             "doorway should stay split into multiple wall quads, got {} triangles",
             simplified_triangles
+        );
+    }
+
+    #[test]
+    fn planar_surface_mesh_reduction_only_consumes_rect_covered_triangles() {
+        let region = SimplifiedPlaneRegion {
+            group: ExtractedPlaneGroup::Vertical,
+            source_triangle_indices: vec![11, 12],
+            triangles: vec![
+                ExtractedPlaneTriangle {
+                    source_triangle_index: 11,
+                    group: ExtractedPlaneGroup::Vertical,
+                    area: 0.25,
+                    normal: vec3f(1.0, 0.0, 0.0),
+                    centroid: vec3f(0.0, 0.25, 0.25),
+                    vertices: [
+                        vec3f(0.0, 0.0, 0.0),
+                        vec3f(0.0, 0.5, 0.0),
+                        vec3f(0.0, 0.25, 0.5),
+                    ],
+                },
+                ExtractedPlaneTriangle {
+                    source_triangle_index: 12,
+                    group: ExtractedPlaneGroup::Vertical,
+                    area: 0.25,
+                    normal: vec3f(1.0, 0.0, 0.0),
+                    centroid: vec3f(0.0, 0.25, 1.25),
+                    vertices: [
+                        vec3f(0.0, 0.0, 1.0),
+                        vec3f(0.0, 0.5, 1.0),
+                        vec3f(0.0, 0.25, 1.5),
+                    ],
+                },
+            ],
+        };
+        let emitted = EmittedPlanarRegion {
+            tangent: vec3f(0.0, 1.0, 0.0),
+            bitangent: vec3f(0.0, 0.0, 1.0),
+            rects: vec![PlanarRectCoverage {
+                min_u: 0.0,
+                max_u: 0.6,
+                min_v: 0.0,
+                max_v: 0.6,
+            }],
+        };
+
+        let covered = covered_planar_region_triangles(&region, &emitted);
+        assert!(covered.contains(&11), "covered triangle should be consumed");
+        assert!(
+            !covered.contains(&12),
+            "triangle outside emitted rect coverage must stay as raw mesh"
+        );
+    }
+
+    #[test]
+    fn dense_hole_repair_fills_isolated_missing_sample() {
+        let size = VoxelCoord::new(6, 6, 6);
+        let mut dense = plane_dense_field(size, 2.4);
+        let missing = VoxelCoord::new(3, 2, 3);
+        let missing_index = flatten_coord(missing, size);
+        dense[missing_index] = f32::NEG_INFINITY;
+        let mut scratch = Vec::new();
+        repair_dense_meshing_holes(&mut dense, &mut scratch, size);
+        assert!(
+            dense[missing_index].is_finite(),
+            "isolated dense puncture should be repaired for meshing"
+        );
+        assert!(
+            (dense[missing_index] + 0.4).abs() < 0.11,
+            "repaired sample drifted too far from local plane field: {}",
+            dense[missing_index]
         );
     }
 
@@ -5337,6 +3988,12 @@ mod tests {
         match result {
             XrDepthMeshQueryResult::Hit(hit) => {
                 assert!(hit.from_planar_patch, "expected reduced planar mesh classification");
+                assert!(
+                    hit.patch
+                        .windows(2)
+                        .any(|edge| (edge[1] - edge[0]).length() > 1.0e-4),
+                    "expected reduced planar mesh hit to carry its full support quad"
+                );
                 for expected in &triangle {
                     assert!(
                         hit.triangle
@@ -5352,5 +4009,29 @@ mod tests {
                 panic!("expected reduced planar mesh hit");
             }
         }
+    }
+
+    #[test]
+    fn plane_patch_corner_winding_matches_patch_normal() {
+        let patch = XrDepthPlanePatch {
+            generation: 1,
+            kind: XrDepthPlaneKind::Table,
+            center: vec3f(0.0, 0.75, 0.0),
+            normal: vec3f(0.0, 1.0, 0.0),
+            tangent: vec3f(1.0, 0.0, 0.0),
+            bitangent: vec3f(0.0, 0.0, 1.0),
+            half_extent_tangent: 0.3,
+            half_extent_bitangent: 0.2,
+            area: 0.24,
+            support_triangles: 2,
+        };
+        let corners = plane_patch_corners(&patch);
+        let tri_normal =
+            Vec3f::cross(corners[1] - corners[0], corners[2] - corners[0]).normalize();
+        assert!(
+            tri_normal.dot(patch.normal) > 0.99,
+            "patch quad winding should align with patch normal: tri_normal={tri_normal:?} patch_normal={:?}",
+            patch.normal
+        );
     }
 }
