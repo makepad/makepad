@@ -37,12 +37,15 @@ const DEPTH_VOXEL_MAX_DEPTH_VALUE: f32 = 0.9995;
 const DEPTH_TSD_DISTANCE_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 2.0;
 const DEPTH_TSD_MIN_NORMAL_DOT: f32 = 0.3;
 const DEPTH_TSD_APPLY_DELTA_EPSILON: f32 = 0.01;
-const DEPTH_TSD_REFRESH_CLEARANCE_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 0.75;
+const DEPTH_TSD_REFRESH_CLEARANCE_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 1.5;
 const DEPTH_NORMAL_NEIGHBOR_MAX_DISTANCE_DELTA_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 2.5;
+const DEPTH_CARVE_NEIGHBOR_MAX_DISTANCE_DELTA_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 1.5;
 const DEPTH_TSD_MAX_CONFIDENCE: u8 = 32;
 const DEPTH_TSD_MIN_MESH_CONFIDENCE: u8 = 3;
+const DEPTH_TSD_RECENT_MESH_CONFIDENCE: u8 = 1;
+const DEPTH_TSD_RECENT_MESH_GENERATIONS: u64 = 6;
+const DEPTH_TSD_RECENT_MESH_MAX_ABS_DISTANCE: f32 = 0.6;
 const DEPTH_TSD_STABLE_CONFIDENCE: u8 = 8;
-const DEPTH_TSD_STALE_LOW_CONFIDENCE_GENERATIONS: u64 = 12;
 const DEPTH_PLAYER_CLEAR_MAX_CONFIDENCE: u8 = 2;
 const DEPTH_PLAYER_EXCLUDE_RADIUS_METERS: f32 = 0.32;
 const DEPTH_PLAYER_EXCLUDE_TOP_METERS: f32 = 0.12;
@@ -142,15 +145,18 @@ impl SparseTsdChunk {
     }
 
     fn meshing_value(&self, id: usize, current_generation: u64) -> Option<f32> {
-        if self.valid[id] == 0 || self.confidence[id] < DEPTH_TSD_MIN_MESH_CONFIDENCE {
+        if self.valid[id] == 0 {
             None
-        } else if self.confidence[id] < DEPTH_TSD_STABLE_CONFIDENCE
-            && current_generation.saturating_sub(self.observed_generation[id])
-                > DEPTH_TSD_STALE_LOW_CONFIDENCE_GENERATIONS
-        {
-            None
-        } else {
+        } else if self.confidence[id] >= DEPTH_TSD_MIN_MESH_CONFIDENCE {
             Some(self.values[id])
+        } else if self.confidence[id] >= DEPTH_TSD_RECENT_MESH_CONFIDENCE
+            && current_generation.saturating_sub(self.observed_generation[id])
+                <= DEPTH_TSD_RECENT_MESH_GENERATIONS
+            && self.values[id].abs() <= DEPTH_TSD_RECENT_MESH_MAX_ABS_DISTANCE
+        {
+            Some(self.values[id])
+        } else {
+            None
         }
     }
 
@@ -1225,6 +1231,48 @@ fn depth_world_to_pixel(
     Some((pixel_x as usize, pixel_y as usize, ray_distance))
 }
 
+fn depth_pixel_is_reliable_for_carve(
+    job: &CxOpenXrPreparedDepthMeshJob,
+    pixel_x: usize,
+    pixel_y: usize,
+    observed_distance: f32,
+) -> bool {
+    let width = job.width as usize;
+    let height = job.height as usize;
+    if !depth_pixel_inside_margin(width, height, pixel_x, pixel_y) {
+        return false;
+    }
+
+    let mut agreeing_neighbors = 0u8;
+    for (nx, ny) in [
+        (pixel_x.saturating_sub(1), pixel_y),
+        ((pixel_x + 1).min(width.saturating_sub(1)), pixel_y),
+        (pixel_x, pixel_y.saturating_sub(1)),
+        (pixel_x, (pixel_y + 1).min(height.saturating_sub(1))),
+    ] {
+        if nx == pixel_x && ny == pixel_y {
+            continue;
+        }
+        let Some(neighbor_view) = depth_pixel_to_view(
+            &job.depth,
+            job.width,
+            job.height,
+            job.inv_depth_proj,
+            nx,
+            ny,
+        ) else {
+            continue;
+        };
+        let neighbor_distance = neighbor_view.to_vec3f().length();
+        if (neighbor_distance - observed_distance).abs()
+            <= DEPTH_CARVE_NEIGHBOR_MAX_DISTANCE_DELTA_METERS
+        {
+            agreeing_neighbors = agreeing_neighbors.saturating_add(1);
+        }
+    }
+    agreeing_neighbors >= 2
+}
+
 fn apply_tsd_samples(
     volume: &mut DepthMeshVolume,
     frame_tsd_samples: &HashMap<VoxelCoord, f32>,
@@ -1296,8 +1344,18 @@ fn refresh_visible_free_space(
                     continue;
                 };
                 let observed_distance = observed_view.to_vec3f().length();
-                if !observed_distance.is_finite()
-                    || observed_distance - voxel_distance < DEPTH_TSD_REFRESH_CLEARANCE_METERS
+                if !depth_pixel_is_reliable_for_carve(job, pixel_x, pixel_y, observed_distance) {
+                    continue;
+                }
+                let clearance = observed_distance - voxel_distance;
+                if !observed_distance.is_finite() || clearance < DEPTH_TSD_REFRESH_CLEARANCE_METERS
+                {
+                    continue;
+                }
+                let confidence = volume.mesh_grid.confidence(coord);
+                if confidence >= DEPTH_TSD_STABLE_CONFIDENCE
+                    && previous <= 0.25
+                    && clearance < DEPTH_TSD_DISTANCE_METERS
                 {
                     continue;
                 }
