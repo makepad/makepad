@@ -72,7 +72,15 @@ impl ShaderOutput {
             if let ShaderIoKind::UniformBuffer = io.kind {
                 let block_name = self.glsl_uniform_block_name(io.name);
                 let io_name = self.backend.map_io_name(io.name);
-                if io_name == "draw_pass" && self.glsl_write_draw_pass_uniform_block(vm, io.ty, &block_name, &io_name, out) {
+                if io_name == "draw_pass"
+                    && self.glsl_write_draw_pass_uniform_block(
+                        vm,
+                        io.ty,
+                        &block_name,
+                        &io_name,
+                        out,
+                    )
+                {
                     continue;
                 }
                 let type_name = self.glsl_type_name_from_ty(vm, io.ty);
@@ -136,7 +144,8 @@ impl ShaderOutput {
                 "camera_projection" | "camera_view" | "depth_projection" | "depth_view" => {
                     writeln!(out, "    {} {}[2];", type_name, field_name).ok();
                 }
-                "camera_projection_r" | "camera_view_r" | "depth_projection_r" | "depth_view_r" => {}
+                "camera_projection_r" | "camera_view_r" | "depth_projection_r" | "depth_view_r" => {
+                }
                 _ => {
                     writeln!(out, "    {} {};", type_name, field_name).ok();
                 }

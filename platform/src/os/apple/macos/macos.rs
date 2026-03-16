@@ -217,9 +217,7 @@ impl MacosNativeCameraPreview {
         }
     }
 
-    fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
@@ -1183,8 +1181,7 @@ impl Cx {
                             is_seekable,
                             video_tracks,
                             audio_tracks,
-                        })) = preview.check_prepared()
-                        {
+                        })) = preview.check_prepared() {
                             self.call_event_handler(&Event::VideoPlaybackPrepared(
                                 VideoPlaybackPreparedEvent {
                                     video_id,
@@ -1488,7 +1485,10 @@ mod tests {
         ));
         assert_eq!(
             platform_ops,
-            vec![CxOsOp::SetTopmost(window_id, true), CxOsOp::CreateWindow(window_id)]
+            vec![
+                CxOsOp::SetTopmost(window_id, true),
+                CxOsOp::CreateWindow(window_id)
+            ]
         );
     }
 }

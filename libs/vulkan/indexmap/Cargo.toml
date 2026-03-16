@@ -42,7 +42,6 @@ tag-name = "{{version}}"
 [package.metadata.docs.rs]
 features = [
     "arbitrary",
-    "quickcheck",
     "serde",
     "borsh",
     "rayon",
@@ -107,11 +106,6 @@ default-features = false
 
 [dependencies.hashbrown]
 version = "0.16.1"
-default-features = false
-
-[dependencies.quickcheck]
-version = "1.0"
-optional = true
 default-features = false
 
 [dependencies.rayon]

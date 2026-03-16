@@ -8,6 +8,18 @@ use std::ffi::CString;
 use std::fmt;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
+
+// Vulkan raw handle types used by OpenXR graphics bindings.
+pub type VkInstance = *const c_void;
+pub type VkPhysicalDevice = *const c_void;
+pub type VkDevice = *const c_void;
+pub type VkImage = u64;
+pub type VkInstanceCreateInfo = c_void;
+pub type VkDeviceCreateInfo = c_void;
+pub type VkAllocationCallbacks = c_void;
+pub type VkResult = i32;
+pub type VkGetInstanceProcAddr =
+    unsafe extern "system" fn(VkInstance, *const c_char) -> Option<unsafe extern "system" fn()>;
 // Consts
 
 pub const MAX_APPLICATION_NAME_SIZE: usize = 128usize;
@@ -101,14 +113,35 @@ impl LibOpenXrLoader {
             _keep_module_alive: module,
         })
     }
+
+    pub fn destroy_instance(&self, instance: XrInstance) {
+        match get_proc_addr!(self.xrGetInstanceProcAddr, instance, TxrDestroyInstance) {
+            Ok(xr_destroy_instance) => {
+                unsafe { (xr_destroy_instance)(instance) }.log_error("xrDestroyInstance");
+            }
+            Err(err) => {
+                crate::error!("OpenXR cleanup failed while loading xrDestroyInstance: {err}")
+            }
+        }
+    }
 }
 
 pub struct LibOpenXr {
     pub xrGetInstanceProperties: TxrGetInstanceProperties,
     pub xrGetSystem: TxrGetSystem,
     pub xrGetSystemProperties: TxrGetSystemProperties,
+    #[cfg(use_vulkan)]
+    pub xrCreateVulkanInstanceKHR: TxrCreateVulkanInstanceKHR,
+    #[cfg(use_vulkan)]
+    pub xrCreateVulkanDeviceKHR: TxrCreateVulkanDeviceKHR,
+    #[cfg(use_vulkan)]
+    pub xrGetVulkanGraphicsRequirements2KHR: TxrGetVulkanGraphicsRequirements2KHR,
+    #[cfg(use_vulkan)]
+    pub xrGetVulkanGraphicsDevice2KHR: TxrGetVulkanGraphicsDevice2KHR,
+    #[cfg(not(use_vulkan))]
     pub xrGetOpenGLESGraphicsRequirementsKHR: TxrGetOpenGLESGraphicsRequirementsKHR,
     pub xrCreateSession: TxrCreateSession,
+    pub xrEnumerateSwapchainFormats: TxrEnumerateSwapchainFormats,
     pub xrEnumerateViewConfigurations: TxrEnumerateViewConfigurations,
     pub xrGetViewConfigurationProperties: TxrGetViewConfigurationProperties,
     pub xrEnumerateViewConfigurationViews: TxrEnumerateViewConfigurationViews,
@@ -188,12 +221,34 @@ impl LibOpenXr {
             xrGetInstanceProperties: get_proc_addr!(gipa, instance, TxrGetInstanceProperties)?,
             xrGetSystem: get_proc_addr!(gipa, instance, TxrGetSystem)?,
             xrGetSystemProperties: get_proc_addr!(gipa, instance, TxrGetSystemProperties)?,
+            #[cfg(use_vulkan)]
+            xrCreateVulkanInstanceKHR: get_proc_addr!(gipa, instance, TxrCreateVulkanInstanceKHR)?,
+            #[cfg(use_vulkan)]
+            xrCreateVulkanDeviceKHR: get_proc_addr!(gipa, instance, TxrCreateVulkanDeviceKHR)?,
+            #[cfg(use_vulkan)]
+            xrGetVulkanGraphicsRequirements2KHR: get_proc_addr!(
+                gipa,
+                instance,
+                TxrGetVulkanGraphicsRequirements2KHR
+            )?,
+            #[cfg(use_vulkan)]
+            xrGetVulkanGraphicsDevice2KHR: get_proc_addr!(
+                gipa,
+                instance,
+                TxrGetVulkanGraphicsDevice2KHR
+            )?,
+            #[cfg(not(use_vulkan))]
             xrGetOpenGLESGraphicsRequirementsKHR: get_proc_addr!(
                 gipa,
                 instance,
                 TxrGetOpenGLESGraphicsRequirementsKHR
             )?,
             xrCreateSession: get_proc_addr!(gipa, instance, TxrCreateSession)?,
+            xrEnumerateSwapchainFormats: get_proc_addr!(
+                gipa,
+                instance,
+                TxrEnumerateSwapchainFormats
+            )?,
             xrEnumerateViewConfigurations: get_proc_addr!(
                 gipa,
                 instance,
@@ -424,6 +479,45 @@ pub type TxrGetSystemProperties = unsafe extern "C" fn(
     properties: *mut XrSystemProperties,
 ) -> XrResult;
 
+pub type TxrGetVulkanGraphicsRequirementsKHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    system_id: XrSystemId,
+    graphics_requirements: *mut XrGraphicsRequirementsVulkanKHR,
+) -> XrResult;
+
+pub type TxrGetVulkanGraphicsRequirements2KHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    system_id: XrSystemId,
+    graphics_requirements: *mut XrGraphicsRequirementsVulkanKHR,
+) -> XrResult;
+
+pub type TxrCreateVulkanInstanceKHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    create_info: *const XrVulkanInstanceCreateInfoKHR,
+    vulkan_instance: *mut VkInstance,
+    vulkan_result: *mut VkResult,
+) -> XrResult;
+
+pub type TxrCreateVulkanDeviceKHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    create_info: *const XrVulkanDeviceCreateInfoKHR,
+    vulkan_device: *mut VkDevice,
+    vulkan_result: *mut VkResult,
+) -> XrResult;
+
+pub type TxrGetVulkanGraphicsDeviceKHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    system_id: XrSystemId,
+    vk_instance: VkInstance,
+    vk_physical_device: *mut VkPhysicalDevice,
+) -> XrResult;
+
+pub type TxrGetVulkanGraphicsDevice2KHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    get_info: *const XrVulkanGraphicsDeviceGetInfoKHR,
+    vk_physical_device: *mut VkPhysicalDevice,
+) -> XrResult;
+
 pub type TxrGetOpenGLESGraphicsRequirementsKHR = unsafe extern "C" fn(
     instance: XrInstance,
     system_id: XrSystemId,
@@ -472,11 +566,18 @@ pub type TxrCreateSwapchain = unsafe extern "C" fn(
     swapchain: *mut XrSwapchain,
 ) -> XrResult;
 
+pub type TxrEnumerateSwapchainFormats = unsafe extern "C" fn(
+    session: XrSession,
+    format_capacity_input: u32,
+    format_count_output: *mut u32,
+    formats: *mut i64,
+) -> XrResult;
+
 pub type TxrEnumerateSwapchainImages = unsafe extern "C" fn(
     swapchain: XrSwapchain,
     image_capacity_input: u32,
     image_count_output: *mut u32,
-    images: *mut XrSwapchainImageOpenGLESKHR,
+    images: *mut c_void,
 ) -> XrResult;
 
 pub type TxrCreatePassthroughFB = unsafe extern "C" fn(
@@ -517,7 +618,7 @@ pub type TxrEnumerateEnvironmentDepthSwapchainImagesMETA = unsafe extern "C" fn(
     swapchain: XrEnvironmentDepthSwapchainMETA,
     image_capacity_input: u32,
     image_count_output: *mut u32,
-    images: *mut XrSwapchainImageOpenGLESKHR,
+    images: *mut c_void,
 ) -> XrResult;
 
 pub type TxrStartEnvironmentDepthProviderMETA =
@@ -2439,6 +2540,24 @@ impl Default for XrSwapchainImageOpenGLESKHR {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct XrSwapchainImageVulkanKHR {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub image: VkImage,
+}
+
+impl Default for XrSwapchainImageVulkanKHR {
+    fn default() -> Self {
+        XrSwapchainImageVulkanKHR {
+            ty: XrStructureType::SWAPCHAIN_IMAGE_VULKAN_KHR,
+            next: 0 as *mut _,
+            image: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct XrSwapchainCreateInfo {
     pub ty: XrStructureType,
     pub next: *const c_void,
@@ -2612,6 +2731,100 @@ impl Default for XrGraphicsRequirementsOpenGLESKHR {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct XrGraphicsRequirementsVulkanKHR {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub min_api_version_supported: XrVersion,
+    pub max_api_version_supported: XrVersion,
+}
+
+impl Default for XrGraphicsRequirementsVulkanKHR {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::GRAPHICS_REQUIREMENTS_VULKAN_KHR,
+            next: 0 as *mut _,
+            min_api_version_supported: XrVersion(0),
+            max_api_version_supported: XrVersion(0),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct XrVulkanInstanceCreateInfoKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub system_id: XrSystemId,
+    pub create_flags: XrVulkanInstanceCreateFlagsKHR,
+    pub pfn_get_instance_proc_addr: Option<VkGetInstanceProcAddr>,
+    pub vulkan_create_info: *const VkInstanceCreateInfo,
+    pub vulkan_allocator: *const VkAllocationCallbacks,
+}
+
+impl Default for XrVulkanInstanceCreateInfoKHR {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::VULKAN_INSTANCE_CREATE_INFO_KHR,
+            next: std::ptr::null(),
+            system_id: XrSystemId(0),
+            create_flags: XrVulkanInstanceCreateFlagsKHR(0),
+            pfn_get_instance_proc_addr: None,
+            vulkan_create_info: std::ptr::null(),
+            vulkan_allocator: std::ptr::null(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct XrVulkanDeviceCreateInfoKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub system_id: XrSystemId,
+    pub create_flags: XrVulkanDeviceCreateFlagsKHR,
+    pub pfn_get_instance_proc_addr: Option<VkGetInstanceProcAddr>,
+    pub vulkan_physical_device: VkPhysicalDevice,
+    pub vulkan_create_info: *const VkDeviceCreateInfo,
+    pub vulkan_allocator: *const VkAllocationCallbacks,
+}
+
+impl Default for XrVulkanDeviceCreateInfoKHR {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::VULKAN_DEVICE_CREATE_INFO_KHR,
+            next: std::ptr::null(),
+            system_id: XrSystemId(0),
+            create_flags: XrVulkanDeviceCreateFlagsKHR(0),
+            pfn_get_instance_proc_addr: None,
+            vulkan_physical_device: std::ptr::null(),
+            vulkan_create_info: std::ptr::null(),
+            vulkan_allocator: std::ptr::null(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrVulkanGraphicsDeviceGetInfoKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub system_id: XrSystemId,
+    pub vulkan_instance: VkInstance,
+}
+
+impl Default for XrVulkanGraphicsDeviceGetInfoKHR {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR,
+            next: 0 as *const _,
+            system_id: XrSystemId(0),
+            vulkan_instance: std::ptr::null(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct XrSystemGetInfo {
     pub ty: XrStructureType,
     pub next: *const c_void,
@@ -2760,6 +2973,18 @@ pub struct XrGraphicsBindingOpenGLESAndroidKHR {
     pub display: EGLDisplay,
     pub config: EGLConfig,
     pub context: EGLContext,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrGraphicsBindingVulkanKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub instance: VkInstance,
+    pub physical_device: VkPhysicalDevice,
+    pub device: VkDevice,
+    pub queue_family_index: u32,
+    pub queue_index: u32,
 }
 
 #[repr(C)]
@@ -2951,6 +3176,16 @@ impl XrSwapchainUsageFlags {
     pub const INPUT_ATTACHMENT: XrSwapchainUsageFlags = Self(1 << 7u64);
 }
 bitmask!(XrSwapchainUsageFlags);
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct XrVulkanInstanceCreateFlagsKHR(pub u64);
+bitmask!(XrVulkanInstanceCreateFlagsKHR);
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct XrVulkanDeviceCreateFlagsKHR(pub u64);
+bitmask!(XrVulkanDeviceCreateFlagsKHR);
 
 // Enums
 

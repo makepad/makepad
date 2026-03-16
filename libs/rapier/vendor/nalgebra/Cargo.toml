@@ -1,0 +1,133 @@
+[package]
+edition = "2024"
+rust-version = "1.87.0"
+name = "nalgebra"
+version = "0.34.1"
+authors = ["Sébastien Crozet <developer@crozet.re>"]
+build = false
+exclude = [
+    "/ci/*",
+    "/.travis.yml",
+    "/Makefile",
+]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "General-purpose linear algebra library with transformations and statically-sized or dynamically-sized matrices."
+homepage = "https://nalgebra.rs"
+documentation = "https://www.nalgebra.rs/docs"
+readme = "README.md"
+keywords = [
+    "linear",
+    "algebra",
+    "matrix",
+    "vector",
+    "math",
+]
+categories = [
+    "science",
+    "mathematics",
+    "wasm",
+    "no-std",
+]
+license = "Apache-2.0"
+repository = "https://github.com/dimforge/nalgebra"
+resolver = "2"
+
+[features]
+alga = []
+alloc = []
+arbitrary = []
+compare = []
+convert-bytemuck = [
+    "bytemuck",
+    "num-complex/bytemuck",
+]
+glam014 = []
+glam015 = []
+glam016 = []
+glam017 = []
+glam018 = []
+glam019 = []
+glam020 = []
+glam021 = []
+glam022 = []
+glam023 = []
+glam024 = []
+glam025 = []
+glam027 = []
+glam028 = []
+glam029 = []
+glam030 = []
+convert-glam030 = ["glam030"]
+convert-mint = []
+debug = []
+default = [
+    "std",
+]
+defmt = []
+encase = []
+mint = []
+io = []
+libm = ["simba/libm"]
+libm-force = ["simba/libm_force"]
+macros = []
+proptest-support = []
+rand = []
+rand-no-std = []
+rayon = []
+rkyv-safe-deser = []
+rkyv-serialize = []
+rkyv-serialize-no-std = []
+serde-serialize = []
+serde-serialize-no-std = []
+slow-tests = []
+sparse = []
+std = [
+    "matrixmultiply",
+    "num-traits/std",
+    "num-complex/std",
+    "approx/std",
+    "simba/std",
+    "glam030?/std",
+]
+
+[lib]
+name = "nalgebra"
+path = "src/lib.rs"
+
+[dependencies.approx]
+version = "0.5"
+default-features = false
+path = "../approx"
+[dependencies.bytemuck]
+version = "1.5"
+optional = true
+path = "../../../../libs/bytemuck"
+[dependencies.glam030]
+version = "0.30"
+optional = true
+default-features = false
+package = "glam"
+path = "../glam"
+[dependencies.matrixmultiply]
+version = "0.3"
+optional = true
+path = "../matrixmultiply"
+[dependencies.num-complex]
+version = "0.4"
+default-features = false
+path = "../num-complex"
+[dependencies.num-traits]
+version = "0.2"
+default-features = false
+path = "../num-traits"
+[dependencies.simba]
+version = "0.9"
+default-features = false
+path = "../simba"
+[dependencies.typenum]
+version = "1.12"
+path = "../typenum"

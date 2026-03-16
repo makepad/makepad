@@ -44,10 +44,7 @@ impl ImageBuffer {
                     let b = rgba[2];
                     let a = rgba[3];
                     out.push(
-                        ((a as u32) << 24)
-                            | ((r as u32) << 16)
-                            | ((g as u32) << 8)
-                            | (b as u32),
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
                     );
                 }
             }
@@ -64,10 +61,7 @@ impl ImageBuffer {
                     let r = ra[0];
                     let a = ra[1];
                     out.push(
-                        ((a as u32) << 24)
-                            | ((r as u32) << 16)
-                            | ((r as u32) << 8)
-                            | (r as u32),
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((r as u32) << 8) | (r as u32),
                     );
                 }
             }
@@ -208,10 +202,8 @@ impl ImageBuffer {
                             let r = output[y * width * 3 + x * 3];
                             let g = output[y * width * 3 + x * 3 + 1];
                             let b = output[y * width * 3 + x * 3 + 2];
-                            final_buffer.data[(y + cy) * total_width + (x + cx)] = 0xff000000
-                                | ((r as u32) << 16)
-                                | ((g as u32) << 8)
-                                | (b as u32);
+                            final_buffer.data[(y + cy) * total_width + (x + cx)] =
+                                0xff000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                         }
                     }
                 }

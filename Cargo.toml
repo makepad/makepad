@@ -31,7 +31,7 @@ workspace.members = [
     "compositor",
     "libs/gltf",
     "libs/splat",
-    "libs/makepad_physics",
+    # "libs/makepad_physics",
     "libs/latex_math",
     "libs/mbtile_reader",
     "libs/pdf_parse",
@@ -54,6 +54,7 @@ workspace.members = [
     "libs/openexr",
     "libs/git",
     "libs/fast_inflate",
+    "libs/sparse_voxels",
 ]
 
 workspace.exclude = [
@@ -95,6 +96,35 @@ workspace.exclude = [
     "libs/zune/zune-inflate",
     "libs/zune/zune-jpeg",
     "libs/zune/zune-png",
+    # vendored Vulkan crates (patched crates.io crates; tests/benches pull
+    # upstream-only dev-deps or missing packaged assets)
+    "libs/vulkan/arrayvec",
+    "libs/vulkan/ash",
+    "libs/vulkan/bit-set",
+    "libs/vulkan/bit-vec",
+    "libs/vulkan/bitflags",
+    "libs/vulkan/cfg-if",
+    "libs/vulkan/cfg_aliases",
+    "libs/vulkan/crunchy",
+    "libs/vulkan/equivalent",
+    "libs/vulkan/foldhash",
+    "libs/vulkan/half",
+    "libs/vulkan/hashbrown",
+    "libs/vulkan/hexf-parse",
+    "libs/vulkan/indexmap",
+    "libs/vulkan/libloading",
+    "libs/vulkan/log",
+    "libs/vulkan/makepad-half",
+    "libs/vulkan/naga",
+    "libs/vulkan/num-traits",
+    "libs/vulkan/once_cell",
+    "libs/vulkan/rustc-hash",
+    "libs/vulkan/spirv",
+    "libs/vulkan/thiserror",
+    "libs/vulkan/thiserror-impl",
+    "libs/vulkan/unicode-ident",
+    "libs/vulkan/zerocopy",
+    "libs/rapier",
     # platform-specific libs
     "libs/windows/windows-collections",
     "libs/windows/windows-core",
@@ -155,6 +185,10 @@ lto = true        # Enable link-time optimization
 codegen-units = 1 # Reduce number of codegen units to increase optimizations
 panic = 'abort'   # Abort on panic
 strip = true
+
+[profile.profile]
+inherits = "release"
+debug = true
 
 [profile.release.package.makepad-voice]
 codegen-units = 1

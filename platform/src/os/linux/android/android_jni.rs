@@ -226,6 +226,13 @@ pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
 unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANativeWindow {
     let env = attach_jni_env();
 
+    create_native_window_with_env(env, surface)
+}
+
+unsafe fn create_native_window_with_env(
+    env: *mut jni_sys::JNIEnv,
+    surface: jni_sys::jobject,
+) -> *mut ndk_sys::ANativeWindow {
     ndk_sys::ANativeWindow_fromSurface(env, surface)
 }
 
@@ -426,11 +433,11 @@ unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_activityOnWindowFocu
 
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceCreated(
-    _: *mut jni_sys::JNIEnv,
+    env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     surface: jni_sys::jobject,
 ) {
-    let window = unsafe { create_native_window(surface) };
+    let window = unsafe { create_native_window_with_env(env, surface) };
     send_from_java_message(FromJavaMessage::SurfaceCreated { window });
 }
 
@@ -444,13 +451,13 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceDestroyed(
 
 #[no_mangle]
 extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceChanged(
-    _: *mut jni_sys::JNIEnv,
+    env: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
     surface: jni_sys::jobject,
     width: jni_sys::jint,
     height: jni_sys::jint,
 ) {
-    let window = unsafe { create_native_window(surface) };
+    let window = unsafe { create_native_window_with_env(env, surface) };
 
     send_from_java_message(FromJavaMessage::SurfaceChanged {
         window,

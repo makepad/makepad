@@ -859,13 +859,14 @@ impl X11Cx {
                             cx.textures.alloc(TextureFormat::VideoYuvPlane),
                             cx.textures.alloc(TextureFormat::VideoYuvPlane),
                         );
-                        let player = crate::video_decode::software_video::PlaybackSessionHandle::new(
-                            video_id,
-                            texture_id,
-                            source,
-                            autoplay,
-                            should_loop,
-                        );
+                        let player =
+                            crate::video_decode::software_video::PlaybackSessionHandle::new(
+                                video_id,
+                                texture_id,
+                                source,
+                                autoplay,
+                                should_loop,
+                            );
                         cx.os.video_players.insert(
                             video_id,
                             LinuxVideoPlayer::Software {

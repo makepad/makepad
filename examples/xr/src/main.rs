@@ -1,17 +1,44 @@
 pub use makepad_widgets;
 
-use makepad_widgets::makepad_platform::permission::{Permission, PermissionStatus};
+use ::rapier3d::prelude::{
+    BroadPhaseBvh, CCDSolver, ColliderBuilder, ColliderHandle, ColliderSet, ImpulseJointSet,
+    IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
+    Pose as RapierPose, Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
+    Rotation as RapierRotation, SharedShape, Vector as RapierVector,
+};
+use makepad_widgets::makepad_platform::{
+    permission::{Permission, PermissionStatus},
+    XrDepthPhysicsBox, XrDepthPhysicsChunk, XrDepthPhysicsChunkKey, XrDepthVoxels,
+};
 use makepad_widgets::*;
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    hash::{Hash, Hasher},
+};
 
 app_main!(App);
 
 script_mod! {
+    use mod.pod.*
+    use mod.math.*
+    use mod.shader.*
+    use mod.draw
+    use mod.geom
     use mod.prelude.widgets.*
     use mod.widgets.*
 
     mod.widgets.XrSceneBase = #(XrScene::register_widget(vm))
     mod.widgets.XrScene = set_type_default() do mod.widgets.XrSceneBase{
         draw_cube +: {}
+        draw_depth_box +: {}
+        draw_pbr +: {
+            light_dir: vec3(0.35, 0.8, 0.45)
+            light_color: vec3(1.0, 1.0, 1.0)
+            ambient: 0.25
+            spec_power: 128.0
+            spec_strength: 0.9
+            env_intensity: 1.8
+        }
     }
 
     startup() do #(App::script_component(vm)){
@@ -90,17 +117,8 @@ script_mod! {
                         }
 
                         XrRuntime := View{
-                            width: Fill
-                            height: Fill
-                            flow: Down
-                            align: Align{x: 0.5 y: 0.5}
-                            show_bg: true
-                            draw_bg.color: #x02070d
-
-                            launch_label := Label{
-                                text: "XR running. Look ahead for the debug cube."
-                                draw_text.color: #xcfe9ff
-                            }
+                            width: 0
+                            height: 0
                         }
                     }
                 }
@@ -111,21 +129,485 @@ script_mod! {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct PulseTrail {
-    pose: Pose,
-    born_at: f64,
-    length: f32,
-    radius: f32,
-    speed: f32,
-    color: Vec4f,
-}
+const CUBE_COLORS: &[[f32; 3]] = &[
+    [0.90, 0.30, 0.25],
+    [0.25, 0.75, 0.45],
+    [0.30, 0.50, 0.90],
+    [0.95, 0.75, 0.20],
+    [0.80, 0.40, 0.85],
+    [0.20, 0.80, 0.80],
+    [0.95, 0.55, 0.25],
+    [0.60, 0.85, 0.35],
+];
+
+const PLATFORM_COLOR: [f32; 3] = [0.10, 0.14, 0.18];
+const XR_CUBE_HALF_EXTENT: f32 = 0.020;
+const XR_PLATFORM_HALF_WIDTH: f32 = 0.64;
+const XR_PLATFORM_HALF_HEIGHT: f32 = 0.006;
+const XR_PLATFORM_HALF_DEPTH: f32 = 0.16;
+const XR_SCENE_FORWARD_OFFSET: f32 = 0.55;
+const XR_SCENE_VERTICAL_OFFSET: f32 = 0.30;
+const XR_SCENE_HEAD_HEIGHT_SCALE: f32 = 0.5;
+const XR_SIMULATION_DT: f32 = 1.0 / 120.0;
+const XR_ENABLE_HAND_PHYSICS: bool = true;
+const XR_RENDER_HAND_GEOMETRY: bool = false;
+const XR_RENDER_DEPTH_DEBUG: bool = true;
+const XR_HAND_COLLIDER_SLOTS_PER_HAND: usize = 25;
+const XR_HAND_COLLIDER_FRICTION: f32 = 0.8;
+const XR_HAND_PLATE_HALF_WIDTH: f32 = 0.045;
+const XR_HAND_PLATE_HALF_HEIGHT: f32 = 0.005;
+const XR_HAND_PLATE_HALF_DEPTH: f32 = 0.028;
+const XR_HAND_PLATE_FORWARD_OFFSET: f32 = 0.004;
+const XR_HAND_TIP_RADIUS_SCALE: f32 = 0.72;
+const XR_BODY_LINEAR_DAMPING: f32 = 1.5;
+const XR_BODY_ANGULAR_DAMPING: f32 = 6.0;
+const XR_BODY_ADDITIONAL_SOLVER_ITERATIONS: usize = 4;
+const XR_BODY_SLEEP_ANGULAR_THRESHOLD: f32 = 2.0;
+const XR_BODY_SLEEP_TIME: f32 = 0.35;
+const XR_BODY_SNAP_SLEEP_LINEAR_SPEED: f32 = 0.03;
+const XR_BODY_SNAP_SLEEP_ANGULAR_SPEED: f32 = 1.0;
+const XR_PLATFORM_SPAWN_GAP: f32 = 0.0;
+const XR_WALL_BRICK_HALF_WIDTH: f32 = XR_CUBE_HALF_EXTENT * 2.0;
+const XR_WALL_BRICK_HALF_HEIGHT: f32 = XR_CUBE_HALF_EXTENT;
+const XR_WALL_BRICK_HALF_DEPTH: f32 = XR_CUBE_HALF_EXTENT;
+const XR_WALL_FULL_ROW_BRICKS: usize = 12;
+const XR_WALL_SHORT_ROW_BRICKS: usize = 11;
+const XR_WALL_ROWS: usize = 12;
+const XR_WALL_ROTATION_Y: f32 = std::f32::consts::FRAC_PI_2;
+const XR_PLATFORM_ROUND_RADIUS: f32 = 0.005;
+const XR_PBR_FACE_SUBDIVISIONS: usize = 1;
+const XR_PBR_CORNER_SEGMENTS: usize = 3;
+const XR_PBR_HAND_CAPSULE_SUBDIVISIONS: usize = 8;
+const XR_PBR_HAND_SPHERE_SUBDIVISIONS: usize = 8;
+const XR_BRICK_VISUAL_SCALE: f32 = 0.98;
+const XR_DEPTH_BOX_DEBUG_SCALE: f32 = 0.98;
+const XR_DEPTH_BOX_DEBUG_ALPHA: f32 = 0.16;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum AppPhase {
     #[default]
     Preflight,
     XrRuntime,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HandCollider {
+    Capsule { a: Vec3f, b: Vec3f, radius: f32 },
+    Ball { center: Vec3f, radius: f32 },
+    Box { pose: Pose, half_extents: Vec3f },
+}
+
+#[derive(Clone, Copy)]
+struct PhysicsCube {
+    body: RigidBodyHandle,
+    collider: ColliderHandle,
+    half_extents: Vec3f,
+    color_index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct HandColliderBody {
+    body: RigidBodyHandle,
+    collider: ColliderHandle,
+}
+
+#[derive(Clone, Copy)]
+struct DepthChunkCollider {
+    collider: ColliderHandle,
+    fingerprint: u64,
+}
+
+struct RapierScene {
+    gravity: RapierVector,
+    integration_parameters: IntegrationParameters,
+    pipeline: PhysicsPipeline,
+    islands: IslandManager,
+    broad_phase: BroadPhaseBvh,
+    narrow_phase: NarrowPhase,
+    bodies: RigidBodySet,
+    colliders: ColliderSet,
+    impulse_joints: ImpulseJointSet,
+    multibody_joints: MultibodyJointSet,
+    ccd_solver: CCDSolver,
+    cubes: Vec<PhysicsCube>,
+    left_hand: Vec<HandColliderBody>,
+    right_hand: Vec<HandColliderBody>,
+    platform_pose: Pose,
+    depth_body: RigidBodyHandle,
+    depth_chunk_colliders: HashMap<XrDepthPhysicsChunkKey, DepthChunkCollider>,
+    depth_physics_generation: u64,
+}
+
+fn rapier_vec3(v: Vec3f) -> RapierVector {
+    RapierVector::new(v.x, v.y, v.z)
+}
+
+fn rapier_rotation(q: Quat) -> RapierRotation {
+    RapierRotation::from_xyzw(q.x, q.y, q.z, q.w)
+}
+
+fn rapier_pose(pose: Pose) -> RapierPose {
+    RapierPose::from_parts(
+        rapier_vec3(pose.position),
+        rapier_rotation(pose.orientation),
+    )
+}
+
+fn makepad_pose(pose: &RapierPose) -> Pose {
+    Pose::new(
+        Quat {
+            x: pose.rotation.x,
+            y: pose.rotation.y,
+            z: pose.rotation.z,
+            w: pose.rotation.w,
+        },
+        vec3f(pose.translation.x, pose.translation.y, pose.translation.z),
+    )
+}
+
+fn capsule_pose(a: Vec3f, b: Vec3f) -> (RapierPose, RapierReal) {
+    let delta = b - a;
+    let length = delta.length();
+    let rotation = if length > 1.0e-4 {
+        RapierRotation::from_rotation_arc(RapierVector::Y, rapier_vec3(delta * (1.0 / length)))
+    } else {
+        RapierRotation::IDENTITY
+    };
+    (
+        RapierPose::from_parts(rapier_vec3((a + b) * 0.5), rotation),
+        (length * 0.5).max(0.0005),
+    )
+}
+
+impl RapierScene {
+    fn physics_chunk_fingerprint(chunk: &XrDepthPhysicsChunk) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        chunk.key.hash(&mut hasher);
+        chunk.boxes.len().hash(&mut hasher);
+        for physics_box in &chunk.boxes {
+            physics_box.pose.position.x.to_bits().hash(&mut hasher);
+            physics_box.pose.position.y.to_bits().hash(&mut hasher);
+            physics_box.pose.position.z.to_bits().hash(&mut hasher);
+            physics_box.pose.orientation.x.to_bits().hash(&mut hasher);
+            physics_box.pose.orientation.y.to_bits().hash(&mut hasher);
+            physics_box.pose.orientation.z.to_bits().hash(&mut hasher);
+            physics_box.pose.orientation.w.to_bits().hash(&mut hasher);
+            physics_box.half_extents.x.to_bits().hash(&mut hasher);
+            physics_box.half_extents.y.to_bits().hash(&mut hasher);
+            physics_box.half_extents.z.to_bits().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn spawn_dynamic_box(&mut self, pose: Pose, half_extents: Vec3f) {
+        let body = self.bodies.insert(
+            RigidBodyBuilder::dynamic()
+                .pose(rapier_pose(pose))
+                .linear_damping(XR_BODY_LINEAR_DAMPING)
+                .angular_damping(XR_BODY_ANGULAR_DAMPING)
+                .additional_solver_iterations(XR_BODY_ADDITIONAL_SOLVER_ITERATIONS),
+        );
+        if let Some(rigid_body) = self.bodies.get_mut(body) {
+            let activation = rigid_body.activation_mut();
+            activation.angular_threshold = XR_BODY_SLEEP_ANGULAR_THRESHOLD;
+            activation.time_until_sleep = XR_BODY_SLEEP_TIME;
+        }
+        let collider = self.colliders.insert_with_parent(
+            ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
+                .density(1.0)
+                .friction(0.8)
+                .restitution(0.0),
+            body,
+            &mut self.bodies,
+        );
+        self.cubes.push(PhysicsCube {
+            body,
+            collider,
+            half_extents,
+            color_index: self.cubes.len() % CUBE_COLORS.len(),
+        });
+    }
+
+    fn new(center: Vec3f) -> Self {
+        let scene_rotation = Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), XR_WALL_ROTATION_Y);
+        let platform_center = center + vec3f(0.0, -XR_PLATFORM_HALF_HEIGHT, 0.0);
+        let mut scene = Self {
+            gravity: RapierVector::new(0.0, -9.81, 0.0),
+            integration_parameters: IntegrationParameters {
+                dt: XR_SIMULATION_DT,
+                ..IntegrationParameters::default()
+            },
+            pipeline: PhysicsPipeline::new(),
+            islands: IslandManager::new(),
+            broad_phase: BroadPhaseBvh::new(),
+            narrow_phase: NarrowPhase::new(),
+            bodies: RigidBodySet::new(),
+            colliders: ColliderSet::new(),
+            impulse_joints: ImpulseJointSet::new(),
+            multibody_joints: MultibodyJointSet::new(),
+            ccd_solver: CCDSolver::new(),
+            cubes: Vec::new(),
+            left_hand: Vec::new(),
+            right_hand: Vec::new(),
+            platform_pose: Pose::new(scene_rotation, platform_center),
+            depth_body: RigidBodyHandle::invalid(),
+            depth_chunk_colliders: HashMap::new(),
+            depth_physics_generation: 0,
+        };
+
+        let platform = scene
+            .bodies
+            .insert(RigidBodyBuilder::fixed().pose(rapier_pose(scene.platform_pose)));
+        scene.colliders.insert_with_parent(
+            ColliderBuilder::cuboid(
+                XR_PLATFORM_HALF_WIDTH,
+                XR_PLATFORM_HALF_HEIGHT,
+                XR_PLATFORM_HALF_DEPTH,
+            )
+            .friction(0.9),
+            platform,
+            &mut scene.bodies,
+        );
+
+        // Invisible floor at XR ground level (y=0).
+        let floor = scene.bodies.insert(RigidBodyBuilder::fixed().build());
+        scene.colliders.insert_with_parent(
+            ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
+                .friction(0.9),
+            floor,
+            &mut scene.bodies,
+        );
+
+        scene.depth_body = scene.bodies.insert(RigidBodyBuilder::fixed().build());
+
+        let brick_half_extents = vec3f(
+            XR_WALL_BRICK_HALF_WIDTH,
+            XR_WALL_BRICK_HALF_HEIGHT,
+            XR_WALL_BRICK_HALF_DEPTH,
+        );
+        let brick_width = XR_WALL_BRICK_HALF_WIDTH * 2.0 + XR_PLATFORM_SPAWN_GAP;
+        let brick_height = XR_WALL_BRICK_HALF_HEIGHT * 2.0 + XR_PLATFORM_SPAWN_GAP;
+        let wall_origin = center;
+        let row_axis = vec3f(0.0, 0.0, 1.0);
+        let brick_rotation = scene_rotation;
+        for row in 0..XR_WALL_ROWS {
+            let bricks_in_row = if row % 2 == 0 {
+                XR_WALL_FULL_ROW_BRICKS
+            } else {
+                XR_WALL_SHORT_ROW_BRICKS
+            };
+            let row_center_offset = (bricks_in_row as f32 - 1.0) * 0.5;
+            for brick in 0..bricks_in_row {
+                let brick_center = wall_origin
+                    + row_axis * ((brick as f32 - row_center_offset) * brick_width)
+                    + vec3f(
+                        0.0,
+                        XR_WALL_BRICK_HALF_HEIGHT
+                            + XR_PLATFORM_SPAWN_GAP
+                            + row as f32 * brick_height,
+                        0.0,
+                    );
+                scene
+                    .spawn_dynamic_box(Pose::new(brick_rotation, brick_center), brick_half_extents);
+            }
+        }
+
+        if XR_ENABLE_HAND_PHYSICS {
+            scene.left_hand = scene.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND);
+            scene.right_hand = scene.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND);
+        }
+        scene.step();
+        scene
+    }
+
+    fn spawn_hand_colliders(&mut self, count: usize) -> Vec<HandColliderBody> {
+        let mut result = Vec::with_capacity(count);
+        for _ in 0..count {
+            let body = self
+                .bodies
+                .insert(RigidBodyBuilder::kinematic_position_based().pose(RapierPose::IDENTITY));
+            let collider = self.colliders.insert_with_parent(
+                ColliderBuilder::capsule_y(0.01, 0.01)
+                    .friction(XR_HAND_COLLIDER_FRICTION)
+                    .restitution(0.0),
+                body,
+                &mut self.bodies,
+            );
+            if let Some(collider) = self.colliders.get_mut(collider) {
+                collider.set_enabled(false);
+            }
+            result.push(HandColliderBody { body, collider });
+        }
+        result
+    }
+
+    fn sync_hand_bodies(
+        bodies: &[HandColliderBody],
+        colliders: &[HandCollider],
+        rigid_bodies: &mut RigidBodySet,
+        collider_set: &mut ColliderSet,
+    ) {
+        for (index, slot) in bodies.iter().enumerate() {
+            let active = index < colliders.len();
+            if active {
+                let (target_pose, shape) = match colliders[index] {
+                    HandCollider::Capsule { a, b, radius } => {
+                        let (target_pose, half_height) = capsule_pose(a, b);
+                        (target_pose, SharedShape::capsule_y(half_height, radius))
+                    }
+                    HandCollider::Ball { center, radius } => (
+                        RapierPose::from_parts(rapier_vec3(center), RapierRotation::IDENTITY),
+                        SharedShape::ball(radius),
+                    ),
+                    HandCollider::Box { pose, half_extents } => (
+                        rapier_pose(pose),
+                        SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z),
+                    ),
+                };
+                let was_enabled = collider_set
+                    .get(slot.collider)
+                    .map(|collider| collider.is_enabled())
+                    .unwrap_or(false);
+                if let Some(collider) = collider_set.get_mut(slot.collider) {
+                    collider.set_shape(shape);
+                    collider.set_enabled(true);
+                }
+                if let Some(body) = rigid_bodies.get_mut(slot.body) {
+                    if !was_enabled {
+                        // Reset the body pose on reacquire so tracking loss doesn't inject a huge velocity spike.
+                        body.set_position(target_pose, false);
+                    }
+                    body.set_next_kinematic_position(target_pose);
+                }
+            } else if let Some(collider) = collider_set.get_mut(slot.collider) {
+                collider.set_enabled(false);
+            }
+        }
+    }
+
+    fn step(&mut self) {
+        self.pipeline.step(
+            self.gravity,
+            &self.integration_parameters,
+            &mut self.islands,
+            &mut self.broad_phase,
+            &mut self.narrow_phase,
+            &mut self.bodies,
+            &mut self.colliders,
+            &mut self.impulse_joints,
+            &mut self.multibody_joints,
+            &mut self.ccd_solver,
+            &(),
+            &(),
+        );
+        self.settle_resting_bodies();
+    }
+
+    fn settle_resting_bodies(&mut self) {
+        let linear_speed_sq = XR_BODY_SNAP_SLEEP_LINEAR_SPEED * XR_BODY_SNAP_SLEEP_LINEAR_SPEED;
+        let angular_speed_sq = XR_BODY_SNAP_SLEEP_ANGULAR_SPEED * XR_BODY_SNAP_SLEEP_ANGULAR_SPEED;
+        let mut to_sleep = Vec::new();
+
+        for cube in &self.cubes {
+            let has_active_contact = self
+                .narrow_phase
+                .contact_pairs_with(cube.collider)
+                .any(|pair| pair.has_any_active_contact());
+            if !has_active_contact {
+                continue;
+            }
+
+            let Some(body) = self.bodies.get(cube.body) else {
+                continue;
+            };
+            if body.is_sleeping() {
+                continue;
+            }
+
+            let linvel = body.linvel();
+            let angvel = body.angvel();
+            let linvel_sq = linvel.x * linvel.x + linvel.y * linvel.y + linvel.z * linvel.z;
+            let angvel_sq = angvel.x * angvel.x + angvel.y * angvel.y + angvel.z * angvel.z;
+            if linvel_sq <= linear_speed_sq && angvel_sq <= angular_speed_sq {
+                to_sleep.push(cube.body);
+            }
+        }
+
+        for handle in to_sleep {
+            if let Some(body) = self.bodies.get_mut(handle) {
+                body.set_linvel(RapierVector::ZERO, false);
+                body.set_angvel(RapierVector::ZERO, false);
+            }
+        }
+    }
+
+    fn sync_depth_physics_chunks(
+        &mut self,
+        generation: u64,
+        chunks: &[XrDepthPhysicsChunk],
+    ) -> bool {
+        if self.depth_physics_generation == generation {
+            return false;
+        }
+
+        self.depth_physics_generation = generation;
+        let live_keys: HashSet<_> = chunks.iter().map(|chunk| chunk.key).collect();
+        let stale_keys: Vec<_> = self
+            .depth_chunk_colliders
+            .keys()
+            .copied()
+            .filter(|key| !live_keys.contains(key))
+            .collect();
+
+        let mut changed = false;
+        for key in stale_keys {
+            if let Some(chunk) = self.depth_chunk_colliders.remove(&key) {
+                self.colliders
+                    .remove(chunk.collider, &mut self.islands, &mut self.bodies, false);
+                changed = true;
+            }
+        }
+
+        for physics_chunk in chunks {
+            let fingerprint = Self::physics_chunk_fingerprint(physics_chunk);
+            if let Some(existing) = self.depth_chunk_colliders.get_mut(&physics_chunk.key) {
+                if existing.fingerprint != fingerprint {
+                    if let Some(collider) = self.colliders.get_mut(existing.collider) {
+                        collider.set_shape(physics_chunk.shape.clone());
+                        collider.set_enabled(true);
+                    }
+                    existing.fingerprint = fingerprint;
+                    changed = true;
+                }
+                continue;
+            }
+
+            let collider = self.colliders.insert_with_parent(
+                ColliderBuilder::new(physics_chunk.shape.clone())
+                    .friction(0.9)
+                    .restitution(0.0),
+                self.depth_body,
+                &mut self.bodies,
+            );
+            self.depth_chunk_colliders.insert(
+                physics_chunk.key,
+                DepthChunkCollider {
+                    collider,
+                    fingerprint,
+                },
+            );
+            changed = true;
+        }
+
+        if changed {
+            for cube in &self.cubes {
+                if let Some(body) = self.bodies.get_mut(cube.body) {
+                    body.wake_up(true);
+                }
+            }
+        }
+        changed
+    }
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -137,17 +619,26 @@ pub struct XrScene {
     #[redraw]
     #[live]
     draw_cube: DrawCube,
+    #[redraw]
+    #[live]
+    draw_pbr: DrawPbr,
+    #[redraw]
+    #[live]
+    draw_depth_box: DrawCube,
     #[rust]
-    pulses: Vec<PulseTrail>,
+    scene: Option<RapierScene>,
     #[rust]
-    reference_cube_pose: Option<Pose>,
-    #[rust(0.0)]
-    last_emit_at: f64,
+    depth_box_generation: u64,
+    #[rust]
+    depth_debug_boxes: Vec<XrDepthPhysicsBox>,
+    #[rust]
+    depth_debug_hidden: bool,
 }
 
 impl XrScene {
-    const EMIT_INTERVAL: f64 = 0.045;
-    const PULSE_TTL: f64 = 0.95;
+    fn depth_debug_enabled(&self) -> bool {
+        XR_RENDER_DEPTH_DEBUG && !self.depth_debug_hidden
+    }
 
     fn draw_pose_box(
         &mut self,
@@ -155,118 +646,374 @@ impl XrScene {
         pose: Pose,
         size: Vec3f,
         color: Vec4f,
-        _metallic: f32,
-        _roughness: f32,
+        depth_clip: f32,
     ) {
         self.draw_cube.transform = pose.to_mat4();
         self.draw_cube.cube_pos = vec3(0.0, 0.0, 0.0);
         self.draw_cube.cube_size = size;
         self.draw_cube.color = color;
-        self.draw_cube.depth_clip = 0.0;
+        self.draw_cube.depth_clip = depth_clip;
         self.draw_cube.draw(cx);
     }
 
-    fn draw_forward_box(
+    fn draw_depth_pose_box(
         &mut self,
         cx: &mut Cx2d,
         pose: Pose,
         size: Vec3f,
-        forward_offset: f32,
         color: Vec4f,
-        _metallic: f32,
-        _roughness: f32,
+        depth_clip: f32,
     ) {
-        self.draw_cube.transform = pose.to_mat4();
-        self.draw_cube.cube_pos = vec3(0.0, 0.0, forward_offset);
-        self.draw_cube.cube_size = size;
-        self.draw_cube.color = color;
-        self.draw_cube.depth_clip = 0.0;
-        self.draw_cube.draw(cx);
+        self.draw_depth_box.transform = pose.to_mat4();
+        self.draw_depth_box.cube_pos = vec3(0.0, 0.0, 0.0);
+        self.draw_depth_box.cube_size = size;
+        self.draw_depth_box.color = color;
+        self.draw_depth_box.depth_clip = depth_clip;
+        self.draw_depth_box.draw(cx);
     }
 
-    fn draw_anchor_markers(&mut self, cx: &mut Cx2d, anchor: XrAnchor) {
-        self.draw_pose_box(
+    fn prepare_pbr(&mut self, cx: &mut Cx2d) {
+        self.draw_pbr.begin();
+        self.draw_pbr.set_use_pass_camera(true);
+        self.draw_pbr.set_depth_clip(1.0);
+        self.draw_pbr.set_base_color_texture(None);
+        self.draw_pbr.set_metal_roughness_texture(None);
+        self.draw_pbr.set_normal_texture(None);
+        self.draw_pbr.set_occlusion_texture(None);
+        self.draw_pbr.set_emissive_texture(None);
+        let env_tex = self.draw_pbr.default_env_texture(cx);
+        self.draw_pbr.set_env_texture(Some(env_tex));
+    }
+
+    fn prepare_depth_boxes(&mut self) {
+        self.draw_depth_box.draw_vars.options.depth_write = false;
+        self.draw_depth_box.depth_clip = 0.0;
+    }
+
+    fn draw_pbr_rounded_cube(
+        &mut self,
+        cx: &mut Cx2d,
+        pose: Pose,
+        half_extents: Vec3f,
+        radius: f32,
+        color: Vec4f,
+        roughness: f32,
+    ) {
+        self.draw_pbr.set_transform(pose.to_mat4());
+        self.draw_pbr.set_base_color_factor(color);
+        self.draw_pbr.set_metal_roughness(0.0, roughness);
+        let _ = self.draw_pbr.draw_rounded_cube(
             cx,
-            Pose::new(anchor.to_quat(), anchor.left),
-            vec3(0.025, 0.025, 0.025),
-            vec4(0.14, 0.62, 1.0, 1.0),
-            0.10,
-            0.42,
-        );
-        self.draw_pose_box(
-            cx,
-            Pose::new(anchor.to_quat_rev(), anchor.right),
-            vec3(0.025, 0.025, 0.025),
-            vec4(0.20, 1.0, 0.56, 1.0),
-            0.10,
-            0.42,
+            half_extents,
+            radius,
+            XR_PBR_FACE_SUBDIVISIONS,
+            XR_PBR_CORNER_SEGMENTS,
         );
     }
 
-    fn ensure_reference_cube_pose(&mut self, state: &XrState) {
-        if self.reference_cube_pose.is_some() {
-            return;
+    fn draw_pbr_capsule(
+        &mut self,
+        cx: &mut Cx2d,
+        pose: Pose,
+        radius: f32,
+        half_height: f32,
+        color: Vec4f,
+        roughness: f32,
+    ) {
+        self.draw_pbr.set_transform(pose.to_mat4());
+        self.draw_pbr.set_base_color_factor(color);
+        self.draw_pbr.set_metal_roughness(0.0, roughness);
+        let _ =
+            self.draw_pbr
+                .draw_capsule(cx, radius, half_height, XR_PBR_HAND_CAPSULE_SUBDIVISIONS);
+    }
+
+    fn draw_pbr_sphere(
+        &mut self,
+        cx: &mut Cx2d,
+        center: Vec3f,
+        radius: f32,
+        color: Vec4f,
+        roughness: f32,
+    ) {
+        self.draw_pbr
+            .set_transform(Pose::new(Quat::default(), center).to_mat4());
+        self.draw_pbr.set_base_color_factor(color);
+        self.draw_pbr.set_metal_roughness(0.0, roughness);
+        let _ = self
+            .draw_pbr
+            .draw_sphere(cx, radius, XR_PBR_HAND_SPHERE_SUBDIVISIONS);
+    }
+
+    fn pose_point_world(pose: Pose, local: Vec3f) -> Vec3f {
+        pose.to_mat4().transform_vec4(local.to_vec4()).to_vec3f()
+    }
+
+    fn append_capsule_collider(colliders: &mut Vec<HandCollider>, a: Vec3f, b: Vec3f, radius: f32) {
+        colliders.push(HandCollider::Capsule { a, b, radius });
+    }
+
+    fn append_ball_collider(colliders: &mut Vec<HandCollider>, center: Vec3f, radius: f32) {
+        colliders.push(HandCollider::Ball { center, radius });
+    }
+
+    fn append_box_collider(colliders: &mut Vec<HandCollider>, pose: Pose, half_extents: Vec3f) {
+        colliders.push(HandCollider::Box { pose, half_extents });
+    }
+
+    fn hand_plate_pose(hand: &XrHand) -> Pose {
+        let palm_pose = hand.joints[XrHand::CENTER];
+        Pose::new(
+            palm_pose.orientation,
+            Self::pose_point_world(palm_pose, vec3f(0.0, 0.0, XR_HAND_PLATE_FORWARD_OFFSET)),
+        )
+    }
+
+    fn hand_tip_world(hand: &XrHand, finger_index: usize) -> Vec3f {
+        let tip_len = hand.tips[finger_index].max(0.0);
+        hand.joints[XrHand::END_KNUCKLES[finger_index]]
+            .to_mat4()
+            .transform_vec4(vec4(0.0, 0.0, -tip_len, 1.0))
+            .to_vec3f()
+    }
+
+    fn append_finger_chain_colliders(
+        colliders: &mut Vec<HandCollider>,
+        hand: &XrHand,
+        chain: &[usize],
+        tip_index: usize,
+        radius: f32,
+    ) {
+        for segment in chain.windows(2) {
+            Self::append_capsule_collider(
+                colliders,
+                hand.joints[segment[0]].position,
+                hand.joints[segment[1]].position,
+                radius,
+            );
+        }
+        if hand.tip_active(tip_index) {
+            let end_joint = *chain.last().unwrap_or(&XrHand::CENTER);
+            Self::append_capsule_collider(
+                colliders,
+                hand.joints[end_joint].position,
+                Self::hand_tip_world(hand, tip_index),
+                radius * 0.85,
+            );
+        }
+    }
+
+    fn append_fingertip_collider(
+        colliders: &mut Vec<HandCollider>,
+        hand: &XrHand,
+        tip_index: usize,
+        radius: f32,
+    ) {
+        if hand.tip_active(tip_index) {
+            Self::append_ball_collider(colliders, Self::hand_tip_world(hand, tip_index), radius);
+        }
+    }
+
+    fn build_hand_colliders(hand: &XrHand) -> Vec<HandCollider> {
+        let mut colliders = Vec::with_capacity(XR_HAND_COLLIDER_SLOTS_PER_HAND);
+        if !hand.in_view() {
+            return colliders;
         }
 
-        let pose = Pose::new(
-            state.head_pose.orientation,
-            state.vec_in_head_space(vec3(0.0, -0.05, -1.15)),
+        Self::append_box_collider(
+            &mut colliders,
+            Self::hand_plate_pose(hand),
+            vec3f(
+                XR_HAND_PLATE_HALF_WIDTH,
+                XR_HAND_PLATE_HALF_HEIGHT,
+                XR_HAND_PLATE_HALF_DEPTH,
+            ),
         );
-        log!(
-            "XR debug cube spawned at ({:.2}, {:.2}, {:.2})",
-            pose.position.x,
-            pose.position.y,
-            pose.position.z
+
+        Self::append_finger_chain_colliders(
+            &mut colliders,
+            hand,
+            &[
+                XrHand::THUMB_BASE,
+                XrHand::THUMB_KNUCKLE1,
+                XrHand::THUMB_KNUCKLE2,
+            ],
+            XrHand::THUMB_TIP,
+            0.015,
         );
-        self.reference_cube_pose = Some(pose);
+        Self::append_fingertip_collider(
+            &mut colliders,
+            hand,
+            XrHand::THUMB_TIP,
+            0.015 * XR_HAND_TIP_RADIUS_SCALE,
+        );
+        Self::append_finger_chain_colliders(
+            &mut colliders,
+            hand,
+            &[
+                XrHand::INDEX_BASE,
+                XrHand::INDEX_KNUCKLE1,
+                XrHand::INDEX_KNUCKLE2,
+                XrHand::INDEX_KNUCKLE3,
+            ],
+            XrHand::INDEX_TIP,
+            0.014,
+        );
+        Self::append_fingertip_collider(
+            &mut colliders,
+            hand,
+            XrHand::INDEX_TIP,
+            0.014 * XR_HAND_TIP_RADIUS_SCALE,
+        );
+        Self::append_finger_chain_colliders(
+            &mut colliders,
+            hand,
+            &[
+                XrHand::MIDDLE_BASE,
+                XrHand::MIDDLE_KNUCKLE1,
+                XrHand::MIDDLE_KNUCKLE2,
+                XrHand::MIDDLE_KNUCKLE3,
+            ],
+            XrHand::MIDDLE_TIP,
+            0.015,
+        );
+        Self::append_fingertip_collider(
+            &mut colliders,
+            hand,
+            XrHand::MIDDLE_TIP,
+            0.015 * XR_HAND_TIP_RADIUS_SCALE,
+        );
+        Self::append_finger_chain_colliders(
+            &mut colliders,
+            hand,
+            &[
+                XrHand::RING_BASE,
+                XrHand::RING_KNUCKLE1,
+                XrHand::RING_KNUCKLE2,
+                XrHand::RING_KNUCKLE3,
+            ],
+            XrHand::RING_TIP,
+            0.014,
+        );
+        Self::append_fingertip_collider(
+            &mut colliders,
+            hand,
+            XrHand::RING_TIP,
+            0.014 * XR_HAND_TIP_RADIUS_SCALE,
+        );
+        Self::append_finger_chain_colliders(
+            &mut colliders,
+            hand,
+            &[
+                XrHand::LITTLE_BASE,
+                XrHand::LITTLE_KNUCKLE1,
+                XrHand::LITTLE_KNUCKLE2,
+                XrHand::LITTLE_KNUCKLE3,
+            ],
+            XrHand::LITTLE_TIP,
+            0.013,
+        );
+        Self::append_fingertip_collider(
+            &mut colliders,
+            hand,
+            XrHand::LITTLE_TIP,
+            0.013 * XR_HAND_TIP_RADIUS_SCALE,
+        );
+
+        colliders
     }
 
-    fn draw_reference_cube(&mut self, cx: &mut Cx2d) {
-        let Some(pose) = self.reference_cube_pose else {
-            return;
+    fn collect_live_hand_colliders(
+        scene: &RapierScene,
+        slots: &[HandColliderBody],
+    ) -> Vec<HandCollider> {
+        let mut colliders = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let Some(collider) = scene.colliders.get(slot.collider) else {
+                continue;
+            };
+            if !collider.is_enabled() {
+                continue;
+            }
+
+            let pose = makepad_pose(collider.position());
+            let shape = collider.shape();
+            if let Some(capsule) = shape.as_capsule() {
+                colliders.push(HandCollider::Capsule {
+                    a: Self::pose_point_world(
+                        pose,
+                        vec3f(
+                            capsule.segment.a.x,
+                            capsule.segment.a.y,
+                            capsule.segment.a.z,
+                        ),
+                    ),
+                    b: Self::pose_point_world(
+                        pose,
+                        vec3f(
+                            capsule.segment.b.x,
+                            capsule.segment.b.y,
+                            capsule.segment.b.z,
+                        ),
+                    ),
+                    radius: capsule.radius,
+                });
+            } else if let Some(ball) = shape.as_ball() {
+                colliders.push(HandCollider::Ball {
+                    center: pose.position,
+                    radius: ball.radius,
+                });
+            } else if let Some(cuboid) = shape.as_cuboid() {
+                colliders.push(HandCollider::Box {
+                    pose,
+                    half_extents: vec3f(
+                        cuboid.half_extents.x,
+                        cuboid.half_extents.y,
+                        cuboid.half_extents.z,
+                    ),
+                });
+            }
+        }
+        colliders
+    }
+
+    fn draw_hand_shapes(&mut self, cx: &mut Cx2d, colliders: &[HandCollider], is_left: bool) {
+        let color = if is_left {
+            vec4(0.18, 0.72, 1.0, 1.0)
+        } else {
+            vec4(1.0, 0.62, 0.20, 1.0)
         };
-
-        self.draw_pose_box(
-            cx,
-            pose,
-            vec3(0.16, 0.16, 0.16),
-            vec4(0.98, 0.24, 0.18, 1.0),
-            0.06,
-            0.24,
-        );
-        self.draw_forward_box(
-            cx,
-            pose,
-            vec3(0.045, 0.045, 0.11),
-            -0.14,
-            vec4(1.0, 0.96, 0.88, 1.0),
-            0.04,
-            0.18,
-        );
+        for collider in colliders {
+            match collider {
+                HandCollider::Capsule { a, b, radius } => {
+                    let (pose, half_height) = capsule_pose(*a, *b);
+                    self.draw_pbr_capsule(
+                        cx,
+                        makepad_pose(&pose),
+                        *radius,
+                        half_height,
+                        color,
+                        0.58,
+                    );
+                }
+                HandCollider::Ball { center, radius } => {
+                    self.draw_pbr_sphere(cx, *center, *radius, color, 0.56);
+                }
+                HandCollider::Box { pose, half_extents } => {
+                    self.draw_pbr_rounded_cube(cx, *pose, *half_extents, 0.0, color, 0.60);
+                }
+            }
+        }
     }
 
-    fn draw_headset(&mut self, cx: &mut Cx2d, state: &XrState) {
-        self.draw_pose_box(
-            cx,
-            state.head_pose,
-            vec3(0.16, 0.10, 0.12),
-            vec4(0.92, 0.95, 0.98, 1.0),
-            0.08,
-            0.56,
-        );
-        self.draw_forward_box(
-            cx,
-            state.head_pose,
-            vec3(0.08, 0.045, 0.05),
-            -0.06,
-            vec4(0.12, 0.18, 0.22, 1.0),
-            0.04,
-            0.30,
-        );
-    }
-
-    fn draw_hand(&mut self, cx: &mut Cx2d, hand: &XrHand, is_left: bool) {
-        if !hand.in_view() {
+    fn draw_hand(
+        &mut self,
+        cx: &mut Cx2d,
+        hand: &XrHand,
+        physics_colliders: Option<&[HandCollider]>,
+        is_left: bool,
+    ) {
+        if !XR_RENDER_HAND_GEOMETRY || !hand.in_view() {
             return;
         }
 
@@ -275,141 +1022,239 @@ impl XrScene {
         } else {
             vec4(1.0, 0.68, 0.30, 1.0)
         };
-        let tip_color = if is_left {
-            vec4(0.42, 0.98, 1.0, 1.0)
+        let raw_colliders;
+        let colliders = if let Some(physics_colliders) = physics_colliders {
+            physics_colliders
         } else {
-            vec4(1.0, 0.86, 0.44, 1.0)
+            raw_colliders = Self::build_hand_colliders(hand);
+            &raw_colliders
         };
+        self.draw_hand_shapes(cx, colliders, is_left);
 
+        self.draw_cube.begin_many_instances(cx);
         for joint in &hand.joints {
-            self.draw_pose_box(
-                cx,
-                *joint,
-                vec3(0.011, 0.011, 0.016),
-                joint_color,
-                0.06,
-                0.72,
-            );
+            self.draw_pose_box(cx, *joint, vec3(0.011, 0.011, 0.016), joint_color, 0.0);
         }
-
-        for (finger_index, knuckle_index) in XrHand::END_KNUCKLES.iter().enumerate() {
-            if !hand.tip_active(finger_index) {
-                continue;
-            }
-            let tip_len = hand.tips[finger_index].max(0.006);
-            self.draw_forward_box(
-                cx,
-                hand.joints[*knuckle_index],
-                vec3(0.007, 0.007, 0.018 + tip_len * 0.6),
-                -0.014 - tip_len * 0.3,
-                tip_color,
-                0.02,
-                0.20,
-            );
-        }
+        self.draw_cube.end_many_instances(cx);
     }
 
-    fn draw_controller(&mut self, cx: &mut Cx2d, controller: &XrController, color: Vec4f) {
-        if !controller.active() && controller.trigger <= 0.05 && controller.grip <= 0.05 {
+    fn ensure_scene(&mut self, state: &XrState) -> bool {
+        if self.scene.is_some() {
+            return false;
+        }
+
+        let mut forward = state.vec_in_head_space(vec3(0.0, 0.0, -1.0)) - state.head_pose.position;
+        forward.y = 0.0;
+        if forward.length() <= 1.0e-4 {
+            forward = vec3f(0.0, 0.0, -1.0);
+        } else {
+            forward = forward.normalize();
+        }
+        let center = vec3f(
+            state.head_pose.position.x,
+            state.head_pose.position.y * XR_SCENE_HEAD_HEIGHT_SCALE,
+            state.head_pose.position.z,
+        ) + forward * XR_SCENE_FORWARD_OFFSET
+            + vec3f(0.0, XR_SCENE_VERTICAL_OFFSET, 0.0);
+
+        log!(
+            "XR physics wall spawned at ({:.2}, {:.2}, {:.2})",
+            center.x,
+            center.y,
+            center.z
+        );
+        self.scene = Some(RapierScene::new(center));
+        true
+    }
+
+    fn reset_scene(&mut self, state: &XrState) {
+        self.scene = None;
+        self.ensure_scene(state);
+    }
+
+    fn sync_hands(&mut self, state: &XrState) {
+        if !XR_ENABLE_HAND_PHYSICS {
             return;
         }
 
-        self.draw_pose_box(
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+
+        let left = Self::build_hand_colliders(&state.left_hand);
+        let right = Self::build_hand_colliders(&state.right_hand);
+        let RapierScene {
+            bodies,
+            colliders,
+            left_hand,
+            right_hand,
+            ..
+        } = scene;
+        RapierScene::sync_hand_bodies(left_hand, &left, bodies, colliders);
+        RapierScene::sync_hand_bodies(right_hand, &right, bodies, colliders);
+    }
+
+    fn sync_depth_physics(&mut self, cx: &mut Cx) {
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        let Some(volume) = cx.xr_depth_voxels().latest_voxels() else {
+            let _ = scene.sync_depth_physics_chunks(0, &[]);
+            return;
+        };
+        let Ok(volume) = volume.read() else {
+            return;
+        };
+        let _ = scene.sync_depth_physics_chunks(volume.physics_generation, &volume.physics_chunks);
+    }
+
+    fn draw_platform(&mut self, cx: &mut Cx2d) {
+        let Some(scene) = self.scene.as_ref() else {
+            return;
+        };
+
+        self.draw_pbr_rounded_cube(
             cx,
-            controller.grip_pose,
-            vec3(0.035, 0.035, 0.070),
-            vec4(color.x * 0.7, color.y * 0.7, color.z * 0.7, 1.0),
-            0.18,
-            0.44,
-        );
-        self.draw_forward_box(
-            cx,
-            controller.aim_pose,
-            vec3(0.009, 0.009, 0.22),
-            -0.12,
-            color,
-            0.04,
-            0.16,
+            scene.platform_pose,
+            vec3f(
+                XR_PLATFORM_HALF_WIDTH,
+                XR_PLATFORM_HALF_HEIGHT,
+                XR_PLATFORM_HALF_DEPTH,
+            ),
+            XR_PLATFORM_ROUND_RADIUS,
+            vec4(PLATFORM_COLOR[0], PLATFORM_COLOR[1], PLATFORM_COLOR[2], 1.0),
+            0.85,
         );
     }
 
-    fn emit_pulses_from_state(&mut self, state: &XrState) {
-        self.pulses.push(PulseTrail {
-            pose: state.left_hand.joints[XrHand::INDEX_KNUCKLE3],
-            born_at: state.time,
-            length: 0.18,
-            radius: 0.006,
-            speed: 0.55,
-            color: vec4(0.22, 0.88, 1.0, 1.0),
-        });
-        self.pulses.push(PulseTrail {
-            pose: state.right_hand.joints[XrHand::INDEX_KNUCKLE3],
-            born_at: state.time,
-            length: 0.18,
-            radius: 0.006,
-            speed: 0.55,
-            color: vec4(1.0, 0.72, 0.26, 1.0),
-        });
+    fn draw_bodies(&mut self, cx: &mut Cx2d) {
+        let Some(scene) = self.scene.as_ref() else {
+            return;
+        };
 
-        if state.left_controller.active() || state.left_controller.trigger > 0.4 {
-            self.pulses.push(PulseTrail {
-                pose: state.left_controller.aim_pose,
-                born_at: state.time,
-                length: 0.26,
-                radius: 0.010,
-                speed: 0.80,
-                color: vec4(0.24, 0.78, 1.0, 1.0),
-            });
-        }
-        if state.right_controller.active() || state.right_controller.trigger > 0.4 {
-            self.pulses.push(PulseTrail {
-                pose: state.right_controller.aim_pose,
-                born_at: state.time,
-                length: 0.26,
-                radius: 0.010,
-                speed: 0.80,
-                color: vec4(1.0, 0.66, 0.22, 1.0),
-            });
-        }
-    }
+        let cubes: Vec<_> = scene
+            .cubes
+            .iter()
+            .filter_map(|cube| {
+                scene.bodies.get(cube.body).map(|body| {
+                    let phys_pose = makepad_pose(body.position());
+                    let visual_pose = Pose::new(phys_pose.orientation, phys_pose.position);
+                    (visual_pose, cube.half_extents, cube.color_index)
+                })
+            })
+            .collect();
 
-    fn draw_pulses(&mut self, cx: &mut Cx2d, now: f64) {
-        for pulse in &self.pulses {
-            let age = (now - pulse.born_at).max(0.0) as f32;
-            let life = (1.0 - (age as f64 / Self::PULSE_TTL) as f32).max(0.0);
-            if life <= 0.0 {
-                continue;
-            }
-
-            let length = pulse.length * (0.55 + age * 1.8);
-            let radius = (pulse.radius * (0.45 + life * 0.75)).max(0.0025);
-            let color = vec4(
-                pulse.color.x * (0.35 + life * 0.85),
-                pulse.color.y * (0.35 + life * 0.85),
-                pulse.color.z * (0.35 + life * 0.85),
+        self.draw_cube.begin_many_instances(cx);
+        for (pose, half_extents, color_index) in cubes {
+            let color = CUBE_COLORS[color_index];
+            self.draw_pose_box(
+                cx,
+                pose,
+                vec3(
+                    half_extents.x * 2.0 * XR_BRICK_VISUAL_SCALE,
+                    half_extents.y * 2.0 * XR_BRICK_VISUAL_SCALE,
+                    half_extents.z * 2.0 * XR_BRICK_VISUAL_SCALE,
+                ),
+                vec4(color[0], color[1], color[2], 1.0),
                 1.0,
             );
-
-            self.draw_cube.transform = pulse.pose.to_mat4();
-            self.draw_cube.cube_pos = vec3(0.0, 0.0, -0.05 - age * pulse.speed - length * 0.5);
-            self.draw_cube.cube_size = vec3(radius, radius, length);
-            self.draw_cube.color = color;
-            self.draw_cube.depth_clip = 0.0;
-            self.draw_cube.draw(cx);
         }
+        self.draw_cube.end_many_instances(cx);
+    }
+
+    fn rebuild_depth_debug_boxes(&mut self, voxels: &XrDepthVoxels) {
+        self.depth_debug_boxes.clear();
+        let total_boxes: usize = voxels
+            .physics_chunks
+            .iter()
+            .map(|chunk| chunk.boxes.len())
+            .sum();
+        self.depth_debug_boxes.reserve(total_boxes);
+        for physics_chunk in &voxels.physics_chunks {
+            self.depth_debug_boxes
+                .extend_from_slice(&physics_chunk.boxes);
+        }
+    }
+
+    fn clear_depth_debug_boxes(&mut self) {
+        self.depth_box_generation = 0;
+        self.depth_debug_boxes.clear();
+    }
+
+    fn sync_depth_debug_boxes(&mut self, cx: &mut Cx2d) {
+        if !self.depth_debug_enabled() {
+            self.clear_depth_debug_boxes();
+            return;
+        }
+        let Some(voxels) = cx.xr_depth_voxels().latest_voxels() else {
+            self.clear_depth_debug_boxes();
+            return;
+        };
+        let Ok(voxels) = voxels.read() else {
+            return;
+        };
+        if self.depth_box_generation == voxels.physics_generation {
+            return;
+        }
+        self.depth_box_generation = voxels.physics_generation;
+        self.rebuild_depth_debug_boxes(&voxels);
+    }
+
+    fn draw_depth_debug_boxes(&mut self, cx: &mut Cx2d) {
+        if !self.depth_debug_enabled() || self.depth_debug_boxes.is_empty() {
+            return;
+        }
+
+        self.draw_depth_box.transform = Mat4f::identity();
+        self.draw_depth_box.begin_many_instances(cx);
+        let debug_boxes = self.depth_debug_boxes.clone();
+        for physics_box in debug_boxes {
+            self.draw_depth_pose_box(
+                cx,
+                physics_box.pose,
+                vec3(
+                    physics_box.half_extents.x * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
+                    physics_box.half_extents.y * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
+                    physics_box.half_extents.z * 2.0 * XR_DEPTH_BOX_DEBUG_SCALE,
+                ),
+                vec4(0.18, 0.92, 0.98, XR_DEPTH_BOX_DEBUG_ALPHA),
+                0.0,
+            );
+        }
+        self.draw_depth_box.end_many_instances(cx);
     }
 }
 
 impl Widget for XrScene {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::XrUpdate(e) = event {
-            self.ensure_reference_cube_pose(&e.state);
-            if e.state.time - self.last_emit_at >= Self::EMIT_INTERVAL {
-                self.emit_pulses_from_state(&e.state);
-                self.last_emit_at = e.state.time;
+            if e.menu_pressed() {
+                self.depth_debug_hidden = !self.depth_debug_hidden;
+                if self.depth_debug_hidden {
+                    self.clear_depth_debug_boxes();
+                    log!("XR depth debug hidden");
+                } else {
+                    log!("XR depth debug shown");
+                }
             }
-            self.pulses
-                .retain(|pulse| e.state.time - pulse.born_at <= Self::PULSE_TTL);
+            let scene_reset = if e.clicked_menu() {
+                self.reset_scene(&e.state);
+                true
+            } else {
+                self.ensure_scene(&e.state)
+            };
+            self.sync_depth_physics(cx);
+            self.sync_hands(&e.state);
+            if !scene_reset {
+                if let Some(scene) = &mut self.scene {
+                    scene.step();
+                }
+            }
+            if scene_reset {
+                if let Some(scene) = &self.scene {
+                    log!("XR wall scene reset with {} bodies", scene.bodies.len());
+                }
+            }
             self.redraw(cx);
         }
     }
@@ -424,17 +1269,29 @@ impl Widget for XrScene {
         };
 
         let cx = &mut Cx2d::new(cx.cx);
-
-        self.draw_reference_cube(cx);
-        self.draw_headset(cx, state);
-        self.draw_hand(cx, &state.left_hand, true);
-        self.draw_hand(cx, &state.right_hand, false);
-        self.draw_controller(cx, &state.left_controller, vec4(0.24, 0.78, 1.0, 1.0));
-        self.draw_controller(cx, &state.right_controller, vec4(1.0, 0.66, 0.22, 1.0));
-        if let Some(anchor) = state.anchor {
-            self.draw_anchor_markers(cx, anchor);
+        self.ensure_scene(state);
+        self.sync_depth_debug_boxes(cx);
+        let (left_physics, right_physics) = if XR_RENDER_HAND_GEOMETRY && XR_ENABLE_HAND_PHYSICS {
+            if let Some(scene) = self.scene.as_ref() {
+                (
+                    Some(Self::collect_live_hand_colliders(scene, &scene.left_hand)),
+                    Some(Self::collect_live_hand_colliders(scene, &scene.right_hand)),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+        self.prepare_pbr(cx);
+        if XR_RENDER_HAND_GEOMETRY {
+            self.draw_hand(cx, &state.left_hand, left_physics.as_deref(), true);
+            self.draw_hand(cx, &state.right_hand, right_physics.as_deref(), false);
         }
-        self.draw_pulses(cx, state.time);
+        self.draw_platform(cx);
+        self.draw_bodies(cx);
+        self.prepare_depth_boxes();
+        self.draw_depth_debug_boxes(cx);
 
         DrawStep::done()
     }
