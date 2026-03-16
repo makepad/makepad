@@ -220,6 +220,7 @@ pub use {
         xr_depth_mesh::{
             XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery, XrDepthMeshQueryHit,
             XrDepthMeshQueryResult, XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore,
+            XrDepthPlaneKind, XrDepthPlanePatch,
         },
     },
     app_main::*,

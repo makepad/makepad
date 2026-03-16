@@ -27,8 +27,8 @@ script_mod! {
         }
 
         get_color: fn(dp: float) {
-            let ambient = vec3(0.2, 0.2, 0.2);
-            let color = self.color.xyz * dp * self.color.w + ambient;
+            let ambient = self.color.xyz * 0.28;
+            let color = ambient + self.color.xyz * dp * 0.72;
             return vec4(color, self.color.w);
         }
 
