@@ -6,7 +6,6 @@ use {
         media_plugin::PlaybackPrepared,
         os::apple::apple_sys::*,
         texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel},
-        PlaybackPrepared,
     },
     std::{ffi::c_void, ptr::NonNull},
 };
