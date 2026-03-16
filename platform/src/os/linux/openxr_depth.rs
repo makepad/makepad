@@ -1,5 +1,5 @@
 use crate::{
-    makepad_math::{vec3f, vec4f, Mat4f, Vec3f},
+    makepad_math::{vec3f, vec4f, Mat4f, Vec3f, Vec4f},
     os::linux::{
         openxr::CxOpenXrFrame,
         vulkan::{CxVulkan, CxVulkanOpenXrSessionData},
@@ -37,6 +37,8 @@ const DEPTH_VOXEL_MAX_DEPTH_VALUE: f32 = 0.9995;
 const DEPTH_TSD_DISTANCE_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 2.0;
 const DEPTH_TSD_MIN_NORMAL_DOT: f32 = 0.3;
 const DEPTH_TSD_APPLY_DELTA_EPSILON: f32 = 0.01;
+const DEPTH_TSD_REFRESH_CLEARANCE_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 0.75;
+const DEPTH_NORMAL_NEIGHBOR_MAX_DISTANCE_DELTA_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 2.5;
 const DEPTH_TSD_MAX_CONFIDENCE: u8 = 32;
 const DEPTH_TSD_MIN_MESH_CONFIDENCE: u8 = 3;
 const DEPTH_TSD_STABLE_CONFIDENCE: u8 = 8;
@@ -569,7 +571,9 @@ pub(super) struct CxOpenXrDepthMeshJob {
     height: u32,
     sample_step: u32,
     camera_world: Vec3f,
+    depth_proj: Mat4f,
     inv_depth_proj: Mat4f,
+    depth_view_from_world: Mat4f,
     world_from_depth_view: Mat4f,
     depth: Vec<u16>,
 }
@@ -581,9 +585,13 @@ struct CxOpenXrPreparedDepthMeshJob {
     height: u32,
     sample_step: u32,
     camera_world: Vec3f,
+    depth_proj: Mat4f,
+    inv_depth_proj: Mat4f,
+    depth_view_from_world: Mat4f,
     frame_tsd_samples: HashMap<VoxelCoord, f32>,
     visible_world_min: Vec3f,
     visible_world_max: Vec3f,
+    depth: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -722,7 +730,9 @@ impl CxOpenXrDepthMeshPipeline {
                 height,
                 sample_step: DEPTH_VOXEL_SAMPLE_STEP,
                 camera_world,
+                depth_proj: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_proj_mat,
                 inv_depth_proj: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_proj_mat.invert(),
+                depth_view_from_world: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_view_mat,
                 world_from_depth_view,
                 depth,
             })
@@ -953,9 +963,13 @@ fn preprocess_depth_mesh(
         height: job.height,
         sample_step: job.sample_step,
         camera_world: job.camera_world,
+        depth_proj: job.depth_proj,
+        inv_depth_proj: job.inv_depth_proj,
+        depth_view_from_world: job.depth_view_from_world,
         frame_tsd_samples,
         visible_world_min,
         visible_world_max,
+        depth: job.depth,
     })
 }
 
@@ -966,7 +980,8 @@ fn apply_preprocessed_depth_mesh(job: CxOpenXrPreparedDepthMeshJob, volume: &mut
     volume.image_height = job.height;
     volume.sample_step = job.sample_step;
 
-    let mut topology_changes = apply_tsd_samples(volume, job.frame_tsd_samples);
+    let mut topology_changes = apply_tsd_samples(volume, &job.frame_tsd_samples);
+    topology_changes += refresh_visible_free_space(volume, &job);
     topology_changes += clear_player_exclusion_volume(volume, job.camera_world);
     if topology_changes != 0 {
         volume.latest_topology_generation = job.generation;
@@ -1029,6 +1044,14 @@ fn rebuild_sampled_depth_grid(
             let sample_y =
                 sampled_depth_at_pixel(worker_state, x as u32, (y + 2).min(height - 1) as u32);
             if !sample_x.valid || !sample_y.valid {
+                continue;
+            }
+            let ray_distance = worker_state.sampled_depth[index].ray_distance;
+            if (sample_x.ray_distance - ray_distance).abs()
+                > DEPTH_NORMAL_NEIGHBOR_MAX_DISTANCE_DELTA_METERS
+                || (sample_y.ray_distance - ray_distance).abs()
+                    > DEPTH_NORMAL_NEIGHBOR_MAX_DISTANCE_DELTA_METERS
+            {
                 continue;
             }
             let h_deriv = sample_x.world - world;
@@ -1107,22 +1130,44 @@ fn depth_view_to_world(job: &CxOpenXrDepthMeshJob, view: Vec3f) -> Option<Vec3f>
 }
 
 fn depth_pixel_to_world(job: &CxOpenXrDepthMeshJob, x: u32, y: u32) -> Option<Vec3f> {
-    let raw_depth = *job
-        .depth
-        .get(y as usize * job.width as usize + x as usize)? as f32
-        / u16::MAX as f32;
+    let view = depth_pixel_to_view(
+        &job.depth,
+        job.width,
+        job.height,
+        job.inv_depth_proj,
+        x as usize,
+        y as usize,
+    )?;
+    let world = job.world_from_depth_view.transform_vec4(view);
+    if !world.w.is_finite() || world.w.abs() < 1.0e-6 {
+        return None;
+    }
+    let inv_w = 1.0 / world.w;
+    let point = vec3f(world.x * inv_w, world.y * inv_w, world.z * inv_w);
+    (point.x.is_finite() && point.y.is_finite() && point.z.is_finite()).then_some(point)
+}
+
+fn depth_pixel_to_view(
+    depth: &[u16],
+    width: u32,
+    height: u32,
+    inv_depth_proj: Mat4f,
+    x: usize,
+    y: usize,
+) -> Option<Vec4f> {
+    let raw_depth = *depth.get(y * width as usize + x)? as f32 / u16::MAX as f32;
     if !(DEPTH_VOXEL_MIN_DEPTH_VALUE..DEPTH_VOXEL_MAX_DEPTH_VALUE).contains(&raw_depth) {
         return None;
     }
-    let uv_x = (x as f32 + 0.5) / job.width as f32;
-    let uv_y = (y as f32 + 0.5) / job.height as f32;
+    let uv_x = (x as f32 + 0.5) / width as f32;
+    let uv_y = (y as f32 + 0.5) / height as f32;
     let clip = vec4f(
         uv_x * 2.0 - 1.0,
         uv_y * 2.0 - 1.0,
         raw_depth * 2.0 - 1.0,
         1.0,
     );
-    let view = job.inv_depth_proj.transform_vec4(clip);
+    let view = inv_depth_proj.transform_vec4(clip);
     if !view.w.is_finite() || view.w.abs() < 1.0e-6 {
         return None;
     }
@@ -1133,21 +1178,59 @@ fn depth_pixel_to_world(job: &CxOpenXrDepthMeshJob, x: u32, y: u32) -> Option<Ve
     {
         return None;
     }
-    let world = job.world_from_depth_view.transform_vec4(view);
-    if !world.w.is_finite() || world.w.abs() < 1.0e-6 {
+    Some(view)
+}
+
+fn depth_world_to_pixel(
+    world: Vec3f,
+    width: u32,
+    height: u32,
+    depth_view_from_world: Mat4f,
+    depth_proj: Mat4f,
+) -> Option<(usize, usize, f32)> {
+    let view = depth_view_from_world.transform_vec4(vec4f(world.x, world.y, world.z, 1.0));
+    if !view.w.is_finite() || view.w.abs() < 1.0e-6 {
         return None;
     }
-    let inv_w = 1.0 / world.w;
-    let point = vec3f(world.x * inv_w, world.y * inv_w, world.z * inv_w);
-    (point.x.is_finite() && point.y.is_finite() && point.z.is_finite()).then_some(point)
+    let view = vec4f(view.x / view.w, view.y / view.w, view.z / view.w, 1.0);
+    let view_pos = view.to_vec3f();
+    let ray_distance = view_pos.length();
+    if !ray_distance.is_finite()
+        || !(DEPTH_VOXEL_MIN_DISTANCE_METERS..=DEPTH_VOXEL_MAX_DISTANCE_METERS)
+            .contains(&ray_distance)
+    {
+        return None;
+    }
+    let clip = depth_proj.transform_vec4(view);
+    if !clip.w.is_finite() || clip.w.abs() < 1.0e-6 {
+        return None;
+    }
+    let ndc_x = clip.x / clip.w;
+    let ndc_y = clip.y / clip.w;
+    let ndc_z = clip.z / clip.w;
+    if !ndc_x.is_finite() || !ndc_y.is_finite() || !ndc_z.is_finite() {
+        return None;
+    }
+    if !(-1.0..=1.0).contains(&ndc_x)
+        || !(-1.0..=1.0).contains(&ndc_y)
+        || !(-1.0..=1.0).contains(&ndc_z)
+    {
+        return None;
+    }
+    let pixel_x = ((ndc_x * 0.5 + 0.5) * width as f32).floor() as isize;
+    let pixel_y = ((ndc_y * 0.5 + 0.5) * height as f32).floor() as isize;
+    if pixel_x < 0 || pixel_y < 0 || pixel_x >= width as isize || pixel_y >= height as isize {
+        return None;
+    }
+    Some((pixel_x as usize, pixel_y as usize, ray_distance))
 }
 
 fn apply_tsd_samples(
     volume: &mut DepthMeshVolume,
-    frame_tsd_samples: HashMap<VoxelCoord, f32>,
+    frame_tsd_samples: &HashMap<VoxelCoord, f32>,
 ) -> usize {
     let mut changed = 0;
-    for (coord, normalized) in frame_tsd_samples {
+    for (&coord, &normalized) in frame_tsd_samples {
         let previous = volume.mesh_grid.normalized_distance(coord).unwrap_or(2.0);
         if volume
             .mesh_grid
@@ -1163,6 +1246,78 @@ fn apply_tsd_samples(
             }
         }
     }
+    changed
+}
+
+fn refresh_visible_free_space(
+    volume: &mut DepthMeshVolume,
+    job: &CxOpenXrPreparedDepthMeshJob,
+) -> usize {
+    let min_coord = volume.mesh_grid.world_to_voxel_coord(job.visible_world_min);
+    let max_coord = volume.mesh_grid.world_to_voxel_coord(job.visible_world_max);
+    let mut changed = 0;
+
+    for z in min_coord.z..=max_coord.z {
+        for y in min_coord.y..=max_coord.y {
+            for x in min_coord.x..=max_coord.x {
+                let coord = VoxelCoord::new(x, y, z);
+                let Some(previous) = volume.mesh_grid.normalized_distance(coord) else {
+                    continue;
+                };
+                if previous >= 1.0 - 1.0e-4 {
+                    continue;
+                }
+                let voxel_world = volume.mesh_grid.voxel_center_world(coord);
+                let Some((pixel_x, pixel_y, voxel_distance)) = depth_world_to_pixel(
+                    voxel_world,
+                    job.width,
+                    job.height,
+                    job.depth_view_from_world,
+                    job.depth_proj,
+                ) else {
+                    continue;
+                };
+                if !depth_pixel_inside_margin(
+                    job.width as usize,
+                    job.height as usize,
+                    pixel_x,
+                    pixel_y,
+                ) {
+                    continue;
+                }
+                let Some(observed_view) = depth_pixel_to_view(
+                    &job.depth,
+                    job.width,
+                    job.height,
+                    job.inv_depth_proj,
+                    pixel_x,
+                    pixel_y,
+                ) else {
+                    continue;
+                };
+                let observed_distance = observed_view.to_vec3f().length();
+                if !observed_distance.is_finite()
+                    || observed_distance - voxel_distance < DEPTH_TSD_REFRESH_CLEARANCE_METERS
+                {
+                    continue;
+                }
+                if volume
+                    .mesh_grid
+                    .accumulate_normalized_distance(coord, 1.0, volume.generation)
+                {
+                    let current = volume
+                        .mesh_grid
+                        .normalized_distance(coord)
+                        .unwrap_or(previous);
+                    if (previous - current).abs() >= DEPTH_TSD_APPLY_DELTA_EPSILON {
+                        mark_mesh_chunk_dirty(volume, coord);
+                        changed += 1;
+                    }
+                }
+            }
+        }
+    }
+
     changed
 }
 
@@ -1276,23 +1431,16 @@ fn enqueue_visible_mesh_chunks(volume: &mut DepthMeshVolume, world_min: Vec3f, w
     let edge = volume.mesh_config.mesh_chunk_edge_voxels();
     let min_key = volume.mesh_grid.world_to_mesh_chunk_key(world_min, edge);
     let max_key = volume.mesh_grid.world_to_mesh_chunk_key(world_max, edge);
-    let meshed_generations: HashMap<IVector, u64> = volume
+    let meshed_keys: HashSet<IVector> = volume
         .mesh_chunks
         .iter()
-        .map(|chunk| (chunk.chunk_key, chunk.generation))
+        .map(|chunk| chunk.chunk_key)
         .collect();
     for z in (min_key.z - 1)..=(max_key.z + 1) {
         for y in (min_key.y - 1)..=(max_key.y + 1) {
             for x in (min_key.x - 1)..=(max_key.x + 1) {
                 let key = IVector::new(x, y, z);
-                let needs_refresh = meshed_generations
-                    .get(&key)
-                    .map(|generation| {
-                        volume.generation.saturating_sub(*generation)
-                            > DEPTH_TSD_STALE_LOW_CONFIDENCE_GENERATIONS
-                    })
-                    .unwrap_or(true);
-                if needs_refresh && volume.pending_mesh_dirty_chunks.insert(key) {
+                if !meshed_keys.contains(&key) && volume.pending_mesh_dirty_chunks.insert(key) {
                     volume.pending_mesh_chunk_queue.push_back(key);
                 }
             }
