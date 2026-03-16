@@ -82,6 +82,10 @@ const DEPTH_PLANE_TRACK_STABLE_HITS: u32 = 2;
 const DEPTH_PLANE_TRACK_WALL_MATCH_NORMAL_DOT: f32 = 0.93;
 const DEPTH_PLANE_TRACK_WALL_MATCH_CENTER_DISTANCE_METERS: f32 = 0.65;
 const DEPTH_PLANE_TRACK_WALL_MATCH_PLANE_DISTANCE_METERS: f32 = 0.25;
+const DEPTH_PLANE_TRACK_MODEL_ALPHA: f32 = 0.18;
+const DEPTH_PLANE_TRACK_STABLE_MODEL_ALPHA: f32 = 0.06;
+const DEPTH_PLANE_TRACK_STABLE_HORIZONTAL_DISTANCE_STEP_METERS: f32 = 0.02;
+const DEPTH_PLANE_TRACK_STABLE_WALL_DISTANCE_STEP_METERS: f32 = 0.05;
 const DEPTH_PLANE_TRACK_HORIZONTAL_EXPAND_ALPHA: f32 = 0.30;
 const DEPTH_PLANE_TRACK_HORIZONTAL_SHRINK_ALPHA: f32 = 0.08;
 const DEPTH_PLANE_TRACK_HORIZONTAL_STABLE_SHRINK_ALPHA: f32 = 0.02;
@@ -1727,6 +1731,8 @@ struct ExtractedPlanePatchCandidate {
 struct TrackedPlanePatch {
     stable_id: u64,
     patch: XrDepthPlanePatch,
+    model_normal: Vec3f,
+    model_distance: f32,
     hit_count: u32,
     miss_count: u32,
     support_mask: PlaneSupportMask,
@@ -2372,6 +2378,8 @@ fn track_plane_patches(
         tracked.push(TrackedPlanePatch {
             stable_id: current.stable_id,
             patch: current.patch,
+            model_normal: current.model_normal,
+            model_distance: current.model_distance,
             hit_count: current.hit_count,
             miss_count,
             support_mask: current.support_mask,
@@ -2422,9 +2430,13 @@ fn create_tracked_plane_patch(
             )
         })
         .unwrap_or(incoming.patch);
+    let model_normal = patch.normal;
+    let model_distance = patch.center.dot(model_normal);
     TrackedPlanePatch {
         stable_id,
         patch,
+        model_normal,
+        model_distance,
         hit_count: 1,
         miss_count: 0,
         support_mask,
@@ -2439,7 +2451,7 @@ fn update_tracked_plane_patch(
         return current.clone();
     }
 
-    let (normal, tangent, bitangent) = tracked_plane_basis(current, incoming_group);
+    let (observed_normal, tangent, bitangent) = tracked_plane_basis(current, incoming_group);
     let mut support_mask = current.support_mask.clone();
     if current.patch.kind == XrDepthPlaneKind::Wall
         || current.hit_count < DEPTH_PLANE_TRACK_STABLE_HITS
@@ -2452,7 +2464,8 @@ fn update_tracked_plane_patch(
     let mut fallback = None::<XrDepthPlanePatch>;
 
     for incoming in incoming_group {
-        let reframed = reframe_patch_onto_basis(&incoming.patch, normal, tangent, bitangent);
+        let reframed =
+            reframe_patch_onto_basis(&incoming.patch, observed_normal, tangent, bitangent);
         support_triangles = support_triangles.max(incoming.patch.support_triangles);
         kind = choose_plane_kind(kind, incoming.patch.kind);
         rasterize_support_triangles_into_mask(
@@ -2469,7 +2482,7 @@ fn update_tracked_plane_patch(
                     merge_reframed_horizontal_patches(
                         &existing,
                         &reframed,
-                        normal,
+                        observed_normal,
                         tangent,
                         bitangent,
                     )
@@ -2482,27 +2495,43 @@ fn update_tracked_plane_patch(
     let current_center_u = current.patch.center.dot(tangent);
     let current_center_v = current.patch.center.dot(bitangent);
     let anchor = quantize_plane_support_cell(current_center_u, current_center_v);
+    let stable = current.hit_count >= DEPTH_PLANE_TRACK_STABLE_HITS;
+    let mut model_normal = if current.patch.kind == XrDepthPlaneKind::Wall {
+        blend_tracked_model_normal(current.model_normal, observed_normal, stable)
+    } else {
+        current.model_normal
+    };
+    if model_normal.length() <= 1.0e-5 {
+        model_normal = current.model_normal;
+    }
+
     let next_patch = if let Some(component) = select_plane_support_component(
         &support_mask,
         anchor,
         current_center_u,
         current_center_v,
     ) {
-        let plane_distance = plane_distance_for_component(
+        let observed_distance = plane_distance_for_component(
             current,
             incoming_group,
-            normal,
+            model_normal,
             tangent,
             bitangent,
             &component,
         );
+        let model_distance = blend_tracked_model_distance(
+            current.model_distance,
+            observed_distance,
+            current.patch.kind,
+            stable,
+        );
         retain_plane_support_component(&mut support_mask, &component);
         fit_patch_from_support_component(
             kind,
-            normal,
+            model_normal,
             tangent,
             bitangent,
-            plane_distance,
+            model_distance,
             &component,
             support_triangles,
         )
@@ -2515,6 +2544,8 @@ fn update_tracked_plane_patch(
     TrackedPlanePatch {
         stable_id: current.stable_id,
         patch: blend_tracked_plane_patch(current, &next_patch),
+        model_normal,
+        model_distance: next_patch.center.dot(model_normal),
         hit_count: current.hit_count.saturating_add(1),
         miss_count: 0,
         support_mask,
@@ -2527,24 +2558,23 @@ fn tracked_plane_basis(
 ) -> (Vec3f, Vec3f, Vec3f) {
     if current.patch.kind != XrDepthPlaneKind::Wall {
         return (
-            current.patch.normal,
+            current.model_normal,
             current.patch.tangent,
             current.patch.bitangent,
         );
     }
 
     let mut normal_sum = current
-        .patch
-        .normal
+        .model_normal
         .scale(current.patch.area.max(0.001));
     for incoming in incoming_group {
-        let aligned = align_direction(current.patch.normal, incoming.patch.normal);
+        let aligned = align_direction(current.model_normal, incoming.patch.normal);
         normal_sum += aligned.scale(incoming.patch.area.max(0.001));
     }
     let normal = if normal_sum.length() > 1.0e-5 {
         normal_sum.normalize()
     } else {
-        current.patch.normal
+        current.model_normal
     };
     let mut tangent = current.patch.tangent - normal.scale(current.patch.tangent.dot(normal));
     if tangent.length() <= 1.0e-5 {
@@ -2560,6 +2590,37 @@ fn tracked_plane_basis(
         bitangent = current.patch.bitangent;
     }
     (normal, tangent, bitangent)
+}
+
+fn blend_tracked_model_normal(current: Vec3f, observed: Vec3f, stable: bool) -> Vec3f {
+    let alpha = if stable {
+        DEPTH_PLANE_TRACK_STABLE_MODEL_ALPHA
+    } else {
+        DEPTH_PLANE_TRACK_MODEL_ALPHA
+    };
+    blend_direction(current, observed, alpha)
+}
+
+fn blend_tracked_model_distance(
+    current: f32,
+    observed: f32,
+    kind: XrDepthPlaneKind,
+    stable: bool,
+) -> f32 {
+    let alpha = if stable {
+        DEPTH_PLANE_TRACK_STABLE_MODEL_ALPHA
+    } else {
+        DEPTH_PLANE_TRACK_MODEL_ALPHA
+    };
+    let max_step = if stable && is_horizontal_plane_kind(kind) {
+        DEPTH_PLANE_TRACK_STABLE_HORIZONTAL_DISTANCE_STEP_METERS
+    } else if stable && kind == XrDepthPlaneKind::Wall {
+        DEPTH_PLANE_TRACK_STABLE_WALL_DISTANCE_STEP_METERS
+    } else {
+        f32::INFINITY
+    };
+    let clamped_observed = current + (observed - current).clamp(-max_step, max_step);
+    current * (1.0 - alpha) + clamped_observed * alpha
 }
 
 fn decay_plane_support_mask(mask: &mut PlaneSupportMask) {
@@ -2747,26 +2808,38 @@ fn plane_distance_for_component(
     let mut distance_sum = 0.0f32;
     let mut weight_sum = 0.0f32;
     for incoming in incoming_group {
-        let reframed = reframe_patch_onto_basis(&incoming.patch, normal, tangent, bitangent);
-        let cell = quantize_plane_support_cell(
-            reframed.center.dot(tangent),
-            reframed.center.dot(bitangent),
-        );
-        if cell.u < component.min_u
-            || cell.u > component.max_u
-            || cell.v < component.min_v
-            || cell.v > component.max_v
-        {
-            continue;
+        for triangle in &incoming.support_triangles_world {
+            let centroid = (triangle[0] + triangle[1] + triangle[2]).scale(1.0 / 3.0);
+            let cell = quantize_plane_support_cell(
+                centroid.dot(tangent),
+                centroid.dot(bitangent),
+            );
+            if cell.u < component.min_u
+                || cell.u > component.max_u
+                || cell.v < component.min_v
+                || cell.v > component.max_v
+            {
+                continue;
+            }
+            let triangle_normal =
+                Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]);
+            let area_twice = triangle_normal.length();
+            if area_twice <= 1.0e-6 {
+                continue;
+            }
+            let area = area_twice * 0.5;
+            let aligned_normal = align_direction(normal, triangle_normal.scale(1.0 / area_twice));
+            if aligned_normal.dot(normal) < 0.85 {
+                continue;
+            }
+            distance_sum += centroid.dot(normal) * area;
+            weight_sum += area;
         }
-        let weight = reframed.area.max(0.001);
-        distance_sum += reframed.center.dot(normal) * weight;
-        weight_sum += weight;
     }
     if weight_sum > 0.0 {
         distance_sum / weight_sum
     } else {
-        current.patch.center.dot(normal)
+        current.model_distance
     }
 }
 
