@@ -23,6 +23,7 @@ use std::{
 
 const DEPTH_VOXEL_EYE_INDEX: usize = 0;
 const DEPTH_VOXEL_SAMPLE_STEP: u32 = 1;
+const DEPTH_IMAGE_EDGE_MARGIN_PIXELS: usize = 32;
 const DEPTH_VOXEL_SIZE_METERS: f32 = 0.10;
 const DEPTH_VOXEL_MIN_DISTANCE_METERS: f32 = 0.08;
 const DEPTH_VOXEL_MAX_DISTANCE_METERS: f32 = 6.0;
@@ -38,6 +39,9 @@ const DEPTH_TSD_MIN_NORMAL_DOT: f32 = 0.3;
 const DEPTH_TSD_APPLY_DELTA_EPSILON: f32 = 0.01;
 const DEPTH_TSD_MAX_CONFIDENCE: u8 = 32;
 const DEPTH_TSD_MIN_MESH_CONFIDENCE: u8 = 3;
+const DEPTH_TSD_STABLE_CONFIDENCE: u8 = 8;
+const DEPTH_TSD_STALE_LOW_CONFIDENCE_GENERATIONS: u64 = 12;
+const DEPTH_PLAYER_CLEAR_MAX_CONFIDENCE: u8 = 2;
 const DEPTH_PLAYER_EXCLUDE_RADIUS_METERS: f32 = 0.32;
 const DEPTH_PLAYER_EXCLUDE_TOP_METERS: f32 = 0.12;
 const DEPTH_PLAYER_EXCLUDE_BOTTOM_METERS: f32 = 1.30;
@@ -112,6 +116,7 @@ struct SparseTsdChunk {
     values: Vec<f32>,
     valid: Vec<u8>,
     confidence: Vec<u8>,
+    observed_generation: Vec<u64>,
     live_count: usize,
 }
 
@@ -121,6 +126,7 @@ impl SparseTsdChunk {
             values: vec![0.0; chunk_volume],
             valid: vec![0; chunk_volume],
             confidence: vec![0; chunk_volume],
+            observed_generation: vec![0; chunk_volume],
             live_count: 0,
         }
     }
@@ -133,15 +139,28 @@ impl SparseTsdChunk {
         }
     }
 
-    fn meshing_value(&self, id: usize) -> Option<f32> {
+    fn meshing_value(&self, id: usize, current_generation: u64) -> Option<f32> {
         if self.valid[id] == 0 || self.confidence[id] < DEPTH_TSD_MIN_MESH_CONFIDENCE {
+            None
+        } else if self.confidence[id] < DEPTH_TSD_STABLE_CONFIDENCE
+            && current_generation.saturating_sub(self.observed_generation[id])
+                > DEPTH_TSD_STALE_LOW_CONFIDENCE_GENERATIONS
+        {
             None
         } else {
             Some(self.values[id])
         }
     }
 
-    fn accumulate(&mut self, id: usize, value: f32) -> (bool, bool) {
+    fn confidence(&self, id: usize) -> u8 {
+        if self.valid[id] == 0 {
+            0
+        } else {
+            self.confidence[id]
+        }
+    }
+
+    fn accumulate(&mut self, id: usize, value: f32, generation: u64) -> (bool, bool) {
         let previous = self.value(id);
         let next_value = if let Some(previous) = previous {
             let delta = (previous - value).abs();
@@ -176,13 +195,14 @@ impl SparseTsdChunk {
         } else {
             self.confidence[id] = 1;
         }
+        self.observed_generation[id] = generation;
         if previous.is_none() {
             self.live_count += 1;
         }
         (changed, previous.is_none())
     }
 
-    fn overwrite(&mut self, id: usize, value: f32) -> (bool, bool) {
+    fn overwrite(&mut self, id: usize, value: f32, generation: u64) -> (bool, bool) {
         let previous = self.value(id);
         let changed = previous
             .map(|previous| (previous - value).abs() > 1.0e-4)
@@ -190,6 +210,7 @@ impl SparseTsdChunk {
         self.values[id] = value;
         self.valid[id] = 1;
         self.confidence[id] = DEPTH_TSD_MAX_CONFIDENCE;
+        self.observed_generation[id] = generation;
         if previous.is_none() {
             self.live_count += 1;
         }
@@ -227,32 +248,50 @@ impl SparseTsdGrid {
         chunk.value(local_id)
     }
 
-    fn meshing_distance(&self, coord: VoxelCoord) -> Option<f32> {
+    fn meshing_distance(&self, coord: VoxelCoord, generation: u64) -> Option<f32> {
         let (chunk_key, local_id) = self.chunk_key_and_id(coord);
         let chunk = self.chunks.get(&chunk_key)?;
-        chunk.meshing_value(local_id)
+        chunk.meshing_value(local_id, generation)
     }
 
-    pub fn accumulate_normalized_distance(&mut self, coord: VoxelCoord, value: f32) -> bool {
+    fn confidence(&self, coord: VoxelCoord) -> u8 {
+        let (chunk_key, local_id) = self.chunk_key_and_id(coord);
+        self.chunks
+            .get(&chunk_key)
+            .map(|chunk| chunk.confidence(local_id))
+            .unwrap_or(0)
+    }
+
+    pub fn accumulate_normalized_distance(
+        &mut self,
+        coord: VoxelCoord,
+        value: f32,
+        generation: u64,
+    ) -> bool {
         let (chunk_key, local_id) = self.chunk_key_and_id(coord);
         let chunk = self
             .chunks
             .entry(chunk_key)
             .or_insert_with(|| SparseTsdChunk::new(self.chunk_volume));
-        let (changed, became_live) = chunk.accumulate(local_id, value);
+        let (changed, became_live) = chunk.accumulate(local_id, value, generation);
         if became_live {
             self.active_value_count += 1;
         }
         changed
     }
 
-    pub fn overwrite_normalized_distance(&mut self, coord: VoxelCoord, value: f32) -> bool {
+    pub fn overwrite_normalized_distance(
+        &mut self,
+        coord: VoxelCoord,
+        value: f32,
+        generation: u64,
+    ) -> bool {
         let (chunk_key, local_id) = self.chunk_key_and_id(coord);
         let chunk = self
             .chunks
             .entry(chunk_key)
             .or_insert_with(|| SparseTsdChunk::new(self.chunk_volume));
-        let (changed, became_live) = chunk.overwrite(local_id, value);
+        let (changed, became_live) = chunk.overwrite(local_id, value, generation);
         if became_live {
             self.active_value_count += 1;
         }
@@ -322,6 +361,7 @@ impl SparseTsdGrid {
         &self,
         chunk_key: VoxelCoord,
         config: SparseVoxelMeshingConfig,
+        current_generation: u64,
         dense: &mut Vec<f32>,
     ) -> Option<SurfaceMesh32> {
         let edge = config.mesh_chunk_edge_voxels();
@@ -337,7 +377,7 @@ impl SparseTsdGrid {
             align_extent(extent.y, stride),
             align_extent(extent.z, stride),
         );
-        self.extract_dense_region_into(start, dense_size, dense);
+        self.extract_dense_region_into(start, dense_size, current_generation, dense);
         lasertag_surface_net_mesh_from_dense(dense, dense_size, self.voxel_size, start, stride)
     }
 
@@ -380,6 +420,7 @@ impl SparseTsdGrid {
         &self,
         start: VoxelCoord,
         extent: VoxelCoord,
+        current_generation: u64,
         dense: &mut Vec<f32>,
     ) {
         let sx = extent.x.max(0) as usize;
@@ -391,7 +432,9 @@ impl SparseTsdGrid {
             for y in 0..extent.y.max(0) {
                 for x in 0..extent.x.max(0) {
                     let coord = VoxelCoord::new(start.x + x, start.y + y, start.z + z);
-                    let value = self.meshing_distance(coord).unwrap_or(f32::NEG_INFINITY);
+                    let value = self
+                        .meshing_distance(coord, current_generation)
+                        .unwrap_or(f32::NEG_INFINITY);
                     dense[(x as usize) + (y as usize) * sx + (z as usize) * sx * sy] = value;
                 }
             }
@@ -796,8 +839,12 @@ fn preprocess_depth_mesh(
 
     for y in (0..worker_state.depth_height).step_by(sample_step) {
         for x in (0..worker_state.depth_width).step_by(sample_step) {
+            if !depth_pixel_inside_margin(worker_state.depth_width, worker_state.depth_height, x, y)
+            {
+                continue;
+            }
             let sample = worker_state.sampled_depth[y * worker_state.depth_width + x];
-            if !sample.valid {
+            if !sample.valid || !sample.has_normal {
                 continue;
             }
             if point_inside_player_exclusion(job.camera_world, sample.world) {
@@ -950,6 +997,9 @@ fn rebuild_sampled_depth_grid(
 
     for y in 0..height {
         for x in 0..width {
+            if !depth_pixel_inside_margin(width, height, x, y) {
+                continue;
+            }
             let raw_depth = job.depth[y * width + x] as f32 / u16::MAX as f32;
             if !(DEPTH_VOXEL_MIN_DEPTH_VALUE..DEPTH_VOXEL_MAX_DEPTH_VALUE).contains(&raw_depth) {
                 continue;
@@ -1017,6 +1067,14 @@ fn sampled_depth_at_pixel(
     let x = pixel_x.min(worker_state.depth_width.saturating_sub(1) as u32) as usize;
     let y = pixel_y.min(worker_state.depth_height.saturating_sub(1) as u32) as usize;
     worker_state.sampled_depth[y * worker_state.depth_width + x]
+}
+
+fn depth_pixel_inside_margin(width: usize, height: usize, x: usize, y: usize) -> bool {
+    let margin = DEPTH_IMAGE_EDGE_MARGIN_PIXELS;
+    if width <= margin * 2 || height <= margin * 2 {
+        return true;
+    }
+    x >= margin && y >= margin && x + margin < width && y + margin < height
 }
 
 fn depth_ndc_to_view(
@@ -1093,7 +1151,7 @@ fn apply_tsd_samples(
         let previous = volume.mesh_grid.normalized_distance(coord).unwrap_or(2.0);
         if volume
             .mesh_grid
-            .accumulate_normalized_distance(coord, normalized)
+            .accumulate_normalized_distance(coord, normalized, volume.generation)
         {
             let current = volume
                 .mesh_grid
@@ -1130,7 +1188,19 @@ fn clear_player_exclusion_volume(volume: &mut DepthMeshVolume, camera_world: Vec
                 if !point_inside_player_exclusion(camera_world, center) {
                     continue;
                 }
-                if volume.mesh_grid.overwrite_normalized_distance(coord, 1.0) {
+                let Some(previous) = volume.mesh_grid.normalized_distance(coord) else {
+                    continue;
+                };
+                if volume.mesh_grid.confidence(coord) > DEPTH_PLAYER_CLEAR_MAX_CONFIDENCE {
+                    continue;
+                }
+                if previous >= 1.0 - 1.0e-4 {
+                    continue;
+                }
+                if volume
+                    .mesh_grid
+                    .overwrite_normalized_distance(coord, 1.0, volume.generation)
+                {
                     mark_mesh_chunk_dirty(volume, coord);
                     changed += 1;
                 }
@@ -1206,16 +1276,23 @@ fn enqueue_visible_mesh_chunks(volume: &mut DepthMeshVolume, world_min: Vec3f, w
     let edge = volume.mesh_config.mesh_chunk_edge_voxels();
     let min_key = volume.mesh_grid.world_to_mesh_chunk_key(world_min, edge);
     let max_key = volume.mesh_grid.world_to_mesh_chunk_key(world_max, edge);
-    let meshed_keys: HashSet<IVector> = volume
+    let meshed_generations: HashMap<IVector, u64> = volume
         .mesh_chunks
         .iter()
-        .map(|chunk| chunk.chunk_key)
+        .map(|chunk| (chunk.chunk_key, chunk.generation))
         .collect();
     for z in (min_key.z - 1)..=(max_key.z + 1) {
         for y in (min_key.y - 1)..=(max_key.y + 1) {
             for x in (min_key.x - 1)..=(max_key.x + 1) {
                 let key = IVector::new(x, y, z);
-                if !meshed_keys.contains(&key) && volume.pending_mesh_dirty_chunks.insert(key) {
+                let needs_refresh = meshed_generations
+                    .get(&key)
+                    .map(|generation| {
+                        volume.generation.saturating_sub(*generation)
+                            > DEPTH_TSD_STALE_LOW_CONFIDENCE_GENERATIONS
+                    })
+                    .unwrap_or(true);
+                if needs_refresh && volume.pending_mesh_dirty_chunks.insert(key) {
                     volume.pending_mesh_chunk_queue.push_back(key);
                 }
             }
@@ -1257,6 +1334,7 @@ fn process_incremental_surface_mesh(
             .lasertag_surface_net_chunk_mesh_with_scratch(
                 voxel_coord_from_ivector(chunk_key),
                 volume.mesh_config,
+                volume.generation,
                 &mut worker_state.mesh_scratch,
             );
         if DEPTH_DEBUG_LOG_CHUNK_MESH_TIMING {
