@@ -1,5 +1,6 @@
 use {
     crate::{
+        PlaybackPrepared,
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
@@ -13,7 +14,6 @@ use {
         },
         makepad_live_id::*,
         makepad_math::*,
-        media_plugin::PlaybackPrepared,
         os::{
             apple::{
                 apple_classes::init_apple_classes_global,
@@ -640,15 +640,14 @@ impl Cx {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         match player.check_prepared() {
-                            Some(Ok(prepared)) => {
-                                let PlaybackPrepared {
-                                    width,
-                                    height,
-                                    duration_ms: duration,
-                                    is_seekable,
-                                    video_tracks,
-                                    audio_tracks,
-                                } = prepared;
+                            Some(Ok(PlaybackPrepared {
+                                width,
+                                height,
+                                duration_ms: duration,
+                                is_seekable,
+                                video_tracks,
+                                audio_tracks,
+                            })) => {
                                 video_events.push(Event::VideoPlaybackPrepared(
                                     VideoPlaybackPreparedEvent {
                                         video_id: player.video_id,
@@ -1175,15 +1174,14 @@ impl Cx {
                         let camera_access = self.os.media.av_capture();
                         let mut preview =
                             MacosNativeCameraPreview::new(input_id, format_id, camera_access);
-                        if let Some(Ok(prepared)) = preview.check_prepared() {
-                            let PlaybackPrepared {
-                                width,
-                                height,
-                                duration_ms: duration,
-                                is_seekable,
-                                video_tracks,
-                                audio_tracks,
-                            } = prepared;
+                        if let Some(Ok(PlaybackPrepared {
+                            width,
+                            height,
+                            duration_ms: duration,
+                            is_seekable,
+                            video_tracks,
+                            audio_tracks,
+                        })) = preview.check_prepared() {
                             self.call_event_handler(&Event::VideoPlaybackPrepared(
                                 VideoPlaybackPreparedEvent {
                                     video_id,

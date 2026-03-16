@@ -899,7 +899,13 @@ impl WidgetTree {
                     None => continue,
                 };
 
-                if name == target
+                // Skip matching the root node itself — find_within searches
+                // *within* the subtree, so the root should not match.
+                // Without this, if the root's name matches the target and
+                // verify_path_graph traverses above root_uid to find a
+                // matching ancestor, the root would be incorrectly returned.
+                if !frame.is_root
+                    && name == target
                     && (path.len() == 1
                         || Self::verify_path_graph(
                             inner,
@@ -992,7 +998,9 @@ impl WidgetTree {
                     None => continue,
                 };
 
-                if name == target
+                // Skip matching the root node itself — see find_within_graph.
+                if !frame.is_root
+                    && name == target
                     && (path.len() == 1
                         || Self::verify_path_graph(
                             inner,
