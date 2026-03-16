@@ -51,6 +51,8 @@ pub mod permission;
 mod texture;
 mod uniform_buffer;
 mod window;
+mod xr_depth_mesh;
+mod xr_depth_voxels;
 
 pub mod web_socket;
 
@@ -85,7 +87,9 @@ pub use ::windows;
 pub use makepad_futures;
 pub use makepad_script_std::makepad_network;
 pub use makepad_script_std::makepad_script;
+pub use makepad_sparse_voxels as sparse_voxels;
 pub use makepad_studio_protocol as studio;
+pub use parry3d;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
 pub use makepad_script_std::makepad_script::trap;
@@ -183,24 +187,18 @@ pub use {
         media_host::{MediaControlBridge, MediaEventBridge, MediaTextureBridge, MediaTextureInfo},
         media_plugin::{
             media_plugin, media_video_capabilities, merge_video_capabilities,
-            register_media_plugin, FrameDecoderCodec, FrameDecoderConfig,
-            MediaPlaybackSession, MediaPlugin, MediaVideoEncoder, MseAudioTrackInfo,
-            MseDecodedAudioFrame, MseDecodedFrame, MseEngineOutput, MseInitMetadata,
-            MsePlaybackEngine, MseVideoTrackInfo, PlaybackPrepared, VideoFrameDecoder,
-        },
-        playback_session::{
-            mix_active_media_audio, register_active_media_audio,
-            register_media_playback_session, take_registered_media_playback_session,
-            unregister_active_media_audio, unregister_media_playback_session,
-            MediaPlaybackSessionId,
-        },
-        video_session::{
-            register_video_frame_session, take_registered_video_frame_session,
-            unregister_video_frame_session, VideoFrameSession, VideoFrameSessionId,
-            VideoSessionState,
+            register_media_plugin, FrameDecoderCodec, FrameDecoderConfig, MediaPlaybackSession,
+            MediaPlugin, MediaVideoEncoder, MseAudioTrackInfo, MseDecodedAudioFrame,
+            MseDecodedFrame, MseEngineOutput, MseInitMetadata, MsePlaybackEngine,
+            MseVideoTrackInfo, PlaybackPrepared, VideoFrameDecoder,
         },
         midi::*,
         os::*,
+        playback_session::{
+            mix_active_media_audio, register_active_media_audio, register_media_playback_session,
+            take_registered_media_playback_session, unregister_active_media_audio,
+            unregister_media_playback_session, MediaPlaybackSessionId,
+        },
         script::vm::*,
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         texture::{
@@ -210,11 +208,22 @@ pub use {
         ui_runner::*,
         uniform_buffer::{UniformBuffer, UniformBufferId},
         video::*,
+        video_session::{
+            register_video_frame_session, take_registered_video_frame_session,
+            unregister_video_frame_session, VideoFrameSession, VideoFrameSessionId,
+            VideoSessionState,
+        },
         web_socket::{WebSocket, WebSocketMessage},
         window::{
             CxWindowPool, MacosWindowChrome, MacosWindowConfig, MacosWindowKind, MacosWindowLevel,
             ScriptWindowHandle, WindowBackdrop, WindowHandle, WindowIcon, WindowIconBuffer,
             WindowId, WindowVisuals,
+        },
+        xr_depth_mesh::{XrDepthMesh, XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore},
+        xr_depth_voxels::{
+            XrDepthEvidenceChunk, XrDepthEvidenceStorage, XrDepthPhysicsBox, XrDepthPhysicsChunk,
+            XrDepthPhysicsChunkKey, XrDepthVoxels, XrDepthVoxelsState, XrDepthVoxelsStats,
+            XrDepthVoxelsStore,
         },
     },
     app_main::*,

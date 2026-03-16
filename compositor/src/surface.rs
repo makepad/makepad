@@ -28,8 +28,10 @@ impl MpSurface {
         let size = normalized_size(size);
         let clear_color = DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0));
         let clear_depth = DrawPassClearDepth::ClearWith(1.0);
-        let color_texture = Texture::new_with_format(cx, color_texture_format(color_format, size, true));
-        let depth_texture = with_depth.then(|| Texture::new_with_format(cx, depth_texture_format(size, true)));
+        let color_texture =
+            Texture::new_with_format(cx, color_texture_format(color_format, size, true));
+        let depth_texture =
+            with_depth.then(|| Texture::new_with_format(cx, depth_texture_format(size, true)));
         let pass = DrawPass::new(cx);
         pass.set_size(cx, size);
         pass.set_color_texture(cx, &color_texture, clear_color.clone());

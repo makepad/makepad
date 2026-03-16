@@ -44,6 +44,18 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
     native.add_method(
         heap,
         shader,
+        id_lut!(depth_clip),
+        script_args!(world = NIL, color = NIL, clip = 0.0),
+        |vm, args| {
+            vm.bx
+                .heap
+                .value(args, id!(color).into(), vm.bx.threads.cur_ref().trap.pass())
+        },
+    );
+
+    native.add_method(
+        heap,
+        shader,
         id_lut!(instance),
         script_args!(value = NIL),
         |vm, args| {
@@ -355,6 +367,7 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                 output.metal_create_varying_struct(vm, &mut out);
                 output.metal_create_vertex_buffer_struct(vm, &mut out);
                 output.metal_create_sampler_decls(&mut out);
+                output.metal_create_helpers(&mut out);
                 output.metal_create_io_vertex_struct(vm, &mut out);
                 output.metal_create_vertex_fn(vm, &mut out);
                 output.metal_create_io_fragment_struct(vm, &mut out);

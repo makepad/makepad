@@ -1,0 +1,32 @@
+[package]
+edition = "2015"
+name = "ena"
+version = "0.14.4"
+authors = ["Niko Matsakis <niko@alum.mit.edu>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Union-find, congruence closure, and other unification code. Based on code from rustc."
+homepage = "https://github.com/rust-lang/ena"
+readme = "README.md"
+keywords = [
+    "unification",
+    "union-find",
+]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rust-lang/ena"
+
+[features]
+bench = []
+persistent = []
+
+[lib]
+name = "ena"
+path = "src/lib.rs"
+
+[dependencies.log]
+package = "makepad-error-log"
+path = "../../../../libs/error_log"

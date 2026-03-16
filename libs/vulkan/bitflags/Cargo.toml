@@ -46,7 +46,7 @@ features = ["example_generated"]
 
 [features]
 example_generated = []
-serde = ["serde_core"]
+serde = []
 std = []
 
 [lib]
@@ -76,17 +76,4 @@ path = "examples/serde.rs"
 [[bench]]
 name = "parse"
 path = "benches/parse.rs"
-
-[dependencies.arbitrary]
-version = "1.0"
-optional = true
-
-[dependencies.bytemuck]
-version = "1.12"
-optional = true
-
-[dependencies.serde_core]
-version = "1.0.228"
-optional = true
-default-features = false
 

@@ -31,7 +31,7 @@ workspace.members = [
     "compositor",
     "libs/gltf",
     "libs/splat",
-    "libs/makepad_physics",
+    # "libs/makepad_physics",
     "libs/latex_math",
     "libs/mbtile_reader",
     "libs/pdf_parse",
@@ -54,6 +54,7 @@ workspace.members = [
     "libs/openexr",
     "libs/git",
     "libs/fast_inflate",
+    "libs/sparse_voxels",
 ]
 
 workspace.exclude = [
@@ -95,6 +96,7 @@ workspace.exclude = [
     "libs/zune/zune-inflate",
     "libs/zune/zune-jpeg",
     "libs/zune/zune-png",
+    "libs/rapier",
     # platform-specific libs
     "libs/windows/windows-collections",
     "libs/windows/windows-core",
@@ -155,6 +157,10 @@ lto = true        # Enable link-time optimization
 codegen-units = 1 # Reduce number of codegen units to increase optimizations
 panic = 'abort'   # Abort on panic
 strip = true
+
+[profile.profile]
+inherits = "release"
+debug = true
 
 [profile.release.package.makepad-voice]
 codegen-units = 1

@@ -2057,8 +2057,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     let inst_buf = draw_item.instances.as_mut().unwrap();
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
-                            inst_buf[(inst.instance_offset
-                                + rect_pos)
+                            inst_buf[(inst.instance_offset + rect_pos)
                                 + i * sh.mapping.instances.total_slots] += dx as f32;
                             inst_buf[inst.instance_offset
                                 + rect_pos
@@ -2066,8 +2065,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                                 + i * sh.mapping.instances.total_slots] += dy as f32;
                             if shift_clip {
                                 if let Some(draw_clip) = sh.mapping.draw_clip {
-                                    inst_buf[(inst.instance_offset
-                                        + draw_clip)
+                                    inst_buf[(inst.instance_offset + draw_clip)
                                         + i * sh.mapping.instances.total_slots] += dx as f32;
                                     inst_buf[inst.instance_offset
                                         + draw_clip
@@ -2154,8 +2152,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                         let inst_buf = draw_item.instances.as_mut().unwrap();
                         for i in 0..inst.instance_count {
                             if let Some(draw_clip) = sh.mapping.draw_clip {
-                                inst_buf[(inst.instance_offset
-                                    + draw_clip)
+                                inst_buf[(inst.instance_offset + draw_clip)
                                     + i * sh.mapping.instances.total_slots] = clip0.x as f32;
                                 inst_buf[inst.instance_offset
                                     + draw_clip

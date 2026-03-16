@@ -615,12 +615,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         env.push(("CARGO_PROFILE_SMALL_LTO", "off"));
     }
 
-    shell_env(
-        &env,
-        &cwd,
-        "rustup",
-        &args_out_refs,
-    )?;
+    shell_env(&env, &cwd, "rustup", &args_out_refs)?;
 
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
     let build_dir = cwd.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));

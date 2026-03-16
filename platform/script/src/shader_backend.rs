@@ -1073,6 +1073,7 @@ impl ShaderBackend {
                 id_lut!(dfdy);
                 id_lut!(ddx);
                 id_lut!(ddy);
+                id_lut!(_mp_inverse);
                 id_lut!(rsqrt);
                 id_lut!(fmod);
                 id_lut!(frac);
@@ -1101,6 +1102,7 @@ impl ShaderBackend {
                 // Builtin function names
                 id_lut!(dFdx);
                 id_lut!(dFdy);
+                id_lut!(inverse);
                 id_lut!(inversesqrt);
                 id_lut!(mod);
             }
@@ -1108,10 +1110,12 @@ impl ShaderBackend {
                 // Builtin function names
                 id_lut!(dpdx);
                 id_lut!(dpdy);
+                id_lut!(inverse);
             }
             Self::Rust => {
                 // Rust uses canonical names from makepad_math - no remapping needed
                 // Register builtin function names used in Rust backend
+                id_lut!(inverse);
                 id_lut!(inverseSqrt);
                 id_lut!(modf);
             }
@@ -1123,6 +1127,7 @@ impl ShaderBackend {
             Self::Metal => match name_in {
                 id!(dFdx) => id!(dfdx),
                 id!(dFdy) => id!(dfdy),
+                id!(inverse) => id!(_mp_inverse),
                 id!(inverseSqrt) => id!(rsqrt),
                 id!(modf) => id!(fmod),
                 id!(discard) => id!(discard_fragment),

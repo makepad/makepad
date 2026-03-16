@@ -316,8 +316,10 @@ fn generate_android_wrapper_manifest(
         let workspace_patches = extract_workspace_patch_sections(&workspace_manifest);
         if !workspace_patches.trim().is_empty() {
             wrapper_manifest.push('\n');
-            wrapper_manifest
-                .push_str(&rewrite_wrapper_manifest_paths(&workspace_patches, &workspace_root));
+            wrapper_manifest.push_str(&rewrite_wrapper_manifest_paths(
+                &workspace_patches,
+                &workspace_root,
+            ));
         }
     }
 
@@ -412,7 +414,9 @@ fn rust_build(
                 _ => "quest".to_string(),
             })
         } else {
-            std::env::var("MAKEPAD").ok().filter(|value| !value.is_empty())
+            std::env::var("MAKEPAD")
+                .ok()
+                .filter(|value| !value.is_empty())
         };
 
         let android_sdk_version = urls.sdk_version.to_string();
@@ -422,7 +426,10 @@ fn rust_build(
                 android_target.linker_env_var().to_string(),
                 full_clang_path.to_string_lossy().to_string(),
             ),
-            ("ANDROID_HOME".to_string(), sdk_dir.to_string_lossy().to_string()),
+            (
+                "ANDROID_HOME".to_string(),
+                sdk_dir.to_string_lossy().to_string(),
+            ),
             (
                 "ANDROID_SDK_ROOT".to_string(),
                 sdk_dir.to_string_lossy().to_string(),
@@ -432,7 +439,10 @@ fn rust_build(
                 urls.build_tools_version.to_string(),
             ),
             ("ANDROID_PLATFORM".to_string(), urls.platform.to_string()),
-            ("ANDROID_SDK_VERSION".to_string(), android_sdk_version.clone()),
+            (
+                "ANDROID_SDK_VERSION".to_string(),
+                android_sdk_version.clone(),
+            ),
             ("ANDROID_API_LEVEL".to_string(), android_sdk_version),
             (
                 "ANDROID_SDK_EXTENSION".to_string(),
@@ -461,12 +471,7 @@ fn rust_build(
             .map(|(key, value)| (key.as_str(), value.as_str()))
             .collect::<Vec<_>>();
 
-        shell_env(
-            &env_refs,
-            &cargo_cwd,
-            "rustup",
-            &args_out,
-        )?;
+        shell_env(&env_refs, &cargo_cwd, "rustup", &args_out)?;
     }
 
     Ok(())
@@ -1221,7 +1226,12 @@ fn add_font_assets_dir_to_apk(
                 .join(replacement_name)
                 .is_file()
                 .then(|| source_dir.join(replacement_name))
-                .or_else(|| resource_dir.join(replacement_name).is_file().then(|| resource_dir.join(replacement_name)));
+                .or_else(|| {
+                    resource_dir
+                        .join(replacement_name)
+                        .is_file()
+                        .then(|| resource_dir.join(replacement_name))
+                });
             let target = dst_dir.join(target_name);
             if let Some(replacement) = replacement {
                 if target.is_file() {
@@ -1562,7 +1572,13 @@ fn parse_ip_route(output: &str) -> Option<String> {
 }
 
 fn detect_device_ip(sdk_dir: &Path, serial: Option<&str>) -> Result<String, String> {
-    let addr_show = adb_cap(sdk_dir, serial, &["shell", "ip", "-f", "inet", "addr", "show", "scope", "global"])?;
+    let addr_show = adb_cap(
+        sdk_dir,
+        serial,
+        &[
+            "shell", "ip", "-f", "inet", "addr", "show", "scope", "global",
+        ],
+    )?;
     if let Some(ip) = parse_ip_addr_show(&addr_show) {
         return Ok(ip);
     }

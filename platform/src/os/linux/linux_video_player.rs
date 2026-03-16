@@ -59,9 +59,7 @@ impl LinuxVideoPlayer {
         }
     }
 
-    pub fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         match self {
             LinuxVideoPlayer::GStreamer { player: p, .. } => p.check_prepared(),
             LinuxVideoPlayer::Software { player: p, .. } => p.check_prepared(),

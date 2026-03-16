@@ -13,6 +13,7 @@ use {
         },
         makepad_live_id::*,
         makepad_math::*,
+        media_plugin::PlaybackPrepared,
         os::{
             apple::{
                 apple_classes::init_apple_classes_global,
@@ -35,7 +36,6 @@ use {
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
         window::{CxWindowPool, MacosWindowConfig, WindowId},
-        PlaybackPrepared,
     },
     makepad_objc_sys::{msg_send, objc_block, sel, sel_impl},
     std::{
@@ -217,9 +217,7 @@ impl MacosNativeCameraPreview {
         }
     }
 
-    fn check_prepared(
-        &mut self,
-    ) -> Option<Result<PlaybackPrepared, String>> {
+    fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
@@ -1177,8 +1175,7 @@ impl Cx {
                         let camera_access = self.os.media.av_capture();
                         let mut preview =
                             MacosNativeCameraPreview::new(input_id, format_id, camera_access);
-                        if let Some(Ok(prepared)) = preview.check_prepared()
-                        {
+                        if let Some(Ok(prepared)) = preview.check_prepared() {
                             let PlaybackPrepared {
                                 width,
                                 height,
@@ -1490,7 +1487,10 @@ mod tests {
         ));
         assert_eq!(
             platform_ops,
-            vec![CxOsOp::SetTopmost(window_id, true), CxOsOp::CreateWindow(window_id)]
+            vec![
+                CxOsOp::SetTopmost(window_id, true),
+                CxOsOp::CreateWindow(window_id)
+            ]
         );
     }
 }

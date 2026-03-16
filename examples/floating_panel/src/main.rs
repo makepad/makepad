@@ -251,10 +251,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(ping_button)).clicked(actions) {
             self.panel_pings += 1;
             let suffix = if self.panel_pings == 1 { "" } else { "s" };
-            let message = format!(
-                "Panel button pressed {} time{}.",
-                self.panel_pings, suffix
-            );
+            let message = format!("Panel button pressed {} time{}.", self.panel_pings, suffix);
             self.set_status(cx, &message);
         }
 

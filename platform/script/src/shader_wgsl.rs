@@ -20,6 +20,7 @@ pub struct WgslDrawShaderSource {
     pub dyn_uniform_binding: u32,
     pub texture_binding_base: u32,
     pub sampler_binding_base: u32,
+    pub xr_depth_binding: u32,
     pub geometry_slots: usize,
     pub instance_slots: usize,
 }
@@ -386,7 +387,10 @@ fn wgsl_unpack_expr_for_field(
     wgsl_reconstruct_inline(output, vm, &inline, source, &scalars, &mut scalar_index)
 }
 
-fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, u32, u32, u32) {
+fn build_draw_shader_wgsl(
+    vm: &ScriptVm,
+    output: &mut ShaderOutput,
+) -> (String, u32, u32, u32, u32) {
     let mut out = String::new();
 
     let geometry_fields = wgsl_collect_geometry_fields(output, vm);
@@ -612,6 +616,14 @@ fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, 
         next_binding += 1;
     }
 
+    let xr_depth_binding = next_binding;
+    writeln!(
+        out,
+        "@group(0) @binding({}) var tex_xr_depth: texture_depth_2d;",
+        xr_depth_binding
+    )
+    .ok();
+
     writeln!(out, "struct VertexMainIn {{").ok();
     let mut location = 0u32;
     let geometry_slots = geometry_fields
@@ -671,6 +683,60 @@ fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, 
 
     writeln!(out).ok();
     output.create_functions(&mut out);
+    writeln!(out).ok();
+    writeln!(
+        out,
+        "fn depth_clip(world: vec4f, color: vec4f, clip: f32) -> vec4f {{"
+    )
+    .ok();
+    writeln!(out, "    if (clip < 0.5) {{").ok();
+    writeln!(out, "        return color;").ok();
+    writeln!(out, "    }}").ok();
+    writeln!(
+        out,
+        "    if (abs(unibuf_draw_pass.depth_view[3].w - 1.0) > 0.5) {{"
+    )
+    .ok();
+    writeln!(out, "        return color;").ok();
+    writeln!(out, "    }}").ok();
+    writeln!(
+        out,
+        "    let depth_pos = unibuf_draw_pass.depth_projection * unibuf_draw_pass.depth_view * world;"
+    )
+    .ok();
+    writeln!(out, "    if (abs(depth_pos.w) < 0.000001) {{").ok();
+    writeln!(out, "        return color;").ok();
+    writeln!(out, "    }}").ok();
+    writeln!(
+        out,
+        "    let depth_hc = (depth_pos.xyz / vec3f(depth_pos.w)) * vec3f(0.5, 0.5, 0.5) + vec3f(0.5, 0.5, 0.5);"
+    )
+    .ok();
+    writeln!(out, "    let dims = textureDimensions(tex_xr_depth);").ok();
+    writeln!(out, "    if (dims.x == 0u || dims.y == 0u) {{").ok();
+    writeln!(out, "        return color;").ok();
+    writeln!(out, "    }}").ok();
+    writeln!(
+        out,
+        "    let depth_x = clamp(i32(depth_hc.x * f32(dims.x)), 0, max(i32(dims.x) - 1, 0));"
+    )
+    .ok();
+    writeln!(
+        out,
+        "    let depth_y = clamp(i32(depth_hc.y * f32(dims.y)), 0, max(i32(dims.y) - 1, 0));"
+    )
+    .ok();
+    writeln!(
+        out,
+        "    let depth_view_eye_z = textureLoad(tex_xr_depth, vec2i(depth_x, depth_y), 0);"
+    )
+    .ok();
+    writeln!(out, "    if (depth_view_eye_z >= depth_hc.z) {{").ok();
+    writeln!(out, "        return color;").ok();
+    writeln!(out, "    }}").ok();
+    writeln!(out, "    discard;").ok();
+    writeln!(out, "    return vec4f(0.0, 0.0, 0.0, 0.0);").ok();
+    writeln!(out, "}}").ok();
 
     let vertex_fn_name = output.backend.map_function_name("io_vertex");
     let fragment_fn_name = output.backend.map_function_name("io_fragment");
@@ -871,6 +937,7 @@ fn build_draw_shader_wgsl(vm: &ScriptVm, output: &mut ShaderOutput) -> (String, 
         dyn_uniform_binding,
         texture_binding_base.unwrap_or(0),
         sampler_binding_base.unwrap_or(0),
+        xr_depth_binding,
     )
 }
 
@@ -949,7 +1016,7 @@ pub fn compile_draw_shader_wgsl_source(
         .map(|field| field.offset + field.slots)
         .unwrap_or(0);
 
-    let (wgsl, dyn_uniform_binding, texture_binding_base, sampler_binding_base) =
+    let (wgsl, dyn_uniform_binding, texture_binding_base, sampler_binding_base, xr_depth_binding) =
         build_draw_shader_wgsl(vm, &mut output);
 
     Ok(WgslDrawShaderSource {
@@ -957,6 +1024,7 @@ pub fn compile_draw_shader_wgsl_source(
         dyn_uniform_binding,
         texture_binding_base,
         sampler_binding_base,
+        xr_depth_binding,
         geometry_slots,
         instance_slots,
     })
