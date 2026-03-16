@@ -190,9 +190,16 @@ const XR_SCENE_VERTICAL_OFFSET: f32 = 0.30;
 const XR_SCENE_HEAD_HEIGHT_SCALE: f32 = 0.5;
 const XR_SIMULATION_DT: f32 = 1.0 / 120.0;
 const XR_ENABLE_HAND_PHYSICS: bool = true;
-const XR_ENABLE_DEPTH_QUERY_PHYSICS: bool = true;
+const XR_ENABLE_DEPTH_QUERY_PHYSICS: bool = false;
+const XR_ENABLE_DEPTH_PLANE_PHYSICS: bool = true;
 const XR_RENDER_HAND_GEOMETRY: bool = false;
 const XR_RENDER_DEPTH_DEBUG: bool = true;
+const XR_RENDER_DEPTH_PLANE_DEBUG: bool = true;
+const XR_DEPTH_PLANE_DEBUG_THICKNESS: f32 = 0.01;
+const XR_DEPTH_PLANE_DEBUG_OFFSET: f32 = 0.006;
+const XR_DEPTH_PLANE_DEBUG_COLOR: [f32; 4] = [0.42, 0.62, 0.95, 0.22];
+const XR_DEPTH_PLANE_PHYSICS_THICKNESS: f32 = 0.05;
+const XR_DEPTH_PLANE_PHYSICS_FRICTION: f32 = 0.9;
 const XR_DEPTH_QUERY_MAX_DISTANCE: f32 = 0.12;
 const XR_DEPTH_QUERY_FRICTION: f32 = 0.9;
 const XR_DEPTH_QUERY_LOOKAHEAD_SECONDS: f32 = 0.18;
@@ -294,6 +301,11 @@ struct DepthQuerySurfaceCollider {
     miss_count: u64,
 }
 
+#[derive(Clone, Copy)]
+struct DepthPlaneSurfaceCollider {
+    body: RigidBodyHandle,
+}
+
 struct RapierScene {
     gravity: RapierVector,
     integration_parameters: IntegrationParameters,
@@ -308,6 +320,7 @@ struct RapierScene {
     ccd_solver: CCDSolver,
     cubes: Vec<PhysicsCube>,
     depth_query_surfaces: Vec<DepthQuerySurfaceCollider>,
+    depth_plane_surfaces: Vec<DepthPlaneSurfaceCollider>,
     left_hand: Vec<HandColliderBody>,
     right_hand: Vec<HandColliderBody>,
     platform_pose: Pose,
@@ -405,6 +418,7 @@ impl RapierScene {
             ccd_solver: CCDSolver::new(),
             cubes: Vec::new(),
             depth_query_surfaces: Vec::new(),
+            depth_plane_surfaces: Vec::new(),
             left_hand: Vec::new(),
             right_hand: Vec::new(),
             platform_pose: Pose::new(scene_rotation, platform_center),
@@ -517,6 +531,45 @@ impl RapierScene {
             collider,
             last_result_version: 0,
             miss_count: 0,
+        }
+    }
+
+    fn clear_depth_plane_surfaces(&mut self) {
+        let surfaces = std::mem::take(&mut self.depth_plane_surfaces);
+        for surface in surfaces {
+            let _ = self.bodies.remove(
+                surface.body,
+                &mut self.islands,
+                &mut self.colliders,
+                &mut self.impulse_joints,
+                &mut self.multibody_joints,
+                true,
+            );
+        }
+    }
+
+    fn sync_depth_plane_surfaces(&mut self, patches: &[XrDepthPlanePatch]) {
+        self.clear_depth_plane_surfaces();
+        for patch in patches {
+            let pose = Pose::new(
+                Quat::look_rotation(patch.normal, patch.tangent),
+                patch.center - patch.normal.scale(XR_DEPTH_PLANE_PHYSICS_THICKNESS * 0.5),
+            );
+            let body = self
+                .bodies
+                .insert(RigidBodyBuilder::fixed().pose(rapier_pose(pose)));
+            let collider = self.colliders.insert_with_parent(
+                ColliderBuilder::cuboid(
+                    patch.half_extent_bitangent,
+                    patch.half_extent_tangent,
+                    XR_DEPTH_PLANE_PHYSICS_THICKNESS * 0.5,
+                )
+                .friction(XR_DEPTH_PLANE_PHYSICS_FRICTION),
+                body,
+                &mut self.bodies,
+            );
+            let _ = collider;
+            self.depth_plane_surfaces.push(DepthPlaneSurfaceCollider { body });
         }
     }
 
@@ -693,6 +746,12 @@ pub struct XrScene {
     depth_surface_mesh_chunks: HashMap<(i32, i32, i32), (Geometry, DepthSurfaceMeshChunkHandle)>,
     #[rust]
     depth_surface_mesh_upload_count: usize,
+    #[rust]
+    depth_plane_generation: u64,
+    #[rust]
+    depth_plane_physics_generation: u64,
+    #[rust]
+    depth_plane_patches: Vec<XrDepthPlanePatch>,
     #[rust(XR_RENDER_DEPTH_DEBUG)]
     depth_debug_visible: bool,
 }
@@ -700,6 +759,10 @@ pub struct XrScene {
 impl XrScene {
     fn depth_debug_enabled(&self) -> bool {
         self.depth_debug_visible
+    }
+
+    fn depth_plane_debug_enabled(&self) -> bool {
+        XR_RENDER_DEPTH_PLANE_DEBUG
     }
 
     fn draw_pose_box(
@@ -723,6 +786,12 @@ impl XrScene {
         self.depth_surface_mesh_update_sequence = 0;
         self.depth_surface_mesh_chunks.clear();
         self.depth_surface_mesh_upload_count = 0;
+    }
+
+    fn clear_depth_plane_cache(&mut self) {
+        self.depth_plane_generation = 0;
+        self.depth_plane_physics_generation = 0;
+        self.depth_plane_patches.clear();
     }
 
     fn upsert_depth_surface_mesh_chunk(&mut self, cx: &mut Cx2d, chunk: &XrDepthMeshChunk) {
@@ -1157,6 +1226,7 @@ impl XrScene {
         if !self.depth_debug_visible {
             self.clear_depth_surface_mesh();
         }
+        self.clear_depth_plane_cache();
         if XR_ENABLE_DEPTH_QUERY_PHYSICS {
             if let Some(scene) = &self.scene {
                 let depth_mesh = cx.xr_depth_mesh();
@@ -1258,9 +1328,31 @@ impl XrScene {
         }
     }
 
+    fn sync_depth_plane_physics(&mut self, cx: &mut Cx) {
+        if !XR_ENABLE_DEPTH_PLANE_PHYSICS {
+            return;
+        }
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        let Some(depth_mesh) = cx.xr_depth_mesh().latest_mesh() else {
+            scene.clear_depth_plane_surfaces();
+            self.clear_depth_plane_cache();
+            return;
+        };
+        if self.depth_plane_generation != depth_mesh.plane_generation {
+            self.depth_plane_generation = depth_mesh.plane_generation;
+            self.depth_plane_patches = depth_mesh.plane_patches.clone();
+        }
+        if self.depth_plane_physics_generation == depth_mesh.plane_generation {
+            return;
+        }
+        self.depth_plane_physics_generation = depth_mesh.plane_generation;
+        scene.sync_depth_plane_surfaces(&self.depth_plane_patches);
+    }
+
     fn sync_depth_surface_mesh(&mut self, cx: &mut Cx2d) {
         if !self.depth_debug_enabled() {
-            self.clear_depth_surface_mesh();
             return;
         }
 
@@ -1390,6 +1482,41 @@ impl XrScene {
             self.draw_depth_mesh.draw_geometry(cx, geometry_id);
         }
     }
+
+    fn draw_depth_plane_patches(&mut self, cx: &mut Cx2d) {
+        if !self.depth_plane_debug_enabled() || self.depth_plane_patches.is_empty() {
+            return;
+        }
+
+        let patches = self.depth_plane_patches.clone();
+        let previous_depth_write = self.draw_cube.draw_vars.options.depth_write;
+        self.draw_cube.draw_vars.options.depth_write = false;
+        self.draw_cube.begin_many_instances(cx);
+        for patch in &patches {
+            let pose = Pose::new(
+                Quat::look_rotation(patch.normal, patch.tangent),
+                patch.center + patch.normal.scale(XR_DEPTH_PLANE_DEBUG_OFFSET),
+            );
+            self.draw_pose_box(
+                cx,
+                pose,
+                vec3f(
+                    patch.half_extent_bitangent * 2.0,
+                    patch.half_extent_tangent * 2.0,
+                    XR_DEPTH_PLANE_DEBUG_THICKNESS,
+                ),
+                vec4(
+                    XR_DEPTH_PLANE_DEBUG_COLOR[0],
+                    XR_DEPTH_PLANE_DEBUG_COLOR[1],
+                    XR_DEPTH_PLANE_DEBUG_COLOR[2],
+                    XR_DEPTH_PLANE_DEBUG_COLOR[3],
+                ),
+                0.0,
+            );
+        }
+        self.draw_cube.end_many_instances(cx);
+        self.draw_cube.draw_vars.options.depth_write = previous_depth_write;
+    }
 }
 
 fn pack_depth_mesh_vertices(chunk: &XrDepthMeshChunk) -> Vec<f32> {
@@ -1414,6 +1541,7 @@ impl Widget for XrScene {
                 self.ensure_scene(&e.state)
             };
             self.sync_hands(&e.state);
+            self.sync_depth_plane_physics(cx);
             if !scene_reset {
                 self.sync_depth_query_surfaces(cx);
                 if let Some(scene) = &mut self.scene {
@@ -1462,6 +1590,7 @@ impl Widget for XrScene {
         self.draw_bodies(cx);
         self.prepare_depth_mesh(cx);
         self.draw_depth_surface_mesh(cx);
+        self.draw_depth_plane_patches(cx);
 
         DrawStep::done()
     }

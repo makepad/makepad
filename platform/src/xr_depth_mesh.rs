@@ -50,6 +50,8 @@ pub struct XrDepthMesh {
     pub mesh_generation: u64,
     pub mesh_vertex_count: usize,
     pub mesh_triangle_count: usize,
+    pub plane_generation: u64,
+    pub plane_patches: Vec<XrDepthPlanePatch>,
 }
 
 impl XrDepthMesh {
@@ -63,6 +65,30 @@ pub struct XrDepthMeshState {
     pub latest_mesh: Option<Arc<XrDepthMesh>>,
     pub stats: XrDepthMeshStats,
     pub last_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum XrDepthPlaneKind {
+    Floor,
+    Table,
+    Ceiling,
+    Wall,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct XrDepthPlanePatch {
+    pub generation: u64,
+    pub kind: XrDepthPlaneKind,
+    pub center: Vec3f,
+    pub normal: Vec3f,
+    pub tangent: Vec3f,
+    pub bitangent: Vec3f,
+    pub half_extent_tangent: f32,
+    pub half_extent_bitangent: f32,
+    pub area: f32,
+    pub support_triangles: usize,
 }
 
 #[derive(Clone, Copy, Debug)]

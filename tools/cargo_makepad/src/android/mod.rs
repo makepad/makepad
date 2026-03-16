@@ -117,6 +117,7 @@ impl AndroidVariant {
                 <uses-feature android:glEsVersion="0x00030001" android:required="true"/>
                 <uses-feature android:name="android.hardware.vr.headtracking" android:required="false"/>
                 <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true"/>
+                <uses-feature android:name="com.oculus.feature.CONTEXTUAL_BOUNDARYLESS_APP" android:required="false"/>
                 <uses-permission android:name="com.oculus.permission.USE_SCENE" />
                 <!-- Request hand and keyboard tracking for keyboard hand presence testing -->
                 <uses-feature android:name="oculus.software.handtracking" android:required="false"/>
