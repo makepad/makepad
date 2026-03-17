@@ -1792,6 +1792,7 @@ fn texture_pixel_to_mtl_pixel(pix: &TexturePixel) -> MTLPixelFormat {
         TexturePixel::D32 => MTLPixelFormat::Depth32Float,
         TexturePixel::VideoYuvPlane => MTLPixelFormat::R8Unorm,
         TexturePixel::VideoExternal => MTLPixelFormat::BGRA8Unorm,
+        TexturePixel::VideoRgbaHardwareBuffer => MTLPixelFormat::BGRA8Unorm,
     }
 }
 impl CxTexture {

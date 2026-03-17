@@ -10,6 +10,12 @@ pub enum Permission {
     /// Required on: iOS, Android, macOS, Web
     /// Auto-granted on: Windows, Linux
     Camera,
+    /// Permission to access Quest headset cameras.
+    ///
+    /// Required on: Android Quest for headset passthrough camera textures.
+    /// Unsupported on: iOS, macOS, Web
+    /// Auto-granted on: Windows, Linux
+    HeadsetCamera,
     /// Permission to access Quest scene understanding data.
     ///
     /// Required on: Android Quest for scene data, environment depth, and passthrough occlusion.
