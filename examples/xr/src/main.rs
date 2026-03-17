@@ -103,7 +103,15 @@ script_mod! {
                 let is_270 = step(2.5, self.rotation_steps);
                 let is_0 = 1.0 - is_90 - is_180 - is_270;
                 let sample_coord = coord * is_0 + coord_90 * is_90 + coord_180 * is_180 + coord_270 * is_270;
-                return self.camera_texture.sample_video(sample_coord).xyz;
+                let sample = self.camera_texture.sample_video(sample_coord).xyz;
+                // Quest's external sampler path appears to expose the camera sample as U,Y,V.
+                let y = (sample.y * 255.0 - 16.0) / 219.0;
+                let u = (sample.x * 255.0 - 128.0) / 224.0;
+                let v = (sample.z * 255.0 - 128.0) / 224.0;
+                let r = y + 1.8556 * u;
+                let g = y - 0.1873 * u - 0.4681 * v;
+                let b = y + 1.5748 * v;
+                return vec3(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0));
             }
 
             return vec3(0.0, 0.0, 0.0);
@@ -1215,14 +1223,6 @@ impl XrScene {
             return;
         }
 
-        crate::warning!(
-            "XR passthrough camera: requesting playback input_id={} format_id={} size={}x{} mode={:?}",
-            choice.input_id.0,
-            choice.format_id.0,
-            choice.width,
-            choice.height,
-            self.depth_debug_mode,
-        );
         cx.prepare_headset_camera_playback(
             Self::passthrough_video_id(),
             VideoSource::Camera(choice.input_id, choice.format_id),
@@ -2074,15 +2074,7 @@ impl Widget for XrScene {
             Event::VideoInputs(ev) => {
                 self.passthrough_camera_failed = false;
                 self.passthrough_camera_choice = Self::pick_passthrough_camera_choice(ev);
-                if let Some(choice) = &self.passthrough_camera_choice {
-                    crate::warning!(
-                        "XR passthrough camera: selected input_id={} format_id={} size={}x{}",
-                        choice.input_id.0,
-                        choice.format_id.0,
-                        choice.width,
-                        choice.height,
-                    );
-                } else {
+                if self.passthrough_camera_choice.is_none() {
                     crate::warning!("XR passthrough camera: no suitable camera choice found");
                 }
                 self.sync_passthrough_camera(cx);
@@ -2102,11 +2094,6 @@ impl Widget for XrScene {
                 self.redraw(cx);
             }
             Event::VideoPlaybackPrepared(ev) if ev.video_id == Self::passthrough_video_id() => {
-                crate::warning!(
-                    "XR passthrough camera: playback prepared size={}x{}",
-                    ev.video_width,
-                    ev.video_height,
-                );
                 self.passthrough_camera_source_size =
                     vec2f(ev.video_width as f32, ev.video_height as f32);
                 self.redraw(cx);

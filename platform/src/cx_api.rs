@@ -1094,11 +1094,6 @@ impl Cx {
         permission: crate::permission::Permission,
     ) {
         if let VideoSource::Camera(..) = &source {
-            crate::warning!(
-                "Cx camera playback: queueing pending playback video_id={} permission={:?}",
-                video_id.0,
-                permission,
-            );
             self.pending_camera_playbacks
                 .push(crate::cx::PendingCameraPlayback {
                     permission,
@@ -1135,12 +1130,6 @@ impl Cx {
             return;
         }
         let pending: Vec<_> = self.pending_camera_playbacks.drain(..).collect();
-        crate::warning!(
-            "Cx camera playback: permission result {:?} for {:?} with {} pending",
-            result.status,
-            result.permission,
-            pending.len(),
-        );
         for p in pending {
             if p.permission != result.permission {
                 self.pending_camera_playbacks.push(p);
@@ -1148,10 +1137,6 @@ impl Cx {
             }
             match result.status {
                 crate::permission::PermissionStatus::Granted => {
-                    crate::warning!(
-                        "Cx camera playback: issuing PrepareVideoPlayback video_id={}",
-                        p.video_id.0,
-                    );
                     self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
                         p.video_id,
                         p.source,
