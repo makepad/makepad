@@ -443,6 +443,7 @@ impl App {
                     dock.item(tab_id)
                         .desktop_run_view(cx, ids!(run_view))
                         .show_input_viz(cx, kind, x, y);
+                    dock.redraw_tab(cx, tab_id);
                 }
             }
             HubToClient::QueryLogResults {
