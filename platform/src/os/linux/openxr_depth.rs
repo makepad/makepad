@@ -6,12 +6,11 @@ use crate::{
     },
     thread::SignalToUI,
     xr_depth_mesh::{
-        empty_bounds, xr_depth_mesh_store, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery,
-        XrDepthMeshQueryHit, XrDepthMeshQueryResult, XrDepthMeshQuerySurfaceHit,
+        empty_bounds, xr_depth_mesh_store, ChunkKey, XrDepthMesh, XrDepthMeshChunk,
+        XrDepthMeshQuery, XrDepthMeshQueryHit, XrDepthMeshQueryResult, XrDepthMeshQuerySurfaceHit,
         XrDepthMeshStore, XrDepthPlaneKind, XrDepthPlanePatch,
     },
 };
-use parry3d::math::IVector;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
@@ -584,14 +583,14 @@ struct DepthMeshVolume {
     mesh_chunks: Vec<XrDepthMeshChunk>,
     mesh_generation: u64,
     update_sequence: u64,
-    dirty_chunk_keys: Vec<IVector>,
-    removed_chunk_keys: Vec<IVector>,
+    dirty_chunk_keys: Vec<ChunkKey>,
+    removed_chunk_keys: Vec<ChunkKey>,
     mesh_vertex_count: usize,
     mesh_triangle_count: usize,
     plane_generation: u64,
     plane_patches: Vec<XrDepthPlanePatch>,
-    pending_mesh_dirty_chunks: HashSet<IVector>,
-    pending_mesh_chunk_queue: VecDeque<IVector>,
+    pending_mesh_dirty_chunks: HashSet<ChunkKey>,
+    pending_mesh_chunk_queue: VecDeque<ChunkKey>,
 }
 
 impl DepthMeshVolume {
@@ -673,12 +672,12 @@ impl DepthMeshVolume {
         }
     }
 
-    fn record_dirty_chunk(&mut self, chunk_key: IVector) {
+    fn record_dirty_chunk(&mut self, chunk_key: ChunkKey) {
         push_unique_chunk_key(&mut self.dirty_chunk_keys, chunk_key);
         self.removed_chunk_keys.retain(|key| *key != chunk_key);
     }
 
-    fn record_removed_chunk(&mut self, chunk_key: IVector) {
+    fn record_removed_chunk(&mut self, chunk_key: ChunkKey) {
         push_unique_chunk_key(&mut self.removed_chunk_keys, chunk_key);
         self.dirty_chunk_keys.retain(|key| *key != chunk_key);
     }
@@ -1560,7 +1559,7 @@ fn mark_mesh_chunk_dirty(volume: &mut DepthMeshVolume, voxel: VoxelCoord) {
     for z in min_chunk.z..=max_chunk.z {
         for y in min_chunk.y..=max_chunk.y {
             for x in min_chunk.x..=max_chunk.x {
-                let key = IVector::new(x, y, z);
+                let key = ChunkKey::new(x, y, z);
                 if volume.pending_mesh_dirty_chunks.insert(key) {
                     volume.pending_mesh_chunk_queue.push_back(key);
                 }
@@ -1610,7 +1609,7 @@ fn enqueue_visible_mesh_chunks(volume: &mut DepthMeshVolume, world_min: Vec3f, w
     let edge = volume.mesh_config.mesh_chunk_edge_voxels();
     let min_key = volume.mesh_grid.world_to_mesh_chunk_key(world_min, edge);
     let max_key = volume.mesh_grid.world_to_mesh_chunk_key(world_max, edge);
-    let meshed_keys: HashSet<IVector> = volume
+    let meshed_keys: HashSet<ChunkKey> = volume
         .mesh_chunks
         .iter()
         .map(|chunk| chunk.chunk_key)
@@ -1618,7 +1617,7 @@ fn enqueue_visible_mesh_chunks(volume: &mut DepthMeshVolume, world_min: Vec3f, w
     for z in (min_key.z - 1)..=(max_key.z + 1) {
         for y in (min_key.y - 1)..=(max_key.y + 1) {
             for x in (min_key.x - 1)..=(max_key.x + 1) {
-                let key = IVector::new(x, y, z);
+                let key = ChunkKey::new(x, y, z);
                 if !meshed_keys.contains(&key) && volume.pending_mesh_dirty_chunks.insert(key) {
                     volume.pending_mesh_chunk_queue.push_back(key);
                 }
@@ -1656,15 +1655,13 @@ fn process_incremental_surface_mesh(
         };
         volume.pending_mesh_dirty_chunks.remove(&chunk_key);
         let started = Instant::now();
-        let mesh = volume
-            .mesh_grid
-            .surface_net_chunk_mesh_with_scratch(
-                voxel_coord_from_ivector(chunk_key),
-                volume.mesh_config,
-                volume.generation,
-                &mut worker_state.mesh_scratch,
-                &mut worker_state.mesh_fill_scratch,
-            );
+        let mesh = volume.mesh_grid.surface_net_chunk_mesh_with_scratch(
+            voxel_coord_from_chunk_key(chunk_key),
+            volume.mesh_config,
+            volume.generation,
+            &mut worker_state.mesh_scratch,
+            &mut worker_state.mesh_fill_scratch,
+        );
         if DEPTH_DEBUG_LOG_CHUNK_MESH_TIMING {
             let elapsed = started.elapsed().as_secs_f32() * 1000.0;
             let triangles = mesh
@@ -1727,7 +1724,7 @@ enum MeshChunkUpdate {
 
 fn update_incremental_mesh_chunk(
     volume: &mut DepthMeshVolume,
-    chunk_key: IVector,
+    chunk_key: ChunkKey,
     mesh: Option<SurfaceMesh32>,
 ) -> MeshChunkUpdate {
     let existing_index = volume
@@ -1908,13 +1905,8 @@ fn simplify_plane_regions(triangles: Vec<ExtractedPlaneTriangle>) -> Vec<Simplif
             if triangle.group != group {
                 continue;
             }
-            if !planar_region_accepts_triangle(
-                group,
-                triangle,
-                normal_sum,
-                centroid_sum,
-                area_sum,
-            ) {
+            if !planar_region_accepts_triangle(group, triangle, normal_sum, centroid_sum, area_sum)
+            {
                 continue;
             }
 
@@ -1954,7 +1946,9 @@ fn simplify_plane_regions(triangles: Vec<ExtractedPlaneTriangle>) -> Vec<Simplif
     regions
 }
 
-fn collect_classified_plane_triangles_from_surface_mesh(mesh: &SurfaceMesh32) -> Vec<ExtractedPlaneTriangle> {
+fn collect_classified_plane_triangles_from_surface_mesh(
+    mesh: &SurfaceMesh32,
+) -> Vec<ExtractedPlaneTriangle> {
     let mut triangles = Vec::new();
     for (source_triangle_index, triangle) in mesh.indices.chunks_exact(3).enumerate() {
         let a = vec3f(
@@ -2192,7 +2186,11 @@ fn fit_horizontal_plane_patch(
     Some(XrDepthPlanePatch {
         generation: 0,
         kind: XrDepthPlaneKind::Unknown,
-        center: vec3f(rect.center.x, y_sum / area_sum.max(f32::EPSILON), rect.center.y),
+        center: vec3f(
+            rect.center.x,
+            y_sum / area_sum.max(f32::EPSILON),
+            rect.center.y,
+        ),
         normal,
         tangent,
         bitangent,
@@ -2421,10 +2419,7 @@ fn classify_plane_patch_kinds(patches: &mut [XrDepthPlanePatch]) {
 
     for patch in patches.iter_mut() {
         if patch.normal.y > DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN {
-            patch.kind = if floor_y
-                .map(|y| patch.center.y <= y + 0.18)
-                .unwrap_or(false)
-            {
+            patch.kind = if floor_y.map(|y| patch.center.y <= y + 0.18).unwrap_or(false) {
                 XrDepthPlaneKind::Floor
             } else {
                 XrDepthPlaneKind::Table
@@ -2479,10 +2474,7 @@ fn rasterize_triangle_2d_into_support_mask(
             {
                 continue;
             }
-            let weight = mask
-                .cells
-                .entry(PlaneSupportCellKey { u, v })
-                .or_insert(0);
+            let weight = mask.cells.entry(PlaneSupportCellKey { u, v }).or_insert(0);
             *weight = weight
                 .saturating_add(DEPTH_PLANE_SUPPORT_GROW_WEIGHT)
                 .min(DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
@@ -2498,9 +2490,7 @@ fn quantize_plane_support_cell(u: f32, v: f32) -> PlaneSupportCellKey {
     }
 }
 
-fn largest_supported_rectangle(
-    component: &PlaneSupportComponent,
-) -> Option<(i32, i32, i32, i32)> {
+fn largest_supported_rectangle(component: &PlaneSupportComponent) -> Option<(i32, i32, i32, i32)> {
     let width = (component.max_u - component.min_u + 1).max(0) as usize;
     let height = (component.max_v - component.min_v + 1).max(0) as usize;
     if width == 0 || height == 0 {
@@ -2746,7 +2736,7 @@ fn evaluate_geometry_query(
                 from_planar_patch: true,
                 triangle: [patch_corners[0], patch_corners[1], patch_corners[2]],
                 patch: patch_corners,
-                chunk_key: IVector::new(0, 0, 0),
+                chunk_key: ChunkKey::new(0, 0, 0),
             };
             consider_query_surface_candidate(
                 &mut best_any_hit,
@@ -2759,8 +2749,12 @@ fn evaluate_geometry_query(
     }
 
     for chunk in &volume.mesh_chunks {
-        if aabb_aabb_distance_sq(sweep_bounds_min, sweep_bounds_max, chunk.bounds_min, chunk.bounds_max)
-            > max_search_distance_sq
+        if aabb_aabb_distance_sq(
+            sweep_bounds_min,
+            sweep_bounds_max,
+            chunk.bounds_min,
+            chunk.bounds_max,
+        ) > max_search_distance_sq
         {
             continue;
         }
@@ -2789,7 +2783,8 @@ fn evaluate_geometry_query(
                 if distance_sq > max_search_distance_sq {
                     continue;
                 }
-                let lateral_sq = point_segment_distance_sq(closest, query.center, query.predicted_center);
+                let lateral_sq =
+                    point_segment_distance_sq(closest, query.center, query.predicted_center);
                 if lateral_sq > sweep_radius_sq {
                     continue;
                 }
@@ -2836,11 +2831,8 @@ fn evaluate_geometry_query(
                 normal = normal.scale(-1.0);
                 hit_triangle.swap(1, 2);
             }
-            let matched_planar_patch = matching_reduced_planar_patch(
-                hit_triangle,
-                normal,
-                &chunk.planar_patches,
-            );
+            let matched_planar_patch =
+                matching_reduced_planar_patch(hit_triangle, normal, &chunk.planar_patches);
             let surface = XrDepthMeshQuerySurfaceHit {
                 distance: best_distance_sq.sqrt(),
                 point: best_closest,
@@ -2864,10 +2856,15 @@ fn evaluate_geometry_query(
 
     let primary_hit = best_support_hit.or(best_any_hit);
     if let Some(primary_hit) = primary_hit {
-        let mut additional_hits = Vec::with_capacity(DEPTH_QUERY_MAX_SURFACES_PER_QUERY.saturating_sub(1));
+        let mut additional_hits =
+            Vec::with_capacity(DEPTH_QUERY_MAX_SURFACES_PER_QUERY.saturating_sub(1));
         if DEPTH_QUERY_MAX_SURFACES_PER_QUERY > 1 {
             if let Some(lateral_hit) = best_lateral_hit {
-                if query_surface_hits_are_distinct(&primary_hit.surface, &lateral_hit.surface, query.radius) {
+                if query_surface_hits_are_distinct(
+                    &primary_hit.surface,
+                    &lateral_hit.surface,
+                    query.radius,
+                ) {
                     additional_hits.push(lateral_hit.surface);
                 }
             }
@@ -2973,12 +2970,7 @@ fn matching_reduced_planar_patch(
     })
 }
 
-fn aabb_aabb_distance_sq(
-    a_min: Vec3f,
-    a_max: Vec3f,
-    b_min: Vec3f,
-    b_max: Vec3f,
-) -> f32 {
+fn aabb_aabb_distance_sq(a_min: Vec3f, a_max: Vec3f, b_min: Vec3f, b_max: Vec3f) -> f32 {
     let dx = if a_max.x < b_min.x {
         b_min.x - a_max.x
     } else if b_max.x < a_min.x {
@@ -3066,7 +3058,8 @@ fn closest_point_on_triangle(point: Vec3f, a: Vec3f, b: Vec3f, c: Vec3f) -> Vec3
 }
 
 fn simplify_surface_mesh_planar_regions(mesh: SurfaceMesh32) -> ReducedSurfaceMesh {
-    let regions = simplify_plane_regions(collect_classified_plane_triangles_from_surface_mesh(&mesh));
+    let regions =
+        simplify_plane_regions(collect_classified_plane_triangles_from_surface_mesh(&mesh));
     if regions.is_empty() {
         return ReducedSurfaceMesh {
             mesh,
@@ -3092,9 +3085,8 @@ fn simplify_surface_mesh_planar_regions(mesh: SurfaceMesh32) -> ReducedSurfaceMe
             &mut indices,
             &mut planar_patches,
         ) {
-            consumed_triangles.extend(
-                covered_planar_region_triangles(region, &emitted).into_iter(),
-            );
+            consumed_triangles
+                .extend(covered_planar_region_triangles(region, &emitted).into_iter());
         }
     }
 
@@ -3282,7 +3274,9 @@ fn decompose_support_mask_components(mask: &PlaneSupportMask) -> Vec<PlaneSuppor
     components
 }
 
-fn rebuild_support_component_from_cells(cells: Vec<PlaneSupportCellKey>) -> Option<PlaneSupportComponent> {
+fn rebuild_support_component_from_cells(
+    cells: Vec<PlaneSupportCellKey>,
+) -> Option<PlaneSupportComponent> {
     let first = *cells.first()?;
     let mut component = PlaneSupportComponent {
         cells,
@@ -3311,9 +3305,7 @@ fn remove_rect_from_support_component(
         .cells
         .iter()
         .copied()
-        .filter(|cell| {
-            cell.u < min_u || cell.u > max_u || cell.v < min_v || cell.v > max_v
-        })
+        .filter(|cell| cell.u < min_u || cell.u > max_u || cell.v < min_v || cell.v > max_v)
         .collect::<Vec<_>>();
     if let Some(rebuilt) = rebuild_support_component_from_cells(remaining) {
         *component = rebuilt;
@@ -3407,7 +3399,7 @@ fn append_surface_mesh_triangle(
 }
 
 fn depth_mesh_chunk_from_surface_mesh(
-    chunk_key: IVector,
+    chunk_key: ChunkKey,
     generation: u64,
     mesh: SurfaceMesh32,
 ) -> Option<XrDepthMeshChunk> {
@@ -3453,11 +3445,11 @@ fn depth_mesh_chunk_from_surface_mesh(
     })
 }
 
-fn voxel_coord_from_ivector(key: IVector) -> VoxelCoord {
+fn voxel_coord_from_chunk_key(key: ChunkKey) -> VoxelCoord {
     VoxelCoord::new(key.x, key.y, key.z)
 }
 
-fn push_unique_chunk_key(keys: &mut Vec<IVector>, key: IVector) {
+fn push_unique_chunk_key(keys: &mut Vec<ChunkKey>, key: ChunkKey) {
     if !keys.contains(&key) {
         keys.push(key);
     }
@@ -3709,7 +3701,13 @@ fn surface_net_tris_for_axis(
 mod tests {
     use super::*;
 
-    fn quad_vertices(center: Vec3f, axis_u: Vec3f, axis_v: Vec3f, half_u: f32, half_v: f32) -> [Vec3f; 4] {
+    fn quad_vertices(
+        center: Vec3f,
+        axis_u: Vec3f,
+        axis_v: Vec3f,
+        half_u: f32,
+        half_v: f32,
+    ) -> [Vec3f; 4] {
         let du = axis_u.normalize().scale(half_u);
         let dv = axis_v.normalize().scale(half_v);
         [
@@ -3744,7 +3742,7 @@ mod tests {
 
         XrDepthMeshChunk {
             generation: 1,
-            chunk_key: IVector::new(0, 0, 0),
+            chunk_key: ChunkKey::new(0, 0, 0),
             fingerprint: 1,
             bounds_min,
             bounds_max,
@@ -4060,7 +4058,10 @@ mod tests {
 
         match result {
             XrDepthMeshQueryResult::Hit(hit) => {
-                assert!(hit.from_planar_patch, "expected reduced planar mesh classification");
+                assert!(
+                    hit.from_planar_patch,
+                    "expected reduced planar mesh classification"
+                );
                 assert!(
                     hit.patch
                         .windows(2)
@@ -4168,8 +4169,7 @@ mod tests {
             support_triangles: 2,
         };
         let corners = plane_patch_corners(&patch);
-        let tri_normal =
-            Vec3f::cross(corners[1] - corners[0], corners[2] - corners[0]).normalize();
+        let tri_normal = Vec3f::cross(corners[1] - corners[0], corners[2] - corners[0]).normalize();
         assert!(
             tri_normal.dot(patch.normal) > 0.99,
             "patch quad winding should align with patch normal: tri_normal={tri_normal:?} patch_normal={:?}",

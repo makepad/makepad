@@ -87,10 +87,10 @@ impl ScriptHook for DrawVars {
                 self.options.depth_write = v != 0.0;
             }
 
-            let backface_culling_value = vm
-                .bx
-                .heap
-                .value(io_self, id!(backface_culling).into(), NoTrap);
+            let backface_culling_value =
+                vm.bx
+                    .heap
+                    .value(io_self, id!(backface_culling).into(), NoTrap);
             if let Some(v) = backface_culling_value.as_bool() {
                 self.options.backface_culling = v;
             } else if let Some(v) = backface_culling_value.as_f64() {

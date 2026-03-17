@@ -87,7 +87,6 @@ pub use makepad_futures;
 pub use makepad_script_std::makepad_network;
 pub use makepad_script_std::makepad_script;
 pub use makepad_studio_protocol as studio;
-pub use parry3d;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
 pub use makepad_script_std::makepad_script::trap;
@@ -218,7 +217,7 @@ pub use {
             WindowId, WindowVisuals,
         },
         xr_depth_mesh::{
-            XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery, XrDepthMeshQueryHit,
+            ChunkKey, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery, XrDepthMeshQueryHit,
             XrDepthMeshQueryResult, XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore,
             XrDepthPlaneKind, XrDepthPlanePatch,
         },
