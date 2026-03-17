@@ -535,6 +535,12 @@ impl Cx {
                     } else {
                         0 as gl_sys::GLboolean
                     });
+                    if draw_call.options.backface_culling {
+                        (gl.glEnable)(gl_sys::CULL_FACE);
+                        (gl.glCullFace)(gl_sys::BACK);
+                    } else {
+                        (gl.glDisable)(gl_sys::CULL_FACE);
+                    }
                     // bind all uniform buffers
                     {
                         shgl.uniforms

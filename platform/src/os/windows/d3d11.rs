@@ -235,6 +235,14 @@ impl Cx {
                             .context
                             .OMSetDepthStencilState(depth_stencil_state, 0);
                     }
+                    let raster_state = if draw_call.options.backface_culling {
+                        self.passes[pass_id].os.raster_state_backface_cull.as_ref()
+                    } else {
+                        self.passes[pass_id].os.raster_state_no_cull.as_ref()
+                    };
+                    if let Some(raster_state) = raster_state {
+                        d3d11_cx.context.RSSetState(raster_state);
+                    }
 
                     let geom_ibuf = geometry.os.geom_ibuf.buffer.as_ref().unwrap();
                     d3d11_cx
@@ -1461,27 +1469,31 @@ impl CxOsPass {
             self.blend_state = blend_state;
         }
 
-        if self.raster_state.is_none() {
-            let raster_desc = D3D11_RASTERIZER_DESC {
-                AntialiasedLineEnable: FALSE,
-                CullMode: D3D11_CULL_NONE,
-                DepthBias: 0,
-                DepthBiasClamp: 0.0,
-                DepthClipEnable: TRUE,
-                FillMode: D3D11_FILL_SOLID,
-                FrontCounterClockwise: FALSE,
-                MultisampleEnable: FALSE,
-                ScissorEnable: FALSE,
-                SlopeScaledDepthBias: 0.0,
+        if self.raster_state_no_cull.is_none() || self.raster_state_backface_cull.is_none() {
+            let make_raster_state = |cull_mode| {
+                let raster_desc = D3D11_RASTERIZER_DESC {
+                    AntialiasedLineEnable: FALSE,
+                    CullMode: cull_mode,
+                    DepthBias: 0,
+                    DepthBiasClamp: 0.0,
+                    DepthClipEnable: TRUE,
+                    FillMode: D3D11_FILL_SOLID,
+                    FrontCounterClockwise: FALSE,
+                    MultisampleEnable: FALSE,
+                    ScissorEnable: FALSE,
+                    SlopeScaledDepthBias: 0.0,
+                };
+                let mut raster_state = None;
+                unsafe {
+                    d3d11_cx
+                        .device
+                        .CreateRasterizerState(&raster_desc, Some(&mut raster_state))
+                        .unwrap()
+                }
+                raster_state
             };
-            let mut raster_state = None;
-            unsafe {
-                d3d11_cx
-                    .device
-                    .CreateRasterizerState(&raster_desc, Some(&mut raster_state))
-                    .unwrap()
-            }
-            self.raster_state = raster_state;
+            self.raster_state_no_cull = make_raster_state(D3D11_CULL_NONE);
+            self.raster_state_backface_cull = make_raster_state(D3D11_CULL_BACK);
         }
 
         if self.depth_stencil_state_write.is_none() {
@@ -1523,7 +1535,7 @@ impl CxOsPass {
         unsafe {
             d3d11_cx
                 .context
-                .RSSetState(self.raster_state.as_ref().unwrap());
+                .RSSetState(self.raster_state_no_cull.as_ref().unwrap());
             let blend_factor = [0., 0., 0., 0.];
             d3d11_cx.context.OMSetBlendState(
                 self.blend_state.as_ref().unwrap(),
@@ -1543,7 +1555,8 @@ impl CxOsPass {
 pub struct CxOsPass {
     pass_uniforms: D3d11Buffer,
     blend_state: Option<ID3D11BlendState>,
-    raster_state: Option<ID3D11RasterizerState>,
+    raster_state_no_cull: Option<ID3D11RasterizerState>,
+    raster_state_backface_cull: Option<ID3D11RasterizerState>,
     depth_stencil_state_write: Option<ID3D11DepthStencilState>,
     depth_stencil_state_no_write: Option<ID3D11DepthStencilState>,
 }
