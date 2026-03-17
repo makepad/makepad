@@ -159,18 +159,9 @@ impl AndroidCaptureSession {
             let mut image_format = -1i32;
             let _ = AImage_getFormat(image, &mut image_format);
             if AImage_getHardwareBuffer(image, &mut hardware_buffer) == 0 && !hardware_buffer.is_null() {
-                if !context
+                context
                     .logged_first_hardware_buffer_frame
-                    .swap(true, Ordering::Relaxed)
-                {
-                    crate::warning!(
-                        "Android headset camera: first hardware-buffer frame received format={} size={}x{} timestamp_ns={}",
-                        image_format,
-                        context.format.width,
-                        context.format.height,
-                        timestamp_ns.max(0),
-                    );
-                }
+                    .store(true, Ordering::Relaxed);
                 for cb in &dispatch_snapshot.3 {
                     if let Ok(mut guard) = cb.try_lock() {
                         if let Some(cb) = &mut *guard {
@@ -446,19 +437,16 @@ impl AndroidCaptureSession {
         _context: *mut c_void,
         _session: *mut ACameraCaptureSession,
     ) {
-        crate::warning!("Android camera: session closed");
     }
     unsafe extern "C" fn session_on_ready(
         _context: *mut c_void,
         _session: *mut ACameraCaptureSession,
     ) {
-        crate::warning!("Android camera: session ready");
     }
     unsafe extern "C" fn session_on_active(
         _context: *mut c_void,
         _session: *mut ACameraCaptureSession,
     ) {
-        crate::warning!("Android camera: session active");
     }
 
     unsafe fn start(
@@ -567,15 +555,7 @@ impl AndroidCaptureSession {
 
             let image_target_result = ACameraOutputTarget_create(image_window, &mut image_target);
             if !image_target.is_null() {
-                let add_target_result = ACaptureRequest_addTarget(capture_request, image_target);
-                crate::warning!(
-                    "Android camera: image target create={} add_target={} mode={:?} size={}x{}",
-                    image_target_result,
-                    add_target_result,
-                    reader_mode as u32,
-                    format.width,
-                    format.height,
-                );
+                let _ = ACaptureRequest_addTarget(capture_request, image_target);
             } else {
                 crate::warning!(
                     "Android camera: image target creation failed result={} mode={:?} size={}x{}",
@@ -593,14 +573,7 @@ impl AndroidCaptureSession {
                 ACaptureRequest_setEntry_u8(capture_request, ACAMERA_JPEG_QUALITY, 1, &jpeg_quality);
             }
 
-            let image_output_result = ACaptureSessionOutput_create(image_window, &mut image_output);
-            crate::warning!(
-                "Android camera: image output create={} mode={:?} size={}x{}",
-                image_output_result,
-                reader_mode as u32,
-                format.width,
-                format.height,
-            );
+            let _ = ACaptureSessionOutput_create(image_window, &mut image_output);
         }
 
         let mut output_container = std::ptr::null_mut();
@@ -617,23 +590,11 @@ impl AndroidCaptureSession {
             if !preview_window.is_null() {
                 preview_window_ptr = preview_window;
                 ANativeWindow_acquire(preview_window_ptr);
-                let preview_target_result =
-                    ACameraOutputTarget_create(preview_window_ptr, &mut preview_target);
+                let _ = ACameraOutputTarget_create(preview_window_ptr, &mut preview_target);
                 if !preview_target.is_null() {
-                    let add_target_result =
-                        ACaptureRequest_addTarget(capture_request, preview_target);
-                    crate::warning!(
-                        "Android camera: preview target create={} add_target={}",
-                        preview_target_result,
-                        add_target_result,
-                    );
+                    let _ = ACaptureRequest_addTarget(capture_request, preview_target);
                 }
-                let preview_output_result =
-                    ACaptureSessionOutput_create(preview_window_ptr, &mut preview_output);
-                crate::warning!(
-                    "Android camera: preview output create={}",
-                    preview_output_result,
-                );
+                let _ = ACaptureSessionOutput_create(preview_window_ptr, &mut preview_output);
                 if !preview_output.is_null() {
                     ACaptureSessionOutputContainer_add(output_container, preview_output);
                 }
@@ -657,18 +618,12 @@ impl AndroidCaptureSession {
 
         let mut capture_session = std::ptr::null_mut();
 
-        let create_session_result = ACameraDevice_createCaptureSession(
+        let _ = ACameraDevice_createCaptureSession(
             camera_device,
             output_container,
             &session_callbacks,
             &mut capture_session,
         );
-        crate::warning!(
-            "Android camera: create capture session result={} session_null={}",
-            create_session_result,
-            capture_session.is_null(),
-        );
-
         let mut capture_callbacks = ACameraCaptureSession_captureCallbacks {
             context: capture_context as *mut _,
             onCaptureStarted: Some(Self::capture_on_started),
@@ -680,19 +635,13 @@ impl AndroidCaptureSession {
             onCaptureBufferLost: Some(Self::capture_on_buffer_lost),
         };
 
-        let repeating_result = ACameraCaptureSession_setRepeatingRequest(
+        let _ = ACameraCaptureSession_setRepeatingRequest(
             capture_session,
             &mut capture_callbacks,
             1,
             &mut capture_request,
             std::ptr::null_mut(),
         );
-        crate::warning!(
-            "Android camera: set repeating request result={} session_null={}",
-            repeating_result,
-            capture_session.is_null(),
-        );
-
         Some(Self {
             image_reader,
             image_window,

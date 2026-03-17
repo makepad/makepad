@@ -1881,15 +1881,6 @@ impl Cx {
                         let use_hardware_buffer_texture =
                             cfg!(use_vulkan) && !native_preview && texture_id != TextureId::default();
                         let use_cpu_plane_textures = cfg!(use_vulkan) && !native_preview;
-                        crate::warning!(
-                            "Android video: prepare camera playback video_id={} input_id={} format_id={} native_preview={} hardware_buffer={} cpu_planes={}",
-                            video_id.0,
-                            input_id.0,
-                            format_id.0,
-                            native_preview,
-                            use_hardware_buffer_texture,
-                            use_cpu_plane_textures,
-                        );
                         let (camera_width, camera_height) = camera_access
                             .lock()
                             .unwrap()
