@@ -331,6 +331,8 @@ pub struct DrawPassUniforms {
     #[live]
     pub camera_inv: Mat4f,
     #[live]
+    pub camera_inv_r: Mat4f,
+    #[live]
     pub dpi_factor: f32,
     #[live]
     pub dpi_dilate: f32,
