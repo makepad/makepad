@@ -8,7 +8,7 @@ use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_micro_serde::{DeJson, DeJsonErr, DeJsonState, SerJson, SerJsonState};
 use makepad_toml_parser::{parse_toml, Toml};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     fs::File,
     io::prelude::*,
@@ -154,6 +154,7 @@ struct WebPerfReport {
 struct HtmlAssetPaths {
     wasm_path: String,
     split_data_path: Option<String>,
+    split_data_active_only: bool,
     secondary_wasm_path: Option<String>,
     defer_secondary_wasm: bool,
     web_gl_js_path: String,
@@ -329,6 +330,24 @@ fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> S
     let wasm_url = app_relative_url(&assets.wasm_path);
     let web_gl_js_url = app_relative_url(&assets.web_gl_js_path);
     let full_canvas_css_url = app_relative_url(&assets.full_canvas_css_path);
+    let split_preloads = {
+        let mut preloads = String::new();
+        if let Some(split_data_path) = assets.split_data_path.as_deref() {
+            preloads.push_str(&format!(
+                "\n        <link rel='preload' href='{}' as='fetch' type='application/octet-stream' crossorigin>",
+                app_relative_url(split_data_path)
+            ));
+        }
+        if !assets.defer_secondary_wasm {
+            if let Some(secondary_wasm_path) = assets.secondary_wasm_path.as_deref() {
+                preloads.push_str(&format!(
+                    "\n        <link rel='preload' href='{}' as='fetch' type='application/wasm' crossorigin>",
+                    app_relative_url(secondary_wasm_path)
+                ));
+            }
+        }
+        preloads
+    };
 
     let init = if config.bindgen {
         let wasm_bridge_js_url = app_relative_url(
@@ -362,17 +381,25 @@ fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> S
         } else {
             ""
         };
+        let split_data_active_only = if assets.split_data_active_only {
+            ", split_data_active_only: true"
+        } else {
+            ""
+        };
         let split_options = match (
             assets.split_data_path.as_deref(),
             assets.secondary_wasm_path.as_deref(),
         ) {
             (Some(data), Some(funcs)) => format!(
-                ", undefined, {{ split_data_url: '{}', secondary_wasm_url: '{}'{defer_secondary} }}",
+                ", undefined, {{ split_data_url: '{}'{split_data_active_only}, secondary_wasm_url: '{}'{defer_secondary} }}",
                 app_relative_url(data),
                 app_relative_url(funcs)
             ),
             (Some(data), None) => {
-                format!(", undefined, {{ split_data_url: '{}' }}", app_relative_url(data))
+                format!(
+                    ", undefined, {{ split_data_url: '{}'{split_data_active_only} }}",
+                    app_relative_url(data)
+                )
             }
             (None, Some(funcs)) => format!(
                 ", undefined, {{ secondary_wasm_url: '{}'{defer_secondary} }}",
@@ -411,6 +438,7 @@ fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> S
         <link rel='modulepreload' href='{web_gl_js_url}'>
         <link rel='preload' href='{wasm_url}' as='fetch' type='application/wasm' crossorigin>
         <link rel='preload' href='{full_canvas_css_url}' as='style'>
+        {split_preloads}
         "
         )
     } else {
@@ -419,6 +447,7 @@ fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> S
         <link rel='modulepreload' href='{web_gl_js_url}'>
         <link rel='preload' href='{wasm_url}' as='fetch' type='application/wasm' crossorigin>
         <link rel='preload' href='{full_canvas_css_url}' as='style'>
+        {split_preloads}
         "
         )
     };
@@ -798,23 +827,30 @@ fn finalize_pending_assets(
 ) -> Result<AssetManifest, String> {
     let mut startup_assets = Vec::new();
     let mut assets = Vec::new();
+    let mut seen_logical_paths = HashSet::new();
 
     for asset in pending_assets.iter_mut() {
+        if !seen_logical_paths.insert(asset.logical_path.clone()) {
+            continue;
+        }
         let logical_path = asset.logical_path.clone();
         let original_path = app_dir.join(&logical_path);
         let data = fs::read(&original_path)
             .map_err(|e| format!("Can't read emitted asset {:?}: {}", original_path, e))?;
         let hashed = shipping_build
             && asset.startup_blocking
-            && matches!(Path::new(&logical_path).extension().and_then(|ext| ext.to_str()), Some("wasm" | "js" | "css"));
+            && matches!(
+                Path::new(&logical_path)
+                    .extension()
+                    .and_then(|ext| ext.to_str()),
+                Some("wasm" | "js" | "css")
+            );
         if hashed {
             let fingerprinted = fingerprinted_asset_path(&logical_path, &data);
             let fingerprinted_path = app_dir.join(&fingerprinted);
-            mkdir(
-                fingerprinted_path
-                    .parent()
-                    .ok_or_else(|| format!("Missing fingerprinted parent for {:?}", fingerprinted_path))?,
-            )?;
+            mkdir(fingerprinted_path.parent().ok_or_else(|| {
+                format!("Missing fingerprinted parent for {:?}", fingerprinted_path)
+            })?)?;
             fs::rename(&original_path, &fingerprinted_path).map_err(|e| {
                 format!(
                     "Can't fingerprint asset {:?} -> {:?}: {}",
@@ -888,7 +924,11 @@ fn write_json_file<T: SerJson>(path: &Path, value: &T, compress: bool) -> Result
 }
 
 fn build_web_perf_report(manifest: &AssetManifest) -> WebPerfReport {
-    let total_raw_bytes = manifest.assets.iter().map(|asset| asset.raw_bytes).sum::<u64>();
+    let total_raw_bytes = manifest
+        .assets
+        .iter()
+        .map(|asset| asset.raw_bytes)
+        .sum::<u64>();
     let total_transfer_bytes = manifest
         .assets
         .iter()
@@ -900,8 +940,10 @@ fn build_web_perf_report(manifest: &AssetManifest) -> WebPerfReport {
         .filter(|asset| asset.startup_blocking)
         .collect();
     let startup_blocking_raw_bytes = startup_assets.iter().map(|asset| asset.raw_bytes).sum();
-    let startup_blocking_transfer_bytes =
-        startup_assets.iter().map(|asset| asset.transfer_bytes).sum();
+    let startup_blocking_transfer_bytes = startup_assets
+        .iter()
+        .map(|asset| asset.transfer_bytes)
+        .sum();
     let oversized_optional_assets = manifest
         .assets
         .iter()
@@ -990,7 +1032,8 @@ fn patch_bindgen_worker_import(
         return Ok(());
     }
     let patched = worker_source.replace("../bindgen.js", &format!("../{}", bindgen_emitted_path));
-    fs::write(&worker_path, patched).map_err(|e| format!("Can't write {:?}: {}", worker_path, e))?;
+    fs::write(&worker_path, patched)
+        .map_err(|e| format!("Can't write {:?}: {}", worker_path, e))?;
     if compress {
         brotli_compress(&worker_path);
     } else {
@@ -1405,9 +1448,12 @@ fn collect_shipping_resources(
             continue;
         };
         for resource_spec in extract_crate_resource_literals_from_rust_file(&source)? {
-            let Some((logical_path, abs_path, crate_name)) =
-                resolve_resource_spec(&resource_spec, &build_crate_dir, &build_crate_name, &manifests)
-            else {
+            let Some((logical_path, abs_path, crate_name)) = resolve_resource_spec(
+                &resource_spec,
+                &build_crate_dir,
+                &build_crate_name,
+                &manifests,
+            ) else {
                 println!(
                     "Warning: unresolved crate_resource path while packaging web app: {}",
                     resource_spec
@@ -1764,7 +1810,8 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     }
 
     if config.shipping_build {
-        let (selected_resources, metadata) = collect_shipping_resources(build_crate, &build_dir, &config)?;
+        let (selected_resources, metadata) =
+            collect_shipping_resources(build_crate, &build_dir, &config)?;
         if metadata.full_i18n || config.full_fonts {
             println!("Shipping web build: full i18n font payload enabled");
         }
@@ -1778,21 +1825,25 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             let underscore_build_crate = build_crate.replace('-', "_");
             let dst_dir = app_dir.join(underscore_build_crate).join("resources");
             mkdir(&dst_dir)?;
-            walk_all(&local_resources_path, &dst_dir, &mut |source_path, dest_dir| {
-                let source_file_name = source_path
-                    .file_name()
-                    .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
-                    .to_string_lossy()
-                    .to_string();
-                let dest_path = dest_dir.join(&source_file_name);
-                cp(&source_path, &dest_path, false)?;
-                if config.brotli {
-                    brotli_compress(&dest_path);
-                } else {
-                    remove_brotli_artifact(&dest_path);
-                }
-                Ok(())
-            })?;
+            walk_all(
+                &local_resources_path,
+                &dst_dir,
+                &mut |source_path, dest_dir| {
+                    let source_file_name = source_path
+                        .file_name()
+                        .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
+                        .to_string_lossy()
+                        .to_string();
+                    let dest_path = dest_dir.join(&source_file_name);
+                    cp(&source_path, &dest_path, false)?;
+                    if config.brotli {
+                        brotli_compress(&dest_path);
+                    } else {
+                        remove_brotli_artifact(&dest_path);
+                    }
+                    Ok(())
+                },
+            )?;
         }
 
         for (name, dep_dir) in resources.iter() {
@@ -1938,12 +1989,16 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             });
         }
         let result = if config.split_auto && config.split {
-            let cold_result = wasm_split_functions_cold(&output).map_err(|e| {
-                format!(
-                    "Cannot auto split wasm functions {:?}: {:?}",
-                    wasm_source, e
-                )
-            })?;
+            let cold_target = output.len().saturating_sub(1);
+            let cold_result =
+                wasm_split_functions_to_target_primary_size_cold(&output, cold_target).map_err(
+                    |e| {
+                        format!(
+                            "Cannot auto split wasm functions {:?}: {:?}",
+                            wasm_source, e
+                        )
+                    },
+                )?;
             if cold_result.split_count > 0 && cold_result.primary_wasm.len() < output.len() {
                 defer_secondary_wasm = true;
                 auto_split_outcome = AutoSplitOutcome::Deferred;
@@ -2007,13 +2062,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             } else {
                 remove_brotli_artifact(&secondary_wasm_dest);
             }
+            let secondary_startup_blocking = !defer_secondary_wasm;
             if config.shipping_build {
                 pending_assets.push(PendingAsset {
                     logical_path: format!("{}.secondary.wasm", build_crate),
                     emitted_path: format!("{}.secondary.wasm", build_crate),
                     kind: "wasm".to_string(),
                     content_type: "application/wasm".to_string(),
-                    startup_blocking: false,
+                    startup_blocking: secondary_startup_blocking,
                     direct_reference: false,
                     crate_name: None,
                     reason: "split_secondary".to_string(),
@@ -2030,23 +2086,29 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     let split_data_dest = app_dir.join(format!("{}.data.bin", build_crate));
     let mut split_data_bytes = None;
     let mut split_brotli_bytes = None;
+    let mut split_data_active_only = false;
     let split_data_path = if config.split {
         if config.bindgen {
             return Err("--split is not supported together with --bindgen".to_string());
         }
         let split = wasm_split_data_segments(&output)
             .map_err(|_| format!("Cannot split wasm data section {:?}", wasm_source))?;
-        print_wasm_split_report(
-            split.primary_wasm.len(),
-            split.split_data.len(),
-            split.segment_count,
-        );
-        output = split.primary_wasm;
-        if split.split_data.is_empty() {
+        if split.segment_count == 0 {
             let _ = fs::remove_file(&split_data_dest);
             remove_brotli_artifact(&split_data_dest);
             None
         } else {
+            print_wasm_split_report(
+                split.primary_wasm.len(),
+                split.split_data.len(),
+                split.segment_count,
+            );
+            println!(
+                "  active segments: {} | passive segments: {}",
+                split.active_segment_count, split.passive_segment_count
+            );
+            split_data_active_only = split.passive_segment_count == 0;
+            output = split.primary_wasm;
             split_data_bytes = Some(split.split_data.len());
             fs::write(&split_data_dest, &split.split_data)
                 .map_err(|e| format!("Can't write file {:?} {:?} ", split_data_dest, e))?;
@@ -2061,7 +2123,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     emitted_path: format!("{}.data.bin", build_crate),
                     kind: "binary".to_string(),
                     content_type: "application/octet-stream".to_string(),
-                    startup_blocking: false,
+                    startup_blocking: true,
                     direct_reference: false,
                     crate_name: None,
                     reason: "split_data".to_string(),
@@ -2124,11 +2186,20 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 .to_string(),
             split_data_path: split_data_path
                 .as_deref()
-                .and_then(|path| manifest.emitted_path_for(path).map(|value| value.to_string()))
+                .and_then(|path| {
+                    manifest
+                        .emitted_path_for(path)
+                        .map(|value| value.to_string())
+                })
                 .or(split_data_path.clone()),
+            split_data_active_only,
             secondary_wasm_path: secondary_wasm_path
                 .as_deref()
-                .and_then(|path| manifest.emitted_path_for(path).map(|value| value.to_string()))
+                .and_then(|path| {
+                    manifest
+                        .emitted_path_for(path)
+                        .map(|value| value.to_string())
+                })
                 .or(secondary_wasm_path.clone()),
             defer_secondary_wasm,
             web_gl_js_path: manifest
@@ -2164,6 +2235,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         HtmlAssetPaths {
             wasm_path: format!("{}.wasm", build_crate),
             split_data_path,
+            split_data_active_only,
             secondary_wasm_path,
             defer_secondary_wasm,
             web_gl_js_path: "makepad_platform/web_gl.js".to_string(),
@@ -2177,8 +2249,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 
     let index_path = app_dir.join("index.html");
     let html = generate_html(build_crate, &html_assets, &config);
-    fs::write(&index_path, &html)
-        .map_err(|e| format!("Can't write {:?} {:?} ", index_path, e))?;
+    fs::write(&index_path, &html).map_err(|e| format!("Can't write {:?} {:?} ", index_path, e))?;
     if config.brotli {
         brotli_compress(&index_path);
     } else {
@@ -2190,7 +2261,9 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             .map_err(|e| format!("Can't stat {:?}: {}", index_path, e))?
             .len();
         let html_brotli_bytes = if config.brotli {
-            fs::metadata(app_dir.join("index.html.br")).ok().map(|meta| meta.len())
+            fs::metadata(app_dir.join("index.html.br"))
+                .ok()
+                .map(|meta| meta.len())
         } else {
             None
         };
@@ -3232,7 +3305,8 @@ fn start_wasm_server(
                                         cache_extra,
                                         body.len()
                                     );
-                                    let _ = response_sender.send(HttpServerResponse { header, body });
+                                    let _ =
+                                        response_sender.send(HttpServerResponse { header, body });
                                     continue;
                                 }
                             }
@@ -3247,11 +3321,12 @@ fn start_wasm_server(
                             } else {
                                 ""
                             };
-                            let vary_header = if compressed_path.as_ref().is_some_and(|path| path.exists()) {
-                                "Vary: Accept-Encoding\r\n"
-                            } else {
-                                ""
-                            };
+                            let vary_header =
+                                if compressed_path.as_ref().is_some_and(|path| path.exists()) {
+                                    "Vary: Accept-Encoding\r\n"
+                                } else {
+                                    ""
+                                };
                             let header = format!(
                                 "HTTP/1.1 200 OK\r\n\
                                 Content-Type: {}\r\n\
@@ -3329,6 +3404,32 @@ fn start_wasm_server(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_wasm_config() -> WasmConfig {
+        WasmConfig {
+            strip: false,
+            lan: false,
+            port: None,
+            small_fonts: false,
+            brotli: false,
+            bindgen: false,
+            threads: false,
+            optimize_size: false,
+            wasm_opt: false,
+            split: false,
+            split_auto: false,
+            split_functions: false,
+            split_functions_threshold: 0,
+            hot_reload: false,
+            serve: false,
+            shipping_build: true,
+            full_fonts: false,
+            brotli_explicit: false,
+            threads_explicit: false,
+            small_fonts_explicit: false,
+            split_explicit: false,
+        }
+    }
 
     #[test]
     fn script_mod_extraction_ignores_non_code_segments() {
@@ -3528,11 +3629,7 @@ mod tests {
         };
 
         assert_eq!(
-            cache_control_for_request(
-                WasmServeMode::Shipping,
-                "app.1234.wasm",
-                Some(&manifest)
-            ),
+            cache_control_for_request(WasmServeMode::Shipping, "app.1234.wasm", Some(&manifest)),
             immutable_cache_control()
         );
         assert_eq!(
@@ -3547,6 +3644,84 @@ mod tests {
             cache_control_for_request(WasmServeMode::Dev, "app.1234.wasm", Some(&manifest)),
             "no-store, must-revalidate".to_string()
         );
+    }
+
+    #[test]
+    fn generate_html_preloads_only_startup_split_assets() {
+        let config = test_wasm_config();
+        let eager_assets = HtmlAssetPaths {
+            wasm_path: "app.wasm".to_string(),
+            split_data_path: Some("app.data.bin".to_string()),
+            split_data_active_only: false,
+            secondary_wasm_path: Some("app.secondary.wasm".to_string()),
+            defer_secondary_wasm: false,
+            web_gl_js_path: "makepad_platform/web_gl.js".to_string(),
+            full_canvas_css_path: "makepad_platform/full_canvas.css".to_string(),
+            bindgen_js_path: None,
+            wasm_bridge_js_path: None,
+        };
+        let eager_html = generate_html("app", &eager_assets, &config);
+        assert!(eager_html.contains("./app.data.bin"));
+        assert!(eager_html.contains("./app.secondary.wasm"));
+        assert!(!eager_html.contains("defer_secondary_wasm: true"));
+
+        let deferred_assets = HtmlAssetPaths {
+            defer_secondary_wasm: true,
+            ..eager_assets
+        };
+        let deferred_html = generate_html("app", &deferred_assets, &config);
+        assert!(deferred_html.contains("./app.data.bin"));
+        assert!(deferred_html.contains("defer_secondary_wasm: true"));
+        assert!(!deferred_html.contains(
+            "href='./app.secondary.wasm' as='fetch' type='application/wasm' crossorigin"
+        ));
+
+        let active_only_assets = HtmlAssetPaths {
+            split_data_active_only: true,
+            ..deferred_assets
+        };
+        let active_only_html = generate_html("app", &active_only_assets, &config);
+        assert!(active_only_html.contains("split_data_active_only: true"));
+    }
+
+    #[test]
+    fn finalize_pending_assets_skips_duplicate_logical_entries() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let app_dir = std::env::temp_dir().join(format!("makepad-wasm-assets-{unique}"));
+        fs::create_dir_all(app_dir.join("makepad_platform")).unwrap();
+        fs::write(
+            app_dir.join("makepad_platform/web_gl.js"),
+            "console.log('webgl');",
+        )
+        .unwrap();
+
+        let asset = PendingAsset {
+            logical_path: "makepad_platform/web_gl.js".to_string(),
+            emitted_path: "makepad_platform/web_gl.js".to_string(),
+            kind: "javascript".to_string(),
+            content_type: "text/javascript".to_string(),
+            startup_blocking: true,
+            direct_reference: false,
+            crate_name: Some("makepad_platform".to_string()),
+            reason: "runtime_support".to_string(),
+        };
+        let mut pending_assets = vec![asset.clone(), asset];
+        let manifest =
+            finalize_pending_assets(&app_dir, "app", "small", false, true, &mut pending_assets)
+                .unwrap();
+
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(manifest.startup_assets.len(), 1);
+        assert_ne!(
+            manifest.assets[0].emitted_path,
+            "makepad_platform/web_gl.js".to_string()
+        );
+        assert!(app_dir.join(&manifest.assets[0].emitted_path).exists());
+
+        let _ = fs::remove_dir_all(&app_dir);
     }
 
     #[test]
@@ -3600,5 +3775,72 @@ mod tests {
             .unwrap();
         assert_eq!(oversized_budget.actual_bytes, 1);
         assert!(!oversized_budget.passed);
+    }
+
+    #[test]
+    fn web_perf_report_counts_split_assets_when_startup_blocking() {
+        let manifest = AssetManifest {
+            version: 1,
+            build_crate: "app".to_string(),
+            profile: "small".to_string(),
+            shipping_build: true,
+            threaded: false,
+            startup_assets: vec![
+                "app.1234.wasm".to_string(),
+                "app.secondary.5678.wasm".to_string(),
+                "app.data.bin".to_string(),
+            ],
+            assets: vec![
+                AssetManifestEntry {
+                    logical_path: "app.wasm".to_string(),
+                    emitted_path: "app.1234.wasm".to_string(),
+                    kind: "wasm".to_string(),
+                    content_type: "application/wasm".to_string(),
+                    cache_control: immutable_cache_control(),
+                    startup_blocking: true,
+                    hashed: true,
+                    direct_reference: false,
+                    crate_name: None,
+                    reason: "startup_wasm".to_string(),
+                    raw_bytes: 500_000,
+                    transfer_bytes: 220_000,
+                    brotli_bytes: Some(220_000),
+                },
+                AssetManifestEntry {
+                    logical_path: "app.secondary.wasm".to_string(),
+                    emitted_path: "app.secondary.5678.wasm".to_string(),
+                    kind: "wasm".to_string(),
+                    content_type: "application/wasm".to_string(),
+                    cache_control: immutable_cache_control(),
+                    startup_blocking: true,
+                    hashed: true,
+                    direct_reference: false,
+                    crate_name: None,
+                    reason: "split_secondary".to_string(),
+                    raw_bytes: 120_000,
+                    transfer_bytes: 40_000,
+                    brotli_bytes: Some(40_000),
+                },
+                AssetManifestEntry {
+                    logical_path: "app.data.bin".to_string(),
+                    emitted_path: "app.data.bin".to_string(),
+                    kind: "binary".to_string(),
+                    content_type: "application/octet-stream".to_string(),
+                    cache_control: short_cache_control(),
+                    startup_blocking: true,
+                    hashed: false,
+                    direct_reference: false,
+                    crate_name: None,
+                    reason: "split_data".to_string(),
+                    raw_bytes: 90_000,
+                    transfer_bytes: 30_000,
+                    brotli_bytes: Some(30_000),
+                },
+            ],
+        };
+
+        let report = build_web_perf_report(&manifest);
+        assert_eq!(report.startup_blocking_raw_bytes, 710_000);
+        assert_eq!(report.startup_blocking_transfer_bytes, 290_000);
     }
 }

@@ -27,5 +27,34 @@ Implement a concrete `cargo makepad wasm ship` pipeline that reduces shipped web
 - `cp_brotli` tried to minify JS before creating the destination directory; fixed by creating the parent directory before writing the minified output.
 - `crate_resource` raw-string extraction dropped the first character of raw literals; fixed the literal decoder and covered it with a unit test.
 
+## Follow-up Pass
+- [x] Inspect the split loader/runtime contract and confirm which assets are truly startup-blocking.
+- [x] Patch deferred secondary wasm loading so its fetch starts after first paint instead of on the initial critical path.
+- [x] Align manifest and perf-report startup-blocking flags with the actual loader behavior.
+- [x] Re-verify shipping metrics and note any remaining gaps.
+
+## Split Overhead Pass
+- [x] Inspect why `makepad-example-splash` still falls back to startup-path secondary wasm in automatic split mode.
+- [x] Reduce split-module overhead by exporting/importing only the primary functions that split bodies directly reference.
+- [x] Re-verify the splash shipping build and capture the updated startup-transfer baseline.
+
+## Startup Classification Pass
+- [x] Relax startup hot/cold classification so active-element functions are only treated as startup-hot when startup code performs matching indirect calls.
+- [x] Re-verify that `makepad-example-splash` now takes a true deferred secondary wasm split in automatic mode.
+- [x] Capture the new startup-transfer baseline after the classifier change.
+
+## Cold Prefix Selection Pass
+- [x] Revert the active-only data shortcut after it regressed the splash shipping baseline.
+- [x] Update cold split selection to choose the largest safe deferred prefix instead of the first safe prefix.
+- [x] Re-verify wasm-strip and cargo-makepad tests against the stronger cold split behavior.
+- [x] Capture the updated splash shipping baseline and compare transfer versus raw startup wasm size.
+
+## Active-Only Split Data Overlap Pass
+- [x] Detect active-only split data at build time and emit it into the generated web loader config.
+- [x] Add a wasm-loader fast path that compiles and instantiates the primary module before `data.bin` finishes loading, then patches active segments into memory before startup.
+- [x] Keep the old rebuild-before-compile path for modules with passive split data segments.
+- [x] Harden asset finalization against duplicate logical entries after a shipping build exposed a fingerprinting failure.
+- [x] Re-verify splash shipping output and confirm the emitted HTML uses the active-only split-data fast path.
+
 ## Status
-**Completed** - shipping pipeline, packaging metadata, docs, and validation are in place.
+**Completed** - splash now uses a true deferred secondary wasm split in automatic shipping mode, a larger cold split for startup wasm reduction, and an active-only split-data loader path that overlaps `data.bin` fetch with primary wasm compile/instantiate. The remaining biggest byte wins are still the split data blob and default web font payloads.

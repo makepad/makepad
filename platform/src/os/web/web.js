@@ -391,7 +391,10 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
         const start_worklet = async () => {
-            if (this.wasm._secondary_ready) {
+            if (this.wasm._ensure_secondary_ready) {
+                await this.wasm._ensure_secondary_ready();
+            }
+            else if (this.wasm._secondary_ready) {
                 await this.wasm._secondary_ready;
             }
             if (!this.wasm._has_thread_support) {
@@ -599,7 +602,10 @@ export class WasmWebBrowser extends WasmBridge {
     // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
     FromWasmCreateThread(args) {
         (async () => {
-            if (this.wasm._secondary_ready) {
+            if (this.wasm._ensure_secondary_ready) {
+                await this.wasm._ensure_secondary_ready();
+            }
+            else if (this.wasm._secondary_ready) {
                 await this.wasm._secondary_ready;
             }
             if (!this.wasm._has_thread_support) {

@@ -415,6 +415,37 @@ export class WasmBridge {
         throw new Error("split wasm missing data section");
     }
 
+    static async fetch_split_data(split_response_promise) {
+        if (!split_response_promise) {
+            return null;
+        }
+        const split_response = await split_response_promise;
+        if (!split_response.ok) {
+            throw new Error(`failed to fetch split data: ${split_response.status}`);
+        }
+        const split_bytes = new Uint8Array(await split_response.arrayBuffer());
+        return this.parse_split_data_blob(split_bytes);
+    }
+
+    static apply_split_data_to_memory(memory, split) {
+        if (!split || !split.segments || split.segments.length === 0) {
+            return;
+        }
+        for (const segment of split.segments) {
+            if (segment.kind !== 0) {
+                throw new Error("cannot apply passive split data directly to memory");
+            }
+            if (segment.memory_index !== 0) {
+                throw new Error(`unsupported split data memory index: ${segment.memory_index}`);
+            }
+            const end = segment.offset + segment.bytes.length;
+            if (end > memory.buffer.byteLength) {
+                throw new Error("split data segment exceeds memory buffer");
+            }
+            new Uint8Array(memory.buffer, segment.offset, segment.bytes.length).set(segment.bytes);
+        }
+    }
+
     static patch_split_table(primary_exports, secondary_exports) {
         const split_table = primary_exports.$s;
         if (!(split_table instanceof WebAssembly.Table)) {
@@ -433,34 +464,53 @@ export class WasmBridge {
         }
     }
 
-    static async compile_primary_module(wasm_bytes, split_response_promise) {
-        if (!split_response_promise) {
+    static async compile_primary_module(wasm_bytes, split) {
+        if (!split) {
             return WebAssembly.compile(wasm_bytes);
         }
-        const split_response = await split_response_promise;
-        if (!split_response.ok) {
-            throw new Error(`failed to fetch split data: ${split_response.status}`);
-        }
-        const split_bytes = new Uint8Array(await split_response.arrayBuffer());
-        const split = this.parse_split_data_blob(split_bytes);
         const rebuilt_bytes = this.rebuild_split_wasm(wasm_bytes, split.segments);
         return WebAssembly.compile(rebuilt_bytes);
     }
 
-    static async attach_secondary_wasm(primary_wasm, secondary_response_promise, defer_secondary) {
-        if (!secondary_response_promise) {
+    static schedule_deferred_secondary_attach(ensure_secondary_ready) {
+        const schedule = typeof requestAnimationFrame === "function"
+            ? (callback) => requestAnimationFrame(() => requestAnimationFrame(callback))
+            : (callback) => setTimeout(callback, 0);
+        // Wait until after the first paint opportunity before starting the cold-path fetch.
+        schedule(() => {
+            ensure_secondary_ready().catch(error => {
+                console.error(error);
+            });
+        });
+    }
+
+    static async attach_secondary_wasm(primary_wasm, secondary_wasm_url, secondary_response_promise, defer_secondary) {
+        if (!secondary_wasm_url && !secondary_response_promise) {
             return;
         }
-        primary_wasm._secondary_ready = (async () => {
-            const secondary_response = await secondary_response_promise;
-            if (!secondary_response.ok) {
-                throw new Error(`failed to fetch secondary wasm: ${secondary_response.status}`);
+        let secondary_ready = null;
+        let pending_response_promise = secondary_response_promise;
+        const ensure_secondary_ready = () => {
+            if (!secondary_ready) {
+                const response_promise = pending_response_promise || fetch(secondary_wasm_url);
+                pending_response_promise = null;
+                secondary_ready = (async () => {
+                    const secondary_response = await response_promise;
+                    if (!secondary_response.ok) {
+                        throw new Error(`failed to fetch secondary wasm: ${secondary_response.status}`);
+                    }
+                    await this._instantiate_secondary(secondary_response, primary_wasm);
+                })();
+                primary_wasm._secondary_ready = secondary_ready;
             }
-            await this._instantiate_secondary(secondary_response, primary_wasm);
-        })();
-        if (!defer_secondary) {
-            await primary_wasm._secondary_ready;
+            return secondary_ready;
+        };
+        primary_wasm._ensure_secondary_ready = ensure_secondary_ready;
+        if (defer_secondary) {
+            this.schedule_deferred_secondary_attach(ensure_secondary_ready);
+            return;
         }
+        await ensure_secondary_ready();
     }
 
     static instantiate_wasm(module, memory, env) {
@@ -501,28 +551,67 @@ export class WasmBridge {
 
     static fetch_and_instantiate_wasm(wasm_url, memory, split_config) {
         const has_split_data = split_config && split_config.split_data_url;
+        const split_data_active_only = !!(split_config && split_config.split_data_active_only);
         const has_secondary = split_config && split_config.secondary_wasm_url;
         const defer_secondary = !!(split_config && split_config.defer_secondary_wasm);
+        const secondary_wasm_url = has_secondary ? split_config.secondary_wasm_url : null;
 
         if (has_split_data || has_secondary) {
             return (async () => {
-                const wasm_response_promise = fetch(wasm_url);
                 const split_response_promise = has_split_data
                     ? fetch(split_config.split_data_url)
                     : null;
                 const secondary_response_promise = has_secondary
+                    && !defer_secondary
                     ? fetch(split_config.secondary_wasm_url)
                     : null;
+                const checked_wasm_response_promise = fetch(wasm_url).then(response => {
+                    if (!response.ok) {
+                        throw new Error(`failed to fetch wasm: ${response.status}`);
+                    }
+                    return response;
+                });
 
-                const wasm_response = await wasm_response_promise;
-                if (!wasm_response.ok) {
-                    throw new Error(`failed to fetch wasm: ${wasm_response.status}`);
+                if (!has_split_data) {
+                    const module = await WebAssembly.compileStreaming(checked_wasm_response_promise);
+                    const wasm = await this.instantiate_wasm(module, memory, { _post_signal: _ => { } });
+                    await this.attach_secondary_wasm(
+                        wasm,
+                        secondary_wasm_url,
+                        secondary_response_promise,
+                        defer_secondary
+                    );
+                    return wasm;
                 }
 
+                if (split_data_active_only) {
+                    const module_promise =
+                        WebAssembly.compileStreaming(checked_wasm_response_promise);
+                    const split_promise = this.fetch_split_data(split_response_promise);
+                    const module = await module_promise;
+                    const wasm = await this.instantiate_wasm(module, memory, { _post_signal: _ => { } });
+                    const split = await split_promise;
+                    this.apply_split_data_to_memory(wasm._memory, split);
+                    await this.attach_secondary_wasm(
+                        wasm,
+                        secondary_wasm_url,
+                        secondary_response_promise,
+                        defer_secondary
+                    );
+                    return wasm;
+                }
+
+                const wasm_response = await checked_wasm_response_promise;
                 const wasm_bytes = new Uint8Array(await wasm_response.arrayBuffer());
-                const module = await this.compile_primary_module(wasm_bytes, split_response_promise);
+                const split = await this.fetch_split_data(split_response_promise);
+                const module = await this.compile_primary_module(wasm_bytes, split);
                 const wasm = await this.instantiate_wasm(module, memory, { _post_signal: _ => { } });
-                await this.attach_secondary_wasm(wasm, secondary_response_promise, defer_secondary);
+                await this.attach_secondary_wasm(
+                    wasm,
+                    secondary_wasm_url,
+                    secondary_response_promise,
+                    defer_secondary
+                );
                 return wasm;
             })().catch(error => {
                 console.error(error);
