@@ -98,3 +98,20 @@
   - package size remains about `8.4M` raw,
   - `web-perf-report.json` still reports `startup_blocking_transfer_bytes = 1019413`,
   - inference: this pass reduces serialization on the startup path but does not reduce shipped bytes, so the next measurable package-size optimization should target the default web font payloads.
+
+## Small Font Dedup Follow-up Verified
+- Canonicalized small-font widget fallback asset paths so `LXGWWenKaiRegular.ttf`, `LXGWWenKaiBold.ttf`, and `NotoColorEmoji.ttf` no longer ship as separate IBM Plex duplicates.
+- Threaded a `small_font_aliases` flag through the web bootstrap so wasm resource fetches can rewrite the old fallback URLs to the canonical IBM Plex font files.
+- `node --check libs/wasm_bridge/src/wasm_bridge.js`
+- `node --check platform/src/os/web/web.js`
+- `cargo test -p cargo-makepad`
+- `cargo test -p makepad-platform`
+- `cargo run -p cargo-makepad -- wasm ship -p makepad-example-splash`
+- Verified after this change:
+  - splash `index.html` now emits `window.makepad_small_font_aliases = true`,
+  - the shipped `makepad_widgets/resources` directory no longer contains `LXGWWenKaiRegular.ttf`, `LXGWWenKaiBold.ttf`, or `NotoColorEmoji.ttf`,
+  - package directory size dropped from about `8.4M` to `7.7M`,
+  - `web-perf-report.json` now reports `total_raw_bytes = 6279998`,
+  - `web-perf-report.json` now reports `total_transfer_bytes = 1544422`,
+  - `web-perf-report.json` now reports `startup_blocking_transfer_bytes = 1018711`,
+  - inference: the next largest remaining byte target is the split data blob rather than duplicated font packaging.

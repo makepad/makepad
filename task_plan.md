@@ -56,5 +56,10 @@ Implement a concrete `cargo makepad wasm ship` pipeline that reduces shipped web
 - [x] Harden asset finalization against duplicate logical entries after a shipping build exposed a fingerprinting failure.
 - [x] Re-verify splash shipping output and confirm the emitted HTML uses the active-only split-data fast path.
 
+## Small Font Dedup Pass
+- [x] Replace duplicated small-font fallback files in the shipping package with canonical IBM Plex font assets.
+- [x] Thread a `small_font_aliases` flag through the web bootstrap so wasm resource fetches can rewrite fallback font URLs to canonical files.
+- [x] Re-verify splash shipping output and confirm the duplicate fallback font files are gone.
+
 ## Status
-**Completed** - splash now uses a true deferred secondary wasm split in automatic shipping mode, a larger cold split for startup wasm reduction, and an active-only split-data loader path that overlaps `data.bin` fetch with primary wasm compile/instantiate. The remaining biggest byte wins are still the split data blob and default web font payloads.
+**Completed** - splash now uses a true deferred secondary wasm split in automatic shipping mode, an active-only split-data overlap path, and small-font URL aliasing so duplicated fallback font payloads are no longer shipped. The remaining biggest byte win is now the split data blob itself.

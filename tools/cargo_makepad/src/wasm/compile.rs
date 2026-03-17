@@ -155,6 +155,7 @@ struct HtmlAssetPaths {
     wasm_path: String,
     split_data_path: Option<String>,
     split_data_active_only: bool,
+    small_font_aliases: bool,
     secondary_wasm_path: Option<String>,
     defer_secondary_wasm: bool,
     web_gl_js_path: String,
@@ -348,6 +349,11 @@ fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> S
         }
         preloads
     };
+    let small_font_aliases = if assets.small_font_aliases {
+        "\n            window.makepad_small_font_aliases = true;"
+    } else {
+        ""
+    };
 
     let init = if config.bindgen {
         let wasm_bridge_js_url = app_relative_url(
@@ -360,6 +366,7 @@ fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> S
             app_relative_url(assets.bindgen_js_path.as_deref().unwrap_or("bindgen.js"));
         format!(
             "
+            {small_font_aliases}
             const {{init_env}} = await import('{wasm_bridge_js_url}');
             const init = (await import('{bindgen_js_url}')).default;
 
@@ -409,6 +416,7 @@ fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> S
         };
         format!(
             "
+            {small_font_aliases}
             const {{WasmWebGL}} = await import('{web_gl_js_url}');
             const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
                 '{wasm_url}'{split_options}
@@ -558,6 +566,35 @@ fn brotli_compress(dest_path: &PathBuf) -> usize {
     let mut brotli_file = File::create(dest_path_br).unwrap();
     brotli_file.write_all(&brotli_data).unwrap();
     brotli_data.len()
+}
+
+fn brotli_compressed_len(bytes: &[u8]) -> usize {
+    let mut brotli_data = Vec::new();
+    {
+        let mut writer =
+            brotli::CompressorWriter::new(&mut brotli_data, 65536 /* buffer size */, 11, 24);
+        writer.write_all(bytes).expect("Can't write data");
+    }
+    brotli_data.len()
+}
+
+fn estimated_transfer_bytes(bytes: &[u8], brotli_enabled: bool) -> usize {
+    if brotli_enabled {
+        brotli_compressed_len(bytes)
+    } else {
+        bytes.len()
+    }
+}
+
+const DATA_SPLIT_MIN_TRANSFER_SAVINGS_BYTES: usize = 16 * 1024;
+
+fn should_keep_split_data(
+    unsplit_transfer_bytes: usize,
+    split_primary_transfer_bytes: usize,
+    split_data_transfer_bytes: usize,
+) -> bool {
+    split_primary_transfer_bytes + split_data_transfer_bytes + DATA_SPLIT_MIN_TRANSFER_SAVINGS_BYTES
+        <= unsplit_transfer_bytes
 }
 
 fn remove_brotli_artifact(dest_path: &PathBuf) {
@@ -1185,6 +1222,27 @@ fn remapped_small_font_source(source_path: &Path) -> Option<PathBuf> {
     Some(source_path.parent()?.join(remap_target))
 }
 
+fn remapped_small_font_dependency_path(path: &str) -> Option<&'static str> {
+    match path.replace('\\', "/").as_str() {
+        "makepad_widgets/resources/GoNotoKurrent-Bold.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-SemiBold.ttf")
+        }
+        "makepad_widgets/resources/GoNotoKurrent-Regular.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        "makepad_widgets/resources/LXGWWenKaiBold.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        "makepad_widgets/resources/LXGWWenKaiRegular.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        "makepad_widgets/resources/NotoColorEmoji.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        _ => None,
+    }
+}
+
 fn add_selected_resource(
     selected: &mut HashMap<String, SelectedResource>,
     entry: SelectedResource,
@@ -1375,6 +1433,13 @@ fn add_curated_widget_web_resources(
 
     for font_name in font_names {
         let logical_path = format!("makepad_widgets/resources/{font_name}");
+        let logical_path = if small_fonts {
+            remapped_small_font_dependency_path(&logical_path)
+                .unwrap_or(logical_path.as_str())
+                .to_string()
+        } else {
+            logical_path
+        };
         let source_path = resources_dir.join(font_name);
         let source_path = if small_fonts {
             remapped_small_font_source(&source_path).unwrap_or(source_path)
@@ -1468,6 +1533,13 @@ fn collect_shipping_resources(
                 );
                 continue;
             }
+            let logical_path = if config.small_fonts && !full_i18n {
+                remapped_small_font_dependency_path(&logical_path)
+                    .unwrap_or(logical_path.as_str())
+                    .to_string()
+            } else {
+                logical_path
+            };
             let source_path = if config.small_fonts && !full_i18n {
                 remapped_small_font_source(&abs_path).unwrap_or(abs_path.clone())
             } else {
@@ -1504,6 +1576,13 @@ fn collect_shipping_resources(
             );
             continue;
         }
+        let logical_path = if config.small_fonts && !full_i18n {
+            remapped_small_font_dependency_path(&logical_path)
+                .unwrap_or(logical_path.as_str())
+                .to_string()
+        } else {
+            logical_path
+        };
         let source_path = if config.small_fonts && !full_i18n {
             remapped_small_font_source(&abs_path).unwrap_or(abs_path.clone())
         } else {
@@ -1659,9 +1738,10 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     mkdir(&app_dir)?;
 
     let mut pending_assets = Vec::<PendingAsset>::new();
+    let mut use_small_font_aliases = config.small_fonts && !config.full_fonts;
     let resources = get_crate_dep_dirs(build_crate, &build_dir, WASM_TARGET_TRIPLE);
     for (name, dep_dir) in resources.iter() {
-        if name == "makepad-wasm-bridge" && config.bindgen {
+        if name == "makepad-wasm-bridge" {
             cp_brotli(
                 &dep_dir.join("src/wasm_bridge.js"),
                 &app_dir.join("makepad_wasm_bridge/wasm_bridge.js"),
@@ -1674,7 +1754,9 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     emitted_path: "makepad_wasm_bridge/wasm_bridge.js".to_string(),
                     kind: "javascript".to_string(),
                     content_type: "text/javascript".to_string(),
-                    startup_blocking: true,
+                    // `makepad_platform/web.js` imports this path literally, so we cannot
+                    // fingerprint it without also rewriting runtime module specifiers.
+                    startup_blocking: false,
                     direct_reference: false,
                     crate_name: Some("makepad_wasm_bridge".to_string()),
                     reason: "runtime_support".to_string(),
@@ -1812,6 +1894,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     if config.shipping_build {
         let (selected_resources, metadata) =
             collect_shipping_resources(build_crate, &build_dir, &config)?;
+        use_small_font_aliases = config.small_fonts && !(metadata.full_i18n || config.full_fonts);
         if metadata.full_i18n || config.full_fonts {
             println!("Shipping web build: full i18n font payload enabled");
         }
@@ -2098,38 +2181,64 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             remove_brotli_artifact(&split_data_dest);
             None
         } else {
-            print_wasm_split_report(
-                split.primary_wasm.len(),
-                split.split_data.len(),
-                split.segment_count,
-            );
-            println!(
-                "  active segments: {} | passive segments: {}",
-                split.active_segment_count, split.passive_segment_count
-            );
-            split_data_active_only = split.passive_segment_count == 0;
-            output = split.primary_wasm;
-            split_data_bytes = Some(split.split_data.len());
-            fs::write(&split_data_dest, &split.split_data)
-                .map_err(|e| format!("Can't write file {:?} {:?} ", split_data_dest, e))?;
-            if config.brotli {
-                split_brotli_bytes = Some(brotli_compress(&split_data_dest));
-            } else {
+            let unsplit_transfer_bytes = estimated_transfer_bytes(&output, config.brotli);
+            let split_primary_transfer_bytes =
+                estimated_transfer_bytes(&split.primary_wasm, config.brotli);
+            let split_data_transfer_bytes =
+                estimated_transfer_bytes(&split.split_data, config.brotli);
+            let keep_split_data = !config.shipping_build
+                || should_keep_split_data(
+                    unsplit_transfer_bytes,
+                    split_primary_transfer_bytes,
+                    split_data_transfer_bytes,
+                );
+
+            if !keep_split_data {
+                println!(
+                    "Wasm data split: skipping split_data.bin because startup transfer only improves by {} bytes ({} -> {}), below {} byte threshold",
+                    unsplit_transfer_bytes
+                        .saturating_sub(split_primary_transfer_bytes + split_data_transfer_bytes),
+                    unsplit_transfer_bytes,
+                    split_primary_transfer_bytes + split_data_transfer_bytes,
+                    DATA_SPLIT_MIN_TRANSFER_SAVINGS_BYTES
+                );
+                let _ = fs::remove_file(&split_data_dest);
                 remove_brotli_artifact(&split_data_dest);
+                None
+            } else {
+                print_wasm_split_report(
+                    split.primary_wasm.len(),
+                    split.split_data.len(),
+                    split.segment_count,
+                );
+                println!(
+                    "  active segments: {} | passive segments: {}",
+                    split.active_segment_count, split.passive_segment_count
+                );
+                split_data_active_only = split.passive_segment_count == 0;
+                output = split.primary_wasm;
+                split_data_bytes = Some(split.split_data.len());
+                fs::write(&split_data_dest, &split.split_data)
+                    .map_err(|e| format!("Can't write file {:?} {:?} ", split_data_dest, e))?;
+                if config.brotli {
+                    split_brotli_bytes = Some(brotli_compress(&split_data_dest));
+                } else {
+                    remove_brotli_artifact(&split_data_dest);
+                }
+                if config.shipping_build {
+                    pending_assets.push(PendingAsset {
+                        logical_path: format!("{}.data.bin", build_crate),
+                        emitted_path: format!("{}.data.bin", build_crate),
+                        kind: "binary".to_string(),
+                        content_type: "application/octet-stream".to_string(),
+                        startup_blocking: true,
+                        direct_reference: false,
+                        crate_name: None,
+                        reason: "split_data".to_string(),
+                    });
+                }
+                Some(format!("{}.data.bin", build_crate))
             }
-            if config.shipping_build {
-                pending_assets.push(PendingAsset {
-                    logical_path: format!("{}.data.bin", build_crate),
-                    emitted_path: format!("{}.data.bin", build_crate),
-                    kind: "binary".to_string(),
-                    content_type: "application/octet-stream".to_string(),
-                    startup_blocking: true,
-                    direct_reference: false,
-                    crate_name: None,
-                    reason: "split_data".to_string(),
-                });
-            }
-            Some(format!("{}.data.bin", build_crate))
         }
     } else {
         let _ = fs::remove_file(&split_data_dest);
@@ -2193,6 +2302,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 })
                 .or(split_data_path.clone()),
             split_data_active_only,
+            small_font_aliases: use_small_font_aliases,
             secondary_wasm_path: secondary_wasm_path
                 .as_deref()
                 .and_then(|path| {
@@ -2236,6 +2346,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             wasm_path: format!("{}.wasm", build_crate),
             split_data_path,
             split_data_active_only,
+            small_font_aliases: use_small_font_aliases,
             secondary_wasm_path,
             defer_secondary_wasm,
             web_gl_js_path: "makepad_platform/web_gl.js".to_string(),
@@ -3541,6 +3652,26 @@ mod tests {
     }
 
     #[test]
+    fn remapped_small_font_dependency_path_canonicalizes_widget_fallbacks() {
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiRegular.ttf"),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiBold.ttf"),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/NotoColorEmoji.ttf"),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/IBMPlexSans-Text.ttf"),
+            None
+        );
+    }
+
+    #[test]
     fn resolve_resource_spec_supports_self_and_dependency_paths() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3653,6 +3784,7 @@ mod tests {
             wasm_path: "app.wasm".to_string(),
             split_data_path: Some("app.data.bin".to_string()),
             split_data_active_only: false,
+            small_font_aliases: false,
             secondary_wasm_path: Some("app.secondary.wasm".to_string()),
             defer_secondary_wasm: false,
             web_gl_js_path: "makepad_platform/web_gl.js".to_string(),
@@ -3682,6 +3814,19 @@ mod tests {
         };
         let active_only_html = generate_html("app", &active_only_assets, &config);
         assert!(active_only_html.contains("split_data_active_only: true"));
+
+        let aliased_font_assets = HtmlAssetPaths {
+            small_font_aliases: true,
+            ..active_only_assets
+        };
+        let aliased_font_html = generate_html("app", &aliased_font_assets, &config);
+        assert!(aliased_font_html.contains("window.makepad_small_font_aliases = true;"));
+    }
+
+    #[test]
+    fn split_data_requires_meaningful_transfer_savings() {
+        assert!(!should_keep_split_data(1_000_000, 900_000, 90_000));
+        assert!(should_keep_split_data(1_000_000, 900_000, 80_000));
     }
 
     #[test]
@@ -3722,6 +3867,65 @@ mod tests {
         assert!(app_dir.join(&manifest.assets[0].emitted_path).exists());
 
         let _ = fs::remove_dir_all(&app_dir);
+    }
+
+    #[test]
+    fn finalize_pending_assets_keeps_wasm_bridge_path_stable() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let app_dir = std::env::temp_dir().join(format!("makepad-wasm-bridge-{unique}"));
+        fs::create_dir_all(app_dir.join("makepad_wasm_bridge")).unwrap();
+        fs::write(
+            app_dir.join("makepad_wasm_bridge/wasm_bridge.js"),
+            "export class WasmBridge {}",
+        )
+        .unwrap();
+
+        let mut pending_assets = vec![PendingAsset {
+            logical_path: "makepad_wasm_bridge/wasm_bridge.js".to_string(),
+            emitted_path: "makepad_wasm_bridge/wasm_bridge.js".to_string(),
+            kind: "javascript".to_string(),
+            content_type: "text/javascript".to_string(),
+            startup_blocking: false,
+            direct_reference: false,
+            crate_name: Some("makepad_wasm_bridge".to_string()),
+            reason: "runtime_support".to_string(),
+        }];
+        let manifest =
+            finalize_pending_assets(&app_dir, "app", "small", false, true, &mut pending_assets)
+                .unwrap();
+
+        assert_eq!(manifest.assets.len(), 1);
+        assert_eq!(
+            manifest.assets[0].emitted_path,
+            "makepad_wasm_bridge/wasm_bridge.js"
+        );
+        assert!(app_dir.join("makepad_wasm_bridge/wasm_bridge.js").exists());
+
+        let _ = fs::remove_dir_all(&app_dir);
+    }
+
+    #[test]
+    fn ship_html_without_bindgen_still_references_runtime_web_gl_only() {
+        let config = test_wasm_config();
+        let assets = HtmlAssetPaths {
+            wasm_path: "app.wasm".to_string(),
+            split_data_path: None,
+            split_data_active_only: false,
+            small_font_aliases: false,
+            secondary_wasm_path: None,
+            defer_secondary_wasm: false,
+            web_gl_js_path: "makepad_platform/web_gl.js".to_string(),
+            full_canvas_css_path: "makepad_platform/full_canvas.css".to_string(),
+            bindgen_js_path: None,
+            wasm_bridge_js_path: None,
+        };
+        let html = generate_html("app", &assets, &config);
+
+        assert!(html.contains("await import('./makepad_platform/web_gl.js')"));
+        assert!(!html.contains("await import('./makepad_wasm_bridge/wasm_bridge.js')"));
     }
 
     #[test]

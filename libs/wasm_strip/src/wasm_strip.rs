@@ -1100,10 +1100,28 @@ fn scan_function_body_refs(body: &[u8]) -> Result<FunctionBodyRefs, WasmParseErr
     Ok(refs)
 }
 
-fn exported_function_indices(info: &WasmModuleInfo) -> BTreeSet<u32> {
+fn startup_hot_export_name(name: &str) -> bool {
+    matches!(
+        name,
+        "wasm_create_app"
+            | "wasm_process_msg"
+            | "wasm_return_first_msg"
+            | "wasm_get_js_message_bridge"
+            | "wasm_init_panic_hook"
+            | "wasm_check_signal"
+            | "wasm_msg_free"
+            | "wasm_msg_reserve_u64"
+            | "wasm_new_data_u8"
+            | "wasm_free_data_u8"
+            | "wasm_new_msg_with_u64_capacity"
+    ) || name.starts_with("wasm_network_http_")
+        || name.starts_with("wasm_network_ws_")
+}
+
+fn startup_hot_exported_function_indices(info: &WasmModuleInfo) -> BTreeSet<u32> {
     info.exports
         .iter()
-        .filter(|export| export.kind == 0x00)
+        .filter(|export| export.kind == 0x00 && startup_hot_export_name(&export.name))
         .map(|export| export.index)
         .collect()
 }
@@ -1119,7 +1137,7 @@ fn startup_hot_function_indices(
     if let Some(start_idx) = info.start_func_index {
         queue.push(start_idx);
     }
-    queue.extend(exported_function_indices(info));
+    queue.extend(startup_hot_exported_function_indices(info));
 
     while let Some(abs_index) = queue.pop() {
         if abs_index < info.num_func_imports {
@@ -2570,7 +2588,7 @@ mod tests {
 
     #[test]
     fn split_functions_auto_target_primary_size_cold_preserves_export_reachable_functions() {
-        let main_body = &[0x00, 0x10, 0x01, 0x0b];
+        let startup_body = &[0x00, 0x10, 0x01, 0x0b];
 
         let mut hot_large_body = vec![0x00];
         for _ in 0..240 {
@@ -2588,8 +2606,8 @@ mod tests {
             type_section(&[(0, 0)]),
             function_section(&[0, 0, 0]),
             table_section(0, Some(0)),
-            export_section(&[("main", 0x00, 0)]),
-            code_section(&[main_body, &hot_large_body, &cold_large_body]),
+            export_section(&[("wasm_create_app", 0x00, 0)]),
+            code_section(&[startup_body, &hot_large_body, &cold_large_body]),
         ]);
 
         let result =
@@ -2605,19 +2623,70 @@ mod tests {
     }
 
     #[test]
-    fn split_functions_auto_target_primary_size_cold_skips_when_only_hot_functions_remain() {
-        let mut main_body = vec![0x00];
-        for _ in 0..260 {
-            main_body.push(0x01);
+    fn startup_hot_export_name_matches_web_bootstrap_contract() {
+        assert!(startup_hot_export_name("wasm_create_app"));
+        assert!(startup_hot_export_name("wasm_process_msg"));
+        assert!(startup_hot_export_name("wasm_new_msg_with_u64_capacity"));
+        assert!(startup_hot_export_name("wasm_network_http_response"));
+        assert!(startup_hot_export_name("wasm_network_ws_opened"));
+        assert!(!startup_hot_export_name("main"));
+        assert!(!startup_hot_export_name("wasm_terminate_thread_pools"));
+        assert!(!startup_hot_export_name("wasm_web_socket_opened"));
+    }
+
+    #[test]
+    fn split_functions_auto_target_primary_size_cold_can_split_late_exports() {
+        let mut startup_hot_large_body = vec![0x00];
+        for _ in 0..240 {
+            startup_hot_large_body.push(0x01);
         }
-        main_body.push(0x0b);
+        startup_hot_large_body.push(0x0b);
+
+        let mut late_export_large_body = vec![0x00];
+        for _ in 0..260 {
+            late_export_large_body.push(0x01);
+        }
+        late_export_large_body.push(0x0b);
+
+        let wasm = wasm_with_sections(&[
+            type_section(&[(0, 0)]),
+            function_section(&[0, 0]),
+            table_section(0, Some(0)),
+            export_section(&[
+                ("wasm_create_app", 0x00, 0),
+                ("wasm_terminate_thread_pools", 0x00, 1),
+            ]),
+            code_section(&[&startup_hot_large_body, &late_export_large_body]),
+        ]);
+
+        let result =
+            wasm_split_functions_to_target_primary_size_cold(&wasm, wasm.len() - 40).unwrap();
+        assert_eq!(result.split_count, 1);
+
+        let primary_info = parse_wasm_module_info(&result.primary_wasm).unwrap();
+        let startup_hot_primary_len =
+            primary_info.code_bodies[0].end - primary_info.code_bodies[0].start;
+        let late_export_primary_len =
+            primary_info.code_bodies[1].end - primary_info.code_bodies[1].start;
+
+        assert_eq!(startup_hot_primary_len, 244);
+        assert!(late_export_primary_len < 20);
+    }
+
+    #[test]
+    fn split_functions_auto_target_primary_size_cold_skips_when_only_hot_functions_remain() {
+        let mut startup_body = vec![0x00];
+        for _ in 0..260 {
+            startup_body.push(0x01);
+        }
+        startup_body.push(0x0b);
 
         let wasm = wasm_with_sections(&[
             type_section(&[(0, 0)]),
             function_section(&[0]),
             table_section(0, Some(0)),
-            export_section(&[("main", 0x00, 0)]),
-            code_section(&[&main_body]),
+            export_section(&[("wasm_create_app", 0x00, 0)]),
+            code_section(&[&startup_body]),
         ]);
 
         let result =
@@ -2629,7 +2698,7 @@ mod tests {
 
     #[test]
     fn split_functions_auto_target_primary_size_cold_keeps_startup_indirect_targets_in_primary() {
-        let main_body = &[0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b];
+        let startup_body = &[0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b];
 
         let mut table_hot_large_body = vec![0x00];
         for _ in 0..240 {
@@ -2647,9 +2716,9 @@ mod tests {
             type_section(&[(0, 0)]),
             function_section(&[0, 0, 0]),
             table_section(1, Some(1)),
-            export_section(&[("main", 0x00, 0)]),
+            export_section(&[("wasm_create_app", 0x00, 0)]),
             active_element_section(&[1]),
-            code_section(&[main_body, &table_hot_large_body, &cold_large_body]),
+            code_section(&[startup_body, &table_hot_large_body, &cold_large_body]),
         ]);
 
         let result =
@@ -2667,7 +2736,7 @@ mod tests {
 
     #[test]
     fn split_functions_auto_target_primary_size_cold_can_split_unused_active_element_functions() {
-        let main_body = &[0x00, 0x0b];
+        let startup_body = &[0x00, 0x0b];
 
         let mut unused_active_large_body = vec![0x00];
         for _ in 0..300 {
@@ -2685,9 +2754,9 @@ mod tests {
             type_section(&[(0, 0)]),
             function_section(&[0, 0, 0]),
             table_section(1, Some(1)),
-            export_section(&[("main", 0x00, 0)]),
+            export_section(&[("wasm_create_app", 0x00, 0)]),
             active_element_section(&[1]),
-            code_section(&[main_body, &unused_active_large_body, &cold_large_body]),
+            code_section(&[startup_body, &unused_active_large_body, &cold_large_body]),
         ]);
 
         let result =
@@ -2705,7 +2774,7 @@ mod tests {
 
     #[test]
     fn split_functions_auto_target_primary_size_cold_uses_largest_safe_prefix() {
-        let main_body = &[0x00, 0x0b];
+        let startup_body = &[0x00, 0x0b];
 
         let mut cold_large_body_a = vec![0x00];
         for _ in 0..280 {
@@ -2725,9 +2794,9 @@ mod tests {
             type_section(&[(0, 0)]),
             function_section(&[0, 0, 0, 0]),
             table_section(0, Some(0)),
-            export_section(&[("main", 0x00, 0)]),
+            export_section(&[("wasm_create_app", 0x00, 0)]),
             code_section(&[
-                main_body,
+                startup_body,
                 &cold_large_body_a,
                 &cold_large_body_b,
                 tiny_cold_body,

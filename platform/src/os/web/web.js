@@ -37,8 +37,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.thread_stack_size = 2 * 1024 * 1024;
         this.buffer_upload_serial = 0;
         this.loader_removed = false;
-        this.loader_seen_animation_frame = false;
-        this.loader_quiet_animation_frames = 0;
+        this.loader_removal_scheduled = false;
         this.loader_fallback_timer = null;
         this.init_detection();
         this.midi_inputs = [];
@@ -86,7 +85,8 @@ export class WasmWebBrowser extends WasmBridge {
                 pathname: location.pathname + "",
                 search: location.search + "",
                 hash: location.hash + "",
-                has_thread_support: this.wasm._has_thread_support
+                has_thread_support: this.wasm._has_thread_support,
+                small_font_aliases: window.makepad_small_font_aliases === true
             },
             window_info: this.window_info,
         });
@@ -109,6 +109,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
         this.do_wasm_pump();
+        this.schedule_loader_after_presented_frame();
         this.schedule_loader_fallback();
     }
 
@@ -133,6 +134,20 @@ export class WasmWebBrowser extends WasmBridge {
         }
     }
 
+    schedule_loader_after_presented_frame() {
+        if (this.loader_removed || this.loader_removal_scheduled) {
+            return;
+        }
+        this.loader_removal_scheduled = true;
+        const schedule = typeof requestAnimationFrame === "function"
+            ? requestAnimationFrame
+            : (callback) => setTimeout(callback, 0);
+        // Let the browser present the startup frame before removing the overlay.
+        schedule(() => {
+            this.remove_canvas_loader();
+        });
+    }
+
     schedule_loader_fallback() {
         if (this.loader_removed || this.loader_fallback_timer) {
             return;
@@ -147,21 +162,8 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         this.schedule_loader_fallback();
-        if (!this.in_animation_frame) {
-            if (pump_duration_ms > 32) {
-                this.loader_quiet_animation_frames = 0;
-            }
-            return;
-        }
-        this.loader_seen_animation_frame = true;
-        if (pump_duration_ms <= 16) {
-            this.loader_quiet_animation_frames += 1;
-        }
-        else {
-            this.loader_quiet_animation_frames = 0;
-        }
-        if (this.loader_seen_animation_frame && this.loader_quiet_animation_frames >= 2) {
-            this.remove_canvas_loader();
+        if (this.in_animation_frame || pump_duration_ms <= 32) {
+            this.schedule_loader_after_presented_frame();
         }
     }
 

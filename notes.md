@@ -76,3 +76,14 @@
   - package size remains about `8.4M` raw,
   - `startup_blocking_transfer_bytes` remains `1019413`,
   - inference: this pass is a startup overlap improvement, not a transfer-byte reduction, so the next materially measurable package-size win is still font/resource payload cleanup.
+
+## Small Font Dedup Follow-up
+- Small-font shipping no longer preserves `LXGWWenKaiRegular.ttf`, `LXGWWenKaiBold.ttf`, and `NotoColorEmoji.ttf` as separate files with duplicated IBM Plex bytes.
+- The shipping build now canonicalizes those widget fallback font asset paths to IBM Plex during packaging, and the web bootstrap sets `window.makepad_small_font_aliases = true` so wasm resource fetches can rewrite the old fallback URLs to the canonical files.
+- Verified on `makepad-example-splash` after this change:
+  - generated `index.html` now contains `window.makepad_small_font_aliases = true`,
+  - `makepad_widgets/resources` no longer contains the duplicated fallback font files in the shipping package,
+  - package directory size dropped from about `8.4M` to `7.7M`,
+  - `web-perf-report.json` now reports `total_raw_bytes = 6279998` and `total_transfer_bytes = 1544422`,
+  - `startup_blocking_transfer_bytes` improved slightly from `1019413` to `1018711`,
+  - inference: the default web font payload is no longer the dominant packaging waste, so the next biggest remaining byte target is the split data blob.
