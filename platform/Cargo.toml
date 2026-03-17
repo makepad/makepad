@@ -20,7 +20,6 @@ makepad-live-reload-core = { path = "../libs/live_reload_core", version = "0.1.0
 makepad-zune-png = { path = "../libs/zune/zune-png", version = "0.5.1" }
 smallvec = { version = "1.15", path = "../libs/smallvec" }
 bitflags = { version = "2.10", path = "../libs/bitflags" }
-parry3d = { path = "../libs/rapier/vendor/parry3d", default-features = false, features = ["alloc", "dim3", "f32", "required-features", "std", "enhanced-determinism"] }
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }

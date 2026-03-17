@@ -75,13 +75,12 @@ impl AndroidCameraPlayer {
             AndroidCameraTextureMode::GlYuv
         };
 
-        let i420_frames = if native_preview
-            || texture_mode == AndroidCameraTextureMode::HardwareBufferExternal
-        {
-            None
-        } else {
-            Some(CameraFrameLatest::new(4))
-        };
+        let i420_frames =
+            if native_preview || texture_mode == AndroidCameraTextureMode::HardwareBufferExternal {
+                None
+            } else {
+                Some(CameraFrameLatest::new(4))
+            };
         let hardware_buffer_frame =
             if texture_mode == AndroidCameraTextureMode::HardwareBufferExternal {
                 Some(Arc::new(Mutex::new(None)))
@@ -116,7 +115,9 @@ impl AndroidCameraPlayer {
                     hardware_buffer_cb,
                     preview_window,
                 ),
-                None => cam.register_preview(video_id, input_id, format_id, frame_cb, preview_window),
+                None => {
+                    cam.register_preview(video_id, input_id, format_id, frame_cb, preview_window)
+                }
             }
 
             (width, height, yuv_rotation_steps)
@@ -179,7 +180,9 @@ impl AndroidCameraPlayer {
             return Ok(());
         }
         let Some(camera_access) = self.camera_access.as_ref().cloned() else {
-            return Err("Android headset camera fallback failed: missing camera access".to_string());
+            return Err(
+                "Android headset camera fallback failed: missing camera access".to_string(),
+            );
         };
 
         let frames = CameraFrameLatest::new(4);
@@ -191,7 +194,13 @@ impl AndroidCameraPlayer {
         {
             let mut cam = camera_access.lock().unwrap();
             cam.unregister_preview(self.video_id);
-            cam.register_preview(self.video_id, self.input_id, self.format_id, Some(frame_cb), None);
+            cam.register_preview(
+                self.video_id,
+                self.input_id,
+                self.format_id,
+                Some(frame_cb),
+                None,
+            );
         }
 
         self.texture_mode = AndroidCameraTextureMode::CpuYuv;
