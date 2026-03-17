@@ -32,6 +32,7 @@ pub struct ShaderSampler {
     pub filter: SamplerFilter,
     pub address: SamplerAddress,
     pub coord: SamplerCoord,
+    pub is_video: bool,
 }
 
 impl Default for ShaderSampler {
@@ -40,6 +41,16 @@ impl Default for ShaderSampler {
             filter: SamplerFilter::Linear,
             address: SamplerAddress::ClampToEdge,
             coord: SamplerCoord::Normalized,
+            is_video: false,
+        }
+    }
+}
+
+impl ShaderSampler {
+    pub fn video() -> Self {
+        Self {
+            is_video: true,
+            ..Self::default()
         }
     }
 }

@@ -655,6 +655,14 @@ impl super::Instruction {
         instruction
     }
 
+    pub(super) fn image(result_type_id: Word, id: Word, sampled_image: Word) -> Self {
+        let mut instruction = Self::new(Op::Image);
+        instruction.set_type(result_type_id);
+        instruction.set_result(id);
+        instruction.add_operand(sampled_image);
+        instruction
+    }
+
     pub(super) fn image_gather(
         result_type_id: Word,
         id: Word,

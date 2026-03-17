@@ -1,6 +1,10 @@
 pub use makepad_widgets;
 
-use makepad_widgets::makepad_platform::permission::{Permission, PermissionStatus};
+use makepad_widgets::makepad_platform::{
+    event::{CameraPreviewMode, VideoSource, VideoYuvMetadata},
+    permission::{Permission, PermissionStatus},
+    video::{VideoFormatId, VideoInputId, VideoInputsEvent, VideoPixelFormat},
+};
 use makepad_widgets::*;
 use rapier3d::prelude::{
     BroadPhaseBvh, CCDSolver, ColliderBuilder, ColliderHandle, ColliderSet, ImpulseJointSet,
@@ -66,6 +70,71 @@ script_mod! {
         }
     }
 
+    set_type_default() do #(DrawXrPassthroughQuad::script_shader(vm)){
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
+
+        camera_texture: texture_video()
+
+        v_uv: varying(vec2f)
+
+        vertex: fn() {
+            let world = vec4(
+                self.geom.pos_nx.x,
+                self.geom.pos_nx.y,
+                self.geom.pos_nx.z,
+                1.0
+            );
+            self.v_uv = self.geom.ny_nz_uv.zw;
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world);
+        }
+
+        sample_camera_rgb: fn(coord: vec2f) -> vec3f {
+            if self.camera_enabled > 0.5 {
+                let coord_90 = vec2(1.0 - coord.y, coord.x);
+                let coord_180 = vec2(1.0 - coord.x, 1.0 - coord.y);
+                let coord_270 = vec2(coord.y, 1.0 - coord.x);
+                let is_90 = step(0.5, self.rotation_steps) * step(self.rotation_steps, 1.5);
+                let is_180 = step(1.5, self.rotation_steps) * step(self.rotation_steps, 2.5);
+                let is_270 = step(2.5, self.rotation_steps);
+                let is_0 = 1.0 - is_90 - is_180 - is_270;
+                let sample_coord = coord * is_0 + coord_90 * is_90 + coord_180 * is_180 + coord_270 * is_270;
+                return self.camera_texture.sample_video(sample_coord).xyz;
+            }
+
+            return vec3(0.0, 0.0, 0.0);
+        }
+
+        frosted_offset: fn(seed: vec2f, scale: f32) -> vec2f {
+            let texel = self.scatter_pixels / max(self.source_size, vec2(1.0, 1.0));
+            let ox = Math.random_2d(seed + vec2(3.17, 9.41)) - 0.5;
+            let oy = Math.random_2d(seed.yx + vec2(5.93, 1.27)) - 0.5;
+            return vec2(ox, oy) * texel * scale;
+        }
+
+        pixel: fn() {
+            let uv = clamp(self.v_uv, vec2(0.0, 0.0), vec2(1.0, 1.0));
+            let seed = uv * self.source_size;
+            let center = self.sample_camera_rgb(uv);
+            let blur = center * 0.34
+                + self.sample_camera_rgb(clamp(uv + self.frosted_offset(seed, 1.0), vec2(0.0, 0.0), vec2(1.0, 1.0))) * 0.17
+                + self.sample_camera_rgb(clamp(uv + self.frosted_offset(seed + vec2(17.0, 11.0), 1.4), vec2(0.0, 0.0), vec2(1.0, 1.0))) * 0.17
+                + self.sample_camera_rgb(clamp(uv + self.frosted_offset(seed + vec2(31.0, 7.0), 1.9), vec2(0.0, 0.0), vec2(1.0, 1.0))) * 0.16
+                + self.sample_camera_rgb(clamp(uv + self.frosted_offset(seed + vec2(13.0, 29.0), 2.3), vec2(0.0, 0.0), vec2(1.0, 1.0))) * 0.16;
+
+            let frosted = mix(center, blur, self.frost_mix);
+            return vec4(frosted, 1.0);
+        }
+
+        fragment: fn() {
+            self.fb0 = self.pixel();
+        }
+    }
+
     mod.widgets.XrScene = set_type_default() do mod.widgets.XrSceneBase{
         draw_cube +: {}
         draw_depth_mesh +: {
@@ -81,6 +150,15 @@ script_mod! {
             spec_power: 128.0
             spec_strength: 0.9
             env_intensity: 1.8
+        }
+        draw_passthrough_quad +: {
+            source_size: vec2(1280.0, 960.0)
+            tint_color: vec4(1.0, 1.0, 1.0, 1.0)
+            frost_mix: 0.84
+            scatter_pixels: 2.6
+            camera_enabled: 0.0
+            rotation_steps: 0.0
+            biplanar: 0.0
         }
     }
 
@@ -195,6 +273,9 @@ const XR_SIMULATION_DT: f32 = 1.0 / 120.0;
 const XR_ENABLE_HAND_PHYSICS: bool = true;
 const XR_ENABLE_DEPTH_QUERY_PHYSICS: bool = true;
 const XR_RENDER_HAND_GEOMETRY: bool = false;
+const XR_PASSTHROUGH_QUAD_DISTANCE: f32 = 0.55;
+const XR_PASSTHROUGH_QUAD_HEIGHT: f32 = 0.42;
+const XR_PASSTHROUGH_QUAD_WORLD_OFFSET_Y: f32 = 0.0;
 const XR_DEPTH_QUERY_MAX_DISTANCE: f32 = 0.12;
 const XR_DEPTH_QUERY_FRICTION: f32 = 0.9;
 const XR_DEPTH_QUERY_LOOKAHEAD_SECONDS: f32 = 0.18;
@@ -238,20 +319,39 @@ enum AppPhase {
     XrRuntime,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum XrDepthDebugMode {
-    #[default]
-    Mesh,
-    Off,
+    Passthrough,
 }
 
-impl XrDepthDebugMode {
-    fn next(self) -> Self {
-        match self {
-            Self::Mesh => Self::Off,
-            Self::Off => Self::Mesh,
-        }
+impl Default for XrDepthDebugMode {
+    fn default() -> Self {
+        Self::Passthrough
     }
+}
+
+#[derive(Clone)]
+struct XrPassthroughCameraChoice {
+    input_id: VideoInputId,
+    format_id: VideoFormatId,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Clone)]
+struct XrPassthroughCameraTextures {
+    camera: Texture,
+    tex_y: Option<Texture>,
+    tex_u: Option<Texture>,
+    tex_v: Option<Texture>,
+}
+
+#[derive(Clone, Copy)]
+struct XrPassthroughQuadPlacement {
+    center: Vec3f,
+    right: Vec3f,
+    up: Vec3f,
+    normal: Vec3f,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -301,6 +401,40 @@ impl DrawDepthMeshBasic {
     }
 }
 
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawXrPassthroughQuad {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub source_size: Vec2f,
+    #[live]
+    pub tint_color: Vec4f,
+    #[live]
+    pub frost_mix: f32,
+    #[live]
+    pub scatter_pixels: f32,
+    #[live]
+    pub camera_enabled: f32,
+    #[live]
+    pub rotation_steps: f32,
+    #[live]
+    pub biplanar: f32,
+    #[live]
+    pub yuv_enabled: f32,
+}
+
+impl DrawXrPassthroughQuad {
+    fn draw_geometry(&mut self, cx: &mut Cx2d, geometry_id: GeometryId) {
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
+        self.draw_vars.geometry_id = Some(geometry_id);
+        if cx.new_draw_call(&self.draw_vars).is_some() && self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct DepthSurfaceMeshChunkHandle {
     geometry_id: GeometryId,
@@ -325,10 +459,35 @@ struct DepthQuerySurfaceTarget {
     fingerprint: u64,
 }
 
+#[derive(Clone, Copy)]
+struct DepthQuerySurfaceCandidate {
+    key: u64,
+    distance: f32,
+    shape: DepthQuerySurfaceShape,
+    fingerprint: u64,
+}
+
 #[derive(Clone)]
 struct RetainedDepthQueryHit {
     hit: XrDepthMeshQueryHit,
     misses_left: u8,
+}
+
+impl RetainedDepthQueryHit {
+    fn new(hit: XrDepthMeshQueryHit) -> Self {
+        Self {
+            hit,
+            misses_left: XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES,
+        }
+    }
+
+    fn reuse_result(&mut self) -> Option<XrDepthMeshQueryResult> {
+        if self.misses_left == 0 {
+            return None;
+        }
+        self.misses_left -= 1;
+        Some(XrDepthMeshQueryResult::Hit(self.hit.clone()))
+    }
 }
 
 struct RapierScene {
@@ -430,19 +589,66 @@ fn depth_query_patch_is_degenerate(patch: [Vec3f; 4]) -> bool {
         && (patch[3] - patch[0]).length() <= epsilon
 }
 
+fn depth_query_surface_candidate(
+    key: u64,
+    distance: f32,
+    from_planar_patch: bool,
+    triangle: [Vec3f; 3],
+    patch: [Vec3f; 4],
+) -> DepthQuerySurfaceCandidate {
+    let (shape, fingerprint) = if from_planar_patch && !depth_query_patch_is_degenerate(patch) {
+        (
+            DepthQuerySurfaceShape::Quad(patch),
+            depth_query_quad_fingerprint(patch),
+        )
+    } else {
+        (
+            DepthQuerySurfaceShape::Triangle(triangle),
+            depth_query_triangle_fingerprint(triangle),
+        )
+    };
+    DepthQuerySurfaceCandidate {
+        key,
+        distance,
+        shape,
+        fingerprint,
+    }
+}
+
+fn extend_depth_query_surface_candidates(
+    candidates: &mut Vec<DepthQuerySurfaceCandidate>,
+    hit: &XrDepthMeshQueryHit,
+) {
+    candidates.push(depth_query_surface_candidate(
+        hit.key,
+        hit.distance,
+        hit.from_planar_patch,
+        hit.triangle,
+        hit.patch,
+    ));
+    candidates.extend(hit.additional_hits.iter().map(|extra| {
+        depth_query_surface_candidate(
+            hit.key,
+            extra.distance,
+            extra.from_planar_patch,
+            extra.triangle,
+            extra.patch,
+        )
+    }));
+}
+
 fn build_depth_query_surface_targets(
     results: &[XrDepthMeshQueryResult],
 ) -> Vec<DepthQuerySurfaceTarget> {
-    let mut hits = results
-        .iter()
-        .filter_map(|result| match result {
-            XrDepthMeshQueryResult::Hit(hit) => Some(hit),
-            XrDepthMeshQueryResult::Miss { .. } => None,
-        })
-        .collect::<Vec<_>>();
+    let mut hits = Vec::new();
+    for result in results {
+        if let XrDepthMeshQueryResult::Hit(hit) = result {
+            extend_depth_query_surface_candidates(&mut hits, hit);
+        }
+    }
     hits.sort_by(|a, b| {
-        b.from_planar_patch
-            .cmp(&a.from_planar_patch)
+        matches!(b.shape, DepthQuerySurfaceShape::Quad(_))
+            .cmp(&matches!(a.shape, DepthQuerySurfaceShape::Quad(_)))
             .then_with(|| {
                 a.distance
                     .partial_cmp(&b.distance)
@@ -454,23 +660,12 @@ fn build_depth_query_surface_targets(
     let mut seen = HashSet::new();
     let mut targets = Vec::with_capacity(XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE);
     for hit in hits {
-        let (shape, fingerprint) = if hit.from_planar_patch && !depth_query_patch_is_degenerate(hit.patch) {
-            (
-                DepthQuerySurfaceShape::Quad(hit.patch),
-                depth_query_quad_fingerprint(hit.patch),
-            )
-        } else {
-            (
-                DepthQuerySurfaceShape::Triangle(hit.triangle),
-                depth_query_triangle_fingerprint(hit.triangle),
-            )
-        };
-        if !seen.insert(fingerprint) {
+        if !seen.insert(hit.fingerprint) {
             continue;
         }
         targets.push(DepthQuerySurfaceTarget {
-            shape,
-            fingerprint,
+            shape: hit.shape,
+            fingerprint: hit.fingerprint,
         });
         if targets.len() >= XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE {
             break;
@@ -816,6 +1011,9 @@ pub struct XrScene {
     #[redraw]
     #[live]
     draw_depth_mesh: DrawDepthMeshBasic,
+    #[redraw]
+    #[live]
+    draw_passthrough_quad: DrawXrPassthroughQuad,
     #[rust]
     scene: Option<RapierScene>,
     #[rust]
@@ -830,11 +1028,303 @@ pub struct XrScene {
     depth_query_retained_hits: HashMap<u64, RetainedDepthQueryHit>,
     #[rust]
     depth_debug_mode: XrDepthDebugMode,
+    #[rust]
+    passthrough_camera_choice: Option<XrPassthroughCameraChoice>,
+    #[rust]
+    passthrough_camera_textures: Option<XrPassthroughCameraTextures>,
+    #[rust]
+    passthrough_camera_video: VideoYuvMetadata,
+    #[rust]
+    passthrough_camera_permission: Option<PermissionStatus>,
+    #[rust]
+    passthrough_camera_source_size: Vec2f,
+    #[rust]
+    passthrough_camera_playback_requested: bool,
+    #[rust]
+    passthrough_camera_failed: bool,
+    #[rust]
+    passthrough_camera_has_frame: bool,
+    #[rust]
+    passthrough_camera_quad: Option<Geometry>,
+    #[rust]
+    passthrough_quad_placement: Option<XrPassthroughQuadPlacement>,
 }
 
 impl XrScene {
+    fn current_passthrough_quad_placement(
+        &self,
+        state: &XrState,
+    ) -> (XrPassthroughQuadPlacement, f32, f32) {
+        let source_size = self.passthrough_camera_source_size;
+        let aspect = if source_size.y > 1.0 {
+            source_size.x / source_size.y
+        } else {
+            4.0 / 3.0
+        };
+        let half_height = XR_PASSTHROUGH_QUAD_HEIGHT * 0.5;
+        let half_width = half_height * aspect;
+
+        let head = state.head_pose.position;
+        let forward = (state.vec_in_head_space(vec3(0.0, 0.0, -1.0)) - head).normalize();
+        let center = head
+            + forward * XR_PASSTHROUGH_QUAD_DISTANCE
+            + vec3f(0.0, XR_PASSTHROUGH_QUAD_WORLD_OFFSET_Y, 0.0);
+
+        let to_head = (head - center).normalize();
+        let world_up = vec3f(0.0, 1.0, 0.0);
+        let mut right = Vec3f::cross(world_up, to_head);
+        if right.length() <= 1.0e-4 {
+            right = vec3f(1.0, 0.0, 0.0);
+        } else {
+            right = right.normalize();
+        }
+        let up = Vec3f::cross(to_head, right).normalize();
+        (
+            XrPassthroughQuadPlacement {
+                center,
+                right,
+                up,
+                normal: to_head,
+            },
+            half_width,
+            half_height,
+        )
+    }
+
     fn depth_debug_enabled(&self) -> bool {
-        self.depth_debug_mode == XrDepthDebugMode::Mesh
+        let _ = self.depth_debug_mode;
+        false
+    }
+
+    fn passthrough_debug_enabled(&self) -> bool {
+        let _ = self.depth_debug_mode;
+        true
+    }
+
+    fn passthrough_video_id() -> LiveId {
+        live_id!(xr_passthrough_camera)
+    }
+
+    fn pick_passthrough_camera_choice(ev: &VideoInputsEvent) -> Option<XrPassthroughCameraChoice> {
+        fn better(a: &makepad_widgets::makepad_platform::video::VideoFormat, b: &makepad_widgets::makepad_platform::video::VideoFormat) -> bool {
+            let a_is_preferred_square = a.width == 1280 && a.height == 1280;
+            let b_is_preferred_square = b.width == 1280 && b.height == 1280;
+            if a_is_preferred_square != b_is_preferred_square {
+                return a_is_preferred_square;
+            }
+
+            let a_fits_cap = a.width <= 1920 && a.height <= 1920;
+            let b_fits_cap = b.width <= 1920 && b.height <= 1920;
+            if a_fits_cap != b_fits_cap {
+                return a_fits_cap;
+            }
+
+            let a_is_square = a.width == a.height;
+            let b_is_square = b.width == b.height;
+            if a_is_square != b_is_square {
+                return a_is_square;
+            }
+            let a_pixels = a.width * a.height;
+            let b_pixels = b.width * b.height;
+            if a_pixels != b_pixels {
+                return a_pixels > b_pixels;
+            }
+            a.frame_rate.unwrap_or(0.0) > b.frame_rate.unwrap_or(0.0)
+        }
+
+        let desc = ev
+            .descs
+            .iter()
+            .find(|desc| desc.name == "Back Camera")
+            .or_else(|| ev.descs.iter().find(|desc| desc.name == "External Camera"))
+            .or_else(|| ev.descs.first())?;
+
+        let mut best = None;
+        for format in &desc.formats {
+            if format.pixel_format != VideoPixelFormat::YUV420 {
+                continue;
+            }
+            if best.as_ref().is_none_or(|current| better(format, current)) {
+                best = Some(*format);
+            }
+        }
+
+        let format = best?;
+        Some(XrPassthroughCameraChoice {
+            input_id: desc.input_id,
+            format_id: format.format_id,
+            width: format.width,
+            height: format.height,
+        })
+    }
+
+    fn reset_passthrough_camera_state(&mut self) {
+        self.passthrough_camera_playback_requested = false;
+        self.passthrough_camera_failed = false;
+        self.passthrough_camera_textures = None;
+        self.passthrough_camera_video = VideoYuvMetadata::disabled();
+        self.passthrough_camera_has_frame = false;
+        self.passthrough_camera_quad = None;
+        self.passthrough_quad_placement = None;
+    }
+
+    fn stop_passthrough_camera(&mut self, cx: &mut Cx) {
+        cx.cancel_pending_camera_playback(Self::passthrough_video_id());
+        if self.passthrough_camera_playback_requested || self.passthrough_camera_textures.is_some()
+        {
+            cx.cleanup_video_playback_resources(Self::passthrough_video_id());
+        }
+        self.reset_passthrough_camera_state();
+    }
+
+    fn sync_passthrough_camera(&mut self, cx: &mut Cx) {
+        if !self.passthrough_debug_enabled() {
+            self.stop_passthrough_camera(cx);
+            return;
+        }
+
+        if matches!(
+            self.passthrough_camera_permission,
+            Some(PermissionStatus::DeniedCanRetry) | Some(PermissionStatus::DeniedPermanent)
+        ) {
+            crate::warning!(
+                "XR passthrough camera: sync blocked by permission state {:?}",
+                self.passthrough_camera_permission
+            );
+            return;
+        }
+
+        let Some(choice) = self.passthrough_camera_choice.clone() else {
+            crate::warning!("XR passthrough camera: sync waiting for camera choice");
+            return;
+        };
+
+        self.passthrough_camera_source_size = vec2f(choice.width as f32, choice.height as f32);
+        if self.passthrough_camera_textures.is_none() {
+            self.passthrough_camera_textures = Some(XrPassthroughCameraTextures {
+                camera: Texture::new_with_format(cx, TextureFormat::VideoExternal),
+                tex_y: None,
+                tex_u: None,
+                tex_v: None,
+            });
+        }
+        if self.passthrough_camera_failed {
+            return;
+        }
+        if self.passthrough_camera_playback_requested {
+            return;
+        }
+
+        crate::warning!(
+            "XR passthrough camera: requesting playback input_id={} format_id={} size={}x{} mode={:?}",
+            choice.input_id.0,
+            choice.format_id.0,
+            choice.width,
+            choice.height,
+            self.depth_debug_mode,
+        );
+        cx.prepare_headset_camera_playback(
+            Self::passthrough_video_id(),
+            VideoSource::Camera(choice.input_id, choice.format_id),
+            CameraPreviewMode::Texture,
+            0,
+            self.passthrough_camera_textures
+                .as_ref()
+                .map(|textures| textures.camera.texture_id())
+                .unwrap_or_default(),
+            false,
+            false,
+        );
+        self.passthrough_camera_playback_requested = true;
+    }
+
+    fn upsert_passthrough_quad_geometry(&mut self, cx: &mut Cx2d, state: &XrState) -> Option<GeometryId> {
+        let (placement, half_width, half_height) = self.current_passthrough_quad_placement(state);
+
+        let corners = [
+            placement.center - placement.right * half_width + placement.up * half_height,
+            placement.center + placement.right * half_width + placement.up * half_height,
+            placement.center + placement.right * half_width - placement.up * half_height,
+            placement.center - placement.right * half_width - placement.up * half_height,
+        ];
+
+        let tangent = [placement.right.x, placement.right.y, placement.right.z, 1.0];
+        let color = [1.0, 1.0, 1.0, 1.0];
+        let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let mut vertices = Vec::with_capacity(4 * 16);
+        for (corner, uv) in corners.iter().zip(uvs.iter()) {
+            vertices.extend_from_slice(&[
+                corner.x,
+                corner.y,
+                corner.z,
+                placement.normal.x,
+                placement.normal.y,
+                placement.normal.z,
+                uv[0],
+                uv[1],
+                color[0],
+                color[1],
+                color[2],
+                color[3],
+                tangent[0],
+                tangent[1],
+                tangent[2],
+                tangent[3],
+            ]);
+        }
+        let indices = vec![0, 1, 2, 2, 3, 0, 0, 2, 1, 0, 3, 2];
+
+        let geometry = self
+            .passthrough_camera_quad
+            .get_or_insert_with(|| Geometry::new(cx.cx.cx));
+        geometry.update(cx.cx.cx, indices, vertices);
+        Some(geometry.geometry_id())
+    }
+
+    fn draw_passthrough_camera_quad(&mut self, cx: &mut Cx2d, state: &XrState) {
+        if !self.passthrough_debug_enabled() {
+            return;
+        }
+        let Some(textures) = self.passthrough_camera_textures.clone() else {
+            return;
+        };
+        let Some(geometry_id) = self.upsert_passthrough_quad_geometry(cx, state) else {
+            return;
+        };
+
+        self.draw_passthrough_quad.draw_vars.options.depth_write = true;
+        self.draw_passthrough_quad.source_size = self.passthrough_camera_source_size;
+        self.draw_passthrough_quad.camera_enabled = if self.passthrough_camera_has_frame {
+            1.0
+        } else {
+            0.0
+        };
+        self.draw_passthrough_quad.rotation_steps = self.passthrough_camera_video.rotation_steps;
+        self.draw_passthrough_quad.biplanar = self.passthrough_camera_video.shader_biplanar();
+        self.draw_passthrough_quad.yuv_enabled = if self.passthrough_camera_has_frame {
+            self.passthrough_camera_video.shader_enabled()
+        } else {
+            -1.0
+        };
+        self.draw_passthrough_quad
+            .draw_vars
+            .set_texture(0, &textures.camera);
+        self.draw_passthrough_quad.draw_geometry(cx, geometry_id);
+    }
+
+    fn draw_passthrough_probe_plate(&mut self, cx: &mut Cx2d, state: &XrState) {
+        let (placement, half_width, half_height) = self.current_passthrough_quad_placement(state);
+        let pose = Pose::new(
+            Quat::look_rotation(-placement.normal, placement.up),
+            placement.center - placement.normal * 0.0015,
+        );
+        self.draw_pose_box(
+            cx,
+            pose,
+            vec3(half_width, half_height, 0.001),
+            vec4(0.20, 0.55, 0.95, 1.0),
+            1.0,
+        );
     }
 
     fn draw_pose_box(
@@ -1282,24 +1772,13 @@ impl XrScene {
     }
 
     fn reset_scene(&mut self, cx: &mut Cx, state: &XrState) {
-        self.depth_debug_mode = self.depth_debug_mode.next();
-        if !self.depth_debug_enabled() {
-            self.clear_depth_surface_mesh();
-        }
-        if XR_ENABLE_DEPTH_QUERY_PHYSICS {
-            if let Some(scene) = &mut self.scene {
-                scene.clear_depth_query_surfaces();
-            }
-            self.depth_query_retained_hits.clear();
-            if let Some(scene) = &self.scene {
-                let depth_mesh = cx.xr_depth_mesh();
-                for index in 0..scene.cubes.len() {
-                    depth_mesh.clear_query(RapierScene::depth_query_key(index));
-                }
-            }
-        }
+        self.depth_debug_mode = XrDepthDebugMode::Passthrough;
+        self.passthrough_quad_placement = None;
+        self.passthrough_camera_quad = None;
+        self.clear_depth_surface_mesh();
         let _ = self.scene.take();
-        self.ensure_scene(state);
+        self.sync_passthrough_camera(cx);
+        let _ = state;
     }
 
     fn sync_hands(&mut self, state: &XrState) {
@@ -1324,6 +1803,52 @@ impl XrScene {
         RapierScene::sync_hand_bodies(right_hand, &right, bodies, colliders);
     }
 
+    fn resolve_depth_query_result(
+        retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
+        key: u64,
+        latest_result: Option<XrDepthMeshQueryResult>,
+        expired_retained_keys: &mut Vec<u64>,
+    ) -> Option<XrDepthMeshQueryResult> {
+        match latest_result {
+            Some(XrDepthMeshQueryResult::Hit(hit)) => {
+                retained_hits.insert(key, RetainedDepthQueryHit::new(hit.clone()));
+                Some(XrDepthMeshQueryResult::Hit(hit))
+            }
+            Some(XrDepthMeshQueryResult::Miss { .. }) | None => retained_hits
+                .get_mut(&key)
+                .and_then(|retained| retained.reuse_result())
+                .or_else(|| {
+                    if retained_hits.contains_key(&key) {
+                        expired_retained_keys.push(key);
+                    }
+                    None
+                }),
+        }
+    }
+
+    fn build_depth_query_request(
+        key: u64,
+        pose: Pose,
+        velocity: Vec3f,
+        half_extents: Vec3f,
+    ) -> XrDepthMeshQuery {
+        let mut lookahead = velocity.scale(XR_DEPTH_QUERY_LOOKAHEAD_SECONDS);
+        let lookahead_length = lookahead.length();
+        if lookahead_length > XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE && lookahead_length > 1.0e-6 {
+            lookahead =
+                lookahead.scale(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / lookahead_length);
+        }
+        XrDepthMeshQuery {
+            key,
+            center: pose.position,
+            predicted_center: pose.position + lookahead,
+            velocity,
+            radius: half_extents.length(),
+            max_distance: XR_DEPTH_QUERY_MAX_DISTANCE,
+            include_planar_patches: false,
+        }
+    }
+
     fn sync_depth_query_surfaces(&mut self, cx: &mut Cx) {
         if !XR_ENABLE_DEPTH_QUERY_PHYSICS {
             return;
@@ -1336,6 +1861,7 @@ impl XrScene {
         let mut query_requests = Vec::new();
         let mut query_results = Vec::new();
         let mut expired_retained_keys = Vec::new();
+        let retained_hits = &mut self.depth_query_retained_hits;
 
         for (index, cube) in scene.cubes.iter().enumerate() {
             let key = RapierScene::depth_query_key(index);
@@ -1344,27 +1870,13 @@ impl XrScene {
                 continue;
             };
 
-            match depth_mesh.latest_query_result(key) {
-                Some(XrDepthMeshQueryResult::Hit(hit)) => {
-                    self.depth_query_retained_hits.insert(
-                        key,
-                        RetainedDepthQueryHit {
-                            hit: hit.clone(),
-                            misses_left: XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES,
-                        },
-                    );
-                    query_results.push(XrDepthMeshQueryResult::Hit(hit));
-                }
-                Some(XrDepthMeshQueryResult::Miss { .. }) | None => {
-                    if let Some(retained) = self.depth_query_retained_hits.get_mut(&key) {
-                        if retained.misses_left > 0 {
-                            retained.misses_left -= 1;
-                            query_results.push(XrDepthMeshQueryResult::Hit(retained.hit.clone()));
-                        } else {
-                            expired_retained_keys.push(key);
-                        }
-                    }
-                }
+            if let Some(result) = Self::resolve_depth_query_result(
+                retained_hits,
+                key,
+                depth_mesh.latest_query_result(key),
+                &mut expired_retained_keys,
+            ) {
+                query_results.push(result);
             }
 
             if body.is_sleeping() {
@@ -1374,35 +1886,20 @@ impl XrScene {
             let pose = makepad_pose(body.position());
             let linvel = body.linvel();
             let velocity = vec3f(linvel.x, linvel.y, linvel.z);
-            let mut lookahead = velocity.scale(XR_DEPTH_QUERY_LOOKAHEAD_SECONDS);
-            let lookahead_length = lookahead.length();
-            if lookahead_length > XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE
-                && lookahead_length > 1.0e-6
-            {
-                lookahead = lookahead.scale(
-                    XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / lookahead_length,
-                );
-            }
-            let radius = cube
-                .half_extents
-                .length();
-            query_requests.push(XrDepthMeshQuery {
+            query_requests.push(Self::build_depth_query_request(
                 key,
-                center: pose.position,
-                predicted_center: pose.position + lookahead,
+                pose,
                 velocity,
-                radius,
-                max_distance: XR_DEPTH_QUERY_MAX_DISTANCE,
-                include_planar_patches: false,
-            });
+                cube.half_extents,
+            ));
         }
 
         for key in clear_keys {
             depth_mesh.clear_query(key);
-            self.depth_query_retained_hits.remove(&key);
+            retained_hits.remove(&key);
         }
         for key in expired_retained_keys {
-            self.depth_query_retained_hits.remove(&key);
+            retained_hits.remove(&key);
         }
 
         for query in query_requests {
@@ -1561,26 +2058,73 @@ fn pack_depth_mesh_vertices(chunk: &XrDepthMeshChunk) -> Vec<f32> {
 
 impl Widget for XrScene {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if let Event::XrUpdate(e) = event {
-            let scene_reset = if e.clicked_menu() || e.menu_pressed() {
-                self.reset_scene(cx, &e.state);
-                true
-            } else {
-                self.ensure_scene(&e.state)
-            };
-            self.sync_hands(&e.state);
-            if !scene_reset {
-                self.sync_depth_query_surfaces(cx);
-                if let Some(scene) = &mut self.scene {
-                    scene.step();
+        match event {
+            Event::XrUpdate(e) => {
+                if e.clicked_menu() || e.menu_pressed() {
+                    self.reset_scene(cx, &e.state);
                 }
+                self.sync_passthrough_camera(cx);
+                self.redraw(cx);
             }
-            if scene_reset {
-                if let Some(scene) = &self.scene {
-                    log!("XR wall scene reset with {} bodies", scene.bodies.len());
+            Event::PermissionResult(result) if result.permission == Permission::HeadsetCamera => {
+                self.passthrough_camera_permission = Some(result.status);
+                self.sync_passthrough_camera(cx);
+                self.redraw(cx);
+            }
+            Event::VideoInputs(ev) => {
+                self.passthrough_camera_failed = false;
+                self.passthrough_camera_choice = Self::pick_passthrough_camera_choice(ev);
+                if let Some(choice) = &self.passthrough_camera_choice {
+                    crate::warning!(
+                        "XR passthrough camera: selected input_id={} format_id={} size={}x{}",
+                        choice.input_id.0,
+                        choice.format_id.0,
+                        choice.width,
+                        choice.height,
+                    );
+                } else {
+                    crate::warning!("XR passthrough camera: no suitable camera choice found");
                 }
+                self.sync_passthrough_camera(cx);
+                self.redraw(cx);
             }
-            self.redraw(cx);
+            Event::VideoYuvTexturesReady(ev) if ev.video_id == Self::passthrough_video_id() => {
+                if let Some(textures) = self.passthrough_camera_textures.as_mut() {
+                    textures.tex_y = Some(ev.tex_y.clone());
+                    textures.tex_u = Some(ev.tex_u.clone());
+                    textures.tex_v = Some(ev.tex_v.clone());
+                }
+                self.redraw(cx);
+            }
+            Event::VideoTextureUpdated(ev) if ev.video_id == Self::passthrough_video_id() => {
+                self.passthrough_camera_video = ev.yuv;
+                self.passthrough_camera_has_frame = true;
+                self.redraw(cx);
+            }
+            Event::VideoPlaybackPrepared(ev) if ev.video_id == Self::passthrough_video_id() => {
+                crate::warning!(
+                    "XR passthrough camera: playback prepared size={}x{}",
+                    ev.video_width,
+                    ev.video_height,
+                );
+                self.passthrough_camera_source_size =
+                    vec2f(ev.video_width as f32, ev.video_height as f32);
+                self.redraw(cx);
+            }
+            Event::VideoPlaybackResourcesReleased(ev)
+                if ev.video_id == Self::passthrough_video_id() =>
+            {
+                self.reset_passthrough_camera_state();
+                self.redraw(cx);
+            }
+            Event::VideoDecodingError(ev) if ev.video_id == Self::passthrough_video_id() => {
+                crate::warning!("XR passthrough camera error: {}", ev.error);
+                self.passthrough_camera_playback_requested = false;
+                self.passthrough_camera_failed = true;
+                self.passthrough_camera_has_frame = false;
+                self.redraw(cx);
+            }
+            _ => {}
         }
     }
 
@@ -1594,29 +2138,7 @@ impl Widget for XrScene {
         };
 
         let cx = &mut Cx2d::new(cx.cx);
-        self.ensure_scene(state);
-        self.sync_depth_surface_mesh(cx);
-        let (left_physics, right_physics) = if XR_RENDER_HAND_GEOMETRY && XR_ENABLE_HAND_PHYSICS {
-            if let Some(scene) = self.scene.as_ref() {
-                (
-                    Some(Self::collect_live_hand_colliders(scene, &scene.left_hand)),
-                    Some(Self::collect_live_hand_colliders(scene, &scene.right_hand)),
-                )
-            } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        };
-        self.prepare_pbr(cx);
-        if XR_RENDER_HAND_GEOMETRY {
-            self.draw_hand(cx, &state.left_hand, left_physics.as_deref(), true);
-            self.draw_hand(cx, &state.right_hand, right_physics.as_deref(), false);
-        }
-        self.draw_platform(cx);
-        self.draw_bodies(cx);
-        self.prepare_depth_mesh(cx);
-        self.draw_depth_surface_mesh(cx);
+        self.draw_passthrough_camera_quad(cx, state);
 
         DrawStep::done()
     }
@@ -1631,9 +2153,15 @@ pub struct App {
     #[rust]
     scene_access: Option<PermissionStatus>,
     #[rust]
+    headset_camera: Option<PermissionStatus>,
+    #[rust]
     pending_scene_access_check: Option<i32>,
     #[rust]
+    pending_headset_camera_check: Option<i32>,
+    #[rust]
     pending_scene_access_request: Option<i32>,
+    #[rust]
+    pending_headset_camera_request: Option<i32>,
     #[rust]
     ui_refresh_next_frame: Option<NextFrame>,
     #[rust]
@@ -1648,6 +2176,23 @@ impl App {
     fn scene_access_granted(&self) -> bool {
         !Self::is_android_preflight()
             || matches!(self.scene_access, Some(PermissionStatus::Granted))
+    }
+
+    fn headset_camera_granted(&self) -> bool {
+        !Self::is_android_preflight()
+            || matches!(self.headset_camera, Some(PermissionStatus::Granted))
+    }
+
+    fn xr_permissions_ready(&self) -> bool {
+        self.scene_access_granted() && self.headset_camera_granted()
+    }
+
+    fn permission_checks_pending(&self) -> bool {
+        self.pending_scene_access_check.is_some() || self.pending_headset_camera_check.is_some()
+    }
+
+    fn permission_requests_pending(&self) -> bool {
+        self.pending_scene_access_request.is_some() || self.pending_headset_camera_request.is_some()
     }
 
     fn phase_variant(&self) -> LiveId {
@@ -1671,58 +2216,46 @@ impl App {
     }
 
     fn allow_button_text(&self) -> &'static str {
-        if self.pending_scene_access_check.is_some() {
-            "Checking Quest Scene Access..."
-        } else if self.pending_scene_access_request.is_some() {
-            "Waiting for Quest Permission..."
-        } else if matches!(self.scene_access, Some(PermissionStatus::Granted)) {
-            "Re-check Quest Scene Access"
+        if self.permission_checks_pending() {
+            "Checking Quest Permissions..."
+        } else if self.permission_requests_pending() {
+            "Waiting for Quest Permissions..."
+        } else if self.xr_permissions_ready() {
+            "Re-check Quest Permissions"
         } else {
-            "Allow Quest Scene Access"
+            "Allow Quest Permissions"
         }
     }
 
     fn detail_text(&self) -> &'static str {
         if !Self::is_android_preflight() {
             "This build can start XR directly from the splash screen."
+        } else if self.xr_permissions_ready() {
+            "Quest scene access and headset camera are granted. Start XR when you are ready."
+        } else if !self.scene_access_granted() {
+            "Allow Quest scene access before starting XR. This unlocks environment depth and passthrough occlusion."
+        } else if !self.headset_camera_granted() {
+            "Allow Quest headset camera access before starting XR. This unlocks the passthrough texture overlay."
         } else {
-            match self.scene_access {
-                Some(PermissionStatus::Granted) => {
-                    "Quest scene access is granted. Start XR when you are ready."
-                }
-                Some(PermissionStatus::DeniedCanRetry) => {
-                    "Quest scene access was denied. Use the allow button to ask again."
-                }
-                Some(PermissionStatus::DeniedPermanent) => {
-                    "Quest scene access was denied again. Retry is still available here, but Android may require system settings before the dialog reappears."
-                }
-                Some(PermissionStatus::NotDetermined) | None => {
-                    "Allow Quest scene access before starting XR. This unlocks environment depth and passthrough occlusion."
-                }
-            }
+            "Allow Quest permissions before starting XR."
         }
     }
 
     fn status_text(&self) -> &'static str {
-        if self.pending_scene_access_check.is_some() {
+        if self.permission_checks_pending() {
             "Checking current Quest permission status."
-        } else if self.pending_scene_access_request.is_some() {
+        } else if self.permission_requests_pending() {
             "Approve the Quest permission dialog to continue."
         } else if !Self::is_android_preflight() {
             "XR is ready to launch from this splash screen."
+        } else if self.xr_permissions_ready() {
+            "Quest scene access and headset camera granted."
+        } else if !self.scene_access_granted() {
+            "Quest scene access has not been granted yet."
+        } else if !self.headset_camera_granted() {
+            "Quest headset camera permission has not been granted yet."
         } else {
-            match self.scene_access {
-                Some(PermissionStatus::Granted) => "Quest scene access granted.",
-                Some(PermissionStatus::DeniedCanRetry) => {
-                    "Quest scene access denied. You can request it again."
-                }
-                Some(PermissionStatus::DeniedPermanent) => {
-                    "Quest scene access denied. Retry may require Android settings."
-                }
-                Some(PermissionStatus::NotDetermined) | None => {
-                    "Quest scene access has not been granted yet."
-                }
-            }
+            "Quest permissions are incomplete."
         }
     }
 
@@ -1742,8 +2275,8 @@ impl App {
         allow_button.set_enabled(
             cx,
             Self::is_android_preflight()
-                && self.pending_scene_access_check.is_none()
-                && self.pending_scene_access_request.is_none(),
+                && !self.permission_checks_pending()
+                && !self.permission_requests_pending(),
         );
         self.ui
             .widget(cx, ids!(allow_button))
@@ -1751,7 +2284,7 @@ impl App {
 
         self.ui
             .button(cx, ids!(start_xr_button))
-            .set_enabled(cx, self.scene_access_granted());
+            .set_enabled(cx, self.xr_permissions_ready());
     }
 
     fn begin_scene_access_check(&mut self, cx: &mut Cx) {
@@ -1762,6 +2295,17 @@ impl App {
             return;
         }
         self.pending_scene_access_check = Some(cx.check_permission(Permission::SceneAccess));
+        self.schedule_ui_refresh(cx);
+    }
+
+    fn begin_headset_camera_check(&mut self, cx: &mut Cx) {
+        if self.phase != AppPhase::Preflight
+            || !Self::is_android_preflight()
+            || self.pending_headset_camera_check.is_some()
+        {
+            return;
+        }
+        self.pending_headset_camera_check = Some(cx.check_permission(Permission::HeadsetCamera));
         self.schedule_ui_refresh(cx);
     }
 
@@ -1777,6 +2321,33 @@ impl App {
         self.schedule_ui_refresh(cx);
     }
 
+    fn request_headset_camera(&mut self, cx: &mut Cx) {
+        if self.phase != AppPhase::Preflight
+            || !Self::is_android_preflight()
+            || self.pending_headset_camera_check.is_some()
+            || self.pending_headset_camera_request.is_some()
+        {
+            return;
+        }
+        self.pending_headset_camera_request = Some(cx.request_permission(Permission::HeadsetCamera));
+        self.schedule_ui_refresh(cx);
+    }
+
+    fn begin_preflight_permission_checks(&mut self, cx: &mut Cx) {
+        self.begin_scene_access_check(cx);
+        self.begin_headset_camera_check(cx);
+    }
+
+    fn request_next_missing_permission(&mut self, cx: &mut Cx) {
+        if !self.scene_access_granted() {
+            self.request_scene_access(cx);
+        } else if !self.headset_camera_granted() {
+            self.request_headset_camera(cx);
+        } else {
+            self.begin_preflight_permission_checks(cx);
+        }
+    }
+
     fn begin_xr_runtime(&mut self, cx: &mut Cx) {
         if self.phase == AppPhase::XrRuntime {
             return;
@@ -1787,7 +2358,7 @@ impl App {
     }
 
     fn maybe_start_xr_on_ready(&mut self, cx: &mut Cx) -> bool {
-        if self.phase != AppPhase::Preflight || !self.scene_access_granted() {
+        if self.phase != AppPhase::Preflight || !self.xr_permissions_ready() {
             return false;
         }
         self.begin_xr_runtime(cx);
@@ -1800,20 +2371,21 @@ impl MatchEvent for App {
         self.phase = AppPhase::Preflight;
         if !Self::is_android_preflight() {
             self.scene_access = Some(PermissionStatus::Granted);
+            self.headset_camera = Some(PermissionStatus::Granted);
             self.maybe_start_xr_on_ready(cx);
             return;
         }
         self.apply_phase(cx);
         self.schedule_ui_refresh(cx);
-        self.begin_scene_access_check(cx);
+        self.begin_preflight_permission_checks(cx);
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(cx, ids!(allow_button)).clicked(actions) {
-            self.request_scene_access(cx);
+            self.request_next_missing_permission(cx);
         }
 
-        if self.ui.button(cx, ids!(start_xr_button)).clicked(actions) && self.scene_access_granted()
+        if self.ui.button(cx, ids!(start_xr_button)).clicked(actions) && self.xr_permissions_ready()
         {
             self.begin_xr_runtime(cx);
         }
@@ -1849,6 +2421,7 @@ impl AppMain for App {
                 }
             }
             Event::PermissionResult(result) if result.permission == Permission::SceneAccess => {
+                let was_request = self.pending_scene_access_request == Some(result.request_id);
                 if self.pending_scene_access_check == Some(result.request_id) {
                     self.pending_scene_access_check = None;
                 } else if self.pending_scene_access_request == Some(result.request_id) {
@@ -1857,16 +2430,40 @@ impl AppMain for App {
                     return;
                 }
                 self.scene_access = Some(result.status);
-                if !self.maybe_start_xr_on_ready(cx) {
+                if was_request
+                    && result.status == PermissionStatus::Granted
+                    && !self.headset_camera_granted()
+                {
+                    self.request_next_missing_permission(cx);
+                } else if !self.maybe_start_xr_on_ready(cx) {
+                    self.schedule_ui_refresh(cx);
+                }
+            }
+            Event::PermissionResult(result) if result.permission == Permission::HeadsetCamera => {
+                let was_request = self.pending_headset_camera_request == Some(result.request_id);
+                if self.pending_headset_camera_check == Some(result.request_id) {
+                    self.pending_headset_camera_check = None;
+                } else if self.pending_headset_camera_request == Some(result.request_id) {
+                    self.pending_headset_camera_request = None;
+                } else {
+                    return;
+                }
+                self.headset_camera = Some(result.status);
+                if was_request
+                    && result.status == PermissionStatus::Granted
+                    && !self.scene_access_granted()
+                {
+                    self.request_next_missing_permission(cx);
+                } else if !self.maybe_start_xr_on_ready(cx) {
                     self.schedule_ui_refresh(cx);
                 }
             }
             Event::Resume => {
                 if self.phase == AppPhase::Preflight
                     && Self::is_android_preflight()
-                    && self.pending_scene_access_request.is_none()
+                    && !self.permission_requests_pending()
                 {
-                    self.begin_scene_access_check(cx);
+                    self.begin_preflight_permission_checks(cx);
                 }
             }
             _ => {}

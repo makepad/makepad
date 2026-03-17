@@ -1048,11 +1048,60 @@ impl Cx {
         autoplay: bool,
         should_loop: bool,
     ) {
+        self.prepare_video_playback_with_permission(
+            video_id,
+            source,
+            camera_preview_mode,
+            external_texture_id,
+            texture_id,
+            autoplay,
+            should_loop,
+            crate::permission::Permission::Camera,
+        );
+    }
+
+    pub fn prepare_headset_camera_playback(
+        &mut self,
+        video_id: LiveId,
+        source: VideoSource,
+        camera_preview_mode: CameraPreviewMode,
+        external_texture_id: u32,
+        texture_id: TextureId,
+        autoplay: bool,
+        should_loop: bool,
+    ) {
+        self.prepare_video_playback_with_permission(
+            video_id,
+            source,
+            camera_preview_mode,
+            external_texture_id,
+            texture_id,
+            autoplay,
+            should_loop,
+            crate::permission::Permission::HeadsetCamera,
+        );
+    }
+
+    fn prepare_video_playback_with_permission(
+        &mut self,
+        video_id: LiveId,
+        source: VideoSource,
+        camera_preview_mode: CameraPreviewMode,
+        external_texture_id: u32,
+        texture_id: TextureId,
+        autoplay: bool,
+        should_loop: bool,
+        permission: crate::permission::Permission,
+    ) {
         if let VideoSource::Camera(..) = &source {
-            // Auto-request camera permission before opening device
-            let _request_id = self.request_permission(crate::permission::Permission::Camera);
+            crate::warning!(
+                "Cx camera playback: queueing pending playback video_id={} permission={:?}",
+                video_id.0,
+                permission,
+            );
             self.pending_camera_playbacks
                 .push(crate::cx::PendingCameraPlayback {
+                    permission,
                     video_id,
                     source,
                     camera_preview_mode,
@@ -1061,6 +1110,7 @@ impl Cx {
                     autoplay,
                     should_loop,
                 });
+            let _request_id = self.request_permission(permission);
             return;
         }
         self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
@@ -1078,13 +1128,30 @@ impl Cx {
         &mut self,
         result: &crate::permission::PermissionResult,
     ) {
-        if result.permission != crate::permission::Permission::Camera {
+        if !matches!(
+            result.permission,
+            crate::permission::Permission::Camera | crate::permission::Permission::HeadsetCamera
+        ) {
             return;
         }
         let pending: Vec<_> = self.pending_camera_playbacks.drain(..).collect();
+        crate::warning!(
+            "Cx camera playback: permission result {:?} for {:?} with {} pending",
+            result.status,
+            result.permission,
+            pending.len(),
+        );
         for p in pending {
+            if p.permission != result.permission {
+                self.pending_camera_playbacks.push(p);
+                continue;
+            }
             match result.status {
                 crate::permission::PermissionStatus::Granted => {
+                    crate::warning!(
+                        "Cx camera playback: issuing PrepareVideoPlayback video_id={}",
+                        p.video_id.0,
+                    );
                     self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
                         p.video_id,
                         p.source,
@@ -1099,7 +1166,12 @@ impl Cx {
                     self.call_event_handler(&crate::event::Event::VideoDecodingError(
                         crate::event::VideoDecodingErrorEvent {
                             video_id: p.video_id,
-                            error: "Camera permission denied".to_string(),
+                            error: match p.permission {
+                                crate::permission::Permission::HeadsetCamera => {
+                                    "Headset camera permission denied".to_string()
+                                }
+                                _ => "Camera permission denied".to_string(),
+                            },
                         },
                     ));
                 }
@@ -1150,6 +1222,11 @@ impl Cx {
     pub fn cleanup_video_playback_resources(&mut self, video_id: LiveId) {
         self.platform_ops
             .push(CxOsOp::CleanupVideoPlaybackResources(video_id));
+    }
+
+    pub fn cancel_pending_camera_playback(&mut self, video_id: LiveId) {
+        self.pending_camera_playbacks
+            .retain(|pending| pending.video_id != video_id);
     }
 
     pub fn seek_video_playback(&mut self, video_id: LiveId, position_ms: u64) {

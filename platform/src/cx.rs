@@ -42,6 +42,7 @@ use {
 //pub use makepad_shader_compiler::makepad_math::*;
 
 pub(crate) struct PendingCameraPlayback {
+    pub permission: crate::permission::Permission,
     pub video_id: LiveId,
     pub source: crate::event::VideoSource,
     pub camera_preview_mode: crate::event::video_playback::CameraPreviewMode,
