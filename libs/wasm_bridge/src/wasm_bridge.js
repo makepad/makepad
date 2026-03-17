@@ -472,18 +472,6 @@ export class WasmBridge {
         return WebAssembly.compile(rebuilt_bytes);
     }
 
-    static schedule_deferred_secondary_attach(ensure_secondary_ready) {
-        const schedule = typeof requestAnimationFrame === "function"
-            ? (callback) => requestAnimationFrame(() => requestAnimationFrame(callback))
-            : (callback) => setTimeout(callback, 0);
-        // Wait until after the first paint opportunity before starting the cold-path fetch.
-        schedule(() => {
-            ensure_secondary_ready().catch(error => {
-                console.error(error);
-            });
-        });
-    }
-
     static async attach_secondary_wasm(primary_wasm, secondary_wasm_url, secondary_response_promise, defer_secondary) {
         if (!secondary_wasm_url && !secondary_response_promise) {
             return;
@@ -507,7 +495,11 @@ export class WasmBridge {
         };
         primary_wasm._ensure_secondary_ready = ensure_secondary_ready;
         if (defer_secondary) {
-            this.schedule_deferred_secondary_attach(ensure_secondary_ready);
+            // Keep startup non-blocking, but begin attaching the cold module immediately so
+            // split stubs are not exposed before the secondary is already in flight.
+            ensure_secondary_ready().catch(error => {
+                console.error(error);
+            });
             return;
         }
         await ensure_secondary_ready();
@@ -562,7 +554,6 @@ export class WasmBridge {
                     ? fetch(split_config.split_data_url)
                     : null;
                 const secondary_response_promise = has_secondary
-                    && !defer_secondary
                     ? fetch(split_config.secondary_wasm_url)
                     : null;
                 const checked_wasm_response_promise = fetch(wasm_url).then(response => {

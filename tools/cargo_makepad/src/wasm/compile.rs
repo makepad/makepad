@@ -1277,6 +1277,65 @@ fn collect_rust_files(crate_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn collect_direct_shipping_resources_from_crate(
+    source_crate_name: &str,
+    source_crate_dir: &Path,
+    manifests: &HashMap<String, PathBuf>,
+    use_small_fonts: bool,
+    selected: &mut HashMap<String, SelectedResource>,
+) -> Result<(), String> {
+    for rust_file in collect_rust_files(source_crate_dir) {
+        let Ok(source) = fs::read_to_string(&rust_file) else {
+            continue;
+        };
+        for resource_spec in extract_crate_resource_literals_from_rust_file(&source)? {
+            let Some((logical_path, abs_path, crate_name)) = resolve_resource_spec(
+                &resource_spec,
+                source_crate_dir,
+                source_crate_name,
+                manifests,
+            ) else {
+                println!(
+                    "Warning: unresolved crate_resource path while packaging web app: {}",
+                    resource_spec
+                );
+                continue;
+            };
+            if !abs_path.is_file() {
+                println!(
+                    "Warning: referenced web resource does not exist and will be skipped: {} ({})",
+                    resource_spec,
+                    abs_path.display()
+                );
+                continue;
+            }
+            let logical_path = if use_small_fonts {
+                remapped_small_font_dependency_path(&logical_path)
+                    .unwrap_or(logical_path.as_str())
+                    .to_string()
+            } else {
+                logical_path
+            };
+            let source_path = if use_small_fonts {
+                remapped_small_font_source(&abs_path).unwrap_or(abs_path.clone())
+            } else {
+                abs_path.clone()
+            };
+            add_selected_resource(
+                selected,
+                SelectedResource {
+                    logical_path,
+                    source_path,
+                    crate_name,
+                    direct_reference: true,
+                    reason: "direct_resource".to_string(),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
 fn decode_basic_rust_string_literal(literal: &str) -> Option<String> {
     if let Some((_, hashes)) = raw_string_prefix(literal.as_bytes(), 0) {
         let first_quote = literal.find('"')?;
@@ -1500,57 +1559,23 @@ fn collect_shipping_resources(
     let manifests = build_crate_manifests(build_crate, build_dir);
     let metadata = read_wasm_web_metadata(build_crate)?;
     let full_i18n = config.full_fonts || metadata.full_i18n;
+    let use_small_fonts = config.small_fonts && !full_i18n;
     let mut selected = HashMap::<String, SelectedResource>::new();
-    let build_rust_files = collect_rust_files(&build_crate_dir);
 
-    for rust_file in build_rust_files {
-        let Ok(source) = fs::read_to_string(&rust_file) else {
-            continue;
-        };
-        for resource_spec in extract_crate_resource_literals_from_rust_file(&source)? {
-            let Some((logical_path, abs_path, crate_name)) = resolve_resource_spec(
-                &resource_spec,
-                &build_crate_dir,
-                &build_crate_name,
-                &manifests,
-            ) else {
-                println!(
-                    "Warning: unresolved crate_resource path while packaging web app: {}",
-                    resource_spec
-                );
-                continue;
-            };
-            if !abs_path.is_file() {
-                println!(
-                    "Warning: referenced web resource does not exist and will be skipped: {} ({})",
-                    resource_spec,
-                    abs_path.display()
-                );
-                continue;
-            }
-            let logical_path = if config.small_fonts && !full_i18n {
-                remapped_small_font_dependency_path(&logical_path)
-                    .unwrap_or(logical_path.as_str())
-                    .to_string()
-            } else {
-                logical_path
-            };
-            let source_path = if config.small_fonts && !full_i18n {
-                remapped_small_font_source(&abs_path).unwrap_or(abs_path.clone())
-            } else {
-                abs_path.clone()
-            };
-            add_selected_resource(
-                &mut selected,
-                SelectedResource {
-                    logical_path,
-                    source_path,
-                    crate_name,
-                    direct_reference: true,
-                    reason: "direct_resource".to_string(),
-                },
-            );
-        }
+    let mut source_crates = manifests
+        .iter()
+        .map(|(crate_name, crate_dir)| (crate_name.clone(), crate_dir.clone()))
+        .collect::<Vec<_>>();
+    source_crates.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (crate_name, crate_dir) in source_crates {
+        collect_direct_shipping_resources_from_crate(
+            &crate_name,
+            &crate_dir,
+            &manifests,
+            use_small_fonts,
+            &mut selected,
+        )?;
     }
 
     for preserve in &metadata.preserve {
@@ -1571,14 +1596,14 @@ fn collect_shipping_resources(
             );
             continue;
         }
-        let logical_path = if config.small_fonts && !full_i18n {
+        let logical_path = if use_small_fonts {
             remapped_small_font_dependency_path(&logical_path)
                 .unwrap_or(logical_path.as_str())
                 .to_string()
         } else {
             logical_path
         };
-        let source_path = if config.small_fonts && !full_i18n {
+        let source_path = if use_small_fonts {
             remapped_small_font_source(&abs_path).unwrap_or(abs_path.clone())
         } else {
             abs_path.clone()
@@ -1595,7 +1620,7 @@ fn collect_shipping_resources(
         );
     }
 
-    add_curated_widget_web_resources(&mut selected, &manifests, config.small_fonts && !full_i18n);
+    add_curated_widget_web_resources(&mut selected, &manifests, use_small_fonts);
 
     let mut ordered = selected.into_values().collect::<Vec<_>>();
     ordered.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
@@ -3664,6 +3689,61 @@ mod tests {
         assert_eq!(logical_path, "makepad_widgets/resources/icons/back.svg");
         assert_eq!(abs_path, widgets_dir.join("resources/icons/back.svg"));
         assert_eq!(crate_name, "makepad_widgets");
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn dependency_crate_resources_are_collected_for_packaged_builds() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("makepad-wasm-collect-{unique}"));
+        let app_dir = temp_root.join("app");
+        let dep_dir = temp_root.join("widgets");
+        fs::create_dir_all(app_dir.join("src")).unwrap();
+        fs::create_dir_all(dep_dir.join("src")).unwrap();
+        fs::create_dir_all(dep_dir.join("resources")).unwrap();
+        fs::write(app_dir.join("src/main.rs"), "fn main() {}").unwrap();
+        fs::write(
+            dep_dir.join("src/lib.rs"),
+            r#"
+                fn math_font() {
+                    let _ = crate_resource("self:resources/NewCMMath-Regular.otf");
+                }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            dep_dir.join("resources/NewCMMath-Regular.otf"),
+            b"math-font",
+        )
+        .unwrap();
+
+        let manifests = HashMap::from([
+            ("makepad_example".to_string(), app_dir.clone()),
+            ("makepad_widgets".to_string(), dep_dir.clone()),
+        ]);
+        let mut selected = HashMap::new();
+        collect_direct_shipping_resources_from_crate(
+            "makepad_widgets",
+            &dep_dir,
+            &manifests,
+            false,
+            &mut selected,
+        )
+        .unwrap();
+
+        let selected = selected
+            .get("makepad_widgets/resources/NewCMMath-Regular.otf")
+            .unwrap();
+        assert_eq!(
+            selected.source_path,
+            dep_dir.join("resources/NewCMMath-Regular.otf")
+        );
+        assert_eq!(selected.crate_name, "makepad_widgets");
+        assert!(selected.direct_reference);
 
         let _ = fs::remove_dir_all(temp_root);
     }
