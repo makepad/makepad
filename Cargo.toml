@@ -23,6 +23,7 @@ workspace.members = [
     "examples/text_input",
     "examples/text_selection",
     "examples/counter",
+    "examples/browser",
     "examples/camera",
     "examples/windows_blur",
     "examples/floating_panel",
@@ -54,6 +55,8 @@ workspace.members = [
     "libs/openexr",
     "libs/git",
     "libs/fast_inflate",
+    "libs/xr",
+    "libs/cef",
 ]
 
 workspace.exclude = [
