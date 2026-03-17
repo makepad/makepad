@@ -15,6 +15,43 @@ fn enable_split_pipeline(config: &mut WasmConfig, threshold: Option<usize>) {
     }
 }
 
+fn args_have_profile(args: &[String]) -> bool {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--release" {
+            return true;
+        }
+        if arg == "--profile" {
+            return iter.next().is_some();
+        }
+        if arg.starts_with("--profile=") {
+            return true;
+        }
+    }
+    false
+}
+
+fn apply_ship_defaults(config: &mut WasmConfig, args: &mut Vec<String>) {
+    config.shipping_build = true;
+    enable_strip_pipeline(config);
+    if !config.brotli_explicit {
+        config.brotli = true;
+    }
+    if !config.split_explicit {
+        enable_split_pipeline(config, None);
+    }
+    if !config.small_fonts_explicit {
+        config.small_fonts = true;
+        config.full_fonts = false;
+    }
+    if !config.threads_explicit {
+        config.threads = false;
+    }
+    if !args_have_profile(args) {
+        args.push("--profile=small".to_string());
+    }
+}
+
 fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     if let Some(opt) = v.strip_prefix("--port=") {
         config.port = Some(opt.parse::<u16>().unwrap_or(8010));
@@ -30,15 +67,34 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
         true
     } else if v == "--split" {
         enable_split_pipeline(config, None);
+        config.split_explicit = true;
         true
     } else if let Some(threshold) = v.strip_prefix("--split=") {
         enable_split_pipeline(config, Some(threshold.parse::<usize>().unwrap_or(200)));
+        config.split_explicit = true;
+        true
+    } else if v == "--no-split" {
+        config.split = false;
+        config.split_auto = false;
+        config.split_explicit = true;
         true
     } else if v == "--small-fonts" {
         config.small_fonts = true;
+        config.full_fonts = false;
+        config.small_fonts_explicit = true;
+        true
+    } else if v == "--full-fonts" {
+        config.small_fonts = false;
+        config.full_fonts = true;
+        config.small_fonts_explicit = true;
         true
     } else if v == "--brotli" {
         config.brotli = true;
+        config.brotli_explicit = true;
+        true
+    } else if v == "--no-brotli" {
+        config.brotli = false;
+        config.brotli_explicit = true;
         true
     } else if v == "--lan" {
         config.lan = true;
@@ -46,8 +102,16 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     } else if v == "--bindgen" {
         config.bindgen = true;
         true
+    } else if v == "--threads" {
+        config.threads = true;
+        config.threads_explicit = true;
+        true
     } else if v == "--no-threads" {
         config.threads = false;
+        config.threads_explicit = true;
+        true
+    } else if v == "--serve" {
+        config.serve = true;
         true
     } else if v == "--split-functions" {
         config.split_functions = true;
@@ -87,6 +151,13 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         split_functions: false,
         split_functions_threshold: 200,
         hot_reload: false,
+        serve: false,
+        shipping_build: false,
+        full_fonts: false,
+        brotli_explicit: false,
+        threads_explicit: false,
+        small_fonts_explicit: false,
+        split_explicit: false,
     };
 
     // pull out options
@@ -109,6 +180,12 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         "run" => {
             let run_args = strip_wasm_options(&mut config, &args[1..]);
             compile::run(config, &run_args)?;
+            Ok(())
+        }
+        "ship" => {
+            let mut ship_args = strip_wasm_options(&mut config, &args[1..]);
+            apply_ship_defaults(&mut config, &mut ship_args);
+            compile::ship(config, &ship_args)?;
             Ok(())
         }
         _ => Err(format!("{} is not a valid command or option", args[0])),

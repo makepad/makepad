@@ -107,13 +107,25 @@ cargo makepad wasm install-toolchain
 cargo makepad wasm run -p makepad-example-splash --release
 ```
 
-For smaller shipped wasm output, use the shipping-size optimization pass. It keeps the post-link size reduction behavior and pairs well with the existing `small` profile:
+For production web output, use the shipping pipeline. By default it enables `--profile=small --strip --brotli --split --small-fonts --no-threads`, writes `asset-manifest.json` / `web-perf-report.json`, and fingerprints startup-blocking assets:
 
 ```bash
-cargo makepad wasm build -p makepad-example-splash --profile=small --strip
+cargo makepad wasm ship -p makepad-example-splash
 ```
 
-To split the wasm payloads, add `--split`. Bare `--split` uses an automatic cold-first policy: it first moves defer-safe cold functions into a secondary wasm so startup can begin on the primary first, and if there are no useful cold candidates it falls back to the normal function split. To override the function-splitting threshold directly:
+Add `--serve` to preview the shipping package locally with shipping cache headers and conditional Brotli serving:
+
+```bash
+cargo makepad wasm ship --serve -p makepad-example-splash
+```
+
+To tune the shipping defaults explicitly:
+
+```bash
+cargo makepad wasm ship --threads --full-fonts --no-split --no-brotli -p makepad-example-splash
+```
+
+You can still use `wasm build` directly for manual combinations. To override the function-splitting threshold directly:
 
 ```bash
 cargo makepad wasm build -p makepad-example-splash --release --strip --split=200
@@ -122,7 +134,7 @@ cargo makepad wasm build -p makepad-example-splash --release --strip --split=200
 For maximum size reduction, combine `--wasm-opt` (Binaryen IR optimization) and `--brotli` (compression). Install Binaryen for `--wasm-opt` (e.g. `brew install binaryen` or `apt install binaryen`):
 
 ```bash
-cargo makepad wasm build -p makepad-example-splash --release --wasm-opt --strip --split --brotli
+cargo makepad wasm ship --wasm-opt -p makepad-example-splash
 ```
 
 Notes:
@@ -131,7 +143,7 @@ Notes:
 - `--strip-custom-sections` preserves the old behavior when you only want to remove custom sections.
 - `--wasm-opt` runs Binaryen `wasm-opt -Os` for IR-level optimization (optional; requires [Binaryen](https://github.com/WebAssembly/binaryen)).
 - `--brotli` compresses `.wasm` and assets with Brotli for delivery.
-- `--profile=small` uses smaller fonts and pairs well with `--strip`.
+- `wasm ship` defaults to `--profile=small`, but smaller web font packaging still comes from `--small-fonts`.
 - `--no-threads` trims the web thread bridge and thread exports when threading is disabled.
 - The wasm linker packs relocations before the post-link size and split passes.
 - `--split` emits a primary wasm plus secondary payloads (`.secondary.wasm`, `.data.bin`) and implies function splitting.

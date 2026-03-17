@@ -66,6 +66,9 @@ fn show_help() {
     println!(
         "    wasm [options] run <cargo args>              Build and run a wasm project, starts a webserver at port 8010"
     );
+    println!(
+        "    wasm [options] ship <cargo args>             Build a shipping wasm package; add --serve to preview it with shipping cache semantics"
+    );
     println!();
     println!("    [options] with its default value:");
     println!();
@@ -86,10 +89,18 @@ fn show_help() {
     println!(
         "       --brotli                                  Use brotli to compress the wasm file"
     );
+    println!(
+        "       --no-brotli                               Disable brotli output (useful with `wasm ship` when testing raw sizes)"
+    );
     println!("       --bindgen                                 Enable wasm-bindgen compatibility");
+    println!("       --threads                                 Force threaded web builds (shipping defaults to single-threaded)");
     println!(
         "       --no-threads                              Build single-threaded wasm (no COOP/COEP needed)"
     );
+    println!("       --small-fonts                             Remap large fallback fonts to the small Latin web set");
+    println!("       --full-fonts                              Keep full i18n fallback fonts in the shipped package");
+    println!("       --no-split                                Disable wasm/data split output");
+    println!("       --serve                                   Preview the generated package with the built-in webserver");
     println!();
     println!("Apple iOS/TVOs Commands:");
     println!();

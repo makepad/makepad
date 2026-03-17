@@ -165,9 +165,15 @@ pub fn get_target_from_args(args: &[String]) -> Option<String> {
 }
 
 pub fn get_profile_from_args(args: &[String]) -> String {
-    for arg in args {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
         if let Some(opt) = arg.strip_prefix("--profile=") {
             return opt.to_string();
+        }
+        if arg == "--profile" {
+            if let Some(profile) = iter.next() {
+                return profile.clone();
+            }
         }
         if arg == "--release" {
             return "release".to_string();
