@@ -7,8 +7,8 @@ use crate::{
     thread::SignalToUI,
     xr_depth_mesh::{
         empty_bounds, xr_depth_mesh_store, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery,
-        XrDepthMeshQueryHit, XrDepthMeshQueryResult, XrDepthMeshStore, XrDepthPlaneKind,
-        XrDepthPlanePatch,
+        XrDepthMeshQueryHit, XrDepthMeshQueryResult, XrDepthMeshQuerySurfaceHit,
+        XrDepthMeshStore, XrDepthPlaneKind, XrDepthPlanePatch,
     },
 };
 use parry3d::math::IVector;
@@ -58,8 +58,11 @@ const DEPTH_MESH_UPDATE_DISTANCE_METERS: f32 = 4.0;
 const DEPTH_SURFACE_MESH_CHUNKS_PER_TICK: usize = 1;
 const DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS: u64 = 8;
 const DEPTH_QUERY_BATCH_PER_TICK: usize = 24;
+const DEPTH_QUERY_MAX_SURFACES_PER_QUERY: usize = 2;
 const DEPTH_DEBUG_LOG_CHUNK_MESH_TIMING: bool = false;
 const DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT: f32 = 0.2;
+const DEPTH_QUERY_SUPPORT_NORMAL_Y_MIN: f32 = 0.25;
+const DEPTH_QUERY_LATERAL_NORMAL_Y_MAX: f32 = 0.80;
 const DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN: f32 = 0.82;
 const DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX: f32 = 0.35;
 const DEPTH_PLANE_VERTEX_LINK_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 0.75;
@@ -394,7 +397,7 @@ impl SparseTsdGrid {
         ))
     }
 
-    pub fn lasertag_surface_net_chunk_mesh_with_scratch(
+    pub fn surface_net_chunk_mesh_with_scratch(
         &self,
         chunk_key: VoxelCoord,
         config: SparseVoxelMeshingConfig,
@@ -417,7 +420,7 @@ impl SparseTsdGrid {
         );
         self.extract_dense_region_into(start, dense_size, current_generation, dense);
         repair_dense_meshing_holes(dense, fill_scratch, dense_size);
-        lasertag_surface_net_mesh_from_dense(dense, dense_size, self.voxel_size, start, stride)
+        surface_net_mesh_from_dense(dense, dense_size, self.voxel_size, start, stride)
     }
 
     fn region_has_surface(&self, start: VoxelCoord, extent: VoxelCoord) -> bool {
@@ -667,8 +670,6 @@ impl DepthMeshVolume {
             mesh_generation: self.mesh_generation,
             mesh_vertex_count: self.mesh_vertex_count,
             mesh_triangle_count: self.mesh_triangle_count,
-            plane_generation: self.plane_generation,
-            plane_patches: self.plane_patches.clone(),
         }
     }
 
@@ -1657,7 +1658,7 @@ fn process_incremental_surface_mesh(
         let started = Instant::now();
         let mesh = volume
             .mesh_grid
-            .lasertag_surface_net_chunk_mesh_with_scratch(
+            .surface_net_chunk_mesh_with_scratch(
                 voxel_coord_from_ivector(chunk_key),
                 volume.mesh_config,
                 volume.generation,
@@ -2621,6 +2622,12 @@ fn process_geometry_queries(
     true
 }
 
+#[derive(Clone)]
+struct ScoredQuerySurfaceHit {
+    score: f32,
+    surface: XrDepthMeshQuerySurfaceHit,
+}
+
 fn evaluate_geometry_query(
     volume: &DepthMeshVolume,
     query: XrDepthMeshQuery,
@@ -2645,8 +2652,9 @@ fn evaluate_geometry_query(
         query.center.y.max(query.predicted_center.y),
         query.center.z.max(query.predicted_center.z),
     );
-    let mut best_hit: Option<XrDepthMeshQueryHit> = None;
-    let mut best_hit_score = f32::INFINITY;
+    let mut best_any_hit: Option<ScoredQuerySurfaceHit> = None;
+    let mut best_support_hit: Option<ScoredQuerySurfaceHit> = None;
+    let mut best_lateral_hit: Option<ScoredQuerySurfaceHit> = None;
     let mid_point = query.center + travel.scale(0.5);
     let sweep_radius = query.radius + query.max_distance;
     let sweep_radius_sq = sweep_radius * sweep_radius;
@@ -2731,21 +2739,22 @@ fn evaluate_geometry_query(
                 normal = normal.scale(-1.0);
             }
 
-            if best_sample_score < best_hit_score {
-                best_hit_score = best_sample_score;
-                best_hit = Some(XrDepthMeshQueryHit {
-                    key: query.key,
-                    version,
-                    mesh_generation: volume.mesh_generation,
-                    distance: best_distance_sq.sqrt(),
-                    point: best_closest,
-                    normal,
-                    from_planar_patch: true,
-                    triangle: [patch_corners[0], patch_corners[1], patch_corners[2]],
-                    patch: patch_corners,
-                    chunk_key: IVector::new(0, 0, 0),
-                });
-            }
+            let surface = XrDepthMeshQuerySurfaceHit {
+                distance: best_distance_sq.sqrt(),
+                point: best_closest,
+                normal,
+                from_planar_patch: true,
+                triangle: [patch_corners[0], patch_corners[1], patch_corners[2]],
+                patch: patch_corners,
+                chunk_key: IVector::new(0, 0, 0),
+            };
+            consider_query_surface_candidate(
+                &mut best_any_hit,
+                &mut best_support_hit,
+                &mut best_lateral_hit,
+                best_sample_score,
+                surface,
+            );
         }
     }
 
@@ -2827,33 +2836,56 @@ fn evaluate_geometry_query(
                 normal = normal.scale(-1.0);
                 hit_triangle.swap(1, 2);
             }
-            if best_sample_score < best_hit_score {
-                let matched_planar_patch = matching_reduced_planar_patch(
-                    hit_triangle,
-                    normal,
-                    &chunk.planar_patches,
-                );
-                best_hit_score = best_sample_score;
-                best_hit = Some(XrDepthMeshQueryHit {
-                    key: query.key,
-                    version,
-                    mesh_generation: volume.mesh_generation,
-                    distance: best_distance_sq.sqrt(),
-                    point: best_closest,
-                    normal,
-                    from_planar_patch: matched_planar_patch.is_some(),
-                    triangle: hit_triangle,
-                    patch: matched_planar_patch
-                        .map(|patch| plane_patch_corners(patch))
-                        .unwrap_or([best_closest; 4]),
-                    chunk_key: chunk.chunk_key,
-                });
-            }
+            let matched_planar_patch = matching_reduced_planar_patch(
+                hit_triangle,
+                normal,
+                &chunk.planar_patches,
+            );
+            let surface = XrDepthMeshQuerySurfaceHit {
+                distance: best_distance_sq.sqrt(),
+                point: best_closest,
+                normal,
+                from_planar_patch: matched_planar_patch.is_some(),
+                triangle: hit_triangle,
+                patch: matched_planar_patch
+                    .map(|patch| plane_patch_corners(patch))
+                    .unwrap_or([best_closest; 4]),
+                chunk_key: chunk.chunk_key,
+            };
+            consider_query_surface_candidate(
+                &mut best_any_hit,
+                &mut best_support_hit,
+                &mut best_lateral_hit,
+                best_sample_score,
+                surface,
+            );
         }
     }
 
-    if let Some(hit) = best_hit {
-        XrDepthMeshQueryResult::Hit(hit)
+    let primary_hit = best_support_hit.or(best_any_hit);
+    if let Some(primary_hit) = primary_hit {
+        let mut additional_hits = Vec::with_capacity(DEPTH_QUERY_MAX_SURFACES_PER_QUERY.saturating_sub(1));
+        if DEPTH_QUERY_MAX_SURFACES_PER_QUERY > 1 {
+            if let Some(lateral_hit) = best_lateral_hit {
+                if query_surface_hits_are_distinct(&primary_hit.surface, &lateral_hit.surface, query.radius) {
+                    additional_hits.push(lateral_hit.surface);
+                }
+            }
+        }
+        let primary_surface = primary_hit.surface;
+        XrDepthMeshQueryResult::Hit(XrDepthMeshQueryHit {
+            key: query.key,
+            version,
+            mesh_generation: volume.mesh_generation,
+            distance: primary_surface.distance,
+            point: primary_surface.point,
+            normal: primary_surface.normal,
+            from_planar_patch: primary_surface.from_planar_patch,
+            triangle: primary_surface.triangle,
+            patch: primary_surface.patch,
+            chunk_key: primary_surface.chunk_key,
+            additional_hits,
+        })
     } else {
         XrDepthMeshQueryResult::Miss {
             key: query.key,
@@ -2861,6 +2893,47 @@ fn evaluate_geometry_query(
             mesh_generation: volume.mesh_generation,
         }
     }
+}
+
+fn consider_query_surface_candidate(
+    best_any_hit: &mut Option<ScoredQuerySurfaceHit>,
+    best_support_hit: &mut Option<ScoredQuerySurfaceHit>,
+    best_lateral_hit: &mut Option<ScoredQuerySurfaceHit>,
+    score: f32,
+    surface: XrDepthMeshQuerySurfaceHit,
+) {
+    let scored = ScoredQuerySurfaceHit { score, surface };
+    update_best_query_surface(best_any_hit, scored.clone());
+    if scored.surface.normal.y >= DEPTH_QUERY_SUPPORT_NORMAL_Y_MIN {
+        update_best_query_surface(best_support_hit, scored.clone());
+    }
+    if scored.surface.normal.y.abs() <= DEPTH_QUERY_LATERAL_NORMAL_Y_MAX {
+        update_best_query_surface(best_lateral_hit, scored);
+    }
+}
+
+fn update_best_query_surface(
+    slot: &mut Option<ScoredQuerySurfaceHit>,
+    candidate: ScoredQuerySurfaceHit,
+) {
+    let should_replace = slot
+        .as_ref()
+        .map(|current| candidate.score < current.score)
+        .unwrap_or(true);
+    if should_replace {
+        *slot = Some(candidate);
+    }
+}
+
+fn query_surface_hits_are_distinct(
+    a: &XrDepthMeshQuerySurfaceHit,
+    b: &XrDepthMeshQuerySurfaceHit,
+    radius: f32,
+) -> bool {
+    if a.normal.dot(b.normal).abs() < 0.85 {
+        return true;
+    }
+    (a.point - b.point).length() > radius.max(0.02)
 }
 
 fn closest_point_on_plane_patch(point: Vec3f, patch: &XrDepthPlanePatch) -> Vec3f {
@@ -3429,7 +3502,7 @@ const SURFACE_NET_EDGES: [(usize, usize); 12] = [
     (3, 7),
 ];
 
-fn lasertag_surface_net_mesh_from_dense(
+fn surface_net_mesh_from_dense(
     volume: &[f32],
     voxel_count: VoxelCoord,
     voxel_size: f32,
@@ -3530,7 +3603,7 @@ fn lasertag_surface_net_mesh_from_dense(
     }
 
     for coord in vert_coords {
-        lasertag_tris_for_axis(
+        surface_net_tris_for_axis(
             &mut indices,
             &coord_vert_map,
             scaled_count,
@@ -3541,7 +3614,7 @@ fn lasertag_surface_net_mesh_from_dense(
             VoxelCoord::new(0, 1, 0),
             stride,
         );
-        lasertag_tris_for_axis(
+        surface_net_tris_for_axis(
             &mut indices,
             &coord_vert_map,
             scaled_count,
@@ -3552,7 +3625,7 @@ fn lasertag_surface_net_mesh_from_dense(
             VoxelCoord::new(0, 0, 1),
             stride,
         );
-        lasertag_tris_for_axis(
+        surface_net_tris_for_axis(
             &mut indices,
             &coord_vert_map,
             scaled_count,
@@ -3590,7 +3663,7 @@ fn flatten_coord(coord: VoxelCoord, size: VoxelCoord) -> usize {
         + coord.z as usize * size.x as usize * size.y as usize
 }
 
-fn lasertag_tris_for_axis(
+fn surface_net_tris_for_axis(
     indices: &mut Vec<u32>,
     coord_vert_map: &[i32],
     size: VoxelCoord,
@@ -4007,6 +4080,75 @@ mod tests {
             }
             XrDepthMeshQueryResult::Miss { .. } => {
                 panic!("expected reduced planar mesh hit");
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_query_returns_support_and_lateral_surface() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.mesh_generation = 10;
+        volume.mesh_chunks.push(make_triangle_chunk([
+            vec3f(-0.30, 0.0, -0.30),
+            vec3f(0.30, 0.0, -0.30),
+            vec3f(-0.30, 0.0, 0.30),
+        ]));
+        volume.mesh_chunks.push(make_triangle_chunk([
+            vec3f(0.18, -0.20, -0.20),
+            vec3f(0.18, 0.30, -0.20),
+            vec3f(0.18, -0.20, 0.20),
+        ]));
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 11,
+                center: vec3f(0.05, 0.08, 0.0),
+                predicted_center: vec3f(0.05, 0.08, 0.0),
+                velocity: vec3f(0.0, 0.0, 0.0),
+                radius: 0.12,
+                max_distance: 0.20,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        match result {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                assert!(
+                    hit.normal.y >= DEPTH_QUERY_SUPPORT_NORMAL_Y_MIN,
+                    "expected primary hit to be the support surface, got normal {:?}",
+                    hit.normal
+                );
+                assert_eq!(
+                    hit.additional_hits.len(),
+                    1,
+                    "expected one additional lateral surface"
+                );
+                assert!(
+                    hit.additional_hits[0].normal.y.abs() <= DEPTH_QUERY_LATERAL_NORMAL_Y_MAX,
+                    "expected lateral hit normal, got {:?}",
+                    hit.additional_hits[0].normal
+                );
+                assert!(
+                    query_surface_hits_are_distinct(
+                        &XrDepthMeshQuerySurfaceHit {
+                            distance: hit.distance,
+                            point: hit.point,
+                            normal: hit.normal,
+                            from_planar_patch: hit.from_planar_patch,
+                            triangle: hit.triangle,
+                            patch: hit.patch,
+                            chunk_key: hit.chunk_key,
+                        },
+                        &hit.additional_hits[0],
+                        0.12,
+                    ),
+                    "expected support and lateral hits to remain distinct"
+                );
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected support and lateral geometry hits");
             }
         }
     }

@@ -33,6 +33,8 @@ pub const ACAMERA_LENS_FACING_EXTERNAL: u8 = 2;
 
 pub const AIMAGE_FORMAT_YUV_420_888: u32 = 35;
 pub const AIMAGE_FORMAT_JPEG: u32 = 256;
+pub const AIMAGE_FORMAT_RGBA_8888: u32 = 1;
+pub const AIMAGE_FORMAT_PRIVATE: u32 = 0x22;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -101,6 +103,7 @@ pub struct ACaptureRequest {
 }
 
 pub type ANativeWindow = super::ndk_sys::ANativeWindow;
+pub type AHardwareBuffer = super::ndk_sys::AHardwareBuffer;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -252,6 +255,15 @@ extern "C" {
         reader: *mut *mut AImageReader,
     ) -> media_status_t;
 
+    pub fn AImageReader_newWithUsage(
+        width: i32,
+        height: i32,
+        format: u32,
+        usage: u64,
+        maxImages: i32,
+        reader: *mut *mut AImageReader,
+    ) -> media_status_t;
+
     pub fn AImageReader_setImageListener(
         reader: *mut AImageReader,
         listener: *mut AImageReader_ImageListener,
@@ -290,6 +302,11 @@ extern "C" {
         image: *const AImage,
         planeIdx: ::std::os::raw::c_int,
         pixelStride: *mut ::std::os::raw::c_int,
+    ) -> media_status_t;
+    pub fn AImage_getFormat(image: *const AImage, format: *mut i32) -> media_status_t;
+    pub fn AImage_getHardwareBuffer(
+        image: *const AImage,
+        buffer: *mut *mut AHardwareBuffer,
     ) -> media_status_t;
     pub fn AImage_delete(image: *mut AImage);
 

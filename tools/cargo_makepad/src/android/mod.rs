@@ -125,6 +125,7 @@ impl AndroidVariant {
                 <uses-permission android:name="android.permission.INTERNET" />
                 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
                 <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+                <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
                 <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
                 <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
                 <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />

@@ -198,6 +198,9 @@ pub enum TextureFormat {
     /// normal texture upload path (e.g. Android SurfaceTexture/OES, or
     /// platform-native composited video output).
     VideoExternal,
+    /// Android/Vulkan camera texture backed by an imported RGBA
+    /// `AHardwareBuffer`.
+    VideoRgbaHardwareBuffer,
 }
 
 impl std::fmt::Debug for TextureFormat {
@@ -251,6 +254,9 @@ impl std::fmt::Debug for TextureFormat {
             ),
             TextureFormat::VideoYuvPlane => write!(f, "TextureFormat::VideoYuvPlane"),
             TextureFormat::VideoExternal => write!(f, "TextureFormat::VideoExternal"),
+            TextureFormat::VideoRgbaHardwareBuffer => {
+                write!(f, "TextureFormat::VideoRgbaHardwareBuffer")
+            }
         }
     }
 }
@@ -386,6 +392,8 @@ pub(crate) enum TexturePixel {
     VideoYuvPlane,
     /// Opaque external video pixel type (e.g. Android OES, composited RGBA).
     VideoExternal,
+    /// Android/Vulkan imported RGBA hardware buffer.
+    VideoRgbaHardwareBuffer,
 }
 
 impl CxTexture {
@@ -549,11 +557,18 @@ impl TextureFormat {
     }
 
     pub fn is_video(&self) -> bool {
-        matches!(self, Self::VideoYuvPlane | Self::VideoExternal)
+        matches!(
+            self,
+            Self::VideoYuvPlane | Self::VideoExternal | Self::VideoRgbaHardwareBuffer
+        )
     }
 
     pub fn is_video_external(&self) -> bool {
         matches!(self, Self::VideoExternal)
+    }
+
+    pub fn is_video_rgba_hardware_buffer(&self) -> bool {
+        matches!(self, Self::VideoRgbaHardwareBuffer)
     }
 
     pub fn vec_width_height(&self) -> Option<(usize, usize)> {
@@ -687,6 +702,12 @@ impl TextureFormat {
                 width: 0,
                 height: 0,
                 pixel: TexturePixel::VideoExternal,
+                category: TextureCategory::Video,
+            }),
+            Self::VideoRgbaHardwareBuffer => Some(TextureAlloc {
+                width: 0,
+                height: 0,
+                pixel: TexturePixel::VideoRgbaHardwareBuffer,
                 category: TextureCategory::Video,
             }),
             _ => None,

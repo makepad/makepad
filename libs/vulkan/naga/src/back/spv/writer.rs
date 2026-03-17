@@ -7,9 +7,10 @@ use super::{
     block::DebugInfoInner,
     helpers::{contains_builtin, global_needs_wrapper, map_storage_class},
     Block, BlockContext, CachedConstant, CachedExpressions, DebugInfo, EntryPointContext, Error,
-    Function, FunctionArgument, GlobalVariable, IdGenerator, Instruction, LocalImageType,
-    LocalType, LocalVariable, LogicalLayout, LookupFunctionType, LookupType, NumericType, Options,
-    PhysicalLayout, PipelineOptions, ResultMember, Writer, WriterFlags, BITS_PER_BYTE,
+    Function, FunctionArgument, GlobalVariable, IdGenerator, ImageTypeFlags, Instruction,
+    LocalImageType, LocalType, LocalVariable, LogicalLayout, LookupFunctionType, LookupType,
+    NumericType, Options, PhysicalLayout, PipelineOptions, ResultMember, Writer, WriterFlags,
+    BITS_PER_BYTE,
 };
 use crate::{
     arena::{Handle, HandleVec, UniqueArena},
@@ -473,7 +474,10 @@ impl Writer {
                 dim,
                 arrayed,
                 class,
-            } => LocalType::Image(LocalImageType::from_inner(dim, arrayed, class)),
+            } => match class {
+                crate::ImageClass::External => return None,
+                _ => LocalType::Image(LocalImageType::from_inner(dim, arrayed, class)),
+            },
             crate::TypeInner::Sampler { comparison: _ } => LocalType::Sampler,
             crate::TypeInner::AccelerationStructure { .. } => LocalType::AccelerationStructure,
             crate::TypeInner::RayQuery { .. } => LocalType::RayQuery,
@@ -1305,7 +1309,7 @@ impl Writer {
                         self.request_image_format_capabilities(format.into())?;
                         false
                     }
-                    crate::ImageClass::External => unimplemented!(),
+                    crate::ImageClass::External => true,
                 };
 
                 match dim {
@@ -1424,6 +1428,50 @@ impl Writer {
         handle: Handle<crate::Type>,
     ) -> Result<Word, Error> {
         let ty = &module.types[handle];
+        if let crate::TypeInner::Image {
+            dim,
+            arrayed,
+            class: crate::ImageClass::External,
+        } = ty.inner
+        {
+            self.request_type_capabilities(&ty.inner)?;
+
+            let mut flags = ImageTypeFlags::SAMPLED;
+            flags.set(ImageTypeFlags::ARRAYED, arrayed);
+            let image_local = LocalType::Image(LocalImageType {
+                sampled_type: crate::Scalar::F32,
+                dim: spirv::Dim::from(dim),
+                flags,
+                image_format: spirv::ImageFormat::Unknown,
+            });
+            let image_type_id = match self.lookup_type.entry(LookupType::Local(image_local)) {
+                Entry::Occupied(e) => *e.get(),
+                Entry::Vacant(e) => {
+                    let id = self.id_gen.next();
+                    e.insert(id);
+                    self.write_type_declaration_local(id, image_local);
+                    id
+                }
+            };
+            let sampled_local = LocalType::SampledImage { image_type_id };
+            let id = match self.lookup_type.entry(LookupType::Local(sampled_local)) {
+                Entry::Occupied(e) => *e.get(),
+                Entry::Vacant(e) => {
+                    let id = self.id_gen.next();
+                    e.insert(id);
+                    self.write_type_declaration_local(id, sampled_local);
+                    id
+                }
+            };
+            self.lookup_type.insert(LookupType::Handle(handle), id);
+            if self.flags.contains(WriterFlags::DEBUG) {
+                if let Some(ref name) = ty.name {
+                    self.debugs.push(Instruction::name(id, name));
+                }
+            }
+            return Ok(id);
+        }
+
         // If it's a type that needs SPIR-V capabilities, request them now.
         // This needs to happen regardless of the LocalType lookup succeeding,
         // because some types which map to the same LocalType have different
