@@ -389,7 +389,7 @@ struct PulseDeviceQuery {
 }
 
 impl PulseAudioAccess {
-    pub fn new(change_signal: SignalToUI, alsa_audio: &AlsaAudioAccess) -> Arc<Mutex<Self>> {
+    pub fn try_new(change_signal: SignalToUI, alsa_audio: &AlsaAudioAccess) -> Option<Arc<Mutex<Self>>> {
         unsafe {
             let main_loop = pa_threaded_mainloop_new();
             let main_loop_api = pa_threaded_mainloop_get_api(main_loop);
@@ -422,10 +422,19 @@ impl PulseAudioAccess {
                 self_ptr as *mut _,
             );
             if pa_context_connect(context, std::ptr::null(), 0, std::ptr::null()) != 0 {
-                panic!("Pulse audio pa_context_connect failed");
+                let errno = pa_context_errno(context);
+                let msg = CStr::from_ptr(pa_strerror(errno)).to_string_lossy();
+                crate::error!("PulseAudio: pa_context_connect failed: {} ({}), audio unavailable", msg, errno);
+                pa_context_unref(context);
+                pa_threaded_mainloop_free(main_loop);
+                return None;
             };
             if pa_threaded_mainloop_start(main_loop) != 0 {
-                panic!("Pulse audio pa_threaded_mainloop_start failed");
+                crate::error!("PulseAudio: pa_threaded_mainloop_start failed, audio unavailable");
+                pa_context_disconnect(context);
+                pa_context_unref(context);
+                pa_threaded_mainloop_free(main_loop);
+                return None;
             }
 
             pa_threaded_mainloop_lock(main_loop);
@@ -436,9 +445,17 @@ impl PulseAudioAccess {
                 }
                 pa_threaded_mainloop_wait(main_loop);
             }
-
+            let errno = pa_context_errno(context);
+            let failed = matches!(pulse.lock().unwrap().context_state, ContextState::Failed);
             pa_threaded_mainloop_unlock(main_loop);
-            pulse
+
+            if failed {
+                let msg = CStr::from_ptr(pa_strerror(errno)).to_string_lossy();
+                crate::error!("PulseAudio: context connection failed: {} ({}), audio unavailable", msg, errno);
+                return None;
+            }
+
+            Some(pulse)
         }
     }
     /*

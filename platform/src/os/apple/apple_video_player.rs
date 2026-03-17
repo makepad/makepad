@@ -5,7 +5,6 @@ use {
     crate::{
         event::video_playback::VideoSource,
         makepad_live_id::LiveId,
-        media_plugin::PlaybackPrepared,
         texture::{CxTexturePool, TextureId},
         video_decode::software_video::PlaybackSessionHandle,
         video_decode::yuv::{YuvColorMatrix, YuvPlaneData},
@@ -104,7 +103,9 @@ impl AppleUnifiedVideoPlayer {
         ));
     }
 
-    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(
+        &mut self,
+    ) -> Option<Result<crate::media_plugin::PlaybackPrepared, String>> {
         match &mut self.mode {
             ApplePlayerMode::Native(player) => match player.check_prepared() {
                 Some(Err(err)) => {

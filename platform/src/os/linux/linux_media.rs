@@ -5,7 +5,7 @@ use {
     },
     crate::{
         audio::*, cx::Cx, event::Event, media_api::CxMediaApi, midi::*, thread::SignalToUI,
-        video::*,
+        video::*, video_encode::camera_video_encoder::VideoEncoder,
     },
     std::sync::{Arc, Mutex},
 };
@@ -18,7 +18,7 @@ impl Cx {
     pub(crate) fn handle_media_signals(&mut self) {
         let pulse_enabled = pulse_audio_enabled();
         let audio_first = self.os.media.alsa_audio.is_none()
-            || (pulse_enabled && self.os.media.pulse_audio.is_none());
+            || (pulse_enabled && !self.os.media.pulse_audio_tried);
         if audio_first || self.os.media.audio_change.check_and_clear() {
             // alright so. if we 'failed' opening a device here
             // what do we do. we could flag our device as 'failed' on the desc
@@ -30,14 +30,10 @@ impl Cx {
                 .unwrap()
                 .get_updated_descs();
             if pulse_enabled {
-                let descs2 = self
-                    .os
-                    .media
-                    .pulse_audio()
-                    .lock()
-                    .unwrap()
-                    .get_updated_descs();
-                descs.extend(descs2);
+                if let Some(pulse) = self.os.media.pulse_audio() {
+                    let descs2 = pulse.lock().unwrap().get_updated_descs();
+                    descs.extend(descs2);
+                }
             }
             self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent { descs }));
         }
@@ -67,26 +63,44 @@ impl Cx {
     }
 }
 
-#[derive(Default)]
 pub struct CxLinuxMedia {
     pub(crate) pulse_audio: Option<Arc<Mutex<PulseAudioAccess>>>,
+    pub(crate) pulse_audio_tried: bool,
     pub(crate) alsa_audio: Option<Arc<Mutex<AlsaAudioAccess>>>,
     pub(crate) audio_change: SignalToUI,
     pub(crate) alsa_midi: Option<Arc<Mutex<AlsaMidiAccess>>>,
     pub(crate) alsa_midi_change: SignalToUI,
     pub(crate) v4l2_camera: Option<Arc<Mutex<V4l2CameraAccess>>>,
     pub(crate) v4l2_change: SignalToUI,
+    pub(crate) cpu_video_encoder: [Arc<Mutex<Option<VideoEncoder>>>; MAX_VIDEO_DEVICE_INDEX],
+}
+
+impl Default for CxLinuxMedia {
+    fn default() -> Self {
+        Self {
+            pulse_audio: None,
+            pulse_audio_tried: false,
+            alsa_audio: None,
+            audio_change: SignalToUI::default(),
+            alsa_midi: None,
+            alsa_midi_change: SignalToUI::default(),
+            v4l2_camera: None,
+            v4l2_change: SignalToUI::default(),
+            cpu_video_encoder: Default::default(),
+        }
+    }
 }
 
 impl CxLinuxMedia {
-    pub fn pulse_audio(&mut self) -> Arc<Mutex<PulseAudioAccess>> {
-        if self.pulse_audio.is_none() {
-            self.pulse_audio = Some(PulseAudioAccess::new(
+    pub fn pulse_audio(&mut self) -> Option<Arc<Mutex<PulseAudioAccess>>> {
+        if !self.pulse_audio_tried {
+            self.pulse_audio_tried = true;
+            self.pulse_audio = PulseAudioAccess::try_new(
                 self.audio_change.clone(),
                 &self.alsa_audio().lock().unwrap(),
-            ));
+            );
         }
-        self.pulse_audio.as_ref().unwrap().clone()
+        self.pulse_audio.clone()
     }
 
     pub fn alsa_audio(&mut self) -> Arc<Mutex<AlsaAudioAccess>> {
@@ -153,12 +167,9 @@ impl CxMediaApi for Cx {
             .unwrap()
             .use_audio_inputs(devices);
         if pulse_audio_enabled() {
-            self.os
-                .media
-                .pulse_audio()
-                .lock()
-                .unwrap()
-                .use_audio_inputs(devices);
+            if let Some(pulse) = self.os.media.pulse_audio() {
+                pulse.lock().unwrap().use_audio_inputs(devices);
+            }
         }
     }
 
@@ -170,12 +181,9 @@ impl CxMediaApi for Cx {
             .unwrap()
             .use_audio_outputs(devices);
         if pulse_audio_enabled() {
-            self.os
-                .media
-                .pulse_audio()
-                .lock()
-                .unwrap()
-                .use_audio_outputs(devices);
+            if let Some(pulse) = self.os.media.pulse_audio() {
+                pulse.lock().unwrap().use_audio_outputs(devices);
+            }
         }
     }
 
@@ -231,6 +239,18 @@ impl CxMediaApi for Cx {
                 crate::error!("linux video cpu-frame source is not implemented");
                 Err(VideoEncodeError::UnsupportedSource)
             }
+            VideoEncodeSource::Dummy { .. } => {
+                let encoder = VideoEncoder::start(config, f)
+                    .ok_or(VideoEncodeError::CodecUnavailable)?;
+                *self.os.media.cpu_video_encoder[index].lock().unwrap() = Some(encoder);
+                Ok(())
+            }
+        }
+    }
+
+    fn video_encoder_push_frame(&mut self, index: usize, frame: CameraFrameRef<'_>) {
+        if let Some(encoder) = self.os.media.cpu_video_encoder[index].lock().unwrap().as_ref() {
+            encoder.push_frame(frame);
         }
     }
 

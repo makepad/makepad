@@ -13,7 +13,6 @@ use {
         event::video_playback::VideoSource,
         makepad_error_log::*,
         makepad_live_id::LiveId,
-        media_plugin::PlaybackPrepared,
         texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel},
     },
     std::{
@@ -419,7 +418,9 @@ impl GStreamerVideoPlayer {
 
     /// Check if the player has finished prerolling and is ready to play.
     /// Returns `Ok(...)` with metadata when ready, `Err(msg)` on failure, `None` if still loading.
-    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(
+        &mut self,
+    ) -> Option<Result<crate::media_plugin::PlaybackPrepared, String>> {
         if self.prepare_notified || self.pipeline.is_null() {
             return None;
         }
@@ -547,14 +548,14 @@ impl GStreamerVideoPlayer {
                 };
             let audio_tracks = vec!["audio".to_string()];
 
-            Some(Ok(PlaybackPrepared::new(
-                self.video_width,
-                self.video_height,
+            Some(Ok(crate::media_plugin::PlaybackPrepared {
+                width: self.video_width,
+                height: self.video_height,
                 duration_ms,
                 is_seekable,
                 video_tracks,
                 audio_tracks,
-            )))
+            }))
         }
     }
 

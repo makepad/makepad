@@ -1,6 +1,7 @@
 use {
     crate::{
         area::Area,
+        capture::{CaptureResult, CaptureSource},
         cx::Cx,
         cx_api::CxOsApi,
         draw_pass::{CxDrawPassParent, DrawPassId},
@@ -133,18 +134,24 @@ impl Cx {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
-        let mut request_ids = Vec::new();
-        self.screenshot_requests.retain(|request| {
-            if request.kind_id == kind_id {
-                request_ids.push(request.request_id);
-                false
-            } else {
-                true
-            }
-        });
-        request_ids
+    pub fn request_capture(&mut self, source: CaptureSource) -> u64 {
+        let request_id = self.next_capture_id;
+        self.next_capture_id = self.next_capture_id.saturating_add(1);
+        self.capture_requests.push(crate::capture::CaptureRequest { request_id, source });
+        self.redraw_all();
+        request_id
+    }
+
+    pub fn drain_capture_results(&mut self) -> Vec<CaptureResult> {
+        self.capture_results.drain(..).collect()
+    }
+
+    pub(crate) fn take_capture_requests(&mut self) -> Vec<crate::capture::CaptureRequest> {
+        self.capture_requests.drain(..).collect()
+    }
+
+    pub(crate) fn push_capture_result(&mut self, result: CaptureResult) {
+        self.capture_results.push(result);
     }
 
     #[allow(dead_code)]
@@ -163,6 +170,37 @@ impl Cx {
             width,
             height,
         }));
+    }
+
+    pub(crate) fn flush_studio_screenshot_results(&mut self) {
+        if self.screenshot_requests.is_empty() || self.capture_results.is_empty() {
+            return;
+        }
+
+        let mut pending = std::mem::take(&mut self.capture_results);
+        let mut remaining = Vec::new();
+
+        for result in pending.drain(..) {
+            if result.request_id == 0 {
+                if let Ok(png) = Self::encode_rgba_as_png(result.width, result.height, &result.rgba) {
+                    let request_ids: Vec<u64> = self
+                        .screenshot_requests
+                        .drain(..)
+                        .map(|request| request.request_id)
+                        .collect();
+                    Self::send_studio_screenshot_response(
+                        request_ids,
+                        result.width,
+                        result.height,
+                        png,
+                    );
+                }
+            } else {
+                remaining.push(result);
+            }
+        }
+
+        self.capture_results = remaining;
     }
 
     #[allow(dead_code)]
@@ -328,7 +366,7 @@ impl Cx {
             }
             StudioToApp::Screenshot(request) => {
                 self.screenshot_requests.push(request);
-                self.redraw_all();
+                self.request_capture(CaptureSource::Framebuffer);
             }
             StudioToApp::WidgetTreeDump(request) => {
                 self.send_studio_widget_tree_dump_response(request.request_id);

@@ -496,6 +496,9 @@ pub enum VideoEncodeSource {
     CpuFrames {
         layout: CameraFrameLayout,
     },
+    Dummy {
+        layout: CameraFrameLayout,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]

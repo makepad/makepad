@@ -13,6 +13,7 @@ use {
         draw_shader::CxDrawShaders,
         event::{CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger},
         geometry::CxGeometryPool,
+        capture::{CaptureRequest, CaptureResult},
         gpu_info::GpuInfo,
         os::CxOs,
         performance_stats::PerformanceStats,
@@ -133,6 +134,9 @@ pub struct Cx {
     pub performance_stats: PerformanceStats,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
+    pub(crate) capture_requests: Vec<CaptureRequest>,
+    pub(crate) capture_results: Vec<CaptureResult>,
+    pub(crate) next_capture_id: u64,
     pub(crate) widget_tree_dump_requests: Vec<u64>,
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches
@@ -389,6 +393,9 @@ impl Cx {
             new_next_frames: Default::default(),
 
             screenshot_requests: Default::default(),
+            capture_requests: Default::default(),
+            capture_results: Default::default(),
+            next_capture_id: 1,
             widget_tree_dump_requests: Default::default(),
 
             dependencies: Default::default(),

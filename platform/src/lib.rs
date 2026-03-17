@@ -1,4 +1,5 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
+pub mod capture;
 pub mod gl_render_bridge;
 pub mod os;
 
@@ -103,6 +104,7 @@ pub use {
         },
         area::{Area, InstanceArea, RectArea},
         audio::*,
+        capture::{CaptureResult, CaptureSource},
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType},
@@ -187,8 +189,8 @@ pub use {
         media_host::{MediaControlBridge, MediaEventBridge, MediaTextureBridge, MediaTextureInfo},
         media_plugin::{
             media_plugin, media_video_capabilities, merge_video_capabilities,
-            register_media_plugin, FrameDecoderCodec, FrameDecoderConfig, MediaPlaybackSession,
-            MediaPlugin, MediaVideoEncoder, MseAudioTrackInfo, MseDecodedAudioFrame,
+            register_media_plugin, FrameDecoderCodec, FrameDecoderConfig, MediaPlugin,
+            MediaPlaybackSession, MediaVideoEncoder, MseAudioTrackInfo, MseDecodedAudioFrame,
             MseDecodedFrame, MseEngineOutput, MseInitMetadata, MsePlaybackEngine,
             MseVideoTrackInfo, PlaybackPrepared, VideoFrameDecoder,
         },

@@ -1,7 +1,7 @@
 use {
     self::super::{from_wasm::*, to_wasm::*, web_media::CxWebMedia},
     crate::{
-        cx::{Cx, OsType},
+        cx::Cx,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
@@ -77,6 +77,7 @@ impl Cx {
         params.hash = hash;
         true
     }
+
 
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
@@ -248,13 +249,6 @@ impl Cx {
                     self.script_data
                         .live_reload
                         .queue_file_change(tw.file_name, tw.content);
-                }
-
-                live_id!(ToWasmLocationChange) => {
-                    let tw = ToWasmLocationChange::read_to_wasm(&mut to_wasm);
-                    if self.update_web_location_state(tw.pathname, tw.search, tw.hash) {
-                        self.call_event_handler(&Event::Signal);
-                    }
                 }
 
                 live_id!(ToWasmHTTPResponse) => {
@@ -845,7 +839,6 @@ impl CxOsApi for Cx {
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
-            ToWasmLocationChange::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
             ToWasmWindowLostFocus::to_js_code(),
             ToWasmHTTPResponse::to_js_code(),
@@ -901,8 +894,6 @@ impl CxOsApi for Cx {
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
             FromWasmDrawCall::to_js_code(),
             FromWasmOpenUrl::to_js_code(),
-            FromWasmBrowserUpdateUrl::to_js_code(),
-            FromWasmBrowserHistoryGo::to_js_code(),
             FromWasmUseMidiInputs::to_js_code(),
             FromWasmSendMidiOutput::to_js_code(),
             FromWasmQueryAudioDevices::to_js_code(),
@@ -957,25 +948,6 @@ impl CxOsApi for Cx {
             },
         });
     }
-
-    fn browser_update_url(&mut self, url: &str, replace: bool) {
-        let (pathname, search, hash) = Self::split_web_location(url);
-        self.update_web_location_state(pathname, search, hash);
-        self.os.from_wasm(FromWasmBrowserUpdateUrl {
-            url: url.to_string(),
-            replace,
-        });
-    }
-
-    fn browser_history_go(&mut self, delta: i32) {
-        if delta == 0 {
-            return;
-        }
-        self.os.from_wasm(FromWasmBrowserHistoryGo {
-            delta: delta as f64,
-        });
-    }
-
     fn default_window_size(&self) -> Vec2d {
         self.os.window_geom.inner_size
     }

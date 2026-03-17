@@ -10,7 +10,7 @@ use crate::{
     thread::SignalToUI,
     window::CxWindowPool,
 };
-use makepad_studio_protocol::{AppToStudio, ScreenshotResponse, StudioToApp};
+use makepad_studio_protocol::{AppToStudio, StudioToApp};
 use std::{
     cell::RefCell,
     io::{self, BufRead, BufReader, Write},
@@ -293,7 +293,7 @@ impl Cx {
                     }
 
                     let mut rendered = false;
-                    if self.need_redrawing() && !self.screenshot_requests.is_empty() {
+                    if self.need_redrawing() && (!self.screenshot_requests.is_empty() || !self.capture_requests.is_empty()) {
                         self.call_draw_event(time_now);
                         self.headless_compile_shaders();
                         rendered = self.headless_emit_frames(&mut windows, true, time_now);
@@ -336,12 +336,12 @@ impl Cx {
             let width = fb.width as u32;
             let height = fb.height as u32;
 
-            let request_ids = if send_protocol {
-                self.take_studio_screenshot_request_ids(0)
+            let capture_requests = if send_protocol {
+                self.take_capture_requests()
             } else {
                 Vec::new()
             };
-            if send_protocol && request_ids.is_empty() {
+            if send_protocol && capture_requests.is_empty() {
                 continue;
             }
 
@@ -373,12 +373,22 @@ impl Cx {
             }
 
             if send_protocol {
-                write_stdout_msg(&AppToStudio::Screenshot(ScreenshotResponse {
-                    request_ids,
-                    png,
-                    width,
-                    height,
-                }));
+                for request in capture_requests {
+                    match request.source {
+                        crate::capture::CaptureSource::Framebuffer => {
+                            self.push_capture_result(crate::capture::CaptureResult {
+                                request_id: request.request_id,
+                                width,
+                                height,
+                                rgba: rgba.clone(),
+                            });
+                        }
+                        crate::capture::CaptureSource::Texture(_) => {
+                            // TODO: headless texture capture support when a concrete texture-backed source needs it.
+                        }
+                    }
+                }
+                self.flush_studio_screenshot_results();
                 let target_id = if let Some(id) = state.presentable_id {
                     id
                 } else {

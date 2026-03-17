@@ -1749,6 +1749,7 @@ extern "C" {
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
+    pub static kCFAllocatorNull: CFAllocatorRef;
     pub static kCFBooleanTrue: CFBooleanRef;
     pub static kCFBooleanFalse: CFBooleanRef;
 
