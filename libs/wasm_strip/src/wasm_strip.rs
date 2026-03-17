@@ -952,44 +952,44 @@ fn skip_vec_types(reader: &mut Reader<'_>) -> Result<(), WasmParseError> {
     Ok(())
 }
 
-fn scan_prefixed_fc_instruction(reader: &mut Reader<'_>) -> Result<(), WasmParseError> {
+fn scan_prefixed_fc_instruction(reader: &mut Reader<'_>) -> Result<bool, WasmParseError> {
     match reader.read_var_u32()? {
-        0..=7 => Ok(()),
+        0..=7 => Ok(false),
         8 => {
             reader.read_var_u32()?;
             reader.read_var_u32()?;
-            Ok(())
+            Ok(true)
         }
         9 => {
             reader.read_var_u32()?;
-            Ok(())
+            Ok(true)
         }
         10 => {
             reader.read_var_u32()?;
             reader.read_var_u32()?;
-            Ok(())
+            Ok(false)
         }
         11 => {
             reader.read_var_u32()?;
-            Ok(())
+            Ok(false)
         }
         12 => {
             reader.read_var_u32()?;
             reader.read_var_u32()?;
-            Ok(())
+            Ok(false)
         }
         13 => {
             reader.read_var_u32()?;
-            Ok(())
+            Ok(false)
         }
         14 => {
             reader.read_var_u32()?;
             reader.read_var_u32()?;
-            Ok(())
+            Ok(false)
         }
         15..=17 => {
             reader.read_var_u32()?;
-            Ok(())
+            Ok(false)
         }
         _ => Err(WasmParseError),
     }
@@ -1027,6 +1027,7 @@ fn scan_prefixed_fe_instruction(reader: &mut Reader<'_>) -> Result<(), WasmParse
 struct FunctionBodyRefs {
     direct_refs: BTreeSet<u32>,
     indirect_call_type_indices: BTreeSet<u32>,
+    references_data_segments: bool,
 }
 
 fn scan_function_body_refs(body: &[u8]) -> Result<FunctionBodyRefs, WasmParseError> {
@@ -1091,7 +1092,11 @@ fn scan_function_body_refs(body: &[u8]) -> Result<FunctionBodyRefs, WasmParseErr
             0xd2 => {
                 refs.direct_refs.insert(reader.read_var_u32()?);
             }
-            0xfc => scan_prefixed_fc_instruction(&mut reader)?,
+            0xfc => {
+                if scan_prefixed_fc_instruction(&mut reader)? {
+                    refs.references_data_segments = true;
+                }
+            }
             0xfd => scan_prefixed_fd_instruction(&mut reader)?,
             0xfe => scan_prefixed_fe_instruction(&mut reader)?,
             _ => {}
@@ -1277,7 +1282,9 @@ fn rewrite_function_body_direct_refs(
                 rewritten_payload.extend_from_slice(&encode_var_u32(remap_func_index(abs_index)?));
                 copy_from = reader.offset;
             }
-            0xfc => scan_prefixed_fc_instruction(&mut reader)?,
+            0xfc => {
+                let _ = scan_prefixed_fc_instruction(&mut reader)?;
+            }
             0xfd => scan_prefixed_fd_instruction(&mut reader)?,
             0xfe => scan_prefixed_fe_instruction(&mut reader)?,
             _ => {}
@@ -1730,7 +1737,10 @@ fn empty_function_split_result(buf: &[u8], total_functions: usize) -> WasmFuncti
     }
 }
 
-fn selectable_function_indices(info: &WasmModuleInfo) -> Vec<usize> {
+fn selectable_function_indices(
+    buf: &[u8],
+    info: &WasmModuleInfo,
+) -> Result<Vec<usize>, WasmParseError> {
     let mut split_indices = Vec::new();
     for i in 0..info.code_bodies.len() {
         if let Some(start_idx) = info.start_func_index {
@@ -1738,9 +1748,13 @@ fn selectable_function_indices(info: &WasmModuleInfo) -> Vec<usize> {
                 continue;
             }
         }
+        let body = &buf[info.code_bodies[i].start..info.code_bodies[i].end];
+        if scan_function_body_refs(body)?.references_data_segments {
+            continue;
+        }
         split_indices.push(i);
     }
-    split_indices
+    Ok(split_indices)
 }
 
 fn build_function_split_result(
@@ -1795,7 +1809,7 @@ pub fn wasm_split_functions(
 
     // Select functions to split based on body size threshold
     let mut split_indices = Vec::new();
-    for i in selectable_function_indices(&info) {
+    for i in selectable_function_indices(buf, &info)? {
         let body = &info.code_bodies[i];
         let body_size = body.end - body.start;
         if body_size >= threshold {
@@ -1821,7 +1835,7 @@ pub fn wasm_split_functions_to_target_primary_size(
         return Ok(empty_function_split_result(buf, num_defined));
     }
 
-    let mut ranked = selectable_function_indices(&info);
+    let mut ranked = selectable_function_indices(buf, &info)?;
     if ranked.is_empty() {
         return Ok(empty_function_split_result(buf, num_defined));
     }
@@ -1890,7 +1904,7 @@ pub fn wasm_split_functions_to_target_primary_size_cold(
     }
 
     let startup_hot = startup_hot_function_indices(buf, &info)?;
-    let mut ranked = selectable_function_indices(&info)
+    let mut ranked = selectable_function_indices(buf, &info)?
         .into_iter()
         .filter(|index| !startup_hot.contains(index))
         .collect::<Vec<_>>();
@@ -1974,7 +1988,7 @@ pub fn wasm_split_functions_cold(buf: &[u8]) -> Result<WasmFunctionSplitResult, 
     let num_defined = info.func_type_indices.len();
 
     let startup_hot = startup_hot_function_indices(buf, &info)?;
-    let mut split_indices = selectable_function_indices(&info)
+    let mut split_indices = selectable_function_indices(buf, &info)?
         .into_iter()
         .filter(|index| !startup_hot.contains(index))
         .collect::<Vec<_>>();
@@ -2847,6 +2861,33 @@ mod tests {
         assert!(cold_a_primary_len < 20);
         assert!(cold_b_primary_len < 20);
         assert!(tiny_cold_primary_len < 20);
+    }
+
+    #[test]
+    fn split_functions_keep_data_segment_users_in_primary() {
+        let main_body = &[0x00, 0x0b];
+        let mut data_ref_body = vec![0x00];
+        for _ in 0..250 {
+            data_ref_body.push(0x01);
+        }
+        data_ref_body.extend_from_slice(&[0xfc, 0x08, 0x00, 0x00]);
+        data_ref_body.extend_from_slice(&[0xfc, 0x09, 0x00]);
+        data_ref_body.push(0x0b);
+
+        let wasm = wasm_with_sections(&[
+            type_section(&[(0, 0)]),
+            function_section(&[0, 0]),
+            memory_section(),
+            export_section(&[("main", 0x00, 0)]),
+            code_section(&[main_body, &data_ref_body]),
+            data_count_section(1),
+            raw_data_section(&[passive_data_segment(&[1, 2, 3])]),
+        ]);
+
+        let result = wasm_split_functions(&wasm, 10).unwrap();
+        assert_eq!(result.split_count, 0);
+        assert_eq!(result.primary_wasm, wasm);
+        assert!(result.secondary_wasm.is_empty());
     }
 
     #[test]

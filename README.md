@@ -106,6 +106,10 @@ cargo makepad wasm install-toolchain
 ```bash
 cargo makepad wasm run -p makepad-example-splash --release
 ```
+OR
+```bash
+cargo run -p cargo-makepad -- wasm run --split -p makepad-example-splash --release
+```
 
 `wasm run` is the dev workflow: it always serves with hot reload and dev cache semantics on port `8010`.
 
