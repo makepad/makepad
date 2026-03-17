@@ -103,10 +103,7 @@ struct VulkanRenderPassKey {
 impl VulkanRenderPassKey {
     fn new(color_formats: &[vk::Format], depth_format: Option<vk::Format>) -> Self {
         Self {
-            color_formats: color_formats
-                .iter()
-                .map(|format| format.as_raw())
-                .collect(),
+            color_formats: color_formats.iter().map(|format| format.as_raw()).collect(),
             depth_format: depth_format.map(|format| format.as_raw()),
         }
     }
@@ -405,9 +402,7 @@ impl CxVulkan {
 
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
         let external_memory_android_hardware_buffer =
-            ash::android::external_memory_android_hardware_buffer::Device::new(
-                &instance, &device,
-            );
+            ash::android::external_memory_android_hardware_buffer::Device::new(&instance, &device);
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
         let command_pool_info = vk::CommandPoolCreateInfo::default()
@@ -778,9 +773,7 @@ impl CxVulkan {
         };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
         let external_memory_android_hardware_buffer =
-            ash::android::external_memory_android_hardware_buffer::Device::new(
-                &instance, &device,
-            );
+            ash::android::external_memory_android_hardware_buffer::Device::new(&instance, &device);
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
         let command_pool_info = vk::CommandPoolCreateInfo::default()
@@ -1763,7 +1756,10 @@ impl CxVulkan {
             let cxtexture = &mut cx.textures[texture_id];
             let alloc_changed = cxtexture.alloc_render(width, height);
             let alloc = cxtexture.alloc.clone().ok_or_else(|| {
-                format!("render target texture {} missing allocation metadata", texture_key)
+                format!(
+                    "render target texture {} missing allocation metadata",
+                    texture_key
+                )
             })?;
             (alloc_changed, alloc)
         };
@@ -1792,7 +1788,8 @@ impl CxVulkan {
             if let Some(old_resource) = self.textures.remove(&texture_key) {
                 self.destroy_texture_resource(old_resource);
             }
-            let resource = self.create_color_target_resource(target_width, target_height, format)?;
+            let resource =
+                self.create_color_target_resource(target_width, target_height, format)?;
             self.textures.insert(texture_key, resource);
         }
         Ok(())
@@ -1810,7 +1807,10 @@ impl CxVulkan {
             let cxtexture = &mut cx.textures[texture_id];
             let alloc_changed = cxtexture.alloc_depth(width, height);
             let alloc = cxtexture.alloc.clone().ok_or_else(|| {
-                format!("depth target texture {} missing allocation metadata", texture_key)
+                format!(
+                    "depth target texture {} missing allocation metadata",
+                    texture_key
+                )
             })?;
             (alloc_changed, alloc)
         };
@@ -1865,7 +1865,8 @@ impl CxVulkan {
 
         let color_formats = key.color_vk_formats();
         let depth_format = key.depth_vk_format();
-        let mut attachments = Vec::with_capacity(color_formats.len() + depth_format.is_some() as usize);
+        let mut attachments =
+            Vec::with_capacity(color_formats.len() + depth_format.is_some() as usize);
         let mut color_refs = Vec::with_capacity(color_formats.len());
         for (index, format) in color_formats.iter().enumerate() {
             attachments.push(
@@ -1942,7 +1943,8 @@ impl CxVulkan {
             .dependencies(&dependencies);
         let render_pass = unsafe { self.device.create_render_pass(&render_pass_info, None) }
             .map_err(|e| format!("create_render_pass(pipeline-cache) failed: {e:?}"))?;
-        self.offscreen_render_passes.insert(key.clone(), render_pass);
+        self.offscreen_render_passes
+            .insert(key.clone(), render_pass);
         Ok(render_pass)
     }
 
@@ -2062,12 +2064,16 @@ impl CxVulkan {
                 DrawPassClearColor::ClearWith(_) => !pass_dont_clear,
             };
             let clear = match clear_color {
-                DrawPassClearColor::InitWith(color) | DrawPassClearColor::ClearWith(color) => *color,
+                DrawPassClearColor::InitWith(color) | DrawPassClearColor::ClearWith(color) => {
+                    *color
+                }
             };
             let resource = self
                 .textures
                 .get(&Self::texture_key(*texture_id))
-                .ok_or_else(|| format!("missing Vulkan color target for texture {:?}", texture_id))?;
+                .ok_or_else(|| {
+                    format!("missing Vulkan color target for texture {:?}", texture_id)
+                })?;
             color_attachments.push(ColorAttachmentState {
                 texture_id: *texture_id,
                 view: resource.view,
@@ -2093,7 +2099,9 @@ impl CxVulkan {
             let resource = self
                 .textures
                 .get(&Self::texture_key(texture_id))
-                .ok_or_else(|| format!("missing Vulkan depth target for texture {:?}", texture_id))?;
+                .ok_or_else(|| {
+                    format!("missing Vulkan depth target for texture {:?}", texture_id)
+                })?;
             clear_values.push(vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
                     depth: clear_depth_value,
@@ -2217,8 +2225,10 @@ impl CxVulkan {
         let render_pass = unsafe { self.device.create_render_pass(&render_pass_info, None) }
             .map_err(|e| format!("create_render_pass(offscreen) failed: {e:?}"))?;
 
-        let mut framebuffer_attachments: Vec<vk::ImageView> =
-            color_attachments.iter().map(|attachment| attachment.view).collect();
+        let mut framebuffer_attachments: Vec<vk::ImageView> = color_attachments
+            .iter()
+            .map(|attachment| attachment.view)
+            .collect();
         if let Some(depth) = depth_attachment {
             framebuffer_attachments.push(depth.view);
         }
@@ -2314,7 +2324,10 @@ impl CxVulkan {
         }
 
         for attachment in &color_attachments {
-            if let Some(resource) = self.textures.get_mut(&Self::texture_key(attachment.texture_id)) {
+            if let Some(resource) = self
+                .textures
+                .get_mut(&Self::texture_key(attachment.texture_id))
+            {
                 resource.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
             }
         }
@@ -3156,7 +3169,8 @@ impl CxVulkan {
                 self.device.destroy_sampler(sampler, None);
             }
             if let Some(conversion) = resource.ycbcr_conversion {
-                self.device.destroy_sampler_ycbcr_conversion(conversion, None);
+                self.device
+                    .destroy_sampler_ycbcr_conversion(conversion, None);
             }
             if resource.view != vk::ImageView::null() {
                 self.device.destroy_image_view(resource.view, None);
@@ -3237,9 +3251,8 @@ impl CxVulkan {
             .usage(vk::ImageUsageFlags::SAMPLED)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        let image = unsafe { self.device.create_image(&image_info, None) }.map_err(|e| {
-            format!("Android Vulkan camera import failed: create_image: {e:?}")
-        })?;
+        let image = unsafe { self.device.create_image(&image_info, None) }
+            .map_err(|e| format!("Android Vulkan camera import failed: create_image: {e:?}"))?;
         let memory_req = unsafe { self.device.get_image_memory_requirements(image) };
         let compatible_memory_bits = memory_req.memory_type_bits & android_memory_type_bits;
         let memory_type_index = self
@@ -3247,7 +3260,9 @@ impl CxVulkan {
                 compatible_memory_bits,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
             )
-            .or_else(|_| self.find_memory_type(compatible_memory_bits, vk::MemoryPropertyFlags::empty()))
+            .or_else(|_| {
+                self.find_memory_type(compatible_memory_bits, vk::MemoryPropertyFlags::empty())
+            })
             .map_err(|err| {
                 unsafe {
                     self.device.destroy_image(image, None);
@@ -3419,10 +3434,7 @@ impl CxVulkan {
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
             )
             .or_else(|_| {
-                self.find_memory_type(
-                    compatible_memory_bits,
-                    vk::MemoryPropertyFlags::empty(),
-                )
+                self.find_memory_type(compatible_memory_bits, vk::MemoryPropertyFlags::empty())
             })
             .map_err(|err| {
                 unsafe {
@@ -3475,9 +3487,7 @@ impl CxVulkan {
                 self.device.free_memory(memory, None);
                 self.device.destroy_image(image, None);
             }
-            format!(
-                "Android Vulkan camera import failed: create_sampler_ycbcr_conversion: {e:?}"
-            )
+            format!("Android Vulkan camera import failed: create_sampler_ycbcr_conversion: {e:?}")
         })?;
 
         let mut view_conversion =
@@ -3499,7 +3509,8 @@ impl CxVulkan {
             Ok(view) => view,
             Err(e) => {
                 unsafe {
-                    self.device.destroy_sampler_ycbcr_conversion(ycbcr_conversion, None);
+                    self.device
+                        .destroy_sampler_ycbcr_conversion(ycbcr_conversion, None);
                     self.device.free_memory(memory, None);
                     self.device.destroy_image(image, None);
                 }
@@ -3526,7 +3537,8 @@ impl CxVulkan {
         let sampler = unsafe { self.device.create_sampler(&sampler_info, None) }.map_err(|e| {
             unsafe {
                 self.device.destroy_image_view(view, None);
-                self.device.destroy_sampler_ycbcr_conversion(ycbcr_conversion, None);
+                self.device
+                    .destroy_sampler_ycbcr_conversion(ycbcr_conversion, None);
                 self.device.free_memory(memory, None);
                 self.device.destroy_image(image, None);
             }
@@ -3698,7 +3710,9 @@ impl CxVulkan {
                 compatible_memory_bits,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
             )
-            .or_else(|_| self.find_memory_type(compatible_memory_bits, vk::MemoryPropertyFlags::empty()))
+            .or_else(|_| {
+                self.find_memory_type(compatible_memory_bits, vk::MemoryPropertyFlags::empty())
+            })
             .map_err(|err| {
                 unsafe {
                     self.device.destroy_image(image, None);
@@ -3845,7 +3859,9 @@ impl CxVulkan {
             height: chroma_height,
             layers: 1,
             is_cube: false,
-            format: plane_layout.plane2_view_format.unwrap_or(plane_layout.plane1_view_format),
+            format: plane_layout
+                .plane2_view_format
+                .unwrap_or(plane_layout.plane1_view_format),
             layout: vk::ImageLayout::GENERAL,
             hardware_buffer: None,
             sampler: None,
@@ -4303,7 +4319,12 @@ impl CxVulkan {
                 .geometries
                 .get(&packet.geometry_id)
                 .copied()
-                .ok_or_else(|| format!("missing Vulkan geometry resource for {:?}", packet.geometry_id))?;
+                .ok_or_else(|| {
+                    format!(
+                        "missing Vulkan geometry resource for {:?}",
+                        packet.geometry_id
+                    )
+                })?;
             let index_count = geometry.indices.len() as u32;
             let pass_uniforms = cx.passes[draw_pass_id].pass_uniforms.as_slice().to_vec();
             let draw_list_uniforms = cx.draw_lists[draw_list_id]
@@ -4355,10 +4376,9 @@ impl CxVulkan {
                 render_pass: render_pass_key.clone(),
                 backface_culling: packet.backface_culling,
             };
-            let pipeline = self
-                .pipelines
-                .get(&pipeline_key)
-                .ok_or_else(|| format!("missing Vulkan pipeline for shader {}", packet.shader_index))?;
+            let pipeline = self.pipelines.get(&pipeline_key).ok_or_else(|| {
+                format!("missing Vulkan pipeline for shader {}", packet.shader_index)
+            })?;
             (
                 if packet.depth_write {
                     pipeline.pipeline_write
@@ -4462,8 +4482,8 @@ impl CxVulkan {
         }
         uniform_uploads.retain(|uniform| uniform.size != 0);
 
-        let packet_buffer_usage = vk::BufferUsageFlags::VERTEX_BUFFER
-            | vk::BufferUsageFlags::UNIFORM_BUFFER;
+        let packet_buffer_usage =
+            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
         let packet_buffer = self.create_host_buffer(packet_buffer_usage, cursor.max(4))?;
         unsafe {
             let mapped = self
@@ -5192,10 +5212,9 @@ impl CxVulkan {
         };
 
         let new_index_buffer = if index_needs_upload {
-            match self.create_host_buffer_with_data(
-                vk::BufferUsageFlags::INDEX_BUFFER,
-                &geometry.indices,
-            ) {
+            match self
+                .create_host_buffer_with_data(vk::BufferUsageFlags::INDEX_BUFFER, &geometry.indices)
+            {
                 Ok(buffer) => Some(buffer),
                 Err(err) => {
                     if let Some(buffer) = new_vertex_buffer {
@@ -5725,8 +5744,11 @@ impl CxVulkan {
     }
 
     fn destroy_geometry_resources(&mut self) {
-        let resources: Vec<VulkanGeometryResource> =
-            self.geometries.drain().map(|(_, resource)| resource).collect();
+        let resources: Vec<VulkanGeometryResource> = self
+            .geometries
+            .drain()
+            .map(|(_, resource)| resource)
+            .collect();
         for resource in resources {
             self.destroy_geometry_resource(resource);
         }

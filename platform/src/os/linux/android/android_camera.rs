@@ -158,7 +158,9 @@ impl AndroidCaptureSession {
             let mut hardware_buffer = std::ptr::null_mut();
             let mut image_format = -1i32;
             let _ = AImage_getFormat(image, &mut image_format);
-            if AImage_getHardwareBuffer(image, &mut hardware_buffer) == 0 && !hardware_buffer.is_null() {
+            if AImage_getHardwareBuffer(image, &mut hardware_buffer) == 0
+                && !hardware_buffer.is_null()
+            {
                 context
                     .logged_first_hardware_buffer_frame
                     .store(true, Ordering::Relaxed);
@@ -430,7 +432,10 @@ impl AndroidCaptureSession {
         _window: *mut ACameraWindowType,
         frame_number: i64,
     ) {
-        crate::warning!("Android camera: capture buffer lost frame_number={}", frame_number);
+        crate::warning!(
+            "Android camera: capture buffer lost frame_number={}",
+            frame_number
+        );
     }
 
     unsafe extern "C" fn session_on_closed(
@@ -521,7 +526,9 @@ impl AndroidCaptureSession {
                         VideoPixelFormat::YUV420 => AIMAGE_FORMAT_YUV_420_888,
                         VideoPixelFormat::MJPEG => AIMAGE_FORMAT_JPEG,
                         _ => {
-                            crate::log!("Android camera pixelformat not possible, should not happen");
+                            crate::log!(
+                                "Android camera pixelformat not possible, should not happen"
+                            );
                             ACameraDevice_close(camera_device);
                             let _ = Box::from_raw(capture_context);
                             return None;
@@ -537,7 +544,10 @@ impl AndroidCaptureSession {
                 }
             };
             if image_reader_result != 0 || image_reader.is_null() {
-                crate::warning!("Android camera: failed to create image reader for mode {:?}", reader_mode as u32);
+                crate::warning!(
+                    "Android camera: failed to create image reader for mode {:?}",
+                    reader_mode as u32
+                );
                 ACameraDevice_close(camera_device);
                 let _ = Box::from_raw(capture_context);
                 return None;
@@ -570,7 +580,12 @@ impl AndroidCaptureSession {
                 && format.pixel_format == VideoPixelFormat::MJPEG
             {
                 let jpeg_quality = 60u8;
-                ACaptureRequest_setEntry_u8(capture_request, ACAMERA_JPEG_QUALITY, 1, &jpeg_quality);
+                ACaptureRequest_setEntry_u8(
+                    capture_request,
+                    ACAMERA_JPEG_QUALITY,
+                    1,
+                    &jpeg_quality,
+                );
             }
 
             let _ = ACaptureSessionOutput_create(image_window, &mut image_output);
