@@ -122,21 +122,6 @@ impl AndroidCameraPlayer {
             (width, height, yuv_rotation_steps)
         };
 
-        crate::warning!(
-            "Android headset camera player: video_id={} input_id={} format_id={} mode={:?} size={}x{} rotation_steps={}",
-            video_id.0,
-            input_id.0,
-            format_id.0,
-            match texture_mode {
-                AndroidCameraTextureMode::GlYuv => "gl-yuv",
-                AndroidCameraTextureMode::CpuYuv => "cpu-yuv",
-                AndroidCameraTextureMode::HardwareBufferExternal => "hardware-buffer-external",
-            },
-            width,
-            height,
-            yuv_rotation_steps,
-        );
-
         Self {
             video_id,
             texture_id,
@@ -251,13 +236,6 @@ impl AndroidCameraPlayer {
                     && self.created_at.elapsed().as_secs_f32() >= 2.0
                 {
                     self.warned_waiting_for_first_frame = true;
-                    crate::warning!(
-                        "Android headset camera player: still waiting for first hardware-buffer frame after {:.2}s video_id={} size={}x{}",
-                        self.created_at.elapsed().as_secs_f32(),
-                        self.video_id.0,
-                        self.width,
-                        self.height,
-                    );
                 }
                 return None;
             };
@@ -301,16 +279,7 @@ impl AndroidCameraPlayer {
     pub fn take_hardware_buffer_frame(&mut self) -> Option<AndroidCameraHardwareBufferFrame> {
         let latest = self.hardware_buffer_frame.as_ref()?;
         let frame = latest.lock().unwrap().take()?;
-        if !self.logged_first_hardware_buffer_consume {
-            self.logged_first_hardware_buffer_consume = true;
-            crate::warning!(
-                "Android headset camera player: consuming first hardware-buffer frame video_id={} size={}x{} timestamp_ns={}",
-                self.video_id.0,
-                frame.width,
-                frame.height,
-                frame.timestamp_ns,
-            );
-        }
+        self.logged_first_hardware_buffer_consume = true;
         self.width = frame.width;
         self.height = frame.height;
         self.prepared = true;
