@@ -51,14 +51,6 @@ pub struct XrDepthMesh {
     pub mesh_generation: u64,
     pub mesh_vertex_count: usize,
     pub mesh_triangle_count: usize,
-    pub plane_generation: u64,
-    pub plane_patches: Vec<XrDepthPlanePatch>,
-}
-
-impl XrDepthMesh {
-    pub fn triangle_count(&self) -> usize {
-        self.mesh_triangle_count
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -104,6 +96,17 @@ pub struct XrDepthMeshQuery {
 }
 
 #[derive(Clone, Debug)]
+pub struct XrDepthMeshQuerySurfaceHit {
+    pub distance: f32,
+    pub point: Vec3f,
+    pub normal: Vec3f,
+    pub from_planar_patch: bool,
+    pub triangle: [Vec3f; 3],
+    pub patch: [Vec3f; 4],
+    pub chunk_key: IVector,
+}
+
+#[derive(Clone, Debug)]
 pub struct XrDepthMeshQueryHit {
     pub key: u64,
     pub version: u64,
@@ -115,6 +118,7 @@ pub struct XrDepthMeshQueryHit {
     pub triangle: [Vec3f; 3],
     pub patch: [Vec3f; 4],
     pub chunk_key: IVector,
+    pub additional_hits: Vec<XrDepthMeshQuerySurfaceHit>,
 }
 
 #[derive(Clone, Debug)]

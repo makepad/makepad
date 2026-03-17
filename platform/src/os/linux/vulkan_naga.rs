@@ -56,7 +56,7 @@ fn compile_wgsl_to_spirv(wgsl: &str) -> Result<(Option<Vec<u32>>, Option<Vec<u32
     })?;
 
     let mut validator =
-        valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::empty());
+        valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all());
     let module_info = validator
         .validate(&module)
         .map_err(|e| format!("WGSL validation error: {e}"))?;
