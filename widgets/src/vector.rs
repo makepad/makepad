@@ -515,12 +515,35 @@ pub struct VectorRotate {
 }
 
 impl VectorRotate {
+    /// Append " cx cy" to an angle string when cx/cy are non-zero,
+    /// so SVG rotate gets "angle cx cy" format.
+    fn rotate_str_with_center(&self, v: &ScriptValue) -> Option<String> {
+        let angle = sv_f32(v)?;
+        if self.cx != 0.0 || self.cy != 0.0 {
+            Some(format!("{} {} {}", angle, self.cx, self.cy))
+        } else {
+            Some(format!("{}", angle))
+        }
+    }
+
+    fn rotate_str_vec_with_center(&self) -> Option<Vec<String>> {
+        if self.values.is_empty() {
+            return None;
+        }
+        Some(
+            self.values
+                .iter()
+                .filter_map(|v| self.rotate_str_with_center(v))
+                .collect(),
+        )
+    }
+
     fn to_animate_transform(&self) -> SvgAnimateTransform {
         SvgAnimateTransform {
             kind: AnimateTransformType::Rotate,
-            from: sv_opt_str(&self.from),
-            to: sv_opt_str(&self.to),
-            values: sv_opt_str_vec(&self.values),
+            from: self.rotate_str_with_center(&self.from),
+            to: self.rotate_str_with_center(&self.to),
+            values: self.rotate_str_vec_with_center(),
             key_times: None,
             dur: if self.dur > 0.0 { self.dur } else { 1.0 },
             begin: self.begin,
@@ -1616,6 +1639,11 @@ impl Widget for Vector {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.doc.root.is_empty() {
             return DrawStep::done();
+        }
+        // Start animation loop on first draw if there are animations
+        // (handles dynamically created Vectors that miss Event::Startup)
+        if self.has_animations && self.next_frame.0 == 0 {
+            self.next_frame = cx.new_next_frame();
         }
         let sw = self.draw_svg.content_size.x;
         let sh = self.draw_svg.content_size.y;

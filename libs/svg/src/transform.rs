@@ -73,10 +73,11 @@ pub fn parse_transform(s: &str) -> Transform2d {
                 if nargs >= 3 {
                     let cx = args[1];
                     let cy = args[2];
-                    // rotate(a, cx, cy) = translate(cx,cy) rotate(a) translate(-cx,-cy)
-                    Transform2d::translate(cx, cy)
+                    // rotate(a, cx, cy): first translate to origin, rotate, translate back
+                    // a.then(b) = b*a, so this yields T(cx,cy)*R(a)*T(-cx,-cy)
+                    Transform2d::translate(-cx, -cy)
                         .then(&Transform2d::rotate(angle))
-                        .then(&Transform2d::translate(-cx, -cy))
+                        .then(&Transform2d::translate(cx, cy))
                 } else {
                     Transform2d::rotate(angle)
                 }

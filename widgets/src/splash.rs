@@ -63,6 +63,54 @@ impl Splash {
             }
         });
     }
+
+    /// Start a new streaming session. Resets the accumulated code and
+    /// increments the generation so the VM creates a fresh body.
+    pub fn stream_begin(&mut self, cx: &mut Cx) {
+        self.eval_generation += 1;
+        self.body.set("");
+        // Eval a minimal empty view to clear previous content
+        self.body.set("View{}");
+        self.eval_body(cx);
+        self.body.set("");
+        cx.redraw_all();
+    }
+
+    /// Append a chunk of Splash code and incrementally re-evaluate.
+    /// The VM reuses the same body (fixed line ID) so only new tokens
+    /// are tokenized and parsed via checkpoint-based streaming.
+    pub fn stream_append(&mut self, cx: &mut Cx, chunk: &str) {
+        // Append to body
+        let mut current = self.body.as_ref().to_string();
+        current.push_str(chunk);
+        self.body.set(&current);
+
+        let code = format!("{}{}", SPLASH_PREFIX, current);
+
+        // Use a fixed line ID (based on self_id + current generation)
+        // so eval_with_append_source finds the existing body and
+        // only tokenizes/parses the new delta.
+        let unique_id = self.self_id().wrapping_add(self.eval_generation as usize);
+
+        let script_mod = ScriptMod {
+            cargo_manifest_path: String::new(),
+            module_path: String::new(),
+            file: String::new(),
+            line: unique_id,
+            column: 0,
+            code: String::new(),
+            values: vec![],
+        };
+
+        cx.with_vm(|vm| {
+            let value = vm.eval_with_append_source(script_mod, &code, NIL.into());
+            if !value.is_err() && !value.is_nil() {
+                self.view = View::script_from_value(vm, value);
+            }
+        });
+
+        cx.redraw_all();
+    }
 }
 
 impl Widget for Splash {
@@ -98,6 +146,18 @@ impl SplashRef {
     pub fn set_text(&self, cx: &mut Cx, v: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_text(cx, v);
+        }
+    }
+
+    pub fn stream_begin(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.stream_begin(cx);
+        }
+    }
+
+    pub fn stream_append(&self, cx: &mut Cx, chunk: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.stream_append(cx, chunk);
         }
     }
 }

@@ -420,9 +420,9 @@ fn numbers_to_transform(kind: &AnimateTransformType, nums: &[f32]) -> Transform2
             if nums.len() >= 3 {
                 let cx = nums[1];
                 let cy = nums[2];
-                Transform2d::translate(cx, cy)
+                Transform2d::translate(-cx, -cy)
                     .then(&Transform2d::rotate(angle))
-                    .then(&Transform2d::translate(-cx, -cy))
+                    .then(&Transform2d::translate(cx, cy))
             } else {
                 Transform2d::rotate(angle)
             }
