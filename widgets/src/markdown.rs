@@ -303,26 +303,68 @@ impl Widget for Markdown {
 }
 
 impl Markdown {
+    fn enter_block(block_first_stack: &mut Vec<bool>) -> bool {
+        let is_first = block_first_stack.last().copied().unwrap_or(true);
+        if let Some(current) = block_first_stack.last_mut() {
+            *current = false;
+        }
+        is_first
+    }
+
+    fn mark_current_container_non_first(block_first_stack: &mut Vec<bool>) {
+        if let Some(current) = block_first_stack.last_mut() {
+            *current = false;
+        }
+    }
+
+    fn text_starts_with_plain_bullet(text: &str) -> bool {
+        matches!(
+            text.trim_start().chars().next(),
+            Some('•' | '◦' | '▪' | '‣' | '∙')
+        )
+    }
+
+    fn next_text_starts_with_plain_bullet(events: &[MdEvent<'_>], current_index: usize) -> bool {
+        for event in events.iter().skip(current_index + 1) {
+            match event {
+                MdEvent::Text(text) => return Self::text_starts_with_plain_bullet(text),
+                MdEvent::Code(text) => return Self::text_starts_with_plain_bullet(text),
+                MdEvent::InlineMath(text) => return Self::text_starts_with_plain_bullet(text),
+                MdEvent::Start(Tag::Emphasis)
+                | MdEvent::End(TagEnd::Emphasis)
+                | MdEvent::Start(Tag::Strong)
+                | MdEvent::End(TagEnd::Strong)
+                | MdEvent::Start(Tag::Strikethrough)
+                | MdEvent::End(TagEnd::Strikethrough)
+                | MdEvent::Start(Tag::Link { .. })
+                | MdEvent::End(TagEnd::Link) => continue,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     fn process_markdown_doc(&mut self, cx: &mut Cx2d) {
         let tf = &mut self.text_flow;
-        // Track state for nested formatting
+        // Track state for nested formatting and block-layout containers.
         let mut list_stack: Vec<ListState> = Vec::new();
-        let mut is_first_block = true;
+        let mut block_first_stack = vec![true];
+        let mut list_item_depth = 0usize;
 
         let parser = Parser::new_ext(
             self.body.as_ref(),
             Options::ENABLE_TABLES | Options::ENABLE_MATH,
         );
+        let events: Vec<_> = parser.into_iter().collect();
 
-        for event in parser.into_iter() {
+        for (event_index, event) in events.iter().enumerate() {
             match event {
                 MdEvent::Start(Tag::Heading { level, .. }) => {
-                    if !is_first_block {
+                    if !Self::enter_block(&mut block_first_stack) {
                         tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
-                    is_first_block = false;
                     let heading_base = self.heading_base_scale;
-                    let scale = match level {
+                    let scale = match *level {
                         HeadingLevel::H1 => heading_base,
                         HeadingLevel::H2 => heading_base * 0.75,
                         HeadingLevel::H3 => heading_base * 0.58,
@@ -339,38 +381,43 @@ impl Markdown {
                     tf.new_line_collapsed(cx);
                 }
                 MdEvent::Start(Tag::Paragraph) => {
-                    if !is_first_block {
+                    if !Self::enter_block(&mut block_first_stack) {
                         tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
-                    is_first_block = false;
                 }
                 MdEvent::End(TagEnd::Paragraph) => {
                     // No special handling needed, turtle position is managed by content/following blocks
                 }
                 MdEvent::Start(Tag::BlockQuote(_)) => {
-                    if !is_first_block {
+                    if !Self::enter_block(&mut block_first_stack) {
                         tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
-                    is_first_block = false;
                     tf.begin_quote(cx);
+                    block_first_stack.push(true);
                 }
                 MdEvent::End(TagEnd::BlockQuote(_quote_kind)) => {
+                    block_first_stack.pop();
                     tf.end_quote(cx);
                 }
                 MdEvent::Start(Tag::List(first_number)) => {
+                    let first_number = *first_number;
+                    if !Self::enter_block(&mut block_first_stack) {
+                        tf.new_line_collapsed(cx);
+                    }
                     list_stack.push(ListState {
                         start_number: first_number,
                         current_number: first_number.unwrap_or(1),
                     });
+                    block_first_stack.push(true);
                 }
                 MdEvent::End(TagEnd::List(_is_ordered)) => {
+                    block_first_stack.pop();
                     list_stack.pop();
                 }
                 MdEvent::Start(Tag::Item) => {
-                    if !is_first_block {
+                    if !Self::enter_block(&mut block_first_stack) {
                         tf.new_line_collapsed(cx);
                     }
-                    is_first_block = false;
                     let marker = if let Some(state) = list_stack.last_mut() {
                         if state.start_number.is_some() {
                             // Ordered list - use and increment the counter
@@ -385,9 +432,13 @@ impl Markdown {
                         "•".to_string()
                     };
                     tf.begin_list_item(cx, &marker, 2.5);
+                    block_first_stack.push(true);
+                    list_item_depth += 1;
                 }
                 MdEvent::End(TagEnd::Item) => {
+                    block_first_stack.pop();
                     tf.end_list_item(cx);
+                    list_item_depth = list_item_depth.saturating_sub(1);
                 }
                 MdEvent::Start(Tag::Emphasis) => {
                     tf.italic.push();
@@ -408,6 +459,7 @@ impl Markdown {
                     tf.underline.pop();
                 }
                 MdEvent::Start(Tag::Link { dest_url, .. }) => {
+                    Self::mark_current_container_non_first(&mut block_first_stack);
                     self.auto_id += 1;
                     let item = tf.item(cx, LiveId(self.auto_id), live_id!(link));
                     item.as_markdown_link().set_href(&dest_url);
@@ -419,6 +471,7 @@ impl Markdown {
                 MdEvent::Start(Tag::Image {
                     dest_url, title, ..
                 }) => {
+                    Self::mark_current_container_non_first(&mut block_first_stack);
                     tf.draw_text(cx, "Image[name:");
                     tf.draw_text(cx, &title);
                     tf.draw_text(cx, ", url:");
@@ -426,10 +479,9 @@ impl Markdown {
                     tf.draw_text(cx, "]");
                 }
                 MdEvent::Start(Tag::CodeBlock(kind)) => {
-                    if !is_first_block {
+                    if !Self::enter_block(&mut block_first_stack) {
                         tf.new_line_collapsed_with_spacing(cx, self.pre_code_spacing);
                     }
-                    is_first_block = false;
                     // Check if this is a runsplash block
                     let is_runsplash = matches!(&kind, CodeBlockKind::Fenced(lang) if lang.as_ref() == "runsplash");
                     if is_runsplash {
@@ -486,6 +538,7 @@ impl Markdown {
                 }
                 // Inline code
                 MdEvent::Code(text) => {
+                    Self::mark_current_container_non_first(&mut block_first_stack);
                     const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
                     tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
                     tf.fixed.push();
@@ -497,6 +550,7 @@ impl Markdown {
                 }
                 // Inline math ($...$)
                 MdEvent::InlineMath(text) => {
+                    Self::mark_current_container_non_first(&mut block_first_stack);
                     if self.use_math_widget {
                         let entry_id = tf.new_counted_id();
                         tf.item_with(cx, entry_id, live_id!(inline_math), |cx, item, _tf| {
@@ -517,11 +571,9 @@ impl Markdown {
                 }
                 // Display math ($$...$$)
                 MdEvent::DisplayMath(text) => {
-                    if !is_first_block {
+                    if !Self::enter_block(&mut block_first_stack) {
                         tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
-                    is_first_block = false;
-
                     if self.use_math_widget {
                         let entry_id = tf.new_counted_id();
                         tf.item_with(cx, entry_id, live_id!(display_math), |cx, item, _tf| {
@@ -543,6 +595,9 @@ impl Markdown {
                     } else if self.in_code_block {
                         self.code_block_string.push_str(&text);
                     } else {
+                        if !text.is_empty() {
+                            Self::mark_current_container_non_first(&mut block_first_stack);
+                        }
                         tf.draw_text(cx, &text.trim_end_matches("\n"));
                     }
                 }
@@ -551,6 +606,10 @@ impl Markdown {
                         self.splash_block_string.push('\n');
                     } else if self.in_code_block {
                         self.code_block_string.push('\n');
+                    } else if list_item_depth > 0
+                        && Self::next_text_starts_with_plain_bullet(&events, event_index)
+                    {
+                        tf.new_line_collapsed(cx);
                     } else {
                         tf.draw_text(cx, " ");
                     }
@@ -565,10 +624,9 @@ impl Markdown {
                     }
                 }
                 MdEvent::Rule => {
-                    if !is_first_block {
+                    if !Self::enter_block(&mut block_first_stack) {
                         tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
-                    is_first_block = false;
                     tf.sep(cx);
                     tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                 }
