@@ -308,6 +308,7 @@ pub struct FromWasmDrawCall {
     pub vao_id: usize,
     pub shader_id: usize,
     pub depth_write: bool,
+    pub backface_culling: bool,
     pub pass_uniforms: WasmPtrF32,
     pub draw_list_uniforms: WasmPtrF32,
     pub draw_call_uniforms: WasmPtrF32,

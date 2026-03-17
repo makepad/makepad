@@ -250,6 +250,7 @@ impl Cx {
                     shader_id: sh.os_shader_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     depth_write: draw_call.options.depth_write,
+                    backface_culling: draw_call.options.backface_culling,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
                     draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
                     draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),

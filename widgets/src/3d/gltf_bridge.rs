@@ -417,7 +417,8 @@ impl GltfRenderer {
             .emissive_texture
             .and_then(|texture_index| self.textures.get(texture_index))
             .and_then(|texture| texture.clone());
-        let env_texture = draw.default_env_texture(cx);
+        let env_texture = Some(draw.default_env_texture(cx));
+        let env_atlas_texture = None;
 
         draw.apply_material_state(&DrawPbrMaterialState {
             base_color_factor: material.base_color_factor,
@@ -432,8 +433,8 @@ impl GltfRenderer {
                 normal: normal_texture,
                 occlusion: occlusion_texture,
                 emissive: emissive_texture,
-                env: Some(env_texture),
-                env_atlas: None,
+                env: env_texture,
+                env_atlas: env_atlas_texture,
             },
         });
     }

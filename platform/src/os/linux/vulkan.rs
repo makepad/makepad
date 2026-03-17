@@ -73,6 +73,12 @@ struct VulkanBuffer {
     size: vk::DeviceSize,
 }
 
+#[derive(Clone, Copy)]
+struct VulkanGeometryResource {
+    vertex_buffer: VulkanBuffer,
+    index_buffer: VulkanBuffer,
+}
+
 #[derive(Default)]
 struct FrameResources {
     buffers: Vec<VulkanBuffer>,
@@ -121,12 +127,14 @@ impl VulkanRenderPassKey {
 struct VulkanPipelineKey {
     shader_index: usize,
     render_pass: VulkanRenderPassKey,
+    backface_culling: bool,
 }
 
 struct VulkanDrawPacket {
     shader_index: usize,
     geometry_id: GeometryId,
     depth_write: bool,
+    backface_culling: bool,
     instances: Vec<f32>,
     draw_call_uniforms: Vec<f32>,
     dyn_uniforms: Vec<f32>,
@@ -240,6 +248,7 @@ pub struct CxVulkan {
     framebuffers: Vec<vk::Framebuffer>,
     pipelines: HashMap<VulkanPipelineKey, VulkanPipeline>,
     offscreen_render_passes: HashMap<VulkanRenderPassKey, vk::RenderPass>,
+    geometries: HashMap<GeometryId, VulkanGeometryResource>,
     textures: HashMap<VulkanTextureKey, VulkanTextureResource>,
     frame_resources: FrameResources,
     command_pool: vk::CommandPool,
@@ -526,6 +535,7 @@ impl CxVulkan {
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
             offscreen_render_passes: HashMap::new(),
+            geometries: HashMap::new(),
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool,
@@ -900,6 +910,7 @@ impl CxVulkan {
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
             offscreen_render_passes: HashMap::new(),
+            geometries: HashMap::new(),
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool,
@@ -4261,6 +4272,7 @@ impl CxVulkan {
                     shader_index: draw_call.draw_shader_id.index,
                     geometry_id,
                     depth_write: draw_call.options.depth_write,
+                    backface_culling: draw_call.options.backface_culling,
                     instances,
                     draw_call_uniforms: draw_call.draw_call_uniforms.as_slice().to_vec(),
                     dyn_uniforms: draw_call.dyn_uniforms[..sh
@@ -4281,11 +4293,18 @@ impl CxVulkan {
                 }
             };
 
-            let geometry = &cx.geometries[packet.geometry_id];
+            let geometry = &mut cx.geometries[packet.geometry_id];
             if geometry.indices.is_empty() || geometry.vertices.is_empty() {
                 draw_stats.skipped_empty_geometry += 1;
                 continue;
             }
+            self.ensure_geometry_resource(packet.geometry_id, geometry)?;
+            let geometry_resource = self
+                .geometries
+                .get(&packet.geometry_id)
+                .copied()
+                .ok_or_else(|| format!("missing Vulkan geometry resource for {:?}", packet.geometry_id))?;
+            let index_count = geometry.indices.len() as u32;
             let pass_uniforms = cx.passes[draw_pass_id].pass_uniforms.as_slice().to_vec();
             let draw_list_uniforms = cx.draw_lists[draw_list_id]
                 .draw_list_uniforms
@@ -4296,8 +4315,8 @@ impl CxVulkan {
                 cx,
                 &packet,
                 render_pass_key,
-                &geometry.vertices,
-                &geometry.indices,
+                geometry_resource,
+                index_count,
                 &pass_uniforms,
                 &draw_list_uniforms,
                 xr_depth_view,
@@ -4312,13 +4331,18 @@ impl CxVulkan {
         cx: &Cx,
         packet: &VulkanDrawPacket,
         render_pass_key: &VulkanRenderPassKey,
-        geometry_vertices: &[f32],
-        geometry_indices: &[u32],
+        geometry_resource: VulkanGeometryResource,
+        index_count: u32,
         pass_uniforms: &[f32],
         draw_list_uniforms: &[f32],
         xr_depth_view: vk::ImageView,
     ) -> Result<(), String> {
-        self.ensure_pipeline(cx, packet.shader_index, render_pass_key)?;
+        self.ensure_pipeline(
+            cx,
+            packet.shader_index,
+            render_pass_key,
+            packet.backface_culling,
+        )?;
         let (
             pipeline_handle,
             pipeline_layout,
@@ -4329,6 +4353,7 @@ impl CxVulkan {
             let pipeline_key = VulkanPipelineKey {
                 shader_index: packet.shader_index,
                 render_pass: render_pass_key.clone(),
+                backface_culling: packet.backface_culling,
             };
             let pipeline = self
                 .pipelines
@@ -4366,7 +4391,6 @@ impl CxVulkan {
         let instance_count = (packet.instances.len() as u64
             / (instance_stride / std::mem::size_of::<f32>() as u64))
             as u32;
-        let index_count = geometry_indices.len() as u32;
         if instance_count == 0 || index_count == 0 {
             return Ok(());
         }
@@ -4421,17 +4445,9 @@ impl CxVulkan {
         uniform_uploads.dedup_by_key(|uniform| uniform.binding);
 
         let mut cursor: vk::DeviceSize = 0;
-        let geometry_offset = Self::align_device_size(cursor, 4);
-        let geometry_bytes = std::mem::size_of_val(geometry_vertices) as vk::DeviceSize;
-        cursor = geometry_offset + geometry_bytes;
-
         let instances_offset = Self::align_device_size(cursor, 4);
         let instances_bytes = std::mem::size_of_val(packet.instances.as_slice()) as vk::DeviceSize;
         cursor = instances_offset + instances_bytes;
-
-        let indices_offset = Self::align_device_size(cursor, 4);
-        let indices_bytes = std::mem::size_of_val(geometry_indices) as vk::DeviceSize;
-        cursor = indices_offset + indices_bytes;
 
         let uniform_alignment = self.min_uniform_buffer_offset_alignment.max(4);
         for uniform in &mut uniform_uploads {
@@ -4447,7 +4463,6 @@ impl CxVulkan {
         uniform_uploads.retain(|uniform| uniform.size != 0);
 
         let packet_buffer_usage = vk::BufferUsageFlags::VERTEX_BUFFER
-            | vk::BufferUsageFlags::INDEX_BUFFER
             | vk::BufferUsageFlags::UNIFORM_BUFFER;
         let packet_buffer = self.create_host_buffer(packet_buffer_usage, cursor.max(4))?;
         unsafe {
@@ -4461,25 +4476,11 @@ impl CxVulkan {
                 )
                 .map_err(|e| format!("map_memory(packet_buffer) failed: {e:?}"))?;
             let mapped_ptr = mapped as *mut u8;
-            if geometry_bytes != 0 {
-                std::ptr::copy_nonoverlapping(
-                    geometry_vertices.as_ptr() as *const u8,
-                    mapped_ptr.add(geometry_offset as usize),
-                    geometry_bytes as usize,
-                );
-            }
             if instances_bytes != 0 {
                 std::ptr::copy_nonoverlapping(
                     packet.instances.as_ptr() as *const u8,
                     mapped_ptr.add(instances_offset as usize),
                     instances_bytes as usize,
-                );
-            }
-            if indices_bytes != 0 {
-                std::ptr::copy_nonoverlapping(
-                    geometry_indices.as_ptr() as *const u8,
-                    mapped_ptr.add(indices_offset as usize),
-                    indices_bytes as usize,
                 );
             }
             for uniform in &uniform_uploads {
@@ -4622,8 +4623,8 @@ impl CxVulkan {
         } else {
             None
         };
-        let vertex_buffers = [packet_buffer.buffer, packet_buffer.buffer];
-        let vertex_offsets = [geometry_offset, instances_offset];
+        let vertex_buffers = [geometry_resource.vertex_buffer.buffer, packet_buffer.buffer];
+        let vertex_offsets = [0, instances_offset];
 
         unsafe {
             self.device.cmd_bind_pipeline(
@@ -4649,8 +4650,8 @@ impl CxVulkan {
             );
             self.device.cmd_bind_index_buffer(
                 self.command_buffer,
-                packet_buffer.buffer,
-                indices_offset,
+                geometry_resource.index_buffer.buffer,
+                0,
                 vk::IndexType::UINT32,
             );
             self.device
@@ -4665,10 +4666,12 @@ impl CxVulkan {
         cx: &Cx,
         shader_index: usize,
         render_pass_key: &VulkanRenderPassKey,
+        backface_culling: bool,
     ) -> Result<(), String> {
         let pipeline_key = VulkanPipelineKey {
             shader_index,
             render_pass: render_pass_key.clone(),
+            backface_culling,
         };
         if self.pipelines.contains_key(&pipeline_key) {
             return Ok(());
@@ -4890,7 +4893,11 @@ impl CxVulkan {
             .depth_clamp_enable(false)
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
-            .cull_mode(vk::CullModeFlags::NONE)
+            .cull_mode(if backface_culling {
+                vk::CullModeFlags::BACK
+            } else {
+                vk::CullModeFlags::NONE
+            })
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
@@ -5138,6 +5145,98 @@ impl CxVulkan {
             memory,
             size: byte_len.max(4),
         })
+    }
+
+    fn destroy_buffer(&self, buffer: VulkanBuffer) {
+        unsafe {
+            if buffer.buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(buffer.buffer, None);
+            }
+            if buffer.memory != vk::DeviceMemory::null() {
+                self.device.free_memory(buffer.memory, None);
+            }
+        }
+    }
+
+    fn destroy_geometry_resource(&self, resource: VulkanGeometryResource) {
+        self.destroy_buffer(resource.vertex_buffer);
+        self.destroy_buffer(resource.index_buffer);
+    }
+
+    fn ensure_geometry_resource(
+        &mut self,
+        geometry_id: GeometryId,
+        geometry: &mut crate::geometry::CxGeometry,
+    ) -> Result<(), String> {
+        if geometry.vertices.is_empty() || geometry.indices.is_empty() {
+            if let Some(old) = self.geometries.remove(&geometry_id) {
+                self.destroy_geometry_resource(old);
+            }
+            geometry.dirty_vertices = false;
+            geometry.dirty_indices = false;
+            geometry.dirty = false;
+            return Ok(());
+        }
+
+        let existing = self.geometries.remove(&geometry_id);
+        let vertex_needs_upload = existing.is_none() || geometry.dirty_vertices;
+        let index_needs_upload = existing.is_none() || geometry.dirty_indices;
+
+        let new_vertex_buffer = if vertex_needs_upload {
+            Some(self.create_host_buffer_with_data(
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                &geometry.vertices,
+            )?)
+        } else {
+            None
+        };
+
+        let new_index_buffer = if index_needs_upload {
+            match self.create_host_buffer_with_data(
+                vk::BufferUsageFlags::INDEX_BUFFER,
+                &geometry.indices,
+            ) {
+                Ok(buffer) => Some(buffer),
+                Err(err) => {
+                    if let Some(buffer) = new_vertex_buffer {
+                        self.destroy_buffer(buffer);
+                    }
+                    if let Some(existing) = existing {
+                        self.geometries.insert(geometry_id, existing);
+                    }
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
+
+        let resource = match existing {
+            Some(existing) => {
+                if vertex_needs_upload {
+                    self.destroy_buffer(existing.vertex_buffer);
+                }
+                if index_needs_upload {
+                    self.destroy_buffer(existing.index_buffer);
+                }
+                VulkanGeometryResource {
+                    vertex_buffer: new_vertex_buffer.unwrap_or(existing.vertex_buffer),
+                    index_buffer: new_index_buffer.unwrap_or(existing.index_buffer),
+                }
+            }
+            None => VulkanGeometryResource {
+                vertex_buffer: new_vertex_buffer
+                    .ok_or_else(|| "missing Vulkan vertex buffer upload".to_string())?,
+                index_buffer: new_index_buffer
+                    .ok_or_else(|| "missing Vulkan index buffer upload".to_string())?,
+            },
+        };
+
+        self.geometries.insert(geometry_id, resource);
+        geometry.dirty_vertices = false;
+        geometry.dirty_indices = false;
+        geometry.dirty = false;
+        Ok(())
     }
 
     fn create_frame_descriptor_pool(&self) -> Result<vk::DescriptorPool, String> {
@@ -5625,6 +5724,14 @@ impl CxVulkan {
         }
     }
 
+    fn destroy_geometry_resources(&mut self) {
+        let resources: Vec<VulkanGeometryResource> =
+            self.geometries.drain().map(|(_, resource)| resource).collect();
+        for resource in resources {
+            self.destroy_geometry_resource(resource);
+        }
+    }
+
     fn destroy_surface(&mut self) {
         if self.surface != vk::SurfaceKHR::null() {
             unsafe { self.surface_loader.destroy_surface(self.surface, None) };
@@ -5641,6 +5748,7 @@ impl Drop for CxVulkan {
     fn drop(&mut self) {
         self.device_wait_idle();
         self.destroy_swapchain();
+        self.destroy_geometry_resources();
         self.destroy_texture_resources();
 
         unsafe {
