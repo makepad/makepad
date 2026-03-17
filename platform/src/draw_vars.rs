@@ -86,6 +86,16 @@ impl ScriptHook for DrawVars {
             } else if let Some(v) = depth_write_value.as_f64() {
                 self.options.depth_write = v != 0.0;
             }
+
+            let backface_culling_value = vm
+                .bx
+                .heap
+                .value(io_self, id!(backface_culling).into(), NoTrap);
+            if let Some(v) = backface_culling_value.as_bool() {
+                self.options.backface_culling = v;
+            } else if let Some(v) = backface_culling_value.as_f64() {
+                self.options.backface_culling = v != 0.0;
+            }
         }
         // lets fill our values
         if self.draw_shader_id.is_some() {
