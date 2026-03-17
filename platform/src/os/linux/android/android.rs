@@ -62,8 +62,8 @@ use {
         os::cx_native::EventFlow,
         os::linux::gl_video_upload::upload_yuv_to_gl,
         shared_framebuf::{PollTimer, PollTimers},
-        texture::{TextureFormat, TextureUpdated},
         texture::TextureId,
+        texture::{TextureFormat, TextureUpdated},
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
         video::{VideoEncodeError, MAX_VIDEO_DEVICE_INDEX},
@@ -1893,8 +1893,9 @@ impl Cx {
                         let camera_access = self.os.media.android_camera();
                         let native_preview =
                             matches!(camera_preview_mode, CameraPreviewMode::Native);
-                        let use_hardware_buffer_texture =
-                            cfg!(use_vulkan) && !native_preview && texture_id != TextureId::default();
+                        let use_hardware_buffer_texture = cfg!(use_vulkan)
+                            && !native_preview
+                            && texture_id != TextureId::default();
                         let use_cpu_plane_textures = cfg!(use_vulkan) && !native_preview;
                         let (camera_width, camera_height) = camera_access
                             .lock()
@@ -2433,9 +2434,7 @@ fn string_to_permission(permission_str: &str) -> Option<crate::permission::Permi
     match permission_str {
         "android.permission.RECORD_AUDIO" => Some(crate::permission::Permission::AudioInput),
         "android.permission.CAMERA" => Some(crate::permission::Permission::Camera),
-        "horizonos.permission.HEADSET_CAMERA" => {
-            Some(crate::permission::Permission::HeadsetCamera)
-        }
+        "horizonos.permission.HEADSET_CAMERA" => Some(crate::permission::Permission::HeadsetCamera),
         "com.oculus.permission.USE_SCENE" => Some(crate::permission::Permission::SceneAccess),
         _ => None,
     }

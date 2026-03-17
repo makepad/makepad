@@ -1,11 +1,23 @@
 use crate::makepad_math::{vec3, Vec3f};
-use parry3d::math::IVector;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
 
 const XR_DEPTH_QUERY_MAX_PENDING: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ChunkKey {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl ChunkKey {
+    pub const fn new(x: i32, y: i32, z: i32) -> Self {
+        Self { x, y, z }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct XrDepthMeshStats {
@@ -17,7 +29,7 @@ pub struct XrDepthMeshStats {
 #[derive(Clone, Debug, Default)]
 pub struct XrDepthMeshChunk {
     pub generation: u64,
-    pub chunk_key: IVector,
+    pub chunk_key: ChunkKey,
     pub fingerprint: u64,
     pub bounds_min: Vec3f,
     pub bounds_max: Vec3f,
@@ -46,8 +58,8 @@ pub struct XrDepthMesh {
     pub bounds_min: Vec3f,
     pub bounds_max: Vec3f,
     pub mesh_chunks: Vec<XrDepthMeshChunk>,
-    pub dirty_chunk_keys: Vec<IVector>,
-    pub removed_chunk_keys: Vec<IVector>,
+    pub dirty_chunk_keys: Vec<ChunkKey>,
+    pub removed_chunk_keys: Vec<ChunkKey>,
     pub mesh_generation: u64,
     pub mesh_vertex_count: usize,
     pub mesh_triangle_count: usize,
@@ -103,7 +115,7 @@ pub struct XrDepthMeshQuerySurfaceHit {
     pub from_planar_patch: bool,
     pub triangle: [Vec3f; 3],
     pub patch: [Vec3f; 4],
-    pub chunk_key: IVector,
+    pub chunk_key: ChunkKey,
 }
 
 #[derive(Clone, Debug)]
@@ -117,7 +129,7 @@ pub struct XrDepthMeshQueryHit {
     pub from_planar_patch: bool,
     pub triangle: [Vec3f; 3],
     pub patch: [Vec3f; 4],
-    pub chunk_key: IVector,
+    pub chunk_key: ChunkKey,
     pub additional_hits: Vec<XrDepthMeshQuerySurfaceHit>,
 }
 

@@ -221,8 +221,7 @@ impl DrawVars {
                             }
                         }
                         if os_shader_id.is_none() {
-                            let mut os_shader =
-                                CxOsDrawShader::new_vulkan_only(&vertex, &fragment);
+                            let mut os_shader = CxOsDrawShader::new_vulkan_only(&vertex, &fragment);
                             os_shader.vulkan_shader = Some(vk_shader);
                             os_shader_id = Some(cx.draw_shaders.os_shaders.len());
                             cx.draw_shaders.os_shaders.push(os_shader);
