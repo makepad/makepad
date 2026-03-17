@@ -43,6 +43,7 @@ impl Cx {
 
         for eye in 0..2 {
             let pass = &mut self.passes[draw_pass_id];
+            let camera_inv = frame.eyes[eye].view_mat.invert();
             pass.set_dpi_factor(dpi_factor);
             pass.paint_dirty = true;
             pass.os.shader_variant = SHADER_VARIANT_XR;
@@ -50,6 +51,8 @@ impl Cx {
             pass.pass_uniforms.camera_view = frame.eyes[eye].view_mat;
             pass.pass_uniforms.camera_projection_r = frame.eyes[eye].proj_mat;
             pass.pass_uniforms.camera_view_r = frame.eyes[eye].view_mat;
+            pass.pass_uniforms.camera_inv = camera_inv;
+            pass.pass_uniforms.camera_inv_r = camera_inv;
             if depth_image_index.is_some() {
                 pass.pass_uniforms.depth_projection = frame.eyes[eye].depth_proj_mat;
                 pass.pass_uniforms.depth_view = frame.eyes[eye].depth_view_mat;

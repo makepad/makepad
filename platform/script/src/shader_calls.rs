@@ -1523,10 +1523,11 @@ impl ShaderFnCompiler {
                             let sampler = ShaderSampler::default();
                             let sampler_idx = output.get_or_create_sampler(sampler);
                             output.bind_texture_sampler(&texture_expr, sampler_idx);
-                            #[cfg(target_os = "android")]
-                            write!(s, "sample2dOES({}, {})", texture_expr, coord).ok();
-                            #[cfg(not(target_os = "android"))]
-                            write!(s, "sample2d({}, {})", texture_expr, coord).ok();
+                            if cfg!(target_os = "android") && !cfg!(use_vulkan) {
+                                write!(s, "sample2dOES({}, {})", texture_expr, coord).ok();
+                            } else {
+                                write!(s, "sample2d({}, {})", texture_expr, coord).ok();
+                            }
                         }
                         ShaderBackend::Metal => {
                             let sampler = ShaderSampler::video();

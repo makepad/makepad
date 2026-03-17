@@ -934,9 +934,8 @@ impl Cx {
     pub(crate) fn compile_shaders_for_active_backend(&mut self) {
         #[cfg(use_vulkan)]
         {
-            // Vulkan mode is currently a staged path:
-            // run WGSL->SPIR-V compilation via the OpenGL shader compile entry point.
-            self.opengl_compile_shaders();
+            // In Vulkan mode shaders are compiled directly to SPIR-V during draw-shader
+            // creation; no GL shader compilation should occur on this path.
             return;
         }
 
@@ -966,6 +965,22 @@ impl Cx {
         {
             self.draw_pass_to_fullscreen(draw_pass_id);
         }
+    }
+
+    pub(crate) fn draw_pass_to_texture_for_active_backend(&mut self, draw_pass_id: DrawPassId) {
+        #[cfg(use_vulkan)]
+        {
+            if let Some(mut vulkan) = self.os.vulkan.take() {
+                let result = vulkan.draw_pass_to_texture(self, draw_pass_id);
+                self.os.vulkan = Some(vulkan);
+                if let Err(err) = result {
+                    crate::error!("Android Vulkan draw-to-texture failed: {err}");
+                }
+                return;
+            }
+        }
+
+        self.draw_pass_to_texture(draw_pass_id, None);
     }
 
     fn present_window_for_active_backend(&mut self) {
@@ -1638,10 +1653,10 @@ impl Cx {
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*draw_pass_id, None);
+                    self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
                 }
                 CxDrawPassParent::None => {
-                    self.draw_pass_to_texture(*draw_pass_id, None);
+                    self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
                 }
             }
         }

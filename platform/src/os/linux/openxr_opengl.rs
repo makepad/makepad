@@ -21,6 +21,8 @@ impl Cx {
             pass.pass_uniforms.camera_view = frame.eyes[0].view_mat;
             pass.pass_uniforms.camera_projection_r = frame.eyes[1].proj_mat;
             pass.pass_uniforms.camera_view_r = frame.eyes[1].view_mat;
+            pass.pass_uniforms.camera_inv = frame.eyes[0].view_mat.invert();
+            pass.pass_uniforms.camera_inv_r = frame.eyes[1].view_mat.invert();
 
             pass.pass_uniforms.depth_projection = frame.eyes[0].depth_proj_mat;
             pass.pass_uniforms.depth_view = frame.eyes[0].depth_view_mat;
