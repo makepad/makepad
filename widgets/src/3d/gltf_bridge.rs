@@ -433,6 +433,7 @@ impl GltfRenderer {
                 occlusion: occlusion_texture,
                 emissive: emissive_texture,
                 env: Some(env_texture),
+                env_atlas: None,
             },
         });
     }

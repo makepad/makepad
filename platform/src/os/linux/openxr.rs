@@ -159,9 +159,15 @@ impl Cx {
                     // this cant exist..
                 }
                 CxDrawPassParent::DrawPass(_) => {
+                    #[cfg(target_os = "android")]
+                    self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
+                    #[cfg(not(target_os = "android"))]
                     self.draw_pass_to_texture(*draw_pass_id, None);
                 }
                 CxDrawPassParent::None => {
+                    #[cfg(target_os = "android")]
+                    self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
+                    #[cfg(not(target_os = "android"))]
                     self.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
