@@ -134,6 +134,7 @@ pub const VENDOR: GLenum = 0x1F00;
 pub const RENDERER: GLenum = 0x1F01;
 pub const SCISSOR_TEST: GLenum = 0x0C11;
 pub const CULL_FACE: GLenum = 0x0B44;
+pub const BACK: GLenum = 0x0405;
 pub const DONT_CARE: GLenum = 0x1100;
 pub const UNIFORM_BUFFER: GLenum = 0x8A11;
 
@@ -193,6 +194,7 @@ pub type TglRenderbufferStorage = unsafe extern "C" fn(
     height: GLsizei,
 ) -> ();
 pub type TglDisable = unsafe extern "C" fn(cap: GLenum) -> ();
+pub type TglCullFace = unsafe extern "C" fn(mode: GLenum) -> ();
 pub type TglFramebufferRenderbuffer = unsafe extern "C" fn(
     target: GLenum,
     attachment: GLenum,
@@ -413,6 +415,7 @@ pub struct LibGl {
     pub glBindRenderbuffer: TglBindRenderbuffer,
     pub glRenderbufferStorage: TglRenderbufferStorage,
     pub glDisable: TglDisable,
+    pub glCullFace: TglCullFace,
     pub glFramebufferRenderbuffer: TglFramebufferRenderbuffer,
     pub glFramebufferTexture2D: TglFramebufferTexture2D,
     pub glGetShaderiv: TglGetShaderiv,
@@ -625,6 +628,7 @@ impl LibGl {
                 "glRenderbufferStorageEXT"
             )?,
             glDisable: load!(loadfn, TglDisable, "glDisable")?,
+            glCullFace: load!(loadfn, TglCullFace, "glCullFace")?,
             glFramebufferRenderbuffer: load!(
                 loadfn,
                 TglFramebufferRenderbuffer,

@@ -561,6 +561,12 @@ export class WasmWebGL extends WasmWebBrowser {
 
     gl.useProgram(shader.program);
     gl.depthMask(!!args.depth_write);
+    if (args.backface_culling) {
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+    } else {
+      gl.disable(gl.CULL_FACE);
+    }
 
     let vao = this.vaos[args.vao_id];
 

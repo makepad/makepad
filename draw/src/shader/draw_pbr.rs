@@ -79,6 +79,7 @@ script_mod! {
     use mod.geom
 
     mod.draw.DrawPbr = mod.std.set_type_default() do #(DrawPbr::script_shader(vm)){
+        backface_culling: true
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -120,6 +121,8 @@ script_mod! {
         u_has_emissive_texture: uniform(float(0.0))
         u_has_env_texture: uniform(float(0.0))
         u_has_env_atlas_texture: uniform(float(0.0))
+        u_debug_cubemap_only: uniform(float(0.0))
+        u_debug_simple_env_specular: uniform(float(0.0))
         u_light_dir: uniform(vec3(0.3, 0.7, 1.0))
         u_light_color: uniform(vec3(1.0, 1.0, 1.0))
         u_ambient: uniform(float(0.15))
@@ -214,8 +217,16 @@ script_mod! {
             self.vertex_pos = self.transform_with_camera(view_pos);
         }
 
+        pow5: fn(x: float) {
+            let x2 = x * x;
+            return x2 * x2 * x
+        }
+
         get_base_color: fn(uv: vec2, vertex_color: vec4) {
             let base = self.u_base_color_factor * vertex_color;
+            if self.u_has_base_color_texture <= 0.5 {
+                return base
+            }
             let tex_srgb = self.base_color_texture.sample_as_bgra(uv);
             let tex_linear = vec4(
                 pow(max(tex_srgb.x, 0.0), 2.2),
@@ -232,6 +243,12 @@ script_mod! {
         }
 
         get_metal_roughness: fn(uv: vec2) {
+            if self.u_has_metal_roughness_texture <= 0.5 {
+                return vec2(
+                    clamp(self.u_metallic_factor, 0.0, 1.0),
+                    clamp(self.u_roughness_factor, 0.045, 1.0)
+                )
+            }
             let mr_tex = self.metallic_roughness_texture.sample_as_bgra(uv);
             let mr_mix = mix(
                 vec4(1.0, 1.0, 1.0, 1.0),
@@ -254,24 +271,24 @@ script_mod! {
         }
 
         get_occlusion: fn(uv: vec2) {
+            if self.u_has_occlusion_texture <= 0.5 {
+                return 1.0
+            }
             let occlusion_tex = self.occlusion_texture.sample_as_bgra(uv);
-            let occ_val = mix(1.0, occlusion_tex.x, clamp(self.u_occlusion_strength, 0.0, 1.0));
-            return mix(1.0, occ_val, clamp(self.u_has_occlusion_texture, 0.0, 1.0))
+            return mix(1.0, occlusion_tex.x, clamp(self.u_occlusion_strength, 0.0, 1.0))
         }
 
         get_emissive: fn(uv: vec2) {
+            if self.u_has_emissive_texture <= 0.5 {
+                return self.u_emissive_factor
+            }
             let emissive_tex_srgb = self.emissive_texture.sample_as_bgra(uv);
             let emissive_tex = vec3(
                 pow(max(emissive_tex_srgb.x, 0.0), 2.2),
                 pow(max(emissive_tex_srgb.y, 0.0), 2.2),
                 pow(max(emissive_tex_srgb.z, 0.0), 2.2)
             );
-            let emissive_src = mix(
-                vec3(1.0, 1.0, 1.0),
-                emissive_tex,
-                clamp(self.u_has_emissive_texture, 0.0, 1.0)
-            );
-            return self.u_emissive_factor * emissive_src
+            return self.u_emissive_factor * emissive_tex
         }
 
         env_atlas_uv_from_dir: fn(dir: vec3f) -> vec2f {
@@ -297,32 +314,34 @@ script_mod! {
         }
 
         sample_env_atlas: fn(dir: vec3f) -> vec3f {
-            let uv = self.env_atlas_uv_from_dir(normalize(dir));
+            let uv = self.env_atlas_uv_from_dir(dir);
             return self.env_atlas_texture.sample_as_bgra(uv).xyz
         }
 
         get_env_specular: fn(refl_dir: vec3) {
-            let env_has = clamp(self.u_has_env_texture, 0.0, 1.0);
-            let atlas_has = clamp(self.u_has_env_atlas_texture, 0.0, 1.0);
             let env_t_spec = clamp(refl_dir.y * 0.5 + 0.5, 0.0, 1.0);
             let env_low = vec3(0.03, 0.035, 0.045);
             let env_high = vec3(0.36, 0.43, 0.5);
-            let env_fallback_spec = mix(env_low, env_high, env_t_spec);
-            let env_spec_tex = self.env_texture.sample_as_bgra(refl_dir).xyz;
-            let env_spec = mix(env_spec_tex, self.sample_env_atlas(refl_dir), atlas_has);
-            return mix(env_fallback_spec, env_spec, max(env_has, atlas_has))
+            if self.u_has_env_atlas_texture > 0.5 {
+                return self.sample_env_atlas(refl_dir)
+            }
+            if self.u_has_env_texture > 0.5 {
+                return self.env_texture.sample_as_bgra(refl_dir).xyz
+            }
+            return mix(env_low, env_high, env_t_spec)
         }
 
         get_env_diffuse: fn(normal_dir: vec3) {
-            let env_has = clamp(self.u_has_env_texture, 0.0, 1.0);
-            let atlas_has = clamp(self.u_has_env_atlas_texture, 0.0, 1.0);
             let env_t_diff = clamp(normal_dir.y * 0.5 + 0.5, 0.0, 1.0);
             let env_low = vec3(0.03, 0.035, 0.045);
             let env_high = vec3(0.36, 0.43, 0.5);
-            let env_fallback_diff = mix(env_low, env_high, env_t_diff);
-            let env_diff_tex = self.env_texture.sample_as_bgra(normal_dir).xyz;
-            let env_diff = mix(env_diff_tex, self.sample_env_atlas(normal_dir), atlas_has);
-            return mix(env_fallback_diff, env_diff, max(env_has, atlas_has))
+            if self.u_has_env_atlas_texture > 0.5 {
+                return self.sample_env_atlas(normal_dir)
+            }
+            if self.u_has_env_texture > 0.5 {
+                return self.env_texture.sample_as_bgra(normal_dir).xyz
+            }
+            return mix(env_low, env_high, env_t_diff)
         }
 
         fragment: fn(){
@@ -331,26 +350,44 @@ script_mod! {
 
         pixel: fn() {
             let uv = vec2(fract(self.v_uv.x), fract(self.v_uv.y));
+            let n_geom = normalize(self.v_normal);
+            if self.u_debug_cubemap_only > 0.5 {
+                if self.u_has_env_texture <= 0.5 {
+                    return vec4(1.0, 0.0, 1.0, 1.0)
+                }
+                let view_dir = normalize(self.u_camera_pos - self.v_world);
+                let incident_dir = -view_dir;
+                let cubemap_dir = normalize(
+                    incident_dir - 2.0 * dot(incident_dir, n_geom) * n_geom
+                );
+                let cubemap = self.env_texture.sample_as_bgra(cubemap_dir).xyz;
+                if cubemap.x + cubemap.y + cubemap.z < 0.02 {
+                    return vec4(1.0, 0.0, 0.0, 1.0)
+                }
+                return vec4(cubemap, 1.0)
+            }
             let albedo = self.get_base_color(uv, self.v_color);
 
-            let n_geom = normalize(self.v_normal);
-            let tangent_world = self.v_tangent.xyz;
-            let tangent_len = length(tangent_world);
-            let tangent_base = if tangent_len > 0.00001 {
-                tangent_world / tangent_len
+            let n = if self.u_has_normal_texture > 0.5 {
+                let tangent_world = self.v_tangent.xyz;
+                let tangent_len = length(tangent_world);
+                let tangent_base = if tangent_len > 0.00001 {
+                    tangent_world / tangent_len
+                } else {
+                    vec3(1.0, 0.0, 0.0)
+                };
+                let t_raw = tangent_base - n_geom * dot(n_geom, tangent_base);
+                let t_len = length(t_raw);
+                let up_axis = if abs(n_geom.y) > 0.99 { vec3(1.0, 0.0, 0.0) } else { vec3(0.0, 1.0, 0.0) };
+                let t = if t_len > 0.00001 { t_raw / t_len } else { normalize(cross(up_axis, n_geom)) };
+                let b = normalize(cross(n_geom, t)) * self.v_tangent.w;
+                let n_tex = self.get_normal_tangent(uv);
+                normalize(t * n_tex.x + b * n_tex.y + n_geom * n_tex.z)
             } else {
-                vec3(1.0, 0.0, 0.0)
+                n_geom
             };
-            let t_raw = tangent_base - n_geom * dot(n_geom, tangent_base);
-            let t_len = length(t_raw);
-            let up_axis = if abs(n_geom.y) > 0.99 { vec3(1.0, 0.0, 0.0) } else { vec3(0.0, 1.0, 0.0) };
-            let t = if t_len > 0.00001 { t_raw / t_len } else { normalize(cross(up_axis, n_geom)) };
-            let b = normalize(cross(n_geom, t)) * self.v_tangent.w;
-            let n_tex = self.get_normal_tangent(uv);
-            let n_tangent = normalize(t * n_tex.x + b * n_tex.y + n_geom * n_tex.z);
-            let n = normalize(mix(n_geom, n_tangent, clamp(self.u_has_normal_texture, 0.0, 1.0)));
 
-            let l = normalize(self.u_light_dir);
+            let l = self.u_light_dir;
             let v = normalize(self.u_camera_pos - self.v_world);
             let h = normalize(l + v);
             let ndotl = max(dot(n, l), 0.0);
@@ -374,7 +411,7 @@ script_mod! {
             let g = g_v * g_l;
 
             let f0 = mix(vec3(0.04, 0.04, 0.04), albedo.xyz, metal);
-            let fresnel = pow(1.0 - vdoth, 5.0);
+            let fresnel = self.pow5(1.0 - vdoth);
             let f = f0 + (vec3(1.0, 1.0, 1.0) - f0) * fresnel;
 
             let spec = (d * g) / max(4.0 * ndotv * ndotl, 0.0001);
@@ -392,15 +429,24 @@ script_mod! {
             let env_spec_color = self.get_env_specular(refl_rough);
             let env_diff_color = self.get_env_diffuse(n);
 
-            let c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
-            let c1 = vec4(1.0, 0.0425, 1.04, -0.04);
-            let r = c0 * rough + c1;
-            let a004 = min(r.x * r.x, pow(2.0, -9.28 * ndotv)) * r.x + r.y;
-            let env_brdf = vec2(-1.04, 1.04) * a004 + r.zw;
-            let env_fresnel = f0 * env_brdf.x + vec3(env_brdf.y, env_brdf.y, env_brdf.y);
-
             let ibl_diffuse = kd * albedo.xyz * env_diff_color * self.u_env_intensity;
-            let env_spec = env_spec_color * env_fresnel * self.u_spec_strength * self.u_env_intensity;
+            let env_spec = if self.u_debug_simple_env_specular > 0.5 {
+                let env_fresnel = f0 + (vec3(1.0, 1.0, 1.0) - f0) * self.pow5(1.0 - ndotv_env);
+                let rough_atten = 1.0 - rough * 0.65;
+                env_spec_color
+                    * env_fresnel
+                    * rough_atten
+                    * self.u_spec_strength
+                    * self.u_env_intensity
+            } else {
+                let c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+                let c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+                let r = c0 * rough + c1;
+                let a004 = min(r.x * r.x, pow(2.0, -9.28 * ndotv)) * r.x + r.y;
+                let env_brdf = vec2(-1.04, 1.04) * a004 + r.zw;
+                let env_fresnel = f0 * env_brdf.x + vec3(env_brdf.y, env_brdf.y, env_brdf.y);
+                env_spec_color * env_fresnel * self.u_spec_strength * self.u_env_intensity
+            };
             let emissive = self.get_emissive(uv);
 
             let lit = (diffuse + specular) * self.u_light_color * ndotl;
@@ -715,7 +761,7 @@ script_mod! {
 
             let camera_world_pos = self.active_eye_camera_world_pos();
             let view_dir_world = normalize(camera_world_pos - self.v_world);
-            let l = normalize(self.u_light_dir);
+            let l = self.u_light_dir;
             let h = normalize(l + view_dir_world);
             let ndotv = clamp(dot(n, view_dir_world), 0.0, 1.0);
             let ndotl = max(dot(n, l), 0.0);
@@ -755,7 +801,7 @@ script_mod! {
                 + (1.0 - ndotv) * 0.18;
             let absorption = mix(vec3(1.0, 1.0, 1.0), tint, clamp(thickness, 0.0, 1.0));
             let f0 = pow((1.12 - 1.0) / (1.12 + 1.0), 2.0);
-            let fresnel = f0 + (1.0 - f0) * pow(1.0 - ndotv, 5.0);
+            let fresnel = f0 + (1.0 - f0) * self.pow5(1.0 - ndotv);
 
             let highlight = self.u_light_color
                 * pow(max(dot(n, h), 0.0), mix(72.0, 180.0, 1.0 - rough))
@@ -809,6 +855,8 @@ pub struct DrawPbr {
     primitive_mesh_cache: HashMap<PbrPrimitiveMeshKey, PbrMeshHandle>,
     #[rust]
     default_env_texture: Option<Texture>,
+    #[rust]
+    default_env_atlas_texture: Option<Texture>,
     #[rust(Mat4f::identity())]
     pub cur_transform: Mat4f,
     #[rust]
@@ -852,6 +900,10 @@ pub struct DrawPbr {
     pub has_env_texture: f32,
     #[rust(0.0)]
     pub has_env_atlas_texture: f32,
+    #[rust(0.0)]
+    pub debug_cubemap_only: f32,
+    #[rust(0.0)]
+    pub debug_simple_env_specular: f32,
     #[rust(vec3(0.3, 0.7, 1.0))]
     pub light_dir: Vec3f,
     #[rust(vec3(1.0, 1.0, 1.0))]
@@ -960,6 +1012,8 @@ impl DrawPbr {
         self.set_emissive_texture(None);
         self.set_env_texture(None);
         self.set_env_atlas_texture(None);
+        self.set_debug_cubemap_only(false);
+        self.set_debug_simple_env_specular(false);
     }
 
     pub fn set_transform(&mut self, transform: Mat4f) {
@@ -1123,6 +1177,14 @@ impl DrawPbr {
         self.draw_vars.texture_slots[6] = texture;
     }
 
+    pub fn set_debug_cubemap_only(&mut self, debug: bool) {
+        self.debug_cubemap_only = if debug { 1.0 } else { 0.0 };
+    }
+
+    pub fn set_debug_simple_env_specular(&mut self, debug: bool) {
+        self.debug_simple_env_specular = if debug { 1.0 } else { 0.0 };
+    }
+
     pub fn set_clip_ndc(&mut self, clip_ndc: Vec4f) {
         self.clip_ndc = clip_ndc;
     }
@@ -1266,8 +1328,23 @@ impl DrawPbr {
         );
         self.draw_vars.set_uniform(
             cx.cx,
+            live_id!(u_debug_cubemap_only),
+            &[self.debug_cubemap_only],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_debug_simple_env_specular),
+            &[self.debug_simple_env_specular],
+        );
+        let light_dir = if self.light_dir.length() > 0.000_01 {
+            self.light_dir.normalize()
+        } else {
+            vec3(0.0, 0.0, 1.0)
+        };
+        self.draw_vars.set_uniform(
+            cx.cx,
             live_id!(u_light_dir),
-            &[self.light_dir.x, self.light_dir.y, self.light_dir.z],
+            &[light_dir.x, light_dir.y, light_dir.z],
         );
         self.draw_vars.set_uniform(
             cx.cx,
@@ -1457,43 +1534,98 @@ impl DrawPbr {
         texture
     }
 
+    pub fn default_env_atlas_texture(&mut self, cx: &mut Cx2d) -> Texture {
+        if let Some(texture) = self.default_env_atlas_texture.clone() {
+            return texture;
+        }
+
+        let face_size = 256usize;
+        let data = Self::build_default_env_atlas_data(face_size);
+        let texture = Texture::new_with_format(
+            cx.cx,
+            TextureFormat::VecBGRAu8_32 {
+                width: face_size * 3,
+                height: face_size * 2,
+                data: Some(data),
+                updated: TextureUpdated::Full,
+            },
+        );
+        self.default_env_atlas_texture = Some(texture.clone());
+        texture
+    }
+
+    fn default_env_face_dir(face: usize, x: usize, y: usize, size: usize) -> Vec3f {
+        let u = ((x as f32 + 0.5) / size as f32) * 2.0 - 1.0;
+        let v = ((y as f32 + 0.5) / size as f32) * 2.0 - 1.0;
+        match face {
+            0 => vec3(1.0, -v, -u),  // +X
+            1 => vec3(-1.0, -v, u),  // -X
+            2 => vec3(u, 1.0, v),    // +Y
+            3 => vec3(u, -1.0, -v),  // -Y
+            4 => vec3(u, -v, 1.0),   // +Z
+            _ => vec3(-u, -v, -1.0), // -Z
+        }
+        .normalize()
+    }
+
+    fn default_env_color(dir: Vec3f) -> Vec3f {
+        let sky_t = (dir.y * 0.5 + 0.5).clamp(0.0, 1.0);
+        let ground = vec3(0.06, 0.065, 0.07);
+        let sky = vec3(0.27, 0.36, 0.46);
+        let mut color = ground + (sky - ground) * sky_t;
+
+        let horizon = (1.0 - dir.y.abs()).powf(2.5) * 0.16;
+        color += vec3(horizon * 0.95, horizon * 0.85, horizon * 0.7);
+
+        let sun_dir = vec3(0.22, 0.72, 0.66).normalize();
+        let sun_dot = dir.dot(sun_dir).max(0.0);
+        let sun_core = sun_dot.powf(96.0) * 1.1;
+        let sun_glow = sun_dot.powf(16.0) * 0.35;
+        let sun = sun_core + sun_glow;
+        color += vec3(sun * 1.0, sun * 0.96, sun * 0.88);
+        color
+    }
+
     fn build_default_env_cube_data(size: usize) -> Vec<u32> {
         let mut out = vec![0u32; size.saturating_mul(size).saturating_mul(6)];
         for face in 0..6usize {
             for y in 0..size {
                 for x in 0..size {
-                    let u = ((x as f32 + 0.5) / size as f32) * 2.0 - 1.0;
-                    let v = ((y as f32 + 0.5) / size as f32) * 2.0 - 1.0;
-                    let d = match face {
-                        0 => vec3(1.0, -v, -u),  // +X
-                        1 => vec3(-1.0, -v, u),  // -X
-                        2 => vec3(u, 1.0, v),    // +Y
-                        3 => vec3(u, -1.0, -v),  // -Y
-                        4 => vec3(u, -v, 1.0),   // +Z
-                        _ => vec3(-u, -v, -1.0), // -Z
-                    }
-                    .normalize();
-
-                    let sky_t = (d.y * 0.5 + 0.5).clamp(0.0, 1.0);
-                    let ground = vec3(0.06, 0.065, 0.07);
-                    let sky = vec3(0.27, 0.36, 0.46);
-                    let mut color = ground + (sky - ground) * sky_t;
-
-                    let horizon = (1.0 - d.y.abs()).powf(2.5) * 0.16;
-                    color += vec3(horizon * 0.95, horizon * 0.85, horizon * 0.7);
-
-                    let sun_dir = vec3(0.22, 0.72, 0.66).normalize();
-                    let sun_dot = d.dot(sun_dir).max(0.0);
-                    let sun_core = sun_dot.powf(96.0) * 1.1;
-                    let sun_glow = sun_dot.powf(16.0) * 0.35;
-                    let sun = sun_core + sun_glow;
-                    color += vec3(sun * 1.0, sun * 0.96, sun * 0.88);
+                    let d = Self::default_env_face_dir(face, x, y, size);
+                    let color = Self::default_env_color(d);
 
                     let idx = face
                         .saturating_mul(size)
                         .saturating_mul(size)
                         .saturating_add(y.saturating_mul(size))
                         .saturating_add(x);
+                    out[idx] = Self::pack_bgra_u32(color.x, color.y, color.z, 1.0);
+                }
+            }
+        }
+        out
+    }
+
+    fn build_default_env_atlas_data(face_size: usize) -> Vec<u32> {
+        let atlas_width = face_size.saturating_mul(3);
+        let atlas_height = face_size.saturating_mul(2);
+        let mut out = vec![0u32; atlas_width.saturating_mul(atlas_height)];
+        for face in 0..6usize {
+            let (tile_x, tile_y) = match face {
+                0 => (0usize, 0usize),
+                1 => (1usize, 0usize),
+                2 => (2usize, 0usize),
+                3 => (0usize, 1usize),
+                4 => (1usize, 1usize),
+                _ => (2usize, 1usize),
+            };
+            for y in 0..face_size {
+                for x in 0..face_size {
+                    let dir = Self::default_env_face_dir(face, x, y, face_size);
+                    let color = Self::default_env_color(dir);
+                    let atlas_x = tile_x.saturating_mul(face_size).saturating_add(x);
+                    let atlas_y = tile_y.saturating_mul(face_size).saturating_add(y);
+                    let idx = atlas_y.saturating_mul(atlas_width).saturating_add(atlas_x);
                     out[idx] = Self::pack_bgra_u32(color.x, color.y, color.z, 1.0);
                 }
             }
@@ -2281,7 +2413,50 @@ impl DrawPbr {
             }
         }
 
+        Self::fix_triangle_winding_from_normals(&positions, &normals, &mut indices);
+
         (positions, normals, uvs, indices)
+    }
+
+    fn fix_triangle_winding_from_normals(
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        indices: &mut [u32],
+    ) {
+        for triangle in indices.chunks_exact_mut(3) {
+            let i0 = triangle[0] as usize;
+            let i1 = triangle[1] as usize;
+            let i2 = triangle[2] as usize;
+            let (Some(&p0), Some(&p1), Some(&p2), Some(&n0), Some(&n1), Some(&n2)) = (
+                positions.get(i0),
+                positions.get(i1),
+                positions.get(i2),
+                normals.get(i0),
+                normals.get(i1),
+                normals.get(i2),
+            ) else {
+                continue;
+            };
+            let e1 = vec3f(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
+            let e2 = vec3f(p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]);
+            let face_normal = Vec3f::cross(e1, e2);
+            if face_normal.length() <= 1.0e-8 {
+                continue;
+            }
+
+            let avg_normal = vec3f(
+                n0[0] + n1[0] + n2[0],
+                n0[1] + n1[1] + n2[1],
+                n0[2] + n1[2] + n2[2],
+            );
+            if avg_normal.length() <= 1.0e-8 {
+                continue;
+            }
+
+            if face_normal.dot(avg_normal) < 0.0 {
+                triangle.swap(1, 2);
+            }
+        }
     }
 
     fn geometry_gen_to_pbr(gen: &GeometryGen) -> Result<PbrMeshBuffers, String> {
