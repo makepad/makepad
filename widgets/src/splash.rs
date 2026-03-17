@@ -19,6 +19,8 @@ pub struct Splash {
     pub view: View,
     #[live]
     body: ArcStringMut,
+    #[rust]
+    eval_generation: u64,
 }
 
 const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*View{height:Fit, ";
@@ -35,16 +37,20 @@ impl Splash {
             return;
         }
 
-        let self_id = self.self_id();
+        // Use a unique generation counter so that full content replacements
+        // get a fresh VM body instead of hitting the broken content_changed
+        // re-parse path in eval_with_append_source.
+        self.eval_generation += 1;
+        let unique_id = self.self_id().wrapping_add(self.eval_generation as usize);
+
         // Full code string: prefix + body (no closing - parser auto-closes)
         let code = format!("{}{}", SPLASH_PREFIX, body);
 
-        // ScriptMod identity is stable (same file/line/column each call)
         let script_mod = ScriptMod {
             cargo_manifest_path: String::new(),
             module_path: String::new(),
             file: String::new(),
-            line: self_id,
+            line: unique_id,
             column: 0,
             code: String::new(),
             values: vec![],
@@ -80,7 +86,10 @@ impl Widget for Splash {
         if self.body.as_ref() != v {
             self.body.set(v);
             self.eval_body(cx);
-            self.redraw(cx);
+            // eval_body replaces self.view with a new View whose area is not
+            // yet registered in the draw system, so self.redraw(cx) would be
+            // a no-op.  Force a full redraw so the parent re-layouts.
+            cx.redraw_all();
         }
     }
 }
