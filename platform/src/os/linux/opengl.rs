@@ -222,7 +222,7 @@ impl DrawVars {
                         }
                         if os_shader_id.is_none() {
                             let mut os_shader =
-                                CxOsDrawShader::new(cx.os.gl(), &vertex, &fragment, &cx.os_type);
+                                CxOsDrawShader::new_vulkan_only(&vertex, &fragment);
                             os_shader.vulkan_shader = Some(vk_shader);
                             os_shader_id = Some(cx.draw_shaders.os_shaders.len());
                             cx.draw_shaders.os_shaders.push(os_shader);
@@ -1568,6 +1568,19 @@ impl GlShader {
 }
 
 impl CxOsDrawShader {
+    #[cfg(use_vulkan)]
+    pub fn new_vulkan_only(in_vertex: &str, in_pixel: &str) -> Self {
+        CxOsDrawShader {
+            in_vertex: in_vertex.to_string(),
+            in_pixel: in_pixel.to_string(),
+            vertex: [String::new(), String::new()],
+            pixel: [String::new(), String::new()],
+            gl_shader: [None, None],
+            live_uniforms: Default::default(),
+            vulkan_shader: None,
+        }
+    }
+
     pub fn new(gl: &LibGl, in_vertex: &str, in_pixel: &str, os_type: &OsType) -> Self {
         // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
         let available_extensions = get_gl_string(gl, gl_sys::EXTENSIONS);

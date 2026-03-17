@@ -16,7 +16,7 @@ use crate::{
             XrVulkanInstanceCreateInfoKHR,
         },
     },
-    texture::{TextureFormat, TextureId, TextureUpdated},
+    texture::{TextureFormat, TextureId, TexturePixel, TextureUpdated},
 };
 use ash::vk::{self, Handle};
 use std::collections::{HashMap, HashSet};
@@ -86,6 +86,41 @@ struct VulkanPipeline {
     descriptor_set_layout: vk::DescriptorSetLayout,
     has_descriptors: bool,
     sampler_handles: Vec<vk::Sampler>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct VulkanRenderPassKey {
+    color_formats: Vec<i32>,
+    depth_format: Option<i32>,
+}
+
+impl VulkanRenderPassKey {
+    fn new(color_formats: &[vk::Format], depth_format: Option<vk::Format>) -> Self {
+        Self {
+            color_formats: color_formats
+                .iter()
+                .map(|format| format.as_raw())
+                .collect(),
+            depth_format: depth_format.map(|format| format.as_raw()),
+        }
+    }
+
+    fn color_vk_formats(&self) -> Vec<vk::Format> {
+        self.color_formats
+            .iter()
+            .map(|format| vk::Format::from_raw(*format))
+            .collect()
+    }
+
+    fn depth_vk_format(&self) -> Option<vk::Format> {
+        self.depth_format.map(vk::Format::from_raw)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct VulkanPipelineKey {
+    shader_index: usize,
+    render_pass: VulkanRenderPassKey,
 }
 
 struct VulkanDrawPacket {
@@ -203,7 +238,8 @@ pub struct CxVulkan {
     render_pass: vk::RenderPass,
     xr_render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
-    pipelines: HashMap<usize, VulkanPipeline>,
+    pipelines: HashMap<VulkanPipelineKey, VulkanPipeline>,
+    offscreen_render_passes: HashMap<VulkanRenderPassKey, vk::RenderPass>,
     textures: HashMap<VulkanTextureKey, VulkanTextureResource>,
     frame_resources: FrameResources,
     command_pool: vk::CommandPool,
@@ -489,6 +525,7 @@ impl CxVulkan {
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
+            offscreen_render_passes: HashMap::new(),
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool,
@@ -862,6 +899,7 @@ impl CxVulkan {
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
+            offscreen_render_passes: HashMap::new(),
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool,
@@ -1450,6 +1488,7 @@ impl CxVulkan {
             );
         }
 
+        let render_pass_key = self.main_render_pass_key();
         let mut zbias = 0.0f32;
         let zbias_step = cx.passes[draw_pass_id].zbias_step;
         let mut draw_stats = VulkanDrawStats::default();
@@ -1457,6 +1496,7 @@ impl CxVulkan {
             cx,
             draw_pass_id,
             draw_list_id,
+            &render_pass_key,
             &mut zbias,
             zbias_step,
             &mut draw_stats,
@@ -1634,10 +1674,12 @@ impl CxVulkan {
         }
 
         let xr_depth_view = self.ensure_xr_depth_dummy()?;
+        let render_pass_key = self.main_render_pass_key();
         self.record_draw_list(
             cx,
             draw_pass_id,
             draw_list_id,
+            &render_pass_key,
             &mut zbias,
             zbias_step,
             &mut draw_stats,
@@ -1693,6 +1735,582 @@ impl CxVulkan {
 
         if acquire_suboptimal || present_suboptimal {
             self.recreate_swapchain()?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_pass_color_target(
+        &mut self,
+        cx: &mut Cx,
+        texture_id: TextureId,
+        width: usize,
+        height: usize,
+    ) -> Result<(), String> {
+        let texture_key = Self::texture_key(texture_id);
+        let (alloc_changed, alloc) = {
+            let cxtexture = &mut cx.textures[texture_id];
+            let alloc_changed = cxtexture.alloc_render(width, height);
+            let alloc = cxtexture.alloc.clone().ok_or_else(|| {
+                format!("render target texture {} missing allocation metadata", texture_key)
+            })?;
+            (alloc_changed, alloc)
+        };
+
+        let format = Self::vk_color_format_from_texture_pixel(alloc.pixel).ok_or_else(|| {
+            format!(
+                "unsupported Vulkan render target pixel format for texture {}",
+                texture_key
+            )
+        })?;
+        let target_width = alloc.width.max(1) as u32;
+        let target_height = alloc.height.max(1) as u32;
+        let needs_recreate = match self.textures.get(&texture_key) {
+            Some(resource) => {
+                alloc_changed
+                    || resource.width != target_width
+                    || resource.height != target_height
+                    || resource.format != format
+                    || resource.layers != 1
+                    || resource.is_cube
+            }
+            None => true,
+        };
+
+        if needs_recreate {
+            if let Some(old_resource) = self.textures.remove(&texture_key) {
+                self.destroy_texture_resource(old_resource);
+            }
+            let resource = self.create_color_target_resource(target_width, target_height, format)?;
+            self.textures.insert(texture_key, resource);
+        }
+        Ok(())
+    }
+
+    fn ensure_pass_depth_target(
+        &mut self,
+        cx: &mut Cx,
+        texture_id: TextureId,
+        width: usize,
+        height: usize,
+    ) -> Result<(), String> {
+        let texture_key = Self::texture_key(texture_id);
+        let (alloc_changed, alloc) = {
+            let cxtexture = &mut cx.textures[texture_id];
+            let alloc_changed = cxtexture.alloc_depth(width, height);
+            let alloc = cxtexture.alloc.clone().ok_or_else(|| {
+                format!("depth target texture {} missing allocation metadata", texture_key)
+            })?;
+            (alloc_changed, alloc)
+        };
+
+        let format = match alloc.pixel {
+            TexturePixel::D32 => vk::Format::D32_SFLOAT,
+            _ => {
+                return Err(format!(
+                    "unsupported Vulkan depth target pixel format for texture {}",
+                    texture_key
+                ));
+            }
+        };
+        let target_width = alloc.width.max(1) as u32;
+        let target_height = alloc.height.max(1) as u32;
+        let needs_recreate = match self.textures.get(&texture_key) {
+            Some(resource) => {
+                alloc_changed
+                    || resource.width != target_width
+                    || resource.height != target_height
+                    || resource.format != format
+                    || resource.layers != 1
+                    || resource.is_cube
+            }
+            None => true,
+        };
+
+        if needs_recreate {
+            if let Some(old_resource) = self.textures.remove(&texture_key) {
+                self.destroy_texture_resource(old_resource);
+            }
+            let resource = self.create_depth_target(target_width, target_height, format)?;
+            self.textures.insert(texture_key, resource);
+        }
+        Ok(())
+    }
+
+    fn main_render_pass_key(&self) -> VulkanRenderPassKey {
+        VulkanRenderPassKey::new(&[self.swapchain_format], Some(self.depth_format))
+    }
+
+    fn get_or_create_pipeline_render_pass(
+        &mut self,
+        key: &VulkanRenderPassKey,
+    ) -> Result<vk::RenderPass, String> {
+        if *key == self.main_render_pass_key() {
+            return Ok(self.render_pass);
+        }
+        if let Some(render_pass) = self.offscreen_render_passes.get(key) {
+            return Ok(*render_pass);
+        }
+
+        let color_formats = key.color_vk_formats();
+        let depth_format = key.depth_vk_format();
+        let mut attachments = Vec::with_capacity(color_formats.len() + depth_format.is_some() as usize);
+        let mut color_refs = Vec::with_capacity(color_formats.len());
+        for (index, format) in color_formats.iter().enumerate() {
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(*format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::LOAD)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            );
+            color_refs.push(
+                vk::AttachmentReference::default()
+                    .attachment(index as u32)
+                    .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+            );
+        }
+        let depth_ref = if let Some(format) = depth_format {
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::LOAD)
+                    .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            );
+            Some(
+                vk::AttachmentReference::default()
+                    .attachment(color_formats.len() as u32)
+                    .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            )
+        } else {
+            None
+        };
+
+        let mut subpass = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_refs);
+        if let Some(depth_ref) = depth_ref.as_ref() {
+            subpass = subpass.depth_stencil_attachment(depth_ref);
+        }
+        let dependencies = [vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
+            .src_access_mask(
+                vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_READ
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )];
+        let subpasses = [subpass];
+        let render_pass_info = vk::RenderPassCreateInfo::default()
+            .attachments(&attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+        let render_pass = unsafe { self.device.create_render_pass(&render_pass_info, None) }
+            .map_err(|e| format!("create_render_pass(pipeline-cache) failed: {e:?}"))?;
+        self.offscreen_render_passes.insert(key.clone(), render_pass);
+        Ok(render_pass)
+    }
+
+    pub fn draw_pass_to_texture(
+        &mut self,
+        cx: &mut Cx,
+        draw_pass_id: DrawPassId,
+    ) -> Result<(), String> {
+        let draw_list_id = if let Some(id) = cx.passes[draw_pass_id].main_draw_list_id {
+            id
+        } else {
+            return Ok(());
+        };
+
+        let dpi_factor = cx.passes[draw_pass_id].dpi_factor.unwrap_or(1.0);
+        let pass_rect = match cx.get_pass_rect(draw_pass_id, dpi_factor) {
+            Some(rect) => rect,
+            None => return Ok(()),
+        };
+        if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
+            return Ok(());
+        }
+
+        {
+            let pass = &mut cx.passes[draw_pass_id];
+            pass.paint_dirty = false;
+            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            pass.set_dpi_factor(dpi_factor);
+        }
+
+        let target_width = (dpi_factor * pass_rect.size.x).max(1.0) as usize;
+        let target_height = (dpi_factor * pass_rect.size.y).max(1.0) as usize;
+
+        #[derive(Clone, Copy)]
+        struct ColorAttachmentState {
+            texture_id: TextureId,
+            view: vk::ImageView,
+            image: vk::Image,
+            format: vk::Format,
+            old_layout: vk::ImageLayout,
+            should_clear: bool,
+        }
+
+        #[derive(Clone, Copy)]
+        struct DepthAttachmentState {
+            texture_id: TextureId,
+            view: vk::ImageView,
+            image: vk::Image,
+            format: vk::Format,
+            old_layout: vk::ImageLayout,
+            should_clear: bool,
+        }
+
+        let pass_dont_clear = cx.passes[draw_pass_id].dont_clear;
+        let color_targets: Vec<_> = cx.passes[draw_pass_id]
+            .color_textures
+            .iter()
+            .map(|color_texture| {
+                (
+                    color_texture.texture.texture_id(),
+                    color_texture.clear_color.clone(),
+                )
+            })
+            .collect();
+        if color_targets.is_empty() {
+            return Ok(());
+        }
+        let depth_target = cx.passes[draw_pass_id]
+            .depth_texture
+            .as_ref()
+            .map(|texture| texture.texture_id());
+        let clear_depth_value = match cx.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::InitWith(depth) | DrawPassClearDepth::ClearWith(depth) => depth,
+        };
+
+        for (texture_id, _) in &color_targets {
+            self.ensure_pass_color_target(cx, *texture_id, target_width, target_height)?;
+        }
+        if let Some(texture_id) = depth_target {
+            self.ensure_pass_depth_target(cx, texture_id, target_width, target_height)?;
+        }
+
+        unsafe {
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(offscreen) failed: {e:?}"))?;
+            self.device
+                .reset_fences(&[self.in_flight_fence])
+                .map_err(|e| format!("reset_fences(offscreen) failed: {e:?}"))?;
+        }
+
+        self.destroy_frame_resources();
+        unsafe {
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| format!("reset_command_buffer(offscreen) failed: {e:?}"))?;
+            self.device
+                .begin_command_buffer(
+                    self.command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(|e| format!("begin_command_buffer(offscreen) failed: {e:?}"))?;
+        }
+
+        self.texture_upload_count_this_frame = 0;
+        self.texture_upload_bytes_this_frame = 0;
+        self.prepare_draw_list_textures(cx, draw_list_id)?;
+
+        let mut color_attachments = Vec::with_capacity(color_targets.len());
+        let mut clear_values = Vec::with_capacity(color_targets.len() + 1);
+        for (texture_id, clear_color) in &color_targets {
+            let should_clear = match clear_color {
+                DrawPassClearColor::InitWith(_) => {
+                    !pass_dont_clear && cx.textures[*texture_id].take_initial()
+                }
+                DrawPassClearColor::ClearWith(_) => !pass_dont_clear,
+            };
+            let clear = match clear_color {
+                DrawPassClearColor::InitWith(color) | DrawPassClearColor::ClearWith(color) => *color,
+            };
+            let resource = self
+                .textures
+                .get(&Self::texture_key(*texture_id))
+                .ok_or_else(|| format!("missing Vulkan color target for texture {:?}", texture_id))?;
+            color_attachments.push(ColorAttachmentState {
+                texture_id: *texture_id,
+                view: resource.view,
+                image: resource.image,
+                format: resource.format,
+                old_layout: resource.layout,
+                should_clear,
+            });
+            clear_values.push(vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [clear.x, clear.y, clear.z, clear.w],
+                },
+            });
+        }
+
+        let depth_attachment = if let Some(texture_id) = depth_target {
+            let should_clear = match cx.passes[draw_pass_id].clear_depth {
+                DrawPassClearDepth::InitWith(_) => {
+                    !pass_dont_clear && cx.textures[texture_id].take_initial()
+                }
+                DrawPassClearDepth::ClearWith(_) => !pass_dont_clear,
+            };
+            let resource = self
+                .textures
+                .get(&Self::texture_key(texture_id))
+                .ok_or_else(|| format!("missing Vulkan depth target for texture {:?}", texture_id))?;
+            clear_values.push(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: clear_depth_value,
+                    stencil: 0,
+                },
+            });
+            Some(DepthAttachmentState {
+                texture_id,
+                view: resource.view,
+                image: resource.image,
+                format: resource.format,
+                old_layout: resource.layout,
+                should_clear,
+            })
+        } else {
+            None
+        };
+
+        for attachment in &color_attachments {
+            self.transition_image_layout(
+                attachment.image,
+                vk::ImageAspectFlags::COLOR,
+                1,
+                attachment.old_layout,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            );
+        }
+        if let Some(depth) = depth_attachment {
+            self.transition_image_layout(
+                depth.image,
+                vk::ImageAspectFlags::DEPTH,
+                1,
+                depth.old_layout,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            );
+        }
+
+        let color_attachment_descriptions: Vec<_> = color_attachments
+            .iter()
+            .map(|attachment| {
+                vk::AttachmentDescription::default()
+                    .format(attachment.format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(if attachment.should_clear {
+                        vk::AttachmentLoadOp::CLEAR
+                    } else {
+                        vk::AttachmentLoadOp::LOAD
+                    })
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            })
+            .collect();
+        let mut attachments = color_attachment_descriptions;
+        let color_refs: Vec<_> = (0..color_attachments.len())
+            .map(|index| {
+                vk::AttachmentReference::default()
+                    .attachment(index as u32)
+                    .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            })
+            .collect();
+        let depth_ref = depth_attachment.as_ref().map(|_| {
+            vk::AttachmentReference::default()
+                .attachment(color_attachments.len() as u32)
+                .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        });
+        if let Some(depth) = depth_attachment {
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(depth.format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(if depth.should_clear {
+                        vk::AttachmentLoadOp::CLEAR
+                    } else {
+                        vk::AttachmentLoadOp::LOAD
+                    })
+                    .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            );
+        }
+
+        let mut subpass = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_refs);
+        if let Some(depth_ref) = depth_ref.as_ref() {
+            subpass = subpass.depth_stencil_attachment(depth_ref);
+        }
+        let dependencies = [vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
+            .src_access_mask(
+                vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_READ
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )];
+        let subpasses = [subpass];
+        let render_pass_info = vk::RenderPassCreateInfo::default()
+            .attachments(&attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+        let render_pass = unsafe { self.device.create_render_pass(&render_pass_info, None) }
+            .map_err(|e| format!("create_render_pass(offscreen) failed: {e:?}"))?;
+
+        let mut framebuffer_attachments: Vec<vk::ImageView> =
+            color_attachments.iter().map(|attachment| attachment.view).collect();
+        if let Some(depth) = depth_attachment {
+            framebuffer_attachments.push(depth.view);
+        }
+        let framebuffer_info = vk::FramebufferCreateInfo::default()
+            .render_pass(render_pass)
+            .attachments(&framebuffer_attachments)
+            .width(target_width as u32)
+            .height(target_height as u32)
+            .layers(1);
+        let framebuffer = unsafe { self.device.create_framebuffer(&framebuffer_info, None) }
+            .map_err(|e| format!("create_framebuffer(offscreen) failed: {e:?}"))?;
+
+        unsafe {
+            self.device.cmd_begin_render_pass(
+                self.command_buffer,
+                &vk::RenderPassBeginInfo::default()
+                    .render_pass(render_pass)
+                    .framebuffer(framebuffer)
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: vk::Extent2D {
+                            width: target_width as u32,
+                            height: target_height as u32,
+                        },
+                    })
+                    .clear_values(&clear_values),
+                vk::SubpassContents::INLINE,
+            );
+            self.device.cmd_set_viewport(
+                self.command_buffer,
+                0,
+                &[vk::Viewport {
+                    x: 0.0,
+                    y: target_height as f32,
+                    width: target_width as f32,
+                    height: -(target_height as f32),
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }],
+            );
+            self.device.cmd_set_scissor(
+                self.command_buffer,
+                0,
+                &[vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: vk::Extent2D {
+                        width: target_width as u32,
+                        height: target_height as u32,
+                    },
+                }],
+            );
+        }
+
+        let xr_depth_view = self.ensure_xr_depth_dummy()?;
+        let render_pass_key = VulkanRenderPassKey::new(
+            &color_attachments
+                .iter()
+                .map(|attachment| attachment.format)
+                .collect::<Vec<_>>(),
+            depth_attachment.map(|depth| depth.format),
+        );
+        let mut zbias = 0.0f32;
+        let zbias_step = cx.passes[draw_pass_id].zbias_step;
+        let mut draw_stats = VulkanDrawStats::default();
+        self.record_draw_list(
+            cx,
+            draw_pass_id,
+            draw_list_id,
+            &render_pass_key,
+            &mut zbias,
+            zbias_step,
+            &mut draw_stats,
+            xr_depth_view,
+        )?;
+
+        unsafe {
+            self.device.cmd_end_render_pass(self.command_buffer);
+            self.device
+                .end_command_buffer(self.command_buffer)
+                .map_err(|e| format!("end_command_buffer(offscreen) failed: {e:?}"))?;
+            self.device
+                .queue_submit(
+                    self.queue,
+                    &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])],
+                    self.in_flight_fence,
+                )
+                .map_err(|e| format!("queue_submit(offscreen) failed: {e:?}"))?;
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(offscreen submit) failed: {e:?}"))?;
+            self.device.destroy_framebuffer(framebuffer, None);
+            self.device.destroy_render_pass(render_pass, None);
+        }
+
+        for attachment in &color_attachments {
+            if let Some(resource) = self.textures.get_mut(&Self::texture_key(attachment.texture_id)) {
+                resource.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+            }
+        }
+        if let Some(depth) = depth_attachment {
+            if let Some(resource) = self.textures.get_mut(&Self::texture_key(depth.texture_id)) {
+                resource.layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            }
         }
 
         Ok(())
@@ -2147,6 +2765,146 @@ impl CxVulkan {
             ycbcr_conversion: None,
             owns_image: true,
         })
+    }
+
+    fn vk_color_format_from_texture_pixel(pixel: TexturePixel) -> Option<vk::Format> {
+        match pixel {
+            TexturePixel::BGRAu8 => Some(vk::Format::B8G8R8A8_UNORM),
+            TexturePixel::RGBAf16 => Some(vk::Format::R16G16B16A16_SFLOAT),
+            TexturePixel::RGBAf32 => Some(vk::Format::R32G32B32A32_SFLOAT),
+            _ => None,
+        }
+    }
+
+    fn create_color_target_resource(
+        &self,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+    ) -> Result<VulkanTextureResource, String> {
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: width.max(1),
+                height: height.max(1),
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { self.device.create_image(&image_info, None) }
+            .map_err(|e| format!("create_image(render_target) failed: {e:?}"))?;
+        let memory_req = unsafe { self.device.get_image_memory_requirements(image) };
+        let memory_type_index = self
+            .find_memory_type(
+                memory_req.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .or_else(|_| {
+                self.find_memory_type(
+                    memory_req.memory_type_bits,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )
+            })?;
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(memory_req.size)
+            .memory_type_index(memory_type_index);
+        let memory = match unsafe { self.device.allocate_memory(&alloc_info, None) } {
+            Ok(memory) => memory,
+            Err(e) => {
+                unsafe {
+                    self.device.destroy_image(image, None);
+                }
+                return Err(format!("allocate_memory(render_target) failed: {e:?}"));
+            }
+        };
+        unsafe {
+            if let Err(e) = self.device.bind_image_memory(image, memory, 0) {
+                self.device.free_memory(memory, None);
+                self.device.destroy_image(image, None);
+                return Err(format!("bind_image_memory(render_target) failed: {e:?}"));
+            }
+        }
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let view = match unsafe { self.device.create_image_view(&view_info, None) } {
+            Ok(view) => view,
+            Err(e) => {
+                unsafe {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_image(image, None);
+                }
+                return Err(format!("create_image_view(render_target) failed: {e:?}"));
+            }
+        };
+
+        Ok(VulkanTextureResource {
+            image,
+            memory,
+            view,
+            width: width.max(1),
+            height: height.max(1),
+            layers: 1,
+            is_cube: false,
+            format,
+            layout: vk::ImageLayout::UNDEFINED,
+            hardware_buffer: None,
+            sampler: None,
+            ycbcr_conversion: None,
+            owns_image: true,
+        })
+    }
+
+    fn transition_image_layout(
+        &self,
+        image: vk::Image,
+        aspect_mask: vk::ImageAspectFlags,
+        layer_count: u32,
+        old_layout: vk::ImageLayout,
+        new_layout: vk::ImageLayout,
+    ) {
+        let (src_stage, src_access) = Self::layout_stage_access(old_layout);
+        let (dst_stage, dst_access) = Self::layout_stage_access(new_layout);
+        let barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(old_layout)
+            .new_layout(new_layout)
+            .src_access_mask(src_access)
+            .dst_access_mask(dst_access)
+            .image(image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(aspect_mask)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(layer_count.max(1)),
+            );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
+        }
     }
 
     fn has_stencil_component(format: vk::Format) -> bool {
@@ -3173,9 +3931,23 @@ impl CxVulkan {
                 vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::VERTEX_SHADER,
                 vk::AccessFlags::SHADER_READ,
             ),
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ),
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => (
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+            vk::ImageLayout::GENERAL => (
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
+            ),
             _ => (
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::AccessFlags::empty(),
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
             ),
         }
     }
@@ -3370,6 +4142,7 @@ impl CxVulkan {
         cx: &mut Cx,
         draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
+        render_pass_key: &VulkanRenderPassKey,
         zbias: &mut f32,
         zbias_step: f32,
         draw_stats: &mut VulkanDrawStats,
@@ -3393,6 +4166,7 @@ impl CxVulkan {
                     cx,
                     draw_pass_id,
                     sub_list_id,
+                    render_pass_key,
                     zbias,
                     zbias_step,
                     draw_stats,
@@ -3521,6 +4295,7 @@ impl CxVulkan {
             self.record_draw_packet(
                 cx,
                 &packet,
+                render_pass_key,
                 &geometry.vertices,
                 &geometry.indices,
                 &pass_uniforms,
@@ -3536,13 +4311,14 @@ impl CxVulkan {
         &mut self,
         cx: &Cx,
         packet: &VulkanDrawPacket,
+        render_pass_key: &VulkanRenderPassKey,
         geometry_vertices: &[f32],
         geometry_indices: &[u32],
         pass_uniforms: &[f32],
         draw_list_uniforms: &[f32],
         xr_depth_view: vk::ImageView,
     ) -> Result<(), String> {
-        self.ensure_pipeline(cx, packet.shader_index)?;
+        self.ensure_pipeline(cx, packet.shader_index, render_pass_key)?;
         let (
             pipeline_handle,
             pipeline_layout,
@@ -3550,9 +4326,14 @@ impl CxVulkan {
             pipeline_has_descriptors,
             pipeline_samplers,
         ) = {
-            let pipeline = self.pipelines.get(&packet.shader_index).ok_or_else(|| {
-                format!("missing Vulkan pipeline for shader {}", packet.shader_index)
-            })?;
+            let pipeline_key = VulkanPipelineKey {
+                shader_index: packet.shader_index,
+                render_pass: render_pass_key.clone(),
+            };
+            let pipeline = self
+                .pipelines
+                .get(&pipeline_key)
+                .ok_or_else(|| format!("missing Vulkan pipeline for shader {}", packet.shader_index))?;
             (
                 if packet.depth_write {
                     pipeline.pipeline_write
@@ -3879,8 +4660,17 @@ impl CxVulkan {
         Ok(())
     }
 
-    fn ensure_pipeline(&mut self, cx: &Cx, shader_index: usize) -> Result<(), String> {
-        if self.pipelines.contains_key(&shader_index) {
+    fn ensure_pipeline(
+        &mut self,
+        cx: &Cx,
+        shader_index: usize,
+        render_pass_key: &VulkanRenderPassKey,
+    ) -> Result<(), String> {
+        let pipeline_key = VulkanPipelineKey {
+            shader_index,
+            render_pass: render_pass_key.clone(),
+        };
+        if self.pipelines.contains_key(&pipeline_key) {
             return Ok(());
         }
 
@@ -4117,10 +4907,11 @@ impl CxVulkan {
         let color_blend_attachments = [color_blend_attachment];
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
+        let has_depth = render_pass_key.depth_format.is_some();
         let make_depth_stencil = |depth_write| {
             vk::PipelineDepthStencilStateCreateInfo::default()
-                .depth_test_enable(true)
-                .depth_write_enable(depth_write)
+                .depth_test_enable(has_depth)
+                .depth_write_enable(has_depth && depth_write)
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
                 .depth_bounds_test_enable(false)
                 .stencil_test_enable(false)
@@ -4128,6 +4919,7 @@ impl CxVulkan {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
+        let render_pass = self.get_or_create_pipeline_render_pass(render_pass_key)?;
         let depth_stencil_write = make_depth_stencil(true);
         let depth_stencil_no_write = make_depth_stencil(false);
         let create_info_write = vk::GraphicsPipelineCreateInfo::default()
@@ -4141,7 +4933,7 @@ impl CxVulkan {
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic)
             .layout(pipeline_layout)
-            .render_pass(self.render_pass)
+            .render_pass(render_pass)
             .subpass(0);
         let create_info_no_write = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -4154,7 +4946,7 @@ impl CxVulkan {
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic)
             .layout(pipeline_layout)
-            .render_pass(self.render_pass)
+            .render_pass(render_pass)
             .subpass(0);
 
         let pipeline_result = unsafe {
@@ -4254,7 +5046,7 @@ impl CxVulkan {
         }
 
         self.pipelines.insert(
-            shader_index,
+            pipeline_key,
             VulkanPipeline {
                 pipeline_write,
                 pipeline_no_write,
@@ -4775,6 +5567,9 @@ impl CxVulkan {
                 self.device.destroy_pipeline_layout(pipeline.layout, None);
                 self.device
                     .destroy_descriptor_set_layout(pipeline.descriptor_set_layout, None);
+            }
+            for (_, render_pass) in self.offscreen_render_passes.drain() {
+                self.device.destroy_render_pass(render_pass, None);
             }
         }
     }
