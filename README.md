@@ -107,22 +107,12 @@ cargo makepad wasm install-toolchain
 cargo makepad wasm run -p makepad-example-splash --release
 ```
 
-For production web output, use the shipping pipeline. By default it enables `--profile=small --strip --brotli --split --small-fonts --no-threads`, writes `asset-manifest.json` / `web-perf-report.json`, and fingerprints startup-blocking assets:
+`wasm run` is the dev workflow: it always serves with hot reload and dev cache semantics on port `8010`.
+
+For deployable web output, use `wasm build` with explicit packaging flags. Package layout is enabled only when `wasm build` includes `--strip`, `--brotli`, `--split`, or `--no-threads`; `--profile=small` by itself does not switch layouts. The package-layout path writes `asset-manifest.json` / `web-perf-report.json` and fingerprints startup-blocking assets:
 
 ```bash
-cargo makepad wasm ship -p makepad-example-splash
-```
-
-Add `--serve` to preview the shipping package locally with shipping cache headers and conditional Brotli serving:
-
-```bash
-cargo makepad wasm ship --serve -p makepad-example-splash
-```
-
-To tune the shipping defaults explicitly:
-
-```bash
-cargo makepad wasm ship --threads --full-fonts --no-split --no-brotli -p makepad-example-splash
+cargo makepad wasm build -p makepad-example-splash --profile=small --strip --brotli --split --no-threads
 ```
 
 You can still use `wasm build` directly for manual combinations. To override the function-splitting threshold directly:
@@ -134,7 +124,7 @@ cargo makepad wasm build -p makepad-example-splash --release --strip --split=200
 For maximum size reduction, combine `--wasm-opt` (Binaryen IR optimization) and `--brotli` (compression). Install Binaryen for `--wasm-opt` (e.g. `brew install binaryen` or `apt install binaryen`):
 
 ```bash
-cargo makepad wasm ship --wasm-opt -p makepad-example-splash
+cargo makepad wasm build -p makepad-example-splash --profile=small --strip --brotli --split --no-threads --wasm-opt
 ```
 
 Notes:
@@ -143,7 +133,6 @@ Notes:
 - `--strip-custom-sections` preserves the old behavior when you only want to remove custom sections.
 - `--wasm-opt` runs Binaryen `wasm-opt -Os` for IR-level optimization (optional; requires [Binaryen](https://github.com/WebAssembly/binaryen)).
 - `--brotli` compresses `.wasm` and assets with Brotli for delivery.
-- `wasm ship` defaults to `--profile=small`, but smaller web font packaging still comes from `--small-fonts`.
 - `--no-threads` trims the web thread bridge and thread exports when threading is disabled.
 - The wasm linker packs relocations before the post-link size and split passes.
 - `--split` emits a primary wasm plus secondary payloads (`.secondary.wasm`, `.data.bin`) and implies function splitting.

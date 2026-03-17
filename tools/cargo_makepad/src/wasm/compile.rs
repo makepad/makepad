@@ -25,7 +25,7 @@ pub struct WasmBuildResult {
     asset_manifest: Option<AssetManifest>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct WasmConfig {
     pub strip: bool,
     pub lan: bool,
@@ -41,19 +41,14 @@ pub struct WasmConfig {
     pub split_functions: bool,
     pub split_functions_threshold: usize,
     pub hot_reload: bool,
-    pub serve: bool,
-    pub shipping_build: bool,
+    pub package_layout: bool,
     pub full_fonts: bool,
-    pub brotli_explicit: bool,
-    pub threads_explicit: bool,
-    pub small_fonts_explicit: bool,
-    pub split_explicit: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WasmServeMode {
     Dev,
-    Shipping,
+    Packaged,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -88,7 +83,7 @@ pub struct AssetManifest {
     version: u32,
     build_crate: String,
     profile: String,
-    shipping_build: bool,
+    package_layout: bool,
     threaded: bool,
     startup_assets: Vec<String>,
     assets: Vec<AssetManifestEntry>,
@@ -140,7 +135,7 @@ struct WebPerfReport {
     version: u32,
     build_crate: String,
     profile: String,
-    shipping_build: bool,
+    package_layout: bool,
     threaded: bool,
     total_raw_bytes: u64,
     total_transfer_bytes: u64,
@@ -859,7 +854,7 @@ fn finalize_pending_assets(
     build_crate: &str,
     profile: &str,
     threaded: bool,
-    shipping_build: bool,
+    package_layout: bool,
     pending_assets: &mut [PendingAsset],
 ) -> Result<AssetManifest, String> {
     let mut startup_assets = Vec::new();
@@ -874,7 +869,7 @@ fn finalize_pending_assets(
         let original_path = app_dir.join(&logical_path);
         let data = fs::read(&original_path)
             .map_err(|e| format!("Can't read emitted asset {:?}: {}", original_path, e))?;
-        let hashed = shipping_build
+        let hashed = package_layout
             && asset.startup_blocking
             && matches!(
                 Path::new(&logical_path)
@@ -942,7 +937,7 @@ fn finalize_pending_assets(
         version: 1,
         build_crate: build_crate.to_string(),
         profile: profile.to_string(),
-        shipping_build,
+        package_layout,
         threaded,
         startup_assets,
         assets,
@@ -996,7 +991,7 @@ fn build_web_perf_report(manifest: &AssetManifest) -> WebPerfReport {
         version: 1,
         build_crate: manifest.build_crate.clone(),
         profile: manifest.profile.clone(),
-        shipping_build: manifest.shipping_build,
+        package_layout: manifest.package_layout,
         threaded: manifest.threaded,
         total_raw_bytes,
         total_transfer_bytes,
@@ -1697,6 +1692,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     let profile = get_profile_from_args(&args);
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
     let build_dir = cwd.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
+    let package_layout = config.package_layout;
     let wasm_target_spec = build_wasm_target_spec(&cwd, config.threads)?;
     let target_arg = format!("--target={}", wasm_target_spec.display());
 
@@ -1748,7 +1744,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 false,
                 config.brotli,
             )?;
-            if config.shipping_build {
+            if package_layout {
                 pending_assets.push(PendingAsset {
                     logical_path: "makepad_wasm_bridge/wasm_bridge.js".to_string(),
                     emitted_path: "makepad_wasm_bridge/wasm_bridge.js".to_string(),
@@ -1770,7 +1766,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 false,
                 config.brotli,
             )?;
-            if config.shipping_build {
+            if package_layout {
                 pending_assets.push(PendingAsset {
                     logical_path: "makepad_platform/audio_worklet.js".to_string(),
                     emitted_path: "makepad_platform/audio_worklet.js".to_string(),
@@ -1789,7 +1785,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 false,
                 config.brotli,
             )?;
-            if config.shipping_build {
+            if package_layout {
                 pending_assets.push(PendingAsset {
                     logical_path: "makepad_platform/web_gl.js".to_string(),
                     emitted_path: "makepad_platform/web_gl.js".to_string(),
@@ -1829,7 +1825,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     config.brotli,
                 )?;
             }
-            if config.shipping_build {
+            if package_layout {
                 pending_assets.push(PendingAsset {
                     logical_path: "makepad_platform/web_worker.js".to_string(),
                     emitted_path: "makepad_platform/web_worker.js".to_string(),
@@ -1848,7 +1844,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 false,
                 config.brotli,
             )?;
-            if config.shipping_build {
+            if package_layout {
                 pending_assets.push(PendingAsset {
                     logical_path: "makepad_platform/web.js".to_string(),
                     emitted_path: "makepad_platform/web.js".to_string(),
@@ -1876,7 +1872,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 false,
                 config.brotli,
             )?;
-            if config.shipping_build {
+            if package_layout {
                 pending_assets.push(PendingAsset {
                     logical_path: "makepad_platform/full_canvas.css".to_string(),
                     emitted_path: "makepad_platform/full_canvas.css".to_string(),
@@ -1891,13 +1887,10 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         }
     }
 
-    if config.shipping_build {
+    if package_layout {
         let (selected_resources, metadata) =
             collect_shipping_resources(build_crate, &build_dir, &config)?;
         use_small_font_aliases = config.small_fonts && !(metadata.full_i18n || config.full_fonts);
-        if metadata.full_i18n || config.full_fonts {
-            println!("Shipping web build: full i18n font payload enabled");
-        }
         for asset in &selected_resources {
             pending_assets.push(copy_resource_asset(&app_dir, asset, config.brotli)?);
         }
@@ -2016,7 +2009,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             .write(patched.as_bytes())
             .unwrap();
         cp_brotli(&jsfile, &app_dir.join("bindgen.js"), false, config.brotli)?;
-        if config.shipping_build {
+        if package_layout {
             pending_assets.push(PendingAsset {
                 logical_path: "bindgen.js".to_string(),
                 emitted_path: "bindgen.js".to_string(),
@@ -2146,7 +2139,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 remove_brotli_artifact(&secondary_wasm_dest);
             }
             let secondary_startup_blocking = !defer_secondary_wasm;
-            if config.shipping_build {
+            if package_layout {
                 pending_assets.push(PendingAsset {
                     logical_path: format!("{}.secondary.wasm", build_crate),
                     emitted_path: format!("{}.secondary.wasm", build_crate),
@@ -2186,7 +2179,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 estimated_transfer_bytes(&split.primary_wasm, config.brotli);
             let split_data_transfer_bytes =
                 estimated_transfer_bytes(&split.split_data, config.brotli);
-            let keep_split_data = !config.shipping_build
+            let keep_split_data = !package_layout
                 || should_keep_split_data(
                     unsplit_transfer_bytes,
                     split_primary_transfer_bytes,
@@ -2225,7 +2218,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 } else {
                     remove_brotli_artifact(&split_data_dest);
                 }
-                if config.shipping_build {
+                if package_layout {
                     pending_assets.push(PendingAsset {
                         logical_path: format!("{}.data.bin", build_crate),
                         emitted_path: format!("{}.data.bin", build_crate),
@@ -2257,7 +2250,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         remove_brotli_artifact(&wasm_dest);
         None
     };
-    if config.shipping_build {
+    if package_layout {
         pending_assets.push(PendingAsset {
             logical_path: format!("{}.wasm", build_crate),
             emitted_path: format!("{}.wasm", build_crate),
@@ -2270,13 +2263,13 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         });
     }
 
-    let mut asset_manifest = if config.shipping_build {
+    let mut asset_manifest = if package_layout {
         Some(finalize_pending_assets(
             &app_dir,
             build_crate,
             &profile,
             config.threads,
-            config.shipping_build,
+            package_layout,
             &mut pending_assets,
         )?)
     } else {
@@ -2409,7 +2402,11 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             split_brotli_bytes,
         );
     }
-    println!("Created wasm package: {:?}", app_dir);
+    if package_layout {
+        println!("Created wasm package layout: {:?}", app_dir);
+    } else {
+        println!("Created wasm build output: {:?}", app_dir);
+    }
     if config.threads {
         println!("Copy this directory to any webserver, and serve with atleast these headers:");
         println!("Cross-Origin-Embedder-Policy: require-corp");
@@ -2432,8 +2429,8 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     println!("*.bin => application/octet-stream");
     Ok(WasmBuildResult {
         app_dir,
-        serve_mode: if config.shipping_build {
-            WasmServeMode::Shipping
+        serve_mode: if package_layout {
+            WasmServeMode::Packaged
         } else {
             WasmServeMode::Dev
         },
@@ -2450,6 +2447,7 @@ pub fn run(config: WasmConfig, args: &[String]) -> Result<(), String> {
     let port = config.port.unwrap_or(8010);
     let mut run_config = config;
     run_config.hot_reload = true;
+    run_config.package_layout = false;
 
     let result = build(run_config, args)?;
     let hot_reload_plan = collect_wasm_hot_reload_watch_plan(&build_crate, &build_dir);
@@ -2473,39 +2471,6 @@ pub fn run(config: WasmConfig, args: &[String]) -> Result<(), String> {
         result.asset_manifest,
         hot_reload_plan,
         Some(rebuild_plan),
-        &mut ownership_guard,
-    )?;
-    Ok(())
-}
-
-pub fn ship(config: WasmConfig, args: &[String]) -> Result<(), String> {
-    let build_crate = get_build_crate_from_args(args)?.to_string();
-    let profile = get_profile_from_args(args);
-    let workspace_root = std::env::current_dir()
-        .map_err(|err| format!("failed to resolve workspace root: {}", err))?;
-    let port = config.port.unwrap_or(8010);
-
-    let result = build(config, args)?;
-    if !config.serve {
-        return Ok(());
-    }
-
-    let mut ownership_guard = WasmServerOwnershipGuard::prepare(
-        &workspace_root,
-        &build_crate,
-        &profile,
-        port,
-        config.lan,
-    )?;
-    start_wasm_server(
-        result.app_dir,
-        config.lan,
-        port,
-        config.threads,
-        result.serve_mode,
-        result.asset_manifest,
-        None,
-        None,
         &mut ownership_guard,
     )?;
     Ok(())
@@ -2581,7 +2546,7 @@ fn cache_control_for_request(
 ) -> String {
     match serve_mode {
         WasmServeMode::Dev => "no-store, must-revalidate".to_string(),
-        WasmServeMode::Shipping => {
+        WasmServeMode::Packaged => {
             if matches!(
                 request_path,
                 "index.html" | "asset-manifest.json" | "web-perf-report.json"
@@ -3532,13 +3497,8 @@ mod tests {
             split_functions: false,
             split_functions_threshold: 0,
             hot_reload: false,
-            serve: false,
-            shipping_build: true,
+            package_layout: true,
             full_fonts: false,
-            brotli_explicit: false,
-            threads_explicit: false,
-            small_fonts_explicit: false,
-            split_explicit: false,
         }
     }
 
@@ -3734,12 +3694,12 @@ mod tests {
     }
 
     #[test]
-    fn shipping_cache_control_uses_manifest_entries() {
+    fn packaged_cache_control_uses_manifest_entries() {
         let manifest = AssetManifest {
             version: 1,
             build_crate: "app".to_string(),
             profile: "small".to_string(),
-            shipping_build: true,
+            package_layout: true,
             threaded: false,
             startup_assets: vec!["app.1234.wasm".to_string()],
             assets: vec![AssetManifestEntry {
@@ -3760,12 +3720,12 @@ mod tests {
         };
 
         assert_eq!(
-            cache_control_for_request(WasmServeMode::Shipping, "app.1234.wasm", Some(&manifest)),
+            cache_control_for_request(WasmServeMode::Packaged, "app.1234.wasm", Some(&manifest)),
             immutable_cache_control()
         );
         assert_eq!(
             cache_control_for_request(
-                WasmServeMode::Shipping,
+                WasmServeMode::Packaged,
                 "asset-manifest.json",
                 Some(&manifest)
             ),
@@ -3934,7 +3894,7 @@ mod tests {
             version: 1,
             build_crate: "app".to_string(),
             profile: "small".to_string(),
-            shipping_build: true,
+            package_layout: true,
             threaded: false,
             startup_assets: vec!["app.1234.wasm".to_string()],
             assets: vec![
@@ -3987,7 +3947,7 @@ mod tests {
             version: 1,
             build_crate: "app".to_string(),
             profile: "small".to_string(),
-            shipping_build: true,
+            package_layout: true,
             threaded: false,
             startup_assets: vec![
                 "app.1234.wasm".to_string(),

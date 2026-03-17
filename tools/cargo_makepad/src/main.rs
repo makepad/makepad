@@ -62,20 +62,21 @@ fn show_help() {
     println!(
         "    wasm install-toolchain                       Install the toolchain needed for wasm32 with rustup"
     );
-    println!("    wasm build <cargo args>                      Build a wasm project");
     println!(
-        "    wasm [options] run <cargo args>              Build and run a wasm project, starts a webserver at port 8010"
+        "    wasm build <cargo args>                      Build a wasm project; explicit packaging flags also emit a deployable web app directory"
     );
     println!(
-        "    wasm [options] ship <cargo args>             Build a shipping wasm package; add --serve to preview it with shipping cache semantics"
+        "    wasm [options] run <cargo args>              Build and run a dev wasm project, starts a webserver at port 8010"
     );
     println!();
     println!("    [options] with its default value:");
     println!();
-    println!("       --port=8010                               The port to run the wasm webserver");
-    println!("       --lan                                     Bind the webserver to your lan ip");
+    println!("       --port=8010                               The port for `wasm run`");
     println!(
-        "       --strip                                   Shipping-size wasm optimization pass (implies custom-section stripping)"
+        "       --lan                                     Bind the `wasm run` webserver to your lan ip"
+    );
+    println!(
+        "       --strip                                   Size-focused wasm optimization pass (implies custom-section stripping and package layout for `wasm build`)"
     );
     println!(
         "       --strip-custom-sections                   Legacy mode: only strip custom wasm sections"
@@ -87,20 +88,12 @@ fn show_help() {
         "       --split[=200]                             Split wasm payloads; bare --split uses a cold-first automatic split policy"
     );
     println!(
-        "       --brotli                                  Use brotli to compress the wasm file"
-    );
-    println!(
-        "       --no-brotli                               Disable brotli output (useful with `wasm ship` when testing raw sizes)"
+        "       --brotli                                  Compress wasm/assets with brotli and use package layout for `wasm build`"
     );
     println!("       --bindgen                                 Enable wasm-bindgen compatibility");
-    println!("       --threads                                 Force threaded web builds (shipping defaults to single-threaded)");
     println!(
-        "       --no-threads                              Build single-threaded wasm (no COOP/COEP needed)"
+        "       --no-threads                              Build single-threaded wasm (no COOP/COEP needed; also uses package layout for `wasm build`)"
     );
-    println!("       --small-fonts                             Remap large fallback fonts to the small Latin web set");
-    println!("       --full-fonts                              Keep full i18n fallback fonts in the shipped package");
-    println!("       --no-split                                Disable wasm/data split output");
-    println!("       --serve                                   Preview the generated package with the built-in webserver");
     println!();
     println!("Apple iOS/TVOs Commands:");
     println!();
