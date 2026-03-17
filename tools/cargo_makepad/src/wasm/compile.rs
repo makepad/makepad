@@ -2208,7 +2208,8 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     "  active segments: {} | passive segments: {}",
                     split.active_segment_count, split.passive_segment_count
                 );
-                split_data_active_only = split.passive_segment_count == 0;
+                split_data_active_only =
+                    split.passive_segment_count == 0 && !split.has_start_section;
                 output = split.primary_wasm;
                 split_data_bytes = Some(split.split_data.len());
                 fs::write(&split_data_dest, &split.split_data)
@@ -3306,26 +3307,12 @@ fn start_wasm_server(
                         continue;
                     }
 
-                    let is_spa_route = |request_path: &str| {
-                        if request_path.starts_with("/$") || request_path == "/favicon.ico" {
-                            return false;
-                        }
-                        let trimmed = request_path.trim_end_matches('/');
-                        let last_segment = trimmed.rsplit('/').next().unwrap_or("");
-                        !last_segment.is_empty() && !last_segment.contains('.')
-                    };
-
-                    let mut spa_fallback_to_index = false;
                     let mime_type = if let Some(mime_type) = mime_type_for_path(path) {
                         mime_type
                     } else if path.ends_with(".ttf.2") {
                         "application/ttf"
                     } else if path.ends_with(".otf.2") {
                         "font/otf"
-                    } else if is_spa_route(path) {
-                        spa_fallback_to_index = true;
-                        path = "/index.html";
-                        "text/html"
                     } else {
                         println!("Wasm webserver 404 (unknown mime/path): {}", headers.path);
                         let body = b"Not found".to_vec();
@@ -3340,9 +3327,6 @@ fn start_wasm_server(
                         continue;
                     };
 
-                    if spa_fallback_to_index {
-                        println!("Wasm webserver SPA fallback: {} -> {}", headers.path, path);
-                    }
                     let path = path.strip_prefix("/").unwrap();
                     let cache_control =
                         cache_control_for_request(serve_mode, path, asset_manifest.as_ref());

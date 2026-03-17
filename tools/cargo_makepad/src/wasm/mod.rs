@@ -53,6 +53,12 @@ fn build_uses_package_layout(config: &WasmConfig) -> bool {
     config.optimize_size || config.brotli || config.split || !config.threads
 }
 
+fn apply_packaged_web_defaults(config: &mut WasmConfig) {
+    if config.package_layout && !config.full_fonts {
+        config.small_fonts = true;
+    }
+}
+
 fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> Result<bool, String> {
     if let Some(error) = removed_wasm_option_error(v) {
         Err(error)
@@ -150,6 +156,7 @@ fn parse_wasm_command(
         "build" => {
             let build_args = strip_wasm_options(&mut config, &args[1..])?;
             config.package_layout = build_uses_package_layout(&config);
+            apply_packaged_web_defaults(&mut config);
             Ok((WasmCommand::Build, config, build_args))
         }
         "run" => {
@@ -195,6 +202,7 @@ mod tests {
             parse(&["build", "-p", "makepad-example-splash"]).unwrap();
         assert_eq!(command, WasmCommand::Build);
         assert!(!config.package_layout);
+        assert!(!config.small_fonts);
         assert_eq!(command_args, vec!["-p", "makepad-example-splash"]);
     }
 
@@ -213,6 +221,11 @@ mod tests {
                 "expected package layout for {:?}",
                 args
             );
+            assert!(
+                config.small_fonts,
+                "expected packaged font defaults for {:?}",
+                args
+            );
         }
     }
 
@@ -222,6 +235,7 @@ mod tests {
             parse(&["build", "-p", "app", "--profile=small"]).unwrap();
         assert_eq!(command, WasmCommand::Build);
         assert!(!config.package_layout);
+        assert!(!config.small_fonts);
         assert_eq!(command_args, vec!["-p", "app", "--profile=small"]);
     }
 
@@ -233,6 +247,7 @@ mod tests {
         assert!(!config.package_layout);
         assert!(config.strip);
         assert!(!config.optimize_size);
+        assert!(!config.small_fonts);
         assert_eq!(command_args, vec!["-p", "app"]);
     }
 
@@ -243,6 +258,7 @@ mod tests {
         assert_eq!(command, WasmCommand::Run);
         assert!(config.hot_reload);
         assert!(!config.package_layout);
+        assert!(!config.small_fonts);
         assert!(!config.threads);
         assert!(config.optimize_size);
         assert!(config.split);

@@ -160,6 +160,7 @@ pub struct WasmDataSplitResult {
     pub segment_count: usize,
     pub active_segment_count: usize,
     pub passive_segment_count: usize,
+    pub has_start_section: bool,
 }
 
 fn read_wasm_sections(buf: &[u8]) -> Result<Vec<WasmSection>, WasmParseError> {
@@ -1990,6 +1991,7 @@ pub fn wasm_split_functions_cold(buf: &[u8]) -> Result<WasmFunctionSplitResult, 
 
 pub fn wasm_split_data_segments(buf: &[u8]) -> Result<WasmDataSplitResult, WasmParseError> {
     let sections = read_wasm_sections(buf)?;
+    let has_start_section = sections.iter().any(|section| section.type_id == 8);
     let Some(data_section) = sections.iter().find(|section| section.type_id == 11) else {
         return Ok(WasmDataSplitResult {
             primary_wasm: buf.to_vec(),
@@ -1997,6 +1999,7 @@ pub fn wasm_split_data_segments(buf: &[u8]) -> Result<WasmDataSplitResult, WasmP
             segment_count: 0,
             active_segment_count: 0,
             passive_segment_count: 0,
+            has_start_section,
         });
     };
 
@@ -2016,6 +2019,7 @@ pub fn wasm_split_data_segments(buf: &[u8]) -> Result<WasmDataSplitResult, WasmP
         segment_count: segments.len(),
         active_segment_count,
         passive_segment_count,
+        has_start_section,
     })
 }
 
@@ -2208,6 +2212,7 @@ mod tests {
         assert_eq!(split.segment_count, 1);
         assert_eq!(split.active_segment_count, 1);
         assert_eq!(split.passive_segment_count, 0);
+        assert!(!split.has_start_section);
         assert_eq!(
             decode_split_data(&split.split_data),
             vec![WasmDataSegment {
@@ -2240,6 +2245,7 @@ mod tests {
         assert_eq!(split.segment_count, 3);
         assert_eq!(split.active_segment_count, 1);
         assert_eq!(split.passive_segment_count, 2);
+        assert!(!split.has_start_section);
         assert_eq!(
             decode_split_data(&split.split_data),
             vec![
@@ -2273,6 +2279,29 @@ mod tests {
                 ]),
             ])
         );
+    }
+
+    fn start_section(func_index: u32) -> Vec<u8> {
+        let payload = encode_var_u32(func_index);
+        let mut section = vec![8];
+        section.extend_from_slice(&encode_var_u32(payload.len() as u32));
+        section.extend_from_slice(&payload);
+        section
+    }
+
+    #[test]
+    fn split_data_segments_reports_start_section_presence() {
+        let ty = standard_type_section();
+        let funcs = function_section(&[0]);
+        let mem = memory_section();
+        let start = start_section(0);
+        let code = code_section(&[&[0x00, 0x0b]]);
+        let data = data_section(7, &[1, 2, 3, 4]);
+        let wasm = wasm_with_sections(&[ty, funcs, mem, start, code, data]);
+
+        let split = wasm_split_data_segments(&wasm).unwrap();
+        assert_eq!(split.segment_count, 1);
+        assert!(split.has_start_section);
     }
 
     // --- Function splitting tests ---

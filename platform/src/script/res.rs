@@ -275,7 +275,7 @@ impl Cx {
             }
 
             #[cfg(target_arch = "wasm32")]
-            if res.web_url.is_none() {
+            if res.dependency_path.is_none() {
                 if let Some(dep_path) = resolve_dependency_path_from_manifests(
                     &res.abs_path,
                     None,
@@ -283,8 +283,14 @@ impl Cx {
                     crate_manifests,
                 ) {
                     res.dependency_path = Some(dep_path.clone());
-                    res.web_url = Some(format!("/{}", web_resource_request_path(self, &dep_path)));
                 }
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            if let Some(dep_path) = res.dependency_path.as_deref() {
+                res.web_url = Some(format!("/{}", web_resource_request_path(self, dep_path)));
+            } else {
+                res.web_url = None;
             }
 
             if let Some(dep_path) = res.dependency_path.as_deref() {
