@@ -1,0 +1,11 @@
+[package]
+name = "makepad-example-browser"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad browser example"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["cef"] }
+makepad-cef = { path = "../../libs/cef" }

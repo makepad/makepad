@@ -38,7 +38,6 @@ pub use crate::{
         draw_pbr::DrawPbrTextureSet, draw_quad::DrawColor,
         draw_quad::DrawQuad, draw_rotated_text::DrawRotatedText,
         draw_rotated_text::PathGlyphInstance, draw_rotated_text::PathTextPlacement,
-        passthrough_cube::DrawPassthroughCubeAtlas,
         draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText, draw_text::TextStyle,
         draw_text_3d::DrawText3d, draw_vector::DrawVector,
     },
@@ -65,7 +64,6 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::draw_text_3d::script_mod(vm);
     crate::shader::draw_vector::script_mod(vm);
     crate::shader::draw_pbr::script_mod(vm);
-    crate::shader::passthrough_cube::script_mod(vm);
     crate::shader::draw_svg::script_mod(vm);
     crate::shader::draw_svg_glyph::script_mod(vm);
     NIL
