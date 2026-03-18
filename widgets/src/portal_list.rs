@@ -648,18 +648,23 @@ impl PortalList {
                         self.first_scroll = start_pos;
                     }
                 }
-                // Capture measured heights into height_tree and height_cache
+                // Capture measured heights into height_tree and height_cache.
+                // Skip zero-height items: newly-created widgets may produce zero height
+                // on their first draw frame, and recording those zeros would corrupt
+                // the height averages and tree, causing scroll position miscalculations.
                 for item in list.iter() {
                     if item.index >= self.range_start && item.index < self.range_end {
                         let height = item.size.index(vi);
-                        let idx = item.index - self.range_start;
+                        if height > 0.0 {
+                            let idx = item.index - self.range_start;
 
-                        // Record in cache for average calculation
-                        self.height_cache.record_height(height);
+                            // Record in cache for average calculation
+                            self.height_cache.record_height(height);
 
-                        // Update in tree
-                        if let Some(ref mut tree) = self.height_tree {
-                            tree.update(idx, height);
+                            // Update in tree
+                            if let Some(ref mut tree) = self.height_tree {
+                                tree.update(idx, height);
+                            }
                         }
                     }
                 }
