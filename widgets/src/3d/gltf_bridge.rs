@@ -417,8 +417,18 @@ impl GltfRenderer {
             .emissive_texture
             .and_then(|texture_index| self.textures.get(texture_index))
             .and_then(|texture| texture.clone());
-        let env_texture = Some(draw.default_env_texture(cx));
-        let env_atlas_texture = None;
+        let env_texture = if draw.has_env_texture > 0.5 {
+            draw.draw_vars.texture_slots[5].clone()
+        } else if draw.has_env_atlas_texture > 0.5 {
+            None
+        } else {
+            Some(draw.default_env_texture(cx))
+        };
+        let env_atlas_texture = if draw.has_env_atlas_texture > 0.5 {
+            draw.draw_vars.texture_slots[6].clone()
+        } else {
+            None
+        };
 
         draw.apply_material_state(&DrawPbrMaterialState {
             base_color_factor: material.base_color_factor,
