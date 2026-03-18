@@ -24,7 +24,14 @@ script_mod! {
         async_load: 0.0
 
         get_color_scale_pan: fn(scale: vec2, pan: vec2) {
-            return self.image_texture.sample_as_bgra(self.pos * scale + pan)
+            let uv = self.pos * scale + pan;
+
+            // 2. Prevent the image from repeating infinitely outside its bounds
+            if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                return vec4(0.0, 0.0, 0.0, 0.0); // Transparent
+            }
+
+            return self.image_texture.sample_as_bgra(uv)
         }
 
         get_color: fn() {
