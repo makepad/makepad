@@ -10,7 +10,7 @@ let RunItem = {
 let RunQuest = RunItem{
     on_run: fn(){
         hub.run(
-            {"STUDIO": hub.studio_ip, "MAKEPAD": ""},
+            {"STUDIO": hub.studio_ip, "MAKEPAD": "vulkan"},
             "cargo", 
             [
                 "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"
@@ -23,7 +23,7 @@ let RunQuest = RunItem{
 let RunAndroid = RunItem{
     on_run: fn(){
         hub.run(
-            {"STUDIO": hub.studio_ip, "MAKEPAD": ""},
+            {"STUDIO": hub.studio_ip, "MAKEPAD": "vulkan"},
             "cargo", 
             [
                 "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"

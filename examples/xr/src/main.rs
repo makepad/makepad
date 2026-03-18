@@ -4,6 +4,7 @@ use makepad_gltf::load_gltf_from_bytes;
 use makepad_xr::XrScene as EngineXrScene;
 use makepad_widgets::makepad_platform::permission::{Permission, PermissionStatus};
 use makepad_widgets::*;
+use std::{path::PathBuf, rc::Rc};
 
 app_main!(App);
 
@@ -14,13 +15,15 @@ script_mod! {
     mod.widgets.ExampleXrSceneBase = #(ExampleXrScene::register_widget(vm))
     mod.widgets.ExampleXrScene = set_type_default() do mod.widgets.ExampleXrSceneBase{
         scene := mod.widgets.XrScene{}
+        src: crate_resource("self://resources/DamagedHelmet.glb")
+        env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
         draw_pbr +: {
             light_dir: vec3(0.35, 0.8, 0.45)
             light_color: vec3(1.0, 1.0, 1.0)
             ambient: 0.22
             spec_power: 128.0
             spec_strength: 0.9
-            env_intensity: 1.0
+            env_intensity: 1.8
         }
     }
 
@@ -149,7 +152,6 @@ const EXAMPLE_WALL_ROWS: usize = 4;
 const EXAMPLE_WALL_ROTATION_Y: f32 = std::f32::consts::FRAC_PI_2;
 const EXAMPLE_PLATFORM_ROUND_RADIUS: f32 = 0.005;
 const EXAMPLE_BRICK_VISUAL_SCALE: f32 = 0.98;
-const EXAMPLE_HELMET_BYTES: &[u8] = include_bytes!("../resources/DamagedHelmet.glb");
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ExampleXrScene {
@@ -160,6 +162,10 @@ pub struct ExampleXrScene {
     #[redraw]
     #[live]
     draw_pbr: DrawPbr,
+    #[live]
+    src: Option<ScriptHandleRef>,
+    #[live]
+    env_src: Option<ScriptHandleRef>,
     #[rust]
     scene_center: Option<Vec3f>,
     #[rust]
@@ -168,8 +174,6 @@ pub struct ExampleXrScene {
     scene_right: Vec3f,
     #[rust]
     helmet_renderer: Option<GltfRenderer>,
-    #[rust]
-    helmet_load_attempted: bool,
     #[rust]
     helmet_load_logged: bool,
     #[rust]
@@ -180,9 +184,73 @@ pub struct ExampleXrScene {
     helmet_model_center: Vec3f,
     #[rust(1.0)]
     helmet_fit_scale: f32,
+    #[rust]
+    loaded_src_handle: Option<ScriptHandle>,
+    #[rust]
+    loaded_env_handle: Option<ScriptHandle>,
+}
+
+enum ResourceResolve {
+    Ready {
+        handle: ScriptHandle,
+        abs_path: PathBuf,
+        data: Rc<Vec<u8>>,
+    },
+    Pending {
+        handle: ScriptHandle,
+    },
+    Error {
+        handle: ScriptHandle,
+    },
+    Missing,
 }
 
 impl ExampleXrScene {
+    fn resource_metadata_by_handle(cx: &mut Cx, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
+        let resources = cx.script_data.resources.resources.borrow();
+        let resource = resources
+            .iter()
+            .find(|resource| resource.handle == handle)?;
+        Some((PathBuf::from(&resource.abs_path), resource.is_error()))
+    }
+
+    fn resolve_resource(cx: &mut Cx, handle_ref: &ScriptHandleRef) -> ResourceResolve {
+        let handle = handle_ref.as_handle();
+
+        if let Some(data) = cx.get_resource(handle) {
+            let abs_path = Self::resource_metadata_by_handle(cx, handle)
+                .map(|metadata| metadata.0)
+                .unwrap_or_else(|| PathBuf::from("resource"));
+            return ResourceResolve::Ready {
+                handle,
+                abs_path,
+                data,
+            };
+        }
+
+        cx.load_script_resource(handle);
+
+        if let Some(data) = cx.get_resource(handle) {
+            let abs_path = Self::resource_metadata_by_handle(cx, handle)
+                .map(|metadata| metadata.0)
+                .unwrap_or_else(|| PathBuf::from("resource"));
+            return ResourceResolve::Ready {
+                handle,
+                abs_path,
+                data,
+            };
+        }
+
+        if let Some((_, is_error)) = Self::resource_metadata_by_handle(cx, handle) {
+            if is_error {
+                return ResourceResolve::Error { handle };
+            }
+            return ResourceResolve::Pending { handle };
+        }
+
+        ResourceResolve::Missing
+    }
+
     fn scene_basis(state: &XrState) -> (Vec3f, Vec3f) {
         let mut forward = state.vec_in_head_space(vec3(0.0, 0.0, -1.0)) - state.head_pose.position;
         forward.y = 0.0;
@@ -344,63 +412,111 @@ impl ExampleXrScene {
             + vec3f(0.0, EXAMPLE_HELMET_HEIGHT_OFFSET, 0.0)
     }
 
-    fn ensure_helmet_loaded(&mut self, cx: &mut Cx2d) {
-        if self.helmet_load_attempted {
+    fn ensure_env_loaded(&mut self, cx: &mut Cx2d) {
+        let Some(handle_ref) = self.env_src.as_ref() else {
+            return;
+        };
+        let handle = handle_ref.as_handle();
+        if self.loaded_env_handle == Some(handle) {
             return;
         }
-        self.helmet_load_attempted = true;
 
-        match load_gltf_from_bytes(EXAMPLE_HELMET_BYTES, None) {
-            Ok(loaded) => {
-                let decoded_meshes = match GltfDecodedMeshes::decode_all(&loaded) {
-                    Ok(decoded_meshes) => decoded_meshes,
-                    Err(err) => {
-                        log!("XR helmet decode failed: {err}");
-                        self.helmet_renderer = None;
-                        return;
-                    }
-                };
-                let renderer = match GltfRenderer::from_loaded_predecoded(
-                    &mut self.draw_pbr,
-                    cx,
-                    &loaded,
-                    &decoded_meshes,
-                ) {
-                    Ok(renderer) => renderer,
-                    Err(err) => {
-                        log!("XR helmet upload failed: {err}");
-                        self.helmet_renderer = None;
-                        return;
-                    }
-                };
-                let mut renderer = renderer;
-                for material in &mut renderer.materials {
-                    material.metallic_roughness_texture = None;
-                    material.metallic_factor = 1.0;
-                    material.roughness_factor = 0.18;
-                    material.occlusion_texture = None;
-                    material.occlusion_strength = 0.0;
+        match Self::resolve_resource(cx, handle_ref) {
+            ResourceResolve::Ready {
+                handle,
+                abs_path,
+                data,
+            } => {
+                if let Err(err) =
+                    self.draw_pbr
+                        .load_default_env_equirect_from_bytes(cx, &data, Some(&abs_path))
+                {
+                    log!("XR helmet env load failed: {err}");
                 }
-                self.update_helmet_fit_from_renderer(&renderer);
-                if !self.helmet_load_logged {
-                    log!(
-                        "XR helmet load ok: draw_objects={} materials={} textures={} fit_scale={:.3} model_center=({:.3}, {:.3}, {:.3})",
-                        renderer.draw_objects.len(),
-                        renderer.materials.len(),
-                        renderer.textures.len(),
-                        self.helmet_fit_scale,
-                        self.helmet_model_center.x,
-                        self.helmet_model_center.y,
-                        self.helmet_model_center.z,
-                    );
-                    self.helmet_load_logged = true;
-                }
-                self.helmet_renderer = Some(renderer);
+                self.loaded_env_handle = Some(handle);
             }
-            Err(err) => {
-                log!("XR helmet load failed: {err}");
+            ResourceResolve::Error { handle } => {
+                self.loaded_env_handle = Some(handle);
+            }
+            ResourceResolve::Pending { handle } => {
+                let _ = handle;
+            }
+            ResourceResolve::Missing => {}
+        }
+    }
+
+    fn ensure_helmet_loaded(&mut self, cx: &mut Cx2d) {
+        let Some(handle_ref) = self.src.as_ref() else {
+            return;
+        };
+        let handle = handle_ref.as_handle();
+        if self.loaded_src_handle == Some(handle) {
+            return;
+        }
+
+        match Self::resolve_resource(cx, handle_ref) {
+            ResourceResolve::Ready {
+                handle,
+                abs_path,
+                data,
+            } => match load_gltf_from_bytes(&data, abs_path.parent()) {
+                Ok(mut loaded) => {
+                    loaded.source_path = Some(abs_path.clone());
+                    loaded.base_dir = abs_path.parent().map(PathBuf::from);
+                    let decoded_meshes = match GltfDecodedMeshes::decode_all(&loaded) {
+                        Ok(decoded_meshes) => decoded_meshes,
+                        Err(err) => {
+                            log!("XR helmet decode failed: {err}");
+                            self.helmet_renderer = None;
+                            self.loaded_src_handle = Some(handle);
+                            return;
+                        }
+                    };
+                    let renderer = match GltfRenderer::from_loaded_predecoded(
+                        &mut self.draw_pbr,
+                        cx,
+                        &loaded,
+                        &decoded_meshes,
+                    ) {
+                        Ok(renderer) => renderer,
+                        Err(err) => {
+                            log!("XR helmet upload failed: {err}");
+                            self.helmet_renderer = None;
+                            self.loaded_src_handle = Some(handle);
+                            return;
+                        }
+                    };
+                    self.update_helmet_fit_from_renderer(&renderer);
+                    if !self.helmet_load_logged {
+                        log!(
+                            "XR helmet load ok: draw_objects={} materials={} textures={} fit_scale={:.3} model_center=({:.3}, {:.3}, {:.3})",
+                            renderer.draw_objects.len(),
+                            renderer.materials.len(),
+                            renderer.textures.len(),
+                            self.helmet_fit_scale,
+                            self.helmet_model_center.x,
+                            self.helmet_model_center.y,
+                            self.helmet_model_center.z,
+                        );
+                        self.helmet_load_logged = true;
+                    }
+                    self.helmet_renderer = Some(renderer);
+                    self.loaded_src_handle = Some(handle);
+                }
+                Err(err) => {
+                    log!("XR helmet load failed: {err}");
+                    self.helmet_renderer = None;
+                    self.loaded_src_handle = Some(handle);
+                }
+            },
+            ResourceResolve::Error { handle } => {
                 self.helmet_renderer = None;
+                self.loaded_src_handle = Some(handle);
             }
+            ResourceResolve::Pending { handle } => {
+                let _ = handle;
+            }
+            ResourceResolve::Missing => {}
         }
     }
 
@@ -440,7 +556,12 @@ impl ExampleXrScene {
         Mat4f::mul(&Mat4f::translation(correction), &base_transform)
     }
 
-    fn prepare_helmet_draw(&mut self, cx: &mut Cx2d, state: &XrState) {
+    fn prepare_helmet_draw(
+        &mut self,
+        cx: &mut Cx2d,
+        state: &XrState,
+        camera_env_atlas: Option<Texture>,
+    ) {
         self.draw_pbr.begin();
         self.draw_pbr.set_use_pass_camera(true);
         self.draw_pbr.set_depth_clip(1.0);
@@ -449,9 +570,14 @@ impl ExampleXrScene {
         self.draw_pbr.set_normal_texture(None);
         self.draw_pbr.set_occlusion_texture(None);
         self.draw_pbr.set_emissive_texture(None);
-        self.draw_pbr.set_env_atlas_texture(None);
-        let env_texture = self.draw_pbr.default_env_texture(cx);
-        self.draw_pbr.set_env_texture(Some(env_texture));
+        if let Some(env_atlas) = camera_env_atlas {
+            self.draw_pbr.set_env_texture(None);
+            self.draw_pbr.set_env_atlas_texture(Some(env_atlas));
+        } else {
+            self.draw_pbr.set_env_atlas_texture(None);
+            let env_texture = self.draw_pbr.default_env_texture(cx);
+            self.draw_pbr.set_env_texture(Some(env_texture));
+        }
         self.draw_pbr.camera_pos = state.head_pose.position;
     }
 
@@ -546,9 +672,11 @@ impl Widget for ExampleXrScene {
         self.ensure_demo_scene(state);
         self.draw_demo_platform(cx);
         self.draw_demo_bodies(cx);
+        let camera_env_atlas = self.scene.render_passthrough_env_atlas(cx, state);
+        self.ensure_env_loaded(cx);
         self.ensure_helmet_loaded(cx);
         if self.helmet_renderer.is_some() {
-            self.prepare_helmet_draw(cx, state);
+            self.prepare_helmet_draw(cx, state, camera_env_atlas);
             let world_center = self.helmet_world_center();
             let helmet_transform = self.helmet_transform();
             let renderer = self.helmet_renderer.as_mut().unwrap();

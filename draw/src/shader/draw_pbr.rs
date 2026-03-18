@@ -155,6 +155,18 @@ script_mod! {
             return self.projection_matrix * view_pos
         }
 
+        active_camera_world_pos: fn() -> vec3f {
+            if self.use_pass_camera > 0.5 {
+                let camera_world = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0);
+                return vec3(
+                    camera_world.x / max(camera_world.w, 0.00001),
+                    camera_world.y / max(camera_world.w, 0.00001),
+                    camera_world.z / max(camera_world.w, 0.00001)
+                )
+            }
+            return self.u_camera_pos
+        }
+
         world_with_model_matrix: fn(local_pos: vec4) {
             let model_view = self.draw_list.view_transform * self.model_matrix;
             return model_view * local_pos
@@ -371,7 +383,7 @@ script_mod! {
             };
 
             let l = self.u_light_dir;
-            let v = normalize(self.u_camera_pos - self.v_world);
+            let v = normalize(self.active_camera_world_pos() - self.v_world);
             let h = normalize(l + v);
             let ndotl = max(dot(n, l), 0.0);
             let ndotv = max(dot(n, v), 0.0001);
