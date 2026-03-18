@@ -1620,7 +1620,7 @@ fn run_item_spawns_cargo_run_for_clicked_name() {
     .unwrap();
     fs::write(
         dir.path().join("makepad.splash"),
-        "use mod.hub\nhub.set_run_items([{name:\"makepad-example-splash\" in_studio:true on_run:fn(){let name = me.name hub.run({\"STUDIO\":hub.studio_ip}, \"cargo\", [\"run\" \"-p\" name \"--release\" \"--message-format=json\" \"--\" \"--message-format=json\" \"--stdin-loop\"])}}])\n",
+        "use mod.hub\nhub.set_run_items([{name:\"makepad-example-splash\" in_studio:true on_run:fn(){let name = self.name hub.run({\"STUDIO\":hub.studio_ip}, \"cargo\", [\"run\" \"-p\" name \"--release\" \"--message-format=json\" \"--\" \"--message-format=json\" \"--stdin-loop\"])}}])\n",
     )
     .unwrap();
 
@@ -1738,6 +1738,102 @@ fn run_item_spawns_cargo_run_for_clicked_name() {
     let _ = connection.send(ClientToHub::StopBuild {
         build_id: splash_build_id,
     });
+}
+
+#[test]
+fn run_item_binds_self_to_registered_item() {
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.std\nuse mod.hub\nhub.set_run_items([{name:\"hello\" package:\"self-bound\" in_studio:true on_run:fn(){std.println(self.package) if me is nil {std.println(\"me-unbound\")}}}])\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(true),
+    });
+    let started = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted { mount, package, .. }
+                if mount == "repo" && package == "makepad.splash"
+        )
+    })
+    .expect("did not receive BuildStarted");
+    let build_id = match started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let _run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.len() == 1),
+    )
+    .expect("did not receive RunItems");
+
+    let _ = connection.send(ClientToHub::RunItem {
+        mount: "repo".to_string(),
+        name: "hello".to_string(),
+    });
+    let _ = drain_messages(&connection, Duration::from_millis(250));
+
+    let query_id = connection.send(ClientToHub::QueryLogs {
+        build_id: Some(build_id),
+        level: None,
+        source: None,
+        file: None,
+        pattern: None,
+        is_regex: None,
+        since_index: None,
+        live: Some(false),
+    });
+    let log_results = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::QueryLogResults {
+                query_id: id, ..
+            } if *id == query_id
+        )
+    })
+    .expect("did not receive QueryLogResults");
+
+    match log_results {
+        HubToClient::QueryLogResults { entries, done, .. } => {
+            assert!(done);
+            let messages: Vec<String> = entries
+                .iter()
+                .map(|entry| entry.1.message.clone())
+                .collect();
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.1.message.contains("self-bound")),
+                "expected self-bound log in splash logs, got {:?}",
+                messages
+            );
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.1.message.contains("me-unbound")),
+                "expected me-unbound log in splash logs, got {:?}",
+                messages
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::StopBuild { build_id });
 }
 
 #[test]

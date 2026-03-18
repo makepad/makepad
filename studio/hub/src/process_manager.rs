@@ -583,7 +583,7 @@ fn run_pending_script_commands(
                 };
                 host.current_run_item_name = Some(name.clone());
                 let result = with_vm_and_async(host, std, script_vm, |vm| {
-                    vm.call_with_me(on_run_object.into(), &[], item_object.into())
+                    vm.call_with_self(on_run_object.into(), &[], item_object.into())
                 });
                 host.current_run_item_name = None;
                 if result.is_err() {
