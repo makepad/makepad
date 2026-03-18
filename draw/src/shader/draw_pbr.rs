@@ -121,8 +121,6 @@ script_mod! {
         u_has_emissive_texture: uniform(float(0.0))
         u_has_env_texture: uniform(float(0.0))
         u_has_env_atlas_texture: uniform(float(0.0))
-        u_debug_cubemap_only: uniform(float(0.0))
-        u_debug_simple_env_specular: uniform(float(0.0))
         u_light_dir: uniform(vec3(0.3, 0.7, 1.0))
         u_light_color: uniform(vec3(1.0, 1.0, 1.0))
         u_ambient: uniform(float(0.15))
@@ -322,11 +320,11 @@ script_mod! {
             let env_t_spec = clamp(refl_dir.y * 0.5 + 0.5, 0.0, 1.0);
             let env_low = vec3(0.03, 0.035, 0.045);
             let env_high = vec3(0.36, 0.43, 0.5);
-            if self.u_has_env_atlas_texture > 0.5 {
-                return self.sample_env_atlas(refl_dir)
-            }
             if self.u_has_env_texture > 0.5 {
                 return self.env_texture.sample_as_bgra(refl_dir).xyz
+            }
+            if self.u_has_env_atlas_texture > 0.5 {
+                return self.sample_env_atlas(refl_dir)
             }
             return mix(env_low, env_high, env_t_spec)
         }
@@ -335,11 +333,11 @@ script_mod! {
             let env_t_diff = clamp(normal_dir.y * 0.5 + 0.5, 0.0, 1.0);
             let env_low = vec3(0.03, 0.035, 0.045);
             let env_high = vec3(0.36, 0.43, 0.5);
-            if self.u_has_env_atlas_texture > 0.5 {
-                return self.sample_env_atlas(normal_dir)
-            }
             if self.u_has_env_texture > 0.5 {
                 return self.env_texture.sample_as_bgra(normal_dir).xyz
+            }
+            if self.u_has_env_atlas_texture > 0.5 {
+                return self.sample_env_atlas(normal_dir)
             }
             return mix(env_low, env_high, env_t_diff)
         }
@@ -351,21 +349,6 @@ script_mod! {
         pixel: fn() {
             let uv = vec2(fract(self.v_uv.x), fract(self.v_uv.y));
             let n_geom = normalize(self.v_normal);
-            if self.u_debug_cubemap_only > 0.5 {
-                if self.u_has_env_texture <= 0.5 {
-                    return vec4(1.0, 0.0, 1.0, 1.0)
-                }
-                let view_dir = normalize(self.u_camera_pos - self.v_world);
-                let incident_dir = -view_dir;
-                let cubemap_dir = normalize(
-                    incident_dir - 2.0 * dot(incident_dir, n_geom) * n_geom
-                );
-                let cubemap = self.env_texture.sample_as_bgra(cubemap_dir).xyz;
-                if cubemap.x + cubemap.y + cubemap.z < 0.02 {
-                    return vec4(1.0, 0.0, 0.0, 1.0)
-                }
-                return vec4(cubemap, 1.0)
-            }
             let albedo = self.get_base_color(uv, self.v_color);
 
             let n = if self.u_has_normal_texture > 0.5 {
@@ -430,23 +413,13 @@ script_mod! {
             let env_diff_color = self.get_env_diffuse(n);
 
             let ibl_diffuse = kd * albedo.xyz * env_diff_color * self.u_env_intensity;
-            let env_spec = if self.u_debug_simple_env_specular > 0.5 {
-                let env_fresnel = f0 + (vec3(1.0, 1.0, 1.0) - f0) * self.pow5(1.0 - ndotv_env);
-                let rough_atten = 1.0 - rough * 0.65;
-                env_spec_color
-                    * env_fresnel
-                    * rough_atten
-                    * self.u_spec_strength
-                    * self.u_env_intensity
-            } else {
-                let c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
-                let c1 = vec4(1.0, 0.0425, 1.04, -0.04);
-                let r = c0 * rough + c1;
-                let a004 = min(r.x * r.x, pow(2.0, -9.28 * ndotv)) * r.x + r.y;
-                let env_brdf = vec2(-1.04, 1.04) * a004 + r.zw;
-                let env_fresnel = f0 * env_brdf.x + vec3(env_brdf.y, env_brdf.y, env_brdf.y);
-                env_spec_color * env_fresnel * self.u_spec_strength * self.u_env_intensity
-            };
+            let c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+            let c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+            let r = c0 * rough + c1;
+            let a004 = min(r.x * r.x, pow(2.0, -9.28 * ndotv)) * r.x + r.y;
+            let env_brdf = vec2(-1.04, 1.04) * a004 + r.zw;
+            let env_fresnel = f0 * env_brdf.x + vec3(env_brdf.y, env_brdf.y, env_brdf.y);
+            let env_spec = env_spec_color * env_fresnel * self.u_spec_strength * self.u_env_intensity;
             let emissive = self.get_emissive(uv);
 
             let lit = (diffuse + specular) * self.u_light_color * ndotl;
@@ -900,10 +873,6 @@ pub struct DrawPbr {
     pub has_env_texture: f32,
     #[rust(0.0)]
     pub has_env_atlas_texture: f32,
-    #[rust(0.0)]
-    pub debug_cubemap_only: f32,
-    #[rust(0.0)]
-    pub debug_simple_env_specular: f32,
     #[rust(vec3(0.3, 0.7, 1.0))]
     pub light_dir: Vec3f,
     #[rust(vec3(1.0, 1.0, 1.0))]
@@ -1012,8 +981,6 @@ impl DrawPbr {
         self.set_emissive_texture(None);
         self.set_env_texture(None);
         self.set_env_atlas_texture(None);
-        self.set_debug_cubemap_only(false);
-        self.set_debug_simple_env_specular(false);
     }
 
     pub fn set_transform(&mut self, transform: Mat4f) {
@@ -1177,14 +1144,6 @@ impl DrawPbr {
         self.draw_vars.texture_slots[6] = texture;
     }
 
-    pub fn set_debug_cubemap_only(&mut self, debug: bool) {
-        self.debug_cubemap_only = if debug { 1.0 } else { 0.0 };
-    }
-
-    pub fn set_debug_simple_env_specular(&mut self, debug: bool) {
-        self.debug_simple_env_specular = if debug { 1.0 } else { 0.0 };
-    }
-
     pub fn set_clip_ndc(&mut self, clip_ndc: Vec4f) {
         self.clip_ndc = clip_ndc;
     }
@@ -1325,16 +1284,6 @@ impl DrawPbr {
             cx.cx,
             live_id!(u_has_env_atlas_texture),
             &[self.has_env_atlas_texture],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(u_debug_cubemap_only),
-            &[self.debug_cubemap_only],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(u_debug_simple_env_specular),
-            &[self.debug_simple_env_specular],
         );
         let light_dir = if self.light_dir.length() > 0.000_01 {
             self.light_dir.normalize()

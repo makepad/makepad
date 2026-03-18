@@ -375,8 +375,11 @@ impl ExampleXrScene {
                 };
                 let mut renderer = renderer;
                 for material in &mut renderer.materials {
-                    material.normal_texture = None;
-                    material.normal_scale = 1.0;
+                    material.metallic_roughness_texture = None;
+                    material.metallic_factor = 1.0;
+                    material.roughness_factor = 0.18;
+                    material.occlusion_texture = None;
+                    material.occlusion_strength = 0.0;
                 }
                 self.update_helmet_fit_from_renderer(&renderer);
                 if !self.helmet_load_logged {
@@ -449,12 +452,6 @@ impl ExampleXrScene {
         self.draw_pbr.set_env_atlas_texture(None);
         let env_texture = self.draw_pbr.default_env_texture(cx);
         self.draw_pbr.set_env_texture(Some(env_texture));
-        self.draw_pbr.set_debug_cubemap_only(false);
-        self.draw_pbr.set_debug_simple_env_specular(true);
-        self.draw_pbr.light_color = vec3f(0.0, 0.0, 0.0);
-        self.draw_pbr.ambient = 0.0;
-        self.draw_pbr.env_intensity = 5.0;
-        self.draw_pbr.spec_strength = 1.0;
         self.draw_pbr.camera_pos = state.head_pose.position;
     }
 
