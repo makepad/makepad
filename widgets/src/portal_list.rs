@@ -1189,6 +1189,27 @@ impl PortalList {
             self.first_scroll += delta;
         }
 
+        // Normalize first_id/first_scroll when scrolling up past the current first item.
+        // When multiple scroll events arrive in a single frame (e.g., macOS trackpad
+        // momentum scrolling), first_scroll can accumulate a large positive value
+        // before the draw phase's end() function gets a chance to normalize it.
+        // Without this, the accumulated offset can exceed the total height of all items
+        // above first_id, which triggers a jump-to-top reset in end().
+        if self.first_scroll > 0.0 && self.first_id > self.range_start {
+            if let Some(ref tree) = self.height_tree {
+                // Use the average measured height as fallback for unmeasured (zero-height)
+                // items, so the loop doesn't race through them without reducing first_scroll.
+                let fallback_height = self.height_cache.average().max(1.0);
+                while self.first_scroll > 0.0 && self.first_id > self.range_start {
+                    let prev_idx = self.first_id - 1 - self.range_start;
+                    let prev_height = tree.point_query(prev_idx);
+                    let height = if prev_height > 0.0 { prev_height } else { fallback_height };
+                    self.first_id -= 1;
+                    self.first_scroll -= height;
+                }
+            }
+        }
+
         if self.first_id == self.range_start {
             self.first_scroll = self.first_scroll.min(self.max_pull_down);
             if transition_to_pulldown && self.first_scroll > 0.0 {
