@@ -331,6 +331,35 @@ impl<'a> ScriptVm<'a> {
         self.call_with_me(fnobj, args, NIL)
     }
 
+    pub fn call_with_self(
+        &mut self,
+        fnobj: ScriptValue,
+        args: &[ScriptValue],
+        sself: ScriptValue,
+    ) -> ScriptValue {
+        let scope = self.bx.heap.new_with_proto(fnobj);
+
+        self.bx.heap.clear_object_deep(scope);
+        if fnobj.is_err() {
+            return fnobj;
+        }
+
+        let trap = self.bx.threads.cur().trap.pass();
+        let err = self.bx.heap.push_all_fn_args(scope, args, trap);
+        if err.is_err() {
+            return err;
+        }
+        if !sself.is_nil() {
+            self.bx
+                .heap
+                .force_value_in_map(scope, id!(self).into(), sself);
+        }
+
+        self.bx.heap.set_object_deep(scope);
+        self.bx.heap.set_object_storage_auto(scope);
+        self.call_with_scope(scope, NIL)
+    }
+
     pub fn call_with_me(
         &mut self,
         fnobj: ScriptValue,
