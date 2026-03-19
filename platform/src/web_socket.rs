@@ -13,6 +13,7 @@ use crate::{
     Cx,
 };
 use makepad_studio_protocol::{
+    hub_protocol::HubToClient,
     AppToStudio, AppToStudioVec, LocalProfileSample, StudioToApp, StudioToAppVec,
 };
 #[allow(unused_imports)]
@@ -65,10 +66,20 @@ pub(crate) fn consume_studio_socket_response(response: &NetworkResponse) -> Opti
                 WsMessage::Binary(data) => match StudioToAppVec::deserialize_bin(data) {
                     Ok(msgs) => msgs.0,
                     Err(err) => {
-                        crate::error!(
-                            "Cant parse studio websocket binary payload in windowed mode: {:?}",
-                            err
-                        );
+                        match HubToClient::deserialize_bin(data) {
+                            Ok(HubToClient::Hello { .. }) => {}
+                            Ok(_) => {
+                                crate::warning!(
+                                    "Ignoring unexpected HubToClient payload on studio app websocket"
+                                );
+                            }
+                            Err(_) => {
+                                crate::error!(
+                                    "Cant parse studio websocket binary payload in windowed mode: {:?}",
+                                    err
+                                );
+                            }
+                        }
                         Vec::new()
                     }
                 },
