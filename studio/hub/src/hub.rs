@@ -236,10 +236,10 @@ fn studio_local_addr_for_child(listen_address: SocketAddr) -> String {
 
 fn studio_ext_addr_for_child(listen_address: SocketAddr) -> String {
     let ip = match listen_address.ip() {
-        IpAddr::V4(ip) if ip.is_loopback() || ip.is_unspecified() => detect_external_ipv4()
+        IpAddr::V4(ip) if ip.is_unspecified() => detect_external_ipv4()
             .map(IpAddr::V4)
             .unwrap_or(IpAddr::V4(ip)),
-        IpAddr::V6(ip) if ip.is_loopback() || ip.is_unspecified() => {
+        IpAddr::V6(ip) if ip.is_unspecified() => {
             detect_external_ipv4().map(IpAddr::V4).unwrap_or(IpAddr::V6(ip))
         }
         ip => ip,
@@ -253,5 +253,26 @@ fn detect_external_ipv4() -> Option<Ipv4Addr> {
     match socket.local_addr().ok()?.ip() {
         IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn studio_local_addr_maps_unspecified_to_loopback() {
+        assert_eq!(
+            studio_local_addr_for_child(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8001)),
+            "127.0.0.1:8001"
+        );
+    }
+
+    #[test]
+    fn studio_ext_addr_keeps_loopback_bind_loopback() {
+        assert_eq!(
+            studio_ext_addr_for_child(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8001)),
+            "127.0.0.1:8001"
+        );
     }
 }
