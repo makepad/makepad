@@ -9,6 +9,7 @@ pub mod ui_signal;
 pub mod utils;
 pub mod web_socket_parser;
 
+pub use makepad_error_log;
 pub use crate::backend::{EventSink, NetworkBackend, UnsupportedBackend};
 pub use crate::http_server::{
     start_http_server, HttpServer, HttpServerRequest, HttpServerResponse,

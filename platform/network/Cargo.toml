@@ -10,6 +10,7 @@ default = []
 script = ["dep:makepad-script"]
 
 [dependencies]
+makepad-error-log = { path = "../../libs/error_log", version = "1.0.0" }
 makepad-live-id = { path = "../../libs/live_id", version = "1.0.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 makepad-script = { path = "../script", version = "1.0.0", optional = true }

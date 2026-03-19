@@ -1400,10 +1400,13 @@ pub fn run(
         ];
         if let Ok(studio) = std::env::var("STUDIO") {
             if !studio.trim().is_empty() {
+                println!("Android launch intent makepad.STUDIO={}", studio);
                 args.push("--es".to_string());
                 args.push("makepad.STUDIO".to_string());
                 args.push(studio);
             }
+        } else {
+            println!("Android launch intent makepad.STUDIO is not set");
         }
         args
     }

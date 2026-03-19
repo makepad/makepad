@@ -709,6 +709,12 @@ impl DesktopRunView {
         }
         #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
         {
+            // Keep websocket-only targets, such as Android app sockets, on the
+            // remote frame path unless the app has explicitly signaled stdin-loop
+            // style readiness via RunViewCreated.
+            if !self.app_ready_for_swapchain {
+                return outbound;
+            }
             if let Some(swapchain) = self.swapchain.as_ref() {
                 let shared_swapchain = shared_swapchain_from_host_swapchain(swapchain, cx);
                 outbound.push(StudioToApp::Swapchain(shared_swapchain));

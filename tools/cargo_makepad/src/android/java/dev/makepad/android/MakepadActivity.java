@@ -1368,7 +1368,6 @@ public class MakepadActivity
     }
 
     public void openWebSocket(long id, String url, long callback) {
-        
         MakepadWebSocket webSocket = new MakepadWebSocket(id, url, callback);
         mActiveWebsockets.put(id, webSocket);
         webSocket.connect();
@@ -1377,6 +1376,8 @@ public class MakepadActivity
             MakepadWebSocketReader reader = new MakepadWebSocketReader(this, webSocket);
             mWebSocketsHandler.post(reader);
             mActiveWebsocketsReaders.put(id, reader);
+        } else {
+            Log.e("Makepad", "openWebSocket failed id=" + id + " url=" + url);
         }
     }
 

@@ -213,16 +213,64 @@ impl Cx {
         self.run_view_frame_encode_in_flight = true;
         let sender = self.run_view_frame_results.sender();
         self.spawn_thread(move || {
-            let result = Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {
-                window_id: request.window_id,
-                frame_id: request.frame_id,
-                width,
-                height,
-                codec: Some(FrameCodec::Png),
-                data: png,
-            });
+            let result = Cx::prepare_studio_run_view_rgba(&request, width, height, rgba)
+                .and_then(|(width, height, rgba)| {
+                    Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {
+                        window_id: request.window_id,
+                        frame_id: request.frame_id,
+                        width,
+                        height,
+                        codec: Some(FrameCodec::Png),
+                        data: png,
+                    })
+                });
             let _ = sender.send(result);
         });
+    }
+
+    fn prepare_studio_run_view_rgba(
+        request: &RunViewFrameRequest,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(u32, u32, Vec<u8>), String> {
+        let expected_len = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        if rgba.len() != expected_len {
+            return Err(format!(
+                "runview frame rgba size mismatch: got {} bytes for {}x{}",
+                rgba.len(),
+                width,
+                height
+            ));
+        }
+
+        let target_width = request.width.max(1);
+        let target_height = request.height.max(1);
+
+        let out = if width == target_width && height == target_height {
+            rgba
+        } else {
+            let mut resized = vec![
+                0u8;
+                (target_width as usize)
+                    .saturating_mul(target_height as usize)
+                    .saturating_mul(4)
+            ];
+            for y in 0..target_height as usize {
+                let src_y = ((y as u64) * (height as u64) / (target_height as u64)) as usize;
+                for x in 0..target_width as usize {
+                    let src_x = ((x as u64) * (width as u64) / (target_width as u64)) as usize;
+                    let src = (src_y * width as usize + src_x) * 4;
+                    let dst = (y * target_width as usize + x) * 4;
+                    resized[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+                }
+            }
+            resized
+        };
+
+        Ok((target_width, target_height, out))
     }
 
     #[allow(dead_code)]
