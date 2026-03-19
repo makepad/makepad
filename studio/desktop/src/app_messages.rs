@@ -404,6 +404,43 @@ impl App {
                     dock.redraw_tab(cx, tab_id);
                 }
             }
+            HubToClient::RunViewFrame {
+                build_id,
+                window_id,
+                frame_id,
+                width,
+                height,
+                codec,
+                data,
+            } => {
+                let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() else {
+                    return;
+                };
+                let Some(mount) = self
+                    .data
+                    .run_tab_state
+                    .get(&tab_id)
+                    .map(|state| state.mount.clone())
+                else {
+                    return;
+                };
+                if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                    let run_view = dock.item(tab_id).desktop_run_view(cx, ids!(run_view));
+                    run_view.set_remote_frame(
+                        cx,
+                        build_id,
+                        makepad_studio_protocol::RunViewFrameData {
+                            window_id,
+                            frame_id,
+                            width,
+                            height,
+                            codec: Some(codec),
+                            data,
+                        },
+                    );
+                    dock.redraw_tab(cx, tab_id);
+                }
+            }
             HubToClient::RunViewCursor { build_id, cursor } => {
                 let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() else {
                     return;

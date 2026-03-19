@@ -1,0 +1,18 @@
+[package]
+name = "makepad-xr"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Reusable XR scene components for Makepad"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+gltf = ["dep:makepad-gltf"]
+splat = ["dep:makepad-splat"]
+
+[dependencies]
+makepad-widgets = { path = "../widgets", version = "2.0.0" }
+makepad-gltf = { path = "../libs/gltf", version = "1.0.0", optional = true }
+makepad-splat = { path = "../libs/splat", version = "1.0.0", optional = true }
+rapier3d = { path = "../libs/rapier/crates/rapier3d", default-features = false, features = ["dim3", "f32", "enhanced-determinism"] }

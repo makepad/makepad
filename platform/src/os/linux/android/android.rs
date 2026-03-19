@@ -88,6 +88,9 @@ use {
     std::time::Instant,
 };
 
+const ANDROID_XR_BUFFER_SCALE: f32 = 1.3;
+const ANDROID_XR_MULTISAMPLES: usize = 4;
+
 /*
 fn android_debug_log(msg:&str){
     use std::ffi::c_int;
@@ -275,8 +278,8 @@ impl Cx {
                             self.os.display.as_ref().unwrap(),
                             vulkan.as_mut(),
                             CxOpenXrOptions {
-                                buffer_scale: 1.5,
-                                multisamples: 4,
+                                buffer_scale: ANDROID_XR_BUFFER_SCALE,
+                                multisamples: ANDROID_XR_MULTISAMPLES,
                                 remove_hands_from_depth: false,
                             },
                             &self.os_type,
@@ -292,8 +295,8 @@ impl Cx {
                         if let Err(e) = self.os.openxr.create_session(
                             self.os.display.as_ref().unwrap(),
                             CxOpenXrOptions {
-                                buffer_scale: 1.5,
-                                multisamples: 4,
+                                buffer_scale: ANDROID_XR_BUFFER_SCALE,
+                                multisamples: ANDROID_XR_MULTISAMPLES,
                                 remove_hands_from_depth: false,
                             },
                             &self.os_type,
@@ -1030,6 +1033,7 @@ impl Cx {
         }
 
         self.dispatch_network_runtime_events();
+        self.flush_studio_run_view_frame_results();
 
         // Native video updates (SurfaceTexture path)
         let to_dispatch = self.get_video_updates();

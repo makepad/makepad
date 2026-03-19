@@ -14,7 +14,7 @@ let RunQuest = RunItem{
             "cargo", 
             [
                 "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"
-                "android" "--variant=quest" "--no-icon" "--small-fonts" "run" "-p" self.name "--release" "--message-format=json"
+                "android" "--variant=quest" "--no-icon" "--small-fonts" "run" "-p" self.run "--release" "--message-format=json"
             ],
         )
     }
@@ -43,18 +43,24 @@ let RunStudioRelease = RunItem{
     }
 }
 
+let RunRelease = RunItem{
+    on_run: fn(){
+        hub.run(
+            {"STUDIO": hub.studio_ip},
+            "cargo", 
+            ["run" "-p" self.run "--release" "--message-format=json" "--" "--message-format=json"],
+        )
+    }
+}
+
 hub.set_run_items([
     RunStudioRelease{name: "makepad-example-browser"}
-    RunStudioRelease{name: "makepad-example-automate"}
     RunStudioRelease{name: "makepad-example-charts"}
     RunStudioRelease{name: "makepad-example-pdf"}
-   //RunStudioRelease{name: "makepad-example-gltf"}
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-example-todo"}
-    RunStudioRelease{name: "makepad-example-physics"}
-    RunStudioRelease{name: "makepad-example-splash"}
-    RunStudioRelease{name: "makepad-example-splat"}
-    RunStudioRelease{name: "makepad-studio"}
-    RunQuest{name: "makepad-example-xr"}
-    RunAndroid{name: "makepad-example-gltf"} 
+    RunStudioRelease{name: "makepad-studio"} 
+    RunRelease{name: "makepad-studio-ext" run:"makepad-studio"}
+    RunStudioRelease{name: "makepad-example-xr"}
+    RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
 ])

@@ -5,20 +5,19 @@ use ::rapier3d::prelude::{
     Rotation as RapierRotation, SharedShape, Vector as RapierVector,
 };
 use makepad_widgets::*;
+use makepad_widgets::event::TouchState;
+
+use crate::scene_3d::{
+    apply_scene_to_draw_pbr, ray_from_scene_viewport, scene_state_from_scope, SceneState3D,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
-    mod.widgets.PhysicsViewBase = #(PhysicsView::register_widget(vm))
+    mod.widgets.PhysicsWorld3DBase = #(PhysicsWorld3D::register_widget(vm))
 
-    mod.widgets.PhysicsView = set_type_default() do mod.widgets.PhysicsViewBase{
-        width: Fill
-        height: Fill
-        draw_bg +: {
-            color: #x131922
-            draw_depth: -299.0
-        }
+    mod.widgets.PhysicsWorld3D = set_type_default() do mod.widgets.PhysicsWorld3DBase{
         draw_pbr +: {
             light_dir: vec3(0.35, 0.8, 0.45)
             light_color: vec3(1.0, 1.0, 1.0)
@@ -27,19 +26,19 @@ script_mod! {
             spec_strength: 0.9
         }
     }
+
+    mod.widgets.PhysicsView = mod.widgets.PhysicsWorld3D{}
 }
 
-// --- Cube colors (one per body, cycling) ---
-
 const CUBE_COLORS: &[[f32; 3]] = &[
-    [0.90, 0.30, 0.25], // red
-    [0.25, 0.75, 0.45], // green
-    [0.30, 0.50, 0.90], // blue
-    [0.95, 0.75, 0.20], // yellow
-    [0.80, 0.40, 0.85], // purple
-    [0.20, 0.80, 0.80], // cyan
-    [0.95, 0.55, 0.25], // orange
-    [0.60, 0.85, 0.35], // lime
+    [0.90, 0.30, 0.25],
+    [0.25, 0.75, 0.45],
+    [0.30, 0.50, 0.90],
+    [0.95, 0.75, 0.20],
+    [0.80, 0.40, 0.85],
+    [0.20, 0.80, 0.80],
+    [0.95, 0.55, 0.25],
+    [0.60, 0.85, 0.35],
 ];
 
 const GROUND_COLOR: [f32; 3] = [0.35, 0.38, 0.42];
@@ -201,7 +200,6 @@ impl RapierScene {
             }
         }
 
-        // Prime the broad-phase/query structures so picking works on the first frame.
         scene.step();
         scene
     }
@@ -296,42 +294,19 @@ impl RapierScene {
     }
 }
 
-// --- PhysicsView widget ---
-
 #[derive(Script, ScriptHook, Widget)]
-pub struct PhysicsView {
+pub struct PhysicsWorld3D {
     #[uid]
     uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[layout]
     layout: Layout,
     #[redraw]
     #[live]
-    draw_bg: DrawColor,
-    #[redraw]
-    #[live]
     draw_pbr: DrawPbr,
-    #[live]
-    draw_list_3d: DrawList2d,
-    #[live(45.0)]
-    camera_fov_y: f32,
-    #[live(1.7)]
-    camera_distance: f32,
-    #[live(0.25)]
-    camera_distance_min: f32,
-    #[live(8.0)]
-    camera_distance_max: f32,
-    #[live(0.1)]
-    wheel_zoom_step: f32,
-    #[live(0.05)]
-    camera_near: f32,
-    #[live(200.0)]
-    camera_far: f32,
-    #[live(vec2(0.6, 0.98))]
-    depth_range: Vec2f,
-    #[live(0.7)]
-    depth_forward_bias: f32,
     #[rust]
     ground_mesh: Option<usize>,
     #[rust]
@@ -341,25 +316,18 @@ pub struct PhysicsView {
     #[rust]
     time: f64,
     #[rust]
-    area: Area,
-    #[rust(0.6)]
-    orbit_yaw: f32,
-    #[rust(0.4)]
-    orbit_pitch: f32,
-    #[rust]
-    drag_last_abs: Option<DVec2>,
+    last_scene_state: Option<SceneState3D>,
     #[rust]
     initialized: bool,
 }
 
-impl PhysicsView {
+impl PhysicsWorld3D {
     fn ensure_initialized(&mut self, cx: &mut Cx2d) {
         if self.initialized {
             return;
         }
         self.initialized = true;
 
-        // Upload a tessellated ground grid.
         let (ground_positions, ground_normals, ground_indices) = build_ground_grid_mesh(64, 24.0);
         match self.draw_pbr.upload_indexed_triangles_mesh(
             cx,
@@ -371,62 +339,17 @@ impl PhysicsView {
             &ground_indices[..],
         ) {
             Ok(handle) => self.ground_mesh = Some(handle),
-            Err(e) => log!("Failed to upload ground mesh: {}", e),
+            Err(error) => log!("Failed to upload ground mesh: {}", error),
         }
 
         self.scene = Some(RapierScene::new());
     }
 
-    fn camera_setup(&self, rect: Rect) -> (Vec3f, Vec3f, Mat4f, Mat4f) {
-        let aspect = (rect.size.x / rect.size.y).max(0.001) as f32;
-        let fov = self.camera_fov_y.clamp(1.0, 179.0);
-        let near = self.camera_near.max(0.001);
-        let far = self.camera_far.max(near + 0.001);
-        let projection = Mat4f::perspective(fov, aspect, near, far);
-
-        let wall_height = WALL_ROWS as f32 * (WALL_BRICK_HALF_HEIGHT * 2.0 + WALL_SPAWN_GAP) * 0.5;
-        let camera_target = vec3(0.0, PLATFORM_TOP_Y + wall_height, 0.0);
-        let distance = self.camera_distance.max(0.001);
-        let yaw = self.orbit_yaw;
-        let pitch = self.orbit_pitch.clamp(-1.45, 1.45);
-        let cos_pitch = pitch.cos();
-        let camera_pos = vec3(
-            distance * yaw.sin() * cos_pitch,
-            distance * pitch.sin(),
-            distance * yaw.cos() * cos_pitch,
-        ) + camera_target;
-        let view = Mat4f::look_at(camera_pos, camera_target, vec3(0.0, 1.0, 0.0));
-        (camera_pos, camera_target, view, projection)
-    }
-
-    fn ray_from_screen(&self, abs: DVec2, rect: Rect) -> Option<(Vec3f, Vec3f)> {
-        if rect.size.x <= 1.0 || rect.size.y <= 1.0 {
-            return None;
-        }
-
-        let (camera_pos, camera_target, _view, _projection) = self.camera_setup(rect);
-        let fov = self.camera_fov_y.clamp(1.0, 179.0).to_radians();
-        let aspect = (rect.size.x / rect.size.y).max(0.001) as f32;
-
-        let sx = ((abs.x - rect.pos.x) / rect.size.x).clamp(0.0, 1.0) as f32;
-        let sy = ((abs.y - rect.pos.y) / rect.size.y).clamp(0.0, 1.0) as f32;
-        let ndc_x = sx * 2.0 - 1.0;
-        let ndc_y = 1.0 - sy * 2.0;
-
-        let forward = (camera_target - camera_pos).normalize();
-        let right = Vec3f::cross(forward, vec3f(0.0, 1.0, 0.0)).normalize();
-        let up = Vec3f::cross(right, forward).normalize();
-
-        let tan_half_fov = (0.5 * fov).tan();
-        let dir_camera = vec3f(ndc_x * tan_half_fov * aspect, ndc_y * tan_half_fov, 1.0);
-        let ray_dir =
-            (forward * dir_camera.z + right * dir_camera.x + up * dir_camera.y).normalize();
-
-        Some((camera_pos, ray_dir))
-    }
-
-    fn kick_cube_at(&mut self, abs: DVec2, rect: Rect) -> bool {
-        let Some((ray_origin, ray_dir)) = self.ray_from_screen(abs, rect) else {
+    fn kick_cube_at(&mut self, abs: DVec2) -> bool {
+        let Some(scene_state) = self.last_scene_state else {
+            return false;
+        };
+        let Some((ray_origin, ray_dir)) = ray_from_scene_viewport(&scene_state, abs) else {
             return false;
         };
         let Some(scene) = self.scene.as_mut() else {
@@ -435,47 +358,27 @@ impl PhysicsView {
         scene.apply_kick(ray_origin, ray_dir, self.time)
     }
 
-    fn draw_scene(&mut self, cx: &mut Cx2d, rect: Rect) {
-        if rect.size.x <= 1.0 || rect.size.y <= 1.0 {
+    fn draw_scene(&mut self, cx: &mut Cx2d, scene_state: &SceneState3D) {
+        if scene_state.viewport_rect.size.x <= 1.0 || scene_state.viewport_rect.size.y <= 1.0 {
             return;
         }
-        let pass_size = cx.current_pass_size();
-        if pass_size.x <= 1.0 || pass_size.y <= 1.0 {
-            return;
-        }
-        // Compute view/projection (orbit camera, same pattern as Scene3D)
-        let clip_ndc = clip_ndc_for_rect(rect, pass_size);
-        let viewport = clip_space_viewport_matrix(clip_ndc);
-        let (camera_pos, _camera_target, view, projection) = self.camera_setup(rect);
-        let projection_viewport = Mat4f::mul(&viewport, &projection);
 
-        self.draw_pbr.set_clip_ndc(clip_ndc);
-        self.draw_pbr
-            .set_depth_range(self.depth_range.x, self.depth_range.y);
-        self.draw_pbr
-            .set_depth_forward_bias(self.depth_forward_bias);
-        self.draw_pbr.set_view_projection(view, projection_viewport);
-        self.draw_pbr.camera_pos = camera_pos;
-
-        // No textures — pure material colors
+        apply_scene_to_draw_pbr(&mut self.draw_pbr, cx, scene_state);
         self.draw_pbr.set_base_color_texture(None);
         self.draw_pbr.set_metal_roughness_texture(None);
         self.draw_pbr.set_normal_texture(None);
         self.draw_pbr.set_occlusion_texture(None);
         self.draw_pbr.set_emissive_texture(None);
+        let env_texture = self.draw_pbr.default_env_texture(cx);
+        self.draw_pbr.set_env_texture(Some(env_texture));
 
-        // Set up default env cubemap
-        let env_tex = self.draw_pbr.default_env_texture(cx);
-        self.draw_pbr.set_env_texture(Some(env_tex));
-
-        // Draw ground platform.
         if let Some(ground_mesh) = self.ground_mesh {
             let ground_pose = Pose {
                 position: vec3f(0.0, -0.002, 0.0),
                 orientation: Quat::default(),
             };
-            let ground_transform = pose_scaled_model(&ground_pose, vec3f(1.0, 1.0, 1.0));
-            self.draw_pbr.set_transform(ground_transform);
+            self.draw_pbr
+                .set_transform(pose_scaled_model(&ground_pose, vec3f(1.0, 1.0, 1.0)));
             self.draw_pbr.set_base_color_factor(vec4(
                 GROUND_COLOR[0],
                 GROUND_COLOR[1],
@@ -511,17 +414,14 @@ impl PhysicsView {
             );
         }
 
-        // Draw physics bodies as rounded cubes
         self.draw_pbr.set_metal_roughness(0.0, 0.55);
-
         if let Some(scene) = &self.scene {
             for cube in &scene.cubes {
                 if let Some(body) = scene.bodies.get(cube.body) {
                     let color = CUBE_COLORS[cube.color_index];
                     let pose = makepad_pose_from_rapier(body.translation(), *body.rotation());
-                    let model = pose_scaled_model(&pose, vec3(1.0, 1.0, 1.0));
-
-                    self.draw_pbr.set_transform(model);
+                    self.draw_pbr
+                        .set_transform(pose_scaled_model(&pose, vec3(1.0, 1.0, 1.0)));
                     self.draw_pbr
                         .set_base_color_factor(vec4(color[0], color[1], color[2], 1.0));
                     let _ = self.draw_pbr.draw_rounded_cube(
@@ -537,117 +437,56 @@ impl PhysicsView {
     }
 }
 
-impl Widget for PhysicsView {
+impl Widget for PhysicsWorld3D {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        match event.hits_with_capture_overload(cx, self.area, true) {
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                self.kick_cube_at(fe.abs, fe.rect);
-                self.drag_last_abs = Some(fe.abs);
-                cx.set_cursor(MouseCursor::Grabbing);
-            }
-            Hit::FingerMove(fe) => {
-                if let Some(last_abs) = self.drag_last_abs {
-                    let delta = fe.abs - last_abs;
-                    let sensitivity = 0.01_f32;
-                    self.orbit_yaw -= (delta.x as f32) * sensitivity;
-                    self.orbit_pitch =
-                        (self.orbit_pitch + (delta.y as f32) * sensitivity).clamp(-1.45, 1.45);
-                    self.drag_last_abs = Some(fe.abs);
-                    self.area.redraw(cx);
+        match event {
+            Event::MouseDown(event) => {
+                if event.button == MouseButton::PRIMARY
+                    && event.handled.get().is_empty()
+                    && self.kick_cube_at(event.abs)
+                {
+                    cx.redraw_all();
                 }
             }
-            Hit::FingerScroll(fs) => {
-                let scroll = if fs.scroll.y.abs() > f64::EPSILON {
-                    fs.scroll.y
-                } else {
-                    fs.scroll.x
-                };
-                let step = self.wheel_zoom_step.max(0.001);
-                let zoom_factor = if scroll > 0.0 {
-                    1.0 / (1.0 - step)
-                } else {
-                    1.0 - step
-                };
-                self.camera_distance = (self.camera_distance * zoom_factor)
-                    .clamp(self.camera_distance_min.max(0.01), self.camera_distance_max);
-                self.area.redraw(cx);
-            }
-            Hit::FingerUp(fe) => {
-                if self.drag_last_abs.take().is_some() {
-                    if fe.was_tap() && self.kick_cube_at(fe.abs, fe.rect) {
-                        self.area.redraw(cx);
-                    }
-                    if fe.is_over {
-                        cx.set_cursor(MouseCursor::Grab);
-                    } else {
-                        cx.set_cursor(MouseCursor::Default);
+            Event::TouchUpdate(event) => {
+                for touch in &event.touches {
+                    if touch.state == TouchState::Start
+                        && touch.handled.get().is_empty()
+                        && self.kick_cube_at(touch.abs)
+                    {
+                        cx.redraw_all();
+                        break;
                     }
                 }
             }
-            Hit::FingerHoverIn(_) => {
-                if self.drag_last_abs.is_some() {
-                    cx.set_cursor(MouseCursor::Grabbing);
-                } else {
-                    cx.set_cursor(MouseCursor::Grab);
+            Event::NextFrame(event) => {
+                self.time = event.time;
+                if let Some(scene) = &mut self.scene {
+                    scene.step();
                 }
+                cx.redraw_all();
+                self.next_frame = cx.new_next_frame();
             }
-            Hit::FingerHoverOut(_) => {
-                if self.drag_last_abs.is_none() {
-                    cx.set_cursor(MouseCursor::Default);
-                }
+            Event::Startup => {
+                self.next_frame = cx.new_next_frame();
             }
             _ => {}
         }
-
-        // Step physics and redraw every frame
-        if let Event::NextFrame(ne) = event {
-            self.time = ne.time;
-            if let Some(scene) = &mut self.scene {
-                scene.step();
-            }
-            self.area.redraw(cx);
-            self.next_frame = cx.new_next_frame();
-        }
-        if let Event::Startup = event {
-            self.next_frame = cx.new_next_frame();
-        }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
+        let Some(scene_state) = scene_state_from_scope(scope) else {
+            return DrawStep::done();
+        };
+        let cx = &mut Cx2d::new(cx.cx);
         self.ensure_initialized(cx);
-
-        let rect = cx.walk_turtle(walk);
-        self.draw_bg.draw_abs(cx, rect);
-        self.area = self.draw_bg.area();
-
-        self.draw_list_3d.begin_always(cx);
-        self.draw_scene(cx, rect);
-        self.draw_list_3d.end(cx);
+        self.last_scene_state = Some(scene_state);
+        self.draw_scene(cx, &scene_state);
         DrawStep::done()
     }
-}
 
-// --- Helper functions (from GltfView pattern) ---
-
-fn clip_ndc_for_rect(rect: Rect, pass_size: Vec2d) -> Vec4f {
-    let pass_w = pass_size.x.max(1.0) as f32;
-    let pass_h = pass_size.y.max(1.0) as f32;
-    let x0 = (2.0 * rect.pos.x as f32 / pass_w) - 1.0;
-    let x1 = (2.0 * (rect.pos.x + rect.size.x) as f32 / pass_w) - 1.0;
-    let y0 = 1.0 - (2.0 * rect.pos.y as f32 / pass_h);
-    let y1 = 1.0 - (2.0 * (rect.pos.y + rect.size.y) as f32 / pass_h);
-    vec4(x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1))
-}
-
-fn clip_space_viewport_matrix(clip_ndc: Vec4f) -> Mat4f {
-    let sx = (clip_ndc.z - clip_ndc.x) * 0.5;
-    let sy = (clip_ndc.w - clip_ndc.y) * 0.5;
-    let tx = (clip_ndc.z + clip_ndc.x) * 0.5;
-    let ty = (clip_ndc.w + clip_ndc.y) * 0.5;
-    Mat4f {
-        v: [
-            sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0,
-        ],
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
+        DrawStep::done()
     }
 }
 

@@ -121,6 +121,13 @@ script_mod! {
         u_has_emissive_texture: uniform(float(0.0))
         u_has_env_texture: uniform(float(0.0))
         u_has_env_atlas_texture: uniform(float(0.0))
+        u_enable_occlusion: uniform(float(0.0))
+        u_enable_emissive: uniform(float(0.0))
+        u_enable_direct_light: uniform(float(0.0))
+        u_enable_brdf: uniform(float(0.0))
+        u_enable_direct_specular: uniform(float(0.0))
+        u_enable_ibl: uniform(float(0.0))
+        u_enable_env_specular: uniform(float(0.0))
         u_light_dir: uniform(vec3(0.3, 0.7, 1.0))
         u_light_color: uniform(vec3(1.0, 1.0, 1.0))
         u_ambient: uniform(float(0.15))
@@ -232,6 +239,18 @@ script_mod! {
             return x2 * x2 * x
         }
 
+        tone_map_color: fn(color_linear: vec3f) -> vec3f {
+            let mapped = max(color_linear, vec3(0.0, 0.0, 0.0));
+            let tone_num = mapped * (mapped * 2.51 + vec3(0.03, 0.03, 0.03));
+            let tone_den = mapped * (mapped * 2.43 + vec3(0.59, 0.59, 0.59)) + vec3(0.14, 0.14, 0.14);
+            let tone = tone_num / tone_den;
+            return vec3(
+                pow(max(tone.x, 0.0), 1.0 / 2.2),
+                pow(max(tone.y, 0.0), 1.0 / 2.2),
+                pow(max(tone.z, 0.0), 1.0 / 2.2)
+            )
+        }
+
         get_base_color: fn(uv: vec2, vertex_color: vec4) {
             let base = self.u_base_color_factor * vertex_color;
             if self.u_has_base_color_texture <= 0.5 {
@@ -244,12 +263,7 @@ script_mod! {
                 pow(max(tex_srgb.z, 0.0), 2.2),
                 tex_srgb.w
             );
-            let tex_mix = mix(
-                vec4(1.0, 1.0, 1.0, 1.0),
-                tex_linear,
-                clamp(self.u_has_base_color_texture, 0.0, 1.0)
-            );
-            return base * tex_mix
+            return base * tex_linear
         }
 
         get_metal_roughness: fn(uv: vec2) {
@@ -260,14 +274,9 @@ script_mod! {
                 )
             }
             let mr_tex = self.metallic_roughness_texture.sample_as_bgra(uv);
-            let mr_mix = mix(
-                vec4(1.0, 1.0, 1.0, 1.0),
-                mr_tex,
-                clamp(self.u_has_metal_roughness_texture, 0.0, 1.0)
-            );
             return vec2(
-                clamp(self.u_metallic_factor * mr_mix.z, 0.0, 1.0),
-                clamp(self.u_roughness_factor * mr_mix.y, 0.045, 1.0)
+                clamp(self.u_metallic_factor * mr_tex.z, 0.0, 1.0),
+                clamp(self.u_roughness_factor * mr_tex.y, 0.045, 1.0)
             )
         }
 
@@ -281,7 +290,7 @@ script_mod! {
         }
 
         get_occlusion: fn(uv: vec2) {
-            if self.u_has_occlusion_texture <= 0.5 {
+            if self.u_enable_occlusion <= 0.5 {
                 return 1.0
             }
             let occlusion_tex = self.occlusion_texture.sample_as_bgra(uv);
@@ -289,6 +298,9 @@ script_mod! {
         }
 
         get_emissive: fn(uv: vec2) {
+            if self.u_enable_emissive <= 0.5 {
+                return vec3(0.0, 0.0, 0.0)
+            }
             if self.u_has_emissive_texture <= 0.5 {
                 return self.u_emissive_factor
             }
@@ -360,9 +372,16 @@ script_mod! {
 
         pixel: fn() {
             let uv = vec2(fract(self.v_uv.x), fract(self.v_uv.y));
-            let n_geom = normalize(self.v_normal);
             let albedo = self.get_base_color(uv, self.v_color);
+            let occlusion = self.get_occlusion(uv);
+            let emissive = self.get_emissive(uv);
+            let ambient = albedo.xyz * self.u_ambient;
+            if self.u_enable_brdf <= 0.5 {
+                let color = self.tone_map_color(ambient * occlusion + emissive);
+                return vec4(color.x, color.y, color.z, albedo.w)
+            }
 
+            let n_geom = normalize(self.v_normal);
             let n = if self.u_has_normal_texture > 0.5 {
                 let tangent_world = self.v_tangent.xyz;
                 let tangent_len = length(tangent_world);
@@ -385,71 +404,72 @@ script_mod! {
             let l = self.u_light_dir;
             let v = normalize(self.active_camera_world_pos() - self.v_world);
             let h = normalize(l + v);
-            let ndotl = max(dot(n, l), 0.0);
+            let ndotl = if self.u_enable_direct_light > 0.5 {
+                max(dot(n, l), 0.0)
+            } else {
+                0.0
+            };
             let ndotv = max(dot(n, v), 0.0001);
-            let ndoth = max(dot(n, h), 0.0001);
             let vdoth = max(dot(v, h), 0.0);
 
             let mr = self.get_metal_roughness(uv);
             let metal = mr.x;
             let rough = mr.y;
-
-            let a = rough * rough;
-            let a2 = a * a;
-            let denom = ndoth * ndoth * (a2 - 1.0) + 1.0;
-            let d = a2 / max(3.14159265 * denom * denom, 0.0001);
-
-            let k0 = rough + 1.0;
-            let k = (k0 * k0) / 8.0;
-            let g_v = ndotv / max(ndotv * (1.0 - k) + k, 0.0001);
-            let g_l = ndotl / max(ndotl * (1.0 - k) + k, 0.0001);
-            let g = g_v * g_l;
-
             let f0 = mix(vec3(0.04, 0.04, 0.04), albedo.xyz, metal);
             let fresnel = self.pow5(1.0 - vdoth);
             let f = f0 + (vec3(1.0, 1.0, 1.0) - f0) * fresnel;
-
-            let spec = (d * g) / max(4.0 * ndotv * ndotl, 0.0001);
-            let specular = f * spec * self.u_spec_strength;
-
             let kd = (vec3(1.0, 1.0, 1.0) - f) * (1.0 - metal);
             let diffuse = kd * albedo.xyz * (1.0 / 3.14159265);
 
-            let occlusion = self.get_occlusion(uv);
+            let specular = if self.u_enable_direct_specular > 0.5 {
+                let ndoth = max(dot(n, h), 0.0001);
+                let a = rough * rough;
+                let a2 = a * a;
+                let denom = ndoth * ndoth * (a2 - 1.0) + 1.0;
+                let d = a2 / max(3.14159265 * denom * denom, 0.0001);
+                let k0 = rough + 1.0;
+                let k = (k0 * k0) / 8.0;
+                let g_v = ndotv / max(ndotv * (1.0 - k) + k, 0.0001);
+                let g_l = ndotl / max(ndotl * (1.0 - k) + k, 0.0001);
+                let g = g_v * g_l;
+                let spec = (d * g) / max(4.0 * ndotv * ndotl, 0.0001);
+                f * spec * self.u_spec_strength
+            } else {
+                vec3(0.0, 0.0, 0.0)
+            };
 
-            let ndotv_env = clamp(dot(n, v), 0.0, 1.0);
-            let refl = normalize(n * (2.0 * ndotv_env) - v);
-            let refl_rough = normalize(mix(refl, n, rough * rough));
+            let lit = if self.u_enable_direct_light > 0.5 {
+                (diffuse + specular) * self.u_light_color * ndotl
+            } else {
+                vec3(0.0, 0.0, 0.0)
+            };
 
-            let env_spec_color = self.get_env_specular(refl_rough);
-            let env_diff_color = self.get_env_diffuse(n);
+            let ibl_diffuse = if self.u_enable_ibl > 0.5 {
+                let env_diff_color = self.get_env_diffuse(n);
+                kd * albedo.xyz * env_diff_color * self.u_env_intensity
+            } else {
+                vec3(0.0, 0.0, 0.0)
+            };
 
-            let ibl_diffuse = kd * albedo.xyz * env_diff_color * self.u_env_intensity;
-            let c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
-            let c1 = vec4(1.0, 0.0425, 1.04, -0.04);
-            let r = c0 * rough + c1;
-            let a004 = min(r.x * r.x, pow(2.0, -9.28 * ndotv)) * r.x + r.y;
-            let env_brdf = vec2(-1.04, 1.04) * a004 + r.zw;
-            let env_fresnel = f0 * env_brdf.x + vec3(env_brdf.y, env_brdf.y, env_brdf.y);
-            let env_spec = env_spec_color * env_fresnel * self.u_spec_strength * self.u_env_intensity;
-            let emissive = self.get_emissive(uv);
+            let indirect_spec = if self.u_enable_env_specular > 0.5 {
+                let ndotv_env = clamp(dot(n, v), 0.0, 1.0);
+                let refl = normalize(n * (2.0 * ndotv_env) - v);
+                let refl_rough = normalize(mix(refl, n, rough * rough));
+                let env_spec_color = self.get_env_specular(refl_rough);
+                let c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+                let c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+                let r = c0 * rough + c1;
+                let a004 = min(r.x * r.x, pow(2.0, -9.28 * ndotv)) * r.x + r.y;
+                let env_brdf = vec2(-1.04, 1.04) * a004 + r.zw;
+                let env_fresnel = f0 * env_brdf.x + vec3(env_brdf.y, env_brdf.y, env_brdf.y);
+                let env_spec = env_spec_color * env_fresnel * self.u_spec_strength * self.u_env_intensity;
+                env_spec * mix(1.0, occlusion, 0.35)
+            } else {
+                vec3(0.0, 0.0, 0.0)
+            };
 
-            let lit = (diffuse + specular) * self.u_light_color * ndotl;
-            let ambient = albedo.xyz * self.u_ambient;
             let indirect_diffuse = (ambient + ibl_diffuse) * occlusion;
-            let indirect_spec = env_spec * mix(1.0, occlusion, 0.35);
-            let color_linear = lit + indirect_diffuse + indirect_spec + emissive;
-
-            let mapped = max(color_linear, vec3(0.0, 0.0, 0.0));
-            let tone_num = mapped * (mapped * 2.51 + vec3(0.03, 0.03, 0.03));
-            let tone_den = mapped * (mapped * 2.43 + vec3(0.59, 0.59, 0.59)) + vec3(0.14, 0.14, 0.14);
-            let tone = tone_num / tone_den;
-
-            let color = vec3(
-                pow(max(tone.x, 0.0), 1.0 / 2.2),
-                pow(max(tone.y, 0.0), 1.0 / 2.2),
-                pow(max(tone.z, 0.0), 1.0 / 2.2)
-            );
+            let color = self.tone_map_color(lit + indirect_diffuse + indirect_spec + emissive);
             return vec4(color.x, color.y, color.z, albedo.w)
         }
     }
@@ -721,101 +741,104 @@ script_mod! {
         }
 
         pixel: fn() {
-            let uv = vec2(fract(self.v_uv.x), fract(self.v_uv.y));
-            let albedo = self.get_base_color(uv, self.v_color);
+            let env_enabled = self.u_enable_ibl > 0.5;
+            let highlight_enabled = self.u_enable_direct_specular > 0.5;
+            if !env_enabled && !highlight_enabled {
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }
 
+            let uv = vec2(fract(self.v_uv.x), fract(self.v_uv.y));
+            let rough = self.get_metal_roughness(uv).y;
             let n_geom = normalize(self.v_normal);
-            let tangent_world = self.v_tangent.xyz;
-            let tangent_len = length(tangent_world);
-            let tangent_base = if tangent_len > 0.00001 {
-                tangent_world / tangent_len
+            let n_base = if self.u_has_normal_texture > 0.5 {
+                let tangent_world = self.v_tangent.xyz;
+                let tangent_len = length(tangent_world);
+                let tangent_base = if tangent_len > 0.00001 {
+                    tangent_world / tangent_len
+                } else {
+                    vec3(1.0, 0.0, 0.0)
+                };
+                let t_raw = tangent_base - n_geom * dot(n_geom, tangent_base);
+                let t_len = length(t_raw);
+                let up_axis = if abs(n_geom.y) > 0.99 { vec3(1.0, 0.0, 0.0) } else { vec3(0.0, 1.0, 0.0) };
+                let t = if t_len > 0.00001 { t_raw / t_len } else { normalize(cross(up_axis, n_geom)) };
+                let b = normalize(cross(n_geom, t)) * self.v_tangent.w;
+                let n_tex = self.get_normal_tangent(uv);
+                normalize(t * n_tex.x + b * n_tex.y + n_geom * n_tex.z)
             } else {
-                vec3(1.0, 0.0, 0.0)
+                n_geom
             };
-            let t_raw = tangent_base - n_geom * dot(n_geom, tangent_base);
-            let t_len = length(t_raw);
-            let up_axis = if abs(n_geom.y) > 0.99 { vec3(1.0, 0.0, 0.0) } else { vec3(0.0, 1.0, 0.0) };
-            let t = if t_len > 0.00001 { t_raw / t_len } else { normalize(cross(up_axis, n_geom)) };
-            let b = normalize(cross(n_geom, t)) * self.v_tangent.w;
-            let n_tex = self.get_normal_tangent(uv);
-            let n_tangent = normalize(t * n_tex.x + b * n_tex.y + n_geom * n_tex.z);
-            let n_base = normalize(mix(n_geom, n_tangent, clamp(self.u_has_normal_texture, 0.0, 1.0)));
             let local_surface = self.world_to_object_point(self.v_world);
             let wobble_world = self.object_to_world_dir(self.surface_wobble_local(local_surface));
             let n = normalize(n_base + wobble_world * 0.14);
-
             let camera_world_pos = self.active_eye_camera_world_pos();
             let view_dir_world = normalize(camera_world_pos - self.v_world);
-            let l = self.u_light_dir;
-            let h = normalize(l + view_dir_world);
             let ndotv = clamp(dot(n, view_dir_world), 0.0, 1.0);
-            let ndotl = max(dot(n, l), 0.0);
-            let mr = self.get_metal_roughness(uv);
-            let rough = mr.y;
+            let highlight = if highlight_enabled {
+                let l = self.u_light_dir;
+                let h = normalize(l + view_dir_world);
+                let ndotl = max(dot(n, l), 0.0);
+                self.u_light_color
+                    * pow(max(dot(n, h), 0.0), mix(72.0, 180.0, 1.0 - rough))
+                    * self.u_spec_strength
+                    * 0.20
+                    * ndotl
+            } else {
+                vec3(0.0, 0.0, 0.0)
+            };
 
-            let reflection_dir = normalize(n * (2.0 * ndotv) - view_dir_world);
-            let reflection = self.get_env_specular(normalize(mix(reflection_dir, n, rough * rough)));
+            let env_color = if env_enabled {
+                let albedo = self.get_base_color(uv, self.v_color);
+                let reflection_dir = normalize(n * (2.0 * ndotv) - view_dir_world);
+                let reflection = self.get_env_specular(normalize(mix(reflection_dir, n, rough * rough)));
 
-            let ior = 1.04;
-            let inside_dir_world = self.refracted_dir(-view_dir_world, n, 1.0 / ior);
-            let local_origin = self.world_to_object_point(self.v_world + inside_dir_world * 0.0035);
-            let local_dir = normalize(self.world_to_object_dir(inside_dir_world));
-            let exit_local = self.trace_rounded_box_exit_local(local_origin, local_dir);
-            let exit_world = self.object_to_world_point(exit_local);
-            let exit_normal_local = self.rounded_box_normal_local(exit_local);
-            let exit_wobble_world = self.object_to_world_dir(self.surface_wobble_local(exit_local));
-            let exit_normal_world = normalize(self.object_to_world_dir(exit_normal_local) + exit_wobble_world * 0.14);
-            let exit_dir_world = self.refracted_dir(inside_dir_world, -exit_normal_world, ior);
-            let exit_up_axis = if abs(exit_normal_world.y) > 0.99 { vec3(1.0, 0.0, 0.0) } else { vec3(0.0, 1.0, 0.0) };
-            let exit_tangent = normalize(cross(exit_up_axis, exit_normal_world));
-            let exit_bitangent = normalize(cross(exit_normal_world, exit_tangent));
-            let chroma = (0.0032 + rough * 0.0055) * (0.28 + (1.0 - ndotv));
-            let refr_r = normalize(exit_dir_world + exit_tangent * chroma + exit_bitangent * (0.30 * chroma));
-            let refr_g = normalize(exit_dir_world);
-            let refr_b = normalize(exit_dir_world - exit_tangent * chroma - exit_bitangent * (0.30 * chroma));
-            let transmitted = vec3(
-                self.sample_transmission(exit_world, refr_r).x,
-                self.sample_transmission(exit_world, refr_g).y,
-                self.sample_transmission(exit_world, refr_b).z
-            );
+                let ior = 1.04;
+                let inside_dir_world = self.refracted_dir(-view_dir_world, n, 1.0 / ior);
+                let local_origin = self.world_to_object_point(self.v_world + inside_dir_world * 0.0035);
+                let local_dir = normalize(self.world_to_object_dir(inside_dir_world));
+                let exit_local = self.trace_rounded_box_exit_local(local_origin, local_dir);
+                let exit_world = self.object_to_world_point(exit_local);
+                let exit_normal_local = self.rounded_box_normal_local(exit_local);
+                let exit_wobble_world = self.object_to_world_dir(self.surface_wobble_local(exit_local));
+                let exit_normal_world = normalize(self.object_to_world_dir(exit_normal_local) + exit_wobble_world * 0.14);
+                let exit_dir_world = self.refracted_dir(inside_dir_world, -exit_normal_world, ior);
+                let exit_up_axis = if abs(exit_normal_world.y) > 0.99 { vec3(1.0, 0.0, 0.0) } else { vec3(0.0, 1.0, 0.0) };
+                let exit_tangent = normalize(cross(exit_up_axis, exit_normal_world));
+                let exit_bitangent = normalize(cross(exit_normal_world, exit_tangent));
+                let chroma = (0.0032 + rough * 0.0055) * (0.28 + (1.0 - ndotv));
+                let refr_r = normalize(exit_dir_world + exit_tangent * chroma + exit_bitangent * (0.30 * chroma));
+                let refr_g = normalize(exit_dir_world);
+                let refr_b = normalize(exit_dir_world - exit_tangent * chroma - exit_bitangent * (0.30 * chroma));
+                let transmitted = vec3(
+                    self.sample_transmission(exit_world, refr_r).x,
+                    self.sample_transmission(exit_world, refr_g).y,
+                    self.sample_transmission(exit_world, refr_b).z
+                );
 
-            let tint = mix(vec3(1.0, 1.0, 1.0), albedo.xyz, 0.58) * vec3(0.74, 0.88, 1.20);
-            let trace_length = length(exit_world - self.v_world);
-            let thickness = clamp(trace_length / max(self.object_half_extents.x * 2.0, 0.001), 0.0, 1.2)
-                + rough * 0.10
-                + (1.0 - ndotv) * 0.18;
-            let absorption = mix(vec3(1.0, 1.0, 1.0), tint, clamp(thickness, 0.0, 1.0));
-            let f0 = pow((1.12 - 1.0) / (1.12 + 1.0), 2.0);
-            let fresnel = f0 + (1.0 - f0) * self.pow5(1.0 - ndotv);
+                let tint = mix(vec3(1.0, 1.0, 1.0), albedo.xyz, 0.58) * vec3(0.74, 0.88, 1.20);
+                let trace_length = length(exit_world - self.v_world);
+                let thickness = clamp(trace_length / max(self.object_half_extents.x * 2.0, 0.001), 0.0, 1.2)
+                    + rough * 0.10
+                    + (1.0 - ndotv) * 0.18;
+                let absorption = mix(vec3(1.0, 1.0, 1.0), tint, clamp(thickness, 0.0, 1.0));
+                let f0 = pow((1.12 - 1.0) / (1.12 + 1.0), 2.0);
+                let fresnel = f0 + (1.0 - f0) * self.pow5(1.0 - ndotv);
+                let transmitted_color = transmitted * absorption * self.u_env_intensity * 0.94;
+                let reflection_color = reflection * self.u_env_intensity * (0.42 + 0.30 * self.u_spec_strength);
+                let sheen_reflection = self.get_env_specular(normalize(mix(reflection_dir, n, 0.02)));
+                let sheen_strength =
+                    (0.028 + 0.028 * self.u_spec_strength)
+                    + (0.14 + 0.10 * self.u_spec_strength) * pow(1.0 - ndotv, 4.0);
+                mix(
+                    transmitted_color,
+                    reflection_color,
+                    clamp(fresnel * 0.68 + rough * 0.06, 0.0, 0.82)
+                ) + sheen_reflection * self.u_env_intensity * sheen_strength
+            } else {
+                vec3(0.0, 0.0, 0.0)
+            };
 
-            let highlight = self.u_light_color
-                * pow(max(dot(n, h), 0.0), mix(72.0, 180.0, 1.0 - rough))
-                * self.u_spec_strength
-                * 0.20
-                * ndotl;
-
-            let transmitted_color = transmitted * absorption * self.u_env_intensity * 0.94;
-            let reflection_color = reflection * self.u_env_intensity * (0.42 + 0.30 * self.u_spec_strength);
-            let sheen_reflection = self.get_env_specular(normalize(mix(reflection_dir, n, 0.02)));
-            let sheen_strength =
-                (0.028 + 0.028 * self.u_spec_strength)
-                + (0.14 + 0.10 * self.u_spec_strength) * pow(1.0 - ndotv, 4.0);
-            let color_linear = mix(
-                transmitted_color,
-                reflection_color,
-                clamp(fresnel * 0.68 + rough * 0.06, 0.0, 0.82)
-            ) + sheen_reflection * self.u_env_intensity * sheen_strength + highlight;
-
-            let mapped = max(color_linear, vec3(0.0, 0.0, 0.0));
-            let tone_num = mapped * (mapped * 2.51 + vec3(0.03, 0.03, 0.03));
-            let tone_den = mapped * (mapped * 2.43 + vec3(0.59, 0.59, 0.59)) + vec3(0.14, 0.14, 0.14);
-            let tone = tone_num / tone_den;
-
-            let color = vec3(
-                pow(max(tone.x, 0.0), 1.0 / 2.2),
-                pow(max(tone.y, 0.0), 1.0 / 2.2),
-                pow(max(tone.z, 0.0), 1.0 / 2.2)
-            );
+            let color = self.tone_map_color(env_color + highlight);
             return vec4(color.x, color.y, color.z, 1.0)
         }
     }
@@ -965,6 +988,65 @@ impl DrawPbrRefractive {
 }
 
 impl DrawPbr {
+    fn emissive_enabled(&self) -> f32 {
+        if self.emissive_factor.x.abs() > 0.000_01
+            || self.emissive_factor.y.abs() > 0.000_01
+            || self.emissive_factor.z.abs() > 0.000_01
+        {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn direct_light_enabled(&self) -> f32 {
+        if self.light_color.length() > 0.000_01 {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn ibl_enabled(&self) -> f32 {
+        if self.env_intensity.abs() > 0.000_01 {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn direct_specular_enabled(&self, direct_light_enabled: f32) -> f32 {
+        if direct_light_enabled > 0.5 && self.spec_strength.abs() > 0.000_01 {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn env_specular_enabled(&self, ibl_enabled: f32) -> f32 {
+        if ibl_enabled > 0.5 && self.spec_strength.abs() > 0.000_01 {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn brdf_enabled(&self, direct_light_enabled: f32, ibl_enabled: f32) -> f32 {
+        if direct_light_enabled > 0.5 || ibl_enabled > 0.5 {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn occlusion_enabled(&self) -> f32 {
+        if self.has_occlusion_texture > 0.5 && self.occlusion_strength > 0.000_01 {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
     pub fn begin(&mut self) {
         if self.many_instances.is_some() {
             debug_assert!(
@@ -1296,6 +1378,36 @@ impl DrawPbr {
             cx.cx,
             live_id!(u_has_env_atlas_texture),
             &[self.has_env_atlas_texture],
+        );
+        let enable_occlusion = self.occlusion_enabled();
+        let enable_emissive = self.emissive_enabled();
+        let enable_direct_light = self.direct_light_enabled();
+        let enable_ibl = self.ibl_enabled();
+        let enable_brdf = self.brdf_enabled(enable_direct_light, enable_ibl);
+        let enable_direct_specular = self.direct_specular_enabled(enable_direct_light);
+        let enable_env_specular = self.env_specular_enabled(enable_ibl);
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_enable_occlusion), &[enable_occlusion]);
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_enable_emissive), &[enable_emissive]);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_enable_direct_light),
+            &[enable_direct_light],
+        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_enable_brdf), &[enable_brdf]);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_enable_direct_specular),
+            &[enable_direct_specular],
+        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_enable_ibl), &[enable_ibl]);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_enable_env_specular),
+            &[enable_env_specular],
         );
         let light_dir = if self.light_dir.length() > 0.000_01 {
             self.light_dir.normalize()
