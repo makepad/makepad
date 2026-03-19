@@ -1097,18 +1097,15 @@ impl HubCore {
                 }
             }
             ClientToHub::ForwardToApp { build_id, msg_bin } => {
-                let is_bootstrap =
-                    StudioToAppVec::deserialize_bin(&msg_bin)
-                        .ok()
-                        .is_some_and(|msgs| {
-                            msgs.0.iter().any(|msg| {
-                                matches!(
-                                    msg,
-                                    StudioToApp::WindowGeomChange { .. }
-                                        | StudioToApp::Swapchain(_)
-                                )
-                            })
-                        });
+                let parsed_msgs = StudioToAppVec::deserialize_bin(&msg_bin).ok().map(|msgs| msgs.0);
+                let is_bootstrap = parsed_msgs.as_ref().is_some_and(|msgs| {
+                    msgs.iter().any(|msg| {
+                        matches!(
+                            msg,
+                            StudioToApp::WindowGeomChange { .. } | StudioToApp::Swapchain(_)
+                        )
+                    })
+                });
                 match self.send_to_app_with_socket(build_id, msg_bin.clone()) {
                     Ok(_) => {}
                     Err(err) if err.starts_with("no app socket for build") => {
@@ -2060,8 +2057,50 @@ impl HubCore {
             .pending_forward_to_app_by_build
             .entry(build_id)
             .or_default();
+        if let Some(existing) = queue.first() {
+            if let Some(merged) = Self::merge_pending_bootstrap_msgs(existing, &msg_bin) {
+                queue.clear();
+                queue.push(merged);
+                return;
+            }
+        }
         queue.clear();
         queue.push(msg_bin);
+    }
+
+    fn merge_pending_bootstrap_msgs(existing: &[u8], incoming: &[u8]) -> Option<Vec<u8>> {
+        let existing = StudioToAppVec::deserialize_bin(existing).ok()?.0;
+        let incoming = StudioToAppVec::deserialize_bin(incoming).ok()?.0;
+
+        let mut window_geom = None;
+        let mut swapchain = None;
+        let mut frame_request = None;
+        let mut saw_tick = false;
+
+        for msg in existing.into_iter().chain(incoming.into_iter()) {
+            match msg {
+                StudioToApp::WindowGeomChange { .. } => window_geom = Some(msg),
+                StudioToApp::Swapchain(_) => swapchain = Some(msg),
+                StudioToApp::RunViewFrameRequest(request) => frame_request = Some(request),
+                StudioToApp::Tick => saw_tick = true,
+                _ => {}
+            }
+        }
+
+        let mut merged = Vec::new();
+        if let Some(msg) = window_geom {
+            merged.push(msg);
+        }
+        if let Some(msg) = swapchain {
+            merged.push(msg);
+        }
+        if let Some(request) = frame_request {
+            merged.push(StudioToApp::RunViewFrameRequest(request));
+        }
+        if saw_tick {
+            merged.push(StudioToApp::Tick);
+        }
+        (!merged.is_empty()).then_some(StudioToAppVec(merged).serialize_bin())
     }
 
     fn flush_pending_forward_to_app(&mut self, build_id: QueryId) {
