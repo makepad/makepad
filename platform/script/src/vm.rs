@@ -25,7 +25,6 @@ use std::rc::Rc;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct ScriptModKey {
-    pub source_id: u64,
     pub file: String,
     pub line: usize,
     pub column: usize,
@@ -34,7 +33,6 @@ pub struct ScriptModKey {
 impl ScriptModKey {
     pub fn from_script_mod(script_mod: &ScriptMod) -> Self {
         Self {
-            source_id: script_mod.source_id,
             file: script_mod.file.clone(),
             line: script_mod.line,
             column: script_mod.column,
@@ -42,49 +40,10 @@ impl ScriptModKey {
     }
 }
 
-fn normalize_externalized_script_mod_file(file: &str) -> String {
-    let normalized = file.replace('\\', "/");
-    let is_absolute = normalized.starts_with('/');
-    let mut stack = Vec::<&str>::new();
-    for part in normalized.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                if let Some(last) = stack.last() {
-                    if *last != ".." {
-                        stack.pop();
-                        continue;
-                    }
-                }
-                if !is_absolute {
-                    stack.push("..");
-                }
-            }
-            _ => stack.push(part),
-        }
-    }
-    let mut collapsed = if is_absolute {
-        format!("/{}", stack.join("/"))
-    } else {
-        stack.join("/")
-    };
-    let mut parts = collapsed.splitn(3, '/');
-    if let (Some(first), Some(second), Some(rest)) = (parts.next(), parts.next(), parts.next()) {
-        if first == second {
-            return format!("{first}/{rest}");
-        }
-    }
-    if collapsed.is_empty() {
-        collapsed.push('.');
-    }
-    collapsed
-}
-
 #[derive(Default, Debug)]
 pub struct ScriptMod {
     pub cargo_manifest_path: String,
     pub module_path: String,
-    pub source_id: u64,
     pub file: String,
     pub line: usize,
     pub column: usize,
@@ -941,31 +900,16 @@ impl<'a> ScriptVm<'a> {
         let me_obj = self.bx.heap.new_with_proto(id!(root_me).into());
         let me = self.bx.heap.new_object_ref(me_obj);
         let key = ScriptModKey::from_script_mod(&new_mod);
-        let normalized_key = {
-            let normalized_file = normalize_externalized_script_mod_file(&new_mod.file);
-            (normalized_file != new_mod.file).then_some(ScriptModKey {
-                source_id: new_mod.source_id,
-                file: normalized_file,
-                line: new_mod.line,
-                column: new_mod.column,
-            })
-        };
-        let overrides = self.bx.code.script_mod_overrides.borrow();
-        let override_code = overrides.get(&key).cloned().or_else(|| {
-            normalized_key
-                .as_ref()
-                .and_then(|key| overrides.get(key).cloned())
-        });
-        let effective_code = if let Some(override_code) = override_code.clone() {
-            override_code
-        } else if new_mod.code.is_empty() {
-            panic!(
-                "Missing externalized script source for {}:{}:{} (source_id={:#x})",
-                new_mod.file, new_mod.line, new_mod.column, new_mod.source_id
-            );
-        } else {
-            new_mod.code.clone()
-        };
+        let override_code = self
+            .bx
+            .code
+            .script_mod_overrides
+            .borrow()
+            .get(&key)
+            .cloned();
+        let effective_code = override_code
+            .clone()
+            .unwrap_or_else(|| new_mod.code.clone());
 
         let new_body = ScriptBody {
             source: ScriptSource::Mod(new_mod),
@@ -982,7 +926,6 @@ impl<'a> ScriptVm<'a> {
             if let ScriptSource::Mod(script_mod) = &body.source {
                 if let ScriptSource::Mod(new_mod) = &new_body.source {
                     if script_mod.file == new_mod.file
-                        && script_mod.source_id == new_mod.source_id
                         && script_mod.line == new_mod.line
                         && script_mod.column == new_mod.column
                     {
@@ -1274,42 +1217,5 @@ mod tests {
                 idx
             );
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "Missing externalized script source")]
-    fn add_script_mod_rejects_missing_externalized_source() {
-        let mut host = ();
-        let mut std = ();
-        let mut vm = ScriptVm {
-            host: &mut host,
-            std: &mut std,
-            bx: Box::new(ScriptVmBase::new()),
-        };
-
-        vm.add_script_mod(ScriptMod {
-            cargo_manifest_path: "/tmp/app".to_string(),
-            module_path: "app::ui".to_string(),
-            source_id: 0,
-            file: "app/src/ui.rs".to_string(),
-            line: 12,
-            column: 4,
-            code: String::new(),
-            values: Vec::new(),
-        });
-    }
-
-    #[test]
-    fn normalize_externalized_script_mod_file_collapses_duplicate_package_prefix() {
-        assert_eq!(
-            normalize_externalized_script_mod_file(
-                "makepad-gallery/makepad-gallery/src/ui/page.rs"
-            ),
-            "makepad-gallery/src/ui/page.rs"
-        );
-        assert_eq!(
-            normalize_externalized_script_mod_file("makepad-platform/platform/src/ime.rs"),
-            "makepad-platform/platform/src/ime.rs"
-        );
     }
 }

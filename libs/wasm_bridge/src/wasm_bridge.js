@@ -128,9 +128,6 @@ export class WasmBridge {
         this.memory = wasm._memory;
         this.wasm_url = wasm._wasm_url;
         this.buffer_ref_len_check = 0;
-        this.bundle_manifest_promise = null;
-        this.bundle_promises = new Map();
-        this.base_script_sources_promise = null;
 
         this.from_wasm_args = {};
 
@@ -255,132 +252,6 @@ export class WasmBridge {
 
     js_time_now() {
         return Date.now() / 1000.0;
-    }
-
-    resolve_bundle_manifest_url() {
-        const base = this.wasm_url || (typeof window !== "undefined" ? window.location.href : "wasm-bundles.json");
-        return new URL("wasm-bundles.json", base).toString();
-    }
-
-    async load_bundle_manifest(optional = false) {
-        if (!this.bundle_manifest_promise) {
-            const manifest_url = this.resolve_bundle_manifest_url();
-            this.bundle_manifest_promise = (async () => {
-                const response = await fetch(manifest_url, { cache: "no-store" });
-                if (!response.ok) {
-                    if (optional && response.status === 404) {
-                        return null;
-                    }
-                    throw new Error(`failed to fetch wasm bundle manifest: ${response.status}`);
-                }
-                return {
-                    url: manifest_url,
-                    data: await response.json(),
-                };
-            })().catch(error => {
-                this.bundle_manifest_promise = null;
-                throw error;
-            });
-        }
-        return this.bundle_manifest_promise;
-    }
-
-    async register_script_sources_from_url(script_url, description) {
-        if (!script_url) {
-            return;
-        }
-        if (!this.to_wasm || typeof this.to_wasm.ToWasmRegisterScriptSources !== "function") {
-            throw new Error("wasm bridge cannot register script sources before message bridge setup");
-        }
-
-        const response = await fetch(script_url, { cache: "no-store" });
-        if (!response.ok) {
-            throw new Error(`failed to fetch ${description}: ${response.status}`);
-        }
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        this.to_wasm.ToWasmRegisterScriptSources({ data: bytes });
-        this.do_wasm_pump();
-    }
-
-    async ensure_base_script_sources() {
-        if (!this.base_script_sources_promise) {
-            this.base_script_sources_promise = (async () => {
-                const manifest = await this.load_bundle_manifest(true);
-                const script_entry = manifest && manifest.data
-                    ? manifest.data.base_scripts
-                    : null;
-                if (!manifest || !script_entry || !script_entry.url) {
-                    return;
-                }
-                const script_url = new URL(script_entry.url, manifest.url).toString();
-                await this.register_script_sources_from_url(script_url, "base script source pack");
-            })().catch(error => {
-                this.base_script_sources_promise = null;
-                throw error;
-            });
-        }
-        return this.base_script_sources_promise;
-    }
-
-    ensure_bundle(bundle_id) {
-        if (!bundle_id) {
-            return Promise.reject(new Error("missing wasm bundle id"));
-        }
-        if (this.bundle_promises.has(bundle_id)) {
-            return this.bundle_promises.get(bundle_id);
-        }
-
-        const promise = (async () => {
-            const manifest = await this.load_bundle_manifest();
-            const bundle = manifest.data && manifest.data.bundles
-                ? manifest.data.bundles[bundle_id]
-                : null;
-            if (!bundle || !bundle.url) {
-                throw new Error(`missing wasm bundle entry: ${bundle_id}`);
-            }
-
-            if (bundle.script_url) {
-                const script_url = new URL(bundle.script_url, manifest.url).toString();
-                await this.register_script_sources_from_url(
-                    script_url,
-                    `wasm bundle script source pack ${bundle_id}`
-                );
-            }
-
-            const bundle_url = new URL(bundle.url, manifest.url).toString();
-            const response = await fetch(bundle_url);
-            if (!response.ok) {
-                throw new Error(`failed to fetch wasm bundle ${bundle_id}: ${response.status}`);
-            }
-
-            const bytes = await response.arrayBuffer();
-            const module = await WebAssembly.compile(bytes);
-            const imports = {
-                env: this.wasm._env || {},
-                $p: this.wasm.exports
-            };
-            const instance = await WebAssembly.instantiate(module, imports);
-            if (bundle.init_export) {
-                const init_export =
-                    this.wasm.exports[bundle.init_export] ||
-                    instance.exports[bundle.init_export];
-                if (typeof init_export !== "function") {
-                    throw new Error(`missing wasm bundle init export ${bundle.init_export} for ${bundle_id}`);
-                }
-                init_export();
-            }
-            if (!this.wasm._route_bundle_instances) {
-                this.wasm._route_bundle_instances = new Map();
-            }
-            this.wasm._route_bundle_instances.set(bundle_id, instance);
-            return instance;
-        })().catch(error => {
-            this.bundle_promises.delete(bundle_id);
-            throw error;
-        });
-
-        this.bundle_promises.set(bundle_id, promise);
-        return promise;
     }
 
     static create_shared_memory() {
@@ -634,19 +505,6 @@ export class WasmBridge {
         await ensure_secondary_ready();
     }
 
-    static with_wasm_url(wasm, wasm_url) {
-        if (!wasm) {
-            return wasm;
-        }
-        try {
-            const base = typeof window !== "undefined" ? window.location.href : wasm_url;
-            wasm._wasm_url = new URL(wasm_url, base).toString();
-        } catch (_error) {
-            wasm._wasm_url = wasm_url;
-        }
-        return wasm;
-    }
-
     static instantiate_wasm(module, memory, env) {
         let set_wasm = init_env(env);
 
@@ -714,7 +572,7 @@ export class WasmBridge {
                         secondary_response_promise,
                         defer_secondary
                     );
-                    return this.with_wasm_url(wasm, wasm_url);
+                    return wasm;
                 }
 
                 if (split_data_active_only) {
@@ -731,7 +589,7 @@ export class WasmBridge {
                         secondary_response_promise,
                         defer_secondary
                     );
-                    return this.with_wasm_url(wasm, wasm_url);
+                    return wasm;
                 }
 
                 const wasm_response = await checked_wasm_response_promise;
@@ -745,15 +603,14 @@ export class WasmBridge {
                     secondary_response_promise,
                     defer_secondary
                 );
-                return this.with_wasm_url(wasm, wasm_url);
+                return wasm;
             })().catch(error => {
                 console.error(error);
             });
         }
         return WebAssembly.compileStreaming(fetch(wasm_url))
             .then(
-                (module) => this.instantiate_wasm(module, memory, { _post_signal: _ => { } })
-                    .then(wasm => this.with_wasm_url(wasm, wasm_url)),
+                (module) => this.instantiate_wasm(module, memory, { _post_signal: _ => { } }),
                 error => {
                     console.error(error)
                 }

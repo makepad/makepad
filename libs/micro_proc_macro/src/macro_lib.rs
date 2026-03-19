@@ -271,25 +271,11 @@ impl TokenBuilder {
         self
     }
 
-    #[track_caller]
     pub fn ident(&mut self, id: &str) -> &mut Self {
-        if id.is_empty() {
-            panic!(
-                "TokenBuilder::ident called with empty id at {}",
-                std::panic::Location::caller()
-            );
-        }
         self.extend(TokenTree::from(Ident::new(id, Span::call_site())))
     }
 
-    #[track_caller]
     pub fn ident_with_span(&mut self, id: &str, span: Span) -> &mut Self {
-        if id.is_empty() {
-            panic!(
-                "TokenBuilder::ident_with_span called with empty id at {}",
-                std::panic::Location::caller()
-            );
-        }
         self.extend(TokenTree::from(Ident::new(id, span)))
     }
 

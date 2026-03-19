@@ -236,586 +236,7 @@ pub use crate::chart::*;
 
 pub use crate::video::*;
 
-const WIDGET_THEME_REGISTRY_MODULE: LiveId = live_id!(makepad_widgets_theme_registered);
-const WIDGET_NAMESPACE_REGISTRY_MODULE: LiveId = live_id!(makepad_widgets_namespace_registered);
-const WIDGET_REGISTRY_MODULE: LiveId = live_id!(makepad_widgets_registered);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum WidgetModule {
-    ScrollBar,
-    ScrollBars,
-    View,
-    ViewUi,
-    RubberView,
-    Label,
-    LinkLabel,
-    Button,
-    CheckBox,
-    RadioButton,
-    Image,
-    ImageBlend,
-    Icon,
-    AdaptiveView,
-    DesktopButton,
-    KeyboardView,
-    VoiceWave,
-    WindowMenu,
-    NavControl,
-    Window,
-    PopupMenu,
-    DropDown,
-    TextInput,
-    Slider,
-    Splitter,
-    FoldButton,
-    FoldHeader,
-    LoadingSpinner,
-    GlassPanel,
-    BareStep,
-    TurtleStep,
-    PortalList,
-    TextFlow,
-    CachedWidget,
-    Root,
-    CommandTextInput,
-    TabCloseButton,
-    Tab,
-    TabBar,
-    Dock,
-    ScrollShadow,
-    StackNavigation,
-    ExpandablePanel,
-    Modal,
-    Tooltip,
-    CalloutTooltip,
-    PopupNotification,
-    Video,
-    PageFlip,
-    FileTree,
-    FlatList,
-    SlidesView,
-    SlidePanel,
-    Html,
-    Markdown,
-    Splash,
-    Svg,
-    Vector,
-    Chart,
-    MathView,
-    PdfView,
-    Widgets3d,
-    MapStyle,
-    MapView,
-}
-
-impl WidgetModule {
-    fn marker_id(self) -> LiveId {
-        match self {
-            WidgetModule::ScrollBar => live_id!(scroll_bar),
-            WidgetModule::ScrollBars => live_id!(scroll_bars),
-            WidgetModule::View => live_id!(view),
-            WidgetModule::ViewUi => live_id!(view_ui),
-            WidgetModule::RubberView => live_id!(rubber_view),
-            WidgetModule::Label => live_id!(label),
-            WidgetModule::LinkLabel => live_id!(link_label),
-            WidgetModule::Button => live_id!(button),
-            WidgetModule::CheckBox => live_id!(check_box),
-            WidgetModule::RadioButton => live_id!(radio_button),
-            WidgetModule::Image => live_id!(image),
-            WidgetModule::ImageBlend => live_id!(image_blend),
-            WidgetModule::Icon => live_id!(icon),
-            WidgetModule::AdaptiveView => live_id!(adaptive_view),
-            WidgetModule::DesktopButton => live_id!(desktop_button),
-            WidgetModule::KeyboardView => live_id!(keyboard_view),
-            WidgetModule::VoiceWave => live_id!(voice_wave),
-            WidgetModule::WindowMenu => live_id!(window_menu),
-            WidgetModule::NavControl => live_id!(nav_control),
-            WidgetModule::Window => live_id!(window),
-            WidgetModule::PopupMenu => live_id!(popup_menu),
-            WidgetModule::DropDown => live_id!(drop_down),
-            WidgetModule::TextInput => live_id!(text_input),
-            WidgetModule::Slider => live_id!(slider),
-            WidgetModule::Splitter => live_id!(splitter),
-            WidgetModule::FoldButton => live_id!(fold_button),
-            WidgetModule::FoldHeader => live_id!(fold_header),
-            WidgetModule::LoadingSpinner => live_id!(loading_spinner),
-            WidgetModule::GlassPanel => live_id!(glass_panel),
-            WidgetModule::BareStep => live_id!(bare_step),
-            WidgetModule::TurtleStep => live_id!(turtle_step),
-            WidgetModule::PortalList => live_id!(portal_list),
-            WidgetModule::TextFlow => live_id!(text_flow),
-            WidgetModule::CachedWidget => live_id!(cached_widget),
-            WidgetModule::Root => live_id!(root),
-            WidgetModule::CommandTextInput => live_id!(command_text_input),
-            WidgetModule::TabCloseButton => live_id!(tab_close_button),
-            WidgetModule::Tab => live_id!(tab),
-            WidgetModule::TabBar => live_id!(tab_bar),
-            WidgetModule::Dock => live_id!(dock),
-            WidgetModule::ScrollShadow => live_id!(scroll_shadow),
-            WidgetModule::StackNavigation => live_id!(stack_navigation),
-            WidgetModule::ExpandablePanel => live_id!(expandable_panel),
-            WidgetModule::Modal => live_id!(modal),
-            WidgetModule::Tooltip => live_id!(tooltip),
-            WidgetModule::CalloutTooltip => live_id!(callout_tooltip),
-            WidgetModule::PopupNotification => live_id!(popup_notification),
-            WidgetModule::Video => live_id!(video),
-            WidgetModule::PageFlip => live_id!(page_flip),
-            WidgetModule::FileTree => live_id!(file_tree),
-            WidgetModule::FlatList => live_id!(flat_list),
-            WidgetModule::SlidesView => live_id!(slides_view),
-            WidgetModule::SlidePanel => live_id!(slide_panel),
-            WidgetModule::Html => live_id!(html),
-            WidgetModule::Markdown => live_id!(markdown),
-            WidgetModule::Splash => live_id!(splash),
-            WidgetModule::Svg => live_id!(svg),
-            WidgetModule::Vector => live_id!(vector),
-            WidgetModule::Chart => live_id!(chart),
-            WidgetModule::MathView => live_id!(math_view),
-            WidgetModule::PdfView => live_id!(pdf_view),
-            WidgetModule::Widgets3d => live_id!(widgets_3d),
-            WidgetModule::MapStyle => live_id!(map_style),
-            WidgetModule::MapView => live_id!(map_view),
-        }
-    }
-
-    fn dependencies(self) -> &'static [WidgetModule] {
-        match self {
-            WidgetModule::AdaptiveView => &[WidgetModule::View],
-            WidgetModule::CommandTextInput => &[
-                WidgetModule::Label,
-                WidgetModule::PortalList,
-                WidgetModule::TextInput,
-                WidgetModule::ViewUi,
-            ],
-            WidgetModule::Dock => &[WidgetModule::Tab, WidgetModule::TabBar],
-            WidgetModule::DropDown => &[WidgetModule::PopupMenu],
-            WidgetModule::FileTree => &[WidgetModule::ScrollBars],
-            WidgetModule::FlatList => &[WidgetModule::ScrollBars],
-            WidgetModule::GlassPanel => &[WidgetModule::ViewUi],
-            WidgetModule::KeyboardView => &[WidgetModule::ViewUi],
-            WidgetModule::LoadingSpinner => &[WidgetModule::ViewUi],
-            WidgetModule::PortalList => &[WidgetModule::ScrollBar],
-            WidgetModule::ScrollBars => &[WidgetModule::ScrollBar],
-            WidgetModule::SlidesView => &[WidgetModule::Label, WidgetModule::ViewUi],
-            WidgetModule::TabBar => &[WidgetModule::Tab],
-            WidgetModule::ViewUi => &[WidgetModule::ScrollBars, WidgetModule::View],
-            WidgetModule::VoiceWave => &[WidgetModule::View],
-            WidgetModule::Window => &[
-                WidgetModule::DesktopButton,
-                WidgetModule::KeyboardView,
-                WidgetModule::Label,
-                WidgetModule::NavControl,
-                WidgetModule::ViewUi,
-                WidgetModule::VoiceWave,
-                WidgetModule::WindowMenu,
-            ],
-            _ => &[],
-        }
-    }
-
-    fn register_script_mod(self, vm: &mut ScriptVm) {
-        match self {
-            WidgetModule::ScrollBar => {
-                crate::scroll_bar::script_mod(vm);
-            }
-            WidgetModule::ScrollBars => {
-                crate::scroll_bars::script_mod(vm);
-            }
-            WidgetModule::View => {
-                crate::view::script_mod(vm);
-            }
-            WidgetModule::ViewUi => {
-                crate::view_ui::script_mod(vm);
-            }
-            WidgetModule::RubberView => {
-                crate::rubber_view::script_mod(vm);
-            }
-            WidgetModule::Label => {
-                crate::label::script_mod(vm);
-            }
-            WidgetModule::LinkLabel => {
-                crate::link_label::script_mod(vm);
-            }
-            WidgetModule::Button => {
-                crate::button::script_mod(vm);
-            }
-            WidgetModule::CheckBox => {
-                crate::check_box::script_mod(vm);
-            }
-            WidgetModule::RadioButton => {
-                crate::radio_button::script_mod(vm);
-            }
-            WidgetModule::Image => {
-                crate::image::script_mod(vm);
-            }
-            WidgetModule::ImageBlend => {
-                crate::image_blend::script_mod(vm);
-            }
-            WidgetModule::Icon => {
-                crate::icon::script_mod(vm);
-            }
-            WidgetModule::AdaptiveView => {
-                crate::adaptive_view::script_mod(vm);
-            }
-            WidgetModule::DesktopButton => {
-                crate::desktop_button::script_mod(vm);
-            }
-            WidgetModule::KeyboardView => {
-                crate::keyboard_view::script_mod(vm);
-            }
-            WidgetModule::VoiceWave => {
-                #[cfg(feature = "voice")]
-                crate::voice_wave::script_mod(vm);
-                #[cfg(not(feature = "voice"))]
-                script_eval!(vm, {
-                    use mod.widgets.View
-                    mod.widgets.VoiceWave = mod.widgets.View {
-                        visible: false
-                    }
-                });
-            }
-            WidgetModule::WindowMenu => {
-                crate::window_menu::script_mod(vm);
-            }
-            WidgetModule::NavControl => {
-                crate::nav_control::script_mod(vm);
-            }
-            WidgetModule::Window => {
-                crate::window::script_mod(vm);
-            }
-            WidgetModule::PopupMenu => {
-                crate::popup_menu::script_mod(vm);
-            }
-            WidgetModule::DropDown => {
-                crate::drop_down::script_mod(vm);
-            }
-            WidgetModule::TextInput => {
-                crate::text_input::script_mod(vm);
-            }
-            WidgetModule::Slider => {
-                crate::slider::script_mod(vm);
-            }
-            WidgetModule::Splitter => {
-                crate::splitter::script_mod(vm);
-            }
-            WidgetModule::FoldButton => {
-                crate::fold_button::script_mod(vm);
-            }
-            WidgetModule::FoldHeader => {
-                crate::fold_header::script_mod(vm);
-            }
-            WidgetModule::LoadingSpinner => {
-                crate::loading_spinner::script_mod(vm);
-            }
-            WidgetModule::GlassPanel => {
-                crate::glass_panel::script_mod(vm);
-            }
-            WidgetModule::BareStep => {
-                crate::bare_step::script_mod(vm);
-            }
-            WidgetModule::TurtleStep => {
-                crate::turtle_step::script_mod(vm);
-            }
-            WidgetModule::PortalList => {
-                crate::portal_list::script_mod(vm);
-            }
-            WidgetModule::TextFlow => {
-                crate::text_flow::script_mod(vm);
-            }
-            WidgetModule::CachedWidget => {
-                crate::cached_widget::script_mod(vm);
-            }
-            WidgetModule::Root => {
-                crate::root::script_mod(vm);
-            }
-            WidgetModule::CommandTextInput => {
-                crate::command_text_input::script_mod(vm);
-            }
-            WidgetModule::TabCloseButton => {
-                crate::tab_close_button::script_mod(vm);
-            }
-            WidgetModule::Tab => {
-                crate::tab::script_mod(vm);
-            }
-            WidgetModule::TabBar => {
-                crate::tab_bar::script_mod(vm);
-            }
-            WidgetModule::Dock => {
-                crate::dock::script_mod(vm);
-            }
-            WidgetModule::ScrollShadow => {
-                crate::scroll_shadow::script_mod(vm);
-            }
-            WidgetModule::StackNavigation => {
-                crate::stack_navigation::script_mod(vm);
-            }
-            WidgetModule::ExpandablePanel => {
-                crate::expandable_panel::script_mod(vm);
-            }
-            WidgetModule::Modal => {
-                crate::modal::script_mod(vm);
-            }
-            WidgetModule::Tooltip => {
-                crate::tooltip::script_mod(vm);
-            }
-            WidgetModule::CalloutTooltip => {
-                crate::callout_tooltip::script_mod(vm);
-            }
-            WidgetModule::PopupNotification => {
-                crate::popup_notification::script_mod(vm);
-            }
-            WidgetModule::Video => {
-                crate::video::script_mod(vm);
-            }
-            WidgetModule::PageFlip => {
-                crate::page_flip::script_mod(vm);
-            }
-            WidgetModule::FileTree => {
-                crate::file_tree::script_mod(vm);
-            }
-            WidgetModule::FlatList => {
-                crate::flat_list::script_mod(vm);
-            }
-            WidgetModule::SlidesView => {
-                crate::slides_view::script_mod(vm);
-            }
-            WidgetModule::SlidePanel => {
-                crate::slide_panel::script_mod(vm);
-            }
-            WidgetModule::Html => {
-                crate::html::script_mod(vm);
-            }
-            WidgetModule::Markdown => {
-                crate::markdown::script_mod(vm);
-            }
-            WidgetModule::Splash => {
-                crate::splash::script_mod(vm);
-            }
-            WidgetModule::Svg => {
-                crate::svg::script_mod(vm);
-            }
-            WidgetModule::Vector => {
-                crate::vector::script_mod(vm);
-            }
-            WidgetModule::Chart => {
-                crate::chart::script_mod(vm);
-            }
-            WidgetModule::MathView => {
-                crate::math_view::script_mod(vm);
-            }
-            WidgetModule::PdfView => {
-                #[cfg(feature = "pdf")]
-                crate::pdf_view::script_mod(vm);
-            }
-            WidgetModule::Widgets3d => {
-                #[cfg(feature = "3d")]
-                crate::widgets_3d::script_mod(vm);
-            }
-            WidgetModule::MapStyle => {
-                #[cfg(feature = "maps")]
-                crate::map::style::script_mod(vm);
-            }
-            WidgetModule::MapView => {
-                #[cfg(feature = "maps")]
-                crate::map::view::script_mod(vm);
-            }
-        }
-    }
-}
-
-fn registry_module(vm: &mut ScriptVm, marker: LiveId) -> ScriptObject {
-    let existing = vm.bx.heap.value(vm.bx.heap.modules, marker.into(), NoTrap);
-    if let Some(module) = existing.as_object() {
-        module
-    } else {
-        vm.new_module(marker)
-    }
-}
-
-fn theme_mod_registered(vm: &mut ScriptVm) -> bool {
-    vm.bx
-        .heap
-        .value(vm.bx.heap.modules, WIDGET_THEME_REGISTRY_MODULE.into(), NoTrap)
-        .as_object()
-        .is_some()
-}
-
-fn mark_theme_mod_registered(vm: &mut ScriptVm) {
-    if !theme_mod_registered(vm) {
-        vm.new_module(WIDGET_THEME_REGISTRY_MODULE);
-    }
-}
-
-fn widgets_namespace_registered(vm: &mut ScriptVm) -> bool {
-    vm.bx
-        .heap
-        .value(
-            vm.bx.heap.modules,
-            WIDGET_NAMESPACE_REGISTRY_MODULE.into(),
-            NoTrap,
-        )
-        .as_object()
-        .is_some()
-}
-
-fn mark_widgets_namespace_registered(vm: &mut ScriptVm) {
-    if !widgets_namespace_registered(vm) {
-        vm.new_module(WIDGET_NAMESPACE_REGISTRY_MODULE);
-    }
-}
-
-fn widget_registered(vm: &mut ScriptVm, module: WidgetModule) -> bool {
-    let registry = registry_module(vm, WIDGET_REGISTRY_MODULE);
-    vm.bx
-        .heap
-        .value(registry, module.marker_id().into(), NoTrap)
-        .as_object()
-        .is_some()
-}
-
-fn mark_widget_registered(vm: &mut ScriptVm, module: WidgetModule) {
-    let registry = registry_module(vm, WIDGET_REGISTRY_MODULE);
-    vm.bx
-        .heap
-        .set_value_def(registry, module.marker_id().into(), registry.into());
-}
-
-fn ensure_widgets_namespace(vm: &mut ScriptVm) {
-    theme_mod(vm);
-    if widgets_namespace_registered(vm) {
-        return;
-    }
-
-    script_eval!(vm, {
-        mod.prelude.widgets_internal = {
-            ..mod.prelude.widgets_header,
-            theme:mod.theme,
-        }
-    });
-    if vm
-        .bx
-        .heap
-        .value(vm.bx.heap.modules, id!(widgets).into(), NoTrap)
-        .as_object()
-        .is_none()
-    {
-        vm.new_module(id!(widgets));
-    }
-    refresh_widgets_prelude(vm);
-    mark_widgets_namespace_registered(vm);
-}
-
-fn refresh_widgets_prelude(vm: &mut ScriptVm) {
-    script_eval!(vm, {
-        mod.prelude.widgets = {
-            ..mod.prelude.widgets_header,
-            theme:mod.theme,
-            ..mod.widgets,
-        }
-    });
-}
-
-fn register_widget_recursive(vm: &mut ScriptVm, module: WidgetModule) -> bool {
-    if widget_registered(vm, module) {
-        return false;
-    }
-
-    for dependency in module.dependencies() {
-        register_widget_recursive(vm, *dependency);
-    }
-
-    module.register_script_mod(vm);
-    mark_widget_registered(vm, module);
-    true
-}
-
-pub fn register_widgets(vm: &mut ScriptVm, modules: &[WidgetModule]) {
-    ensure_widgets_namespace(vm);
-    let mut changed = false;
-    for module in modules {
-        changed |= register_widget_recursive(vm, *module);
-    }
-    if changed {
-        refresh_widgets_prelude(vm);
-    }
-}
-
-pub fn register_all_widgets(vm: &mut ScriptVm) {
-    register_widgets(
-        vm,
-        &[
-            WidgetModule::ScrollBar,
-            WidgetModule::ScrollBars,
-            WidgetModule::View,
-            WidgetModule::ViewUi,
-            WidgetModule::RubberView,
-            WidgetModule::Label,
-            WidgetModule::LinkLabel,
-            WidgetModule::Button,
-            WidgetModule::CheckBox,
-            WidgetModule::RadioButton,
-            WidgetModule::Image,
-            WidgetModule::ImageBlend,
-            WidgetModule::Icon,
-            WidgetModule::AdaptiveView,
-            WidgetModule::DesktopButton,
-            WidgetModule::KeyboardView,
-            WidgetModule::VoiceWave,
-            WidgetModule::WindowMenu,
-            WidgetModule::NavControl,
-            WidgetModule::Window,
-            WidgetModule::PopupMenu,
-            WidgetModule::DropDown,
-            WidgetModule::TextInput,
-            WidgetModule::Slider,
-            WidgetModule::Splitter,
-            WidgetModule::FoldButton,
-            WidgetModule::FoldHeader,
-            WidgetModule::LoadingSpinner,
-            WidgetModule::GlassPanel,
-            WidgetModule::BareStep,
-            WidgetModule::TurtleStep,
-            WidgetModule::PortalList,
-            WidgetModule::TextFlow,
-            WidgetModule::CachedWidget,
-            WidgetModule::Root,
-            WidgetModule::CommandTextInput,
-            WidgetModule::TabCloseButton,
-            WidgetModule::Tab,
-            WidgetModule::TabBar,
-            WidgetModule::Dock,
-            WidgetModule::ScrollShadow,
-            WidgetModule::StackNavigation,
-            WidgetModule::ExpandablePanel,
-            WidgetModule::Modal,
-            WidgetModule::Tooltip,
-            WidgetModule::CalloutTooltip,
-            WidgetModule::PopupNotification,
-            WidgetModule::Video,
-            WidgetModule::PageFlip,
-            WidgetModule::FileTree,
-            WidgetModule::FlatList,
-            WidgetModule::SlidesView,
-            WidgetModule::SlidePanel,
-            WidgetModule::Html,
-            WidgetModule::Markdown,
-            WidgetModule::Splash,
-            WidgetModule::Svg,
-            WidgetModule::Vector,
-            WidgetModule::Chart,
-            WidgetModule::MathView,
-            WidgetModule::PdfView,
-            WidgetModule::Widgets3d,
-            WidgetModule::MapStyle,
-            WidgetModule::MapView,
-        ],
-    );
-}
-
 pub fn theme_mod(vm: &mut ScriptVm) {
-    if theme_mod_registered(vm) {
-        return;
-    }
     makepad_draw::script_mod(vm);
     if !vm.is_reload() {
         makepad_platform::ime::script_mod(vm);
@@ -1067,11 +488,116 @@ pub fn theme_mod(vm: &mut ScriptVm) {
         mod.theme = mod.themes.dark
 
     });
-    mark_theme_mod_registered(vm);
 }
 
 pub fn widgets_mod(vm: &mut ScriptVm) {
-    register_all_widgets(vm);
+    // make the prelude for our own widgets
+    script_eval!(vm, {
+        mod.prelude.widgets_internal = {
+            ..mod.prelude.widgets_header,
+            theme:mod.theme,
+        }
+    });
+
+    vm.bx.heap.new_module(id!(widgets));
+
+    crate::scroll_bar::script_mod(vm);
+    crate::scroll_bars::script_mod(vm);
+    crate::view::script_mod(vm);
+    crate::view_ui::script_mod(vm);
+    crate::rubber_view::script_mod(vm);
+
+    crate::label::script_mod(vm);
+    crate::link_label::script_mod(vm);
+    crate::button::script_mod(vm);
+    crate::check_box::script_mod(vm);
+    crate::radio_button::script_mod(vm);
+    crate::image::script_mod(vm);
+    crate::image_blend::script_mod(vm);
+    crate::icon::script_mod(vm);
+
+    crate::adaptive_view::script_mod(vm);
+    crate::desktop_button::script_mod(vm);
+    crate::keyboard_view::script_mod(vm);
+    #[cfg(feature = "voice")]
+    crate::voice_wave::script_mod(vm);
+    #[cfg(not(feature = "voice"))]
+    script_eval!(vm, {
+        use mod.widgets.View
+        mod.widgets.VoiceWave = mod.widgets.View {
+            visible: false
+        }
+    });
+    crate::window_menu::script_mod(vm);
+    crate::nav_control::script_mod(vm);
+    crate::window::script_mod(vm);
+
+    crate::popup_menu::script_mod(vm);
+    crate::drop_down::script_mod(vm);
+    crate::text_input::script_mod(vm);
+    crate::slider::script_mod(vm);
+
+    crate::splitter::script_mod(vm);
+
+    crate::fold_button::script_mod(vm);
+    crate::fold_header::script_mod(vm);
+
+    crate::loading_spinner::script_mod(vm);
+    crate::glass_panel::script_mod(vm);
+
+    crate::bare_step::script_mod(vm);
+    crate::turtle_step::script_mod(vm);
+
+    crate::portal_list::script_mod(vm);
+    crate::text_flow::script_mod(vm);
+
+    crate::cached_widget::script_mod(vm);
+    crate::root::script_mod(vm);
+
+    crate::tab_close_button::script_mod(vm);
+    crate::tab::script_mod(vm);
+    crate::tab_bar::script_mod(vm);
+    crate::dock::script_mod(vm);
+
+    // Navigation and panels
+    crate::scroll_shadow::script_mod(vm);
+    crate::stack_navigation::script_mod(vm);
+    crate::expandable_panel::script_mod(vm);
+    crate::modal::script_mod(vm);
+    crate::tooltip::script_mod(vm);
+    crate::callout_tooltip::script_mod(vm);
+    crate::popup_notification::script_mod(vm);
+    crate::video::script_mod(vm);
+    crate::page_flip::script_mod(vm);
+    crate::file_tree::script_mod(vm);
+    crate::flat_list::script_mod(vm);
+    crate::slides_view::script_mod(vm);
+    crate::slide_panel::script_mod(vm);
+
+    crate::html::script_mod(vm);
+    crate::markdown::script_mod(vm);
+
+    crate::splash::script_mod(vm);
+    #[cfg(feature = "pdf")]
+    crate::pdf_view::script_mod(vm);
+    crate::svg::script_mod(vm);
+    crate::vector::script_mod(vm);
+    crate::chart::script_mod(vm);
+    #[cfg(feature = "3d")]
+    crate::widgets_3d::script_mod(vm);
+    #[cfg(feature = "maps")]
+    crate::map::style::script_mod(vm);
+    #[cfg(feature = "maps")]
+    crate::map::view::script_mod(vm);
+    crate::math_view::script_mod(vm);
+
+    script_eval!(vm, {
+        mod.prelude.widgets = {
+            ..mod.prelude.widgets_header,
+            theme:mod.theme,
+            ..mod.widgets,
+        }
+    });
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {

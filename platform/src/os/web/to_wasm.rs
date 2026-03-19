@@ -142,22 +142,6 @@ pub struct ToWasmLocationChange {
     pub hash: String,
 }
 
-#[derive(ToWasm)]
-pub struct ToWasmRegisterScriptSources {
-    pub data: WasmDataU8,
-}
-
-#[derive(ToWasm)]
-pub struct ToWasmWasmBundleReady {
-    pub bundle_id: String,
-}
-
-#[derive(ToWasm)]
-pub struct ToWasmWasmBundleError {
-    pub bundle_id: String,
-    pub error: String,
-}
-
 // Touch API
 
 #[derive(ToWasm, Clone, Debug)]

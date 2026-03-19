@@ -70,7 +70,6 @@ export class WasmWebBrowser extends WasmBridge {
     async load_deps() {
         this.to_wasm = this.new_to_wasm();
         this.install_live_reload_bridge();
-        await this.ensure_base_script_sources();
 
         await this.query_xr_capabilities();
         this.update_window_info();
@@ -946,24 +945,6 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmCancelHTTPRequest(args) {
         // Web doesn't provide a way to cancel XHR requests by ID
         // This would require tracking requests, which we don't currently do
-    }
-
-    FromWasmEnsureWasmBundle(args) {
-        this.ensure_bundle(args.bundle_id)
-            .then(() => {
-                this.to_wasm.ToWasmWasmBundleReady({
-                    bundle_id: args.bundle_id
-                });
-                this.do_wasm_pump();
-            })
-            .catch((error) => {
-                console.error(error);
-                this.to_wasm.ToWasmWasmBundleError({
-                    bundle_id: args.bundle_id,
-                    error: error && error.message ? "" + error.message : "" + error
-                });
-                this.do_wasm_pump();
-            });
     }
 
     async FromWasmCheckPermission(args) {

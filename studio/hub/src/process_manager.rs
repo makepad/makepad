@@ -676,7 +676,6 @@ fn run_script_build(
     let script_mod = ScriptMod {
         cargo_manifest_path: cwd.to_string_lossy().to_string(),
         module_path: MAKEPAD_SPLASH_RUNNABLE.to_string(),
-        source_id: 0,
         file: splash_path.to_string_lossy().to_string(),
         line: 1,
         column: 1,

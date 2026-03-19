@@ -8,7 +8,6 @@ use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_micro_serde::{DeJson, DeJsonErr, DeJsonState, SerJson, SerJsonState};
 use makepad_toml_parser::{parse_toml, Toml};
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     fs::File,
@@ -26,7 +25,7 @@ pub struct WasmBuildResult {
     asset_manifest: Option<AssetManifest>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct WasmConfig {
     pub strip: bool,
     pub lan: bool,
@@ -44,7 +43,6 @@ pub struct WasmConfig {
     pub hot_reload: bool,
     pub package_layout: bool,
     pub full_fonts: bool,
-    pub route_bundles: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,89 +159,6 @@ struct HtmlAssetPaths {
     wasm_bridge_js_path: Option<String>,
 }
 
-#[derive(Clone, Debug, Default)]
-struct WasmBundlesJson {
-    base_scripts: Option<WasmScriptPackJsonEntry>,
-    bundles: BTreeMap<String, WasmBundleJsonEntry>,
-}
-
-impl SerJson for WasmBundlesJson {
-    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
-        s.out.push('{');
-        if let Some(base_scripts) = &self.base_scripts {
-            s.field(d + 1, "base_scripts");
-            base_scripts.ser_json(d + 1, s);
-            s.conl();
-        }
-        s.field(d + 1, "bundles");
-        s.out.push('{');
-        let last = self.bundles.len().saturating_sub(1);
-        for (index, (bundle_id, bundle)) in self.bundles.iter().enumerate() {
-            bundle_id.ser_json(d + 2, s);
-            s.out.push(':');
-            bundle.ser_json(d + 2, s);
-            if index != last {
-                s.conl();
-            }
-        }
-        s.out.push('}');
-        s.out.push('}');
-    }
-}
-
-#[derive(Clone, Debug, Default, SerJson)]
-struct WasmScriptPackJsonEntry {
-    url: String,
-}
-
-#[derive(Clone, Debug, Default, SerJson)]
-struct WasmBundleJsonEntry {
-    url: String,
-    init_export: Option<String>,
-    script_url: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RouteBundleSpec {
-    id: String,
-    functions: Vec<String>,
-    script_files: Vec<String>,
-    script_modules: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResolvedRouteBundleSpec {
-    id: String,
-    functions: Vec<String>,
-    script_files: Vec<String>,
-    script_modules: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RouteBundleOutput {
-    id: String,
-    logical_path: String,
-    init_export: Option<String>,
-    script_logical_path: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CompiledScriptModRecord {
-    source_id: u64,
-    module_path: String,
-    file: String,
-    line: usize,
-    column: usize,
-    code: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ExtractedScriptModBody {
-    code: String,
-    line: usize,
-    column: usize,
-}
-
 #[derive(SerJson, Clone)]
 struct WasmHotReloadEvent {
     kind: String,
@@ -278,10 +193,6 @@ enum AutoSplitOutcome {
     Deferred,
     StartupPathFallback,
 }
-
-const MAKEPAD_EXTERNALIZE_SCRIPT_MODS_ENV: &str = "MAKEPAD_EXTERNALIZE_SCRIPT_MODS";
-const MAKEPAD_EXTERNALIZED_SCRIPT_MOD_DIR_ENV: &str = "MAKEPAD_EXTERNALIZED_SCRIPT_MOD_DIR";
-const SCRIPT_MOD_SECTION_NAME: &str = "makepad:script_mod";
 
 fn format_section_counts(summary: &WasmSectionSummary) -> String {
     if summary.counts.is_empty() {
@@ -367,9 +278,7 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.trim().is_empty() {
-                println!(
-                    "wasm-opt: skipped (Binaryen wasm-opt failed; install from https://github.com/WebAssembly/binaryen)"
-                );
+                println!("wasm-opt: skipped (Binaryen wasm-opt failed; install from https://github.com/WebAssembly/binaryen)");
             } else {
                 println!(
                     "wasm-opt: skipped ({})",
@@ -409,27 +318,27 @@ fn print_brotli_size_report(
     }
 }
 
-fn app_asset_url(path: &str) -> String {
-    format!("/{}", path.trim_start_matches('/'))
+fn app_relative_url(path: &str) -> String {
+    format!("./{}", path.trim_start_matches('/'))
 }
 
 fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> String {
-    let wasm_url = app_asset_url(&assets.wasm_path);
-    let web_gl_js_url = app_asset_url(&assets.web_gl_js_path);
-    let full_canvas_css_url = app_asset_url(&assets.full_canvas_css_path);
+    let wasm_url = app_relative_url(&assets.wasm_path);
+    let web_gl_js_url = app_relative_url(&assets.web_gl_js_path);
+    let full_canvas_css_url = app_relative_url(&assets.full_canvas_css_path);
     let split_preloads = {
         let mut preloads = String::new();
         if let Some(split_data_path) = assets.split_data_path.as_deref() {
             preloads.push_str(&format!(
                 "\n        <link rel='preload' href='{}' as='fetch' type='application/octet-stream' crossorigin>",
-                app_asset_url(split_data_path)
+                app_relative_url(split_data_path)
             ));
         }
         if !assets.defer_secondary_wasm {
             if let Some(secondary_wasm_path) = assets.secondary_wasm_path.as_deref() {
                 preloads.push_str(&format!(
                     "\n        <link rel='preload' href='{}' as='fetch' type='application/wasm' crossorigin>",
-                    app_asset_url(secondary_wasm_path)
+                    app_relative_url(secondary_wasm_path)
                 ));
             }
         }
@@ -442,14 +351,14 @@ fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> S
     };
 
     let init = if config.bindgen {
-        let wasm_bridge_js_url = app_asset_url(
+        let wasm_bridge_js_url = app_relative_url(
             assets
                 .wasm_bridge_js_path
                 .as_deref()
                 .unwrap_or("makepad_wasm_bridge/wasm_bridge.js"),
         );
         let bindgen_js_url =
-            app_asset_url(assets.bindgen_js_path.as_deref().unwrap_or("bindgen.js"));
+            app_relative_url(assets.bindgen_js_path.as_deref().unwrap_or("bindgen.js"));
         format!(
             "
             {small_font_aliases}
@@ -485,18 +394,18 @@ fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> S
         ) {
             (Some(data), Some(funcs)) => format!(
                 ", undefined, {{ split_data_url: '{}'{split_data_active_only}, secondary_wasm_url: '{}'{defer_secondary} }}",
-                app_asset_url(data),
-                app_asset_url(funcs)
+                app_relative_url(data),
+                app_relative_url(funcs)
             ),
             (Some(data), None) => {
                 format!(
                     ", undefined, {{ split_data_url: '{}'{split_data_active_only} }}",
-                    app_asset_url(data)
+                    app_relative_url(data)
                 )
             }
             (None, Some(funcs)) => format!(
                 ", undefined, {{ secondary_wasm_url: '{}'{defer_secondary} }}",
-                app_asset_url(funcs)
+                app_relative_url(funcs)
             ),
             (None, None) => String::new(),
         };
@@ -511,20 +420,20 @@ fn generate_html(title: &str, assets: &HtmlAssetPaths, config: &WasmConfig) -> S
         )
     };
     let auto_reload_script = if config.hot_reload {
-        "\n        <script type='module' src='/makepad_platform/auto_reload.js'></script>"
+        "\n        <script type='module' src='./makepad_platform/auto_reload.js'></script>"
     } else {
         ""
     };
 
     let preloads = if config.bindgen {
-        let wasm_bridge_js_url = app_asset_url(
+        let wasm_bridge_js_url = app_relative_url(
             assets
                 .wasm_bridge_js_path
                 .as_deref()
                 .unwrap_or("makepad_wasm_bridge/wasm_bridge.js"),
         );
         let bindgen_js_url =
-            app_asset_url(assets.bindgen_js_path.as_deref().unwrap_or("bindgen.js"));
+            app_relative_url(assets.bindgen_js_path.as_deref().unwrap_or("bindgen.js"));
         format!(
             "
         <link rel='modulepreload' href='{wasm_bridge_js_url}'>
@@ -872,8 +781,6 @@ fn mime_type_for_path(path: &str) -> Option<&'static str> {
         Some("font/woff2")
     } else if path.ends_with(".json") {
         Some("application/json")
-    } else if path.ends_with(".txt") {
-        Some("text/plain")
     } else {
         None
     }
@@ -963,13 +870,13 @@ fn finalize_pending_assets(
         let data = fs::read(&original_path)
             .map_err(|e| format!("Can't read emitted asset {:?}: {}", original_path, e))?;
         let hashed = package_layout
+            && asset.startup_blocking
             && matches!(
                 Path::new(&logical_path)
                     .extension()
                     .and_then(|ext| ext.to_str()),
                 Some("wasm" | "js" | "css")
-            )
-            && (asset.startup_blocking || asset.reason == "route_bundle");
+            );
         if hashed {
             let fingerprinted = fingerprinted_asset_path(&logical_path, &data);
             let fingerprinted_path = app_dir.join(&fingerprinted);
@@ -1039,37 +946,6 @@ fn finalize_pending_assets(
 
 fn write_json_file<T: SerJson>(path: &Path, value: &T, compress: bool) -> Result<(), String> {
     fs::write(path, value.serialize_json())
-        .map_err(|e| format!("Can't write JSON file {:?}: {}", path, e))?;
-    if compress {
-        brotli_compress(&path.to_path_buf());
-    } else {
-        remove_brotli_artifact(&path.to_path_buf());
-    }
-    Ok(())
-}
-
-fn serialize_script_source_pack(pack: &BTreeMap<String, String>) -> String {
-    let mut state = SerJsonState { out: String::new() };
-    state.out.push('{');
-    let last = pack.len().saturating_sub(1);
-    for (index, (key, value)) in pack.iter().enumerate() {
-        key.ser_json(1, &mut state);
-        state.out.push(':');
-        value.ser_json(1, &mut state);
-        if index != last {
-            state.conl();
-        }
-    }
-    state.out.push('}');
-    state.out
-}
-
-fn write_script_source_pack_file(
-    path: &Path,
-    pack: &BTreeMap<String, String>,
-    compress: bool,
-) -> Result<(), String> {
-    fs::write(path, serialize_script_source_pack(pack))
         .map_err(|e| format!("Can't write JSON file {:?}: {}", path, e))?;
     if compress {
         brotli_compress(&path.to_path_buf());
@@ -1294,98 +1170,6 @@ fn build_crate_manifests(build_crate: &str, build_dir: &Path) -> HashMap<String,
     manifests
 }
 
-fn build_crate_package_dirs(build_crate: &str, build_dir: &Path) -> HashMap<String, PathBuf> {
-    let mut manifests = HashMap::new();
-    if let Ok(build_crate_dir) = get_crate_dir(build_crate) {
-        manifests.insert(build_crate.to_string(), build_crate_dir);
-    }
-    for (name, dep_dir) in get_crate_dep_dirs(build_crate, build_dir, WASM_TARGET_TRIPLE) {
-        manifests.insert(name, dep_dir);
-    }
-    manifests
-}
-
-fn resolve_route_bundle_script_file(
-    manifest_path: &Path,
-    relative_path: &str,
-    package_dirs: &HashMap<String, PathBuf>,
-) -> Result<String, String> {
-    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let absolute_path =
-        normalize_resource_path(&manifest_dir.join(relative_path)).ok_or_else(|| {
-            format!(
-                "Route bundle script file `{relative_path}` in {:?} escapes its root.",
-                manifest_path
-            )
-        })?;
-    let mut best_match: Option<(usize, String)> = None;
-    for (package_name, package_dir) in package_dirs {
-        let Some(package_dir_norm) = normalize_resource_path(package_dir) else {
-            continue;
-        };
-        let Ok(relative) = absolute_path.strip_prefix(&package_dir_norm) else {
-            continue;
-        };
-        let Some(relative_norm) = normalize_dependency_file_path(&relative.to_string_lossy())
-        else {
-            continue;
-        };
-        let match_len = package_dir_norm.to_string_lossy().len();
-        let runtime_path =
-            normalize_externalized_script_mod_file(&format!("{package_name}/{relative_norm}"));
-        match &best_match {
-            Some((best_len, _)) if *best_len >= match_len => {}
-            _ => best_match = Some((match_len, runtime_path)),
-        }
-    }
-    best_match
-        .map(|(_, runtime_path)| runtime_path)
-        .ok_or_else(|| {
-            format!(
-                "Route bundle script file `{relative_path}` in {:?} does not resolve to a workspace or path dependency source file.",
-                manifest_path
-            )
-        })
-}
-
-fn normalize_externalized_script_mod_file(file: &str) -> String {
-    let normalized = file.replace('\\', "/");
-    let is_absolute = normalized.starts_with('/');
-    let mut stack = Vec::<&str>::new();
-    for part in normalized.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                if let Some(last) = stack.last() {
-                    if *last != ".." {
-                        stack.pop();
-                        continue;
-                    }
-                }
-                if !is_absolute {
-                    stack.push("..");
-                }
-            }
-            _ => stack.push(part),
-        }
-    }
-    let mut collapsed = if is_absolute {
-        format!("/{}", stack.join("/"))
-    } else {
-        stack.join("/")
-    };
-    let mut parts = collapsed.splitn(3, '/');
-    if let (Some(first), Some(second), Some(rest)) = (parts.next(), parts.next(), parts.next()) {
-        if first == second {
-            return format!("{first}/{rest}");
-        }
-    }
-    if collapsed.is_empty() {
-        collapsed.push('.');
-    }
-    collapsed
-}
-
 fn read_wasm_web_metadata(build_crate: &str) -> Result<WasmWebMetadata, String> {
     let crate_dir = get_crate_dir(build_crate)?;
     let cargo_toml_path = crate_dir.join("Cargo.toml");
@@ -1418,804 +1202,6 @@ fn parse_wasm_web_metadata_toml(cargo_toml: &str) -> WasmWebMetadata {
         preserve,
         full_i18n,
     }
-}
-
-fn is_safe_route_bundle_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-}
-
-fn normalize_route_bundle_functions(functions: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for function in functions {
-        let function = function.trim().to_string();
-        if function.is_empty() || !seen.insert(function.clone()) {
-            continue;
-        }
-        out.push(function);
-    }
-    out
-}
-
-fn parse_route_bundle_functions_array(
-    manifest_path: &Path,
-    bundle_id: &str,
-    value: &Toml,
-) -> Result<Vec<String>, String> {
-    match value {
-        Toml::Array(values) => Ok(normalize_route_bundle_functions(
-            values
-                .iter()
-                .map(|value| match value {
-                    Toml::Str(value, _) => Ok(value.clone()),
-                    _ => Err(format!(
-                        "Route bundle `{bundle_id}` in {:?} expects `functions` to contain only strings.",
-                        manifest_path
-                    )),
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        _ => Err(format!(
-            "Route bundle `{bundle_id}` in {:?} expects `functions = [..]`.",
-            manifest_path
-        )),
-    }
-}
-
-fn read_route_bundle_functions_file(
-    manifest_path: &Path,
-    bundle_id: &str,
-    relative_path: &str,
-) -> Result<Vec<String>, String> {
-    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let functions_path = manifest_dir.join(relative_path);
-    let data = fs::read_to_string(&functions_path).map_err(|e| {
-        format!(
-            "Can't read `functions_file` for route bundle `{bundle_id}` at {:?}: {}",
-            functions_path, e
-        )
-    })?;
-    Ok(normalize_route_bundle_functions(
-        data.lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(|line| line.to_string())
-            .collect(),
-    ))
-}
-
-fn normalize_route_bundle_script_files(files: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    files
-        .into_iter()
-        .map(|value| value.trim().replace('\\', "/"))
-        .filter(|value| !value.is_empty())
-        .filter(|value| seen.insert(value.clone()))
-        .collect()
-}
-
-fn normalize_route_bundle_script_modules(modules: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    modules
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .filter(|value| seen.insert(value.clone()))
-        .collect()
-}
-
-fn parse_route_bundle_script_files_array(
-    manifest_path: &Path,
-    bundle_id: &str,
-    value: &Toml,
-) -> Result<Vec<String>, String> {
-    match value {
-        Toml::Array(values) => Ok(normalize_route_bundle_script_files(
-            values
-                .iter()
-                .map(|value| match value {
-                    Toml::Str(value, _) => Ok(value.clone()),
-                    _ => Err(format!(
-                        "Route bundle `{bundle_id}` in {:?} expects `script_files` to contain only strings.",
-                        manifest_path
-                    )),
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        _ => Err(format!(
-            "Route bundle `{bundle_id}` in {:?} expects `script_files = [..]`.",
-            manifest_path
-        )),
-    }
-}
-
-fn parse_route_bundle_script_modules_array(
-    manifest_path: &Path,
-    bundle_id: &str,
-    value: &Toml,
-) -> Result<Vec<String>, String> {
-    match value {
-        Toml::Array(values) => Ok(normalize_route_bundle_script_modules(
-            values
-                .iter()
-                .map(|value| match value {
-                    Toml::Str(value, _) => Ok(value.clone()),
-                    _ => Err(format!(
-                        "Route bundle `{bundle_id}` in {:?} expects `script_modules` to contain only strings.",
-                        manifest_path
-                    )),
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        _ => Err(format!(
-            "Route bundle `{bundle_id}` in {:?} expects `script_modules = [..]`.",
-            manifest_path
-        )),
-    }
-}
-
-fn read_route_bundle_script_files_file(
-    manifest_path: &Path,
-    bundle_id: &str,
-    relative_path: &str,
-) -> Result<Vec<String>, String> {
-    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let script_files_path = manifest_dir.join(relative_path);
-    let data = fs::read_to_string(&script_files_path).map_err(|e| {
-        format!(
-            "Can't read `script_files_file` for route bundle `{bundle_id}` at {:?}: {}",
-            script_files_path, e
-        )
-    })?;
-    Ok(normalize_route_bundle_script_files(
-        data.lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(|line| line.to_string())
-            .collect(),
-    ))
-}
-
-fn read_route_bundle_script_modules_file(
-    manifest_path: &Path,
-    bundle_id: &str,
-    relative_path: &str,
-) -> Result<Vec<String>, String> {
-    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let script_modules_path = manifest_dir.join(relative_path);
-    let data = fs::read_to_string(&script_modules_path).map_err(|e| {
-        format!(
-            "Can't read `script_modules_file` for route bundle `{bundle_id}` at {:?}: {}",
-            script_modules_path, e
-        )
-    })?;
-    Ok(normalize_route_bundle_script_modules(
-        data.lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(|line| line.to_string())
-            .collect(),
-    ))
-}
-
-fn parse_route_bundles_manifest(
-    manifest_path: &Path,
-    contents: &str,
-) -> Result<Vec<RouteBundleSpec>, String> {
-    #[derive(Default)]
-    struct RouteBundleBuilder {
-        functions: Option<Vec<String>>,
-        functions_file: Option<String>,
-        script_files: Option<Vec<String>>,
-        script_files_file: Option<String>,
-        script_modules: Option<Vec<String>>,
-        script_modules_file: Option<String>,
-    }
-
-    let toml = parse_toml(contents).map_err(|err| {
-        format!(
-            "Can't parse route bundle manifest {:?}: {}",
-            manifest_path, err.msg
-        )
-    })?;
-
-    let mut builders = BTreeMap::<String, RouteBundleBuilder>::new();
-    for (key, value) in toml.iter() {
-        let Some(rest) = key.strip_prefix("bundles.") else {
-            continue;
-        };
-        let Some((bundle_id, field)) = rest.split_once('.') else {
-            return Err(format!(
-                "Unsupported route bundle key `{key}` in {:?}; expected `bundles.<id>.functions`, `bundles.<id>.functions_file`, `bundles.<id>.script_files`, `bundles.<id>.script_files_file`, `bundles.<id>.script_modules`, or `bundles.<id>.script_modules_file`.",
-                manifest_path
-            ));
-        };
-        if field.contains('.') {
-            return Err(format!(
-                "Unsupported nested route bundle key `{key}` in {:?}.",
-                manifest_path
-            ));
-        }
-        if !is_safe_route_bundle_id(bundle_id) {
-            return Err(format!(
-                "Invalid route bundle id `{bundle_id}` in {:?}; use only ASCII letters, numbers, `_`, and `-`.",
-                manifest_path
-            ));
-        }
-
-        let entry = builders.entry(bundle_id.to_string()).or_default();
-        match field {
-            "functions" => {
-                entry.functions = Some(parse_route_bundle_functions_array(
-                    manifest_path,
-                    bundle_id,
-                    value,
-                )?);
-            }
-            "functions_file" => {
-                let Toml::Str(path, _) = value else {
-                    return Err(format!(
-                        "Route bundle `{bundle_id}` in {:?} expects `functions_file = \"...\"`.",
-                        manifest_path
-                    ));
-                };
-                entry.functions_file = Some(path.clone());
-            }
-            "script_files" => {
-                entry.script_files = Some(parse_route_bundle_script_files_array(
-                    manifest_path,
-                    bundle_id,
-                    value,
-                )?);
-            }
-            "script_files_file" => {
-                let Toml::Str(path, _) = value else {
-                    return Err(format!(
-                        "Route bundle `{bundle_id}` in {:?} expects `script_files_file = \"...\"`.",
-                        manifest_path
-                    ));
-                };
-                entry.script_files_file = Some(path.clone());
-            }
-            "script_modules" => {
-                entry.script_modules = Some(parse_route_bundle_script_modules_array(
-                    manifest_path,
-                    bundle_id,
-                    value,
-                )?);
-            }
-            "script_modules_file" => {
-                let Toml::Str(path, _) = value else {
-                    return Err(format!(
-                        "Route bundle `{bundle_id}` in {:?} expects `script_modules_file = \"...\"`.",
-                        manifest_path
-                    ));
-                };
-                entry.script_modules_file = Some(path.clone());
-            }
-            _ => {
-                return Err(format!(
-                    "Unsupported route bundle field `{field}` for `{bundle_id}` in {:?}.",
-                    manifest_path
-                ));
-            }
-        }
-    }
-
-    if builders.is_empty() {
-        return Err(format!(
-            "Route bundle manifest {:?} does not define any `[bundles.<id>]` entries.",
-            manifest_path
-        ));
-    }
-
-    let mut assigned = HashMap::<String, String>::new();
-    let mut assigned_script_files = HashMap::<String, String>::new();
-    let mut assigned_script_modules = HashMap::<String, String>::new();
-    let mut bundles = Vec::new();
-    for (bundle_id, builder) in builders {
-        let functions = match (builder.functions, builder.functions_file) {
-            (Some(_), Some(_)) => {
-                return Err(format!(
-                    "Route bundle `{bundle_id}` in {:?} cannot define both `functions` and `functions_file`.",
-                    manifest_path
-                ));
-            }
-            (Some(functions), None) => functions,
-            (None, Some(functions_file)) => {
-                read_route_bundle_functions_file(manifest_path, &bundle_id, &functions_file)?
-            }
-            (None, None) => {
-                return Err(format!(
-                    "Route bundle `{bundle_id}` in {:?} must define `functions` or `functions_file`.",
-                    manifest_path
-                ));
-            }
-        };
-        let script_files = match (builder.script_files, builder.script_files_file) {
-            (Some(_), Some(_)) => {
-                return Err(format!(
-                    "Route bundle `{bundle_id}` in {:?} cannot define both `script_files` and `script_files_file`.",
-                    manifest_path
-                ));
-            }
-            (Some(script_files), None) => script_files,
-            (None, Some(script_files_file)) => {
-                read_route_bundle_script_files_file(manifest_path, &bundle_id, &script_files_file)?
-            }
-            (None, None) => Vec::new(),
-        };
-        let script_modules = match (builder.script_modules, builder.script_modules_file) {
-            (Some(_), Some(_)) => {
-                return Err(format!(
-                    "Route bundle `{bundle_id}` in {:?} cannot define both `script_modules` and `script_modules_file`.",
-                    manifest_path
-                ));
-            }
-            (Some(script_modules), None) => script_modules,
-            (None, Some(script_modules_file)) => read_route_bundle_script_modules_file(
-                manifest_path,
-                &bundle_id,
-                &script_modules_file,
-            )?,
-            (None, None) => Vec::new(),
-        };
-        if functions.is_empty() {
-            return Err(format!(
-                "Route bundle `{bundle_id}` in {:?} does not contain any functions.",
-                manifest_path
-            ));
-        }
-        for function in &functions {
-            if let Some(other_bundle) = assigned.insert(function.clone(), bundle_id.clone()) {
-                return Err(format!(
-                    "Function `{function}` is assigned to both route bundles `{other_bundle}` and `{bundle_id}` in {:?}.",
-                    manifest_path
-                ));
-            }
-        }
-        for script_file in &script_files {
-            if let Some(other_bundle) =
-                assigned_script_files.insert(script_file.clone(), bundle_id.clone())
-            {
-                return Err(format!(
-                    "Script file `{script_file}` is assigned to both route bundles `{other_bundle}` and `{bundle_id}` in {:?}.",
-                    manifest_path
-                ));
-            }
-        }
-        for script_module in &script_modules {
-            if let Some(other_bundle) = assigned_script_modules
-                .insert(script_module.clone(), bundle_id.clone())
-            {
-                return Err(format!(
-                    "Script module `{script_module}` is assigned to both route bundles `{other_bundle}` and `{bundle_id}` in {:?}.",
-                    manifest_path
-                ));
-            }
-        }
-        bundles.push(RouteBundleSpec {
-            id: bundle_id,
-            functions,
-            script_files,
-            script_modules,
-        });
-    }
-    Ok(bundles)
-}
-
-fn format_route_bundles_multi_split_manifest(bundles: &[RouteBundleSpec]) -> String {
-    let mut out = String::new();
-    for (index, bundle) in bundles.iter().enumerate() {
-        if index > 0 {
-            out.push('\n');
-        }
-        out.push_str(&bundle.id);
-        out.push_str(":\n");
-        for function in &bundle.functions {
-            out.push_str(function);
-            out.push('\n');
-        }
-    }
-    out
-}
-
-fn resolve_route_bundle_specs(
-    manifest_path: &Path,
-    build_crate: &str,
-    build_dir: &Path,
-    bundles: &[RouteBundleSpec],
-) -> Result<Vec<ResolvedRouteBundleSpec>, String> {
-    let package_dirs = build_crate_package_dirs(build_crate, build_dir);
-    let mut assigned = HashMap::<String, String>::new();
-    let mut resolved = Vec::with_capacity(bundles.len());
-    for bundle in bundles {
-        let mut script_files = Vec::with_capacity(bundle.script_files.len());
-        for script_file in &bundle.script_files {
-            let runtime_path =
-                resolve_route_bundle_script_file(manifest_path, script_file, &package_dirs)?;
-            if let Some(other_bundle) = assigned.insert(runtime_path.clone(), bundle.id.clone()) {
-                return Err(format!(
-                    "Route bundle script file `{script_file}` resolves to `{runtime_path}`, which is already assigned to route bundle `{other_bundle}`."
-                ));
-            }
-            script_files.push(runtime_path);
-        }
-        resolved.push(ResolvedRouteBundleSpec {
-            id: bundle.id.clone(),
-            functions: bundle.functions.clone(),
-            script_files,
-            script_modules: bundle.script_modules.clone(),
-        });
-    }
-    Ok(resolved)
-}
-
-fn partition_script_source_packs(
-    compiled_script_mods: &[CompiledScriptModRecord],
-    bundles: &[ResolvedRouteBundleSpec],
-) -> Result<
-    (
-        BTreeMap<String, String>,
-        BTreeMap<String, BTreeMap<String, String>>,
-    ),
-    String,
-> {
-    let mut matched_claims_by_bundle = BTreeMap::<String, HashSet<String>>::new();
-    let mut matched_module_claims_by_bundle = BTreeMap::<String, HashSet<String>>::new();
-    let mut base_pack = BTreeMap::<String, String>::new();
-    let mut bundle_packs = bundles
-        .iter()
-        .map(|bundle| {
-            matched_claims_by_bundle.insert(bundle.id.clone(), HashSet::new());
-            matched_module_claims_by_bundle.insert(bundle.id.clone(), HashSet::new());
-            (bundle.id.clone(), BTreeMap::<String, String>::new())
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    for script_mod in compiled_script_mods {
-        let normalized_file = normalize_externalized_script_mod_file(&script_mod.file);
-        let key = encode_script_pack_key(
-            script_mod.source_id,
-            &normalized_file,
-            script_mod.line,
-            script_mod.column,
-        );
-        let matching_bundle = bundles.iter().find(|bundle| {
-            bundle
-                .script_files
-                .iter()
-                .any(|script_file| script_mod_matches_file_claim(
-                    script_file,
-                    &normalized_file,
-                    &script_mod.module_path,
-                ))
-                || bundle
-                    .script_modules
-                    .iter()
-                    .any(|script_module| script_mod_matches_module_claim(
-                        script_module,
-                        &script_mod.module_path,
-                    ))
-        });
-        let pack = if let Some(bundle) = matching_bundle {
-            for script_file in &bundle.script_files {
-                if script_mod_matches_file_claim(
-                    script_file,
-                    &normalized_file,
-                    &script_mod.module_path,
-                ) {
-                    matched_claims_by_bundle
-                        .get_mut(&bundle.id)
-                        .expect("bundle matched-claim set")
-                        .insert(script_file.clone());
-                }
-            }
-            for script_module in &bundle.script_modules {
-                if script_mod_matches_module_claim(script_module, &script_mod.module_path) {
-                    matched_module_claims_by_bundle
-                        .get_mut(&bundle.id)
-                        .expect("bundle matched-module set")
-                        .insert(script_module.clone());
-                }
-            }
-            bundle_packs
-                .get_mut(&bundle.id)
-                .ok_or_else(|| format!("Missing route bundle pack for `{}`", bundle.id))?
-        } else {
-            base_pack
-                .entry(key.clone())
-                .or_insert_with(|| script_mod.code.clone());
-            continue;
-        };
-        pack.insert(key, script_mod.code.clone());
-    }
-
-    for bundle in bundles {
-        let file_claims_matched = matched_claims_by_bundle
-            .get(&bundle.id)
-            .map(|claims| claims.len())
-            .unwrap_or(0);
-        let module_claims_matched = matched_module_claims_by_bundle
-            .get(&bundle.id)
-            .map(|claims| claims.len())
-            .unwrap_or(0);
-        if (!bundle.script_files.is_empty() || !bundle.script_modules.is_empty())
-            && file_claims_matched + module_claims_matched == 0
-        {
-            return Err(format!(
-                "Route bundle `{}` claims script files {:?} and script modules {:?}, but no compiled script_mod! sites matched any of them.",
-                bundle.id, bundle.script_files, bundle.script_modules
-            ));
-        }
-    }
-
-    Ok((base_pack, bundle_packs))
-}
-
-fn script_claim_module_suffix(script_file: &str) -> Option<String> {
-    let path = Path::new(script_file);
-    let stem_path = if path.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
-        path.parent()?.to_path_buf()
-    } else {
-        path.with_extension("")
-    };
-    let mut components = Vec::new();
-    for component in stem_path.components() {
-        let value = component.as_os_str().to_string_lossy();
-        if value.is_empty() || value == "." || value == "src" {
-            continue;
-        }
-        components.push(value.replace('-', "_"));
-    }
-    if components.is_empty() {
-        None
-    } else {
-        Some(components.join("::"))
-    }
-}
-
-fn script_mod_matches_file_claim(script_file: &str, normalized_file: &str, module_path: &str) -> bool {
-    if script_file == normalized_file {
-        return true;
-    }
-    script_claim_module_suffix(script_file)
-        .map(|suffix| module_path.ends_with(&suffix))
-        .unwrap_or(false)
-}
-
-fn script_mod_matches_module_claim(script_module: &str, module_path: &str) -> bool {
-    module_path == script_module
-        || module_path
-            .strip_prefix(script_module)
-            .map(|rest| rest.starts_with("::"))
-            .unwrap_or(false)
-}
-
-fn try_wasm_opt_path(path: &Path, cwd: &Path) -> Result<(), String> {
-    let data =
-        fs::read(path).map_err(|e| format!("Can't read wasm-opt input {:?}: {}", path, e))?;
-    let optimized = try_wasm_opt(&data, cwd);
-    fs::write(path, optimized)
-        .map_err(|e| format!("Can't write wasm-opt output {:?}: {}", path, e))?;
-    Ok(())
-}
-
-fn run_wasm_split_multi(
-    cwd: &Path,
-    input_path: &Path,
-    manifest_path: &Path,
-    primary_output_path: &Path,
-    out_prefix: &str,
-) -> Result<(), String> {
-    let output = Command::new("wasm-split")
-        .args([
-            input_path.to_string_lossy().as_ref(),
-            "--multi-split",
-            "--manifest",
-            manifest_path.to_string_lossy().as_ref(),
-            "--output",
-            primary_output_path.to_string_lossy().as_ref(),
-            "--out-prefix",
-            out_prefix,
-            "--import-namespace=$p",
-            "--no-placeholders",
-        ])
-        .current_dir(cwd)
-        .output();
-
-    match output {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let detail = stderr
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .or_else(|| stdout.lines().find(|line| !line.trim().is_empty()))
-                .unwrap_or("unknown error");
-            Err(format!("Binaryen wasm-split failed: {detail}"))
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(
-            "Binaryen wasm-split was not found; install it from https://github.com/WebAssembly/binaryen."
-                .to_string(),
-        ),
-        Err(err) => Err(format!("Failed to launch Binaryen wasm-split: {err}")),
-    }
-}
-
-fn decode_compiled_script_mod_records_payload(
-    payload: &[u8],
-) -> Result<Vec<CompiledScriptModRecord>, String> {
-    if payload.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let read_u32 = |bytes: &[u8], offset: usize| -> u32 {
-        debug_assert!(offset + 4 <= bytes.len());
-        u32::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ])
-    };
-    let read_u64 = |bytes: &[u8], offset: usize| -> u64 {
-        debug_assert!(offset + 8 <= bytes.len());
-        u64::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-            bytes[offset + 4],
-            bytes[offset + 5],
-            bytes[offset + 6],
-            bytes[offset + 7],
-        ])
-    };
-
-    let mut records = Vec::new();
-    let mut offset = 0usize;
-    while offset < payload.len() {
-        let remaining = &payload[offset..];
-        if remaining.len() < 28 {
-            return Err(format!(
-                "script_mod metadata payload is truncated at byte offset {offset}"
-            ));
-        }
-
-        let file_len = read_u32(remaining, 0) as usize;
-        let line = read_u32(remaining, 4) as usize;
-        let column = read_u32(remaining, 8) as usize;
-        let module_path_len = read_u32(remaining, 12) as usize;
-        let source_id = read_u64(remaining, 16);
-        let code_len = read_u32(remaining, 24) as usize;
-        let record_len = 28usize
-            .checked_add(file_len)
-            .and_then(|value| value.checked_add(module_path_len))
-            .and_then(|value| value.checked_add(code_len))
-            .ok_or_else(|| "script_mod metadata payload length overflowed".to_string())?;
-        if remaining.len() < record_len {
-            return Err(format!(
-                "script_mod metadata payload length mismatch at byte offset {offset}: expected {record_len} bytes, got {}",
-                remaining.len()
-            ));
-        }
-
-        let file_start = 28;
-        let file_end = file_start + file_len;
-        let module_path_end = file_end + module_path_len;
-        let file = String::from_utf8(remaining[file_start..file_end].to_vec())
-            .map_err(|_| "script_mod metadata file path is not valid UTF-8".to_string())?;
-        let module_path =
-            String::from_utf8(remaining[file_end..module_path_end].to_vec()).map_err(|_| {
-                "script_mod metadata module_path is not valid UTF-8".to_string()
-            })?;
-        let code = String::from_utf8(remaining[module_path_end..record_len].to_vec())
-            .map_err(|_| "script_mod metadata code body is not valid UTF-8".to_string())?;
-        records.push(CompiledScriptModRecord {
-            source_id,
-            module_path,
-            file,
-            line,
-            column,
-            code,
-        });
-        offset += record_len;
-    }
-    Ok(records)
-}
-
-fn extract_compiled_script_mod_records_from_wasm(
-    wasm_bytes: &[u8],
-) -> Result<Vec<CompiledScriptModRecord>, String> {
-    let payloads =
-        wasm_extract_custom_section_payloads_by_name(wasm_bytes, SCRIPT_MOD_SECTION_NAME)
-            .map_err(|_| "Cannot read script_mod metadata sections from wasm output".to_string())?;
-    let mut records = Vec::new();
-    for payload in payloads {
-        records.extend(decode_compiled_script_mod_records_payload(&payload)?);
-    }
-    Ok(records)
-}
-
-fn strip_compiled_script_mod_metadata_sections(wasm_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    wasm_strip_custom_sections_by_name(wasm_bytes, |name| name == SCRIPT_MOD_SECTION_NAME)
-        .map_err(|_| "Cannot strip script_mod metadata section from wasm output".to_string())
-}
-
-fn encode_script_pack_key(source_id: u64, file: &str, line: usize, column: usize) -> String {
-    format!("{source_id:016x}:{file}:{line}:{column}")
-}
-
-fn externalized_script_mod_record_path(records_dir: &Path, source_id: u64) -> PathBuf {
-    records_dir.join(format!("{source_id:016x}.txt"))
-}
-
-fn hydrate_compiled_script_mod_records(
-    compiled_script_mods: Vec<CompiledScriptModRecord>,
-    records_dir: &Path,
-) -> Result<Vec<CompiledScriptModRecord>, String> {
-    compiled_script_mods
-        .into_iter()
-        .map(|mut record| {
-            if record.code.is_empty() {
-                let record_path = externalized_script_mod_record_path(records_dir, record.source_id);
-                let code = match fs::read_to_string(&record_path) {
-                    Ok(code) => code,
-                    Err(error) => {
-                        return Err(format!(
-                            "Missing externalized script_mod record {:?} for {}:{}:{} (source_id={:016x}): {}",
-                            record_path,
-                            record.file,
-                            record.line,
-                            record.column,
-                            record.source_id,
-                            error
-                        ));
-                    }
-                };
-                record.code = code;
-            }
-            Ok(record)
-        })
-        .collect()
-}
-
-#[cfg(test)]
-fn decode_script_pack_key(key: &str) -> Result<(u64, String, usize, usize), String> {
-    let mut parts = key.splitn(2, ':');
-    let source_id = u64::from_str_radix(
-        parts
-            .next()
-            .ok_or_else(|| format!("Invalid script pack key `{key}`"))?,
-        16,
-    )
-    .map_err(|_| format!("Invalid script pack source_id in `{key}`"))?;
-    let rest = parts
-        .next()
-        .ok_or_else(|| format!("Invalid script pack key `{key}`"))?;
-    let mut parts = rest.rsplitn(3, ':');
-    let column = parts
-        .next()
-        .ok_or_else(|| format!("Invalid script pack key `{key}`"))?
-        .parse::<usize>()
-        .map_err(|_| format!("Invalid script pack column in `{key}`"))?;
-    let line = parts
-        .next()
-        .ok_or_else(|| format!("Invalid script pack key `{key}`"))?
-        .parse::<usize>()
-        .map_err(|_| format!("Invalid script pack line in `{key}`"))?;
-    let file = parts
-        .next()
-        .ok_or_else(|| format!("Invalid script pack key `{key}`"))?;
-    if file.is_empty() {
-        return Err(format!("Invalid script pack file in `{key}`"));
-    }
-    Ok((source_id, file.to_string(), line, column))
 }
 
 fn remapped_small_font_source(source_path: &Path) -> Option<PathBuf> {
@@ -2563,72 +1549,6 @@ fn collect_resource_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn add_preserved_resource_selection(
-    selected: &mut HashMap<String, SelectedResource>,
-    logical_path: &str,
-    abs_path: &Path,
-    crate_name: &str,
-    use_small_fonts: bool,
-) -> Result<(), String> {
-    let mut add_resource = |logical_path: String, source_path: PathBuf| {
-        let logical_path = if use_small_fonts {
-            remapped_small_font_dependency_path(&logical_path)
-                .unwrap_or(logical_path.as_str())
-                .to_string()
-        } else {
-            logical_path
-        };
-        let source_path = if use_small_fonts {
-            remapped_small_font_source(&source_path).unwrap_or(source_path)
-        } else {
-            source_path
-        };
-        add_selected_resource(
-            selected,
-            SelectedResource {
-                logical_path,
-                source_path,
-                crate_name: crate_name.to_string(),
-                direct_reference: false,
-                reason: "preserve".to_string(),
-            },
-        );
-    };
-
-    if abs_path.is_file() {
-        add_resource(logical_path.to_string(), abs_path.to_path_buf());
-        return Ok(());
-    }
-
-    if abs_path.is_dir() {
-        let mut files = Vec::new();
-        collect_resource_files_recursive(abs_path, &mut files);
-        files.sort();
-        for file in files {
-            let rel = file.strip_prefix(abs_path).map_err(|error| {
-                format!(
-                    "Can't compute preserved resource path for {:?} relative to {:?}: {}",
-                    file, abs_path, error
-                )
-            })?;
-            let rel = rel.to_string_lossy().replace('\\', "/");
-            let file_logical_path = if rel.is_empty() {
-                logical_path.to_string()
-            } else {
-                format!("{logical_path}/{rel}")
-            };
-            add_resource(file_logical_path, file);
-        }
-        return Ok(());
-    }
-
-    Err(format!(
-        "preserved web resource does not exist and will be skipped: {} ({})",
-        logical_path,
-        abs_path.display()
-    ))
-}
-
 fn collect_shipping_resources(
     build_crate: &str,
     build_dir: &Path,
@@ -2668,15 +1588,36 @@ fn collect_shipping_resources(
             );
             continue;
         };
-        if let Err(error) = add_preserved_resource_selection(
-            &mut selected,
-            &logical_path,
-            &abs_path,
-            &crate_name,
-            use_small_fonts,
-        ) {
-            println!("Warning: {} ({})", error, preserve);
+        if !abs_path.is_file() {
+            println!(
+                "Warning: preserved web resource does not exist and will be skipped: {} ({})",
+                preserve,
+                abs_path.display()
+            );
+            continue;
         }
+        let logical_path = if use_small_fonts {
+            remapped_small_font_dependency_path(&logical_path)
+                .unwrap_or(logical_path.as_str())
+                .to_string()
+        } else {
+            logical_path
+        };
+        let source_path = if use_small_fonts {
+            remapped_small_font_source(&abs_path).unwrap_or(abs_path.clone())
+        } else {
+            abs_path.clone()
+        };
+        add_selected_resource(
+            &mut selected,
+            SelectedResource {
+                logical_path,
+                source_path,
+                crate_name,
+                direct_reference: false,
+                reason: "preserve".to_string(),
+            },
+        );
     }
 
     add_curated_widget_web_resources(&mut selected, &manifests, use_small_fonts);
@@ -2715,7 +1656,8 @@ fn copy_resource_asset(
 const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
 const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
-const WASM_RUSTFLAGS_SINGLE_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C opt-level=z";
+const WASM_RUSTFLAGS_SINGLE_THREADED: &str =
+    "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C opt-level=z";
 
 fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, String> {
     let target_spec_dir = if threaded {
@@ -2775,7 +1717,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     let profile = get_profile_from_args(&args);
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
     let build_dir = cwd.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
-    let script_mod_records_dir = build_dir.join("makepad-script-mod-records");
     let package_layout = config.package_layout;
     let wasm_target_spec = build_wasm_target_spec(&cwd, config.threads)?;
     let target_arg = format!("--target={}", wasm_target_spec.display());
@@ -2803,36 +1744,13 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     } else {
         WASM_RUSTFLAGS_SINGLE_THREADED
     };
-    let mut env = vec![
-        ("RUSTFLAGS".to_string(), rustflags.to_string()),
-        ("MAKEPAD".to_string(), "lines".to_string()),
-    ];
-    if package_layout {
-        fs::create_dir_all(&script_mod_records_dir).map_err(|e| {
-            format!(
-                "Can't create externalized script_mod dir {:?}: {}",
-                script_mod_records_dir, e
-            )
-        })?;
-        env.push((
-            MAKEPAD_EXTERNALIZE_SCRIPT_MODS_ENV.to_string(),
-            "1".to_string(),
-        ));
-        env.push((
-            MAKEPAD_EXTERNALIZED_SCRIPT_MOD_DIR_ENV.to_string(),
-            script_mod_records_dir.to_string_lossy().into_owned(),
-        ));
-    }
+    let mut env = vec![("RUSTFLAGS", rustflags), ("MAKEPAD", "lines")];
     // `profile.small` with LTO enabled miscompiles single-threaded wasm in the script VM.
     if profile == "small" && !config.threads {
-        env.push(("CARGO_PROFILE_SMALL_LTO".to_string(), "off".to_string()));
+        env.push(("CARGO_PROFILE_SMALL_LTO", "off"));
     }
 
-    let env_refs: Vec<(&str, &str)> = env
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect();
-    shell_env(&env_refs, &cwd, "rustup", &args_out_refs)?;
+    shell_env(&env, &cwd, "rustup", &args_out_refs)?;
 
     if app_dir.exists() {
         fs::remove_dir_all(&app_dir)
@@ -3134,146 +2052,25 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         build_dir.join(format!("{}.wasm", build_crate))
     };
 
-    let route_bundle_manifest_path = config.route_bundles.as_deref().map(|route_bundles_arg| {
-        let path = PathBuf::from(route_bundles_arg);
-        if path.is_absolute() {
-            path
-        } else {
-            cwd.join(path)
-        }
-    });
-    let route_bundle_specs =
-        if let Some(route_bundles_manifest_path) = route_bundle_manifest_path.as_ref() {
-            let route_bundles_manifest =
-                fs::read_to_string(route_bundles_manifest_path).map_err(|e| {
-                    format!(
-                        "Can't read route bundle manifest {:?}: {}",
-                        route_bundles_manifest_path, e
-                    )
-                })?;
-            parse_route_bundles_manifest(route_bundles_manifest_path, &route_bundles_manifest)?
-        } else {
-            Vec::new()
-        };
-    let resolved_route_bundle_specs =
-        if let Some(route_bundles_manifest_path) = route_bundle_manifest_path.as_ref() {
-            resolve_route_bundle_specs(
-                route_bundles_manifest_path,
-                build_crate,
-                &build_dir,
-                &route_bundle_specs,
-            )?
-        } else {
-            Vec::new()
-        };
-
     let wasm_dest = app_dir.join(format!("{}.wasm", build_crate));
-    let raw_output =
-        fs::read(&wasm_source).map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
-    let compiled_script_mods = if package_layout {
-        hydrate_compiled_script_mod_records(
-            extract_compiled_script_mod_records_from_wasm(&raw_output)?,
-            &script_mod_records_dir,
-        )?
-    } else {
-        Vec::new()
-    };
-    let stripped_script_metadata_output = if package_layout {
-        strip_compiled_script_mod_metadata_sections(&raw_output)?
-    } else {
-        raw_output.clone()
-    };
-    let mut output = if config.optimize_size {
-        let report = wasm_size_report(&stripped_script_metadata_output)
-            .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?;
-        print_wasm_size_report(&report);
-        wasm_optimize_size(&stripped_script_metadata_output)
-            .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
-    } else if config.strip {
-        wasm_strip_custom_sections(&stripped_script_metadata_output)
-            .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
-    } else {
-        stripped_script_metadata_output
-    };
+    let mut output = if config.optimize_size || config.strip {
+        let data = fs::read(&wasm_source)
+            .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
 
-    let mut route_bundle_outputs = Vec::<RouteBundleOutput>::new();
-    if route_bundle_manifest_path.is_some() {
-        let split_input_path = build_dir.join(format!("{build_crate}.route-bundles.input.wasm"));
-        let split_manifest_path =
-            build_dir.join(format!("{build_crate}.route-bundles.manifest.txt"));
-        let primary_output_path = app_dir.join(format!("{build_crate}.wasm"));
-        let out_prefix = app_dir.join(format!("{build_crate}.bundle."));
-
-        fs::write(
-            &split_manifest_path,
-            format_route_bundles_multi_split_manifest(&route_bundle_specs),
-        )
-        .map_err(|e| {
-            format!(
-                "Can't write route bundle manifest {:?}: {}",
-                split_manifest_path, e
-            )
-        })?;
-        fs::write(&split_input_path, &output).map_err(|e| {
-            format!(
-                "Can't write route bundle input {:?}: {}",
-                split_input_path, e
-            )
-        })?;
-
-        run_wasm_split_multi(
-            &cwd,
-            &split_input_path,
-            &split_manifest_path,
-            &primary_output_path,
-            out_prefix.to_string_lossy().as_ref(),
-        )?;
-
-        if config.wasm_opt {
-            try_wasm_opt_path(&primary_output_path, &cwd)?;
+        if config.optimize_size {
+            let report = wasm_size_report(&data)
+                .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?;
+            print_wasm_size_report(&report);
+            wasm_optimize_size(&data).map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
+        } else {
+            wasm_strip_custom_sections(&data)
+                .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
         }
+    } else {
+        fs::read(&wasm_source).map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?
+    };
 
-        for bundle in &route_bundle_specs {
-            let logical_path = format!("{build_crate}.bundle.{}.wasm", bundle.id);
-            let bundle_path = app_dir.join(&logical_path);
-            if config.wasm_opt {
-                try_wasm_opt_path(&bundle_path, &cwd)?;
-            }
-            if config.brotli {
-                brotli_compress(&bundle_path);
-            } else {
-                remove_brotli_artifact(&bundle_path);
-            }
-            if package_layout {
-                pending_assets.push(PendingAsset {
-                    logical_path: logical_path.clone(),
-                    emitted_path: logical_path.clone(),
-                    kind: "wasm".to_string(),
-                    content_type: "application/wasm".to_string(),
-                    startup_blocking: false,
-                    direct_reference: false,
-                    crate_name: None,
-                    reason: "route_bundle".to_string(),
-                });
-            }
-            route_bundle_outputs.push(RouteBundleOutput {
-                id: bundle.id.clone(),
-                logical_path,
-                init_export: (bundle.functions.len() == 1).then(|| bundle.functions[0].clone()),
-                script_logical_path: format!("{build_crate}.scripts.{}.json", bundle.id),
-            });
-        }
-
-        output = fs::read(&primary_output_path).map_err(|e| {
-            format!(
-                "Can't read primary wasm after route bundle split {:?}: {}",
-                primary_output_path, e
-            )
-        })?;
-
-        let _ = fs::remove_file(&split_input_path);
-        let _ = fs::remove_file(&split_manifest_path);
-    } else if config.wasm_opt {
+    if config.wasm_opt {
         output = try_wasm_opt(&output, &cwd);
     }
 
@@ -3346,9 +2143,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                         println!("  mode: cold-first split, secondary deferred");
                     }
                     AutoSplitOutcome::StartupPathFallback => {
-                        println!(
-                            "  mode: automatic fallback split, secondary remains on the startup path"
-                        );
+                        println!("  mode: automatic fallback split, secondary remains on the startup path");
                     }
                     AutoSplitOutcome::NotAttempted => {}
                 }
@@ -3494,46 +2289,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         });
     }
 
-    let base_script_logical_path = if package_layout {
-        let (base_script_pack, bundle_script_packs) =
-            partition_script_source_packs(&compiled_script_mods, &resolved_route_bundle_specs)?;
-        let base_script_logical_path = format!("{build_crate}.scripts.base.json");
-        let base_script_path = app_dir.join(&base_script_logical_path);
-        write_script_source_pack_file(&base_script_path, &base_script_pack, config.brotli)?;
-        pending_assets.push(PendingAsset {
-            logical_path: base_script_logical_path.clone(),
-            emitted_path: base_script_logical_path.clone(),
-            kind: "json".to_string(),
-            content_type: "application/json".to_string(),
-            startup_blocking: true,
-            direct_reference: false,
-            crate_name: None,
-            reason: "script_sources_base".to_string(),
-        });
-
-        for bundle in &route_bundle_outputs {
-            let bundle_pack = bundle_script_packs
-                .get(&bundle.id)
-                .ok_or_else(|| format!("Missing script pack for route bundle `{}`", bundle.id))?;
-            let bundle_script_path = app_dir.join(&bundle.script_logical_path);
-            write_script_source_pack_file(&bundle_script_path, bundle_pack, config.brotli)?;
-            pending_assets.push(PendingAsset {
-                logical_path: bundle.script_logical_path.clone(),
-                emitted_path: bundle.script_logical_path.clone(),
-                kind: "json".to_string(),
-                content_type: "application/json".to_string(),
-                startup_blocking: false,
-                direct_reference: false,
-                crate_name: None,
-                reason: "script_sources_bundle".to_string(),
-            });
-        }
-
-        Some(base_script_logical_path)
-    } else {
-        None
-    };
-
     let mut asset_manifest = if package_layout {
         Some(finalize_pending_assets(
             &app_dir,
@@ -3549,72 +2304,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 
     if let Some(manifest) = asset_manifest.as_mut() {
         patch_bindgen_worker_import(&app_dir, manifest, config.brotli)?;
-
-        if let Some(base_script_logical_path_value) = base_script_logical_path.as_ref() {
-            let wasm_bundles = WasmBundlesJson {
-                base_scripts: Some(WasmScriptPackJsonEntry {
-                    url: manifest
-                        .emitted_path_for(base_script_logical_path_value)
-                        .unwrap_or(base_script_logical_path_value.as_str())
-                        .to_string(),
-                }),
-                bundles: route_bundle_outputs
-                    .iter()
-                    .map(|bundle| {
-                        let emitted_path = manifest
-                            .emitted_path_for(&bundle.logical_path)
-                            .unwrap_or(bundle.logical_path.as_str())
-                            .to_string();
-                        let emitted_script_path = manifest
-                            .emitted_path_for(&bundle.script_logical_path)
-                            .unwrap_or(bundle.script_logical_path.as_str())
-                            .to_string();
-                        (
-                            bundle.id.clone(),
-                            WasmBundleJsonEntry {
-                                url: emitted_path,
-                                init_export: bundle.init_export.clone(),
-                                script_url: Some(emitted_script_path),
-                            },
-                        )
-                    })
-                    .collect(),
-            };
-            let wasm_bundles_path = app_dir.join("wasm-bundles.json");
-            write_json_file(&wasm_bundles_path, &wasm_bundles, config.brotli)?;
-
-            let raw_bytes = fs::metadata(&wasm_bundles_path)
-                .map_err(|e| format!("Can't stat {:?}: {}", wasm_bundles_path, e))?
-                .len();
-            let brotli_bytes = if config.brotli {
-                fs::metadata(app_dir.join("wasm-bundles.json.br"))
-                    .ok()
-                    .map(|meta| meta.len())
-            } else {
-                None
-            };
-            let wasm_bundles_startup_blocking = base_script_logical_path.is_some();
-            manifest.assets.push(AssetManifestEntry {
-                logical_path: "wasm-bundles.json".to_string(),
-                emitted_path: "wasm-bundles.json".to_string(),
-                kind: "json".to_string(),
-                content_type: "application/json".to_string(),
-                cache_control: short_cache_control(),
-                startup_blocking: wasm_bundles_startup_blocking,
-                hashed: false,
-                direct_reference: false,
-                crate_name: None,
-                reason: "route_bundle_manifest".to_string(),
-                raw_bytes,
-                transfer_bytes: brotli_bytes.unwrap_or(raw_bytes),
-                brotli_bytes,
-            });
-            if wasm_bundles_startup_blocking {
-                manifest
-                    .startup_assets
-                    .push("wasm-bundles.json".to_string());
-            }
-        }
     }
 
     let html_assets = if let Some(manifest) = asset_manifest.as_ref() {
@@ -3782,10 +2471,11 @@ pub fn run(config: WasmConfig, args: &[String]) -> Result<(), String> {
         .map_err(|err| format!("failed to resolve workspace root: {}", err))?;
     let build_dir = workspace_root.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
     let port = config.port.unwrap_or(8010);
-    let mut run_config = config.clone();
+    let mut run_config = config;
     run_config.hot_reload = true;
+    run_config.package_layout = false;
 
-    let result = build(run_config.clone(), args)?;
+    let result = build(run_config, args)?;
     let hot_reload_plan = collect_wasm_hot_reload_watch_plan(&build_crate, &build_dir);
     let mut ownership_guard = WasmServerOwnershipGuard::prepare(
         &workspace_root,
@@ -3885,7 +2575,7 @@ fn cache_control_for_request(
         WasmServeMode::Packaged => {
             if matches!(
                 request_path,
-                "index.html" | "asset-manifest.json" | "web-perf-report.json" | "wasm-bundles.json"
+                "index.html" | "asset-manifest.json" | "web-perf-report.json"
             ) {
                 short_cache_control()
             } else if let Some(asset) =
@@ -3896,25 +2586,6 @@ fn cache_control_for_request(
                 short_cache_control()
             }
         }
-    }
-}
-
-fn should_fallback_to_index(root: &Path, request_path: &str) -> bool {
-    if request_path == "/" || request_path == "/index.html" || request_path.starts_with("/$") {
-        return false;
-    }
-    let relative = request_path.trim_start_matches('/');
-    if relative.is_empty() || Path::new(relative).extension().is_some() {
-        return false;
-    }
-    !root.join(relative).is_file()
-}
-
-fn resolve_served_request_path<'a>(root: &Path, request_path: &'a str) -> Cow<'a, str> {
-    if request_path == "/" || should_fallback_to_index(root, request_path) {
-        Cow::Borrowed("/index.html")
-    } else {
-        Cow::Borrowed(request_path)
     }
 }
 
@@ -4160,7 +2831,7 @@ fn rebuild_wasm_app(
 ) {
     broadcast_hot_reload_event(make_hot_reload_event("build_start"), watch_clients);
     println!("Wasm hot reload fallback: rebuilding app");
-    match build(plan.config.clone(), &plan.args) {
+    match build(plan.config, &plan.args) {
         Ok(_) => {
             println!("Wasm hot reload fallback: rebuild complete");
             broadcast_hot_reload_event(make_hot_reload_event("reload"), watch_clients);
@@ -4244,9 +2915,7 @@ fn normalize_path(path: &Path) -> PathBuf {
     out
 }
 
-fn extract_script_mod_bodies_with_locations_from_rust_file(
-    source: &str,
-) -> Result<Vec<ExtractedScriptModBody>, String> {
+fn extract_script_mod_bodies_from_rust_file(source: &str) -> Result<Vec<String>, String> {
     let bytes = source.as_bytes();
     let mut i = 0;
     let mut extracted = Vec::new();
@@ -4271,15 +2940,7 @@ fn extract_script_mod_bodies_with_locations_from_rust_file(
                     j = skip_ws_and_comments(bytes, j)?;
                     if bytes.get(j) == Some(&b'{') {
                         let end = find_matching_delim(bytes, j, b'{', b'}')?;
-                        let body_start = j + 1;
-                        let first_token = skip_ws_and_comments(bytes, body_start)?;
-                        let anchor = first_token.min(end);
-                        let (line, column) = line_column_for_offset(source, anchor);
-                        extracted.push(ExtractedScriptModBody {
-                            code: source[body_start..end].to_string(),
-                            line,
-                            column,
-                        });
+                        extracted.push(source[j + 1..end].to_string());
                         i = end + 1;
                         continue;
                     }
@@ -4292,27 +2953,6 @@ fn extract_script_mod_bodies_with_locations_from_rust_file(
     }
 
     Ok(extracted)
-}
-
-fn extract_script_mod_bodies_from_rust_file(source: &str) -> Result<Vec<String>, String> {
-    Ok(extract_script_mod_bodies_with_locations_from_rust_file(source)?
-        .into_iter()
-        .map(|body| body.code)
-        .collect())
-}
-
-fn line_column_for_offset(source: &str, offset: usize) -> (usize, usize) {
-    let mut line = 1usize;
-    let mut column = 1usize;
-    for ch in source[..offset].chars() {
-        if ch == '\n' {
-            line += 1;
-            column = 1;
-        } else {
-            column += 1;
-        }
-    }
-    (line, column)
 }
 
 fn skip_non_code_segment(bytes: &[u8], i: usize) -> Result<Option<usize>, String> {
@@ -4640,9 +3280,11 @@ fn start_wasm_server(
                     headers,
                     response_sender,
                 } => {
-                    let served_path = resolve_served_request_path(&root, headers.path.as_str());
-                    let path = served_path.as_ref();
+                    let mut path = headers.path.as_str();
                     let query = headers.search.as_deref().unwrap_or("");
+                    if path == "/" {
+                        path = "/index.html";
+                    }
                     let cache_extra = if serve_mode == WasmServeMode::Dev {
                         "Pragma: no-cache\r\n\
                         Expires: 0\r\n\
@@ -4866,7 +3508,6 @@ mod tests {
             hot_reload: false,
             package_layout: true,
             full_fonts: false,
-            route_bundles: None,
         }
     }
 
@@ -4934,14 +3575,6 @@ mod tests {
     }
 
     #[test]
-    fn mime_type_for_text_assets_is_plain_text() {
-        assert_eq!(
-            mime_type_for_path("makepad_gallery/resources/snippets/avatar_page.txt"),
-            Some("text/plain")
-        );
-    }
-
-    #[test]
     fn crate_resource_extraction_ignores_comments_and_strings() {
         let source = r###"
             // crate_resource("self:resources/comment.svg")
@@ -4988,111 +3621,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_route_bundles_manifest_reads_inline_and_file_lists() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("makepad-route-bundles-{unique}"));
-        fs::create_dir_all(temp_root.join("bundles")).unwrap();
-        fs::create_dir_all(temp_root.join("scripts")).unwrap();
-        fs::write(
-            temp_root.join("bundles/reports.txt"),
-            "report_func_a\n# comment\nreport_func_b\n",
-        )
-        .unwrap();
-        fs::write(
-            temp_root.join("scripts/reports.txt"),
-            "src/reports.rs\n# comment\nsrc/reports_extra.rs\n",
-        )
-        .unwrap();
-        fs::write(
-            temp_root.join("scripts/modules.txt"),
-            "crate::reports::generated\n# comment\ncrate::reports::generated::nested\n",
-        )
-        .unwrap();
-        let manifest_path = temp_root.join("route-bundles.toml");
-        let manifest = r#"
-            [bundles.alerts]
-            functions = ["alert_func_a", "alert_func_b", "alert_func_a"]
-            script_files = ["src/alert.rs", "src/alert.rs"]
-
-            [bundles.reports]
-            functions_file = "bundles/reports.txt"
-            script_files_file = "scripts/reports.txt"
-            script_modules_file = "scripts/modules.txt"
-        "#;
-
-        let bundles = parse_route_bundles_manifest(&manifest_path, manifest).unwrap();
-        assert_eq!(
-            bundles,
-            vec![
-                RouteBundleSpec {
-                    id: "alerts".to_string(),
-                    functions: vec!["alert_func_a".to_string(), "alert_func_b".to_string()],
-                    script_files: vec!["src/alert.rs".to_string()],
-                    script_modules: vec![],
-                },
-                RouteBundleSpec {
-                    id: "reports".to_string(),
-                    functions: vec!["report_func_a".to_string(), "report_func_b".to_string()],
-                    script_files: vec![
-                        "src/reports.rs".to_string(),
-                        "src/reports_extra.rs".to_string()
-                    ],
-                    script_modules: vec![
-                        "crate::reports::generated".to_string(),
-                        "crate::reports::generated::nested".to_string(),
-                    ],
-                },
-            ]
-        );
-
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn parse_route_bundles_manifest_rejects_cross_bundle_duplicates() {
-        let manifest_path = PathBuf::from("route-bundles.toml");
-        let error = parse_route_bundles_manifest(
-            &manifest_path,
-            r#"
-                [bundles.a]
-                functions = ["shared_func"]
-
-                [bundles.b]
-                functions = ["shared_func"]
-            "#,
-        )
-        .unwrap_err();
-        assert!(error.contains("shared_func"));
-        assert!(error.contains("bundles"));
-    }
-
-    #[test]
-    fn format_route_bundles_multi_split_manifest_emits_binaryen_groups() {
-        let manifest = format_route_bundles_multi_split_manifest(&[
-            RouteBundleSpec {
-                id: "alerts".to_string(),
-                functions: vec!["alert_func_a".to_string(), "alert_func_b".to_string()],
-                script_files: vec![],
-                script_modules: vec![],
-            },
-            RouteBundleSpec {
-                id: "reports".to_string(),
-                functions: vec!["report_func".to_string()],
-                script_files: vec![],
-                script_modules: vec![],
-            },
-        ]);
-
-        assert_eq!(
-            manifest,
-            "alerts:\nalert_func_a\nalert_func_b\n\nreports:\nreport_func\n"
-        );
-    }
-
-    #[test]
     fn remapped_small_font_dependency_path_canonicalizes_widget_fallbacks() {
         assert_eq!(
             remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiRegular.ttf"),
@@ -5110,169 +3638,6 @@ mod tests {
             remapped_small_font_dependency_path("makepad_widgets/resources/IBMPlexSans-Text.ttf"),
             None
         );
-    }
-
-    #[test]
-    fn partition_script_source_packs_routes_claimed_files_to_bundle_packs() {
-        let compiled = vec![
-            CompiledScriptModRecord {
-                source_id: 0x1111,
-                module_path: "app::ui::root".to_string(),
-                file: "app/app/src/ui/root.rs".to_string(),
-                line: 10,
-                column: 5,
-                code: "root{}".to_string(),
-            },
-            CompiledScriptModRecord {
-                source_id: 0x2222,
-                module_path: "app::ui::alert_page".to_string(),
-                file: "app/app/src/ui/alert_page.rs".to_string(),
-                line: 20,
-                column: 7,
-                code: "alert{}".to_string(),
-            },
-        ];
-        let bundles = vec![ResolvedRouteBundleSpec {
-            id: "alert_page".to_string(),
-            functions: vec!["bundle_mark_alert_page".to_string()],
-            script_files: vec!["app/src/ui/alert_page.rs".to_string()],
-            script_modules: vec![],
-        }];
-
-        let (base_pack, bundle_packs) = partition_script_source_packs(&compiled, &bundles).unwrap();
-
-        assert_eq!(
-            base_pack.get("0000000000001111:app/src/ui/root.rs:10:5"),
-            Some(&"root{}".to_string())
-        );
-        assert_eq!(
-            bundle_packs["alert_page"].get("0000000000002222:app/src/ui/alert_page.rs:20:7"),
-            Some(&"alert{}".to_string())
-        );
-    }
-
-    #[test]
-    fn partition_script_source_packs_routes_claimed_modules_to_bundle_packs() {
-        let compiled = vec![
-            CompiledScriptModRecord {
-                source_id: 0x1111,
-                module_path: "makepad_icon::icons::icon_button_menu_module".to_string(),
-                file: "makepad-icon/src/icons.rs".to_string(),
-                line: 20,
-                column: 5,
-                code: "menu{}".to_string(),
-            },
-            CompiledScriptModRecord {
-                source_id: 0x2222,
-                module_path: "makepad_icon::icons::generated".to_string(),
-                file: "makepad-icon/src/icons.rs".to_string(),
-                line: 200,
-                column: 7,
-                code: "all_icons{}".to_string(),
-            },
-        ];
-        let bundles = vec![ResolvedRouteBundleSpec {
-            id: "icon_gallery_page".to_string(),
-            functions: vec!["bundle_mark_icon_gallery_page".to_string()],
-            script_files: vec![],
-            script_modules: vec!["makepad_icon::icons::generated".to_string()],
-        }];
-
-        let (base_pack, bundle_packs) = partition_script_source_packs(&compiled, &bundles).unwrap();
-
-        assert_eq!(
-            base_pack.get("0000000000001111:makepad-icon/src/icons.rs:20:5"),
-            Some(&"menu{}".to_string())
-        );
-        assert_eq!(
-            bundle_packs["icon_gallery_page"]
-                .get("0000000000002222:makepad-icon/src/icons.rs:200:7"),
-            Some(&"all_icons{}".to_string())
-        );
-    }
-
-    #[test]
-    fn decode_compiled_script_mod_records_payload_supports_concatenated_records() {
-        fn encode_record(
-            source_id: u64,
-            module_path: &str,
-            file: &str,
-            line: u32,
-            column: u32,
-            code: &str,
-        ) -> Vec<u8> {
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(&(file.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(&line.to_le_bytes());
-            bytes.extend_from_slice(&column.to_le_bytes());
-            bytes.extend_from_slice(&(module_path.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(&source_id.to_le_bytes());
-            bytes.extend_from_slice(&(code.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(file.as_bytes());
-            bytes.extend_from_slice(module_path.as_bytes());
-            bytes.extend_from_slice(code.as_bytes());
-            bytes
-        }
-
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&encode_record(
-            0x1111,
-            "crate::a",
-            "crate/src/a.rs",
-            3,
-            1,
-            "alpha{}",
-        ));
-        payload.extend_from_slice(&encode_record(
-            0x2222,
-            "crate::b",
-            "crate/src/b.rs",
-            7,
-            9,
-            "beta{}",
-        ));
-
-        let records = decode_compiled_script_mod_records_payload(&payload).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].source_id, 0x1111);
-        assert_eq!(records[0].module_path, "crate::a");
-        assert_eq!(records[0].file, "crate/src/a.rs");
-        assert_eq!(records[0].line, 3);
-        assert_eq!(records[0].column, 1);
-        assert_eq!(records[0].code, "alpha{}");
-        assert_eq!(records[1].source_id, 0x2222);
-        assert_eq!(records[1].module_path, "crate::b");
-        assert_eq!(records[1].file, "crate/src/b.rs");
-        assert_eq!(records[1].line, 7);
-        assert_eq!(records[1].column, 9);
-        assert_eq!(records[1].code, "beta{}");
-    }
-
-    #[test]
-    fn extract_script_mod_bodies_with_locations_reports_first_token_site() {
-        let source = r#"
-script_mod!{
-    // comment
-    use mod.prelude.widgets.*
-    ui: Root{}
-}
-"#;
-
-        let bodies = extract_script_mod_bodies_with_locations_from_rust_file(source).unwrap();
-        assert_eq!(bodies.len(), 1);
-        assert_eq!(bodies[0].line, 4);
-        assert_eq!(bodies[0].column, 5);
-        assert!(bodies[0].code.contains("ui: Root{}"));
-    }
-
-    #[test]
-    fn decode_script_pack_key_round_trips() {
-        let (source_id, file, line, column) =
-            decode_script_pack_key("00000000000000ab:crate/src/ui/page.rs:42:9").unwrap();
-        assert_eq!(source_id, 0xab);
-        assert_eq!(file, "crate/src/ui/page.rs");
-        assert_eq!(line, 42);
-        assert_eq!(column, 9);
     }
 
     #[test]
@@ -5384,62 +3749,6 @@ script_mod!{
     }
 
     #[test]
-    fn preserved_resource_selection_supports_files_and_directories() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("makepad-wasm-preserve-{unique}"));
-        let assets_dir = temp_root.join("assets");
-        fs::create_dir_all(assets_dir.join("icons/nested")).unwrap();
-        fs::write(assets_dir.join("hero.glb"), b"hero").unwrap();
-        fs::write(assets_dir.join("icons/search.svg"), b"search").unwrap();
-        fs::write(assets_dir.join("icons/nested/info.svg"), b"info").unwrap();
-
-        let mut selected = HashMap::new();
-        add_preserved_resource_selection(
-            &mut selected,
-            "app/resources/hero.glb",
-            &assets_dir.join("hero.glb"),
-            "app",
-            false,
-        )
-        .unwrap();
-        add_preserved_resource_selection(
-            &mut selected,
-            "makepad_icon/resources/icons",
-            &assets_dir.join("icons"),
-            "makepad_icon",
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(selected.len(), 3);
-        assert_eq!(
-            selected.get("app/resources/hero.glb").unwrap().source_path,
-            assets_dir.join("hero.glb")
-        );
-        assert_eq!(
-            selected
-                .get("makepad_icon/resources/icons/search.svg")
-                .unwrap()
-                .source_path,
-            assets_dir.join("icons/search.svg")
-        );
-        assert_eq!(
-            selected
-                .get("makepad_icon/resources/icons/nested/info.svg")
-                .unwrap()
-                .source_path,
-            assets_dir.join("icons/nested/info.svg")
-        );
-        assert!(selected.values().all(|entry| !entry.direct_reference));
-        assert!(selected.values().all(|entry| entry.reason == "preserve"));
-
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
     fn brotli_accept_header_respects_quality_values() {
         assert!(client_accepts_brotli(Some("gzip, br")));
         assert!(client_accepts_brotli(Some("br;q=1.0, gzip;q=0.8")));
@@ -5490,50 +3799,6 @@ script_mod!{
             cache_control_for_request(WasmServeMode::Dev, "app.1234.wasm", Some(&manifest)),
             "no-store, must-revalidate".to_string()
         );
-        assert_eq!(
-            cache_control_for_request(
-                WasmServeMode::Packaged,
-                "wasm-bundles.json",
-                Some(&manifest)
-            ),
-            short_cache_control()
-        );
-    }
-
-    #[test]
-    fn resolve_served_request_path_falls_back_only_for_extensionless_routes() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("makepad-wasm-server-{unique}"));
-        fs::create_dir_all(temp_root.join("makepad_platform")).unwrap();
-        fs::write(temp_root.join("index.html"), "<html></html>").unwrap();
-        fs::write(
-            temp_root.join("makepad_platform/web_gl.js"),
-            "console.log('webgl');",
-        )
-        .unwrap();
-
-        assert_eq!(resolve_served_request_path(&temp_root, "/"), "/index.html");
-        assert_eq!(
-            resolve_served_request_path(&temp_root, "/makepad-components/alert"),
-            "/index.html"
-        );
-        assert_eq!(
-            resolve_served_request_path(&temp_root, "/makepad_platform/web_gl.js"),
-            "/makepad_platform/web_gl.js"
-        );
-        assert_eq!(
-            resolve_served_request_path(&temp_root, "/missing.js"),
-            "/missing.js"
-        );
-        assert_eq!(
-            resolve_served_request_path(&temp_root, "/$watch"),
-            "/$watch"
-        );
-
-        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]
@@ -5552,8 +3817,8 @@ script_mod!{
             wasm_bridge_js_path: None,
         };
         let eager_html = generate_html("app", &eager_assets, &config);
-        assert!(eager_html.contains("/app.data.bin"));
-        assert!(eager_html.contains("/app.secondary.wasm"));
+        assert!(eager_html.contains("./app.data.bin"));
+        assert!(eager_html.contains("./app.secondary.wasm"));
         assert!(!eager_html.contains("defer_secondary_wasm: true"));
 
         let deferred_assets = HtmlAssetPaths {
@@ -5561,10 +3826,11 @@ script_mod!{
             ..eager_assets
         };
         let deferred_html = generate_html("app", &deferred_assets, &config);
-        assert!(deferred_html.contains("/app.data.bin"));
+        assert!(deferred_html.contains("./app.data.bin"));
         assert!(deferred_html.contains("defer_secondary_wasm: true"));
-        assert!(!deferred_html
-            .contains("href='/app.secondary.wasm' as='fetch' type='application/wasm' crossorigin"));
+        assert!(!deferred_html.contains(
+            "href='./app.secondary.wasm' as='fetch' type='application/wasm' crossorigin"
+        ));
 
         let active_only_assets = HtmlAssetPaths {
             split_data_active_only: true,
@@ -5666,70 +3932,6 @@ script_mod!{
     }
 
     #[test]
-    fn finalize_pending_assets_fingerprints_optional_route_bundle_wasm() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let app_dir = std::env::temp_dir().join(format!("makepad-route-bundle-asset-{unique}"));
-        fs::create_dir_all(&app_dir).unwrap();
-        fs::write(
-            app_dir.join("app.bundle.alerts.wasm"),
-            b"route-bundle-bytes",
-        )
-        .unwrap();
-
-        let mut pending_assets = vec![PendingAsset {
-            logical_path: "app.bundle.alerts.wasm".to_string(),
-            emitted_path: "app.bundle.alerts.wasm".to_string(),
-            kind: "wasm".to_string(),
-            content_type: "application/wasm".to_string(),
-            startup_blocking: false,
-            direct_reference: false,
-            crate_name: None,
-            reason: "route_bundle".to_string(),
-        }];
-        let manifest =
-            finalize_pending_assets(&app_dir, "app", "small", false, true, &mut pending_assets)
-                .unwrap();
-
-        assert_eq!(manifest.assets.len(), 1);
-        assert_ne!(manifest.assets[0].emitted_path, "app.bundle.alerts.wasm");
-        assert!(manifest.assets[0].hashed);
-        assert!(!manifest.assets[0].startup_blocking);
-
-        let wasm_bundles = WasmBundlesJson {
-            base_scripts: Some(WasmScriptPackJsonEntry {
-                url: "app.scripts.base.1234.json".to_string(),
-            }),
-            bundles: [(
-                "alerts".to_string(),
-                WasmBundleJsonEntry {
-                    url: manifest.assets[0].emitted_path.clone(),
-                    init_export: Some("router_bundle_mark_alerts".to_string()),
-                    script_url: Some("app.scripts.alerts.1234.json".to_string()),
-                },
-            )]
-            .into_iter()
-            .collect(),
-        };
-        assert!(wasm_bundles
-            .serialize_json()
-            .contains(&manifest.assets[0].emitted_path));
-        assert!(wasm_bundles
-            .serialize_json()
-            .contains("router_bundle_mark_alerts"));
-        assert!(wasm_bundles
-            .serialize_json()
-            .contains("app.scripts.base.1234.json"));
-        assert!(wasm_bundles
-            .serialize_json()
-            .contains("app.scripts.alerts.1234.json"));
-
-        let _ = fs::remove_dir_all(&app_dir);
-    }
-
-    #[test]
     fn ship_html_without_bindgen_still_references_runtime_web_gl_only() {
         let config = test_wasm_config();
         let assets = HtmlAssetPaths {
@@ -5746,8 +3948,8 @@ script_mod!{
         };
         let html = generate_html("app", &assets, &config);
 
-        assert!(html.contains("await import('/makepad_platform/web_gl.js')"));
-        assert!(!html.contains("await import('/makepad_wasm_bridge/wasm_bridge.js')"));
+        assert!(html.contains("await import('./makepad_platform/web_gl.js')"));
+        assert!(!html.contains("await import('./makepad_wasm_bridge/wasm_bridge.js')"));
     }
 
     #[test]

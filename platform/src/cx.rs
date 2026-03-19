@@ -18,7 +18,7 @@ use {
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
-        thread::{SignalToUI, ToUISender},
+        thread::SignalToUI,
         uniform_buffer::CxUniformBufferPool,
         window::CxWindowPool,
     },
@@ -85,7 +85,6 @@ pub struct Cx {
     pub(crate) timer_id: u64,
     pub(crate) next_frame_id: u64,
     pub(crate) permissions_request_id: i32,
-    pub(crate) wasm_pending_bundle_loads: HashMap<String, Vec<ToUISender<Result<(), String>>>>,
 
     pub keyboard: CxKeyboard,
     pub fingers: CxFingers,
@@ -114,7 +113,6 @@ pub struct Cx {
     pub(crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
 
     pub(crate) globals: Vec<(TypeId, Box<dyn Any>)>,
-    pub(crate) wasm_loaded_bundles: HashSet<String>,
 
     pub components: ComponentRegistries,
 
@@ -381,7 +379,6 @@ impl Cx {
             timer_id: 1,
             next_frame_id: 1,
             permissions_request_id: 0,
-            wasm_pending_bundle_loads: Default::default(),
 
             keyboard: Default::default(),
             fingers: Default::default(),
@@ -411,7 +408,6 @@ impl Cx {
             debug_trace_active: false,
 
             globals: Default::default(),
-            wasm_loaded_bundles: Default::default(),
 
             components: ComponentRegistries::new(),
 
