@@ -219,6 +219,36 @@ fn is_custom_section(section: &WasmSection) -> bool {
     section.type_id == 0
 }
 
+pub fn wasm_extract_custom_section_payloads_by_name(
+    buf: &[u8],
+    section_name: &str,
+) -> Result<Vec<Vec<u8>>, WasmParseError> {
+    let sections = read_wasm_sections(buf)?;
+    let mut payloads = Vec::new();
+    for section in sections
+        .iter()
+        .filter(|section| section.type_id == 0 && section.name == section_name)
+    {
+        let mut reader = Reader::new(&buf[section.payload_start..section.end]);
+        let name_len = reader.read_var_u32()? as usize;
+        reader.skip(name_len)?;
+        payloads.push(reader.bytes.to_vec());
+    }
+    Ok(payloads)
+}
+
+pub fn wasm_strip_custom_sections_by_name<F>(
+    buf: &[u8],
+    should_strip: F,
+) -> Result<Vec<u8>, WasmParseError>
+where
+    F: Fn(&str) -> bool,
+{
+    rewrite_wasm(buf, |section| {
+        !(section.type_id == 0 && should_strip(section.name.as_str()))
+    })
+}
+
 fn summarize_sections<F>(sections: &[WasmSection], filter: F) -> WasmSectionSummary
 where
     F: Fn(&WasmSection) -> bool,

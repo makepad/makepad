@@ -172,6 +172,11 @@ pub struct FromWasmCancelHTTPRequest {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmEnsureWasmBundle {
+    pub bundle_id: String,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmCheckPermission {
     pub permission: String,
     pub request_id: u32,

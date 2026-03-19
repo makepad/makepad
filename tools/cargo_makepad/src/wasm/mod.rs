@@ -50,13 +50,44 @@ fn removed_wasm_option_error(v: &str) -> Option<String> {
 }
 
 fn build_uses_package_layout(config: &WasmConfig) -> bool {
-    config.optimize_size || config.brotli || config.split || !config.threads
+    config.optimize_size
+        || config.brotli
+        || config.split
+        || config.route_bundles.is_some()
+        || !config.threads
 }
 
 fn apply_packaged_web_defaults(config: &mut WasmConfig) {
     if config.package_layout && !config.full_fonts {
         config.small_fonts = true;
     }
+}
+
+fn validate_wasm_config(command: WasmCommand, config: &WasmConfig) -> Result<(), String> {
+    if let Some(route_bundles) = config.route_bundles.as_deref() {
+        if !matches!(command, WasmCommand::Build | WasmCommand::Run) {
+            return Err(
+                "`--route-bundles` is only supported with `cargo makepad wasm build` or `cargo makepad wasm run`."
+                    .to_string(),
+            );
+        }
+        if config.split {
+            return Err(format!(
+                "`--route-bundles={route_bundles}` cannot be combined with `--split`."
+            ));
+        }
+        if config.split_functions {
+            return Err(format!(
+                "`--route-bundles={route_bundles}` cannot be combined with `--split-functions`."
+            ));
+        }
+        if config.bindgen {
+            return Err(format!(
+                "`--route-bundles={route_bundles}` cannot be combined with `--bindgen`."
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> Result<bool, String> {
@@ -99,6 +130,13 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> Result<bool, String> {
         config.split_functions = true;
         config.split_functions_threshold = threshold.parse::<usize>().unwrap_or(200);
         Ok(true)
+    } else if let Some(path) = v.strip_prefix("--route-bundles=") {
+        if path.trim().is_empty() {
+            Err("`--route-bundles` requires a non-empty manifest path.".to_string())
+        } else {
+            config.route_bundles = Some(path.to_string());
+            Ok(true)
+        }
     } else {
         Ok(false)
     }
@@ -134,6 +172,7 @@ fn parse_wasm_command(
         hot_reload: false,
         package_layout: false,
         full_fonts: false,
+        route_bundles: None,
     };
 
     // pull out options
@@ -149,7 +188,7 @@ fn parse_wasm_command(
         return Err("missing wasm command".to_string());
     }
 
-    match args[0].as_ref() {
+    let parsed = match args[0].as_ref() {
         "rustup-install-toolchain" | "install-toolchain" => {
             Ok((WasmCommand::InstallToolchain, config, Vec::new()))
         }
@@ -162,14 +201,18 @@ fn parse_wasm_command(
         "run" => {
             let run_args = strip_wasm_options(&mut config, &args[1..])?;
             config.hot_reload = true;
-            config.package_layout = false;
+            config.package_layout = config.route_bundles.is_some();
+            apply_packaged_web_defaults(&mut config);
             Ok((WasmCommand::Run, config, run_args))
         }
         "ship" => Err(
             "`cargo makepad wasm ship` has been removed; use `cargo makepad wasm build` with explicit flags or `cargo makepad wasm run` for the dev server.".to_string(),
         ),
         _ => Err(format!("{} is not a valid command or option", args[0])),
-    }
+    }?;
+
+    validate_wasm_config(parsed.0, &parsed.1)?;
+    Ok(parsed)
 }
 
 pub fn handle_wasm(args: &[String]) -> Result<(), String> {
@@ -212,6 +255,7 @@ mod tests {
             vec!["build", "--strip", "-p", "app"],
             vec!["build", "--brotli", "-p", "app"],
             vec!["build", "--split", "-p", "app"],
+            vec!["build", "--route-bundles=route-bundles.toml", "-p", "app"],
             vec!["build", "--no-threads", "-p", "app"],
         ] {
             let (command, config, _) = parse(&args).unwrap();
@@ -288,5 +332,50 @@ mod tests {
                 "missing removed flag hint for {removed}"
             );
         }
+    }
+
+    #[test]
+    fn route_bundles_reject_legacy_split_modes_and_bindgen() {
+        for args in [
+            vec![
+                "build",
+                "--route-bundles=route-bundles.toml",
+                "--split",
+                "-p",
+                "app",
+            ],
+            vec![
+                "build",
+                "--route-bundles=route-bundles.toml",
+                "--split-functions",
+                "-p",
+                "app",
+            ],
+            vec![
+                "build",
+                "--route-bundles=route-bundles.toml",
+                "--bindgen",
+                "-p",
+                "app",
+            ],
+        ] {
+            assert!(
+                parse(&args).is_err(),
+                "expected incompatible args: {:?}",
+                args
+            );
+        }
+    }
+
+    #[test]
+    fn route_bundles_enable_packaged_run_mode() {
+        let (command, config, command_args) =
+            parse(&["run", "--route-bundles=route-bundles.toml", "-p", "app"]).unwrap();
+        assert_eq!(command, WasmCommand::Run);
+        assert!(config.hot_reload);
+        assert!(config.package_layout);
+        assert!(config.small_fonts);
+        assert_eq!(config.route_bundles.as_deref(), Some("route-bundles.toml"));
+        assert_eq!(command_args, vec!["-p", "app"]);
     }
 }

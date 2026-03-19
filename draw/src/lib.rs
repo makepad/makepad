@@ -51,20 +51,164 @@ pub use crate::{
 
 pub use crate::shader::draw_svg::DrawSvg;
 
+const DRAW_REGISTRY_MODULE: LiveId = live_id!(makepad_draw_registered);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DrawModule {
+    Turtle,
+    Sdf,
+    Geometry,
+    DrawQuad,
+    DrawCube,
+    DrawGlyph,
+    DrawPbr,
+    DrawRotatedText,
+    DrawSvg,
+    DrawSvgGlyph,
+    DrawText,
+    DrawText3d,
+    DrawVector,
+}
+
+pub const ALL_DRAW_MODULES: &[DrawModule] = &[
+    DrawModule::Turtle,
+    DrawModule::Sdf,
+    DrawModule::Geometry,
+    DrawModule::DrawQuad,
+    DrawModule::DrawCube,
+    DrawModule::DrawGlyph,
+    DrawModule::DrawPbr,
+    DrawModule::DrawRotatedText,
+    DrawModule::DrawSvg,
+    DrawModule::DrawSvgGlyph,
+    DrawModule::DrawText,
+    DrawModule::DrawText3d,
+    DrawModule::DrawVector,
+];
+
+impl DrawModule {
+    fn marker_id(self) -> LiveId {
+        match self {
+            DrawModule::Turtle => live_id!(turtle),
+            DrawModule::Sdf => live_id!(sdf),
+            DrawModule::Geometry => live_id!(geometry),
+            DrawModule::DrawQuad => live_id!(draw_quad),
+            DrawModule::DrawCube => live_id!(draw_cube),
+            DrawModule::DrawGlyph => live_id!(draw_glyph),
+            DrawModule::DrawPbr => live_id!(draw_pbr),
+            DrawModule::DrawRotatedText => live_id!(draw_rotated_text),
+            DrawModule::DrawSvg => live_id!(draw_svg),
+            DrawModule::DrawSvgGlyph => live_id!(draw_svg_glyph),
+            DrawModule::DrawText => live_id!(draw_text),
+            DrawModule::DrawText3d => live_id!(draw_text_3d),
+            DrawModule::DrawVector => live_id!(draw_vector),
+        }
+    }
+
+    fn dependencies(self) -> &'static [DrawModule] {
+        match self {
+            DrawModule::DrawRotatedText => &[DrawModule::DrawText],
+            DrawModule::DrawSvg => &[DrawModule::DrawVector],
+            DrawModule::DrawSvgGlyph => &[DrawModule::DrawGlyph],
+            DrawModule::DrawText3d => &[DrawModule::DrawRotatedText],
+            _ => &[],
+        }
+    }
+
+    fn register_script_mod(self, vm: &mut ScriptVm) {
+        match self {
+            DrawModule::Turtle => {
+                crate::turtle::script_mod(vm);
+            }
+            DrawModule::Sdf => {
+                crate::shader::sdf::script_mod(vm);
+            }
+            DrawModule::Geometry => {
+                crate::geometry::script_mod(vm);
+            }
+            DrawModule::DrawQuad => {
+                crate::shader::draw_quad::script_mod(vm);
+            }
+            DrawModule::DrawCube => {
+                crate::shader::draw_cube::script_mod(vm);
+            }
+            DrawModule::DrawGlyph => {
+                crate::shader::draw_glyph::script_mod(vm);
+            }
+            DrawModule::DrawPbr => {
+                crate::shader::draw_pbr::script_mod(vm);
+            }
+            DrawModule::DrawRotatedText => {
+                crate::shader::draw_rotated_text::script_mod(vm);
+            }
+            DrawModule::DrawSvg => {
+                crate::shader::draw_svg::script_mod(vm);
+            }
+            DrawModule::DrawSvgGlyph => {
+                crate::shader::draw_svg_glyph::script_mod(vm);
+            }
+            DrawModule::DrawText => {
+                crate::shader::draw_text::script_mod(vm);
+            }
+            DrawModule::DrawText3d => {
+                crate::shader::draw_text_3d::script_mod(vm);
+            }
+            DrawModule::DrawVector => {
+                crate::shader::draw_vector::script_mod(vm);
+            }
+        }
+    }
+}
+
+fn draw_registry_module(vm: &mut ScriptVm) -> ScriptObject {
+    let existing = vm
+        .bx
+        .heap
+        .value(vm.bx.heap.modules, DRAW_REGISTRY_MODULE.into(), NoTrap);
+    if let Some(module) = existing.as_object() {
+        module
+    } else {
+        vm.new_module(DRAW_REGISTRY_MODULE)
+    }
+}
+
+fn draw_module_registered(vm: &mut ScriptVm, module: DrawModule) -> bool {
+    let registry = draw_registry_module(vm);
+    vm.bx
+        .heap
+        .value(registry, module.marker_id().into(), NoTrap)
+        .as_object()
+        .is_some()
+}
+
+fn mark_draw_module_registered(vm: &mut ScriptVm, module: DrawModule) {
+    let registry = draw_registry_module(vm);
+    vm.bx
+        .heap
+        .set_value_def(registry, module.marker_id().into(), registry.into());
+}
+
+fn register_draw_module_recursive(vm: &mut ScriptVm, module: DrawModule) {
+    if draw_module_registered(vm, module) {
+        return;
+    }
+
+    for dependency in module.dependencies() {
+        register_draw_module_recursive(vm, *dependency);
+    }
+
+    module.register_script_mod(vm);
+    mark_draw_module_registered(vm, module);
+}
+
+pub fn register_draw_modules(vm: &mut ScriptVm, modules: &[DrawModule]) {
+    for module in modules {
+        register_draw_module_recursive(vm, *module);
+    }
+}
+
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-    crate::turtle::script_mod(vm);
-    crate::shader::sdf::script_mod(vm);
-    crate::geometry::script_mod(vm);
-    crate::shader::draw_quad::script_mod(vm);
-    crate::shader::draw_cube::script_mod(vm);
-    crate::shader::draw_glyph::script_mod(vm);
-    crate::shader::draw_text::script_mod(vm);
-    crate::shader::draw_rotated_text::script_mod(vm);
-    crate::shader::draw_text_3d::script_mod(vm);
-    crate::shader::draw_vector::script_mod(vm);
-    crate::shader::draw_pbr::script_mod(vm);
-    crate::shader::draw_svg::script_mod(vm);
-    crate::shader::draw_svg_glyph::script_mod(vm);
+    register_draw_modules(vm, ALL_DRAW_MODULES);
     NIL
 }
 /*

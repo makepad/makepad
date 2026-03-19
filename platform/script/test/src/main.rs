@@ -4463,6 +4463,7 @@ View{
                 let script_mod = ScriptMod {
                     cargo_manifest_path: String::new(),
                     module_path: String::new(),
+                    source_id: 0,
                     file: "streaming_test".to_string(),
                     line: 0,
                     column: 0,
@@ -4490,6 +4491,7 @@ View{
                 let script_mod = ScriptMod {
                     cargo_manifest_path: String::new(),
                     module_path: String::new(),
+                    source_id: 0,
                     file: "streaming_20char".to_string(),
                     line: 0,
                     column: 0,

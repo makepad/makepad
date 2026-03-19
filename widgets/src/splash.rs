@@ -43,6 +43,7 @@ impl Splash {
         let script_mod = ScriptMod {
             cargo_manifest_path: String::new(),
             module_path: String::new(),
+            source_id: 0,
             file: String::new(),
             line: self_id,
             column: 0,

@@ -12,6 +12,8 @@ use {
             WindowGeomChangeEvent,
         },
         makepad_live_id::*,
+        makepad_micro_serde::DeJson,
+        makepad_script::ScriptModKey,
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
         permission::{Permission, PermissionResult, PermissionStatus},
         thread::SignalToUI,
@@ -19,11 +21,63 @@ use {
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
     std::cell::RefCell,
+    std::collections::HashMap,
     std::panic,
     std::rc::Rc,
 };
 
 impl Cx {
+    fn decode_script_pack_key(key: &str) -> Result<ScriptModKey, String> {
+        let mut parts = key.splitn(2, ':');
+        let source_id = u64::from_str_radix(
+            parts
+                .next()
+                .ok_or_else(|| format!("Invalid script pack key `{key}`"))?,
+            16,
+        )
+        .map_err(|_| format!("Invalid script pack source_id in `{key}`"))?;
+        let rest = parts
+            .next()
+            .ok_or_else(|| format!("Invalid script pack key `{key}`"))?;
+        let mut parts = rest.rsplitn(3, ':');
+        let column = parts
+            .next()
+            .ok_or_else(|| format!("Invalid script pack key `{key}`"))?
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid script pack column in `{key}`"))?;
+        let line = parts
+            .next()
+            .ok_or_else(|| format!("Invalid script pack key `{key}`"))?
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid script pack line in `{key}`"))?;
+        let file = parts
+            .next()
+            .ok_or_else(|| format!("Invalid script pack key `{key}`"))?;
+        if file.is_empty() {
+            return Err(format!("Invalid script pack file in `{key}`"));
+        }
+        Ok(ScriptModKey {
+            source_id,
+            file: file.to_string(),
+            line,
+            column,
+        })
+    }
+
+    fn register_script_sources_json(&mut self, json: &str) -> Result<(), String> {
+        let sources = HashMap::<String, String>::deserialize_json(json)
+            .map_err(|err| format!("Cannot parse script source pack JSON: {}", err.msg))?;
+        let mut overrides = self
+            .script_data
+            .live_reload
+            .script_mod_overrides
+            .borrow_mut();
+        for (key, code) in sources {
+            overrides.insert(Self::decode_script_pack_key(&key)?, code);
+        }
+        Ok(())
+    }
+
     fn normalize_web_pathname(pathname: &str) -> String {
         let trimmed = pathname.trim();
         if trimmed.is_empty() {
@@ -255,6 +309,25 @@ impl Cx {
                     if self.update_web_location_state(tw.pathname, tw.search, tw.hash) {
                         self.call_event_handler(&Event::Signal);
                     }
+                }
+
+                live_id!(ToWasmRegisterScriptSources) => {
+                    let tw = ToWasmRegisterScriptSources::read_to_wasm(&mut to_wasm);
+                    let json = String::from_utf8(tw.data.into_vec_u8())
+                        .expect("Externalized script source pack is not valid UTF-8");
+                    if let Err(error) = self.register_script_sources_json(&json) {
+                        panic!("Failed to register externalized script sources: {error}");
+                    }
+                }
+
+                live_id!(ToWasmWasmBundleReady) => {
+                    let tw = ToWasmWasmBundleReady::read_to_wasm(&mut to_wasm);
+                    self.complete_wasm_bundle_load(tw.bundle_id, Ok(()));
+                }
+
+                live_id!(ToWasmWasmBundleError) => {
+                    let tw = ToWasmWasmBundleError::read_to_wasm(&mut to_wasm);
+                    self.complete_wasm_bundle_load(tw.bundle_id, Err(tw.error));
                 }
 
                 live_id!(ToWasmHTTPResponse) => {
@@ -642,6 +715,9 @@ impl Cx {
                         request_id_hi: request_id.hi(),
                     });
                 }
+                CxOsOp::EnsureWasmBundle { bundle_id } => {
+                    self.os.from_wasm(FromWasmEnsureWasmBundle { bundle_id });
+                }
                 CxOsOp::CheckPermission {
                     permission,
                     request_id,
@@ -846,6 +922,9 @@ impl CxOsApi for Cx {
             ToWasmRedrawAll::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
+            ToWasmRegisterScriptSources::to_js_code(),
+            ToWasmWasmBundleReady::to_js_code(),
+            ToWasmWasmBundleError::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
             ToWasmWindowLostFocus::to_js_code(),
             ToWasmHTTPResponse::to_js_code(),
@@ -881,6 +960,7 @@ impl CxOsApi for Cx {
             FromWasmHideTextIME::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
             FromWasmCancelHTTPRequest::to_js_code(),
+            FromWasmEnsureWasmBundle::to_js_code(),
             FromWasmCheckPermission::to_js_code(),
             FromWasmRequestPermission::to_js_code(),
             /*FromWasmWebSocketOpen::to_js_code(),

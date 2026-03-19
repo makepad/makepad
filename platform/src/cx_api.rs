@@ -172,6 +172,9 @@ pub enum CxOsOp {
     CancelHttpRequest {
         request_id: LiveId,
     },
+    EnsureWasmBundle {
+        bundle_id: String,
+    },
 
     PrepareVideoPlayback(
         LiveId,
@@ -274,6 +277,7 @@ impl std::fmt::Debug for CxOsOp {
 
             Self::HttpRequest { .. } => write!(f, "HttpRequest"),
             Self::CancelHttpRequest { .. } => write!(f, "CancelHttpRequest"),
+            Self::EnsureWasmBundle { .. } => write!(f, "EnsureWasmBundle"),
 
             Self::PrepareVideoPlayback(..) => write!(f, "PrepareVideoPlayback"),
             Self::AttachCameraNativePreview { .. } => write!(f, "AttachCameraNativePreview"),
@@ -1025,6 +1029,60 @@ impl Cx {
     pub fn cancel_http_request(&mut self, request_id: LiveId) {
         if let Err(err) = self.net.http_cancel(request_id) {
             crate::error!("cancel_http_request failed for {}: {}", request_id.0, err);
+        }
+    }
+
+    pub fn ensure_wasm_bundle(
+        &mut self,
+        bundle_id: &str,
+    ) -> crate::thread::ToUIReceiver<Result<(), String>> {
+        let receiver = crate::thread::ToUIReceiver::default();
+        let sender = receiver.sender();
+
+        if bundle_id.trim().is_empty() {
+            let _ = sender.send(Err("Wasm bundle id must not be empty.".to_string()));
+            return receiver;
+        }
+
+        if !matches!(self.os_type, OsType::Web(_)) {
+            let _ = sender.send(Ok(()));
+            return receiver;
+        }
+
+        if self.wasm_loaded_bundles.contains(bundle_id) {
+            let _ = sender.send(Ok(()));
+            return receiver;
+        }
+
+        if let Some(waiters) = self.wasm_pending_bundle_loads.get_mut(bundle_id) {
+            waiters.push(sender);
+            return receiver;
+        }
+
+        self.wasm_pending_bundle_loads
+            .insert(bundle_id.to_string(), vec![sender]);
+        self.platform_ops.push(CxOsOp::EnsureWasmBundle {
+            bundle_id: bundle_id.to_string(),
+        });
+        receiver
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn complete_wasm_bundle_load(
+        &mut self,
+        bundle_id: String,
+        result: Result<(), String>,
+    ) {
+        if result.is_ok() {
+            self.wasm_loaded_bundles.insert(bundle_id.clone());
+        } else {
+            self.wasm_loaded_bundles.remove(&bundle_id);
+        }
+
+        if let Some(waiters) = self.wasm_pending_bundle_loads.remove(&bundle_id) {
+            for waiter in waiters {
+                let _ = waiter.send(result.clone());
+            }
         }
     }
     /*

@@ -3,12 +3,113 @@
 use {
     makepad_micro_proc_macro::{TokenBuilder, TokenParser},
     proc_macro::{Delimiter, Span, TokenStream},
-    std::fmt::Write,
+    std::{
+        fmt::Write,
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    },
 };
+
+const SCRIPT_MOD_SECTION_NAME: &str = "makepad:script_mod";
+const SCRIPT_MOD_RECORDS_DIR_ENV: &str = "MAKEPAD_EXTERNALIZED_SCRIPT_MOD_DIR";
+static NEXT_SCRIPT_MOD_NONCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ScriptImplOptions {
+    externalize_mod_source: bool,
+}
+
+fn script_mod_externalization_enabled() -> bool {
+    std::env::var_os("MAKEPAD_EXTERNALIZE_SCRIPT_MODS").is_some()
+}
+
+fn normalize_record_relative_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn externalized_script_mod_file_key(span: Span) -> String {
+    let package_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "unknown".to_string());
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+
+    let relative_path = if let (Some(local_file), Some(manifest_dir)) = (span.local_file(), manifest_dir)
+    {
+        local_file
+            .strip_prefix(&manifest_dir)
+            .map(PathBuf::from)
+            .unwrap_or(local_file)
+    } else {
+        PathBuf::from(span.file())
+    };
+
+    format!(
+        "{package_name}/{}",
+        normalize_record_relative_path(&relative_path)
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+    )
+}
+
+fn stable_u64_hash(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    let mut hash = OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+fn next_script_mod_source_id(file: &str, line: usize, column: usize, code: &str) -> u64 {
+    let nonce = NEXT_SCRIPT_MOD_NONCE.fetch_add(1, Ordering::Relaxed);
+    let mut payload = Vec::new();
+    payload.extend_from_slice(file.as_bytes());
+    payload.extend_from_slice(&(line as u64).to_le_bytes());
+    payload.extend_from_slice(&(column as u64).to_le_bytes());
+    payload.extend_from_slice(&nonce.to_le_bytes());
+    payload.extend_from_slice(code.as_bytes());
+    stable_u64_hash(&payload)
+}
+
+fn externalized_script_mod_record_path(source_id: u64) -> PathBuf {
+    let output_dir = std::env::var_os(SCRIPT_MOD_RECORDS_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!(
+                "{SCRIPT_MOD_RECORDS_DIR_ENV} must be set when MAKEPAD_EXTERNALIZE_SCRIPT_MODS is enabled"
+            )
+        });
+    output_dir.join(format!("{source_id:016x}.txt"))
+}
+
+fn write_externalized_script_mod_record(source_id: u64, code: &str) {
+    let record_path = externalized_script_mod_record_path(source_id);
+    if let Some(parent) = record_path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|error| {
+            panic!(
+                "Failed to create externalized script_mod directory {:?}: {error}",
+                parent
+            )
+        });
+    }
+    fs::write(&record_path, code).unwrap_or_else(|error| {
+        panic!(
+            "Failed to write externalized script_mod record {:?}: {error}",
+            record_path
+        )
+    });
+}
 
 pub fn script_mod_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
-    let ts = script_impl(input);
+    let ts = script_impl_with_options(
+        input,
+        ScriptImplOptions {
+            externalize_mod_source: script_mod_externalization_enabled(),
+        },
+    );
     tb.add("pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{");
     tb.add("    let sb=").stream(Some(ts)).add(";");
     tb.add("    vm.eval(sb)");
@@ -48,7 +149,7 @@ pub fn script_apply_eval_impl(input: TokenStream) -> TokenStream {
 
     // Generate the script_impl output (the ScriptMod struct)
     // Use script_impl_expr to NOT add semicolon - we want to return the expression value
-    let script_mod = script_impl(script_code);
+    let script_mod = script_impl_with_options(script_code, ScriptImplOptions::default());
 
     // Build: cx.with_vm(|vm| { let script = ScriptMod{...}; target.script_apply_eval(vm, script) })
     tb.ident(&cx_expr).add(".with_vm(|vm|{");
@@ -61,11 +162,111 @@ pub fn script_apply_eval_impl(input: TokenStream) -> TokenStream {
 }
 
 pub fn script_impl(input: TokenStream) -> TokenStream {
+    script_impl_with_options(input, ScriptImplOptions::default())
+}
+
+fn script_impl_with_options(input: TokenStream, options: ScriptImplOptions) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
 
     if let Some(span) = parser.span() {
         let (s, values) = token_parser_to_whitespace_matching_string(&mut parser, span);
+        let start_line = span.start().line();
+        let start_column = span.start().column();
+        let externalized_file_key = externalized_script_mod_file_key(span);
+        let source_id =
+            next_script_mod_source_id(&externalized_file_key, start_line, start_column, &s);
+        let externalized_file_key = options
+            .externalize_mod_source
+            .then_some(externalized_file_key.clone());
+        let file_expr = if let Some(file_key) = externalized_file_key.as_ref() {
+            format!("{file_key:?}.to_string()")
+        } else {
+            "file!().to_string().replace(\"\\\\\", \"/\")"
+                .to_string()
+        };
+        let inline_code = if options.externalize_mod_source {
+            ""
+        } else {
+            &s
+        };
+
+        if options.externalize_mod_source {
+            let file_key = externalized_file_key
+                .as_ref()
+                .expect("externalized script_mod file key");
+            write_externalized_script_mod_record(source_id, &s);
+            tb.add("{");
+            tb.add("#[cfg(target_arch = \"wasm32\")]");
+            tb.add("#[allow(long_running_const_eval)]");
+            tb.add("const _ : () = {");
+            tb.add("const FILE: &str = ")
+                .string(file_key)
+                .add(";");
+            tb.add("const MODULE_PATH: &str = module_path!();");
+            tb.add(&format!("const LINE: u32 = {start_line};"));
+            tb.add(&format!("const COLUMN: u32 = {start_column};"));
+            tb.add(&format!("const SOURCE_ID: u64 = {source_id};"));
+            tb.add("const LEN: usize = 28 + FILE.len() + MODULE_PATH.len();");
+            tb.add("const fn pack() -> [u8; LEN] {");
+            tb.add("let file_bytes = FILE.as_bytes();");
+            tb.add("let module_path_bytes = MODULE_PATH.as_bytes();");
+            tb.add("let mut out = [0; LEN];");
+            tb.add("let file_len = file_bytes.len() as u32;");
+            tb.add("let module_path_len = module_path_bytes.len() as u32;");
+            tb.add("let file_len_bytes = file_len.to_le_bytes();");
+            tb.add("let line_bytes = LINE.to_le_bytes();");
+            tb.add("let column_bytes = COLUMN.to_le_bytes();");
+            tb.add("let module_path_len_bytes = module_path_len.to_le_bytes();");
+            tb.add("let source_id_bytes = SOURCE_ID.to_le_bytes();");
+            tb.add("out[0] = file_len_bytes[0];");
+            tb.add("out[1] = file_len_bytes[1];");
+            tb.add("out[2] = file_len_bytes[2];");
+            tb.add("out[3] = file_len_bytes[3];");
+            tb.add("out[4] = line_bytes[0];");
+            tb.add("out[5] = line_bytes[1];");
+            tb.add("out[6] = line_bytes[2];");
+            tb.add("out[7] = line_bytes[3];");
+            tb.add("out[8] = column_bytes[0];");
+            tb.add("out[9] = column_bytes[1];");
+            tb.add("out[10] = column_bytes[2];");
+            tb.add("out[11] = column_bytes[3];");
+            tb.add("out[12] = module_path_len_bytes[0];");
+            tb.add("out[13] = module_path_len_bytes[1];");
+            tb.add("out[14] = module_path_len_bytes[2];");
+            tb.add("out[15] = module_path_len_bytes[3];");
+            tb.add("out[16] = source_id_bytes[0];");
+            tb.add("out[17] = source_id_bytes[1];");
+            tb.add("out[18] = source_id_bytes[2];");
+            tb.add("out[19] = source_id_bytes[3];");
+            tb.add("out[20] = source_id_bytes[4];");
+            tb.add("out[21] = source_id_bytes[5];");
+            tb.add("out[22] = source_id_bytes[6];");
+            tb.add("out[23] = source_id_bytes[7];");
+            tb.add("out[24] = 0;");
+            tb.add("out[25] = 0;");
+            tb.add("out[26] = 0;");
+            tb.add("out[27] = 0;");
+            tb.add("let mut i = 0;");
+            tb.add("while i < file_bytes.len() {");
+            tb.add("let byte = file_bytes[i];");
+            tb.add("out[28 + i] = if byte == 92 { 47 } else { byte };");
+            tb.add("i += 1;");
+            tb.add("}");
+            tb.add("let mut j = 0;");
+            tb.add("while j < module_path_bytes.len() {");
+            tb.add("out[28 + file_bytes.len() + j] = module_path_bytes[j];");
+            tb.add("j += 1;");
+            tb.add("}");
+            tb.add("out");
+            tb.add("}");
+            tb.add("#[used]");
+            tb.add("#[unsafe(link_section = ")
+                .string(SCRIPT_MOD_SECTION_NAME)
+                .add(")]");
+            tb.add("static SCRIPT_MOD_SECTION: [u8; LEN] = pack();");
+            tb.add("};");
+        }
 
         tb.add("ScriptMod {");
         tb.add("    cargo_manifest_path: env!(")
@@ -76,17 +277,12 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
         tb.add("    module_path :")
             .ident_with_span("module_path", span)
             .add("!().to_string(),");
-        tb.add("    file:")
-            .ident_with_span("file", span)
-            .add("!().to_string().replace(")
-            .string("\\")
-            .add(",")
-            .string("/")
-            .add("),");
-        tb.add("    line:line!() as usize,");
-        tb.add("    column:column!() as usize,");
+        tb.add(&format!("    source_id:{source_id},"));
+        tb.add("    file:").add(&file_expr).add(",");
+        tb.add(&format!("    line:{start_line},"));
+        tb.add(&format!("    column:{start_column},"));
 
-        tb.add("    code:").string(&s).add(".to_string(),");
+        tb.add("    code:").string(inline_code).add(".to_string(),");
         tb.add("    values:{");
         tb.add("        let mut v = Vec::new();");
         for value in &values {
@@ -96,6 +292,9 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
         }
         tb.add("    v}");
         tb.add("}");
+        if options.externalize_mod_source {
+            tb.add("}");
+        }
     } else {
         tb.add("ScriptMod::default()");
     }
