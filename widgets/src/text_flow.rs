@@ -1320,6 +1320,18 @@ impl TextFlow {
         }
     }
 
+    /// Starts a new line using the current wrap spacing, so that the vertical
+    /// gap matches the line spacing of the most recently drawn text.
+    /// This is intended for `<br>` tags in HTML rendering.
+    pub fn new_line_with_wrap_spacing(&mut self, cx: &mut Cx2d) {
+        let spacing = cx.turtle().wrap_spacing();
+        cx.turtle_new_line_with_spacing(spacing);
+        self.first_thing_on_a_line = true;
+        if self.selectable {
+            self.selection_tracker.push_newline();
+        }
+    }
+
     pub fn new_line_collapsed_with_spacing(&mut self, cx: &mut Cx2d, spacing: f64) {
         cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
