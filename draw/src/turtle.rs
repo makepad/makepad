@@ -620,6 +620,14 @@ impl Turtle {
         self.layout.padding
     }
 
+    /// Sets the left padding of this turtle's layout.
+    ///
+    /// This is useful for adjusting the hanging indent of list items
+    /// after measuring the actual width of the bullet/marker text.
+    pub fn set_padding_left(&mut self, left: f64) {
+        self.layout.padding.left = left;
+    }
+
     /// Returns the alignment of each walk of this turtle with respect to it's rectangle.
     pub fn align(&self) -> Align {
         self.layout.align
