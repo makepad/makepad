@@ -44,20 +44,19 @@ fn parse_cli_mounts_spec() -> Option<String> {
     parse_cli_arg_value("mounts")
 }
 
-fn parse_cli_bind_spec() -> Result<Option<String>, String> {
+fn parse_cli_bind_spec() -> Option<String> {
     let mut value = None;
     let prefixed = "--bind=";
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
+    for arg in std::env::args().skip(1) {
         if let Some(parsed) = arg.strip_prefix(prefixed) {
             value = Some(parsed.to_string());
             continue;
         }
         if arg == "--bind" {
-            return Err("invalid --bind usage, use --bind=<ip[:port]>".to_string());
+            value = Some("0.0.0.0".to_string());
         }
     }
-    Ok(value)
+    value
 }
 
 fn parse_cli_bind_address(spec: Option<String>) -> Result<SocketAddr, String> {
@@ -205,7 +204,7 @@ impl App {
             });
         }
 
-        let listen_address = match parse_cli_bind_spec().and_then(parse_cli_bind_address) {
+        let listen_address = match parse_cli_bind_address(parse_cli_bind_spec()) {
             Ok(addr) => addr,
             Err(err) => {
                 self.set_status(cx, &err);
