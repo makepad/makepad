@@ -423,15 +423,6 @@ impl DesktopRunView {
                     self.apply_remote_texture(cx, &texture, frame.width, frame.height, y_flip);
                     self.remote_current_frame_id = frame.frame_id;
                     self.remote_current_path = Some(path);
-                    if frame.frame_id <= 3 || frame.frame_id % 30 == 0 {
-                        crate::log!(
-                            "runview remote frame applied immediately build={} frame={} size={}x{}",
-                            build_id.0,
-                            frame.frame_id,
-                            frame.width,
-                            frame.height,
-                        );
-                    }
                     return;
                 }
             }
@@ -490,14 +481,6 @@ impl DesktopRunView {
                 self.remote_current_frame_id = pending_frame_id;
                 self.remote_current_path = Some(pending_path);
                 self.remote_pending_decode = None;
-                if pending_frame_id <= 3 || pending_frame_id % 30 == 0 {
-                    crate::log!(
-                        "runview remote frame applied after async decode frame={} size={}x{}",
-                        pending_frame_id,
-                        pending_width,
-                        pending_height,
-                    );
-                }
             }
         }
     }

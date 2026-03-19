@@ -256,7 +256,6 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
         get_intent_string_extra(env, activity, "makepad.STUDIO").filter(|v| !v.trim().is_empty())
     {
         std::env::set_var("STUDIO", &studio);
-        crate::log!("android launch extra STUDIO={}", studio);
     }
 }
 

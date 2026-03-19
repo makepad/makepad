@@ -703,7 +703,6 @@ fn compile_java(
         .unwrap_or(false)
         && expected_outputs.iter().all(|path| path.is_file())
     {
-        println!("Java classes unchanged, reusing cached javac output");
         return Ok(());
     }
 
@@ -1328,11 +1327,9 @@ pub fn build(
     )?;
     let build_paths = prepare_build(build_crate, &java_url, &app_label, variant, urls)?;
 
-    println!("Compiling APK & R.java files");
+    println!("Building APK");
     build_r_class(sdk_dir, &build_paths, urls)?;
     compile_java(sdk_dir, &build_paths, urls)?;
-
-    println!("Building APK");
     build_dex(sdk_dir, &build_paths, urls)?;
     build_unaligned_apk(sdk_dir, &build_paths, urls)?;
     let build_dir = add_rust_library(
@@ -1358,7 +1355,7 @@ pub fn build(
     build_zipaligned_apk(sdk_dir, &build_paths, urls)?;
     sign_apk(sdk_dir, &build_paths, urls)?;
 
-    println!("Compile APK completed");
+    println!("APK Build completed");
     Ok(BuildResult {
         dst_apk: build_paths.dst_apk,
         java_url,
@@ -1412,17 +1409,14 @@ pub fn run(
     }
 
     if devices.len() == 0 {
-        //println!("Installing android application");
+        println!("Uploading android application");
         shell_env_cap(
             &[],
             &cwd,
             sdk_dir.join("platform-tools/adb").to_str().unwrap(),
             &["install", "-r", (result.dst_apk.to_str().unwrap())],
         )?;
-        println!(
-            "Starting android application: {}",
-            result.dst_apk.file_name().unwrap().to_str().unwrap()
-        );
+        println!("Starting android application");
         let start_args = android_start_args(&result.java_url);
         let start_args_refs = start_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
         shell_env_cap(
@@ -1452,8 +1446,8 @@ pub fn run(
         )?;
     } else {
         let mut children = Vec::new();
+        println!("Uploading android application");
         for device in &devices {
-            //println!("Installing android application");
             children.push(shell_child_create(
                 &[],
                 &cwd,
@@ -1471,8 +1465,8 @@ pub fn run(
             shell_child_wait(child)?;
         }
         let mut children = Vec::new();
+        println!("Starting android application");
         for device in &devices {
-            //println!("Installing android application");
             let start_args = android_start_args(&result.java_url);
             let mut device_args = vec!["-s".to_string(), device.clone()];
             device_args.extend(start_args);
