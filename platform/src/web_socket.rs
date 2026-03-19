@@ -53,7 +53,6 @@ pub(crate) fn consume_studio_socket_response(
     match response {
         NetworkResponse::WsOpened { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
             STUDIO_WEB_SOCKET_CONNECTED.store(true, Ordering::SeqCst);
-            crate::log!("studio websocket connected");
             Some(Vec::new())
         }
         NetworkResponse::WsClosed { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
