@@ -2258,6 +2258,13 @@ impl Turtle {
         self.used_height = height_used;
     }
 
+    /// Returns the current wrap spacing, which is the extra vertical space
+    /// added between rows when text wraps (based on the line spacing of the
+    /// most recently drawn text).
+    pub fn wrap_spacing(&self) -> f64 {
+        self.wrap_spacing
+    }
+
     pub fn set_wrap_spacing(&mut self, value: f64) {
         self.wrap_spacing = self.wrap_spacing.max(value);
     }
