@@ -141,10 +141,18 @@ impl ShaderOutput {
             let field_name = self.backend.map_field_name(field.name);
             let type_name = self.glsl_type_name_inline(&field.ty);
             match field_name.as_str() {
-                "camera_projection" | "camera_view" | "depth_projection" | "depth_view" => {
+                "camera_projection"
+                | "camera_view"
+                | "depth_projection"
+                | "depth_view"
+                | "camera_inv" => {
                     writeln!(out, "    {} {}[2];", type_name, field_name).ok();
                 }
-                "camera_projection_r" | "camera_view_r" | "depth_projection_r" | "depth_view_r" => {
+                "camera_projection_r"
+                | "camera_view_r"
+                | "depth_projection_r"
+                | "depth_view_r"
+                | "camera_inv_r" => {
                 }
                 _ => {
                     writeln!(out, "    {} {};", type_name, field_name).ok();
@@ -777,10 +785,13 @@ impl ShaderOutput {
             TextureType::TextureCubeArray => "samplerCubeArray",
             TextureType::TextureDepth => "sampler2D",
             TextureType::TextureDepthArray => "sampler2DArray",
-            #[cfg(target_os = "android")]
-            TextureType::TextureVideo => "samplerExternalOES",
-            #[cfg(not(target_os = "android"))]
-            TextureType::TextureVideo => "sampler2D",
+            TextureType::TextureVideo => {
+                if cfg!(target_os = "android") && !cfg!(use_vulkan) {
+                    "samplerExternalOES"
+                } else {
+                    "sampler2D"
+                }
+            }
         }
     }
 

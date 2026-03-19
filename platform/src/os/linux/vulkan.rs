@@ -16,7 +16,7 @@ use crate::{
             XrVulkanInstanceCreateInfoKHR,
         },
     },
-    texture::{TextureFormat, TextureId, TextureUpdated},
+    texture::{TextureFormat, TextureId, TexturePixel, TextureUpdated},
 };
 use ash::vk::{self, Handle};
 use std::collections::{HashMap, HashSet};
@@ -73,6 +73,12 @@ struct VulkanBuffer {
     size: vk::DeviceSize,
 }
 
+#[derive(Clone, Copy)]
+struct VulkanGeometryResource {
+    vertex_buffer: VulkanBuffer,
+    index_buffer: VulkanBuffer,
+}
+
 #[derive(Default)]
 struct FrameResources {
     buffers: Vec<VulkanBuffer>,
@@ -88,10 +94,44 @@ struct VulkanPipeline {
     sampler_handles: Vec<vk::Sampler>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct VulkanRenderPassKey {
+    color_formats: Vec<i32>,
+    depth_format: Option<i32>,
+}
+
+impl VulkanRenderPassKey {
+    fn new(color_formats: &[vk::Format], depth_format: Option<vk::Format>) -> Self {
+        Self {
+            color_formats: color_formats.iter().map(|format| format.as_raw()).collect(),
+            depth_format: depth_format.map(|format| format.as_raw()),
+        }
+    }
+
+    fn color_vk_formats(&self) -> Vec<vk::Format> {
+        self.color_formats
+            .iter()
+            .map(|format| vk::Format::from_raw(*format))
+            .collect()
+    }
+
+    fn depth_vk_format(&self) -> Option<vk::Format> {
+        self.depth_format.map(vk::Format::from_raw)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct VulkanPipelineKey {
+    shader_index: usize,
+    render_pass: VulkanRenderPassKey,
+    backface_culling: bool,
+}
+
 struct VulkanDrawPacket {
     shader_index: usize,
     geometry_id: GeometryId,
     depth_write: bool,
+    backface_culling: bool,
     instances: Vec<f32>,
     draw_call_uniforms: Vec<f32>,
     dyn_uniforms: Vec<f32>,
@@ -113,6 +153,18 @@ struct VulkanTextureResource {
     is_cube: bool,
     format: vk::Format,
     layout: vk::ImageLayout,
+    hardware_buffer: Option<*mut ndk_sys::AHardwareBuffer>,
+    sampler: Option<vk::Sampler>,
+    ycbcr_conversion: Option<vk::SamplerYcbcrConversion>,
+    owns_image: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ImportedYuvPlaneLayout {
+    biplanar: bool,
+    plane0_view_format: vk::Format,
+    plane1_view_format: vk::Format,
+    plane2_view_format: Option<vk::Format>,
 }
 
 struct VulkanTextureUpload {
@@ -133,6 +185,7 @@ pub(crate) struct CxVulkanOpenXrEyeTarget {
 }
 
 pub(crate) struct CxVulkanOpenXrSwapchainImage {
+    image: vk::Image,
     eyes: [CxVulkanOpenXrEyeTarget; 2],
 }
 
@@ -144,10 +197,12 @@ pub(crate) struct CxVulkanOpenXrDepthImage {
 pub(crate) struct CxVulkanOpenXrSessionData {
     width: u32,
     height: u32,
+    color_format: vk::Format,
     pub(crate) depth_width: u32,
     pub(crate) depth_height: u32,
     color_images: Vec<CxVulkanOpenXrSwapchainImage>,
     depth_images: Vec<CxVulkanOpenXrDepthImage>,
+    color_readback_buffer: Option<VulkanBuffer>,
     depth_readback_buffer: Option<VulkanBuffer>,
 }
 
@@ -177,19 +232,24 @@ pub struct CxVulkan {
     queue_family_index: u32,
     min_uniform_buffer_offset_alignment: vk::DeviceSize,
     device: ash::Device,
+    external_memory_android_hardware_buffer:
+        ash::android::external_memory_android_hardware_buffer::Device,
     queue: vk::Queue,
     swapchain_loader: ash::khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
     swapchain_depth_targets: Vec<VulkanTextureResource>,
+    swapchain_readback_buffer: Option<VulkanBuffer>,
     swapchain_format: vk::Format,
     depth_format: vk::Format,
     swapchain_extent: vk::Extent2D,
     render_pass: vk::RenderPass,
     xr_render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
-    pipelines: HashMap<usize, VulkanPipeline>,
+    pipelines: HashMap<VulkanPipelineKey, VulkanPipeline>,
+    offscreen_render_passes: HashMap<VulkanRenderPassKey, vk::RenderPass>,
+    geometries: HashMap<GeometryId, VulkanGeometryResource>,
     textures: HashMap<VulkanTextureKey, VulkanTextureResource>,
     frame_resources: FrameResources,
     command_pool: vk::CommandPool,
@@ -227,11 +287,6 @@ impl CxVulkan {
             let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
             name.to_bytes() == b"VK_LAYER_KHRONOS_validation"
         });
-        if has_validation_layer {
-            crate::log!("Android Vulkan: VK_LAYER_KHRONOS_validation available");
-        } else {
-            crate::warning!("Android Vulkan: VK_LAYER_KHRONOS_validation not available");
-        }
 
         let available_exts = unsafe { entry.enumerate_instance_extension_properties(None) }
             .map_err(|e| format!("Android Vulkan init failed: enumerate extensions: {e:?}"))?;
@@ -239,11 +294,6 @@ impl CxVulkan {
             let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
             name.to_bytes() == vk::EXT_DEBUG_UTILS_NAME.to_bytes()
         });
-        if has_debug_utils_ext {
-            crate::log!("Android Vulkan: VK_EXT_debug_utils available");
-        } else {
-            crate::warning!("Android Vulkan: VK_EXT_debug_utils not available");
-        }
 
         let mut instance_extensions = vec![
             vk::KHR_SURFACE_NAME.as_ptr(),
@@ -307,17 +357,6 @@ impl CxVulkan {
         let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
             .to_string_lossy()
             .into_owned();
-        crate::log!(
-            "Android Vulkan device: name='{}' vendor=0x{:04X} device=0x{:04X} api={}.{}.{} driver=0x{:X} queue_family={}",
-            device_name,
-            props.vendor_id,
-            props.device_id,
-            vk::api_version_major(props.api_version),
-            vk::api_version_minor(props.api_version),
-            vk::api_version_patch(props.api_version),
-            props.driver_version,
-            queue_family_index
-        );
         if device_name.contains("SwiftShader") || props.vendor_id == 0x1AE0 {
             crate::warning!(
                 "Android Vulkan: SwiftShader/software device detected; expect very low performance"
@@ -328,8 +367,15 @@ impl CxVulkan {
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities)];
-        let device_extensions = [vk::KHR_SWAPCHAIN_NAME.as_ptr()];
+        let device_extensions = [
+            vk::KHR_SWAPCHAIN_NAME.as_ptr(),
+            vk::ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_NAME.as_ptr(),
+        ];
+        let mut sampler_ycbcr_features =
+            vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default()
+                .sampler_ycbcr_conversion(true);
         let device_create_info = vk::DeviceCreateInfo::default()
+            .push_next(&mut sampler_ycbcr_features)
             .queue_create_infos(&queue_info)
             .enabled_extension_names(&device_extensions);
 
@@ -349,6 +395,8 @@ impl CxVulkan {
             };
 
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let external_memory_android_hardware_buffer =
+            ash::android::external_memory_android_hardware_buffer::Device::new(&instance, &device);
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
         let command_pool_info = vk::CommandPoolCreateInfo::default()
@@ -458,12 +506,14 @@ impl CxVulkan {
                 .min_uniform_buffer_offset_alignment
                 .max(4),
             device,
+            external_memory_android_hardware_buffer,
             queue,
             swapchain_loader,
             swapchain: vk::SwapchainKHR::null(),
             swapchain_images: Vec::new(),
             swapchain_image_views: Vec::new(),
             swapchain_depth_targets: Vec::new(),
+            swapchain_readback_buffer: None,
             swapchain_format: vk::Format::UNDEFINED,
             depth_format: vk::Format::UNDEFINED,
             swapchain_extent: vk::Extent2D {
@@ -474,6 +524,8 @@ impl CxVulkan {
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
+            offscreen_render_passes: HashMap::new(),
+            geometries: HashMap::new(),
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool,
@@ -524,11 +576,6 @@ impl CxVulkan {
             let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
             name.to_bytes() == b"VK_LAYER_KHRONOS_validation"
         });
-        if has_validation_layer {
-            crate::log!("Android Vulkan: VK_LAYER_KHRONOS_validation available");
-        } else {
-            crate::warning!("Android Vulkan: VK_LAYER_KHRONOS_validation not available");
-        }
 
         let available_exts = unsafe { entry.enumerate_instance_extension_properties(None) }
             .map_err(|e| format!("Android Vulkan XR init failed: enumerate extensions: {e:?}"))?;
@@ -536,11 +583,6 @@ impl CxVulkan {
             let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
             name.to_bytes() == vk::EXT_DEBUG_UTILS_NAME.to_bytes()
         });
-        if has_debug_utils_ext {
-            crate::log!("Android Vulkan: VK_EXT_debug_utils available");
-        } else {
-            crate::warning!("Android Vulkan: VK_EXT_debug_utils not available");
-        }
 
         let mut instance_extensions = vec![
             vk::KHR_SURFACE_NAME.as_ptr(),
@@ -569,7 +611,6 @@ impl CxVulkan {
             instance_create_info = instance_create_info.push_next(&mut debug_create_info);
         }
 
-        crate::log!("Android Vulkan XR: requesting OpenXR-owned Vulkan instance");
         let mut xr_vk_instance = std::ptr::null();
         let mut xr_vk_instance_result = 0;
         let xr_instance_create_info = XrVulkanInstanceCreateInfoKHR {
@@ -595,8 +636,6 @@ impl CxVulkan {
                 "Android Vulkan XR init failed: xrCreateVulkanInstanceKHR returned Vulkan error {xr_vk_instance_result:?}"
             ));
         }
-        crate::log!("Android Vulkan XR: OpenXR created Vulkan instance");
-
         let instance = unsafe {
             ash::Instance::load(
                 entry.static_fn(),
@@ -618,9 +657,6 @@ impl CxVulkan {
             }
         };
 
-        crate::log!(
-            "Android Vulkan XR: querying runtime Vulkan physical device2 using XR-created instance"
-        );
         let get_info = XrVulkanGraphicsDeviceGetInfoKHR {
             system_id: xr_system_id,
             vulkan_instance: xr_vk_instance,
@@ -641,7 +677,6 @@ impl CxVulkan {
                 xr_get_device_result
             ));
         }
-        crate::log!("Android Vulkan XR: runtime Vulkan physical device acquired");
         let physical_device = vk::PhysicalDevice::from_raw(runtime_physical_device as _);
 
         let queue_family_index = match Self::pick_queue_family_for_device(
@@ -665,17 +700,6 @@ impl CxVulkan {
         let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
             .to_string_lossy()
             .into_owned();
-        crate::log!(
-            "Android Vulkan device: name='{}' vendor=0x{:04X} device=0x{:04X} api={}.{}.{} driver=0x{:X} queue_family={}",
-            device_name,
-            props.vendor_id,
-            props.device_id,
-            vk::api_version_major(props.api_version),
-            vk::api_version_minor(props.api_version),
-            vk::api_version_patch(props.api_version),
-            props.driver_version,
-            queue_family_index
-        );
         if device_name.contains("SwiftShader") || props.vendor_id == 0x1AE0 {
             crate::warning!(
                 "Android Vulkan: SwiftShader/software device detected; expect very low performance"
@@ -686,12 +710,18 @@ impl CxVulkan {
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities)];
-        let device_extensions = [vk::KHR_SWAPCHAIN_NAME.as_ptr()];
+        let device_extensions = [
+            vk::KHR_SWAPCHAIN_NAME.as_ptr(),
+            vk::ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_NAME.as_ptr(),
+        ];
+        let mut sampler_ycbcr_features =
+            vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default()
+                .sampler_ycbcr_conversion(true);
         let device_create_info = vk::DeviceCreateInfo::default()
+            .push_next(&mut sampler_ycbcr_features)
             .queue_create_infos(&queue_info)
             .enabled_extension_names(&device_extensions);
 
-        crate::log!("Android Vulkan XR: requesting OpenXR-owned Vulkan device");
         let mut xr_vk_device = std::ptr::null();
         let mut xr_vk_device_result = 0;
         let xr_device_create_info = XrVulkanDeviceCreateInfoKHR {
@@ -723,12 +753,12 @@ impl CxVulkan {
                 "Android Vulkan XR init failed: xrCreateVulkanDeviceKHR returned Vulkan error {xr_vk_device_result:?}"
             ));
         }
-        crate::log!("Android Vulkan XR: OpenXR created Vulkan device");
-
         let device = unsafe {
             ash::Device::load(instance.fp_v1_0(), vk::Device::from_raw(xr_vk_device as _))
         };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let external_memory_android_hardware_buffer =
+            ash::android::external_memory_android_hardware_buffer::Device::new(&instance, &device);
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
         let command_pool_info = vk::CommandPoolCreateInfo::default()
@@ -840,12 +870,14 @@ impl CxVulkan {
                 .min_uniform_buffer_offset_alignment
                 .max(4),
             device,
+            external_memory_android_hardware_buffer,
             queue,
             swapchain_loader,
             swapchain: vk::SwapchainKHR::null(),
             swapchain_images: Vec::new(),
             swapchain_image_views: Vec::new(),
             swapchain_depth_targets: Vec::new(),
+            swapchain_readback_buffer: None,
             swapchain_format: vk::Format::UNDEFINED,
             depth_format: vk::Format::UNDEFINED,
             swapchain_extent: vk::Extent2D {
@@ -856,6 +888,8 @@ impl CxVulkan {
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
+            offscreen_render_passes: HashMap::new(),
+            geometries: HashMap::new(),
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool,
@@ -895,7 +929,6 @@ impl CxVulkan {
             Ok(messenger) => {
                 self.debug_utils_loader = Some(debug_loader);
                 self.debug_messenger = messenger;
-                crate::log!("Android Vulkan: debug messenger enabled");
             }
             Err(err) => {
                 crate::warning!("Android Vulkan: failed to create debug messenger: {err:?}");
@@ -993,6 +1026,12 @@ impl CxVulkan {
         } else {
             None
         };
+        let color_readback_buffer = if width > 0 && height > 0 {
+            let byte_len = width as vk::DeviceSize * height as vk::DeviceSize * 4;
+            Some(self.create_host_buffer(vk::BufferUsageFlags::TRANSFER_DST, byte_len)?)
+        } else {
+            None
+        };
 
         let mut xr_color_images = Vec::with_capacity(color_images.len());
         for &image in color_images {
@@ -1000,7 +1039,7 @@ impl CxVulkan {
                 self.create_openxr_eye_target(image, 0, color_format, width, height)?,
                 self.create_openxr_eye_target(image, 1, color_format, width, height)?,
             ];
-            xr_color_images.push(CxVulkanOpenXrSwapchainImage { eyes });
+            xr_color_images.push(CxVulkanOpenXrSwapchainImage { image, eyes });
         }
 
         let mut xr_depth_images = Vec::with_capacity(depth_images.len());
@@ -1044,10 +1083,12 @@ impl CxVulkan {
         Ok(CxVulkanOpenXrSessionData {
             width: width.max(1),
             height: height.max(1),
+            color_format,
             depth_width,
             depth_height,
             color_images: xr_color_images,
             depth_images: xr_depth_images,
+            color_readback_buffer,
             depth_readback_buffer,
         })
     }
@@ -1172,6 +1213,16 @@ impl CxVulkan {
             }
         }
         if let Some(buffer) = session.depth_readback_buffer {
+            unsafe {
+                if buffer.buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(buffer.buffer, None);
+                }
+                if buffer.memory != vk::DeviceMemory::null() {
+                    self.device.free_memory(buffer.memory, None);
+                }
+            }
+        }
+        if let Some(buffer) = session.color_readback_buffer {
             unsafe {
                 if buffer.buffer != vk::Buffer::null() {
                     self.device.destroy_buffer(buffer.buffer, None);
@@ -1333,6 +1384,219 @@ impl CxVulkan {
         Ok(depth)
     }
 
+    pub(crate) fn read_openxr_color_image_rgba(
+        &mut self,
+        session: &CxVulkanOpenXrSessionData,
+        color_image_index: usize,
+        eye_index: usize,
+    ) -> Result<Vec<u8>, String> {
+        let color_image = session
+            .color_images
+            .get(color_image_index)
+            .ok_or_else(|| format!("invalid OpenXR color image index {color_image_index}"))?;
+        let staging = session
+            .color_readback_buffer
+            .ok_or_else(|| "OpenXR color readback buffer unavailable".to_string())?;
+        if session.width == 0 || session.height == 0 {
+            return Err("OpenXR color readback dimensions are zero".to_string());
+        }
+
+        let pixel_count = session.width as usize * session.height as usize;
+        let byte_len = pixel_count as vk::DeviceSize * 4;
+
+        unsafe {
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(color readback) failed: {e:?}"))?;
+            self.device
+                .reset_fences(&[self.in_flight_fence])
+                .map_err(|e| format!("reset_fences(color readback) failed: {e:?}"))?;
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| format!("reset_command_buffer(color readback) failed: {e:?}"))?;
+            self.device
+                .begin_command_buffer(
+                    self.command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(|e| format!("begin_command_buffer(color readback) failed: {e:?}"))?;
+        }
+
+        let to_transfer = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .image(color_image.image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(eye_index as u32)
+                    .layer_count(1),
+            );
+        let copy_region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(0)
+                    .base_array_layer(eye_index as u32)
+                    .layer_count(1),
+            )
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: session.width,
+                height: session.height,
+                depth: 1,
+            });
+        let to_color_attachment = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .image(color_image.image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(eye_index as u32)
+                    .layer_count(1),
+            );
+        let buffer_ready = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::HOST_READ)
+            .buffer(staging.buffer)
+            .offset(0)
+            .size(byte_len);
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_transfer],
+            );
+            self.device.cmd_copy_image_to_buffer(
+                self.command_buffer,
+                color_image.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                staging.buffer,
+                &[copy_region],
+            );
+            self.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[buffer_ready],
+                &[to_color_attachment],
+            );
+            self.device
+                .end_command_buffer(self.command_buffer)
+                .map_err(|e| format!("end_command_buffer(color readback) failed: {e:?}"))?;
+            self.device
+                .queue_submit(
+                    self.queue,
+                    &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])],
+                    self.in_flight_fence,
+                )
+                .map_err(|e| format!("queue_submit(color readback) failed: {e:?}"))?;
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(color readback submit) failed: {e:?}"))?;
+        }
+
+        let mut rgba = unsafe {
+            let mapped = self
+                .device
+                .map_memory(staging.memory, 0, byte_len, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("map_memory(color readback) failed: {e:?}"))?;
+            let bytes = std::slice::from_raw_parts(mapped as *const u8, byte_len as usize).to_vec();
+            self.device.unmap_memory(staging.memory);
+            bytes
+        };
+
+        match session.color_format {
+            vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => {
+                for px in rgba.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                }
+            }
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {}
+            other => {
+                return Err(format!(
+                    "OpenXR color readback does not support format {:?}",
+                    other
+                ));
+            }
+        }
+
+        Ok(rgba)
+    }
+
+    fn swapchain_readback_supported(&self) -> bool {
+        matches!(
+            self.swapchain_format,
+            vk::Format::B8G8R8A8_UNORM
+                | vk::Format::B8G8R8A8_SRGB
+                | vk::Format::R8G8B8A8_UNORM
+                | vk::Format::R8G8B8A8_SRGB
+        )
+    }
+
+    fn read_swapchain_color_image_rgba(&mut self, image_index: usize) -> Result<Vec<u8>, String> {
+        let _image = *self
+            .swapchain_images
+            .get(image_index)
+            .ok_or_else(|| format!("invalid swapchain image index {image_index}"))?;
+        let staging = self
+            .swapchain_readback_buffer
+            .ok_or_else(|| "swapchain color readback buffer unavailable".to_string())?;
+        let width = self.swapchain_extent.width;
+        let height = self.swapchain_extent.height;
+        if width == 0 || height == 0 {
+            return Err("swapchain color readback dimensions are zero".to_string());
+        }
+
+        let byte_len = width as vk::DeviceSize * height as vk::DeviceSize * 4;
+        let mut rgba = unsafe {
+            let mapped = self
+                .device
+                .map_memory(staging.memory, 0, byte_len, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("map_memory(swapchain color readback) failed: {e:?}"))?;
+            let bytes = std::slice::from_raw_parts(mapped as *const u8, byte_len as usize).to_vec();
+            self.device.unmap_memory(staging.memory);
+            bytes
+        };
+
+        match self.swapchain_format {
+            vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => {
+                for px in rgba.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                }
+            }
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {}
+            other => {
+                return Err(format!(
+                    "swapchain color readback does not support format {:?}",
+                    other
+                ));
+            }
+        }
+
+        Ok(rgba)
+    }
+
     pub(crate) fn draw_openxr_view(
         &mut self,
         cx: &mut Cx,
@@ -1445,6 +1709,7 @@ impl CxVulkan {
             );
         }
 
+        let render_pass_key = self.main_render_pass_key();
         let mut zbias = 0.0f32;
         let zbias_step = cx.passes[draw_pass_id].zbias_step;
         let mut draw_stats = VulkanDrawStats::default();
@@ -1452,6 +1717,7 @@ impl CxVulkan {
             cx,
             draw_pass_id,
             draw_list_id,
+            &render_pass_key,
             &mut zbias,
             zbias_step,
             &mut draw_stats,
@@ -1549,6 +1815,13 @@ impl CxVulkan {
         if self.swapchain_images.get(image_index as usize).is_none() {
             return Err(format!("invalid swapchain image index {image_index}"));
         }
+        let screenshot_request_ids = cx.take_studio_screenshot_request_ids(0);
+        let run_view_request = cx.take_studio_run_view_frame_request(0);
+        let capture_swapchain =
+            !screenshot_request_ids.is_empty() || run_view_request.is_some();
+        if capture_swapchain && self.swapchain_readback_buffer.is_none() {
+            return Err("swapchain capture requested but readback buffer is unavailable".to_string());
+        }
 
         unsafe {
             self.device
@@ -1629,10 +1902,12 @@ impl CxVulkan {
         }
 
         let xr_depth_view = self.ensure_xr_depth_dummy()?;
+        let render_pass_key = self.main_render_pass_key();
         self.record_draw_list(
             cx,
             draw_pass_id,
             draw_list_id,
+            &render_pass_key,
             &mut zbias,
             zbias_step,
             &mut draw_stats,
@@ -1641,6 +1916,95 @@ impl CxVulkan {
 
         unsafe {
             self.device.cmd_end_render_pass(self.command_buffer);
+        }
+
+        if capture_swapchain {
+            let width = self.swapchain_extent.width;
+            let height = self.swapchain_extent.height;
+            let byte_len = width as vk::DeviceSize * height as vk::DeviceSize * 4;
+            let staging = self
+                .swapchain_readback_buffer
+                .ok_or_else(|| "swapchain color readback buffer unavailable".to_string())?;
+            let image = self.swapchain_images[image_index as usize];
+            let to_transfer = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .image(image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(0)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                );
+            let copy_region = vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(0)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                )
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                });
+            let to_present = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .dst_access_mask(vk::AccessFlags::empty())
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .image(image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(0)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                );
+            let buffer_ready = vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::HOST_READ)
+                .buffer(staging.buffer)
+                .offset(0)
+                .size(byte_len);
+
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_transfer],
+                );
+                self.device.cmd_copy_image_to_buffer(
+                    self.command_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    staging.buffer,
+                    &[copy_region],
+                );
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE | vk::PipelineStageFlags::HOST,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[buffer_ready],
+                    &[to_present],
+                );
+            }
         }
 
         unsafe {
@@ -1663,6 +2027,26 @@ impl CxVulkan {
             self.device
                 .queue_submit(self.queue, &[submit_info], self.in_flight_fence)
                 .map_err(|e| format!("queue_submit failed: {e:?}"))?;
+        }
+
+        if capture_swapchain {
+            unsafe {
+                self.device
+                    .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                    .map_err(|e| format!("wait_for_fences(swapchain capture) failed: {e:?}"))?;
+            }
+            let width = self.swapchain_extent.width.max(1);
+            let height = self.swapchain_extent.height.max(1);
+            let rgba = self.read_swapchain_color_image_rgba(image_index as usize)?;
+
+            if !screenshot_request_ids.is_empty() {
+                let png = Cx::encode_rgba_as_png(width, height, &rgba)?;
+                Cx::send_studio_screenshot_response(screenshot_request_ids, width, height, png);
+            }
+
+            if let Some(request) = run_view_request {
+                cx.encode_studio_run_view_frame_async(request, width, height, rgba);
+            }
         }
 
         let swapchains = [self.swapchain];
@@ -1688,6 +2072,602 @@ impl CxVulkan {
 
         if acquire_suboptimal || present_suboptimal {
             self.recreate_swapchain()?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_pass_color_target(
+        &mut self,
+        cx: &mut Cx,
+        texture_id: TextureId,
+        width: usize,
+        height: usize,
+    ) -> Result<(), String> {
+        let texture_key = Self::texture_key(texture_id);
+        let (alloc_changed, alloc) = {
+            let cxtexture = &mut cx.textures[texture_id];
+            let alloc_changed = cxtexture.alloc_render(width, height);
+            let alloc = cxtexture.alloc.clone().ok_or_else(|| {
+                format!(
+                    "render target texture {} missing allocation metadata",
+                    texture_key
+                )
+            })?;
+            (alloc_changed, alloc)
+        };
+
+        let format = Self::vk_color_format_from_texture_pixel(alloc.pixel).ok_or_else(|| {
+            format!(
+                "unsupported Vulkan render target pixel format for texture {}",
+                texture_key
+            )
+        })?;
+        let target_width = alloc.width.max(1) as u32;
+        let target_height = alloc.height.max(1) as u32;
+        let needs_recreate = match self.textures.get(&texture_key) {
+            Some(resource) => {
+                alloc_changed
+                    || resource.width != target_width
+                    || resource.height != target_height
+                    || resource.format != format
+                    || resource.layers != 1
+                    || resource.is_cube
+            }
+            None => true,
+        };
+
+        if needs_recreate {
+            if let Some(old_resource) = self.textures.remove(&texture_key) {
+                self.destroy_texture_resource(old_resource);
+            }
+            let resource =
+                self.create_color_target_resource(target_width, target_height, format)?;
+            self.textures.insert(texture_key, resource);
+        }
+        Ok(())
+    }
+
+    fn ensure_pass_depth_target(
+        &mut self,
+        cx: &mut Cx,
+        texture_id: TextureId,
+        width: usize,
+        height: usize,
+    ) -> Result<(), String> {
+        let texture_key = Self::texture_key(texture_id);
+        let (alloc_changed, alloc) = {
+            let cxtexture = &mut cx.textures[texture_id];
+            let alloc_changed = cxtexture.alloc_depth(width, height);
+            let alloc = cxtexture.alloc.clone().ok_or_else(|| {
+                format!(
+                    "depth target texture {} missing allocation metadata",
+                    texture_key
+                )
+            })?;
+            (alloc_changed, alloc)
+        };
+
+        let format = match alloc.pixel {
+            TexturePixel::D32 => vk::Format::D32_SFLOAT,
+            _ => {
+                return Err(format!(
+                    "unsupported Vulkan depth target pixel format for texture {}",
+                    texture_key
+                ));
+            }
+        };
+        let target_width = alloc.width.max(1) as u32;
+        let target_height = alloc.height.max(1) as u32;
+        let needs_recreate = match self.textures.get(&texture_key) {
+            Some(resource) => {
+                alloc_changed
+                    || resource.width != target_width
+                    || resource.height != target_height
+                    || resource.format != format
+                    || resource.layers != 1
+                    || resource.is_cube
+            }
+            None => true,
+        };
+
+        if needs_recreate {
+            if let Some(old_resource) = self.textures.remove(&texture_key) {
+                self.destroy_texture_resource(old_resource);
+            }
+            let resource = self.create_depth_target(target_width, target_height, format)?;
+            self.textures.insert(texture_key, resource);
+        }
+        Ok(())
+    }
+
+    fn main_render_pass_key(&self) -> VulkanRenderPassKey {
+        VulkanRenderPassKey::new(&[self.swapchain_format], Some(self.depth_format))
+    }
+
+    fn get_or_create_pipeline_render_pass(
+        &mut self,
+        key: &VulkanRenderPassKey,
+    ) -> Result<vk::RenderPass, String> {
+        if *key == self.main_render_pass_key() {
+            return Ok(self.render_pass);
+        }
+        if let Some(render_pass) = self.offscreen_render_passes.get(key) {
+            return Ok(*render_pass);
+        }
+
+        let color_formats = key.color_vk_formats();
+        let depth_format = key.depth_vk_format();
+        let mut attachments =
+            Vec::with_capacity(color_formats.len() + depth_format.is_some() as usize);
+        let mut color_refs = Vec::with_capacity(color_formats.len());
+        for (index, format) in color_formats.iter().enumerate() {
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(*format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::LOAD)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            );
+            color_refs.push(
+                vk::AttachmentReference::default()
+                    .attachment(index as u32)
+                    .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+            );
+        }
+        let depth_ref = if let Some(format) = depth_format {
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::LOAD)
+                    .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            );
+            Some(
+                vk::AttachmentReference::default()
+                    .attachment(color_formats.len() as u32)
+                    .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            )
+        } else {
+            None
+        };
+
+        let mut subpass = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_refs);
+        if let Some(depth_ref) = depth_ref.as_ref() {
+            subpass = subpass.depth_stencil_attachment(depth_ref);
+        }
+        let dependencies = [vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
+            .src_access_mask(
+                vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_READ
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )];
+        let subpasses = [subpass];
+        let render_pass_info = vk::RenderPassCreateInfo::default()
+            .attachments(&attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+        let render_pass = unsafe { self.device.create_render_pass(&render_pass_info, None) }
+            .map_err(|e| format!("create_render_pass(pipeline-cache) failed: {e:?}"))?;
+        self.offscreen_render_passes
+            .insert(key.clone(), render_pass);
+        Ok(render_pass)
+    }
+
+    pub fn draw_pass_to_texture(
+        &mut self,
+        cx: &mut Cx,
+        draw_pass_id: DrawPassId,
+    ) -> Result<(), String> {
+        let draw_list_id = if let Some(id) = cx.passes[draw_pass_id].main_draw_list_id {
+            id
+        } else {
+            return Ok(());
+        };
+
+        let dpi_factor = cx.passes[draw_pass_id].dpi_factor.unwrap_or(1.0);
+        let pass_rect = match cx.get_pass_rect(draw_pass_id, dpi_factor) {
+            Some(rect) => rect,
+            None => return Ok(()),
+        };
+        if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
+            return Ok(());
+        }
+
+        {
+            let pass = &mut cx.passes[draw_pass_id];
+            pass.paint_dirty = false;
+            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            pass.set_dpi_factor(dpi_factor);
+        }
+
+        let target_width = (dpi_factor * pass_rect.size.x).max(1.0) as usize;
+        let target_height = (dpi_factor * pass_rect.size.y).max(1.0) as usize;
+
+        #[derive(Clone, Copy)]
+        struct ColorAttachmentState {
+            texture_id: TextureId,
+            view: vk::ImageView,
+            image: vk::Image,
+            format: vk::Format,
+            old_layout: vk::ImageLayout,
+            should_clear: bool,
+        }
+
+        #[derive(Clone, Copy)]
+        struct DepthAttachmentState {
+            texture_id: TextureId,
+            view: vk::ImageView,
+            image: vk::Image,
+            format: vk::Format,
+            old_layout: vk::ImageLayout,
+            should_clear: bool,
+        }
+
+        let pass_dont_clear = cx.passes[draw_pass_id].dont_clear;
+        let color_targets: Vec<_> = cx.passes[draw_pass_id]
+            .color_textures
+            .iter()
+            .map(|color_texture| {
+                (
+                    color_texture.texture.texture_id(),
+                    color_texture.clear_color.clone(),
+                )
+            })
+            .collect();
+        if color_targets.is_empty() {
+            return Ok(());
+        }
+        let depth_target = cx.passes[draw_pass_id]
+            .depth_texture
+            .as_ref()
+            .map(|texture| texture.texture_id());
+        let clear_depth_value = match cx.passes[draw_pass_id].clear_depth {
+            DrawPassClearDepth::InitWith(depth) | DrawPassClearDepth::ClearWith(depth) => depth,
+        };
+
+        for (texture_id, _) in &color_targets {
+            self.ensure_pass_color_target(cx, *texture_id, target_width, target_height)?;
+        }
+        if let Some(texture_id) = depth_target {
+            self.ensure_pass_depth_target(cx, texture_id, target_width, target_height)?;
+        }
+
+        unsafe {
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(offscreen) failed: {e:?}"))?;
+            self.device
+                .reset_fences(&[self.in_flight_fence])
+                .map_err(|e| format!("reset_fences(offscreen) failed: {e:?}"))?;
+        }
+
+        self.destroy_frame_resources();
+        unsafe {
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| format!("reset_command_buffer(offscreen) failed: {e:?}"))?;
+            self.device
+                .begin_command_buffer(
+                    self.command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(|e| format!("begin_command_buffer(offscreen) failed: {e:?}"))?;
+        }
+
+        self.texture_upload_count_this_frame = 0;
+        self.texture_upload_bytes_this_frame = 0;
+        self.prepare_draw_list_textures(cx, draw_list_id)?;
+
+        let mut color_attachments = Vec::with_capacity(color_targets.len());
+        let mut clear_values = Vec::with_capacity(color_targets.len() + 1);
+        for (texture_id, clear_color) in &color_targets {
+            let should_clear = match clear_color {
+                DrawPassClearColor::InitWith(_) => {
+                    !pass_dont_clear && cx.textures[*texture_id].take_initial()
+                }
+                DrawPassClearColor::ClearWith(_) => !pass_dont_clear,
+            };
+            let clear = match clear_color {
+                DrawPassClearColor::InitWith(color) | DrawPassClearColor::ClearWith(color) => {
+                    *color
+                }
+            };
+            let resource = self
+                .textures
+                .get(&Self::texture_key(*texture_id))
+                .ok_or_else(|| {
+                    format!("missing Vulkan color target for texture {:?}", texture_id)
+                })?;
+            color_attachments.push(ColorAttachmentState {
+                texture_id: *texture_id,
+                view: resource.view,
+                image: resource.image,
+                format: resource.format,
+                old_layout: resource.layout,
+                should_clear,
+            });
+            clear_values.push(vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [clear.x, clear.y, clear.z, clear.w],
+                },
+            });
+        }
+
+        let depth_attachment = if let Some(texture_id) = depth_target {
+            let should_clear = match cx.passes[draw_pass_id].clear_depth {
+                DrawPassClearDepth::InitWith(_) => {
+                    !pass_dont_clear && cx.textures[texture_id].take_initial()
+                }
+                DrawPassClearDepth::ClearWith(_) => !pass_dont_clear,
+            };
+            let resource = self
+                .textures
+                .get(&Self::texture_key(texture_id))
+                .ok_or_else(|| {
+                    format!("missing Vulkan depth target for texture {:?}", texture_id)
+                })?;
+            clear_values.push(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: clear_depth_value,
+                    stencil: 0,
+                },
+            });
+            Some(DepthAttachmentState {
+                texture_id,
+                view: resource.view,
+                image: resource.image,
+                format: resource.format,
+                old_layout: resource.layout,
+                should_clear,
+            })
+        } else {
+            None
+        };
+
+        for attachment in &color_attachments {
+            self.transition_image_layout(
+                attachment.image,
+                vk::ImageAspectFlags::COLOR,
+                1,
+                attachment.old_layout,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            );
+        }
+        if let Some(depth) = depth_attachment {
+            self.transition_image_layout(
+                depth.image,
+                vk::ImageAspectFlags::DEPTH,
+                1,
+                depth.old_layout,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            );
+        }
+
+        let color_attachment_descriptions: Vec<_> = color_attachments
+            .iter()
+            .map(|attachment| {
+                vk::AttachmentDescription::default()
+                    .format(attachment.format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(if attachment.should_clear {
+                        vk::AttachmentLoadOp::CLEAR
+                    } else {
+                        vk::AttachmentLoadOp::LOAD
+                    })
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            })
+            .collect();
+        let mut attachments = color_attachment_descriptions;
+        let color_refs: Vec<_> = (0..color_attachments.len())
+            .map(|index| {
+                vk::AttachmentReference::default()
+                    .attachment(index as u32)
+                    .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            })
+            .collect();
+        let depth_ref = depth_attachment.as_ref().map(|_| {
+            vk::AttachmentReference::default()
+                .attachment(color_attachments.len() as u32)
+                .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        });
+        if let Some(depth) = depth_attachment {
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(depth.format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(if depth.should_clear {
+                        vk::AttachmentLoadOp::CLEAR
+                    } else {
+                        vk::AttachmentLoadOp::LOAD
+                    })
+                    .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            );
+        }
+
+        let mut subpass = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_refs);
+        if let Some(depth_ref) = depth_ref.as_ref() {
+            subpass = subpass.depth_stencil_attachment(depth_ref);
+        }
+        let dependencies = [vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
+            .src_access_mask(
+                vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_READ
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )];
+        let subpasses = [subpass];
+        let render_pass_info = vk::RenderPassCreateInfo::default()
+            .attachments(&attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+        let render_pass = unsafe { self.device.create_render_pass(&render_pass_info, None) }
+            .map_err(|e| format!("create_render_pass(offscreen) failed: {e:?}"))?;
+
+        let mut framebuffer_attachments: Vec<vk::ImageView> = color_attachments
+            .iter()
+            .map(|attachment| attachment.view)
+            .collect();
+        if let Some(depth) = depth_attachment {
+            framebuffer_attachments.push(depth.view);
+        }
+        let framebuffer_info = vk::FramebufferCreateInfo::default()
+            .render_pass(render_pass)
+            .attachments(&framebuffer_attachments)
+            .width(target_width as u32)
+            .height(target_height as u32)
+            .layers(1);
+        let framebuffer = unsafe { self.device.create_framebuffer(&framebuffer_info, None) }
+            .map_err(|e| format!("create_framebuffer(offscreen) failed: {e:?}"))?;
+
+        unsafe {
+            self.device.cmd_begin_render_pass(
+                self.command_buffer,
+                &vk::RenderPassBeginInfo::default()
+                    .render_pass(render_pass)
+                    .framebuffer(framebuffer)
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: vk::Extent2D {
+                            width: target_width as u32,
+                            height: target_height as u32,
+                        },
+                    })
+                    .clear_values(&clear_values),
+                vk::SubpassContents::INLINE,
+            );
+            self.device.cmd_set_viewport(
+                self.command_buffer,
+                0,
+                &[vk::Viewport {
+                    x: 0.0,
+                    y: target_height as f32,
+                    width: target_width as f32,
+                    height: -(target_height as f32),
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }],
+            );
+            self.device.cmd_set_scissor(
+                self.command_buffer,
+                0,
+                &[vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: vk::Extent2D {
+                        width: target_width as u32,
+                        height: target_height as u32,
+                    },
+                }],
+            );
+        }
+
+        let xr_depth_view = self.ensure_xr_depth_dummy()?;
+        let render_pass_key = VulkanRenderPassKey::new(
+            &color_attachments
+                .iter()
+                .map(|attachment| attachment.format)
+                .collect::<Vec<_>>(),
+            depth_attachment.map(|depth| depth.format),
+        );
+        let mut zbias = 0.0f32;
+        let zbias_step = cx.passes[draw_pass_id].zbias_step;
+        let mut draw_stats = VulkanDrawStats::default();
+        self.record_draw_list(
+            cx,
+            draw_pass_id,
+            draw_list_id,
+            &render_pass_key,
+            &mut zbias,
+            zbias_step,
+            &mut draw_stats,
+            xr_depth_view,
+        )?;
+
+        unsafe {
+            self.device.cmd_end_render_pass(self.command_buffer);
+            self.device
+                .end_command_buffer(self.command_buffer)
+                .map_err(|e| format!("end_command_buffer(offscreen) failed: {e:?}"))?;
+            self.device
+                .queue_submit(
+                    self.queue,
+                    &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])],
+                    self.in_flight_fence,
+                )
+                .map_err(|e| format!("queue_submit(offscreen) failed: {e:?}"))?;
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(offscreen submit) failed: {e:?}"))?;
+            self.device.destroy_framebuffer(framebuffer, None);
+            self.device.destroy_render_pass(render_pass, None);
+        }
+
+        for attachment in &color_attachments {
+            if let Some(resource) = self
+                .textures
+                .get_mut(&Self::texture_key(attachment.texture_id))
+            {
+                resource.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+            }
+        }
+        if let Some(depth) = depth_attachment {
+            if let Some(resource) = self.textures.get_mut(&Self::texture_key(depth.texture_id)) {
+                resource.layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            }
         }
 
         Ok(())
@@ -2137,7 +3117,151 @@ impl CxVulkan {
             is_cube,
             format,
             layout: vk::ImageLayout::UNDEFINED,
+            hardware_buffer: None,
+            sampler: None,
+            ycbcr_conversion: None,
+            owns_image: true,
         })
+    }
+
+    fn vk_color_format_from_texture_pixel(pixel: TexturePixel) -> Option<vk::Format> {
+        match pixel {
+            TexturePixel::BGRAu8 => Some(vk::Format::B8G8R8A8_UNORM),
+            TexturePixel::RGBAf16 => Some(vk::Format::R16G16B16A16_SFLOAT),
+            TexturePixel::RGBAf32 => Some(vk::Format::R32G32B32A32_SFLOAT),
+            _ => None,
+        }
+    }
+
+    fn create_color_target_resource(
+        &self,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+    ) -> Result<VulkanTextureResource, String> {
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: width.max(1),
+                height: height.max(1),
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { self.device.create_image(&image_info, None) }
+            .map_err(|e| format!("create_image(render_target) failed: {e:?}"))?;
+        let memory_req = unsafe { self.device.get_image_memory_requirements(image) };
+        let memory_type_index = self
+            .find_memory_type(
+                memory_req.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .or_else(|_| {
+                self.find_memory_type(
+                    memory_req.memory_type_bits,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )
+            })?;
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(memory_req.size)
+            .memory_type_index(memory_type_index);
+        let memory = match unsafe { self.device.allocate_memory(&alloc_info, None) } {
+            Ok(memory) => memory,
+            Err(e) => {
+                unsafe {
+                    self.device.destroy_image(image, None);
+                }
+                return Err(format!("allocate_memory(render_target) failed: {e:?}"));
+            }
+        };
+        unsafe {
+            if let Err(e) = self.device.bind_image_memory(image, memory, 0) {
+                self.device.free_memory(memory, None);
+                self.device.destroy_image(image, None);
+                return Err(format!("bind_image_memory(render_target) failed: {e:?}"));
+            }
+        }
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let view = match unsafe { self.device.create_image_view(&view_info, None) } {
+            Ok(view) => view,
+            Err(e) => {
+                unsafe {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_image(image, None);
+                }
+                return Err(format!("create_image_view(render_target) failed: {e:?}"));
+            }
+        };
+
+        Ok(VulkanTextureResource {
+            image,
+            memory,
+            view,
+            width: width.max(1),
+            height: height.max(1),
+            layers: 1,
+            is_cube: false,
+            format,
+            layout: vk::ImageLayout::UNDEFINED,
+            hardware_buffer: None,
+            sampler: None,
+            ycbcr_conversion: None,
+            owns_image: true,
+        })
+    }
+
+    fn transition_image_layout(
+        &self,
+        image: vk::Image,
+        aspect_mask: vk::ImageAspectFlags,
+        layer_count: u32,
+        old_layout: vk::ImageLayout,
+        new_layout: vk::ImageLayout,
+    ) {
+        let (src_stage, src_access) = Self::layout_stage_access(old_layout);
+        let (dst_stage, dst_access) = Self::layout_stage_access(new_layout);
+        let barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(old_layout)
+            .new_layout(new_layout)
+            .src_access_mask(src_access)
+            .dst_access_mask(dst_access)
+            .image(image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(aspect_mask)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(layer_count.max(1)),
+            );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
+        }
     }
 
     fn has_stencil_component(format: vk::Format) -> bool {
@@ -2261,6 +3385,10 @@ impl CxVulkan {
             is_cube: false,
             format,
             layout: vk::ImageLayout::UNDEFINED,
+            hardware_buffer: None,
+            sampler: None,
+            ycbcr_conversion: None,
+            owns_image: true,
         })
     }
 
@@ -2353,6 +3481,10 @@ impl CxVulkan {
             is_cube: false,
             format,
             layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            hardware_buffer: None,
+            sampler: None,
+            ycbcr_conversion: None,
+            owns_image: true,
         })
     }
 
@@ -2366,16 +3498,783 @@ impl CxVulkan {
 
     fn destroy_texture_resource(&self, resource: VulkanTextureResource) {
         unsafe {
+            if let Some(sampler) = resource.sampler {
+                self.device.destroy_sampler(sampler, None);
+            }
+            if let Some(conversion) = resource.ycbcr_conversion {
+                self.device
+                    .destroy_sampler_ycbcr_conversion(conversion, None);
+            }
             if resource.view != vk::ImageView::null() {
                 self.device.destroy_image_view(resource.view, None);
             }
-            if resource.image != vk::Image::null() {
+            if resource.owns_image && resource.image != vk::Image::null() {
                 self.device.destroy_image(resource.image, None);
             }
-            if resource.memory != vk::DeviceMemory::null() {
+            if resource.owns_image && resource.memory != vk::DeviceMemory::null() {
                 self.device.free_memory(resource.memory, None);
             }
+            if resource.owns_image {
+                if let Some(hardware_buffer) = resource.hardware_buffer {
+                    if !hardware_buffer.is_null() {
+                        ndk_sys::AHardwareBuffer_release(hardware_buffer);
+                    }
+                }
+            }
         }
+    }
+
+    fn create_imported_hardware_buffer_texture_resource(
+        &mut self,
+        hardware_buffer: *mut ndk_sys::AHardwareBuffer,
+        width: u32,
+        height: u32,
+    ) -> Result<VulkanTextureResource, String> {
+        if hardware_buffer.is_null() {
+            return Err("Android Vulkan camera import failed: null AHardwareBuffer".to_string());
+        }
+
+        let (vk_format, external_format, allocation_size, android_memory_type_bits) = {
+            let mut format_properties = vk::AndroidHardwareBufferFormatPropertiesANDROID::default();
+            let (allocation_size, android_memory_type_bits) = {
+                let mut properties = vk::AndroidHardwareBufferPropertiesANDROID::default()
+                    .push_next(&mut format_properties);
+                unsafe {
+                    self.external_memory_android_hardware_buffer
+                        .get_android_hardware_buffer_properties(
+                            hardware_buffer.cast(),
+                            &mut properties,
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "Android Vulkan camera import failed: get_android_hardware_buffer_properties: {e:?}"
+                            )
+                        })?;
+                }
+                (properties.allocation_size, properties.memory_type_bits)
+            };
+            (
+                format_properties.format,
+                format_properties.external_format,
+                allocation_size,
+                android_memory_type_bits,
+            )
+        };
+        if vk_format == vk::Format::UNDEFINED {
+            return Err(format!(
+                "Android Vulkan camera import failed: hardware buffer reported undefined Vulkan format (external_format={external_format})"
+            ));
+        }
+
+        let mut external_memory = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::ANDROID_HARDWARE_BUFFER_ANDROID);
+        let image_info = vk::ImageCreateInfo::default()
+            .push_next(&mut external_memory)
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk_format)
+            .extent(vk::Extent3D {
+                width: width.max(1),
+                height: height.max(1),
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { self.device.create_image(&image_info, None) }
+            .map_err(|e| format!("Android Vulkan camera import failed: create_image: {e:?}"))?;
+        let memory_req = unsafe { self.device.get_image_memory_requirements(image) };
+        let compatible_memory_bits = memory_req.memory_type_bits & android_memory_type_bits;
+        let memory_type_index = self
+            .find_memory_type(
+                compatible_memory_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .or_else(|_| {
+                self.find_memory_type(compatible_memory_bits, vk::MemoryPropertyFlags::empty())
+            })
+            .map_err(|err| {
+                unsafe {
+                    self.device.destroy_image(image, None);
+                }
+                err
+            })?;
+
+        let mut import_info =
+            vk::ImportAndroidHardwareBufferInfoANDROID::default().buffer(hardware_buffer.cast());
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .push_next(&mut import_info)
+            .allocation_size(allocation_size.max(memory_req.size))
+            .memory_type_index(memory_type_index);
+        let memory = unsafe { self.device.allocate_memory(&alloc_info, None) }.map_err(|e| {
+            unsafe {
+                self.device.destroy_image(image, None);
+            }
+            format!("Android Vulkan camera import failed: allocate_memory: {e:?}")
+        })?;
+
+        if let Err(e) = unsafe { self.device.bind_image_memory(image, memory, 0) } {
+            unsafe {
+                self.device.free_memory(memory, None);
+                self.device.destroy_image(image, None);
+            }
+            return Err(format!(
+                "Android Vulkan camera import failed: bind_image_memory: {e:?}"
+            ));
+        }
+
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk_format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let view = match unsafe { self.device.create_image_view(&view_info, None) } {
+            Ok(view) => view,
+            Err(e) => {
+                unsafe {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_image(image, None);
+                }
+                return Err(format!(
+                    "Android Vulkan camera import failed: create_image_view: {e:?}"
+                ));
+            }
+        };
+
+        unsafe {
+            ndk_sys::AHardwareBuffer_acquire(hardware_buffer);
+        }
+        crate::warning!(
+            "Android Vulkan camera import: size={}x{} vk_format={:?} external_format={} alloc_size={}",
+            width.max(1),
+            height.max(1),
+            vk_format,
+            external_format,
+            allocation_size.max(memory_req.size),
+        );
+
+        let resource = VulkanTextureResource {
+            image,
+            memory,
+            view,
+            width: width.max(1),
+            height: height.max(1),
+            layers: 1,
+            is_cube: false,
+            format: vk_format,
+            // Imported camera contents are produced externally; keeping the image in GENERAL
+            // avoids discarding those contents via an UNDEFINED->SHADER_READ transition.
+            layout: vk::ImageLayout::GENERAL,
+            hardware_buffer: Some(hardware_buffer),
+            sampler: None,
+            ycbcr_conversion: None,
+            owns_image: true,
+        };
+        Ok(resource)
+    }
+
+    fn create_imported_external_hardware_buffer_texture_resource(
+        &mut self,
+        hardware_buffer: *mut ndk_sys::AHardwareBuffer,
+        width: u32,
+        height: u32,
+    ) -> Result<VulkanTextureResource, String> {
+        if hardware_buffer.is_null() {
+            return Err("Android Vulkan camera import failed: null AHardwareBuffer".to_string());
+        }
+
+        let (vk_format, external_format, allocation_size, android_memory_type_bits, format_props) = {
+            let mut format_properties = vk::AndroidHardwareBufferFormatPropertiesANDROID::default();
+            let (allocation_size, android_memory_type_bits) = {
+                let mut properties = vk::AndroidHardwareBufferPropertiesANDROID::default()
+                    .push_next(&mut format_properties);
+                unsafe {
+                    self.external_memory_android_hardware_buffer
+                        .get_android_hardware_buffer_properties(
+                            hardware_buffer.cast(),
+                            &mut properties,
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "Android Vulkan camera import failed: get_android_hardware_buffer_properties: {e:?}"
+                            )
+                        })?;
+                }
+                (properties.allocation_size, properties.memory_type_bits)
+            };
+            (
+                format_properties.format,
+                format_properties.external_format,
+                allocation_size,
+                android_memory_type_bits,
+                format_properties,
+            )
+        };
+
+        if external_format == 0 {
+            if vk_format != vk::Format::UNDEFINED {
+                return self.create_imported_hardware_buffer_texture_resource(
+                    hardware_buffer,
+                    width,
+                    height,
+                );
+            }
+            return Err(
+                "Android Vulkan camera import failed: external-format camera buffer missing external format"
+                    .to_string(),
+            );
+        }
+
+        let mut external_memory = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::ANDROID_HARDWARE_BUFFER_ANDROID);
+        let mut external_format_info =
+            vk::ExternalFormatANDROID::default().external_format(external_format);
+        let image_info = vk::ImageCreateInfo::default()
+            .push_next(&mut external_memory)
+            .push_next(&mut external_format_info)
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::UNDEFINED)
+            .extent(vk::Extent3D {
+                width: width.max(1),
+                height: height.max(1),
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { self.device.create_image(&image_info, None) }.map_err(|e| {
+            format!("Android Vulkan camera import failed: create_image(external): {e:?}")
+        })?;
+        let memory_req = unsafe { self.device.get_image_memory_requirements(image) };
+        let compatible_memory_bits = memory_req.memory_type_bits & android_memory_type_bits;
+        let memory_type_index = self
+            .find_memory_type(
+                compatible_memory_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .or_else(|_| {
+                self.find_memory_type(compatible_memory_bits, vk::MemoryPropertyFlags::empty())
+            })
+            .map_err(|err| {
+                unsafe {
+                    self.device.destroy_image(image, None);
+                }
+                err
+            })?;
+
+        let mut import_info =
+            vk::ImportAndroidHardwareBufferInfoANDROID::default().buffer(hardware_buffer.cast());
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .push_next(&mut import_info)
+            .allocation_size(allocation_size.max(memory_req.size))
+            .memory_type_index(memory_type_index);
+        let memory = unsafe { self.device.allocate_memory(&alloc_info, None) }.map_err(|e| {
+            unsafe {
+                self.device.destroy_image(image, None);
+            }
+            format!("Android Vulkan camera import failed: allocate_memory(external): {e:?}")
+        })?;
+
+        if let Err(e) = unsafe { self.device.bind_image_memory(image, memory, 0) } {
+            unsafe {
+                self.device.free_memory(memory, None);
+                self.device.destroy_image(image, None);
+            }
+            return Err(format!(
+                "Android Vulkan camera import failed: bind_image_memory(external): {e:?}"
+            ));
+        }
+
+        let mut conversion_external_format =
+            vk::ExternalFormatANDROID::default().external_format(external_format);
+        let conversion_info = vk::SamplerYcbcrConversionCreateInfo::default()
+            .push_next(&mut conversion_external_format)
+            .format(vk::Format::UNDEFINED)
+            .ycbcr_model(format_props.suggested_ycbcr_model)
+            .ycbcr_range(format_props.suggested_ycbcr_range)
+            .components(format_props.sampler_ycbcr_conversion_components)
+            .x_chroma_offset(format_props.suggested_x_chroma_offset)
+            .y_chroma_offset(format_props.suggested_y_chroma_offset)
+            .chroma_filter(vk::Filter::LINEAR)
+            .force_explicit_reconstruction(false);
+        let ycbcr_conversion = unsafe {
+            self.device
+                .create_sampler_ycbcr_conversion(&conversion_info, None)
+        }
+        .map_err(|e| {
+            unsafe {
+                self.device.free_memory(memory, None);
+                self.device.destroy_image(image, None);
+            }
+            format!("Android Vulkan camera import failed: create_sampler_ycbcr_conversion: {e:?}")
+        })?;
+
+        let mut view_conversion =
+            vk::SamplerYcbcrConversionInfo::default().conversion(ycbcr_conversion);
+        let view_info = vk::ImageViewCreateInfo::default()
+            .push_next(&mut view_conversion)
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::UNDEFINED)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let view = match unsafe { self.device.create_image_view(&view_info, None) } {
+            Ok(view) => view,
+            Err(e) => {
+                unsafe {
+                    self.device
+                        .destroy_sampler_ycbcr_conversion(ycbcr_conversion, None);
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_image(image, None);
+                }
+                return Err(format!(
+                    "Android Vulkan camera import failed: create_image_view(external): {e:?}"
+                ));
+            }
+        };
+
+        let mut sampler_conversion =
+            vk::SamplerYcbcrConversionInfo::default().conversion(ycbcr_conversion);
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .push_next(&mut sampler_conversion)
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .unnormalized_coordinates(false)
+            .compare_enable(false)
+            .min_lod(0.0)
+            .max_lod(vk::LOD_CLAMP_NONE);
+        let sampler = unsafe { self.device.create_sampler(&sampler_info, None) }.map_err(|e| {
+            unsafe {
+                self.device.destroy_image_view(view, None);
+                self.device
+                    .destroy_sampler_ycbcr_conversion(ycbcr_conversion, None);
+                self.device.free_memory(memory, None);
+                self.device.destroy_image(image, None);
+            }
+            format!("Android Vulkan camera import failed: create_sampler(external): {e:?}")
+        })?;
+
+        unsafe {
+            ndk_sys::AHardwareBuffer_acquire(hardware_buffer);
+        }
+
+        Ok(VulkanTextureResource {
+            image,
+            memory,
+            view,
+            width: width.max(1),
+            height: height.max(1),
+            layers: 1,
+            is_cube: false,
+            format: vk::Format::UNDEFINED,
+            layout: vk::ImageLayout::GENERAL,
+            hardware_buffer: Some(hardware_buffer),
+            sampler: Some(sampler),
+            ycbcr_conversion: Some(ycbcr_conversion),
+            owns_image: true,
+        })
+    }
+
+    fn imported_yuv_plane_layout(vk_format: vk::Format) -> Option<ImportedYuvPlaneLayout> {
+        match vk_format {
+            vk::Format::G8_B8_R8_3PLANE_420_UNORM => Some(ImportedYuvPlaneLayout {
+                biplanar: false,
+                plane0_view_format: vk::Format::R8_UNORM,
+                plane1_view_format: vk::Format::R8_UNORM,
+                plane2_view_format: Some(vk::Format::R8_UNORM),
+            }),
+            vk::Format::G8_B8R8_2PLANE_420_UNORM => Some(ImportedYuvPlaneLayout {
+                biplanar: true,
+                plane0_view_format: vk::Format::R8_UNORM,
+                plane1_view_format: vk::Format::R8G8_UNORM,
+                plane2_view_format: None,
+            }),
+            _ => None,
+        }
+    }
+
+    fn create_imported_hardware_buffer_plane_view(
+        &self,
+        image: vk::Image,
+        view_format: vk::Format,
+        aspect_mask: vk::ImageAspectFlags,
+    ) -> Result<vk::ImageView, String> {
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(view_format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(aspect_mask)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        unsafe { self.device.create_image_view(&view_info, None) }
+            .map_err(|e| format!("Android Vulkan camera import failed: create_plane_view: {e:?}"))
+    }
+
+    pub fn update_video_yuv_hardware_buffer_textures(
+        &mut self,
+        tex_y_id: TextureId,
+        tex_u_id: TextureId,
+        tex_v_id: TextureId,
+        hardware_buffer: *mut ndk_sys::AHardwareBuffer,
+        width: u32,
+        height: u32,
+    ) -> Result<crate::event::video_playback::VideoYuvMetadata, String> {
+        if hardware_buffer.is_null() {
+            return Err("Android Vulkan camera import failed: null AHardwareBuffer".to_string());
+        }
+
+        let tex_y_key = Self::texture_key(tex_y_id);
+        let tex_u_key = Self::texture_key(tex_u_id);
+        let tex_v_key = Self::texture_key(tex_v_id);
+
+        let same_source = self
+            .textures
+            .get(&tex_y_key)
+            .and_then(|resource| resource.hardware_buffer)
+            == Some(hardware_buffer);
+        if same_source {
+            let biplanar = self
+                .textures
+                .get(&tex_u_key)
+                .map(|resource| resource.format == vk::Format::R8G8_UNORM)
+                .unwrap_or(false);
+            return Ok(crate::event::video_playback::VideoYuvMetadata {
+                enabled: true,
+                matrix: 0.0,
+                biplanar,
+                rotation_steps: 0.0,
+            });
+        }
+
+        let (vk_format, external_format, allocation_size, android_memory_type_bits) = {
+            let mut format_properties = vk::AndroidHardwareBufferFormatPropertiesANDROID::default();
+            let (allocation_size, android_memory_type_bits) = {
+                let mut properties = vk::AndroidHardwareBufferPropertiesANDROID::default()
+                    .push_next(&mut format_properties);
+                unsafe {
+                    self.external_memory_android_hardware_buffer
+                        .get_android_hardware_buffer_properties(
+                            hardware_buffer.cast(),
+                            &mut properties,
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "Android Vulkan camera import failed: get_android_hardware_buffer_properties: {e:?}"
+                            )
+                        })?;
+                }
+                (properties.allocation_size, properties.memory_type_bits)
+            };
+            (
+                format_properties.format,
+                format_properties.external_format,
+                allocation_size,
+                android_memory_type_bits,
+            )
+        };
+
+        let plane_layout = Self::imported_yuv_plane_layout(vk_format).ok_or_else(|| {
+            if vk_format == vk::Format::UNDEFINED {
+                format!(
+                    "Android Vulkan camera import failed: YUV hardware buffer reported undefined Vulkan format (external_format={external_format})"
+                )
+            } else {
+                format!(
+                    "Android Vulkan camera import failed: unsupported YUV Vulkan format {vk_format:?}"
+                )
+            }
+        })?;
+
+        let mut external_memory = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::ANDROID_HARDWARE_BUFFER_ANDROID);
+        let image_info = vk::ImageCreateInfo::default()
+            .push_next(&mut external_memory)
+            .flags(vk::ImageCreateFlags::MUTABLE_FORMAT)
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk_format)
+            .extent(vk::Extent3D {
+                width: width.max(1),
+                height: height.max(1),
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { self.device.create_image(&image_info, None) }.map_err(|e| {
+            format!("Android Vulkan camera import failed: create_image(yuv): {e:?}")
+        })?;
+        let memory_req = unsafe { self.device.get_image_memory_requirements(image) };
+        let compatible_memory_bits = memory_req.memory_type_bits & android_memory_type_bits;
+        let memory_type_index = self
+            .find_memory_type(
+                compatible_memory_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .or_else(|_| {
+                self.find_memory_type(compatible_memory_bits, vk::MemoryPropertyFlags::empty())
+            })
+            .map_err(|err| {
+                unsafe {
+                    self.device.destroy_image(image, None);
+                }
+                err
+            })?;
+
+        let mut import_info =
+            vk::ImportAndroidHardwareBufferInfoANDROID::default().buffer(hardware_buffer.cast());
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .push_next(&mut import_info)
+            .allocation_size(allocation_size.max(memory_req.size))
+            .memory_type_index(memory_type_index);
+        let memory = unsafe { self.device.allocate_memory(&alloc_info, None) }.map_err(|e| {
+            unsafe {
+                self.device.destroy_image(image, None);
+            }
+            format!("Android Vulkan camera import failed: allocate_memory(yuv): {e:?}")
+        })?;
+
+        if let Err(e) = unsafe { self.device.bind_image_memory(image, memory, 0) } {
+            unsafe {
+                self.device.free_memory(memory, None);
+                self.device.destroy_image(image, None);
+            }
+            return Err(format!(
+                "Android Vulkan camera import failed: bind_image_memory(yuv): {e:?}"
+            ));
+        }
+
+        let y_view = match self.create_imported_hardware_buffer_plane_view(
+            image,
+            plane_layout.plane0_view_format,
+            vk::ImageAspectFlags::PLANE_0,
+        ) {
+            Ok(view) => view,
+            Err(err) => {
+                unsafe {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_image(image, None);
+                }
+                return Err(err);
+            }
+        };
+        let u_view = match self.create_imported_hardware_buffer_plane_view(
+            image,
+            plane_layout.plane1_view_format,
+            vk::ImageAspectFlags::PLANE_1,
+        ) {
+            Ok(view) => view,
+            Err(err) => {
+                unsafe {
+                    self.device.destroy_image_view(y_view, None);
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_image(image, None);
+                }
+                return Err(err);
+            }
+        };
+        let v_view = match plane_layout.plane2_view_format {
+            Some(view_format) => match self.create_imported_hardware_buffer_plane_view(
+                image,
+                view_format,
+                vk::ImageAspectFlags::PLANE_2,
+            ) {
+                Ok(view) => view,
+                Err(err) => {
+                    unsafe {
+                        self.device.destroy_image_view(u_view, None);
+                        self.device.destroy_image_view(y_view, None);
+                        self.device.free_memory(memory, None);
+                        self.device.destroy_image(image, None);
+                    }
+                    return Err(err);
+                }
+            },
+            None => match self.create_imported_hardware_buffer_plane_view(
+                image,
+                plane_layout.plane1_view_format,
+                vk::ImageAspectFlags::PLANE_1,
+            ) {
+                Ok(view) => view,
+                Err(err) => {
+                    unsafe {
+                        self.device.destroy_image_view(u_view, None);
+                        self.device.destroy_image_view(y_view, None);
+                        self.device.free_memory(memory, None);
+                        self.device.destroy_image(image, None);
+                    }
+                    return Err(err);
+                }
+            },
+        };
+
+        unsafe {
+            ndk_sys::AHardwareBuffer_acquire(hardware_buffer);
+        }
+        crate::warning!(
+            "Android Vulkan camera import: YUV size={}x{} vk_format={:?} external_format={} biplanar={}",
+            width.max(1),
+            height.max(1),
+            vk_format,
+            external_format,
+            plane_layout.biplanar,
+        );
+
+        let chroma_width = width.div_ceil(2).max(1);
+        let chroma_height = height.div_ceil(2).max(1);
+        let y_resource = VulkanTextureResource {
+            image,
+            memory,
+            view: y_view,
+            width: width.max(1),
+            height: height.max(1),
+            layers: 1,
+            is_cube: false,
+            format: plane_layout.plane0_view_format,
+            layout: vk::ImageLayout::GENERAL,
+            hardware_buffer: Some(hardware_buffer),
+            sampler: None,
+            ycbcr_conversion: None,
+            owns_image: true,
+        };
+        let u_resource = VulkanTextureResource {
+            image: vk::Image::null(),
+            memory: vk::DeviceMemory::null(),
+            view: u_view,
+            width: chroma_width,
+            height: chroma_height,
+            layers: 1,
+            is_cube: false,
+            format: plane_layout.plane1_view_format,
+            layout: vk::ImageLayout::GENERAL,
+            hardware_buffer: None,
+            sampler: None,
+            ycbcr_conversion: None,
+            owns_image: false,
+        };
+        let v_resource = VulkanTextureResource {
+            image: vk::Image::null(),
+            memory: vk::DeviceMemory::null(),
+            view: v_view,
+            width: chroma_width,
+            height: chroma_height,
+            layers: 1,
+            is_cube: false,
+            format: plane_layout
+                .plane2_view_format
+                .unwrap_or(plane_layout.plane1_view_format),
+            layout: vk::ImageLayout::GENERAL,
+            hardware_buffer: None,
+            sampler: None,
+            ycbcr_conversion: None,
+            owns_image: false,
+        };
+
+        if let Some(old_resource) = self.textures.remove(&tex_v_key) {
+            self.destroy_texture_resource(old_resource);
+        }
+        if let Some(old_resource) = self.textures.remove(&tex_u_key) {
+            self.destroy_texture_resource(old_resource);
+        }
+        if let Some(old_resource) = self.textures.remove(&tex_y_key) {
+            self.destroy_texture_resource(old_resource);
+        }
+        self.textures.insert(tex_y_key, y_resource);
+        self.textures.insert(tex_u_key, u_resource);
+        self.textures.insert(tex_v_key, v_resource);
+
+        Ok(crate::event::video_playback::VideoYuvMetadata {
+            enabled: true,
+            matrix: 0.0,
+            biplanar: plane_layout.biplanar,
+            rotation_steps: 0.0,
+        })
+    }
+
+    pub fn update_video_external_hardware_buffer_texture(
+        &mut self,
+        texture_id: TextureId,
+        hardware_buffer: *mut ndk_sys::AHardwareBuffer,
+        width: u32,
+        height: u32,
+    ) -> Result<crate::event::video_playback::VideoYuvMetadata, String> {
+        let texture_key = Self::texture_key(texture_id);
+        let same_source = self
+            .textures
+            .get(&texture_key)
+            .and_then(|resource| resource.hardware_buffer)
+            == Some(hardware_buffer);
+        if !same_source {
+            if let Some(old_resource) = self.textures.remove(&texture_key) {
+                self.destroy_texture_resource(old_resource);
+            }
+            let resource = self.create_imported_external_hardware_buffer_texture_resource(
+                hardware_buffer,
+                width,
+                height,
+            )?;
+            self.textures.insert(texture_key, resource);
+        }
+
+        Ok(crate::event::video_playback::VideoYuvMetadata::disabled())
+    }
+
+    pub fn update_video_rgba_hardware_buffer_texture(
+        &mut self,
+        texture_id: TextureId,
+        hardware_buffer: *mut ndk_sys::AHardwareBuffer,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        let texture_key = Self::texture_key(texture_id);
+        let same_source = self
+            .textures
+            .get(&texture_key)
+            .and_then(|resource| resource.hardware_buffer)
+            == Some(hardware_buffer);
+        if same_source {
+            return Ok(());
+        }
+
+        if let Some(old_resource) = self.textures.remove(&texture_key) {
+            self.destroy_texture_resource(old_resource);
+        }
+        let resource =
+            self.create_imported_hardware_buffer_texture_resource(hardware_buffer, width, height)?;
+        self.textures.insert(texture_key, resource);
+        Ok(())
     }
 
     fn layout_stage_access(layout: vk::ImageLayout) -> (vk::PipelineStageFlags, vk::AccessFlags) {
@@ -2392,9 +4291,23 @@ impl CxVulkan {
                 vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::VERTEX_SHADER,
                 vk::AccessFlags::SHADER_READ,
             ),
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ),
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => (
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+            vk::ImageLayout::GENERAL => (
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
+            ),
             _ => (
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::AccessFlags::empty(),
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
             ),
         }
     }
@@ -2589,6 +4502,7 @@ impl CxVulkan {
         cx: &mut Cx,
         draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
+        render_pass_key: &VulkanRenderPassKey,
         zbias: &mut f32,
         zbias_step: f32,
         draw_stats: &mut VulkanDrawStats,
@@ -2612,6 +4526,7 @@ impl CxVulkan {
                     cx,
                     draw_pass_id,
                     sub_list_id,
+                    render_pass_key,
                     zbias,
                     zbias_step,
                     draw_stats,
@@ -2706,6 +4621,7 @@ impl CxVulkan {
                     shader_index: draw_call.draw_shader_id.index,
                     geometry_id,
                     depth_write: draw_call.options.depth_write,
+                    backface_culling: draw_call.options.backface_culling,
                     instances,
                     draw_call_uniforms: draw_call.draw_call_uniforms.as_slice().to_vec(),
                     dyn_uniforms: draw_call.dyn_uniforms[..sh
@@ -2726,11 +4642,23 @@ impl CxVulkan {
                 }
             };
 
-            let geometry = &cx.geometries[packet.geometry_id];
+            let geometry = &mut cx.geometries[packet.geometry_id];
             if geometry.indices.is_empty() || geometry.vertices.is_empty() {
                 draw_stats.skipped_empty_geometry += 1;
                 continue;
             }
+            self.ensure_geometry_resource(packet.geometry_id, geometry)?;
+            let geometry_resource = self
+                .geometries
+                .get(&packet.geometry_id)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "missing Vulkan geometry resource for {:?}",
+                        packet.geometry_id
+                    )
+                })?;
+            let index_count = geometry.indices.len() as u32;
             let pass_uniforms = cx.passes[draw_pass_id].pass_uniforms.as_slice().to_vec();
             let draw_list_uniforms = cx.draw_lists[draw_list_id]
                 .draw_list_uniforms
@@ -2740,8 +4668,9 @@ impl CxVulkan {
             self.record_draw_packet(
                 cx,
                 &packet,
-                &geometry.vertices,
-                &geometry.indices,
+                render_pass_key,
+                geometry_resource,
+                index_count,
                 &pass_uniforms,
                 &draw_list_uniforms,
                 xr_depth_view,
@@ -2755,13 +4684,19 @@ impl CxVulkan {
         &mut self,
         cx: &Cx,
         packet: &VulkanDrawPacket,
-        geometry_vertices: &[f32],
-        geometry_indices: &[u32],
+        render_pass_key: &VulkanRenderPassKey,
+        geometry_resource: VulkanGeometryResource,
+        index_count: u32,
         pass_uniforms: &[f32],
         draw_list_uniforms: &[f32],
         xr_depth_view: vk::ImageView,
     ) -> Result<(), String> {
-        self.ensure_pipeline(cx, packet.shader_index)?;
+        self.ensure_pipeline(
+            cx,
+            packet.shader_index,
+            render_pass_key,
+            packet.backface_culling,
+        )?;
         let (
             pipeline_handle,
             pipeline_layout,
@@ -2769,7 +4704,12 @@ impl CxVulkan {
             pipeline_has_descriptors,
             pipeline_samplers,
         ) = {
-            let pipeline = self.pipelines.get(&packet.shader_index).ok_or_else(|| {
+            let pipeline_key = VulkanPipelineKey {
+                shader_index: packet.shader_index,
+                render_pass: render_pass_key.clone(),
+                backface_culling: packet.backface_culling,
+            };
+            let pipeline = self.pipelines.get(&pipeline_key).ok_or_else(|| {
                 format!("missing Vulkan pipeline for shader {}", packet.shader_index)
             })?;
             (
@@ -2804,7 +4744,6 @@ impl CxVulkan {
         let instance_count = (packet.instances.len() as u64
             / (instance_stride / std::mem::size_of::<f32>() as u64))
             as u32;
-        let index_count = geometry_indices.len() as u32;
         if instance_count == 0 || index_count == 0 {
             return Ok(());
         }
@@ -2859,17 +4798,9 @@ impl CxVulkan {
         uniform_uploads.dedup_by_key(|uniform| uniform.binding);
 
         let mut cursor: vk::DeviceSize = 0;
-        let geometry_offset = Self::align_device_size(cursor, 4);
-        let geometry_bytes = std::mem::size_of_val(geometry_vertices) as vk::DeviceSize;
-        cursor = geometry_offset + geometry_bytes;
-
         let instances_offset = Self::align_device_size(cursor, 4);
         let instances_bytes = std::mem::size_of_val(packet.instances.as_slice()) as vk::DeviceSize;
         cursor = instances_offset + instances_bytes;
-
-        let indices_offset = Self::align_device_size(cursor, 4);
-        let indices_bytes = std::mem::size_of_val(geometry_indices) as vk::DeviceSize;
-        cursor = indices_offset + indices_bytes;
 
         let uniform_alignment = self.min_uniform_buffer_offset_alignment.max(4);
         for uniform in &mut uniform_uploads {
@@ -2884,9 +4815,8 @@ impl CxVulkan {
         }
         uniform_uploads.retain(|uniform| uniform.size != 0);
 
-        let packet_buffer_usage = vk::BufferUsageFlags::VERTEX_BUFFER
-            | vk::BufferUsageFlags::INDEX_BUFFER
-            | vk::BufferUsageFlags::UNIFORM_BUFFER;
+        let packet_buffer_usage =
+            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
         let packet_buffer = self.create_host_buffer(packet_buffer_usage, cursor.max(4))?;
         unsafe {
             let mapped = self
@@ -2899,25 +4829,11 @@ impl CxVulkan {
                 )
                 .map_err(|e| format!("map_memory(packet_buffer) failed: {e:?}"))?;
             let mapped_ptr = mapped as *mut u8;
-            if geometry_bytes != 0 {
-                std::ptr::copy_nonoverlapping(
-                    geometry_vertices.as_ptr() as *const u8,
-                    mapped_ptr.add(geometry_offset as usize),
-                    geometry_bytes as usize,
-                );
-            }
             if instances_bytes != 0 {
                 std::ptr::copy_nonoverlapping(
                     packet.instances.as_ptr() as *const u8,
                     mapped_ptr.add(instances_offset as usize),
                     instances_bytes as usize,
-                );
-            }
-            if indices_bytes != 0 {
-                std::ptr::copy_nonoverlapping(
-                    geometry_indices.as_ptr() as *const u8,
-                    mapped_ptr.add(indices_offset as usize),
-                    indices_bytes as usize,
                 );
             }
             for uniform in &uniform_uploads {
@@ -2932,7 +4848,9 @@ impl CxVulkan {
         self.frame_resources.buffers.push(packet_buffer);
 
         let mut texture_bindings = Vec::new();
+        let mut texture_descriptor_types = Vec::new();
         let mut texture_infos = Vec::new();
+        let mut video_sampler_overrides = std::collections::HashMap::<usize, vk::Sampler>::new();
         let null_texture_key = Self::texture_key(cx.null_texture.texture_id());
         let null_cube_texture_key = Self::texture_key(cx.null_cube_texture.texture_id());
         let null_texture_resource = self.textures.get(&null_texture_key);
@@ -2960,19 +4878,34 @@ impl CxVulkan {
             let Some(resource) = resource else {
                 return Ok(());
             };
+            let sampler_index = sh
+                .mapping
+                .texture_sampler_indices
+                .get(slot)
+                .copied()
+                .unwrap_or(0);
             texture_bindings.push(vk_shader.texture_binding_base + slot as u32);
-            texture_infos.push(
-                vk::DescriptorImageInfo::default()
-                    .image_view(resource.view)
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-            );
+            let descriptor_type = vk::DescriptorType::SAMPLED_IMAGE;
+            texture_descriptor_types.push(descriptor_type);
+
+            let image_info = vk::DescriptorImageInfo::default()
+                .image_view(resource.view)
+                .image_layout(resource.layout);
+            if let Some(video_sampler) = resource.sampler {
+                video_sampler_overrides.insert(sampler_index, video_sampler);
+            }
+            texture_infos.push(image_info);
         }
 
         let mut sampler_bindings = Vec::new();
         let mut sampler_infos = Vec::new();
         for (sampler_index, sampler) in pipeline_samplers.iter().enumerate() {
             sampler_bindings.push(vk_shader.sampler_binding_base + sampler_index as u32);
-            sampler_infos.push(vk::DescriptorImageInfo::default().sampler(*sampler));
+            let sampler = video_sampler_overrides
+                .get(&sampler_index)
+                .copied()
+                .unwrap_or(*sampler);
+            sampler_infos.push(vk::DescriptorImageInfo::default().sampler(sampler));
         }
 
         let xr_depth_info = vk::DescriptorImageInfo::default()
@@ -3016,7 +4949,7 @@ impl CxVulkan {
                     vk::WriteDescriptorSet::default()
                         .dst_set(descriptor_set)
                         .dst_binding(*binding)
-                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .descriptor_type(texture_descriptor_types[index])
                         .image_info(std::slice::from_ref(&texture_infos[index])),
                 );
             }
@@ -3043,8 +4976,8 @@ impl CxVulkan {
         } else {
             None
         };
-        let vertex_buffers = [packet_buffer.buffer, packet_buffer.buffer];
-        let vertex_offsets = [geometry_offset, instances_offset];
+        let vertex_buffers = [geometry_resource.vertex_buffer.buffer, packet_buffer.buffer];
+        let vertex_offsets = [0, instances_offset];
 
         unsafe {
             self.device.cmd_bind_pipeline(
@@ -3070,8 +5003,8 @@ impl CxVulkan {
             );
             self.device.cmd_bind_index_buffer(
                 self.command_buffer,
-                packet_buffer.buffer,
-                indices_offset,
+                geometry_resource.index_buffer.buffer,
+                0,
                 vk::IndexType::UINT32,
             );
             self.device
@@ -3081,8 +5014,19 @@ impl CxVulkan {
         Ok(())
     }
 
-    fn ensure_pipeline(&mut self, cx: &Cx, shader_index: usize) -> Result<(), String> {
-        if self.pipelines.contains_key(&shader_index) {
+    fn ensure_pipeline(
+        &mut self,
+        cx: &Cx,
+        shader_index: usize,
+        render_pass_key: &VulkanRenderPassKey,
+        backface_culling: bool,
+    ) -> Result<(), String> {
+        let pipeline_key = VulkanPipelineKey {
+            shader_index,
+            render_pass: render_pass_key.clone(),
+            backface_culling,
+        };
+        if self.pipelines.contains_key(&pipeline_key) {
             return Ok(());
         }
 
@@ -3143,7 +5087,7 @@ impl CxVulkan {
                 descriptor_bindings.push((idx as u32, vk::DescriptorType::UNIFORM_BUFFER));
             }
         }
-        for slot in 0..sh.mapping.textures.len() {
+        for (slot, _) in sh.mapping.textures.iter().enumerate() {
             descriptor_bindings.push((
                 vk_shader.texture_binding_base + slot as u32,
                 vk::DescriptorType::SAMPLED_IMAGE,
@@ -3302,7 +5246,11 @@ impl CxVulkan {
             .depth_clamp_enable(false)
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
-            .cull_mode(vk::CullModeFlags::NONE)
+            .cull_mode(if backface_culling {
+                vk::CullModeFlags::BACK
+            } else {
+                vk::CullModeFlags::NONE
+            })
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
@@ -3319,10 +5267,11 @@ impl CxVulkan {
         let color_blend_attachments = [color_blend_attachment];
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
+        let has_depth = render_pass_key.depth_format.is_some();
         let make_depth_stencil = |depth_write| {
             vk::PipelineDepthStencilStateCreateInfo::default()
-                .depth_test_enable(true)
-                .depth_write_enable(depth_write)
+                .depth_test_enable(has_depth)
+                .depth_write_enable(has_depth && depth_write)
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
                 .depth_bounds_test_enable(false)
                 .stencil_test_enable(false)
@@ -3330,6 +5279,7 @@ impl CxVulkan {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
+        let render_pass = self.get_or_create_pipeline_render_pass(render_pass_key)?;
         let depth_stencil_write = make_depth_stencil(true);
         let depth_stencil_no_write = make_depth_stencil(false);
         let create_info_write = vk::GraphicsPipelineCreateInfo::default()
@@ -3343,7 +5293,7 @@ impl CxVulkan {
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic)
             .layout(pipeline_layout)
-            .render_pass(self.render_pass)
+            .render_pass(render_pass)
             .subpass(0);
         let create_info_no_write = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -3356,7 +5306,7 @@ impl CxVulkan {
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic)
             .layout(pipeline_layout)
-            .render_pass(self.render_pass)
+            .render_pass(render_pass)
             .subpass(0);
 
         let pipeline_result = unsafe {
@@ -3456,7 +5406,7 @@ impl CxVulkan {
         }
 
         self.pipelines.insert(
-            shader_index,
+            pipeline_key,
             VulkanPipeline {
                 pipeline_write,
                 pipeline_no_write,
@@ -3550,6 +5500,97 @@ impl CxVulkan {
         })
     }
 
+    fn destroy_buffer(&self, buffer: VulkanBuffer) {
+        unsafe {
+            if buffer.buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(buffer.buffer, None);
+            }
+            if buffer.memory != vk::DeviceMemory::null() {
+                self.device.free_memory(buffer.memory, None);
+            }
+        }
+    }
+
+    fn destroy_geometry_resource(&self, resource: VulkanGeometryResource) {
+        self.destroy_buffer(resource.vertex_buffer);
+        self.destroy_buffer(resource.index_buffer);
+    }
+
+    fn ensure_geometry_resource(
+        &mut self,
+        geometry_id: GeometryId,
+        geometry: &mut crate::geometry::CxGeometry,
+    ) -> Result<(), String> {
+        if geometry.vertices.is_empty() || geometry.indices.is_empty() {
+            if let Some(old) = self.geometries.remove(&geometry_id) {
+                self.destroy_geometry_resource(old);
+            }
+            geometry.dirty_vertices = false;
+            geometry.dirty_indices = false;
+            geometry.dirty = false;
+            return Ok(());
+        }
+
+        let existing = self.geometries.remove(&geometry_id);
+        let vertex_needs_upload = existing.is_none() || geometry.dirty_vertices;
+        let index_needs_upload = existing.is_none() || geometry.dirty_indices;
+
+        let new_vertex_buffer = if vertex_needs_upload {
+            Some(self.create_host_buffer_with_data(
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                &geometry.vertices,
+            )?)
+        } else {
+            None
+        };
+
+        let new_index_buffer = if index_needs_upload {
+            match self
+                .create_host_buffer_with_data(vk::BufferUsageFlags::INDEX_BUFFER, &geometry.indices)
+            {
+                Ok(buffer) => Some(buffer),
+                Err(err) => {
+                    if let Some(buffer) = new_vertex_buffer {
+                        self.destroy_buffer(buffer);
+                    }
+                    if let Some(existing) = existing {
+                        self.geometries.insert(geometry_id, existing);
+                    }
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
+
+        let resource = match existing {
+            Some(existing) => {
+                if vertex_needs_upload {
+                    self.destroy_buffer(existing.vertex_buffer);
+                }
+                if index_needs_upload {
+                    self.destroy_buffer(existing.index_buffer);
+                }
+                VulkanGeometryResource {
+                    vertex_buffer: new_vertex_buffer.unwrap_or(existing.vertex_buffer),
+                    index_buffer: new_index_buffer.unwrap_or(existing.index_buffer),
+                }
+            }
+            None => VulkanGeometryResource {
+                vertex_buffer: new_vertex_buffer
+                    .ok_or_else(|| "missing Vulkan vertex buffer upload".to_string())?,
+                index_buffer: new_index_buffer
+                    .ok_or_else(|| "missing Vulkan index buffer upload".to_string())?,
+            },
+        };
+
+        self.geometries.insert(geometry_id, resource);
+        geometry.dirty_vertices = false;
+        geometry.dirty_indices = false;
+        geometry.dirty = false;
+        Ok(())
+    }
+
     fn create_frame_descriptor_pool(&self) -> Result<vk::DescriptorPool, String> {
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -3559,6 +5600,10 @@ impl CxVulkan {
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::SAMPLED_IMAGE,
                 descriptor_count: 4096,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1024,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::SAMPLER,
@@ -3837,16 +5882,6 @@ impl CxVulkan {
         self.depth_format = self.pick_depth_format()?;
         self.swapchain_extent = extent;
 
-        crate::log!(
-            "Android Vulkan swapchain: format={:?} color_space={:?} extent={}x{} images={} present_mode={:?}",
-            format.format,
-            format.color_space,
-            extent.width,
-            extent.height,
-            self.swapchain_images.len(),
-            present_mode
-        );
-
         let color_attachment = vk::AttachmentDescription::default()
             .format(self.swapchain_format)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -3938,6 +5973,20 @@ impl CxVulkan {
             self.swapchain_depth_targets.push(depth_target);
         }
 
+        self.swapchain_readback_buffer = if self.swapchain_readback_supported()
+            && self.swapchain_extent.width > 0
+            && self.swapchain_extent.height > 0
+        {
+            Some(self.create_host_buffer(
+                vk::BufferUsageFlags::TRANSFER_DST,
+                self.swapchain_extent.width as vk::DeviceSize
+                    * self.swapchain_extent.height as vk::DeviceSize
+                    * 4,
+            )?)
+        } else {
+            None
+        };
+
         for (index, view) in self.swapchain_image_views.iter().enumerate() {
             let depth_view = self
                 .swapchain_depth_targets
@@ -3984,6 +6033,9 @@ impl CxVulkan {
                 self.device
                     .destroy_descriptor_set_layout(pipeline.descriptor_set_layout, None);
             }
+            for (_, render_pass) in self.offscreen_render_passes.drain() {
+                self.device.destroy_render_pass(render_pass, None);
+            }
         }
     }
 
@@ -4008,6 +6060,10 @@ impl CxVulkan {
                 self.device.destroy_render_pass(self.xr_render_pass, None);
                 self.xr_render_pass = vk::RenderPass::null();
             }
+            if let Some(buffer) = self.swapchain_readback_buffer.take() {
+                self.device.destroy_buffer(buffer.buffer, None);
+                self.device.free_memory(buffer.memory, None);
+            }
             self.depth_format = vk::Format::UNDEFINED;
         }
     }
@@ -4027,12 +6083,25 @@ impl CxVulkan {
     }
 
     fn destroy_texture_resources(&mut self) {
-        let resources: Vec<VulkanTextureResource> = self.textures.drain().map(|(_, r)| r).collect();
+        let mut resources: Vec<VulkanTextureResource> =
+            self.textures.drain().map(|(_, r)| r).collect();
+        resources.sort_by_key(|resource| resource.owns_image);
         for resource in resources {
             self.destroy_texture_resource(resource);
         }
         if let Some(resource) = self.xr_depth_dummy.take() {
             self.destroy_texture_resource(resource);
+        }
+    }
+
+    fn destroy_geometry_resources(&mut self) {
+        let resources: Vec<VulkanGeometryResource> = self
+            .geometries
+            .drain()
+            .map(|(_, resource)| resource)
+            .collect();
+        for resource in resources {
+            self.destroy_geometry_resource(resource);
         }
     }
 
@@ -4052,6 +6121,7 @@ impl Drop for CxVulkan {
     fn drop(&mut self) {
         self.device_wait_idle();
         self.destroy_swapchain();
+        self.destroy_geometry_resources();
         self.destroy_texture_resources();
 
         unsafe {

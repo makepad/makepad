@@ -1,8 +1,0 @@
-[package]
-name = "makepad-example-physics"
-version = "1.0.0"
-edition = "2021"
-
-[dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0" }
-rapier3d = { path = "../../libs/rapier/crates/rapier3d", default-features = false, features = ["dim3", "f32", "enhanced-determinism"] }

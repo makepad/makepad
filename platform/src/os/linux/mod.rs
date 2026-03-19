@@ -14,6 +14,8 @@ pub mod direct;
 pub mod openxr;
 #[cfg(target_os = "android")]
 pub mod openxr_anchor;
+#[cfg(all(target_os = "android", use_vulkan))]
+pub(crate) mod openxr_depth;
 #[cfg(target_os = "android")]
 pub mod openxr_input;
 #[cfg(target_os = "android")]

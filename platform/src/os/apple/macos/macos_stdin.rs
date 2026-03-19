@@ -266,6 +266,7 @@ impl Cx {
                 self.redraw_all();
                 self.stdin_handle_platform_ops(metal_cx, stdin_windows);
             }
+            StudioToApp::RunViewFrameRequest(_) => {}
             StudioToApp::Tick => {
                 for stdin_window in stdin_windows.iter_mut() {
                     if let Some(swapchain) = stdin_window.swapchain.as_mut() {

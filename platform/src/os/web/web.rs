@@ -726,14 +726,14 @@ impl Cx {
                         let permission_str = match permission {
                             Permission::AudioInput => "microphone",
                             Permission::Camera => "camera",
-                            Permission::SceneAccess => unreachable!(),
+                            Permission::HeadsetCamera | Permission::SceneAccess => unreachable!(),
                         };
                         self.os.from_wasm(FromWasmCheckPermission {
                             permission: permission_str.to_string(),
                             request_id: request_id as u32,
                         });
                     }
-                    Permission::SceneAccess => {
+                    Permission::HeadsetCamera | Permission::SceneAccess => {
                         self.call_event_handler(&Event::PermissionResult(PermissionResult {
                             permission,
                             request_id,
@@ -749,14 +749,14 @@ impl Cx {
                         let permission_str = match permission {
                             Permission::AudioInput => "microphone",
                             Permission::Camera => "camera",
-                            Permission::SceneAccess => unreachable!(),
+                            Permission::HeadsetCamera | Permission::SceneAccess => unreachable!(),
                         };
                         self.os.from_wasm(FromWasmRequestPermission {
                             permission: permission_str.to_string(),
                             request_id: request_id as u32,
                         });
                     }
-                    Permission::SceneAccess => {
+                    Permission::HeadsetCamera | Permission::SceneAccess => {
                         self.call_event_handler(&Event::PermissionResult(PermissionResult {
                             permission,
                             request_id,

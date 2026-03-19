@@ -1195,9 +1195,8 @@ impl Mat4f {
     }
 
     pub fn mul(a: &Mat4f, b: &Mat4f) -> Mat4f {
-        // this is probably stupid. Programmed JS for too long.
-        let a = &a.v;
-        let b = &b.v;
+        // Swap so that mul(a, b) computes standard a * b (was previously b * a).
+        let (a, b) = (&b.v, &a.v);
         #[inline]
         fn d(i: &[f32; 16], x: usize, y: usize) -> f32 {
             i[x + 4 * y]
@@ -2154,6 +2153,76 @@ impl Aabb {
         Aabb {
             min: pose.position - extent,
             max: pose.position + extent,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mat4_mul_order() {
+        // Column-major layout: columns are contiguous in memory.
+        // Scale(2): diag(2,2,2,1)
+        let scale = Mat4f {
+            v: [
+                2.0, 0.0, 0.0, 0.0,  // column 0
+                0.0, 2.0, 0.0, 0.0,  // column 1
+                0.0, 0.0, 2.0, 0.0,  // column 2
+                0.0, 0.0, 0.0, 1.0,  // column 3
+            ],
+        };
+
+        // Translate(5,7,0): identity with tx=5, ty=7 in column 3
+        let translate = Mat4f {
+            v: [
+                1.0, 0.0, 0.0, 0.0,  // column 0
+                0.0, 1.0, 0.0, 0.0,  // column 1
+                0.0, 0.0, 1.0, 0.0,  // column 2
+                5.0, 7.0, 0.0, 1.0,  // column 3
+            ],
+        };
+
+        // Standard linear algebra: Scale * Translate should scale the
+        // translation components, giving tx=10, ty=14.
+        // If mul(a,b) = a*b then result.v[12] == 10.0
+        // If mul(a,b) = b*a then result.v[12] == 5.0
+
+        let result = Mat4f::mul(&scale, &translate);
+        let tx = result.v[12];
+        let ty = result.v[13];
+
+        eprintln!("mul(&scale, &translate): tx={tx}, ty={ty}");
+        eprintln!("result matrix: {:?}", result.v);
+
+        // Check which convention mul uses:
+        if tx == 10.0 {
+            eprintln!("Mat4f::mul(a, b) computes a * b (standard order)");
+        } else if tx == 5.0 {
+            eprintln!("Mat4f::mul(a, b) computes b * a (reversed order)");
+        } else {
+            panic!("Unexpected tx={tx}; neither a*b nor b*a");
+        }
+
+        // Verify with transform_vec4 on the result applied to point (1,1,0,1).
+        // Standard Scale*Translate*(1,1,0,1):
+        //   Translate*(1,1,0,1) = (6,8,0,1)
+        //   Scale*(6,8,0,1) = (12,16,0,1)
+        // Reversed Translate*Scale*(1,1,0,1):
+        //   Scale*(1,1,0,1) = (2,2,0,1)
+        //   Translate*(2,2,0,1) = (7,9,0,1)
+
+        let p = Vec4f { x: 1.0, y: 1.0, z: 0.0, w: 1.0 };
+        let out = result.transform_vec4(p);
+        eprintln!("transform_vec4 result: ({}, {}, {}, {})", out.x, out.y, out.z, out.w);
+
+        if out.x == 12.0 && out.y == 16.0 {
+            eprintln!("Confirmed: mul(a,b) = a*b, transform_vec4 is standard M*v");
+        } else if out.x == 7.0 && out.y == 9.0 {
+            eprintln!("Confirmed: mul(a,b) = b*a (reversed)");
+        } else {
+            panic!("Unexpected transform result: ({}, {})", out.x, out.y);
         }
     }
 }

@@ -159,9 +159,15 @@ impl Cx {
                     // this cant exist..
                 }
                 CxDrawPassParent::DrawPass(_) => {
+                    #[cfg(target_os = "android")]
+                    self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
+                    #[cfg(not(target_os = "android"))]
                     self.draw_pass_to_texture(*draw_pass_id, None);
                 }
                 CxDrawPassParent::None => {
+                    #[cfg(target_os = "android")]
+                    self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
+                    #[cfg(not(target_os = "android"))]
                     self.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
@@ -212,9 +218,9 @@ impl Cx {
                 if let (Some(session), Some(vulkan)) = (openxr.session.as_mut(), vulkan.as_mut()) {
                     if let Some(vulkan_session) = session.vulkan.as_mut() {
                         if let Err(err) =
-                            vulkan_session.submit_depth_voxel_job(vulkan, &frame, depth_image_index)
+                            vulkan_session.submit_depth_mesh_job(vulkan, &frame, depth_image_index)
                         {
-                            crate::warning!("OpenXR depth voxel update failed: {err}");
+                            crate::warning!("OpenXR depth mesh update failed: {err}");
                         }
                     }
                 }
@@ -656,7 +662,7 @@ impl CxOpenXrSession {
         unsafe { (xr.xrCreateReferenceSpace)(session, &head_space_info, &mut head_space) }
             .to_result("xrCreateReferenceSpace")?;
 
-        let (local_space, local_space_type) = Self::create_reference_space_with_fallback(
+        let (local_space, _local_space_type) = Self::create_reference_space_with_fallback(
             xr,
             session,
             &[
@@ -665,8 +671,6 @@ impl CxOpenXrSession {
                 XrReferenceSpaceType::LOCAL,
             ],
         )?;
-        crate::log!("OpenXR app space: {:?}", local_space_type);
-
         let width =
             ((config_views[0].recommended_image_rect_width as f32) * options.buffer_scale) as u32;
         let height =
@@ -833,7 +837,7 @@ impl CxOpenXrSession {
             (xr.xrPerfSettingsSetPerformanceLevelEXT)(
                 self.handle,
                 XrPerfSettingsDomainEXT::GPU,
-                XrPerfSettingsLevelEXT::BOOST,
+                XrPerfSettingsLevelEXT::SUSTAINED_HIGH,
             )
         }
         .log_error("xrPerfSettingsSetPerformanceLevelEXT GPU");

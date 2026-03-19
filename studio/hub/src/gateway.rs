@@ -42,7 +42,7 @@ pub fn start_http_gateway(
                     headers,
                     response_sender,
                 } => {
-                    if headers.path == "/$studio_ui" {
+                    if headers.path == "/ui/" {
                         socket_roles.insert(web_socket_id, SocketRole::Client);
                         let _ = event_tx.send(HubEvent::ClientConnected {
                             web_socket_id: web_socket_id,
@@ -154,16 +154,14 @@ pub fn start_http_gateway(
 }
 
 fn parse_app_path(path: &str) -> Option<QueryId> {
-    for prefix in ["/$studio_app/", "/$studio_web_socket/"] {
-        let Some(rest) = path.strip_prefix(prefix) else {
-            continue;
-        };
-        if rest.is_empty() {
-            return None;
-        }
-        if let Ok(id) = rest.parse::<u64>() {
-            return Some(QueryId(id));
-        }
+    let Some(rest) = path.strip_prefix("/app/") else {
+        return None;
+    };
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    if let Ok(id) = rest.parse::<u64>() {
+        return Some(QueryId(id));
     }
     None
 }
@@ -173,20 +171,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_legacy_studio_app_path() {
-        assert_eq!(parse_app_path("/$studio_app/42"), Some(QueryId(42)));
-    }
-
-    #[test]
-    fn parse_current_studio_web_socket_path() {
-        assert_eq!(parse_app_path("/$studio_web_socket/99"), Some(QueryId(99)));
+    fn parse_clean_app_path() {
+        assert_eq!(parse_app_path("/app/42"), Some(QueryId(42)));
     }
 
     #[test]
     fn reject_missing_or_invalid_build_id() {
-        assert_eq!(parse_app_path("/$studio_app/"), None);
-        assert_eq!(parse_app_path("/$studio_web_socket/not-a-number"), None);
-        assert_eq!(parse_app_path("/$studio_ui"), None);
+        assert_eq!(parse_app_path("/app/"), None);
+        assert_eq!(parse_app_path("/app/not-a-number"), None);
+        assert_eq!(parse_app_path("/app/77/extra"), None);
+        assert_eq!(parse_app_path("/ui/"), None);
     }
 }
 

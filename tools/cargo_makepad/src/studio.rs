@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_STUDIO_HOST_PORT: &str = "127.0.0.1:8001";
-const STUDIO_UI_PATH: &str = "/$studio_ui";
+const STUDIO_UI_PATH: &str = "/ui/";
 
 struct BridgeState {
     client_id: Option<ClientId>,

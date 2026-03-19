@@ -1,6 +1,5 @@
 use {
     crate::{
-        PlaybackPrepared,
         cx::{Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
@@ -36,6 +35,7 @@ use {
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
         window::{CxWindowPool, MacosWindowConfig, WindowId},
+        PlaybackPrepared,
     },
     makepad_objc_sys::{msg_send, objc_block, sel, sel_impl},
     std::{
@@ -1181,7 +1181,8 @@ impl Cx {
                             is_seekable,
                             video_tracks,
                             audio_tracks,
-                        })) = preview.check_prepared() {
+                        })) = preview.check_prepared()
+                        {
                             self.call_event_handler(&Event::VideoPlaybackPrepared(
                                 VideoPlaybackPreparedEvent {
                                     video_id,
@@ -1358,6 +1359,7 @@ impl Cx {
         let status = match permission {
             Permission::AudioInput => self.check_audio_permission_status(),
             Permission::Camera => self.check_camera_permission_status(),
+            Permission::HeadsetCamera => crate::permission::PermissionStatus::DeniedPermanent,
             Permission::SceneAccess => crate::permission::PermissionStatus::DeniedPermanent,
         };
 
@@ -1374,6 +1376,7 @@ impl Cx {
         let status = match permission {
             Permission::AudioInput => self.check_audio_permission_status(),
             Permission::Camera => self.check_camera_permission_status(),
+            Permission::HeadsetCamera => crate::permission::PermissionStatus::DeniedPermanent,
             Permission::SceneAccess => crate::permission::PermissionStatus::DeniedPermanent,
         };
         match status {
@@ -1382,6 +1385,7 @@ impl Cx {
                     self.macos_request_audio_permission(permission, request_id)
                 }
                 Permission::Camera => self.macos_request_camera_permission(permission, request_id),
+                Permission::HeadsetCamera => {}
                 Permission::SceneAccess => {}
             },
             _ => {

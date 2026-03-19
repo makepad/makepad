@@ -117,6 +117,7 @@ impl AndroidVariant {
                 <uses-feature android:glEsVersion="0x00030001" android:required="true"/>
                 <uses-feature android:name="android.hardware.vr.headtracking" android:required="false"/>
                 <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true"/>
+                <uses-feature android:name="com.oculus.feature.CONTEXTUAL_BOUNDARYLESS_APP" android:required="false"/>
                 <uses-permission android:name="com.oculus.permission.USE_SCENE" />
                 <!-- Request hand and keyboard tracking for keyboard hand presence testing -->
                 <uses-feature android:name="oculus.software.handtracking" android:required="false"/>
@@ -124,6 +125,7 @@ impl AndroidVariant {
                 <uses-permission android:name="android.permission.INTERNET" />
                 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
                 <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+                <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
                 <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
                 <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
                 <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
@@ -140,6 +142,10 @@ impl AndroidVariant {
                     android:debuggable="true"
                     android:largeHeap="true"
                     tools:targetApi="{sdk_version}">
+                    <!-- Quest 3-only CPU/GPU trade: prefer one extra CPU level over one GPU level. -->
+                    <meta-data
+                        android:name="com.oculus.trade_cpu_for_gpu_amount"
+                        android:value="-1" />
                     <activity
                         android:name=".{class_name}"
                         android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"

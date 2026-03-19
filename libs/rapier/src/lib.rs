@@ -26,7 +26,6 @@ pub extern crate parry3d as parry;
 #[cfg(all(feature = "dim3", feature = "f64"))]
 pub extern crate parry3d_f64 as parry;
 
-pub extern crate makepad_sparse_voxels as sparse_voxels;
 pub extern crate nalgebra as na;
 #[cfg(feature = "serde-serialize")]
 #[macro_use]

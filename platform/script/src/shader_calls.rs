@@ -1518,29 +1518,36 @@ impl ShaderFnCompiler {
                     let coord = &args[0];
                     let mut s = self.stack.new_string();
 
-                    let sampler = ShaderSampler::default();
-                    let sampler_idx = output.get_or_create_sampler(sampler);
-
                     match output.backend {
                         ShaderBackend::Glsl => {
+                            let sampler = ShaderSampler::default();
+                            let sampler_idx = output.get_or_create_sampler(sampler);
                             output.bind_texture_sampler(&texture_expr, sampler_idx);
-                            #[cfg(target_os = "android")]
-                            write!(s, "sample2dOES({}, {})", texture_expr, coord).ok();
-                            #[cfg(not(target_os = "android"))]
-                            write!(s, "sample2d({}, {})", texture_expr, coord).ok();
+                            if cfg!(target_os = "android") && !cfg!(use_vulkan) {
+                                write!(s, "sample2dOES({}, {})", texture_expr, coord).ok();
+                            } else {
+                                write!(s, "sample2d({}, {})", texture_expr, coord).ok();
+                            }
                         }
                         ShaderBackend::Metal => {
+                            let sampler = ShaderSampler::video();
+                            let sampler_idx = output.get_or_create_sampler(sampler);
                             write!(s, "{}.sample(_s{}, {})", texture_expr, sampler_idx, coord).ok();
                         }
                         ShaderBackend::Wgsl => {
+                            let sampler = ShaderSampler::default();
+                            let sampler_idx = output.get_or_create_sampler(sampler);
+                            output.bind_texture_sampler(&texture_expr, sampler_idx);
                             write!(
                                 s,
-                                "textureSample({}, _s{}, {})",
+                                "textureSampleLevel({}, _s{}, {}, 0.0)",
                                 texture_expr, sampler_idx, coord
                             )
                             .ok();
                         }
                         ShaderBackend::Hlsl => {
+                            let sampler = ShaderSampler::video();
+                            let sampler_idx = output.get_or_create_sampler(sampler);
                             write!(
                                 s,
                                 "{}.SampleLevel(_s{}, {}, 0.0)",
