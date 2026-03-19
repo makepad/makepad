@@ -2,7 +2,7 @@ mod compile;
 mod sdk;
 use compile::WasmConfig;
 
-fn build_uses_packaged_layout(config: &WasmConfig) -> bool {
+fn should_default_to_small_fonts(config: &WasmConfig) -> bool {
     config.optimize_size || config.brotli || config.split || !config.threads
 }
 
@@ -107,7 +107,7 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         "install-toolchain" => sdk::rustup_toolchain_install(),
         "build" => {
             let build_args = strip_wasm_options(&mut config, &args[1..]);
-            if build_uses_packaged_layout(&config) && !config.small_fonts {
+            if should_default_to_small_fonts(&config) && !config.small_fonts {
                 config.small_fonts = true;
             }
             compile::build(config, &build_args)?;
@@ -115,6 +115,9 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         }
         "run" => {
             let run_args = strip_wasm_options(&mut config, &args[1..]);
+            if should_default_to_small_fonts(&config) && !config.small_fonts {
+                config.small_fonts = true;
+            }
             compile::run(config, &run_args)?;
             Ok(())
         }
@@ -157,7 +160,41 @@ mod tests {
 
             let build_args = strip_wasm_options(&mut config, &args[1..]);
             assert!(!build_args.is_empty());
-            if build_uses_packaged_layout(&config) && !config.small_fonts {
+            if should_default_to_small_fonts(&config) && !config.small_fonts {
+                config.small_fonts = true;
+            }
+            assert!(config.small_fonts, "expected small fonts for {:?}", args);
+        }
+    }
+
+    #[test]
+    fn packaged_run_defaults_to_small_fonts() {
+        for args in [
+            args(&["run", "--strip", "-p", "app"]),
+            args(&["run", "--brotli", "-p", "app"]),
+            args(&["run", "--split", "-p", "app"]),
+            args(&["run", "--no-threads", "-p", "app"]),
+        ] {
+            let mut config = WasmConfig {
+                strip: false,
+                lan: false,
+                brotli: false,
+                port: None,
+                small_fonts: false,
+                bindgen: false,
+                threads: true,
+                optimize_size: false,
+                wasm_opt: false,
+                split: false,
+                split_auto: false,
+                split_functions: false,
+                split_functions_threshold: 200,
+                hot_reload: false,
+            };
+
+            let run_args = strip_wasm_options(&mut config, &args[1..]);
+            assert!(!run_args.is_empty());
+            if should_default_to_small_fonts(&config) && !config.small_fonts {
                 config.small_fonts = true;
             }
             assert!(config.small_fonts, "expected small fonts for {:?}", args);
@@ -185,7 +222,7 @@ mod tests {
 
         let build_args = strip_wasm_options(&mut config, &args(&["-p", "app", "--profile=small"]));
         assert_eq!(build_args, vec!["-p", "app", "--profile=small"]);
-        if build_uses_packaged_layout(&config) && !config.small_fonts {
+        if should_default_to_small_fonts(&config) && !config.small_fonts {
             config.small_fonts = true;
         }
         assert!(!config.small_fonts);
