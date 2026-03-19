@@ -228,37 +228,7 @@ pub enum WindowAction {
 }
 
 impl Window {
-    fn ensure_initialized(&mut self, cx: &mut Cx) {
-        if self.initialized {
-            return;
-        }
-        self.initialized = true;
-
-        self.window.handle.set_pass(cx, &self.pass.handle);
-        //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
-        self.depth_texture = Texture::new_with_format(
-            cx,
-            TextureFormat::DepthD32 {
-                size: TextureSize::Auto,
-                initial: true,
-            },
-        );
-        self.pass.handle.set_depth_texture(
-            cx,
-            &self.depth_texture,
-            DrawPassClearDepth::ClearWith(1.0),
-        );
-
-        // check if we are ar/vr capable
-        if cx.xr_capabilities().vr_supported {
-            // lets show a VR button
-            self.view(cx, ids!(web_xr)).set_visible(cx, true);
-        }
-
-        // OS-specific caption bar setup
-        if self.demo {
-            self.demo_next_frame = cx.new_next_frame();
-        }
+    fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
         let linux_custom_window_chrome =
             matches!(cx.os_type(), OsType::LinuxWindow(params) if params.custom_window_chrome);
 
@@ -287,14 +257,58 @@ impl Window {
             }
             _ => (),
         }
+    }
 
-        // Update the caption label with the window title if set
-        let title = cx.windows[self.window.handle.window_id()]
-            .create_title
-            .clone();
+    fn sync_caption_title(&mut self, cx: &mut Cx) {
+        let title = if self.window.title.is_empty() {
+            cx.windows[self.window.handle.window_id()]
+                .create_title
+                .clone()
+        } else {
+            self.window.title.clone()
+        };
         if !title.is_empty() {
             self.label(cx, ids!(caption_label.label))
                 .set_text(cx, &title);
+        }
+    }
+
+    fn ensure_initialized(&mut self, cx: &mut Cx) {
+        // Keep runtime chrome state aligned even if this widget is re-applied.
+        if cx.xr_capabilities().vr_supported {
+            self.view(cx, ids!(web_xr)).set_visible(cx, true);
+        }
+        self.sync_caption_bar_state(cx);
+        self.sync_caption_title(cx);
+
+        if self.initialized {
+            return;
+        }
+        self.initialized = true;
+
+        self.window.handle.set_pass(cx, &self.pass.handle);
+        //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
+        self.depth_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::DepthD32 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        self.pass.handle.set_depth_texture(
+            cx,
+            &self.depth_texture,
+            DrawPassClearDepth::ClearWith(1.0),
+        );
+
+        // check if we are ar/vr capable
+        if cx.xr_capabilities().vr_supported {
+            // lets show a VR button
+            self.view(cx, ids!(web_xr)).set_visible(cx, true);
+        }
+
+        if self.demo {
+            self.demo_next_frame = cx.new_next_frame();
         }
     }
 
