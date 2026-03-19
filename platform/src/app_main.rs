@@ -192,6 +192,7 @@ macro_rules! app_main {
             Cx::init_log();
             $crate::os::linux::android::android_jni::apply_studio_env_from_activity(activity);
             Cx::android_entry(activity, || {
+                let studio_http = $crate::resolve_studio_http();
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                     if let Event::Startup = event {
@@ -222,7 +223,6 @@ macro_rules! app_main {
                         <dyn AppMain>::handle_event(app, cx, event);
                     }
                 })));
-                let studio_http = $crate::resolve_studio_http();
                 cx.init_websockets(&studio_http);
                 cx.init_cx_os();
                 cx

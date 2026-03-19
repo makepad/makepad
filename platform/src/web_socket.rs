@@ -13,8 +13,8 @@ use crate::{
     Cx,
 };
 use makepad_studio_protocol::{
-    hub_protocol::HubToClient,
-    AppToStudio, AppToStudioVec, LocalProfileSample, StudioToApp, StudioToAppVec,
+    hub_protocol::HubToClient, AppToStudio, AppToStudioVec, LocalProfileSample, StudioToApp,
+    StudioToAppVec,
 };
 #[allow(unused_imports)]
 use std::{
@@ -47,41 +47,48 @@ pub(crate) static LOCAL_PROFILE_SAMPLES: Mutex<Vec<LocalProfileSample>> = Mutex:
 const LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT: usize = 16_384;
 const STUDIO_SOCKET_ID: u64 = 0;
 
-pub(crate) fn consume_studio_socket_response(response: &NetworkResponse) -> Option<Vec<StudioToApp>> {
+pub(crate) fn consume_studio_socket_response(
+    response: &NetworkResponse,
+) -> Option<Vec<StudioToApp>> {
     match response {
         NetworkResponse::WsOpened { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
             STUDIO_WEB_SOCKET_CONNECTED.store(true, Ordering::SeqCst);
+            crate::log!("studio websocket connected");
             Some(Vec::new())
         }
         NetworkResponse::WsClosed { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
             STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+            crate::warning!("studio websocket closed");
             Some(Vec::new())
         }
-        NetworkResponse::WsError { socket_id, .. } if socket_id.0 == STUDIO_SOCKET_ID => {
+        NetworkResponse::WsError {
+            socket_id,
+            message,
+        } if socket_id.0 == STUDIO_SOCKET_ID => {
             STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+            crate::error!("studio websocket error: {}", message);
             Some(Vec::new())
         }
         NetworkResponse::WsMessage { socket_id, message } if socket_id.0 == STUDIO_SOCKET_ID => {
             let msgs = match message {
                 WsMessage::Binary(data) => match StudioToAppVec::deserialize_bin(data) {
                     Ok(msgs) => msgs.0,
-                    Err(err) => {
-                        match HubToClient::deserialize_bin(data) {
-                            Ok(HubToClient::Hello { .. }) => {}
-                            Ok(_) => {
-                                crate::warning!(
-                                    "Ignoring unexpected HubToClient payload on studio app websocket"
-                                );
-                            }
-                            Err(_) => {
-                                crate::error!(
-                                    "Cant parse studio websocket binary payload in windowed mode: {:?}",
-                                    err
-                                );
-                            }
+                    Err(err) => match HubToClient::deserialize_bin(data) {
+                        Ok(HubToClient::Hello { .. }) => Vec::new(),
+                        Ok(_) => {
+                            crate::warning!(
+                                "Ignoring unexpected HubToClient payload on studio app websocket"
+                            );
+                            Vec::new()
                         }
-                        Vec::new()
-                    }
+                        Err(_) => {
+                            crate::error!(
+                                "Cant parse studio websocket binary payload in windowed mode: {:?}",
+                                err
+                            );
+                            Vec::new()
+                        }
+                    },
                 },
                 WsMessage::Text(text) => {
                     if text.trim().is_empty() {
@@ -274,6 +281,7 @@ impl Cx {
 
     fn start_studio_websocket(&mut self, studio_http: &str) {
         if studio_http.is_empty() {
+            crate::log!("studio websocket disabled: empty studio_http");
             return;
         }
         self.studio_http = studio_http.into();
