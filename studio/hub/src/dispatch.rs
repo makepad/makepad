@@ -96,6 +96,7 @@ pub enum HubEvent {
         items: Vec<RunItem>,
     },
     ScriptRunRequest {
+        build_id: Option<QueryId>,
         mount: String,
         cwd: PathBuf,
         program: String,
@@ -229,6 +230,7 @@ pub struct HubCore {
     event_tx: Sender<HubEvent>,
     pub vfs: VirtualFs,
     studio_addr: Option<String>,
+    studio_ext_addr: Option<String>,
     client_id_in_use: [bool; MAX_UI_CLIENT_IDS],
     next_build_id: u64,
     client_by_web_socket: HashMap<u64, ClientId>,
@@ -272,6 +274,7 @@ impl HubCore {
         event_tx: Sender<HubEvent>,
         vfs: VirtualFs,
         studio_addr: Option<String>,
+        studio_ext_addr: Option<String>,
     ) -> Self {
         let worker_count = std::thread::available_parallelism()
             .map(|v| v.get())
@@ -283,6 +286,7 @@ impl HubCore {
             event_tx,
             vfs,
             studio_addr,
+            studio_ext_addr,
             client_id_in_use: [false; MAX_UI_CLIENT_IDS],
             next_build_id: 1,
             client_by_web_socket: HashMap::new(),
@@ -437,13 +441,14 @@ impl HubCore {
             } => self.on_process_exited(build_id, exit_code),
             HubEvent::RunItemsUpdated { mount, items } => self.on_run_items_updated(mount, items),
             HubEvent::ScriptRunRequest {
+                build_id,
                 mount,
                 cwd,
                 program,
                 args,
                 env,
                 package,
-            } => self.on_script_run_request(mount, cwd, program, args, env, package),
+            } => self.on_script_run_request(build_id, mount, cwd, program, args, env, package),
             HubEvent::TerminalOutput { path, data } => self.on_terminal_output(path, data),
             HubEvent::TerminalResized { path, cols, rows } => {
                 self.on_terminal_resized(path, cols, rows)
@@ -868,7 +873,11 @@ impl HubCore {
                 );
             }
             ClientToHub::RunItem { mount, name } => {
-                if let Err(err) = self.process_manager.invoke_script_run_item(&mount, &name) {
+                let build_id = self.alloc_build_id();
+                if let Err(err) = self
+                    .process_manager
+                    .invoke_script_run_item(&mount, &name, build_id)
+                {
                     self.send_ui_error(client_id, err);
                 }
             }
@@ -993,6 +1002,7 @@ impl HubCore {
                         mount.clone(),
                         &cwd,
                         self.studio_addr.clone(),
+                        self.studio_ext_addr.clone(),
                         self.event_tx.clone(),
                     ) {
                         Ok(info) => {
@@ -2220,6 +2230,7 @@ impl HubCore {
             mount.to_string(),
             &cwd,
             self.studio_addr.clone(),
+            self.studio_ext_addr.clone(),
             self.event_tx.clone(),
         )?;
         self.build_mount_by_id
@@ -2326,6 +2337,7 @@ impl HubCore {
 
     fn on_script_run_request(
         &mut self,
+        build_id: Option<QueryId>,
         mount: String,
         cwd: PathBuf,
         program: String,
@@ -2333,7 +2345,7 @@ impl HubCore {
         env: HashMap<String, String>,
         package: Option<String>,
     ) {
-        let build_id = self.alloc_build_id();
+        let build_id = build_id.unwrap_or_else(|| self.alloc_build_id());
         let package = package.unwrap_or_else(|| display_name_from_command(&program, &args));
         match self.process_manager.start_command_run(
             build_id,
@@ -3865,7 +3877,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
         let mut vfs = VirtualFs::new();
         vfs.mount("repo", root.to_path_buf()).expect("mount repo");
-        let mut core = HubCore::new(event_rx, event_tx, vfs, None);
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None, None);
 
         let ui_rx = ToUIReceiver::<Vec<u8>>::default();
         core.handle_event(HubEvent::ClientConnected {
@@ -4058,7 +4070,7 @@ mod tests {
         let mut vfs = VirtualFs::new();
         vfs.mount("repo", dir.path().to_path_buf())
             .expect("mount repo");
-        let mut core = HubCore::new(event_rx, event_tx, vfs, None);
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None, None);
 
         let ui_rx_bin = ToUIReceiver::<Vec<u8>>::default();
         let ui_rx_typed = ToUIReceiver::<HubToClient>::default();
@@ -4114,7 +4126,7 @@ mod tests {
         let mut vfs = VirtualFs::new();
         vfs.mount("repo", dir.path().to_path_buf())
             .expect("mount repo");
-        let mut core = HubCore::new(event_rx, event_tx, vfs, None);
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None, None);
 
         let ui_rx = ToUIReceiver::<Vec<u8>>::default();
         core.handle_event(HubEvent::ClientConnected {
@@ -4165,7 +4177,7 @@ mod tests {
         let mut vfs = VirtualFs::new();
         vfs.mount("repo", dir.path().to_path_buf())
             .expect("mount repo");
-        let mut core = HubCore::new(event_rx, event_tx, vfs, None);
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None, None);
 
         let ui_rx = ToUIReceiver::<Vec<u8>>::default();
         core.handle_event(HubEvent::ClientConnected {
@@ -4218,7 +4230,7 @@ mod tests {
         let mut vfs = VirtualFs::new();
         vfs.mount("repo", dir.path().to_path_buf())
             .expect("mount repo");
-        let mut core = HubCore::new(event_rx, event_tx, vfs, None);
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None, None);
 
         let primary_ui = ToUIReceiver::<Vec<u8>>::default();
         core.handle_event(HubEvent::ClientConnected {
