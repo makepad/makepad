@@ -254,6 +254,11 @@ pub fn generate_html(
     } else {
         ""
     };
+    let small_font_aliases = if config.small_fonts {
+        "\n            window.makepad_small_font_aliases = true;"
+    } else {
+        ""
+    };
 
     let preloads = if config.bindgen {
         "
@@ -322,6 +327,7 @@ pub fn generate_html(
             }});
 
             try {{
+                {small_font_aliases}
                 {init}
                 class MyWasmApp {{
                     constructor(wasm) {{
