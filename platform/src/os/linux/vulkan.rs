@@ -287,11 +287,6 @@ impl CxVulkan {
             let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
             name.to_bytes() == b"VK_LAYER_KHRONOS_validation"
         });
-        if has_validation_layer {
-            crate::log!("Android Vulkan: VK_LAYER_KHRONOS_validation available");
-        } else {
-            crate::warning!("Android Vulkan: VK_LAYER_KHRONOS_validation not available");
-        }
 
         let available_exts = unsafe { entry.enumerate_instance_extension_properties(None) }
             .map_err(|e| format!("Android Vulkan init failed: enumerate extensions: {e:?}"))?;
@@ -299,11 +294,6 @@ impl CxVulkan {
             let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
             name.to_bytes() == vk::EXT_DEBUG_UTILS_NAME.to_bytes()
         });
-        if has_debug_utils_ext {
-            crate::log!("Android Vulkan: VK_EXT_debug_utils available");
-        } else {
-            crate::warning!("Android Vulkan: VK_EXT_debug_utils not available");
-        }
 
         let mut instance_extensions = vec![
             vk::KHR_SURFACE_NAME.as_ptr(),
@@ -586,11 +576,6 @@ impl CxVulkan {
             let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
             name.to_bytes() == b"VK_LAYER_KHRONOS_validation"
         });
-        if has_validation_layer {
-            crate::log!("Android Vulkan: VK_LAYER_KHRONOS_validation available");
-        } else {
-            crate::warning!("Android Vulkan: VK_LAYER_KHRONOS_validation not available");
-        }
 
         let available_exts = unsafe { entry.enumerate_instance_extension_properties(None) }
             .map_err(|e| format!("Android Vulkan XR init failed: enumerate extensions: {e:?}"))?;
@@ -598,11 +583,6 @@ impl CxVulkan {
             let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
             name.to_bytes() == vk::EXT_DEBUG_UTILS_NAME.to_bytes()
         });
-        if has_debug_utils_ext {
-            crate::log!("Android Vulkan: VK_EXT_debug_utils available");
-        } else {
-            crate::warning!("Android Vulkan: VK_EXT_debug_utils not available");
-        }
 
         let mut instance_extensions = vec![
             vk::KHR_SURFACE_NAME.as_ptr(),

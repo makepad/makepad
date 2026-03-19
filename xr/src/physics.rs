@@ -313,15 +313,6 @@ impl RapierScene {
         index as u64 + 1
     }
 
-    fn clear_depth_query_surfaces(&mut self) {
-        for surface in &mut self.depth_query_surfaces {
-            if let Some(collider) = self.colliders.get_mut(surface.collider) {
-                collider.set_enabled(false);
-            }
-            surface.fingerprint = 0;
-        }
-    }
-
     pub(super) fn sync_depth_query_surface_pool(&mut self, targets: &[DepthQuerySurfaceTarget]) {
         for (surface, target) in self.depth_query_surfaces.iter_mut().zip(targets.iter()) {
             if surface.fingerprint != target.fingerprint {

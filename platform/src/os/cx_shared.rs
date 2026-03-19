@@ -111,8 +111,19 @@ impl Cx {
     }
 
     pub(crate) fn dispatch_network_runtime_events(&mut self) {
+        use crate::makepad_math::dvec2;
+        use crate::window::CxWindowPool;
+
         let mut responses = Vec::new();
         while let Some(response) = self.net.try_recv() {
+            if let Some(msgs) = crate::web_socket::consume_studio_socket_response(&response) {
+                let window_id = CxWindowPool::id_zero();
+                let pos = dvec2(0.0, 0.0);
+                for msg in msgs {
+                    let _ = self.dispatch_studio_msg(msg, window_id, pos);
+                }
+                continue;
+            }
             match &response {
                 NetworkResponse::WsOpened { .. }
                 | NetworkResponse::WsMessage { .. }
@@ -169,16 +180,6 @@ impl Cx {
     pub(crate) fn queue_studio_run_view_frame_request(&mut self, request: RunViewFrameRequest) {
         self.run_view_frame_requests
             .retain(|existing| existing.window_id != request.window_id);
-        if request.frame_id <= 3 || request.frame_id % 30 == 0 {
-            crate::log!(
-                "runview queued request window={} frame={} size={}x{} dpi={:.2}",
-                request.window_id,
-                request.frame_id,
-                request.width,
-                request.height,
-                request.dpi_factor,
-            );
-        }
         self.run_view_frame_requests.push(request);
         self.redraw_all();
     }
@@ -195,15 +196,7 @@ impl Cx {
             .run_view_frame_requests
             .iter()
             .rposition(|request| request.window_id == window_id)?;
-        let request = self.run_view_frame_requests.swap_remove(index);
-        if request.frame_id <= 3 || request.frame_id % 30 == 0 {
-            crate::log!(
-                "runview taking request window={} frame={}",
-                request.window_id,
-                request.frame_id,
-            );
-        }
-        Some(request)
+        Some(self.run_view_frame_requests.swap_remove(index))
     }
 
     #[allow(dead_code)]
@@ -216,16 +209,6 @@ impl Cx {
     ) {
         if self.run_view_frame_encode_in_flight {
             return;
-        }
-        if request.frame_id <= 3 || request.frame_id % 30 == 0 {
-            crate::log!(
-                "runview encoding frame window={} frame={} rgba_bytes={} size={}x{}",
-                request.window_id,
-                request.frame_id,
-                rgba.len(),
-                width,
-                height,
-            );
         }
         self.run_view_frame_encode_in_flight = true;
         let sender = self.run_view_frame_results.sender();
@@ -250,17 +233,7 @@ impl Cx {
             };
             self.run_view_frame_encode_in_flight = false;
             match result {
-                Ok(frame) => {
-                    if frame.frame_id <= 3 || frame.frame_id % 30 == 0 {
-                        crate::log!(
-                            "runview flushing encoded frame window={} frame={} bytes={}",
-                            frame.window_id,
-                            frame.frame_id,
-                            frame.data.len(),
-                        );
-                    }
-                    Cx::send_studio_message(AppToStudio::RunViewFrame(frame))
-                }
+                Ok(frame) => Cx::send_studio_message(AppToStudio::RunViewFrame(frame)),
                 Err(err) => crate::error!("runview frame encode failed: {}", err),
             }
         }
@@ -432,13 +405,6 @@ impl Cx {
                 self.redraw_all();
             }
             StudioToApp::RunViewFrameRequest(request) => {
-                if request.frame_id <= 3 || request.frame_id % 30 == 0 {
-                    crate::log!(
-                        "runview request received from studio window={} frame={}",
-                        request.window_id,
-                        request.frame_id,
-                    );
-                }
                 self.queue_studio_run_view_frame_request(request);
             }
             StudioToApp::WidgetTreeDump(request) => {

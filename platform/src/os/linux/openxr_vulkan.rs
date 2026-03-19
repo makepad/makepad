@@ -84,13 +84,6 @@ impl Cx {
 
         #[cfg(target_os = "android")]
         if let Some(request) = self.take_studio_run_view_frame_request(0) {
-            if request.frame_id <= 3 || request.frame_id % 30 == 0 {
-                crate::log!(
-                    "openxr_vulkan servicing runview frame={} window={}",
-                    request.frame_id,
-                    request.window_id,
-                );
-            }
             let mut vulkan = self
                 .os
                 .vulkan
@@ -106,15 +99,6 @@ impl Cx {
                         .session
                         .as_ref()
                         .ok_or_else(|| "OpenXR Vulkan frame capture failed: session unavailable".to_string())?;
-                    if request.frame_id <= 3 || request.frame_id % 30 == 0 {
-                        crate::log!(
-                            "openxr_vulkan captured runview frame={} rgba_bytes={} size={}x{}",
-                            request.frame_id,
-                            rgba.len(),
-                            session.width.max(1),
-                            session.height.max(1),
-                        );
-                    }
                     self.encode_studio_run_view_frame_async(
                         request,
                         session.width.max(1),
