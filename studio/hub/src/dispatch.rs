@@ -2137,6 +2137,9 @@ impl HubCore {
                     content: content.clone(),
                 },
             ) {
+                if err.starts_with("no app socket for build ") {
+                    continue;
+                }
                 eprintln!(
                     "[studio-hotreload] failed build={} virtual_path={} error={}",
                     build_id.0, virtual_path, err

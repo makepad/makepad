@@ -240,6 +240,7 @@ pub struct CxVulkan {
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
     swapchain_depth_targets: Vec<VulkanTextureResource>,
+    swapchain_readback_buffer: Option<VulkanBuffer>,
     swapchain_format: vk::Format,
     depth_format: vk::Format,
     swapchain_extent: vk::Extent2D,
@@ -522,6 +523,7 @@ impl CxVulkan {
             swapchain_images: Vec::new(),
             swapchain_image_views: Vec::new(),
             swapchain_depth_targets: Vec::new(),
+            swapchain_readback_buffer: None,
             swapchain_format: vk::Format::UNDEFINED,
             depth_format: vk::Format::UNDEFINED,
             swapchain_extent: vk::Extent2D {
@@ -895,6 +897,7 @@ impl CxVulkan {
             swapchain_images: Vec::new(),
             swapchain_image_views: Vec::new(),
             swapchain_depth_targets: Vec::new(),
+            swapchain_readback_buffer: None,
             swapchain_format: vk::Format::UNDEFINED,
             depth_format: vk::Format::UNDEFINED,
             swapchain_extent: vk::Extent2D {
@@ -1561,6 +1564,59 @@ impl CxVulkan {
         Ok(rgba)
     }
 
+    fn swapchain_readback_supported(&self) -> bool {
+        matches!(
+            self.swapchain_format,
+            vk::Format::B8G8R8A8_UNORM
+                | vk::Format::B8G8R8A8_SRGB
+                | vk::Format::R8G8B8A8_UNORM
+                | vk::Format::R8G8B8A8_SRGB
+        )
+    }
+
+    fn read_swapchain_color_image_rgba(&mut self, image_index: usize) -> Result<Vec<u8>, String> {
+        let _image = *self
+            .swapchain_images
+            .get(image_index)
+            .ok_or_else(|| format!("invalid swapchain image index {image_index}"))?;
+        let staging = self
+            .swapchain_readback_buffer
+            .ok_or_else(|| "swapchain color readback buffer unavailable".to_string())?;
+        let width = self.swapchain_extent.width;
+        let height = self.swapchain_extent.height;
+        if width == 0 || height == 0 {
+            return Err("swapchain color readback dimensions are zero".to_string());
+        }
+
+        let byte_len = width as vk::DeviceSize * height as vk::DeviceSize * 4;
+        let mut rgba = unsafe {
+            let mapped = self
+                .device
+                .map_memory(staging.memory, 0, byte_len, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("map_memory(swapchain color readback) failed: {e:?}"))?;
+            let bytes = std::slice::from_raw_parts(mapped as *const u8, byte_len as usize).to_vec();
+            self.device.unmap_memory(staging.memory);
+            bytes
+        };
+
+        match self.swapchain_format {
+            vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => {
+                for px in rgba.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                }
+            }
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {}
+            other => {
+                return Err(format!(
+                    "swapchain color readback does not support format {:?}",
+                    other
+                ));
+            }
+        }
+
+        Ok(rgba)
+    }
+
     pub(crate) fn draw_openxr_view(
         &mut self,
         cx: &mut Cx,
@@ -1779,6 +1835,13 @@ impl CxVulkan {
         if self.swapchain_images.get(image_index as usize).is_none() {
             return Err(format!("invalid swapchain image index {image_index}"));
         }
+        let screenshot_request_ids = cx.take_studio_screenshot_request_ids(0);
+        let run_view_request = cx.take_studio_run_view_frame_request(0);
+        let capture_swapchain =
+            !screenshot_request_ids.is_empty() || run_view_request.is_some();
+        if capture_swapchain && self.swapchain_readback_buffer.is_none() {
+            return Err("swapchain capture requested but readback buffer is unavailable".to_string());
+        }
 
         unsafe {
             self.device
@@ -1875,6 +1938,95 @@ impl CxVulkan {
             self.device.cmd_end_render_pass(self.command_buffer);
         }
 
+        if capture_swapchain {
+            let width = self.swapchain_extent.width;
+            let height = self.swapchain_extent.height;
+            let byte_len = width as vk::DeviceSize * height as vk::DeviceSize * 4;
+            let staging = self
+                .swapchain_readback_buffer
+                .ok_or_else(|| "swapchain color readback buffer unavailable".to_string())?;
+            let image = self.swapchain_images[image_index as usize];
+            let to_transfer = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .image(image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(0)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                );
+            let copy_region = vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(0)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                )
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                });
+            let to_present = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .dst_access_mask(vk::AccessFlags::empty())
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .image(image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(0)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                );
+            let buffer_ready = vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::HOST_READ)
+                .buffer(staging.buffer)
+                .offset(0)
+                .size(byte_len);
+
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_transfer],
+                );
+                self.device.cmd_copy_image_to_buffer(
+                    self.command_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    staging.buffer,
+                    &[copy_region],
+                );
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE | vk::PipelineStageFlags::HOST,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[buffer_ready],
+                    &[to_present],
+                );
+            }
+        }
+
         unsafe {
             self.device
                 .end_command_buffer(self.command_buffer)
@@ -1895,6 +2047,26 @@ impl CxVulkan {
             self.device
                 .queue_submit(self.queue, &[submit_info], self.in_flight_fence)
                 .map_err(|e| format!("queue_submit failed: {e:?}"))?;
+        }
+
+        if capture_swapchain {
+            unsafe {
+                self.device
+                    .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                    .map_err(|e| format!("wait_for_fences(swapchain capture) failed: {e:?}"))?;
+            }
+            let width = self.swapchain_extent.width.max(1);
+            let height = self.swapchain_extent.height.max(1);
+            let rgba = self.read_swapchain_color_image_rgba(image_index as usize)?;
+
+            if !screenshot_request_ids.is_empty() {
+                let png = Cx::encode_rgba_as_png(width, height, &rgba)?;
+                Cx::send_studio_screenshot_response(screenshot_request_ids, width, height, png);
+            }
+
+            if let Some(request) = run_view_request {
+                cx.encode_studio_run_view_frame_async(request, width, height, rgba);
+            }
         }
 
         let swapchains = [self.swapchain];
@@ -5821,6 +5993,20 @@ impl CxVulkan {
             self.swapchain_depth_targets.push(depth_target);
         }
 
+        self.swapchain_readback_buffer = if self.swapchain_readback_supported()
+            && self.swapchain_extent.width > 0
+            && self.swapchain_extent.height > 0
+        {
+            Some(self.create_host_buffer(
+                vk::BufferUsageFlags::TRANSFER_DST,
+                self.swapchain_extent.width as vk::DeviceSize
+                    * self.swapchain_extent.height as vk::DeviceSize
+                    * 4,
+            )?)
+        } else {
+            None
+        };
+
         for (index, view) in self.swapchain_image_views.iter().enumerate() {
             let depth_view = self
                 .swapchain_depth_targets
@@ -5893,6 +6079,10 @@ impl CxVulkan {
             if self.xr_render_pass != vk::RenderPass::null() {
                 self.device.destroy_render_pass(self.xr_render_pass, None);
                 self.xr_render_pass = vk::RenderPass::null();
+            }
+            if let Some(buffer) = self.swapchain_readback_buffer.take() {
+                self.device.destroy_buffer(buffer.buffer, None);
+                self.device.free_memory(buffer.memory, None);
             }
             self.depth_format = vk::Format::UNDEFINED;
         }

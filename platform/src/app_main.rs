@@ -22,54 +22,62 @@ fn normalize_studio_http_from_studio_var(studio: &str) -> String {
         return String::new();
     }
 
-    let base = if studio.contains("://") {
+    if studio.contains("://") {
         studio.to_string()
     } else {
         format!("http://{studio}")
-    };
-
-    if base.contains("/$studio_web_socket") || base.contains("/build/") {
-        base
-    } else {
-        format!("{base}/$studio_web_socket")
     }
 }
 
-fn with_studio_build_id(studio_http: String) -> String {
-    let Ok(build_id) = std::env::var("STUDIO_BUILD_ID") else {
-        return studio_http;
-    };
-    let build_id = build_id.trim();
-    if build_id.is_empty() {
-        return studio_http;
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn extract_studio_build_id(studio: &str) -> Option<String> {
+    let studio = studio.trim().trim_end_matches('/');
+    if studio.is_empty() {
+        return None;
     }
 
-    let normalized = studio_http.trim_end_matches('/').to_string();
-    if normalized
-        .rsplit('/')
-        .next()
-        .is_some_and(|part| part == build_id)
-    {
-        return normalized;
-    }
-    if normalized.contains("/build/") {
-        return normalized;
-    }
-    if let Some(prefix) = normalized.strip_suffix("/$studio_web_socket") {
-        return format!("{prefix}/build/{build_id}");
-    }
-    format!("{normalized}/build/{build_id}")
-}
+    let without_scheme = studio
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(studio);
+    let path = without_scheme
+        .split_once('/')
+        .map(|(_, path)| path)
+        .unwrap_or("");
 
-pub fn resolve_studio_http(default: &str) -> String {
-    if let Ok(studio) = std::env::var("STUDIO") {
-        let studio_http = normalize_studio_http_from_studio_var(&studio);
-        if !studio_http.is_empty() {
-            return with_studio_build_id(studio_http);
+    if let Some(rest) = path.strip_prefix("app/") {
+        let build_id = rest.split('/').next()?;
+        if !build_id.is_empty() {
+            return Some(build_id.to_string());
         }
     }
 
-    with_studio_build_id(default.to_string())
+    None
+}
+
+pub fn resolve_studio_http() -> String {
+    std::env::var("STUDIO")
+        .ok()
+        .map(|studio| normalize_studio_http_from_studio_var(&studio))
+        .filter(|studio_http| !studio_http.is_empty())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_studio_build_id_handles_app_paths() {
+        assert_eq!(
+            extract_studio_build_id("127.0.0.1:8001/app/42"),
+            Some("42".to_string())
+        );
+        assert_eq!(
+            extract_studio_build_id("http://127.0.0.1:8001/app/77"),
+            Some("77".to_string())
+        );
+    }
 }
 
 pub trait AppMain {
@@ -143,7 +151,7 @@ macro_rules! app_main {
                     }
                 },
             ))));
-            let studio_http = $crate::resolve_studio_http(std::option_env!("STUDIO").unwrap_or(""));
+            let studio_http = $crate::resolve_studio_http();
             cx.borrow_mut().init_websockets(&studio_http);
             if $crate::should_run_stdin_loop_from_env() {
                 cx.borrow_mut().in_makepad_studio = true;
@@ -214,8 +222,7 @@ macro_rules! app_main {
                         <dyn AppMain>::handle_event(app, cx, event);
                     }
                 })));
-                let studio_http =
-                    $crate::resolve_studio_http(std::option_env!("STUDIO").unwrap_or(""));
+                let studio_http = $crate::resolve_studio_http();
                 cx.init_websockets(&studio_http);
                 cx.init_cx_os();
                 cx
@@ -259,8 +266,7 @@ macro_rules! app_main {
                         <dyn AppMain>::handle_event(app, cx, event);
                     }
                 })));
-                let studio_http =
-                    $crate::resolve_studio_http(std::option_env!("STUDIO").unwrap_or(""));
+                let studio_http = $crate::resolve_studio_http();
                 cx.init_websockets(&studio_http);
                 cx.init_cx_os();
                 cx
@@ -304,7 +310,7 @@ macro_rules! app_main {
                     <dyn AppMain>::handle_event(app, cx, event);
                 }
             })));
-            let studio_http = $crate::resolve_studio_http(std::option_env!("STUDIO").unwrap_or(""));
+            let studio_http = $crate::resolve_studio_http();
             cx.init_websockets(&studio_http);
             cx.init_cx_os();
             Box::into_raw(cx) as u32
