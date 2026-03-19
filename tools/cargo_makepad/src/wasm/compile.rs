@@ -811,14 +811,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             .replace(
                 "imports = __wbg_get_imports();",
                 "imports = __wbg_get_imports(); imports.env = env;",
-            )
-            .replace(
-                "const imports=__wbg_get_imports(memory);",
-                "const imports=__wbg_get_imports(memory);imports.env=env;",
-            )
-            .replace(
-                "const imports = __wbg_get_imports(memory);",
-                "const imports = __wbg_get_imports(memory); imports.env = env;",
             );
         let patched = patched
             .lines()
