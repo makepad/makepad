@@ -317,7 +317,7 @@ impl Html {
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(br) => {
-                tf.new_line_collapsed(cx);
+                tf.new_line_with_wrap_spacing(cx);
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(hr) | some_id!(sep) => {
