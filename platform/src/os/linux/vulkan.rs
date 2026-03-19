@@ -185,6 +185,7 @@ pub(crate) struct CxVulkanOpenXrEyeTarget {
 }
 
 pub(crate) struct CxVulkanOpenXrSwapchainImage {
+    image: vk::Image,
     eyes: [CxVulkanOpenXrEyeTarget; 2],
 }
 
@@ -196,10 +197,12 @@ pub(crate) struct CxVulkanOpenXrDepthImage {
 pub(crate) struct CxVulkanOpenXrSessionData {
     width: u32,
     height: u32,
+    color_format: vk::Format,
     pub(crate) depth_width: u32,
     pub(crate) depth_height: u32,
     color_images: Vec<CxVulkanOpenXrSwapchainImage>,
     depth_images: Vec<CxVulkanOpenXrDepthImage>,
+    color_readback_buffer: Option<VulkanBuffer>,
     depth_readback_buffer: Option<VulkanBuffer>,
 }
 
@@ -1040,6 +1043,12 @@ impl CxVulkan {
         } else {
             None
         };
+        let color_readback_buffer = if width > 0 && height > 0 {
+            let byte_len = width as vk::DeviceSize * height as vk::DeviceSize * 4;
+            Some(self.create_host_buffer(vk::BufferUsageFlags::TRANSFER_DST, byte_len)?)
+        } else {
+            None
+        };
 
         let mut xr_color_images = Vec::with_capacity(color_images.len());
         for &image in color_images {
@@ -1047,7 +1056,7 @@ impl CxVulkan {
                 self.create_openxr_eye_target(image, 0, color_format, width, height)?,
                 self.create_openxr_eye_target(image, 1, color_format, width, height)?,
             ];
-            xr_color_images.push(CxVulkanOpenXrSwapchainImage { eyes });
+            xr_color_images.push(CxVulkanOpenXrSwapchainImage { image, eyes });
         }
 
         let mut xr_depth_images = Vec::with_capacity(depth_images.len());
@@ -1091,10 +1100,12 @@ impl CxVulkan {
         Ok(CxVulkanOpenXrSessionData {
             width: width.max(1),
             height: height.max(1),
+            color_format,
             depth_width,
             depth_height,
             color_images: xr_color_images,
             depth_images: xr_depth_images,
+            color_readback_buffer,
             depth_readback_buffer,
         })
     }
@@ -1219,6 +1230,16 @@ impl CxVulkan {
             }
         }
         if let Some(buffer) = session.depth_readback_buffer {
+            unsafe {
+                if buffer.buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(buffer.buffer, None);
+                }
+                if buffer.memory != vk::DeviceMemory::null() {
+                    self.device.free_memory(buffer.memory, None);
+                }
+            }
+        }
+        if let Some(buffer) = session.color_readback_buffer {
             unsafe {
                 if buffer.buffer != vk::Buffer::null() {
                     self.device.destroy_buffer(buffer.buffer, None);
@@ -1378,6 +1399,166 @@ impl CxVulkan {
         };
 
         Ok(depth)
+    }
+
+    pub(crate) fn read_openxr_color_image_rgba(
+        &mut self,
+        session: &CxVulkanOpenXrSessionData,
+        color_image_index: usize,
+        eye_index: usize,
+    ) -> Result<Vec<u8>, String> {
+        let color_image = session
+            .color_images
+            .get(color_image_index)
+            .ok_or_else(|| format!("invalid OpenXR color image index {color_image_index}"))?;
+        let staging = session
+            .color_readback_buffer
+            .ok_or_else(|| "OpenXR color readback buffer unavailable".to_string())?;
+        if session.width == 0 || session.height == 0 {
+            return Err("OpenXR color readback dimensions are zero".to_string());
+        }
+
+        let pixel_count = session.width as usize * session.height as usize;
+        let byte_len = pixel_count as vk::DeviceSize * 4;
+
+        unsafe {
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(color readback) failed: {e:?}"))?;
+            self.device
+                .reset_fences(&[self.in_flight_fence])
+                .map_err(|e| format!("reset_fences(color readback) failed: {e:?}"))?;
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| format!("reset_command_buffer(color readback) failed: {e:?}"))?;
+            self.device
+                .begin_command_buffer(
+                    self.command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(|e| format!("begin_command_buffer(color readback) failed: {e:?}"))?;
+        }
+
+        let to_transfer = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .image(color_image.image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(eye_index as u32)
+                    .layer_count(1),
+            );
+        let copy_region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(0)
+                    .base_array_layer(eye_index as u32)
+                    .layer_count(1),
+            )
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: session.width,
+                height: session.height,
+                depth: 1,
+            });
+        let to_color_attachment = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .image(color_image.image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(eye_index as u32)
+                    .layer_count(1),
+            );
+        let buffer_ready = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::HOST_READ)
+            .buffer(staging.buffer)
+            .offset(0)
+            .size(byte_len);
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_transfer],
+            );
+            self.device.cmd_copy_image_to_buffer(
+                self.command_buffer,
+                color_image.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                staging.buffer,
+                &[copy_region],
+            );
+            self.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[buffer_ready],
+                &[to_color_attachment],
+            );
+            self.device
+                .end_command_buffer(self.command_buffer)
+                .map_err(|e| format!("end_command_buffer(color readback) failed: {e:?}"))?;
+            self.device
+                .queue_submit(
+                    self.queue,
+                    &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])],
+                    self.in_flight_fence,
+                )
+                .map_err(|e| format!("queue_submit(color readback) failed: {e:?}"))?;
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(color readback submit) failed: {e:?}"))?;
+        }
+
+        let mut rgba = unsafe {
+            let mapped = self
+                .device
+                .map_memory(staging.memory, 0, byte_len, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("map_memory(color readback) failed: {e:?}"))?;
+            let bytes = std::slice::from_raw_parts(mapped as *const u8, byte_len as usize).to_vec();
+            self.device.unmap_memory(staging.memory);
+            bytes
+        };
+
+        match session.color_format {
+            vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => {
+                for px in rgba.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                }
+            }
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {}
+            other => {
+                return Err(format!(
+                    "OpenXR color readback does not support format {:?}",
+                    other
+                ));
+            }
+        }
+
+        Ok(rgba)
     }
 
     pub(crate) fn draw_openxr_view(

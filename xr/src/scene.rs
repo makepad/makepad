@@ -1,4 +1,4 @@
-use crate::passthrough_cube::DrawPassthroughCubeAtlas;
+use super::passthrough_cube::DrawPassthroughCubeAtlas;
 use self::{
     depth::{DepthSurfaceMeshChunkHandle, RetainedDepthQueryHit},
     passthrough::{
@@ -21,9 +21,13 @@ use rapier3d::prelude::{
 };
 use std::collections::HashMap;
 
+#[path = "depth.rs"]
 mod depth;
+#[path = "hands.rs"]
 mod hands;
+#[path = "passthrough.rs"]
 mod passthrough;
+#[path = "physics.rs"]
 mod physics;
 
 script_mod! {
@@ -395,6 +399,10 @@ pub struct XrScene {
 }
 
 impl XrScene {
+    pub fn reset_requested(update: &XrUpdateEvent) -> bool {
+        update.clicked_menu()
+    }
+
     fn depth_debug_enabled(&self) -> bool {
         let _ = self.depth_debug_mode;
         false
@@ -606,7 +614,7 @@ impl Widget for XrScene {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         match event {
             Event::XrUpdate(e) => {
-                if e.clicked_menu() || e.menu_pressed() {
+                if Self::reset_requested(e) {
                     self.reset_scene(cx, &e.state);
                 }
                 self.ensure_scene(&e.state);

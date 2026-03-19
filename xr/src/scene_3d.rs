@@ -1,4 +1,7 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
+use crate::{
+    makepad_derive_widget::*, makepad_draw::*, widget::*, widget_async::ScriptAsyncResult,
+    widget_tree::CxWidgetExt,
+};
 use std::cmp::Ordering;
 
 use super::chart_3d::Chart3DData;
@@ -20,6 +23,7 @@ pub struct SceneState3D {
 pub struct SceneScope3D {
     pub scene: SceneState3D,
     pub chart_data: Option<Chart3DData>,
+    pub world_transform: Mat4f,
     pub draw_call_anchors: Vec<SceneDrawCallAnchor>,
 }
 
@@ -46,6 +50,81 @@ pub fn chart_data_from_scope(scope: &mut Scope) -> Option<Chart3DData> {
         return scope_3d.chart_data.clone();
     }
     scope.data.get::<Chart3DData>().cloned()
+}
+
+pub fn scene_node_world_transform_from_scope(scope: &mut Scope) -> Mat4f {
+    scope
+        .data
+        .get::<SceneScope3D>()
+        .map(|scope_3d| scope_3d.world_transform)
+        .unwrap_or_else(Mat4f::identity)
+}
+
+pub fn compose_scene_node_transform(position: Vec3f, rotation: Vec3f, scale: Vec3f) -> Mat4f {
+    Mat4f::mul(
+        &Mat4f::translation(position),
+        &Mat4f::mul(
+            &Mat4f::rotation(rotation),
+            &Mat4f::nonuniform_scaled_translation(scale, vec3(0.0, 0.0, 0.0)),
+        ),
+    )
+}
+
+pub fn ray_from_scene_viewport(scene: &SceneState3D, abs: DVec2) -> Option<(Vec3f, Vec3f)> {
+    let rect = scene.viewport_rect;
+    if rect.size.x <= 1.0 || rect.size.y <= 1.0 || !rect.contains(abs) {
+        return None;
+    }
+
+    let sx = ((abs.x - rect.pos.x) / rect.size.x).clamp(0.0, 1.0) as f32;
+    let sy = ((abs.y - rect.pos.y) / rect.size.y).clamp(0.0, 1.0) as f32;
+    let ndc_x = sx * 2.0 - 1.0;
+    let ndc_y = 1.0 - sy * 2.0;
+
+    let inv_projection = scene.projection.invert();
+    let inv_view = scene.view.invert();
+
+    let near_view = inv_projection.transform_vec4(vec4(ndc_x, ndc_y, -1.0, 1.0));
+    let far_view = inv_projection.transform_vec4(vec4(ndc_x, ndc_y, 1.0, 1.0));
+    if near_view.w.abs() <= 1.0e-6 || far_view.w.abs() <= 1.0e-6 {
+        return None;
+    }
+
+    let near_view = vec4(
+        near_view.x / near_view.w,
+        near_view.y / near_view.w,
+        near_view.z / near_view.w,
+        1.0,
+    );
+    let far_view = vec4(
+        far_view.x / far_view.w,
+        far_view.y / far_view.w,
+        far_view.z / far_view.w,
+        1.0,
+    );
+
+    let near_world = inv_view.transform_vec4(near_view);
+    let far_world = inv_view.transform_vec4(far_view);
+    if near_world.w.abs() <= 1.0e-6 || far_world.w.abs() <= 1.0e-6 {
+        return None;
+    }
+
+    let near_world = vec3f(
+        near_world.x / near_world.w,
+        near_world.y / near_world.w,
+        near_world.z / near_world.w,
+    );
+    let far_world = vec3f(
+        far_world.x / far_world.w,
+        far_world.y / far_world.w,
+        far_world.z / far_world.w,
+    );
+    let dir = far_world - near_world;
+    if dir.length() <= 1.0e-6 {
+        return None;
+    }
+
+    Some((scene.camera_pos, dir.normalize()))
 }
 
 pub fn register_draw_call_anchor(scope: &mut Scope, area: Area, world_pos: Vec3f) {
@@ -192,7 +271,7 @@ script_mod! {
     }
 }
 
-#[derive(Script, Widget)]
+#[derive(Script, WidgetRef, WidgetRegister)]
 pub struct Scene3D {
     #[uid]
     uid: WidgetUid,
@@ -203,7 +282,6 @@ pub struct Scene3D {
     #[layout]
     layout: Layout,
 
-    #[redraw]
     #[live]
     draw_bg: DrawColor,
     #[live]
@@ -354,6 +432,7 @@ impl Scene3D {
         let mut scene_scope_data = SceneScope3D {
             scene: self.current_scene_state,
             chart_data,
+            world_transform: Mat4f::identity(),
             draw_call_anchors: Vec::new(),
         };
         let mut scene_scope = Scope::with_data(&mut scene_scope_data);
@@ -373,9 +452,50 @@ impl Scene3D {
     }
 }
 
+impl WidgetNode for Scene3D {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+
+    fn area(&self) -> Area {
+        self.area
+    }
+
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        for id in &self.layer_order {
+            if let Some(layer) = self.layers.get(id) {
+                visit(*id, layer.clone());
+            }
+        }
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
+    }
+}
+
 impl Widget for Scene3D {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(render) || method == live_id!(render_scene) {
+            if let Some(layer) = self.layers.get(&live_id!(scene_root)) {
+                return layer.script_call(vm, live_id!(render), args);
+            }
+            return ScriptAsyncResult::MethodNotFound;
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let uid = self.widget_uid();
+        let uid = self.uid;
         let layer_order = self.layer_order.clone();
         for id in layer_order {
             if let Some(layer) = self.layers.get_mut(&id) {
@@ -517,6 +637,10 @@ impl ScriptHook for Scene3D {
                         } else {
                             let layer = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
                             self.layers.insert(id, layer);
+                        }
+                        if let Some(layer) = self.layers.get(&id) {
+                            vm.cx_mut()
+                                .widget_tree_insert_child_deep(self.uid, id, layer.clone());
                         }
                     }
                 });

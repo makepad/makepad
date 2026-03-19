@@ -392,6 +392,34 @@ impl Cx {
             }
         }
 
+        #[cfg(target_os = "android")]
+        if let Some(request) = self.take_studio_run_view_frame_request(0) {
+            let w = pix_width.floor() as u32;
+            let h = pix_height.floor() as u32;
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            unsafe {
+                let gl = self.os.gl();
+                (gl.glReadPixels)(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
+                    pixels.as_mut_ptr() as *mut _,
+                );
+            }
+            let stride = (w * 4) as usize;
+            for y in 0..(h as usize / 2) {
+                let top = y * stride;
+                let bot = ((h as usize) - 1 - y) * stride;
+                for x in 0..stride {
+                    pixels.swap(top + x, bot + x);
+                }
+            }
+            self.encode_studio_run_view_frame_async(request, w, h, pixels);
+        }
+
         unsafe {
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
             let swap_ok =

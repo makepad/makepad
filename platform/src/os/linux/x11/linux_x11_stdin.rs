@@ -417,6 +417,7 @@ impl Cx {
                 self.redraw_all();
                 self.stdin_handle_platform_ops(stdin_windows);
             }
+            StudioToApp::RunViewFrameRequest(_) => {}
             StudioToApp::Tick => {
                 if SignalToUI::check_and_clear_ui_signal() {
                     self.handle_media_signals();
