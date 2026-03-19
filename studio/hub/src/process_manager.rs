@@ -322,7 +322,7 @@ fn script_value_to_query_id(
     ))
 }
 
-fn studio_url_for_build(base: Option<&str>, build_id: Option<QueryId>) -> String {
+fn studio_url_for_app(base: Option<&str>, build_id: Option<QueryId>) -> String {
     let Some(base) = base.map(str::trim).filter(|base| !base.is_empty()) else {
         return String::new();
     };
@@ -330,10 +330,10 @@ fn studio_url_for_build(base: Option<&str>, build_id: Option<QueryId>) -> String
     let Some(build_id) = build_id else {
         return normalized;
     };
-    if normalized.contains("/build/") || normalized.contains("/$studio_web_socket/") {
+    if normalized.contains("/app/") {
         return normalized;
     }
-    format!("{normalized}/build/{}", build_id.0)
+    format!("{normalized}/app/{}", build_id.0)
 }
 
 fn script_value_to_bool(value: ScriptValue) -> Option<bool> {
@@ -533,7 +533,7 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
             let url = vm
                 .host
                 .downcast_ref::<ScriptBuildHost>()
-                .map(|host| studio_url_for_build(host.studio_local_addr.as_deref(), build_id))
+                .map(|host| studio_url_for_app(host.studio_local_addr.as_deref(), build_id))
                 .unwrap_or_default();
             vm.new_string_with(|_vm, out| out.push_str(&url)).into()
         },
@@ -557,7 +557,7 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
             let url = vm
                 .host
                 .downcast_ref::<ScriptBuildHost>()
-                .map(|host| studio_url_for_build(host.studio_ext_addr.as_deref(), build_id))
+                .map(|host| studio_url_for_app(host.studio_ext_addr.as_deref(), build_id))
                 .unwrap_or_default();
             vm.new_string_with(|_vm, out| out.push_str(&url)).into()
         },
@@ -858,28 +858,13 @@ impl ProcessManager {
             .entry("MAKEPAD".to_string())
             .or_insert_with(|| "lines".to_string());
 
-        if inject_studio_env {
-            if let Some(studio_addr) = studio_addr.as_deref().map(str::trim) {
-                if !studio_addr.is_empty() {
-                    let studio_addr = if studio_addr.contains("/build/")
-                        || studio_addr.contains("/$studio_web_socket/")
-                    {
-                        studio_addr.to_string()
-                    } else {
-                        format!("{}/build/{}", studio_addr.trim_end_matches('/'), build_id.0)
-                    };
-                    child_env
-                        .entry("STUDIO".to_string())
-                        .or_insert(studio_addr);
-                }
-            }
-        }
-
-        if child_env
+        let resolved_studio = child_env
             .get("STUDIO")
-            .is_some_and(|studio| !studio.trim().is_empty())
-        {
-            child_env.insert("STUDIO_BUILD_ID".to_string(), build_id.0.to_string());
+            .map(String::as_str)
+            .or_else(|| inject_studio_env.then_some(studio_addr.as_deref()).flatten());
+        let resolved_studio = studio_url_for_app(resolved_studio, Some(build_id));
+        if !resolved_studio.is_empty() {
+            child_env.insert("STUDIO".to_string(), resolved_studio);
         }
         command.envs(child_env.iter());
 
@@ -1153,4 +1138,25 @@ fn parse_package_name(args: &[String]) -> Option<String> {
         i += 1;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn studio_url_for_app_appends_app_path_to_base_addr() {
+        assert_eq!(
+            studio_url_for_app(Some("127.0.0.1:8001"), Some(QueryId(7))),
+            "127.0.0.1:8001/app/7"
+        );
+    }
+
+    #[test]
+    fn studio_url_for_app_preserves_existing_app_path() {
+        assert_eq!(
+            studio_url_for_app(Some("127.0.0.1:8001/app/5"), Some(QueryId(9))),
+            "127.0.0.1:8001/app/5"
+        );
+    }
 }

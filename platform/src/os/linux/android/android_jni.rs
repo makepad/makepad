@@ -258,13 +258,6 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
         std::env::set_var("STUDIO", &studio);
         crate::log!("android launch extra STUDIO={}", studio);
     }
-
-    if let Some(build_id) = get_intent_string_extra(env, activity, "makepad.STUDIO_BUILD_ID")
-        .filter(|v| !v.trim().is_empty())
-    {
-        std::env::set_var("STUDIO_BUILD_ID", &build_id);
-        crate::log!("android launch extra STUDIO_BUILD_ID={}", build_id);
-    }
 }
 
 pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {

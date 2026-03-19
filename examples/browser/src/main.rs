@@ -190,7 +190,7 @@ pub fn app_main() {
         }
     }))));
 
-    let studio_http = resolve_studio_http(std::option_env!("STUDIO").unwrap_or(""));
+    let studio_http = resolve_studio_http();
     cx.borrow_mut().init_websockets(&studio_http);
     if should_run_stdin_loop_from_env() {
         cx.borrow_mut().in_makepad_studio = true;

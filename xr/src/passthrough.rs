@@ -16,14 +16,6 @@ pub(super) struct XrPassthroughCameraTextures {
     pub(super) tex_v: Option<Texture>,
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct XrPassthroughQuadPlacement {
-    center: Vec3f,
-    right: Vec3f,
-    up: Vec3f,
-    normal: Vec3f,
-}
-
 pub(super) struct XrPassthroughEnvAtlas {
     pass: DrawPass,
     draw_list: DrawList2d,
@@ -101,38 +93,6 @@ impl XrPassthroughEnvAtlas {
 }
 
 impl XrScene {
-    fn current_passthrough_quad_placement(
-        &self,
-        state: &XrState,
-    ) -> (XrPassthroughQuadPlacement, f32, f32) {
-        let source_size = self.passthrough_camera_source_size;
-        let aspect = if source_size.y > 1.0 {
-            source_size.x / source_size.y
-        } else {
-            4.0 / 3.0
-        };
-        let half_height = XR_PASSTHROUGH_QUAD_DISTANCE
-            * (XR_PASSTHROUGH_ENV_CAMERA_FOV_Y_DEGREES.to_radians() * 0.5).tan()
-            * XR_PASSTHROUGH_ENV_CAMERA_PROJECTION_SCALE;
-        let half_width = half_height * aspect;
-
-        let (head, right, up, forward) = Self::current_head_basis(state);
-        let center = head
-            + forward * XR_PASSTHROUGH_QUAD_DISTANCE
-            + right * XR_PASSTHROUGH_QUAD_WORLD_OFFSET_X
-            + up * XR_PASSTHROUGH_QUAD_WORLD_OFFSET_Y;
-        (
-            XrPassthroughQuadPlacement {
-                center,
-                right,
-                up,
-                normal: -forward,
-            },
-            half_width,
-            half_height,
-        )
-    }
-
     fn passthrough_camera_center_offset_uv(&self) -> Vec2f {
         let source_size = self.passthrough_camera_source_size;
         let aspect = if source_size.y > 1.0 {
@@ -214,25 +174,9 @@ impl XrScene {
         self.passthrough_camera_textures = None;
         self.passthrough_camera_video = VideoYuvMetadata::disabled();
         self.passthrough_camera_has_frame = false;
-        self.passthrough_camera_quad = None;
-        self.passthrough_quad_placement = None;
-    }
-
-    fn stop_passthrough_camera(&mut self, cx: &mut Cx) {
-        cx.cancel_pending_camera_playback(Self::passthrough_video_id());
-        if self.passthrough_camera_playback_requested || self.passthrough_camera_textures.is_some()
-        {
-            cx.cleanup_video_playback_resources(Self::passthrough_video_id());
-        }
-        self.reset_passthrough_camera_state();
     }
 
     pub(super) fn sync_passthrough_camera(&mut self, cx: &mut Cx) {
-        if !self.passthrough_debug_enabled() {
-            self.stop_passthrough_camera(cx);
-            return;
-        }
-
         if matches!(
             self.passthrough_camera_permission,
             Some(PermissionStatus::DeniedCanRetry) | Some(PermissionStatus::DeniedPermanent)
@@ -275,53 +219,6 @@ impl XrScene {
             false,
         );
         self.passthrough_camera_playback_requested = true;
-    }
-
-    fn upsert_passthrough_quad_geometry(
-        &mut self,
-        cx: &mut Cx2d,
-        state: &XrState,
-    ) -> Option<GeometryId> {
-        let (placement, half_width, half_height) = self.current_passthrough_quad_placement(state);
-
-        let corners = [
-            placement.center - placement.right * half_width + placement.up * half_height,
-            placement.center + placement.right * half_width + placement.up * half_height,
-            placement.center + placement.right * half_width - placement.up * half_height,
-            placement.center - placement.right * half_width - placement.up * half_height,
-        ];
-
-        let tangent = [placement.right.x, placement.right.y, placement.right.z, 1.0];
-        let color = [1.0, 1.0, 1.0, 1.0];
-        let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        let mut vertices = Vec::with_capacity(4 * 16);
-        for (corner, uv) in corners.iter().zip(uvs.iter()) {
-            vertices.extend_from_slice(&[
-                corner.x,
-                corner.y,
-                corner.z,
-                placement.normal.x,
-                placement.normal.y,
-                placement.normal.z,
-                uv[0],
-                uv[1],
-                color[0],
-                color[1],
-                color[2],
-                color[3],
-                tangent[0],
-                tangent[1],
-                tangent[2],
-                tangent[3],
-            ]);
-        }
-        let indices = vec![0, 1, 2, 2, 3, 0, 0, 2, 1, 0, 3, 2];
-
-        let geometry = self
-            .passthrough_camera_quad
-            .get_or_insert_with(|| Geometry::new(cx.cx.cx));
-        geometry.update(cx.cx.cx, indices, vertices);
-        Some(geometry.geometry_id())
     }
 
     fn upsert_passthrough_env_atlas_geometry(
@@ -367,39 +264,6 @@ impl XrScene {
             .get_or_insert_with(|| Geometry::new(cx.cx.cx));
         geometry.update(cx.cx.cx, indices, vertices);
         geometry.geometry_id()
-    }
-
-    pub(super) fn draw_passthrough_camera_quad(&mut self, cx: &mut Cx2d, state: &XrState) {
-        if !self.passthrough_debug_enabled() {
-            return;
-        }
-        let Some(textures) = self.passthrough_camera_textures.clone() else {
-            return;
-        };
-        let Some(geometry_id) = self.upsert_passthrough_quad_geometry(cx, state) else {
-            return;
-        };
-
-        self.draw_passthrough_quad.draw_vars.options.depth_write = false;
-        self.draw_passthrough_quad.source_size = self.passthrough_camera_source_size;
-        self.draw_passthrough_quad.frost_mix = 0.0;
-        self.draw_passthrough_quad.tint_color = vec4f(1.0, 1.0, 1.0, 0.42);
-        self.draw_passthrough_quad.camera_enabled = if self.passthrough_camera_has_frame {
-            1.0
-        } else {
-            0.0
-        };
-        self.draw_passthrough_quad.rotation_steps = self.passthrough_camera_video.rotation_steps;
-        self.draw_passthrough_quad.biplanar = self.passthrough_camera_video.shader_biplanar();
-        self.draw_passthrough_quad.yuv_enabled = if self.passthrough_camera_has_frame {
-            self.passthrough_camera_video.shader_enabled()
-        } else {
-            -1.0
-        };
-        self.draw_passthrough_quad
-            .draw_vars
-            .set_texture(0, &textures.camera);
-        self.draw_passthrough_quad.draw_geometry(cx, geometry_id);
     }
 
     fn current_head_basis(state: &XrState) -> (Vec3f, Vec3f, Vec3f, Vec3f) {
@@ -604,21 +468,6 @@ impl XrScene {
             corner_radius,
             XR_PBR_FACE_SUBDIVISIONS,
             XR_PBR_CORNER_SEGMENTS,
-        );
-    }
-
-    pub(super) fn draw_passthrough_probe_plate(&mut self, cx: &mut Cx2d, state: &XrState) {
-        let (placement, half_width, half_height) = self.current_passthrough_quad_placement(state);
-        let pose = Pose::new(
-            Quat::look_rotation(-placement.normal, placement.up),
-            placement.center - placement.normal * 0.0015,
-        );
-        self.draw_pose_box(
-            cx,
-            pose,
-            vec3(half_width, half_height, 0.001),
-            vec4(0.20, 0.55, 0.95, 1.0),
-            1.0,
         );
     }
 }
