@@ -215,7 +215,8 @@ pub struct ExampleXrScene {
 
 impl ExampleXrScene {
     fn scene_forward(state: &XrState) -> Vec3f {
-        let forward = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        let mut forward = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        forward.y = 0.0;
         if forward.length() <= 1.0e-4 {
             vec3f(0.0, 0.0, -1.0)
         } else {
