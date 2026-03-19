@@ -28,7 +28,7 @@ fn normalize_studio_http_from_studio_var(studio: &str) -> String {
         format!("http://{studio}")
     };
 
-    if base.contains("/$studio_web_socket") {
+    if base.contains("/$studio_web_socket") || base.contains("/build/") {
         base
     } else {
         format!("{base}/$studio_web_socket")
@@ -52,10 +52,13 @@ fn with_studio_build_id(studio_http: String) -> String {
     {
         return normalized;
     }
-    if normalized.contains("/$studio_web_socket/") {
+    if normalized.contains("/build/") {
         return normalized;
     }
-    format!("{normalized}/{build_id}")
+    if let Some(prefix) = normalized.strip_suffix("/$studio_web_socket") {
+        return format!("{prefix}/build/{build_id}");
+    }
+    format!("{normalized}/build/{build_id}")
 }
 
 pub fn resolve_studio_http(default: &str) -> String {
@@ -179,6 +182,7 @@ macro_rules! app_main {
             activity: *const std::ffi::c_void,
         ) {
             Cx::init_log();
+            $crate::os::linux::android::android_jni::apply_studio_env_from_activity(activity);
             Cx::android_entry(activity, || {
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {

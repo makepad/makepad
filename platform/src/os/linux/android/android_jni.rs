@@ -213,6 +213,60 @@ pub unsafe fn fetch_activity_handle(activity: *const std::ffi::c_void) -> jni_sy
     (**env).NewGlobalRef.unwrap()(env, activity as jni_sys::jobject)
 }
 
+unsafe fn get_intent_string_extra(
+    env: *mut jni_sys::JNIEnv,
+    activity: jni_sys::jobject,
+    key: &str,
+) -> Option<String> {
+    let intent = ndk_utils::call_object_method!(
+        env,
+        activity,
+        "getIntent",
+        "()Landroid/content/Intent;"
+    );
+    if intent.is_null() {
+        return None;
+    }
+    let key = CString::new(key).ok()?;
+    let key = ((**env).NewStringUTF.unwrap())(env, key.as_ptr());
+    if key.is_null() {
+        return None;
+    }
+    let value = ndk_utils::call_object_method!(
+        env,
+        intent,
+        "getStringExtra",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        key
+    );
+    if value.is_null() {
+        return None;
+    }
+    Some(jstring_to_string(env, value))
+}
+
+pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) {
+    if activity.is_null() {
+        return;
+    }
+    let env = attach_jni_env();
+    let activity = activity as jni_sys::jobject;
+
+    if let Some(studio) =
+        get_intent_string_extra(env, activity, "makepad.STUDIO").filter(|v| !v.trim().is_empty())
+    {
+        std::env::set_var("STUDIO", &studio);
+        crate::log!("android launch extra STUDIO={}", studio);
+    }
+
+    if let Some(build_id) = get_intent_string_extra(env, activity, "makepad.STUDIO_BUILD_ID")
+        .filter(|v| !v.trim().is_empty())
+    {
+        std::env::set_var("STUDIO_BUILD_ID", &build_id);
+        crate::log!("android launch extra STUDIO_BUILD_ID={}", build_id);
+    }
+}
+
 pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
     let mut env: *mut jni_sys::JNIEnv = std::ptr::null_mut();
     let attach_current_thread = (**get_java_vm()).AttachCurrentThread.unwrap();
