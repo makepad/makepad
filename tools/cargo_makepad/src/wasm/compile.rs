@@ -218,7 +218,8 @@ pub fn generate_html(
             let wasm = await init({{module_or_path: module}}, env);
             set_wasm(wasm);
 
-            wasm._has_thread_support = wasm.exports.memory.buffer instanceof SharedArrayBuffer;
+            wasm._has_thread_support = typeof SharedArrayBuffer !== 'undefined'
+                && wasm.exports.memory.buffer instanceof SharedArrayBuffer;
             wasm._memory = wasm.exports.memory;
             wasm._module = module;
             const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
@@ -811,6 +812,23 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 "imports = __wbg_get_imports();",
                 "imports = __wbg_get_imports(); imports.env = env;",
             );
+        let patched = patched
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                let is_env_import = (trimmed.starts_with("import * as __wbg_star")
+                    || trimmed.starts_with("import*as import")
+                    || trimmed.starts_with("import * as import"))
+                    && (trimmed.contains("from 'env'")
+                        || trimmed.contains("from\"env\"")
+                        || trimmed.contains("from \"env\""));
+                let is_env_mapping = (trimmed.starts_with("\"env\":")
+                    || trimmed.starts_with("'env':"))
+                    && trimmed.contains("import");
+                !is_env_import && !is_env_mapping
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
