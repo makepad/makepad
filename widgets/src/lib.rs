@@ -32,8 +32,6 @@ pub mod scroll_bars;
 pub mod view;
 pub mod view_ui;
 
-#[cfg(feature = "cef")]
-pub mod browser;
 pub mod button;
 pub mod check_box;
 pub mod icon;
@@ -93,6 +91,9 @@ pub mod pdf_view;
 pub mod splash;
 pub mod svg;
 pub mod vector;
+#[cfg(feature = "3d")]
+#[path = "3d/mod.rs"]
+pub mod widgets_3d;
 
 // Touch gesture support (used by expandable_panel)
 pub mod touch_gesture;
@@ -210,9 +211,6 @@ pub use crate::{
     window_menu::*,
 };
 
-#[cfg(feature = "cef")]
-pub use crate::browser::*;
-
 #[cfg(feature = "voice")]
 pub use crate::voice_wave::*;
 
@@ -231,6 +229,8 @@ pub use crate::splash::*;
 pub use crate::pdf_view::*;
 pub use crate::svg::*;
 pub use crate::vector::*;
+#[cfg(feature = "3d")]
+pub use crate::widgets_3d::*;
 
 pub use crate::chart::*;
 

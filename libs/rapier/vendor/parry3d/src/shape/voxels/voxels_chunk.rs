@@ -1,22 +1,17 @@
 use crate::bounding_volume::Aabb;
 use crate::math::{ivect_to_vect, IVector, Int, Real, Vector};
 use crate::shape::{VoxelData, VoxelState, Voxels};
+use makepad_sparse_voxels::{SparseChunkHeader, SparseChunkIndex};
 
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-pub(super) struct VoxelsChunkHeader {
-    pub(super) id: usize,
-    // The number of non-empty voxels in the chunk.
-    // This is used for detecting when a chunk can be removed
-    // if it becomes fully empty.
-    pub(super) len: usize,
-}
+/// Metadata for a sparse voxel chunk slot.
+pub type VoxelsChunkHeader = SparseChunkHeader;
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[repr(C)]
 #[repr(align(64))]
-pub(super) struct VoxelsChunk {
+/// A fixed-size chunk of voxel neighborhood states.
+pub struct VoxelsChunk {
     #[cfg_attr(feature = "serde-serialize", serde(with = "serde_arrays"))]
     pub(super) states: [VoxelState; VoxelsChunk::VOXELS_PER_CHUNK],
 }
@@ -29,47 +24,46 @@ impl Default for VoxelsChunk {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct VoxelIndex {
-    pub(super) chunk_id: usize,
-    pub(super) id_in_chunk: usize,
-}
-
-impl VoxelIndex {
-    pub fn flat_id(&self) -> usize {
-        self.chunk_id * VoxelsChunk::VOXELS_PER_CHUNK + self.id_in_chunk
-    }
-
-    pub fn from_flat_id(id: usize) -> Self {
-        Self {
-            chunk_id: id / VoxelsChunk::VOXELS_PER_CHUNK,
-            id_in_chunk: id % VoxelsChunk::VOXELS_PER_CHUNK,
-        }
-    }
-}
+/// A linear index into the sparse voxel storage.
+pub type VoxelIndex = SparseChunkIndex<{ VoxelsChunk::VOXELS_PER_CHUNK }>;
 
 impl VoxelsChunk {
     // TODO: find the ideal number. We want a good balance between cache locality
     //       and number of BVH leaf nodes.
     #[cfg(feature = "dim2")]
-    pub(super) const VOXELS_PER_CHUNK_DIM: usize = 16;
+    /// The edge length of a chunk in voxels.
+    pub const VOXELS_PER_CHUNK_DIM: usize = 16;
     #[cfg(feature = "dim3")]
-    pub(super) const VOXELS_PER_CHUNK_DIM: usize = 8;
+    /// The edge length of a chunk in voxels.
+    pub const VOXELS_PER_CHUNK_DIM: usize = 8;
     #[cfg(feature = "dim2")]
-    pub(super) const VOXELS_PER_CHUNK: usize =
-        Self::VOXELS_PER_CHUNK_DIM * Self::VOXELS_PER_CHUNK_DIM;
+    /// The total number of voxels stored in one chunk.
+    pub const VOXELS_PER_CHUNK: usize = Self::VOXELS_PER_CHUNK_DIM * Self::VOXELS_PER_CHUNK_DIM;
     #[cfg(feature = "dim3")]
-    pub(super) const VOXELS_PER_CHUNK: usize =
+    /// The total number of voxels stored in one chunk.
+    pub const VOXELS_PER_CHUNK: usize =
         Self::VOXELS_PER_CHUNK_DIM * Self::VOXELS_PER_CHUNK_DIM * Self::VOXELS_PER_CHUNK_DIM;
 
     #[cfg(feature = "dim2")]
-    pub(super) const INVALID_CHUNK_KEY: IVector = IVector::new(Int::MAX, Int::MAX);
+    /// Sentinel chunk key used for free chunk slots.
+    pub const INVALID_CHUNK_KEY: IVector = IVector::new(Int::MAX, Int::MAX);
     #[cfg(feature = "dim3")]
-    pub(super) const INVALID_CHUNK_KEY: IVector = IVector::new(Int::MAX, Int::MAX, Int::MAX);
+    /// Sentinel chunk key used for free chunk slots.
+    pub const INVALID_CHUNK_KEY: IVector = IVector::new(Int::MAX, Int::MAX, Int::MAX);
+
+    /// Returns the raw voxel-state array for this chunk.
+    pub fn states(&self) -> &[VoxelState; Self::VOXELS_PER_CHUNK] {
+        &self.states
+    }
+
+    /// Returns mutable access to the raw voxel-state array for this chunk.
+    pub fn states_mut(&mut self) -> &mut [VoxelState; Self::VOXELS_PER_CHUNK] {
+        &mut self.states
+    }
 
     /// The key of the voxel at the given linearized index within this chunk.
     #[cfg(feature = "dim2")]
-    pub(super) fn voxel_key_at_id(chunk_key: IVector, id_in_chunk: u32) -> IVector {
+    pub fn voxel_key_at_id(chunk_key: IVector, id_in_chunk: u32) -> IVector {
         let y = id_in_chunk as Int / Self::VOXELS_PER_CHUNK_DIM as Int;
         let x = id_in_chunk as Int % Self::VOXELS_PER_CHUNK_DIM as Int;
         chunk_key * (Self::VOXELS_PER_CHUNK_DIM as Int) + IVector::new(x, y)
@@ -77,7 +71,7 @@ impl VoxelsChunk {
 
     /// The key of the voxel at the given linearized index.
     #[cfg(feature = "dim3")]
-    pub(super) fn voxel_key_at_id(chunk_key: IVector, id_in_chunk: u32) -> IVector {
+    pub fn voxel_key_at_id(chunk_key: IVector, id_in_chunk: u32) -> IVector {
         let d0d1 = (Self::VOXELS_PER_CHUNK_DIM * Self::VOXELS_PER_CHUNK_DIM) as u32;
         let z = id_in_chunk / d0d1;
         let y = (id_in_chunk - z * d0d1) / Self::VOXELS_PER_CHUNK_DIM as u32;
@@ -86,13 +80,14 @@ impl VoxelsChunk {
     }
 
     /// The semi-open range of valid voxel keys for this chunk.
-    pub(super) fn keys_bounds(chunk_key: &IVector) -> [IVector; 2] {
+    pub fn keys_bounds(chunk_key: &IVector) -> [IVector; 2] {
         let imins = chunk_key * Self::VOXELS_PER_CHUNK_DIM as Int;
         let imaxs = imins + IVector::splat(Self::VOXELS_PER_CHUNK_DIM as Int);
         [imins, imaxs]
     }
 
-    pub(super) fn aabb(chunk_key: &IVector, voxel_size: Vector) -> Aabb {
+    /// Returns the world-space AABB of the chunk identified by `chunk_key`.
+    pub fn aabb(chunk_key: &IVector, voxel_size: Vector) -> Aabb {
         let [imins, imaxs] = Self::keys_bounds(chunk_key);
         let aabb = Aabb::new(ivect_to_vect(imins), ivect_to_vect(imaxs));
         Aabb::new(aabb.mins * voxel_size, aabb.maxs * voxel_size)

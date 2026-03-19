@@ -221,7 +221,8 @@ impl DrawVars {
                             }
                         }
                         if os_shader_id.is_none() {
-                            let mut os_shader = CxOsDrawShader::new_vulkan_only(&vertex, &fragment);
+                            let mut os_shader =
+                                CxOsDrawShader::new(cx.os.gl(), &vertex, &fragment, &cx.os_type);
                             os_shader.vulkan_shader = Some(vk_shader);
                             os_shader_id = Some(cx.draw_shaders.os_shaders.len());
                             cx.draw_shaders.os_shaders.push(os_shader);
@@ -534,12 +535,6 @@ impl Cx {
                     } else {
                         0 as gl_sys::GLboolean
                     });
-                    if draw_call.options.backface_culling {
-                        (gl.glEnable)(gl_sys::CULL_FACE);
-                        (gl.glCullFace)(gl_sys::BACK);
-                    } else {
-                        (gl.glDisable)(gl_sys::CULL_FACE);
-                    }
                     // bind all uniform buffers
                     {
                         shgl.uniforms
@@ -1573,19 +1568,6 @@ impl GlShader {
 }
 
 impl CxOsDrawShader {
-    #[cfg(use_vulkan)]
-    pub fn new_vulkan_only(in_vertex: &str, in_pixel: &str) -> Self {
-        CxOsDrawShader {
-            in_vertex: in_vertex.to_string(),
-            in_pixel: in_pixel.to_string(),
-            vertex: [String::new(), String::new()],
-            pixel: [String::new(), String::new()],
-            gl_shader: [None, None],
-            live_uniforms: Default::default(),
-            vulkan_shader: None,
-        }
-    }
-
     pub fn new(gl: &LibGl, in_vertex: &str, in_pixel: &str, os_type: &OsType) -> Self {
         // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
         let available_extensions = get_gl_string(gl, gl_sys::EXTENSIONS);
@@ -1664,7 +1646,7 @@ impl CxOsDrawShader {
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, 1.0 - pos.y));}
             vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
             vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){return textureLod(sampler, dir, lod);}
-            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
+            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir).zyxw;}
             ";
         #[cfg(not(target_os = "android"))]
         let sampler_helpers = "
@@ -1675,7 +1657,7 @@ impl CxOsDrawShader {
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, 1.0 - pos.y));}
             vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
             vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){return textureLod(sampler, dir, lod);}
-            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
+            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir).zyxw;}
             ";
 
         let vertex_window = format!(
@@ -1713,10 +1695,6 @@ impl CxOsDrawShader {
             {tex_ext_sampler}
             {in_vertex}\0",
         );
-        #[cfg(all(target_os = "android", not(use_vulkan)))]
-        let xr_depth_clip = nop_depth_clip;
-        #[cfg(not(all(target_os = "android", not(use_vulkan))))]
-        let xr_depth_clip = depth_clip;
         let pixel_xr = format!(
             "#version 300 es
             #define VIEW_ID gl_ViewID_OVR
@@ -1728,7 +1706,7 @@ impl CxOsDrawShader {
             {sampler_helpers}
             {tex_ext_sampler}
             {in_pixel}
-            {xr_depth_clip}
+            {depth_clip}
             \0",
         );
         // lets fetch the uniform positions for our uniforms
@@ -1979,11 +1957,11 @@ impl CxTexture {
                     (gl.glTexImage2D)(
                         *target,
                         0,
-                        gl_sys::BGRA as i32,
+                        gl_sys::RGBA as i32,
                         *width as i32,
                         *height as i32,
                         0,
-                        gl_sys::BGRA,
+                        gl_sys::RGBA,
                         gl_sys::UNSIGNED_BYTE,
                         face_ptr,
                     );

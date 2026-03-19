@@ -202,7 +202,7 @@ impl RunningChild {
 }
 
 enum ScriptRunCommand {
-    RunItem { name: String, build_id: QueryId },
+    RunItem { name: String },
 }
 
 struct ScriptRunControl {
@@ -219,14 +219,12 @@ struct ScriptBuildHost {
     build_id: QueryId,
     mount: String,
     cwd: PathBuf,
-    studio_local_addr: Option<String>,
-    studio_ext_addr: Option<String>,
+    studio_addr: Option<String>,
     event_tx: Sender<HubEvent>,
     stop: Arc<AtomicBool>,
     command_rx: Receiver<ScriptRunCommand>,
     run_items: HashMap<String, RegisteredRunItem>,
     current_run_item_name: Option<String>,
-    current_run_build_id: Option<QueryId>,
 }
 
 impl ScriptBuildHost {
@@ -258,7 +256,6 @@ impl ScriptBuildHost {
 
     fn emit_run_request(&self, program: String, args: Vec<String>, env: HashMap<String, String>) {
         let _ = self.event_tx.send(HubEvent::ScriptRunRequest {
-            build_id: self.current_run_build_id,
             mount: self.mount.clone(),
             cwd: self.cwd.clone(),
             program,
@@ -298,42 +295,6 @@ fn script_value_to_checked_string(
         ));
     }
     Ok(script_value_to_string(vm, value))
-}
-
-fn script_value_to_query_id(
-    vm: &mut ScriptVm,
-    value: ScriptValue,
-    what: &str,
-) -> Result<Option<QueryId>, ScriptValue> {
-    if value.is_nil() {
-        return Ok(None);
-    }
-    if let Some(number) = value.as_number() {
-        if number.is_finite() && number >= 0.0 && number.fract() == 0.0 {
-            return Ok(Some(QueryId(number as u64)));
-        }
-    }
-    let rendered = script_value_to_string(vm, value);
-    Err(script_err_type_mismatch!(
-        vm.trap(),
-        "{} expects a build id number or nil, got {}",
-        what,
-        rendered
-    ))
-}
-
-fn studio_url_for_app(base: Option<&str>, build_id: Option<QueryId>) -> String {
-    let Some(base) = base.map(str::trim).filter(|base| !base.is_empty()) else {
-        return String::new();
-    };
-    let normalized = base.trim_end_matches('/').to_string();
-    let Some(build_id) = build_id else {
-        return normalized;
-    };
-    if normalized.contains("/app/") {
-        return normalized;
-    }
-    format!("{normalized}/app/{}", build_id.0)
 }
 
 fn script_value_to_bool(value: ScriptValue) -> Option<bool> {
@@ -508,60 +469,12 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
     let studio_ip = vm
         .host
         .downcast_ref::<ScriptBuildHost>()
-        .and_then(|host| host.studio_local_addr.clone())
+        .and_then(|host| host.studio_addr.clone())
         .unwrap_or_default();
     let studio_ip = vm.new_string_with(|_vm, out| out.push_str(&studio_ip));
     vm.bx
         .heap
         .set_value_def(hub, id!(studio_ip).into(), studio_ip.into());
-
-    vm.add_method(
-        hub,
-        id_lut!(studio_local),
-        script_args_def!(build_id = NIL),
-        |vm, args| {
-            let build_id = script_value!(vm, args.build_id);
-            let build_id = match script_value_to_query_id(vm, build_id, "hub.studio_local build_id")
-            {
-                Ok(Some(build_id)) => Some(build_id),
-                Ok(None) => vm
-                    .host
-                    .downcast_ref::<ScriptBuildHost>()
-                    .and_then(|host| host.current_run_build_id),
-                Err(err) => return err,
-            };
-            let url = vm
-                .host
-                .downcast_ref::<ScriptBuildHost>()
-                .map(|host| studio_url_for_app(host.studio_local_addr.as_deref(), build_id))
-                .unwrap_or_default();
-            vm.new_string_with(|_vm, out| out.push_str(&url)).into()
-        },
-    );
-
-    vm.add_method(
-        hub,
-        id_lut!(studio_ext),
-        script_args_def!(build_id = NIL),
-        |vm, args| {
-            let build_id = script_value!(vm, args.build_id);
-            let build_id = match script_value_to_query_id(vm, build_id, "hub.studio_ext build_id")
-            {
-                Ok(Some(build_id)) => Some(build_id),
-                Ok(None) => vm
-                    .host
-                    .downcast_ref::<ScriptBuildHost>()
-                    .and_then(|host| host.current_run_build_id),
-                Err(err) => return err,
-            };
-            let url = vm
-                .host
-                .downcast_ref::<ScriptBuildHost>()
-                .map(|host| studio_url_for_app(host.studio_ext_addr.as_deref(), build_id))
-                .unwrap_or_default();
-            vm.new_string_with(|_vm, out| out.push_str(&url)).into()
-        },
-    );
 
     vm.add_method(
         hub,
@@ -652,7 +565,7 @@ fn run_pending_script_commands(
             break;
         };
         match command {
-            ScriptRunCommand::RunItem { name, build_id } => {
+            ScriptRunCommand::RunItem { name } => {
                 let Some(item) = host.run_items.get(&name).map(|item| item.item.clone()) else {
                     host.emit_output(format!("unknown run item {:?}", name), true);
                     continue;
@@ -669,13 +582,10 @@ fn run_pending_script_commands(
                     continue;
                 };
                 host.current_run_item_name = Some(name.clone());
-                host.current_run_build_id = Some(build_id);
-                let build_id_arg = (build_id.0 as f64).into();
                 let result = with_vm_and_async(host, std, script_vm, |vm| {
-                    vm.call_with_self(on_run_object.into(), &[build_id_arg], item_object.into())
+                    vm.call_with_me(on_run_object.into(), &[], item_object.into())
                 });
                 host.current_run_item_name = None;
-                host.current_run_build_id = None;
                 if result.is_err() {
                     let err = with_vm_and_async(host, std, script_vm, |vm| {
                         script_value_to_string(vm, result)
@@ -720,8 +630,7 @@ fn run_script_build(
     mount: String,
     cwd: &Path,
     splash_path: &Path,
-    studio_local_addr: Option<String>,
-    studio_ext_addr: Option<String>,
+    studio_addr: Option<String>,
     stop: Arc<AtomicBool>,
     command_rx: Receiver<ScriptRunCommand>,
     event_tx: Sender<HubEvent>,
@@ -733,14 +642,12 @@ fn run_script_build(
                 build_id,
                 mount,
                 cwd: cwd.to_path_buf(),
-                studio_local_addr,
-                studio_ext_addr,
+                studio_addr,
                 event_tx,
                 stop,
                 command_rx,
                 run_items: HashMap::new(),
                 current_run_item_name: None,
-                current_run_build_id: None,
             };
             host.emit_output(
                 format!("failed to read {}: {}", splash_path.to_string_lossy(), err),
@@ -756,14 +663,12 @@ fn run_script_build(
         build_id,
         mount,
         cwd: cwd.to_path_buf(),
-        studio_local_addr,
-        studio_ext_addr,
+        studio_addr,
         event_tx,
         stop,
         command_rx,
         run_items: HashMap::new(),
         current_run_item_name: None,
-        current_run_build_id: None,
     };
     let runtime = Arc::new(NetworkRuntime::new(NetworkConfig::default()));
     let mut std = ScriptStd::with_network_runtime(runtime);
@@ -859,13 +764,21 @@ impl ProcessManager {
             .entry("MAKEPAD".to_string())
             .or_insert_with(|| "lines".to_string());
 
-        let resolved_studio = child_env
+        if inject_studio_env {
+            if let Some(studio_addr) = studio_addr.as_deref().map(str::trim) {
+                if !studio_addr.is_empty() {
+                    child_env
+                        .entry("STUDIO".to_string())
+                        .or_insert_with(|| studio_addr.to_string());
+                }
+            }
+        }
+
+        if child_env
             .get("STUDIO")
-            .map(String::as_str)
-            .or_else(|| inject_studio_env.then_some(studio_addr.as_deref()).flatten());
-        let resolved_studio = studio_url_for_app(resolved_studio, Some(build_id));
-        if !resolved_studio.is_empty() {
-            child_env.insert("STUDIO".to_string(), resolved_studio);
+            .is_some_and(|studio| !studio.trim().is_empty())
+        {
+            child_env.insert("STUDIO_BUILD_ID".to_string(), build_id.0.to_string());
         }
         command.envs(child_env.iter());
 
@@ -943,8 +856,7 @@ impl ProcessManager {
         build_id: QueryId,
         mount: String,
         cwd: &Path,
-        studio_local_addr: Option<String>,
-        studio_ext_addr: Option<String>,
+        studio_addr: Option<String>,
         event_tx: Sender<HubEvent>,
     ) -> Result<BuildInfo, String> {
         if self.builds.contains_key(&build_id) {
@@ -970,16 +882,14 @@ impl ProcessManager {
         let thread_cwd = cwd.to_path_buf();
         let thread_splash = splash_path.clone();
         let thread_mount = mount.clone();
-        let thread_studio_local_addr = studio_local_addr;
-        let thread_studio_ext_addr = studio_ext_addr;
+        let thread_studio_addr = studio_addr;
         thread::spawn(move || {
             run_script_build(
                 build_id,
                 thread_mount,
                 &thread_cwd,
                 &thread_splash,
-                thread_studio_local_addr,
-                thread_studio_ext_addr,
+                thread_studio_addr,
                 Arc::clone(&thread_control.stop),
                 command_rx,
                 event_tx,
@@ -1002,12 +912,7 @@ impl ProcessManager {
         Ok(info)
     }
 
-    pub fn invoke_script_run_item(
-        &self,
-        mount: &str,
-        name: &str,
-        build_id: QueryId,
-    ) -> Result<(), String> {
+    pub fn invoke_script_run_item(&self, mount: &str, name: &str) -> Result<(), String> {
         let Some(build) = self.builds.values().find(|build| {
             build.info.active
                 && build.info.mount == mount
@@ -1028,7 +933,6 @@ impl ProcessManager {
             .command_tx
             .send(ScriptRunCommand::RunItem {
                 name: name.to_string(),
-                build_id,
             })
             .map_err(|_| format!("failed to send run item {:?} to splash", name))
     }
@@ -1139,25 +1043,4 @@ fn parse_package_name(args: &[String]) -> Option<String> {
         i += 1;
     }
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn studio_url_for_app_appends_app_path_to_base_addr() {
-        assert_eq!(
-            studio_url_for_app(Some("127.0.0.1:8001"), Some(QueryId(7))),
-            "127.0.0.1:8001/app/7"
-        );
-    }
-
-    #[test]
-    fn studio_url_for_app_preserves_existing_app_path() {
-        assert_eq!(
-            studio_url_for_app(Some("127.0.0.1:8001/app/5"), Some(QueryId(9))),
-            "127.0.0.1:8001/app/5"
-        );
-    }
 }

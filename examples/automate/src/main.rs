@@ -455,6 +455,8 @@ impl MidiMirrorState {
 struct ControllerSnapshot {
     state: ControllerState,
     mirror: MidiMirrorState,
+    last_event: String,
+    dmx_packets: u64,
 }
 
 impl Default for ControllerSnapshot {
@@ -462,6 +464,8 @@ impl Default for ControllerSnapshot {
         Self {
             state: ControllerState::default(),
             mirror: MidiMirrorState::default(),
+            last_event: "Waiting for MIDI input...".to_string(),
+            dmx_packets: 0,
         }
     }
 }
@@ -787,6 +791,7 @@ impl App {
                 Err(_) => None,
             };
 
+            let mut last_event = String::from("Waiting for MIDI input...");
             let mut dmx_packets: u64 = 0;
             let mut persist_counter: u32 = 0;
             let mut clock = 0.0f64;
@@ -801,6 +806,7 @@ impl App {
                                 state.dial_top[index] = clamp01(value);
                                 let midi = (clamp01(value) * 127.0).round() as u8;
                                 mirror.set_cc(0, 48 + index, midi);
+                                last_event = format!("UI top knob {} = {}", index, midi);
                             }
                         }
                         UiControlMessage::SetFader { index, value } => {
@@ -808,6 +814,7 @@ impl App {
                                 state.fade[index] = clamp01(value);
                                 let midi = (clamp01(value) * 127.0).round() as u8;
                                 mirror.set_cc(index, 7, midi);
+                                last_event = format!("UI fader {} = {}", index, midi);
                             }
                         }
                         UiControlMessage::TriggerScene { index } => {
@@ -818,12 +825,14 @@ impl App {
                                     );
                                 }
                                 if load_preset_slot(index, &mut state) {
+                                    last_event = format!("UI loaded preset {:02}", index);
                                     if DEBUG_SCENE_EVENTS {
                                         println!(
                                             "scene_change source=ui action=load slot={index:02}"
                                         );
                                     }
                                 } else {
+                                    last_event = format!("UI preset {:02} not found", index);
                                     if DEBUG_SCENE_EVENTS {
                                         println!(
                                             "scene_change source=ui action=missing slot={index:02}"
@@ -857,6 +866,7 @@ impl App {
                                 if note == 89 {
                                     buttons.power = on;
                                 }
+                                last_event = format!("UI transport {} = {}", note, on);
                             }
                         }
                     }
@@ -901,6 +911,10 @@ impl App {
                                 state.dial_top[(cc.param - 48) as usize] = value;
                             }
 
+                            last_event = format!(
+                                "CC ch:{} param:{} value:{}",
+                                cc.channel, cc.param, cc.value
+                            );
                         }
                         MidiEvent::Note(note) => {
                             mirror.set_note(
@@ -936,6 +950,8 @@ impl App {
                                                 buttons.preset[channel] = true;
                                                 if buttons.write_preset {
                                                     save_state_file(&preset_file(channel), &state);
+                                                    last_event =
+                                                        format!("Saved preset {:02}", channel);
                                                     if DEBUG_SCENE_EVENTS {
                                                         println!(
                                                             "scene_change source=midi action=save slot={channel:02} note=52 ch={}",
@@ -943,6 +959,8 @@ impl App {
                                                         );
                                                     }
                                                 } else if load_preset_slot(channel, &mut state) {
+                                                    last_event =
+                                                        format!("Loaded preset {:02}", channel);
                                                     if DEBUG_SCENE_EVENTS {
                                                         println!(
                                                             "scene_change source=midi action=load slot={channel:02} note=52 ch={}",
@@ -950,6 +968,8 @@ impl App {
                                                         );
                                                     }
                                                 } else {
+                                                    last_event =
+                                                        format!("Preset {:02} not found", channel);
                                                     if DEBUG_SCENE_EVENTS {
                                                         println!(
                                                             "scene_change source=midi action=missing slot={channel:02} note=52 ch={}",
@@ -989,6 +1009,8 @@ impl App {
                                                 buttons.preset[index] = true;
                                                 if buttons.write_preset {
                                                     save_state_file(&preset_file(index), &state);
+                                                    last_event =
+                                                        format!("Saved preset {:02}", index);
                                                     if DEBUG_SCENE_EVENTS {
                                                         println!(
                                                             "scene_change source=midi action=save slot={index:02} note={} ch={}",
@@ -997,6 +1019,8 @@ impl App {
                                                         );
                                                     }
                                                 } else if load_preset_slot(index, &mut state) {
+                                                    last_event =
+                                                        format!("Loaded preset {:02}", index);
                                                     if DEBUG_SCENE_EVENTS {
                                                         println!(
                                                             "scene_change source=midi action=load slot={index:02} note={} ch={}",
@@ -1005,6 +1029,8 @@ impl App {
                                                         );
                                                     }
                                                 } else {
+                                                    last_event =
+                                                        format!("Preset {:02} not found", index);
                                                     if DEBUG_SCENE_EVENTS {
                                                         println!(
                                                             "scene_change source=midi action=missing slot={index:02} note={} ch={}",
@@ -1021,10 +1047,15 @@ impl App {
                                 }
                                 _ => {}
                             }
-                            let _ = note;
+                            if !matches!(note.note_number, 52 | 82..=86) {
+                                last_event = format!(
+                                    "NOTE ch:{} num:{} on:{} vel:{}",
+                                    note.channel, note.note_number, note.is_on, note.velocity
+                                );
+                            }
                         }
                         other => {
-                            let _ = other;
+                            last_event = format!("MIDI {:?}", other);
                         }
                     }
                 }
@@ -1052,6 +1083,8 @@ impl App {
                     let _ = state_sender.send(ControllerSnapshot {
                         state,
                         mirror: mirror.clone(),
+                        last_event: last_event.clone(),
+                        dmx_packets,
                     });
                 }
 

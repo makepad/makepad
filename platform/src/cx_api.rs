@@ -325,6 +325,10 @@ impl Cx {
         crate::xr_depth_mesh::xr_depth_mesh_store()
     }
 
+    pub fn xr_depth_voxels(&self) -> crate::xr_depth_voxels::XrDepthVoxelsStore {
+        crate::xr_depth_voxels::xr_depth_voxels_store()
+    }
+
     pub fn get_ref(&self) -> CxRef {
         CxRef(self.self_ref.clone().unwrap())
     }
@@ -1106,55 +1110,11 @@ impl Cx {
         autoplay: bool,
         should_loop: bool,
     ) {
-        self.prepare_video_playback_with_permission(
-            video_id,
-            source,
-            camera_preview_mode,
-            external_texture_id,
-            texture_id,
-            autoplay,
-            should_loop,
-            crate::permission::Permission::Camera,
-        );
-    }
-
-    pub fn prepare_headset_camera_playback(
-        &mut self,
-        video_id: LiveId,
-        source: VideoSource,
-        camera_preview_mode: CameraPreviewMode,
-        external_texture_id: u32,
-        texture_id: TextureId,
-        autoplay: bool,
-        should_loop: bool,
-    ) {
-        self.prepare_video_playback_with_permission(
-            video_id,
-            source,
-            camera_preview_mode,
-            external_texture_id,
-            texture_id,
-            autoplay,
-            should_loop,
-            crate::permission::Permission::HeadsetCamera,
-        );
-    }
-
-    fn prepare_video_playback_with_permission(
-        &mut self,
-        video_id: LiveId,
-        source: VideoSource,
-        camera_preview_mode: CameraPreviewMode,
-        external_texture_id: u32,
-        texture_id: TextureId,
-        autoplay: bool,
-        should_loop: bool,
-        permission: crate::permission::Permission,
-    ) {
         if let VideoSource::Camera(..) = &source {
+            // Auto-request camera permission before opening device
+            let _request_id = self.request_permission(crate::permission::Permission::Camera);
             self.pending_camera_playbacks
                 .push(crate::cx::PendingCameraPlayback {
-                    permission,
                     video_id,
                     source,
                     camera_preview_mode,
@@ -1163,7 +1123,6 @@ impl Cx {
                     autoplay,
                     should_loop,
                 });
-            let _request_id = self.request_permission(permission);
             return;
         }
         self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
@@ -1181,18 +1140,11 @@ impl Cx {
         &mut self,
         result: &crate::permission::PermissionResult,
     ) {
-        if !matches!(
-            result.permission,
-            crate::permission::Permission::Camera | crate::permission::Permission::HeadsetCamera
-        ) {
+        if result.permission != crate::permission::Permission::Camera {
             return;
         }
         let pending: Vec<_> = self.pending_camera_playbacks.drain(..).collect();
         for p in pending {
-            if p.permission != result.permission {
-                self.pending_camera_playbacks.push(p);
-                continue;
-            }
             match result.status {
                 crate::permission::PermissionStatus::Granted => {
                     self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
@@ -1209,12 +1161,7 @@ impl Cx {
                     self.call_event_handler(&crate::event::Event::VideoDecodingError(
                         crate::event::VideoDecodingErrorEvent {
                             video_id: p.video_id,
-                            error: match p.permission {
-                                crate::permission::Permission::HeadsetCamera => {
-                                    "Headset camera permission denied".to_string()
-                                }
-                                _ => "Camera permission denied".to_string(),
-                            },
+                            error: "Camera permission denied".to_string(),
                         },
                     ));
                 }
@@ -1265,11 +1212,6 @@ impl Cx {
     pub fn cleanup_video_playback_resources(&mut self, video_id: LiveId) {
         self.platform_ops
             .push(CxOsOp::CleanupVideoPlaybackResources(video_id));
-    }
-
-    pub fn cancel_pending_camera_playback(&mut self, video_id: LiveId) {
-        self.pending_camera_playbacks
-            .retain(|pending| pending.video_id != video_id);
     }
 
     pub fn seek_video_playback(&mut self, video_id: LiveId, position_ms: u64) {

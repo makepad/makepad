@@ -2,7 +2,7 @@ use {
     self::super::acamera_sys::*,
     crate::{
         makepad_live_id::*,
-        os::linux::{android::ndk_sys, gl_sys},
+        os::linux::gl_sys,
         texture::{CxTexturePool, TexturePixel},
         thread::SignalToUI,
         video::*,
@@ -34,7 +34,6 @@ struct StreamDispatch {
     video_input_cbs: Vec<Arc<Mutex<Option<VideoInputFn>>>>,
     frame_input_cbs: Vec<Arc<Mutex<Option<CameraFrameInputFn>>>>,
     preview_frame_input_cbs: Vec<Arc<Mutex<Option<CameraFrameInputFn>>>>,
-    preview_hardware_buffer_input_cbs: Vec<Arc<Mutex<Option<CameraHardwareBufferInputFn>>>>,
     encoders: Vec<Arc<Mutex<Option<VideoEncoder>>>>,
 }
 
@@ -43,43 +42,13 @@ impl StreamDispatch {
         !self.video_input_cbs.is_empty()
             || !self.frame_input_cbs.is_empty()
             || !self.preview_frame_input_cbs.is_empty()
-            || !self.preview_hardware_buffer_input_cbs.is_empty()
             || !self.encoders.is_empty()
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AndroidImageReaderMode {
-    CpuReadable,
-    HardwareBufferYuv,
-}
-
-pub struct AndroidCameraHardwareBufferFrame {
-    pub buffer: *mut ndk_sys::AHardwareBuffer,
-    pub timestamp_ns: u64,
-    pub width: u32,
-    pub height: u32,
-}
-
-unsafe impl Send for AndroidCameraHardwareBufferFrame {}
-
-impl Drop for AndroidCameraHardwareBufferFrame {
-    fn drop(&mut self) {
-        if !self.buffer.is_null() {
-            unsafe {
-                ndk_sys::AHardwareBuffer_release(self.buffer);
-            }
-        }
-    }
-}
-
-pub type CameraHardwareBufferInputFn =
-    Box<dyn FnMut(AndroidCameraHardwareBufferFrame) + Send + 'static>;
-
 struct PreviewSubscription {
     stream: CameraStreamKey,
     frame_cb: Arc<Mutex<Option<CameraFrameInputFn>>>,
-    hardware_buffer_cb: Arc<Mutex<Option<CameraHardwareBufferInputFn>>>,
     preview_window: *mut ANativeWindow,
 }
 
@@ -111,8 +80,6 @@ pub struct AndroidCaptureContext {
     dispatch: Arc<Mutex<StreamDispatch>>,
     format: VideoFormat,
     alive: Arc<AtomicBool>,
-    reader_mode: AndroidImageReaderMode,
-    logged_first_hardware_buffer_frame: AtomicBool,
 }
 
 impl AndroidCaptureSession {
@@ -124,9 +91,8 @@ impl AndroidCaptureSession {
     unsafe extern "C" fn device_on_error(
         _context: *mut c_void,
         _device: *mut ACameraDevice,
-        error: c_int,
+        _error: c_int,
     ) {
-        crate::warning!("Android camera: device error {}", error);
     }
 
     unsafe extern "C" fn image_on_image_available(context: *mut c_void, reader: *mut AImageReader) {
@@ -149,45 +115,9 @@ impl AndroidCaptureSession {
                 guard.video_input_cbs.clone(),
                 guard.frame_input_cbs.clone(),
                 guard.preview_frame_input_cbs.clone(),
-                guard.preview_hardware_buffer_input_cbs.clone(),
                 guard.encoders.clone(),
             )
         };
-
-        if context.reader_mode == AndroidImageReaderMode::HardwareBufferYuv {
-            let mut hardware_buffer = std::ptr::null_mut();
-            let mut image_format = -1i32;
-            let _ = AImage_getFormat(image, &mut image_format);
-            if AImage_getHardwareBuffer(image, &mut hardware_buffer) == 0
-                && !hardware_buffer.is_null()
-            {
-                context
-                    .logged_first_hardware_buffer_frame
-                    .store(true, Ordering::Relaxed);
-                for cb in &dispatch_snapshot.3 {
-                    if let Ok(mut guard) = cb.try_lock() {
-                        if let Some(cb) = &mut *guard {
-                            ndk_sys::AHardwareBuffer_acquire(hardware_buffer);
-                            cb(AndroidCameraHardwareBufferFrame {
-                                buffer: hardware_buffer,
-                                timestamp_ns: timestamp_ns.max(0) as u64,
-                                width: context.format.width as u32,
-                                height: context.format.height as u32,
-                            });
-                        }
-                    }
-                }
-            } else {
-                crate::warning!(
-                    "Android headset camera: AImage_getHardwareBuffer failed for hardware-buffer reader format={} size={}x{}",
-                    image_format,
-                    context.format.width,
-                    context.format.height,
-                );
-            }
-            AImage_delete(image);
-            return;
-        }
 
         match context.format.pixel_format {
             VideoPixelFormat::MJPEG => {
@@ -228,7 +158,7 @@ impl AndroidCaptureSession {
                             }
                         }
                     }
-                    for enc in &dispatch_snapshot.4 {
+                    for enc in &dispatch_snapshot.3 {
                         if let Ok(guard) = enc.try_lock() {
                             if let Some(enc) = &*guard {
                                 enc.push_frame(frame_ref);
@@ -318,7 +248,7 @@ impl AndroidCaptureSession {
                             }
                         }
                     }
-                    for enc in &dispatch_snapshot.4 {
+                    for enc in &dispatch_snapshot.3 {
                         if let Ok(guard) = enc.try_lock() {
                             if let Some(enc) = &*guard {
                                 enc.push_frame(frame_ref);
@@ -401,41 +331,27 @@ impl AndroidCaptureSession {
         _request: *mut ACaptureRequest,
         _failure: *mut ACameraCaptureFailure,
     ) {
-        crate::warning!("Android camera: capture failed");
     }
     unsafe extern "C" fn capture_on_sequence_completed(
         _context: *mut c_void,
         _session: *mut ACameraCaptureSession,
-        sequence_id: ::std::os::raw::c_int,
-        frame_number: i64,
+        _sequence_id: ::std::os::raw::c_int,
+        _frame_number: i64,
     ) {
-        crate::warning!(
-            "Android camera: capture sequence completed sequence_id={} frame_number={}",
-            sequence_id,
-            frame_number,
-        );
     }
     unsafe extern "C" fn capture_on_sequence_aborted(
         _context: *mut c_void,
         _session: *mut ACameraCaptureSession,
-        sequence_id: ::std::os::raw::c_int,
+        _sequence_id: ::std::os::raw::c_int,
     ) {
-        crate::warning!(
-            "Android camera: capture sequence aborted sequence_id={}",
-            sequence_id,
-        );
     }
     unsafe extern "C" fn capture_on_buffer_lost(
         _context: *mut c_void,
         _session: *mut ACameraCaptureSession,
         _request: *mut ACaptureRequest,
         _window: *mut ACameraWindowType,
-        frame_number: i64,
+        _frame_number: i64,
     ) {
-        crate::warning!(
-            "Android camera: capture buffer lost frame_number={}",
-            frame_number
-        );
     }
 
     unsafe extern "C" fn session_on_closed(
@@ -462,26 +378,11 @@ impl AndroidCaptureSession {
         preview_window: Option<*mut ANativeWindow>,
         needs_image_reader: bool,
     ) -> Option<Self> {
-        let reader_mode = {
-            let guard = dispatch.lock().unwrap();
-            if !guard.preview_hardware_buffer_input_cbs.is_empty()
-                && guard.video_input_cbs.is_empty()
-                && guard.frame_input_cbs.is_empty()
-                && guard.preview_frame_input_cbs.is_empty()
-                && guard.encoders.is_empty()
-            {
-                AndroidImageReaderMode::HardwareBufferYuv
-            } else {
-                AndroidImageReaderMode::CpuReadable
-            }
-        };
         let alive = Arc::new(AtomicBool::new(true));
         let capture_context = Box::into_raw(Box::new(AndroidCaptureContext {
             format,
             dispatch,
             alive,
-            reader_mode,
-            logged_first_hardware_buffer_frame: AtomicBool::new(false),
         }));
 
         let mut device_callbacks = ACameraDevice_StateCallbacks {
@@ -512,46 +413,24 @@ impl AndroidCaptureSession {
         let mut image_output = std::ptr::null_mut();
 
         if needs_image_reader {
-            let image_reader_result = match reader_mode {
-                AndroidImageReaderMode::HardwareBufferYuv => AImageReader_newWithUsage(
-                    format.width as _,
-                    format.height as _,
-                    AIMAGE_FORMAT_YUV_420_888,
-                    ndk_sys::AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
-                    3,
-                    &mut image_reader,
-                ),
-                AndroidImageReaderMode::CpuReadable => {
-                    let aimage_format = match format.pixel_format {
-                        VideoPixelFormat::YUV420 => AIMAGE_FORMAT_YUV_420_888,
-                        VideoPixelFormat::MJPEG => AIMAGE_FORMAT_JPEG,
-                        _ => {
-                            crate::log!(
-                                "Android camera pixelformat not possible, should not happen"
-                            );
-                            ACameraDevice_close(camera_device);
-                            let _ = Box::from_raw(capture_context);
-                            return None;
-                        }
-                    };
-                    AImageReader_new(
-                        format.width as _,
-                        format.height as _,
-                        aimage_format,
-                        2,
-                        &mut image_reader,
-                    )
+            let aimage_format = match format.pixel_format {
+                VideoPixelFormat::YUV420 => AIMAGE_FORMAT_YUV_420_888,
+                VideoPixelFormat::MJPEG => AIMAGE_FORMAT_JPEG,
+                _ => {
+                    crate::log!("Android camera pixelformat not possible, should not happen");
+                    ACameraDevice_close(camera_device);
+                    let _ = Box::from_raw(capture_context);
+                    return None;
                 }
             };
-            if image_reader_result != 0 || image_reader.is_null() {
-                crate::warning!(
-                    "Android camera: failed to create image reader for mode {:?}",
-                    reader_mode as u32
-                );
-                ACameraDevice_close(camera_device);
-                let _ = Box::from_raw(capture_context);
-                return None;
-            }
+
+            AImageReader_new(
+                format.width as _,
+                format.height as _,
+                aimage_format,
+                2,
+                &mut image_reader,
+            );
 
             let mut image_listener = AImageReader_ImageListener {
                 context: capture_context as *mut _,
@@ -563,32 +442,15 @@ impl AndroidCaptureSession {
             AImageReader_getWindow(image_reader, &mut image_window);
             ANativeWindow_acquire(image_window);
 
-            let image_target_result = ACameraOutputTarget_create(image_window, &mut image_target);
+            ACameraOutputTarget_create(image_window, &mut image_target);
             if !image_target.is_null() {
-                let _ = ACaptureRequest_addTarget(capture_request, image_target);
-            } else {
-                crate::warning!(
-                    "Android camera: image target creation failed result={} mode={:?} size={}x{}",
-                    image_target_result,
-                    reader_mode as u32,
-                    format.width,
-                    format.height,
-                );
+                ACaptureRequest_addTarget(capture_request, image_target);
             }
 
-            if reader_mode == AndroidImageReaderMode::CpuReadable
-                && format.pixel_format == VideoPixelFormat::MJPEG
-            {
-                let jpeg_quality = 60u8;
-                ACaptureRequest_setEntry_u8(
-                    capture_request,
-                    ACAMERA_JPEG_QUALITY,
-                    1,
-                    &jpeg_quality,
-                );
-            }
+            let jpeg_quality = 60u8;
+            ACaptureRequest_setEntry_u8(capture_request, ACAMERA_JPEG_QUALITY, 1, &jpeg_quality);
 
-            let _ = ACaptureSessionOutput_create(image_window, &mut image_output);
+            ACaptureSessionOutput_create(image_window, &mut image_output);
         }
 
         let mut output_container = std::ptr::null_mut();
@@ -605,11 +467,11 @@ impl AndroidCaptureSession {
             if !preview_window.is_null() {
                 preview_window_ptr = preview_window;
                 ANativeWindow_acquire(preview_window_ptr);
-                let _ = ACameraOutputTarget_create(preview_window_ptr, &mut preview_target);
+                ACameraOutputTarget_create(preview_window_ptr, &mut preview_target);
                 if !preview_target.is_null() {
-                    let _ = ACaptureRequest_addTarget(capture_request, preview_target);
+                    ACaptureRequest_addTarget(capture_request, preview_target);
                 }
-                let _ = ACaptureSessionOutput_create(preview_window_ptr, &mut preview_output);
+                ACaptureSessionOutput_create(preview_window_ptr, &mut preview_output);
                 if !preview_output.is_null() {
                     ACaptureSessionOutputContainer_add(output_container, preview_output);
                 }
@@ -633,12 +495,13 @@ impl AndroidCaptureSession {
 
         let mut capture_session = std::ptr::null_mut();
 
-        let _ = ACameraDevice_createCaptureSession(
+        ACameraDevice_createCaptureSession(
             camera_device,
             output_container,
             &session_callbacks,
             &mut capture_session,
         );
+
         let mut capture_callbacks = ACameraCaptureSession_captureCallbacks {
             context: capture_context as *mut _,
             onCaptureStarted: Some(Self::capture_on_started),
@@ -650,13 +513,14 @@ impl AndroidCaptureSession {
             onCaptureBufferLost: Some(Self::capture_on_buffer_lost),
         };
 
-        let _ = ACameraCaptureSession_setRepeatingRequest(
+        ACameraCaptureSession_setRepeatingRequest(
             capture_session,
             &mut capture_callbacks,
             1,
             &mut capture_request,
             std::ptr::null_mut(),
         );
+
         Some(Self {
             image_reader,
             image_window,
@@ -876,11 +740,6 @@ impl AndroidCameraAccess {
             if sub.frame_cb.lock().unwrap().is_some() {
                 dispatch.preview_frame_input_cbs.push(sub.frame_cb.clone());
             }
-            if sub.hardware_buffer_cb.lock().unwrap().is_some() {
-                dispatch
-                    .preview_hardware_buffer_input_cbs
-                    .push(sub.hardware_buffer_cb.clone());
-            }
             if preview_window.is_null() && !sub.preview_window.is_null() {
                 preview_window = sub.preview_window;
             }
@@ -1029,37 +888,6 @@ impl AndroidCameraAccess {
             PreviewSubscription {
                 stream,
                 frame_cb: Arc::new(Mutex::new(frame_cb)),
-                hardware_buffer_cb: Arc::new(Mutex::new(None)),
-                preview_window: preview_window.unwrap_or(std::ptr::null_mut()),
-            },
-        );
-        self.reconcile_streams();
-    }
-
-    pub fn register_preview_hardware_buffer(
-        &mut self,
-        video_id: LiveId,
-        input_id: VideoInputId,
-        format_id: VideoFormatId,
-        hardware_buffer_cb: CameraHardwareBufferInputFn,
-        preview_window: Option<*mut ANativeWindow>,
-    ) {
-        let Some(stream) = self.key_for(input_id, format_id) else {
-            return;
-        };
-
-        if let Some(old) = self.preview_subscriptions.remove(&video_id) {
-            if !old.preview_window.is_null() {
-                unsafe { ANativeWindow_release(old.preview_window) };
-            }
-        }
-
-        self.preview_subscriptions.insert(
-            video_id,
-            PreviewSubscription {
-                stream,
-                frame_cb: Arc::new(Mutex::new(None)),
-                hardware_buffer_cb: Arc::new(Mutex::new(Some(hardware_buffer_cb))),
                 preview_window: preview_window.unwrap_or(std::ptr::null_mut()),
             },
         );

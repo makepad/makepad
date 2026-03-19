@@ -14,3 +14,7 @@ num-traits = { path = "vendor/num-traits" }
 parry3d = { path = "vendor/parry3d" }
 simba = { path = "vendor/simba" }
 typenum = { path = "vendor/typenum" }
+equivalent = { path = "../vulkan/equivalent" }
+foldhash = { path = "../vulkan/foldhash" }
+hashbrown = { path = "../vulkan/hashbrown" }
+indexmap = { path = "../vulkan/indexmap" }

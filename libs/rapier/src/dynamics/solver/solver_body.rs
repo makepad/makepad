@@ -1,8 +1,8 @@
 use crate::dynamics::RigidBody;
-use crate::math::{Real, SPATIAL_DIM, Vector};
+use crate::math::{Real, Vector, SPATIAL_DIM};
 use crate::utils::{RotationOps, ScalarType};
 use na::{DVectorView, DVectorViewMut};
-use parry::math::{Pose, Rotation, SIMD_WIDTH, SimdReal};
+use parry::math::{Pose, Rotation, SimdReal, SIMD_WIDTH};
 use std::ops::{AddAssign, Sub, SubAssign};
 
 #[cfg(feature = "simd-is-enabled")]

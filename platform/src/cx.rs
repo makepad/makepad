@@ -28,7 +28,7 @@ use {
     },
     makepad_network::NetworkRuntime,
     makepad_script::*,
-    makepad_studio_protocol::{RunViewFrameData, RunViewFrameRequest, ScreenshotRequest},
+    makepad_studio_protocol::ScreenshotRequest,
     std::{
         any::{Any, TypeId},
         cell::RefCell,
@@ -42,7 +42,6 @@ use {
 //pub use makepad_shader_compiler::makepad_math::*;
 
 pub(crate) struct PendingCameraPlayback {
-    pub permission: crate::permission::Permission,
     pub video_id: LiveId,
     pub source: crate::event::VideoSource,
     pub camera_preview_mode: crate::event::video_playback::CameraPreviewMode,
@@ -136,12 +135,6 @@ pub struct Cx {
     pub performance_stats: PerformanceStats,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
-    #[allow(dead_code)]
-    pub(crate) run_view_frame_requests: Vec<RunViewFrameRequest>,
-    #[allow(dead_code)]
-    pub(crate) run_view_frame_results: ToUIReceiver<Result<RunViewFrameData, String>>,
-    #[allow(dead_code)]
-    pub(crate) run_view_frame_encode_in_flight: bool,
     pub(crate) widget_tree_dump_requests: Vec<u64>,
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches
@@ -401,9 +394,6 @@ impl Cx {
             new_next_frames: Default::default(),
 
             screenshot_requests: Default::default(),
-            run_view_frame_requests: Default::default(),
-            run_view_frame_results: Default::default(),
-            run_view_frame_encode_in_flight: false,
             widget_tree_dump_requests: Default::default(),
 
             dependencies: Default::default(),

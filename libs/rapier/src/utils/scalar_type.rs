@@ -6,8 +6,8 @@ use crate::math::{AngularInertia, Matrix, Pose, Real, Rotation, Vector};
 #[cfg(feature = "dim3")]
 use crate::utils::SimdSelect;
 use crate::utils::{
-    AngularInertiaOps, ComponentMul, CrossProduct, CrossProductMatrix, DIM_MINUS_ONE, DotProduct,
-    MatrixColumn, OrthonormalBasis, PoseOps, RotationOps,
+    AngularInertiaOps, ComponentMul, CrossProduct, CrossProductMatrix, DotProduct, MatrixColumn,
+    OrthonormalBasis, PoseOps, RotationOps, DIM_MINUS_ONE,
 };
 use na::SimdRealField;
 use std::fmt::Debug;

@@ -955,10 +955,6 @@ public class MakepadActivity
     public void switchActivityClass(Class c){
         mIsSwitchingActivity = true;
         Intent intent = new Intent(getApplicationContext(), c);
-        Intent currentIntent = getIntent();
-        if (currentIntent != null && currentIntent.getExtras() != null) {
-            intent.putExtras(currentIntent.getExtras());
-        }
         startActivity(intent);
         finish();
     }

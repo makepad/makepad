@@ -682,9 +682,6 @@ impl ShaderFnCompiler {
                             id!(depth_view) => {
                                 write!(s, "unibuf_draw_pass.depth_view[int(VIEW_ID)]").ok();
                             }
-                            id!(camera_inv) => {
-                                write!(s, "unibuf_draw_pass.camera_inv[int(VIEW_ID)]").ok();
-                            }
                             _ => {
                                 self.stack.free_string(s);
                                 let mut s = self.stack.new_string();

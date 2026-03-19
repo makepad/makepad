@@ -1,7 +1,7 @@
-use crate::dynamics::solver::SolverVel;
 use crate::dynamics::solver::contact_constraint::GenericContactConstraint;
+use crate::dynamics::solver::SolverVel;
 use crate::dynamics::solver::{ContactConstraintNormalPart, ContactConstraintTangentPart};
-use crate::math::{AngVector, DIM, DVector, Real, Vector};
+use crate::math::{AngVector, DVector, Real, Vector, DIM};
 use crate::utils::{ComponentMul, DotProduct};
 #[cfg(feature = "dim2")]
 use {crate::utils::OrthonormalBasis, na::SimdPartialOrd};

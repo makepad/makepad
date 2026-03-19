@@ -1,12 +1,12 @@
-use crate::dynamics::solver::ConstraintsCounts;
-use crate::dynamics::solver::MotorParameters;
-use crate::dynamics::solver::joint_constraint::JointSolverBody;
 use crate::dynamics::solver::joint_constraint::joint_velocity_constraint::{
     JointConstraint, WritebackId,
 };
+use crate::dynamics::solver::joint_constraint::JointSolverBody;
 use crate::dynamics::solver::solver_body::SolverBodies;
+use crate::dynamics::solver::ConstraintsCounts;
+use crate::dynamics::solver::MotorParameters;
 use crate::dynamics::{GenericJoint, ImpulseJoint, IntegrationParameters, JointIndex};
-use crate::math::{DIM, Real};
+use crate::math::{Real, DIM};
 use crate::prelude::RigidBodySet;
 use crate::utils;
 #[cfg(feature = "dim3")]
@@ -24,7 +24,7 @@ use parry::math::Rot3;
 #[cfg(feature = "simd-is-enabled")]
 use {
     crate::dynamics::SpringCoefficients,
-    crate::math::{SIMD_WIDTH, SimdPose, SimdReal},
+    crate::math::{SimdPose, SimdReal, SIMD_WIDTH},
 };
 
 pub struct JointConstraintBuilder {

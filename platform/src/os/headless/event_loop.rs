@@ -266,7 +266,6 @@ impl Cx {
                     state.ensure_size_defaults();
                     self.redraw_all();
                 }
-                StudioToApp::RunViewFrameRequest(_) => {}
                 StudioToApp::Tick => {
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_script_signals();

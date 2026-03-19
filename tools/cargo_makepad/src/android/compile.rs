@@ -703,6 +703,7 @@ fn compile_java(
         .unwrap_or(false)
         && expected_outputs.iter().all(|path| path.is_file())
     {
+        println!("Java classes unchanged, reusing cached javac output");
         return Ok(());
     }
 
@@ -1327,9 +1328,11 @@ pub fn build(
     )?;
     let build_paths = prepare_build(build_crate, &java_url, &app_label, variant, urls)?;
 
-    println!("Building APK");
+    println!("Compiling APK & R.java files");
     build_r_class(sdk_dir, &build_paths, urls)?;
     compile_java(sdk_dir, &build_paths, urls)?;
+
+    println!("Building APK");
     build_dex(sdk_dir, &build_paths, urls)?;
     build_unaligned_apk(sdk_dir, &build_paths, urls)?;
     let build_dir = add_rust_library(
@@ -1355,7 +1358,7 @@ pub fn build(
     build_zipaligned_apk(sdk_dir, &build_paths, urls)?;
     sign_apk(sdk_dir, &build_paths, urls)?;
 
-    println!("APK Build completed");
+    println!("Compile APK completed");
     Ok(BuildResult {
         dst_apk: build_paths.dst_apk,
         java_url,
@@ -1389,41 +1392,29 @@ pub fn run(
     let cwd = std::env::current_dir().unwrap();
     // alright so how will we do multiple targets eh
 
-    fn android_start_args(java_url: &str) -> Vec<String> {
-        let mut args = vec![
-            "shell".to_string(),
-            "am".to_string(),
-            "start".to_string(),
-            "-S".to_string(),
-            "-n".to_string(),
-            format!("{0}/{0}.MakepadApp", java_url),
-        ];
-        if let Ok(studio) = std::env::var("STUDIO") {
-            if !studio.trim().is_empty() {
-                args.push("--es".to_string());
-                args.push("makepad.STUDIO".to_string());
-                args.push(studio);
-            }
-        }
-        args
-    }
-
     if devices.len() == 0 {
-        println!("Uploading android application");
+        //println!("Installing android application");
         shell_env_cap(
             &[],
             &cwd,
             sdk_dir.join("platform-tools/adb").to_str().unwrap(),
             &["install", "-r", (result.dst_apk.to_str().unwrap())],
         )?;
-        println!("Starting android application");
-        let start_args = android_start_args(&result.java_url);
-        let start_args_refs = start_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
+        println!(
+            "Starting android application: {}",
+            result.dst_apk.file_name().unwrap().to_str().unwrap()
+        );
         shell_env_cap(
             &[],
             &cwd,
             sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-            &start_args_refs,
+            &[
+                "shell",
+                "am",
+                "start",
+                "-n",
+                &format!("{0}/{0}.MakepadApp", result.java_url),
+            ],
         )?;
         #[allow(unused_assignments)]
         let mut pid = None;
@@ -1446,8 +1437,8 @@ pub fn run(
         )?;
     } else {
         let mut children = Vec::new();
-        println!("Uploading android application");
         for device in &devices {
+            //println!("Installing android application");
             children.push(shell_child_create(
                 &[],
                 &cwd,
@@ -1465,17 +1456,21 @@ pub fn run(
             shell_child_wait(child)?;
         }
         let mut children = Vec::new();
-        println!("Starting android application");
         for device in &devices {
-            let start_args = android_start_args(&result.java_url);
-            let mut device_args = vec!["-s".to_string(), device.clone()];
-            device_args.extend(start_args);
-            let device_args_refs = device_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
+            //println!("Installing android application");
             children.push(shell_child_create(
                 &[],
                 &cwd,
                 sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-                &device_args_refs,
+                &[
+                    "-s",
+                    &device,
+                    "shell",
+                    "am",
+                    "start",
+                    "-n",
+                    &format!("{0}/{0}.MakepadApp", result.java_url),
+                ],
             )?);
         }
         for child in children {

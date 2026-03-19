@@ -21,8 +21,6 @@ impl Cx {
             pass.pass_uniforms.camera_view = frame.eyes[0].view_mat;
             pass.pass_uniforms.camera_projection_r = frame.eyes[1].proj_mat;
             pass.pass_uniforms.camera_view_r = frame.eyes[1].view_mat;
-            pass.pass_uniforms.camera_inv = frame.eyes[0].view_mat.invert();
-            pass.pass_uniforms.camera_inv_r = frame.eyes[1].view_mat.invert();
 
             pass.pass_uniforms.depth_projection = frame.eyes[0].depth_proj_mat;
             pass.pass_uniforms.depth_view = frame.eyes[0].depth_view_mat;
@@ -65,35 +63,6 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = -0.1;
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
-
-        #[cfg(target_os = "android")]
-        if let Some(request) = self.take_studio_run_view_frame_request(0) {
-            let session = self.os.openxr.session.as_ref().unwrap();
-            let gl = &self.os.display.as_ref().unwrap().libgl;
-            let w = session.width.max(1);
-            let h = session.height.max(1);
-            let mut pixels = vec![0u8; (w * h * 4) as usize];
-            unsafe {
-                (gl.glReadPixels)(
-                    0,
-                    0,
-                    w as i32,
-                    h as i32,
-                    gl_sys::RGBA,
-                    gl_sys::UNSIGNED_BYTE,
-                    pixels.as_mut_ptr() as *mut _,
-                );
-            }
-            let stride = (w * 4) as usize;
-            for y in 0..(h as usize / 2) {
-                let top = y * stride;
-                let bot = ((h as usize) - 1 - y) * stride;
-                for x in 0..stride {
-                    pixels.swap(top + x, bot + x);
-                }
-            }
-            self.encode_studio_run_view_frame_async(request, w, h, pixels);
-        }
 
         let gl = &self.os.display.as_ref().unwrap().libgl;
         unsafe {

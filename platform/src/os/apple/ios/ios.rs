@@ -1229,9 +1229,6 @@ impl Cx {
         let status = match permission {
             crate::permission::Permission::AudioInput => self.check_audio_permission_status(),
             crate::permission::Permission::Camera => self.check_camera_permission_status(),
-            crate::permission::Permission::HeadsetCamera => {
-                crate::permission::PermissionStatus::DeniedPermanent
-            }
             crate::permission::Permission::SceneAccess => {
                 crate::permission::PermissionStatus::DeniedPermanent
             }
@@ -1254,9 +1251,6 @@ impl Cx {
         let status = match permission {
             crate::permission::Permission::AudioInput => self.check_audio_permission_status(),
             crate::permission::Permission::Camera => self.check_camera_permission_status(),
-            crate::permission::Permission::HeadsetCamera => {
-                crate::permission::PermissionStatus::DeniedPermanent
-            }
             crate::permission::Permission::SceneAccess => {
                 crate::permission::PermissionStatus::DeniedPermanent
             }
@@ -1269,7 +1263,6 @@ impl Cx {
                 crate::permission::Permission::Camera => {
                     self.ios_request_camera_permission(permission, request_id);
                 }
-                crate::permission::Permission::HeadsetCamera => {}
                 crate::permission::Permission::SceneAccess => {}
             },
             _ => {

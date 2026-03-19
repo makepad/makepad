@@ -62,8 +62,8 @@ use {
         os::cx_native::EventFlow,
         os::linux::gl_video_upload::upload_yuv_to_gl,
         shared_framebuf::{PollTimer, PollTimers},
+        texture::TextureFormat,
         texture::TextureId,
-        texture::{TextureFormat, TextureUpdated},
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
         video::{VideoEncodeError, MAX_VIDEO_DEVICE_INDEX},
@@ -87,9 +87,6 @@ use {
     //std::os::raw::{c_void},
     std::time::Instant,
 };
-
-const ANDROID_XR_BUFFER_SCALE: f32 = 1.3;
-const ANDROID_XR_MULTISAMPLES: usize = 4;
 
 /*
 fn android_debug_log(msg:&str){
@@ -278,8 +275,8 @@ impl Cx {
                             self.os.display.as_ref().unwrap(),
                             vulkan.as_mut(),
                             CxOpenXrOptions {
-                                buffer_scale: ANDROID_XR_BUFFER_SCALE,
-                                multisamples: ANDROID_XR_MULTISAMPLES,
+                                buffer_scale: 1.5,
+                                multisamples: 4,
                                 remove_hands_from_depth: false,
                             },
                             &self.os_type,
@@ -295,8 +292,8 @@ impl Cx {
                         if let Err(e) = self.os.openxr.create_session(
                             self.os.display.as_ref().unwrap(),
                             CxOpenXrOptions {
-                                buffer_scale: ANDROID_XR_BUFFER_SCALE,
-                                multisamples: ANDROID_XR_MULTISAMPLES,
+                                buffer_scale: 1.5,
+                                multisamples: 4,
                                 remove_hands_from_depth: false,
                             },
                             &self.os_type,
@@ -937,8 +934,9 @@ impl Cx {
     pub(crate) fn compile_shaders_for_active_backend(&mut self) {
         #[cfg(use_vulkan)]
         {
-            // In Vulkan mode shaders are compiled directly to SPIR-V during draw-shader
-            // creation; no GL shader compilation should occur on this path.
+            // Vulkan mode is currently a staged path:
+            // run WGSL->SPIR-V compilation via the OpenGL shader compile entry point.
+            self.opengl_compile_shaders();
             return;
         }
 
@@ -968,22 +966,6 @@ impl Cx {
         {
             self.draw_pass_to_fullscreen(draw_pass_id);
         }
-    }
-
-    pub(crate) fn draw_pass_to_texture_for_active_backend(&mut self, draw_pass_id: DrawPassId) {
-        #[cfg(use_vulkan)]
-        {
-            if let Some(mut vulkan) = self.os.vulkan.take() {
-                let result = vulkan.draw_pass_to_texture(self, draw_pass_id);
-                self.os.vulkan = Some(vulkan);
-                if let Err(err) = result {
-                    crate::error!("Android Vulkan draw-to-texture failed: {err}");
-                }
-                return;
-            }
-        }
-
-        self.draw_pass_to_texture(draw_pass_id, None);
     }
 
     fn present_window_for_active_backend(&mut self) {
@@ -1033,7 +1015,6 @@ impl Cx {
         }
 
         self.dispatch_network_runtime_events();
-        self.flush_studio_run_view_frame_results();
 
         // Native video updates (SurfaceTexture path)
         let to_dispatch = self.get_video_updates();
@@ -1088,8 +1069,8 @@ impl Cx {
         }
 
         let mut players = std::mem::take(&mut self.os.camera_players);
-        let needs_gl_upload = players.values().any(AndroidCameraPlayer::needs_gl_upload);
-        let gl = if needs_gl_upload {
+        let has_texture_players = players.values().any(AndroidCameraPlayer::uses_textures);
+        let gl = if has_texture_players {
             Some(self.os.gl() as *const LibGl)
         } else {
             None
@@ -1125,77 +1106,19 @@ impl Cx {
                 None => {}
             }
 
-            #[cfg(use_vulkan)]
-            if player.uses_hardware_buffer_texture() {
-                if let Some(frame) = player.take_hardware_buffer_frame() {
-                    let update_result = self
-                        .os
-                        .vulkan
-                        .as_mut()
-                        .ok_or_else(|| {
-                            "Android camera hardware-buffer texture requested without Vulkan backend"
-                                .to_string()
-                        })
-                        .and_then(|vk| {
-                            vk.update_video_external_hardware_buffer_texture(
-                                player.texture_id(),
-                                frame.buffer,
-                                frame.width,
-                                frame.height,
-                            )
-                        });
-                    match update_result {
-                        Ok(mut yuv) => {
-                            yuv.rotation_steps = player.yuv_rotation_steps();
-                            events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
-                                video_id: player.video_id,
-                                current_position_ms: 0,
-                                yuv,
-                            }));
-                        }
-                        Err(error) => {
-                            let should_fallback = error.contains("undefined Vulkan format")
-                                || error.contains("unsupported YUV Vulkan format");
-                            if should_fallback {
-                                crate::warning!(
-                                    "Android headset camera: Vulkan import unsupported, falling back to cpu-yuv video_id={} error={}",
-                                    player.video_id.0,
-                                    error,
-                                );
-                                if let Err(fallback_error) = player.fallback_to_cpu_yuv() {
-                                    events.push(Event::VideoDecodingError(
-                                        VideoDecodingErrorEvent {
-                                            video_id: player.video_id,
-                                            error: format!(
-                                                "{error}; cpu fallback failed: {fallback_error}"
-                                            ),
-                                        },
-                                    ));
-                                }
-                            } else {
-                                events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
-                                    video_id: player.video_id,
-                                    error,
-                                }));
-                            }
-                        }
-                    }
+            if let Some(gl) = gl {
+                if player.poll_frame(unsafe { &*gl }, &mut self.textures) {
+                    events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                        video_id: player.video_id,
+                        current_position_ms: 0,
+                        yuv: crate::event::video_playback::VideoYuvMetadata {
+                            enabled: true,
+                            matrix: 1.0,
+                            biplanar: false,
+                            rotation_steps: player.yuv_rotation_steps(),
+                        },
+                    }));
                 }
-                continue;
-            }
-
-            let gl_ref = gl.map(|gl| unsafe { &*gl });
-            if player.poll_frame(gl_ref, &mut self.textures) {
-                events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
-                    video_id: player.video_id,
-                    current_position_ms: 0,
-                    yuv: crate::event::video_playback::VideoYuvMetadata {
-                        enabled: true,
-                        matrix: 1.0,
-                        biplanar: false,
-                        rotation_steps: player.yuv_rotation_steps(),
-                    },
-                }));
             }
         }
 
@@ -1316,6 +1239,13 @@ impl Cx {
             let mut cx = startup();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
 
+            #[cfg(use_vulkan)]
+            crate::log!(
+                "Android backend mode: Vulkan renderer + OpenGL shader compiler compatibility path"
+            );
+            #[cfg(not(use_vulkan))]
+            crate::log!("Android backend mode: OpenGL renderer");
+
             cx.os.activity_thread_id = Some(activity_thread_id);
             cx.os.render_thread_id =
                 Some(unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 });
@@ -1430,6 +1360,7 @@ impl Cx {
                     cx.os.display_size.y.max(1.0) as u32,
                 ) {
                     Ok(vulkan) => {
+                        crate::log!("Android Vulkan backend initialized on startup");
                         cx.os.vulkan = Some(vulkan);
                     }
                     Err(err) => {
@@ -1649,10 +1580,10 @@ impl Cx {
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
+                    self.draw_pass_to_texture(*draw_pass_id, None);
                 }
                 CxDrawPassParent::None => {
-                    self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
+                    self.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
         }
@@ -1886,64 +1817,15 @@ impl Cx {
                 ) => {
                     // Camera source: use NDK camera player with YUV plane textures
                     if let VideoSource::Camera(input_id, format_id) = source {
-                        let camera_access = self.os.media.android_camera();
-                        let native_preview =
-                            matches!(camera_preview_mode, CameraPreviewMode::Native);
-                        let use_hardware_buffer_texture = cfg!(use_vulkan)
-                            && !native_preview
-                            && texture_id != TextureId::default();
-                        let use_cpu_plane_textures = cfg!(use_vulkan) && !native_preview;
-                        let (camera_width, camera_height) = camera_access
-                            .lock()
-                            .unwrap()
-                            .format_size(input_id, format_id)
-                            .unwrap_or((1, 1));
-                        let luma_width = camera_width.max(1) as usize;
-                        let luma_height = camera_height.max(1) as usize;
-                        let chroma_width = camera_width.div_ceil(2).max(1) as usize;
-                        let chroma_height = camera_height.div_ceil(2).max(1) as usize;
-                        let tex_y = self.textures.alloc(if use_hardware_buffer_texture {
-                            TextureFormat::VideoYuvPlane
-                        } else if use_cpu_plane_textures {
-                            TextureFormat::VecRu8 {
-                                width: luma_width,
-                                height: luma_height,
-                                data: Some(vec![0; luma_width * luma_height]),
-                                unpack_row_length: None,
-                                updated: TextureUpdated::Full,
-                            }
-                        } else {
-                            TextureFormat::VideoYuvPlane
-                        });
-                        let tex_u = self.textures.alloc(if use_hardware_buffer_texture {
-                            TextureFormat::VideoYuvPlane
-                        } else if use_cpu_plane_textures {
-                            TextureFormat::VecRu8 {
-                                width: chroma_width,
-                                height: chroma_height,
-                                data: Some(vec![0; chroma_width * chroma_height]),
-                                unpack_row_length: None,
-                                updated: TextureUpdated::Full,
-                            }
-                        } else {
-                            TextureFormat::VideoYuvPlane
-                        });
-                        let tex_v = self.textures.alloc(if use_hardware_buffer_texture {
-                            TextureFormat::VideoYuvPlane
-                        } else if use_cpu_plane_textures {
-                            TextureFormat::VecRu8 {
-                                width: chroma_width,
-                                height: chroma_height,
-                                data: Some(vec![0; chroma_width * chroma_height]),
-                                unpack_row_length: None,
-                                updated: TextureUpdated::Full,
-                            }
-                        } else {
-                            TextureFormat::VideoYuvPlane
-                        });
+                        let tex_y = self.textures.alloc(TextureFormat::VideoYuvPlane);
+                        let tex_u = self.textures.alloc(TextureFormat::VideoYuvPlane);
+                        let tex_v = self.textures.alloc(TextureFormat::VideoYuvPlane);
                         let tex_y_id = tex_y.texture_id();
                         let tex_u_id = tex_u.texture_id();
                         let tex_v_id = tex_v.texture_id();
+                        let camera_access = self.os.media.android_camera();
+                        let native_preview =
+                            matches!(camera_preview_mode, CameraPreviewMode::Native);
                         let preview_window = if native_preview {
                             self.os.pending_camera_preview_windows.remove(&video_id)
                         } else {
@@ -1958,15 +1840,12 @@ impl Cx {
                         };
                         let player = AndroidCameraPlayer::new(
                             video_id,
-                            texture_id,
                             tex_y_id,
                             tex_u_id,
                             tex_v_id,
                             input_id,
                             format_id,
                             native_preview,
-                            use_hardware_buffer_texture,
-                            use_cpu_plane_textures,
                             preview_window,
                             camera_access,
                         );
@@ -2293,7 +2172,6 @@ fn to_android_permission(permission: crate::permission::Permission) -> &'static 
     match permission {
         crate::permission::Permission::AudioInput => "android.permission.RECORD_AUDIO",
         crate::permission::Permission::Camera => "android.permission.CAMERA",
-        crate::permission::Permission::HeadsetCamera => "horizonos.permission.HEADSET_CAMERA",
         crate::permission::Permission::SceneAccess => "com.oculus.permission.USE_SCENE",
     }
 }
@@ -2430,7 +2308,6 @@ fn string_to_permission(permission_str: &str) -> Option<crate::permission::Permi
     match permission_str {
         "android.permission.RECORD_AUDIO" => Some(crate::permission::Permission::AudioInput),
         "android.permission.CAMERA" => Some(crate::permission::Permission::Camera),
-        "horizonos.permission.HEADSET_CAMERA" => Some(crate::permission::Permission::HeadsetCamera),
         "com.oculus.permission.USE_SCENE" => Some(crate::permission::Permission::SceneAccess),
         _ => None,
     }
