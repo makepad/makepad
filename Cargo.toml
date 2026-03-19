@@ -11,9 +11,6 @@ workspace.members = [
     "examples/todo",
     "examples/git",
     "examples/vector",
-    "examples/gltf",
-    "examples/splat",
-    "examples/physics",
     "examples/comfyui",
     "examples/aichat",
     "examples/pdf",
@@ -55,7 +52,7 @@ workspace.members = [
     "libs/openexr",
     "libs/git",
     "libs/fast_inflate",
-    "libs/xr",
+    "xr",
     "libs/cef",
 ]
 

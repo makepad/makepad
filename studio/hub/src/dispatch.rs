@@ -2604,6 +2604,20 @@ impl HubCore {
                     }
                 }
             }
+            AppToStudio::RunViewFrame(frame) => {
+                self.send_runview_message(
+                    build_id,
+                    HubToClient::RunViewFrame {
+                        build_id,
+                        window_id: frame.window_id,
+                        frame_id: frame.frame_id,
+                        width: frame.width,
+                        height: frame.height,
+                        codec: frame.codec.unwrap_or(backend_proto::FrameCodec::Png),
+                        data: frame.data,
+                    },
+                );
+            }
             AppToStudio::WidgetTreeDump(response) => {
                 let query_id = QueryId(response.request_id);
                 self.send_to_query_owner(

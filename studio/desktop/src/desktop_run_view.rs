@@ -2,18 +2,25 @@ use crate::makepad_widgets::makepad_micro_serde::SerBin;
 use crate::makepad_widgets::makepad_platform::shared_framebuf::{
     shared_swapchain_from_host_swapchain, HostSwapchain,
 };
+use crate::makepad_widgets::image_cache::{
+    load_image_from_cache, load_image_from_data_async, process_async_image_load, AsyncImageLoad,
+    AsyncLoadResult,
+};
 use crate::makepad_widgets::*;
-use makepad_studio_protocol::hub_protocol::{QueryId, RunViewInputVizKind};
+use makepad_studio_protocol::hub_protocol::{FrameCodec, QueryId, RunViewInputVizKind};
 use makepad_studio_protocol::{
     MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
-    RemoteMouseUp, RemoteScroll, StudioToApp, StudioToAppVec,
+    RemoteMouseUp, RemoteScroll, RunViewFrameData, RunViewFrameRequest, StudioToApp,
+    StudioToAppVec,
 };
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 use crate::makepad_widgets::makepad_platform::shared_framebuf::aux_chan;
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -35,7 +42,12 @@ script_mod! {
             tex_scale: instance(vec2(0.0, 0.0))
             tex_size: instance(vec2(1.0, 1.0))
             y_flip: instance(0.0)
+            packed_header: instance(1.0)
             pixel: fn() {
+                let uv = vec2(self.pos.x, self.pos.y + self.y_flip - 2.0 * self.y_flip * self.pos.y)
+                if self.packed_header < 0.5 {
+                    return self.tex.sample(uv * self.tex_scale)
+                }
                 let tp1 = self.tex.sample(vec2(0.5 / self.tex_size.x, 0.5 / self.tex_size.y))
                 let tp2 = self.tex.sample(vec2(1.5 / self.tex_size.x, 0.5 / self.tex_size.y))
                 let tp = vec2(tp1.r * 65280.0 + tp1.b * 255.0, tp2.r * 65280.0 + tp2.b * 255.0)
@@ -44,7 +56,6 @@ script_mod! {
                 }
                 let counter = (self.rect_size * self.draw_pass.dpi_factor) / tp
                 let tex_scale = tp / self.tex_size
-                let uv = vec2(self.pos.x, self.pos.y + self.y_flip - 2.0 * self.y_flip * self.pos.y)
                 let fb = self.tex.sample(uv * tex_scale * counter)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #2
@@ -107,6 +118,14 @@ struct RunTarget {
 struct InputVizEvent {
     kind: RunViewInputVizKind,
     pos: Vec2d,
+}
+
+#[derive(Clone, Debug)]
+struct PendingRemoteDecode {
+    path: PathBuf,
+    frame_id: u64,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -184,6 +203,20 @@ pub struct DesktopRunView {
     ai_viz_queue: VecDeque<InputVizEvent>,
     #[rust]
     ime_pos: Option<Vec2d>,
+    #[rust]
+    remote_mode: bool,
+    #[rust]
+    remote_frame_request_in_flight: bool,
+    #[rust]
+    remote_requested_frame_id: Option<u64>,
+    #[rust]
+    remote_next_frame_id: u64,
+    #[rust]
+    remote_current_frame_id: u64,
+    #[rust]
+    remote_current_path: Option<PathBuf>,
+    #[rust]
+    remote_pending_decode: Option<PendingRemoteDecode>,
 
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
@@ -195,6 +228,9 @@ impl ScriptHook for DesktopRunView {
         vm.with_cx_mut(|cx| {
             self.draw_app.set_texture(0, &cx.null_texture());
             self.tick_timer = cx.start_interval(0.008);
+            self.draw_app
+                .draw_vars
+                .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
         });
     }
 }
@@ -229,6 +265,13 @@ impl DesktopRunView {
         self.ai_viz_total_frames = 0;
         self.ai_viz_queue.clear();
         self.ime_pos = None;
+        self.remote_mode = false;
+        self.remote_frame_request_in_flight = false;
+        self.remote_requested_frame_id = None;
+        self.remote_next_frame_id = 1;
+        self.remote_current_frame_id = 0;
+        self.remote_current_path = None;
+        self.remote_pending_decode = None;
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
             self.aux_chan_host_endpoint = None;
@@ -257,6 +300,9 @@ impl DesktopRunView {
         self.draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(y_flip), &[0.0f32]);
+        self.draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
         self.redraw(cx);
     }
 
@@ -271,6 +317,209 @@ impl DesktopRunView {
         self.remote_cursor = cursor;
         if self.is_hovered {
             cx.set_cursor(self.remote_cursor);
+        }
+    }
+
+    fn clear_cached_remote_path(cx: &mut Cx, path: &PathBuf) {
+        cx.global::<crate::makepad_widgets::image_cache::ImageCache>()
+            .map
+            .remove(path);
+    }
+
+    fn apply_remote_texture(
+        &mut self,
+        cx: &mut Cx,
+        texture: &Texture,
+        width: u32,
+        height: u32,
+        y_flip: f32,
+    ) {
+        self.draw_app.set_texture(0, texture);
+        self.draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(tex_scale), &[1.0f32, 1.0f32]);
+        self.draw_app.draw_vars.set_dyn_instance(
+            cx,
+            id!(tex_size),
+            &[width.max(1) as f32, height.max(1) as f32],
+        );
+        self.draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(y_flip), &[y_flip]);
+        self.draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(packed_header), &[0.0f32]);
+        self.redraw_countdown = self.redraw_countdown.max(20);
+        self.redraw(cx);
+    }
+
+    fn request_remote_frame_if_needed(&mut self, target: RunTarget) -> Option<StudioToApp> {
+        if self.last_rect.size.x <= 0.0 || self.last_rect.size.y <= 0.0 {
+            return None;
+        }
+        if self.remote_frame_request_in_flight || self.remote_pending_decode.is_some() {
+            return None;
+        }
+        if !self.remote_mode && self.debug_present_ok_count > 0 {
+            return None;
+        }
+        let frame_id = self.remote_next_frame_id.max(1);
+        self.remote_next_frame_id = frame_id.wrapping_add(1).max(1);
+        self.remote_frame_request_in_flight = true;
+        self.remote_requested_frame_id = Some(frame_id);
+        if frame_id <= 3 || frame_id % 30 == 0 {
+            crate::log!(
+                "runview remote request build={} window={} frame={} size={}x{} dpi={:.2}",
+                target.build_id.0,
+                target.window_id,
+                frame_id,
+                (self.last_rect.size.x * self.last_dpi_factor).ceil().max(1.0) as u32,
+                (self.last_rect.size.y * self.last_dpi_factor).ceil().max(1.0) as u32,
+                self.last_dpi_factor,
+            );
+        }
+        Some(StudioToApp::RunViewFrameRequest(RunViewFrameRequest {
+            window_id: target.window_id,
+            frame_id,
+            width: (self.last_rect.size.x * self.last_dpi_factor).ceil().max(1.0) as u32,
+            height: (self.last_rect.size.y * self.last_dpi_factor).ceil().max(1.0) as u32,
+            dpi_factor: self.last_dpi_factor,
+        }))
+    }
+
+    fn set_remote_frame(
+        &mut self,
+        cx: &mut Cx,
+        build_id: QueryId,
+        frame: RunViewFrameData,
+    ) {
+        let Some(target) = self.current_target else {
+            return;
+        };
+        if target.build_id != build_id || target.window_id != frame.window_id {
+            return;
+        }
+        if frame.frame_id < self.remote_current_frame_id {
+            return;
+        }
+        let codec = frame.codec.clone().unwrap_or(FrameCodec::Png);
+        if frame.frame_id <= 3 || frame.frame_id % 30 == 0 {
+            crate::log!(
+                "runview remote frame received build={} window={} frame={} bytes={} codec={:?}",
+                build_id.0,
+                frame.window_id,
+                frame.frame_id,
+                frame.data.len(),
+                codec,
+            );
+        }
+        self.remote_mode = true;
+        self.remote_frame_request_in_flight = false;
+        self.remote_requested_frame_id = None;
+
+        let ext = match codec {
+            FrameCodec::Png => "png",
+            FrameCodec::Jpeg => "jpg",
+            FrameCodec::ZstdRgba => return,
+        };
+        if let Some(prev_path) = self.remote_current_path.take() {
+            Self::clear_cached_remote_path(cx, &prev_path);
+        }
+        if let Some(pending) = self.remote_pending_decode.take() {
+            Self::clear_cached_remote_path(cx, &pending.path);
+        }
+        let path = PathBuf::from(format!(
+            "studio_remote_runview://build-{}-window-{}-frame-{}.{}",
+            build_id.0, frame.window_id, frame.frame_id, ext
+        ));
+        let bytes = Arc::new(frame.data);
+        match load_image_from_data_async(cx, &path, bytes) {
+            Ok(AsyncLoadResult::Loaded) => {
+                if let Some(texture) = load_image_from_cache(cx, &path) {
+                    let y_flip = if cfg!(all(target_os = "linux", not(target_env = "ohos"))) {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    self.apply_remote_texture(cx, &texture, frame.width, frame.height, y_flip);
+                    self.remote_current_frame_id = frame.frame_id;
+                    self.remote_current_path = Some(path);
+                    if frame.frame_id <= 3 || frame.frame_id % 30 == 0 {
+                        crate::log!(
+                            "runview remote frame applied immediately build={} frame={} size={}x{}",
+                            build_id.0,
+                            frame.frame_id,
+                            frame.width,
+                            frame.height,
+                        );
+                    }
+                    return;
+                }
+            }
+            Ok(AsyncLoadResult::Loading(_, _)) => {}
+            Err(_) => {
+                crate::log!(
+                    "runview remote frame decode start failed build={} frame={}",
+                    build_id.0,
+                    frame.frame_id,
+                );
+                Self::clear_cached_remote_path(cx, &path);
+                return;
+            }
+        }
+        self.remote_pending_decode = Some(PendingRemoteDecode {
+            path,
+            frame_id: frame.frame_id,
+            width: frame.width,
+            height: frame.height,
+        });
+        self.redraw(cx);
+    }
+
+    fn handle_remote_decode_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for action in actions {
+            let Some(AsyncImageLoad { image_path, result }) = action.downcast_ref() else {
+                continue;
+            };
+            let Some((pending_path, pending_frame_id, pending_width, pending_height)) = self
+                .remote_pending_decode
+                .as_ref()
+                .map(|pending| {
+                    (
+                        pending.path.clone(),
+                        pending.frame_id,
+                        pending.width,
+                        pending.height,
+                    )
+                })
+            else {
+                continue;
+            };
+            if image_path != &pending_path {
+                continue;
+            }
+            if let Some(result) = result.borrow_mut().take() {
+                process_async_image_load(cx, image_path, result);
+            }
+            if let Some(texture) = load_image_from_cache(cx, image_path) {
+                let y_flip = if cfg!(all(target_os = "linux", not(target_env = "ohos"))) {
+                    1.0
+                } else {
+                    0.0
+                };
+                self.apply_remote_texture(cx, &texture, pending_width, pending_height, y_flip);
+                self.remote_current_frame_id = pending_frame_id;
+                self.remote_current_path = Some(pending_path);
+                self.remote_pending_decode = None;
+                if pending_frame_id <= 3 || pending_frame_id % 30 == 0 {
+                    crate::log!(
+                        "runview remote frame applied after async decode frame={} size={}x{}",
+                        pending_frame_id,
+                        pending_width,
+                        pending_height,
+                    );
+                }
+            }
         }
     }
 
@@ -318,6 +567,9 @@ impl DesktopRunView {
                 (swapchain.alloc_height as f32),
             ],
         );
+        draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         draw_app
             .draw_vars
@@ -510,6 +762,9 @@ impl DesktopRunView {
             self.debug_present_ok_count += 1;
             self.bootstrap_pending = false;
             self.bootstrap_tick_count = 0;
+            self.remote_mode = false;
+            self.remote_frame_request_in_flight = false;
+            self.remote_requested_frame_id = None;
         } else {
             self.pending_draw = Some(presentable_draw);
         }
@@ -655,7 +910,10 @@ impl Widget for DesktopRunView {
             }
         }
 
-        let waiting_for_framebuffer = target.is_some() && self.debug_present_ok_count == 0;
+        let waiting_for_framebuffer = target.is_some()
+            && self.debug_present_ok_count == 0
+            && self.remote_current_frame_id == 0
+            && self.remote_pending_decode.is_none();
         if waiting_for_framebuffer {
             self.redraw(cx);
         } else if self.redraw_countdown > 0 {
@@ -764,10 +1022,17 @@ impl Widget for DesktopRunView {
                             msgs.extend(self.build_bootstrap_msgs(cx, target));
                         }
                     }
+                    if let Some(request) = self.request_remote_frame_if_needed(target) {
+                        msgs.push(request);
+                    }
                     msgs.push(StudioToApp::Tick);
                     self.emit_to_app(cx, target.build_id, msgs);
                 }
             }
+        }
+
+        if let Event::Actions(actions) = event {
+            self.handle_remote_decode_actions(cx, actions);
         }
 
         let Some(target) = target else {
@@ -902,6 +1167,12 @@ impl DesktopRunViewRef {
     pub fn set_presentable_draw(&self, cx: &mut Cx, presentable_draw: PresentableDraw) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_presentable_draw(cx, presentable_draw);
+        }
+    }
+
+    pub fn set_remote_frame(&self, cx: &mut Cx, build_id: QueryId, frame: RunViewFrameData) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_remote_frame(cx, build_id, frame);
         }
     }
 

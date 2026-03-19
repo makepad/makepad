@@ -1,6 +1,8 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-use super::scene_3d::{apply_scene_to_draw_pbr, scene_state_from_scope};
+use super::scene_3d::{
+    apply_scene_to_draw_pbr, scene_node_world_transform_from_scope, scene_state_from_scope,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -87,11 +89,13 @@ impl Widget for Grid3D {
             return DrawStep::done();
         };
         let cx = &mut Cx2d::new(cx.cx);
+        let parent_world = scene_node_world_transform_from_scope(scope);
 
         apply_scene_to_draw_pbr(&mut self.draw_pbr, cx, &scene);
         self.draw_pbr.env_intensity = 0.25;
         self.draw_pbr.spec_strength = 0.08;
         self.draw_pbr.push_matrix();
+        self.draw_pbr.apply_transform(parent_world);
         self.draw_pbr.translate_v(self.position);
         self.draw_pbr
             .rotate_xyz(self.rotation.x, self.rotation.y, self.rotation.z);

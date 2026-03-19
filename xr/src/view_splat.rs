@@ -3,7 +3,8 @@ use makepad_splat::{load_splat_from_bytes, SplatFileFormat, SplatScene};
 use std::{mem, path::PathBuf, rc::Rc, sync::mpsc::TryRecvError};
 
 use super::scene_3d::{
-    apply_scene_to_draw_pbr, register_last_draw_call_anchor, scene_state_from_scope, SceneState3D,
+    apply_scene_to_draw_pbr, compose_scene_node_transform, register_last_draw_call_anchor,
+    scene_node_world_transform_from_scope, scene_state_from_scope, SceneState3D,
 };
 use crate::makepad_draw::shader::draw_pbr::PbrMeshHandle;
 
@@ -1146,13 +1147,7 @@ impl ViewSplat {
     }
 
     fn node_matrix(&self) -> Mat4f {
-        Mat4f::mul(
-            &Mat4f::translation(self.position),
-            &Mat4f::mul(
-                &Mat4f::rotation(self.rotation),
-                &Mat4f::nonuniform_scaled_translation(self.scale, vec3(0.0, 0.0, 0.0)),
-            ),
-        )
+        compose_scene_node_transform(self.position, self.rotation, self.scale)
     }
 }
 
@@ -1179,7 +1174,10 @@ impl Widget for ViewSplat {
 
         apply_scene_to_draw_pbr(&mut self.draw_splat.draw_super, cx, &scene_state);
 
-        let node_matrix = self.node_matrix();
+        let node_matrix = Mat4f::mul(
+            &scene_node_world_transform_from_scope(scope),
+            &self.node_matrix(),
+        );
         let render_w = scene_state.viewport_rect.size.x.max(1.0) as f32;
         let render_h = scene_state.viewport_rect.size.y.max(1.0) as f32;
         self.draw_splat.render_size = vec2(render_w, render_h);

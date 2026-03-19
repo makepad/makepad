@@ -3,7 +3,10 @@ use std::{path::PathBuf, rc::Rc};
 
 use super::{
     gltf_bridge::GltfRenderer,
-    scene_3d::{apply_scene_to_draw_pbr, register_draw_call_anchor, scene_state_from_scope},
+    scene_3d::{
+        apply_scene_to_draw_pbr, compose_scene_node_transform, register_draw_call_anchor,
+        scene_node_world_transform_from_scope, scene_state_from_scope,
+    },
 };
 
 script_mod! {
@@ -199,17 +202,15 @@ impl Widget for Gltf3D {
         };
 
         apply_scene_to_draw_pbr(&mut self.draw_pbr, cx, &scene);
-        let local = Mat4f::mul(
-            &Mat4f::translation(self.position),
-            &Mat4f::mul(
-                &Mat4f::rotation(self.rotation),
-                &Mat4f::nonuniform_scaled_translation(self.scale, vec3(0.0, 0.0, 0.0)),
-            ),
+        let local = compose_scene_node_transform(self.position, self.rotation, self.scale);
+        let world = Mat4f::mul(
+            &scene_node_world_transform_from_scope(scope),
+            &local,
         );
         let _ = renderer.draw_with_transform_anchors(
             &mut self.draw_pbr,
             cx,
-            local,
+            world,
             |area, world_pos| register_draw_call_anchor(scope, area, world_pos),
         );
         DrawStep::done()
