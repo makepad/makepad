@@ -1316,13 +1316,6 @@ impl Cx {
             let mut cx = startup();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
 
-            #[cfg(use_vulkan)]
-            crate::log!(
-                "Android backend mode: Vulkan renderer + OpenGL shader compiler compatibility path"
-            );
-            #[cfg(not(use_vulkan))]
-            crate::log!("Android backend mode: OpenGL renderer");
-
             cx.os.activity_thread_id = Some(activity_thread_id);
             cx.os.render_thread_id =
                 Some(unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 });
@@ -1437,7 +1430,6 @@ impl Cx {
                     cx.os.display_size.y.max(1.0) as u32,
                 ) {
                     Ok(vulkan) => {
-                        crate::log!("Android Vulkan backend initialized on startup");
                         cx.os.vulkan = Some(vulkan);
                     }
                     Err(err) => {
