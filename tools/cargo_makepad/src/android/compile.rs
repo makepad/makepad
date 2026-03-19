@@ -1392,6 +1392,32 @@ pub fn run(
     let cwd = std::env::current_dir().unwrap();
     // alright so how will we do multiple targets eh
 
+    fn android_start_args(java_url: &str) -> Vec<String> {
+        let mut args = vec![
+            "shell".to_string(),
+            "am".to_string(),
+            "start".to_string(),
+            "-S".to_string(),
+            "-n".to_string(),
+            format!("{0}/{0}.MakepadApp", java_url),
+        ];
+        if let Ok(studio) = std::env::var("STUDIO") {
+            if !studio.trim().is_empty() {
+                args.push("--es".to_string());
+                args.push("makepad.STUDIO".to_string());
+                args.push(studio);
+            }
+        }
+        if let Ok(build_id) = std::env::var("STUDIO_BUILD_ID") {
+            if !build_id.trim().is_empty() {
+                args.push("--es".to_string());
+                args.push("makepad.STUDIO_BUILD_ID".to_string());
+                args.push(build_id);
+            }
+        }
+        args
+    }
+
     if devices.len() == 0 {
         //println!("Installing android application");
         shell_env_cap(
@@ -1404,17 +1430,13 @@ pub fn run(
             "Starting android application: {}",
             result.dst_apk.file_name().unwrap().to_str().unwrap()
         );
+        let start_args = android_start_args(&result.java_url);
+        let start_args_refs = start_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
         shell_env_cap(
             &[],
             &cwd,
             sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-            &[
-                "shell",
-                "am",
-                "start",
-                "-n",
-                &format!("{0}/{0}.MakepadApp", result.java_url),
-            ],
+            &start_args_refs,
         )?;
         #[allow(unused_assignments)]
         let mut pid = None;
@@ -1458,19 +1480,15 @@ pub fn run(
         let mut children = Vec::new();
         for device in &devices {
             //println!("Installing android application");
+            let start_args = android_start_args(&result.java_url);
+            let mut device_args = vec!["-s".to_string(), device.clone()];
+            device_args.extend(start_args);
+            let device_args_refs = device_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
             children.push(shell_child_create(
                 &[],
                 &cwd,
                 sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-                &[
-                    "-s",
-                    &device,
-                    "shell",
-                    "am",
-                    "start",
-                    "-n",
-                    &format!("{0}/{0}.MakepadApp", result.java_url),
-                ],
+                &device_args_refs,
             )?);
         }
         for child in children {
