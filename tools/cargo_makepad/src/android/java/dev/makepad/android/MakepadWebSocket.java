@@ -6,13 +6,13 @@ import java.net.Socket;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
 
 import java.io.BufferedWriter;
-import java.io.BufferedReader;
 import java.io.OutputStream;
 import java.io.InputStream;
 import java.io.OutputStreamWriter;
-import java.io.InputStreamReader;
+import java.io.EOFException;
 import java.io.IOException;
 import java.util.Random;
 import android.util.Log;
@@ -56,7 +56,7 @@ public class MakepadWebSocket {
             doHandshake();
         } catch (Exception e) {
             MakepadNative.onWebSocketError(e.toString(), mCallback);
-            // throw new RuntimeException(e);
+            Log.e("Makepad", "MakepadWebSocket.connect failed url=" + mUrl + " error=" + e);
         }
     }
 
@@ -70,19 +70,41 @@ public class MakepadWebSocket {
 
     private void doHandshake() throws IOException {
         BufferedWriter socketWriter = new BufferedWriter(new OutputStreamWriter(mSocket.getOutputStream()));
-        BufferedReader socketReader = new BufferedReader(new InputStreamReader(mSocket.getInputStream()));
+        InputStream socketReader = mSocket.getInputStream();
 
         try {
             String request = this.buildHandshakeRequest();
             socketWriter.write(request);
             socketWriter.flush();
 
-            char[] dataArray = new char[1024];
-            int length;
-            do {
-                String line = socketReader.readLine();
-                length = line.length();
-            } while (length > 0);
+            byte[] terminator = new byte[]{'\r', '\n', '\r', '\n'};
+            byte[] response = new byte[8192];
+            int responseLength = 0;
+            int matched = 0;
+
+            while (true) {
+                int value = socketReader.read();
+                if (value == -1) {
+                    throw new EOFException("socket closed during websocket handshake");
+                }
+                if (responseLength < response.length) {
+                    response[responseLength++] = (byte)value;
+                }
+                if ((byte)value == terminator[matched]) {
+                    matched += 1;
+                    if (matched == terminator.length) {
+                        break;
+                    }
+                } else {
+                    matched = ((byte)value == terminator[0]) ? 1 : 0;
+                }
+            }
+
+            String responseText = new String(response, 0, responseLength, StandardCharsets.US_ASCII);
+            if (!responseText.startsWith("HTTP/1.1 101") && !responseText.startsWith("HTTP/1.0 101")) {
+                String firstLine = responseText.split("\r\n", 2)[0];
+                throw new IOException("websocket upgrade rejected: " + firstLine);
+            }
 
             mIsConnected = true;
         } catch(Exception e) {
@@ -136,11 +158,15 @@ public class MakepadWebSocket {
         URI uri = new URI(mUrl);
         String host = uri.getHost();
         String path = uri.getPath();
+        if (path == null || path.isEmpty()) {
+            path = "/";
+        }
         String query = uri.getQuery() == null ? "" : uri.getQuery();
         int port =  uri.getPort() == -1 ? 443 : uri.getPort();
+        String hostHeader = uri.getPort() == -1 ? host : host + ":" + uri.getPort();
 
         String content = "GET " + path + (query.isEmpty() ? "" : "?" + query) + " HTTP/1.1\r\n" +
-            "Host: " + host + "\r\n" +
+            "Host: " + hostHeader + "\r\n" +
             "Upgrade: websocket\r\n" +
             "Connection: Upgrade\r\n" +
             "Sec-WebSocket-Key: " + this.randomStringKey(22) + "==\r\n" +

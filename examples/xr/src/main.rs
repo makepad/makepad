@@ -191,7 +191,7 @@ script_mod! {
 }
 
 const XR_CUBE_FORWARD_OFFSET: f32 = 0.55;
-const XR_CUBE_VIEW_OFFSET_Y: f32 = -0.12;
+const XR_CUBE_VIEW_OFFSET_Y: f32 = 0.0;
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ExampleXrScene {
@@ -215,8 +215,7 @@ pub struct ExampleXrScene {
 
 impl ExampleXrScene {
     fn scene_forward(state: &XrState) -> Vec3f {
-        let mut forward = state.vec_in_head_space(vec3(0.0, 0.0, -1.0)) - state.head_pose.position;
-        forward.y = 0.0;
+        let forward = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
         if forward.length() <= 1.0e-4 {
             vec3f(0.0, 0.0, -1.0)
         } else {
@@ -294,6 +293,7 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        log!("APP STARTUP");
         crate::makepad_widgets::script_mod(vm);
         makepad_xr::script_mod(vm);
         self::script_mod(vm)

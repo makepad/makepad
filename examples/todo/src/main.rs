@@ -100,6 +100,7 @@ script_mod! {
     todos.push({text: "Get AI to control UI", tag: "dev", done: true})
 
     fn add_todo(text, tag){
+        ~("test")
         todos.push({text: text, tag: tag, done: false})
         ui.todo_list.render()
     }
