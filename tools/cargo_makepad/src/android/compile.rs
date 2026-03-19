@@ -1408,13 +1408,6 @@ pub fn run(
                 args.push(studio);
             }
         }
-        if let Ok(build_id) = std::env::var("STUDIO_BUILD_ID") {
-            if !build_id.trim().is_empty() {
-                args.push("--es".to_string());
-                args.push("makepad.STUDIO_BUILD_ID".to_string());
-                args.push(build_id);
-            }
-        }
         args
     }
 

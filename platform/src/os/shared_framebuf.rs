@@ -462,7 +462,7 @@ pub mod aux_chan {
         io::Error::new(io::ErrorKind::Other, error)
     }
 
-    fn path_for_studio(studio: &str, studio_build_id: &str) -> io::Result<PathBuf> {
+    fn path_for_studio(studio: &str, studio_build_id: Option<&str>) -> io::Result<PathBuf> {
         let without_scheme = studio
             .split_once("://")
             .map(|(_, rest)| rest)
@@ -478,12 +478,17 @@ pub mod aux_chan {
             .rsplit_once(':')
             .map(|(_, port)| port)
             .unwrap_or("80");
-        if studio_build_id.trim().is_empty() {
-            return Err(io_error_other("missing STUDIO_BUILD_ID"));
-        }
+        let studio_build_id = studio_build_id
+            .map(str::trim)
+            .filter(|build_id| !build_id.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| crate::app_main::extract_studio_build_id(studio));
+        let Some(studio_build_id) = studio_build_id else {
+            return Err(io_error_other("missing app id in STUDIO"));
+        };
         Ok(PathBuf::from(format!(
             "/tmp/makepad-stdin-aux-{port}-{}.sock",
-            studio_build_id.trim()
+            studio_build_id
         )))
     }
 
@@ -494,7 +499,7 @@ pub mod aux_chan {
 
     impl ExternalEndpointListener {
         pub fn new_for_studio(studio: &str, studio_build_id: &str) -> io::Result<Self> {
-            let path = path_for_studio(studio, studio_build_id)?;
+            let path = path_for_studio(studio, Some(studio_build_id))?;
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -559,8 +564,7 @@ pub mod aux_chan {
     impl ClientEndpoint {
         pub fn connect_from_studio_env() -> io::Result<Self> {
             let studio = std::env::var("STUDIO").map_err(io_error_other)?;
-            let studio_build_id = std::env::var("STUDIO_BUILD_ID").map_err(io_error_other)?;
-            let path = path_for_studio(&studio, &studio_build_id)?;
+            let path = path_for_studio(&studio, None)?;
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 match UnixStream::connect(&path) {
