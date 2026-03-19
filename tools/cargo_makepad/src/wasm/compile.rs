@@ -4651,10 +4651,7 @@ fn start_wasm_server(
                         ""
                     };
 
-                    if path == "/$watch"
-                        || path == "/favicon.ico"
-                        || path.starts_with("/.well-known/")
-                    {
+                    if path == "/$watch" || path == "/favicon.ico" {
                         let header = "HTTP/1.1 200 OK\r\n\
                         Cache-Control: max-age:0\r\n\
                         Connection: close\r\n\r\n"

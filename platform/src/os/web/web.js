@@ -314,13 +314,6 @@ export class WasmWebBrowser extends WasmBridge {
         document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
     }
 
-    resolve_runtime_asset_url(path) {
-        const base = this.wasm && this.wasm._wasm_url
-            ? this.wasm._wasm_url
-            : (typeof window !== "undefined" ? window.location.href : path);
-        return new URL(path, base).toString();
-    }
-
     FromWasmTextCopyResponse(args) {
         this.text_copy_response = args.response
     }
@@ -417,10 +410,7 @@ export class WasmWebBrowser extends WasmBridge {
                 return;
             }
 
-            await this.audio_context.audioWorklet.addModule(
-                this.resolve_runtime_asset_url("makepad_platform/audio_worklet.js"),
-                { credentials: 'omit' }
-            );
+            await this.audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' });
 
             const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
@@ -631,7 +621,7 @@ export class WasmWebBrowser extends WasmBridge {
                 return;
             }
             let worker = new Worker(
-                this.resolve_runtime_asset_url('makepad_platform/web_worker.js'),
+                './makepad_platform/web_worker.js',
                 { type: 'module' }
             );
             worker.postMessage(thread_info);
