@@ -12,7 +12,8 @@ use {
         makepad_network::NetworkResponse,
     },
     makepad_studio_protocol::{
-        AppToStudio, EventSample, ScreenshotResponse, StudioToApp, WidgetQueryResponse,
+        hub_protocol::FrameCodec, AppToStudio, EventSample, RunViewFrameData,
+        RunViewFrameRequest, ScreenshotResponse, StudioToApp, WidgetQueryResponse,
         WidgetTreeDumpResponse,
     },
     std::cell::{Cell, RefCell},
@@ -163,6 +164,106 @@ impl Cx {
             width,
             height,
         }));
+    }
+
+    pub(crate) fn queue_studio_run_view_frame_request(&mut self, request: RunViewFrameRequest) {
+        self.run_view_frame_requests
+            .retain(|existing| existing.window_id != request.window_id);
+        if request.frame_id <= 3 || request.frame_id % 30 == 0 {
+            crate::log!(
+                "runview queued request window={} frame={} size={}x{} dpi={:.2}",
+                request.window_id,
+                request.frame_id,
+                request.width,
+                request.height,
+                request.dpi_factor,
+            );
+        }
+        self.run_view_frame_requests.push(request);
+        self.redraw_all();
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn take_studio_run_view_frame_request(
+        &mut self,
+        window_id: usize,
+    ) -> Option<RunViewFrameRequest> {
+        if self.run_view_frame_encode_in_flight {
+            return None;
+        }
+        let index = self
+            .run_view_frame_requests
+            .iter()
+            .rposition(|request| request.window_id == window_id)?;
+        let request = self.run_view_frame_requests.swap_remove(index);
+        if request.frame_id <= 3 || request.frame_id % 30 == 0 {
+            crate::log!(
+                "runview taking request window={} frame={}",
+                request.window_id,
+                request.frame_id,
+            );
+        }
+        Some(request)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn encode_studio_run_view_frame_async(
+        &mut self,
+        request: RunViewFrameRequest,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) {
+        if self.run_view_frame_encode_in_flight {
+            return;
+        }
+        if request.frame_id <= 3 || request.frame_id % 30 == 0 {
+            crate::log!(
+                "runview encoding frame window={} frame={} rgba_bytes={} size={}x{}",
+                request.window_id,
+                request.frame_id,
+                rgba.len(),
+                width,
+                height,
+            );
+        }
+        self.run_view_frame_encode_in_flight = true;
+        let sender = self.run_view_frame_results.sender();
+        self.spawn_thread(move || {
+            let result = Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {
+                window_id: request.window_id,
+                frame_id: request.frame_id,
+                width,
+                height,
+                codec: Some(FrameCodec::Png),
+                data: png,
+            });
+            let _ = sender.send(result);
+        });
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn flush_studio_run_view_frame_results(&mut self) {
+        loop {
+            let Ok(result) = self.run_view_frame_results.try_recv() else {
+                break;
+            };
+            self.run_view_frame_encode_in_flight = false;
+            match result {
+                Ok(frame) => {
+                    if frame.frame_id <= 3 || frame.frame_id % 30 == 0 {
+                        crate::log!(
+                            "runview flushing encoded frame window={} frame={} bytes={}",
+                            frame.window_id,
+                            frame.frame_id,
+                            frame.data.len(),
+                        );
+                    }
+                    Cx::send_studio_message(AppToStudio::RunViewFrame(frame))
+                }
+                Err(err) => crate::error!("runview frame encode failed: {}", err),
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -329,6 +430,16 @@ impl Cx {
             StudioToApp::Screenshot(request) => {
                 self.screenshot_requests.push(request);
                 self.redraw_all();
+            }
+            StudioToApp::RunViewFrameRequest(request) => {
+                if request.frame_id <= 3 || request.frame_id % 30 == 0 {
+                    crate::log!(
+                        "runview request received from studio window={} frame={}",
+                        request.window_id,
+                        request.frame_id,
+                    );
+                }
+                self.queue_studio_run_view_frame_request(request);
             }
             StudioToApp::WidgetTreeDump(request) => {
                 self.send_studio_widget_tree_dump_response(request.request_id);

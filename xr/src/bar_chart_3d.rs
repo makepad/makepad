@@ -2,7 +2,7 @@ use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 use super::scene_3d::{
     apply_scene_to_draw_pbr, chart_data_from_scope, register_last_draw_call_anchor,
-    scene_state_from_scope,
+    scene_node_world_transform_from_scope, scene_state_from_scope,
 };
 
 script_mod! {
@@ -155,8 +155,10 @@ impl Widget for BarChart3D {
         // Set up both draw shaders with the scene state
         apply_scene_to_draw_pbr(&mut self.draw_bar.draw_super, cx, &scene);
         apply_scene_to_draw_pbr(&mut self.draw_pbr, cx, &scene);
+        let parent_world = scene_node_world_transform_from_scope(scope);
 
         self.draw_bar.push_matrix();
+        self.draw_bar.apply_transform(parent_world);
         self.draw_bar.translate_v(self.position);
         self.draw_bar
             .rotate_xyz(self.rotation.x, self.rotation.y, self.rotation.z);
@@ -165,6 +167,7 @@ impl Widget for BarChart3D {
 
         // Mirror transforms to draw_pbr for axes
         self.draw_pbr.push_matrix();
+        self.draw_pbr.apply_transform(parent_world);
         self.draw_pbr.translate_v(self.position);
         self.draw_pbr
             .rotate_xyz(self.rotation.x, self.rotation.y, self.rotation.z);
