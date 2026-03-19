@@ -154,6 +154,17 @@ pub fn start_http_gateway(
 }
 
 fn parse_app_path(path: &str) -> Option<QueryId> {
+    if let Some(rest) = path.strip_prefix("/build/") {
+        let build_id = rest
+            .strip_suffix("/$studio_web_socket")
+            .unwrap_or(rest)
+            .trim_matches('/');
+        if !build_id.is_empty() {
+            if let Ok(id) = build_id.parse::<u64>() {
+                return Some(QueryId(id));
+            }
+        }
+    }
     for prefix in ["/$studio_app/", "/$studio_web_socket/"] {
         let Some(rest) = path.strip_prefix(prefix) else {
             continue;
@@ -183,9 +194,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_clean_build_path() {
+        assert_eq!(parse_app_path("/build/77"), Some(QueryId(77)));
+        assert_eq!(
+            parse_app_path("/build/77/$studio_web_socket"),
+            Some(QueryId(77))
+        );
+    }
+
+    #[test]
     fn reject_missing_or_invalid_build_id() {
         assert_eq!(parse_app_path("/$studio_app/"), None);
         assert_eq!(parse_app_path("/$studio_web_socket/not-a-number"), None);
+        assert_eq!(parse_app_path("/build/not-a-number"), None);
         assert_eq!(parse_app_path("/$studio_ui"), None);
     }
 }

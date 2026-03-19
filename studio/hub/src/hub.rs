@@ -5,7 +5,7 @@ use makepad_script_std::makepad_network::ToUIReceiver;
 use makepad_studio_protocol::hub_protocol::{
     ClientId, ClientToHub, ClientToHubEnvelope, HubToClient, QueryId,
 };
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
@@ -67,7 +67,7 @@ impl HubConnection {
     pub fn studio_addr(&self) -> Option<String> {
         self.gateway
             .as_ref()
-            .map(|g| studio_addr_for_child(g.listen_address))
+            .map(|g| studio_local_addr_for_child(g.listen_address))
     }
 
     pub fn send(&mut self, msg: ClientToHub) -> QueryId {
@@ -108,17 +108,19 @@ impl StudioHub {
 
         let mut gateway = None;
         let mut studio_addr = None;
+        let mut studio_ext_addr = None;
         if config.enable_in_process_gateway {
             let handle = start_http_gateway_with_fallback(
                 config.listen_address,
                 config.post_max_size,
                 &event_tx,
             )?;
-            studio_addr = Some(studio_addr_for_child(handle.listen_address));
+            studio_addr = Some(studio_local_addr_for_child(handle.listen_address));
+            studio_ext_addr = Some(studio_ext_addr_for_child(handle.listen_address));
             gateway = Some(handle);
         }
 
-        let mut core = HubCore::new(event_rx, event_tx.clone(), vfs, studio_addr);
+        let mut core = HubCore::new(event_rx, event_tx.clone(), vfs, studio_addr, studio_ext_addr);
         let core_thread = std::thread::spawn(move || {
             core.run();
         });
@@ -179,7 +181,8 @@ impl StudioHub {
             event_rx,
             event_tx.clone(),
             vfs,
-            Some(studio_addr_for_child(listen_address)),
+            Some(studio_local_addr_for_child(listen_address)),
+            Some(studio_ext_addr_for_child(listen_address)),
         );
         let core_thread = std::thread::spawn(move || {
             core.run();
@@ -222,11 +225,33 @@ fn gateway_bind_candidates(base: SocketAddr) -> impl Iterator<Item = SocketAddr>
     (base.port()..=u16::MAX).map(move |port| SocketAddr::new(ip, port))
 }
 
-fn studio_addr_for_child(listen_address: SocketAddr) -> String {
+fn studio_local_addr_for_child(listen_address: SocketAddr) -> String {
     let ip = match listen_address.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
         IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
         ip => ip,
     };
     format!("{}:{}", ip, listen_address.port())
+}
+
+fn studio_ext_addr_for_child(listen_address: SocketAddr) -> String {
+    let ip = match listen_address.ip() {
+        IpAddr::V4(ip) if ip.is_loopback() || ip.is_unspecified() => detect_external_ipv4()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V4(ip)),
+        IpAddr::V6(ip) if ip.is_loopback() || ip.is_unspecified() => {
+            detect_external_ipv4().map(IpAddr::V4).unwrap_or(IpAddr::V6(ip))
+        }
+        ip => ip,
+    };
+    format!("{}:{}", ip, listen_address.port())
+}
+
+fn detect_external_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
 }
