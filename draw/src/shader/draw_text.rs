@@ -469,12 +469,23 @@ impl DrawText {
                 last_row.origin_in_lpxs.y - last_row.ascender_in_lpxs,
             ) * self.font_scale;
         let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
+        // Account for temp_y_shift in the allocated height so that shifted
+        // glyphs (e.g., from top_drop) don't get clipped by their container.
+        let shift_extra_height = if self.temp_y_shift != 0.0 {
+            let fs = text.rows.first()
+                .and_then(|r| r.glyphs.first())
+                .map(|g| g.font_size_in_lpxs)
+                .unwrap_or(0.0);
+            (self.temp_y_shift * fs * self.font_scale).abs() as f64
+        } else {
+            0.0
+        };
         let new_turtle_pos = dvec2(new_turtle_pos.x as f64, new_turtle_pos.y as f64);
         let turtle = cx.turtle_mut();
 
         turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
         turtle.allocate_width(used_size_in_lpxs.width as f64);
-        turtle.allocate_height(used_size_in_lpxs.height as f64);
+        turtle.allocate_height(used_size_in_lpxs.height as f64 + shift_extra_height);
         turtle.move_to(new_turtle_pos);
 
         turtle.set_wrap_spacing(
@@ -486,7 +497,7 @@ impl DrawText {
             pos: new_turtle_pos,
             size: dvec2(
                 used_size_in_lpxs.width as f64,
-                used_size_in_lpxs.height as f64,
+                used_size_in_lpxs.height as f64 + shift_extra_height,
             ),
         });
 
@@ -793,6 +804,11 @@ pub struct TextStyle {
     pub font_size: f32,
     #[live(1.0)]
     pub line_spacing: f32,
+    /// A vertical offset applied when drawing text, as a fraction of the font size.
+    /// Positive values shift text downward, useful for aligning baselines when
+    /// mixing fonts with different vertical metrics (e.g., code font with regular text).
+    #[live(0.0)]
+    pub top_drop: f32,
 }
 
 #[derive(Debug, Clone, Script, ScriptHook)]
