@@ -307,7 +307,7 @@ impl DesktopLogView {
                     if let Some(location) = &entry.location {
                         tf.draw_link(
                             cx,
-                            id!(location_link),
+                            id!(link),
                             LogLocationLink {
                                 path: location.path.clone(),
                                 line: location.line,

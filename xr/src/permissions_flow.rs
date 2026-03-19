@@ -52,14 +52,14 @@ script_mod! {
                 flow: Right
                 spacing: 10
 
-                allow_button := Button{
+                scene_access_button := Button{
                     width: Fill
-                    text: "Allow Quest Permissions"
+                    text: "Allow Scene Access"
                 }
 
-                start_xr_button := Button{
+                headset_camera_button := Button{
                     width: Fill
-                    text: "Start XR"
+                    text: "Allow Headset Camera"
                 }
             }
 
@@ -125,26 +125,47 @@ impl XrPermissionsFlow {
         self.pending_scene_access_request.is_some() || self.pending_headset_camera_request.is_some()
     }
 
+    fn scene_access_button_text(&self) -> &'static str {
+        if self.pending_scene_access_check.is_some() {
+            "Checking Scene Access..."
+        } else if self.pending_scene_access_request.is_some() {
+            "Waiting For Scene Access..."
+        } else if self.scene_access_granted() {
+            "Scene Access Granted"
+        } else {
+            "Allow Scene Access"
+        }
+    }
+
+    fn headset_camera_button_text(&self) -> &'static str {
+        if self.pending_headset_camera_check.is_some() {
+            "Checking Headset Camera..."
+        } else if self.pending_headset_camera_request.is_some() {
+            "Waiting For Headset Camera..."
+        } else if self.headset_camera_granted() {
+            "Headset Camera Granted"
+        } else {
+            "Allow Headset Camera"
+        }
+    }
+
     fn schedule_ui_refresh(&mut self, cx: &mut Cx) {
         self.ui_refresh_next_frame = Some(cx.new_next_frame());
         self.redraw(cx);
     }
 
-    fn allow_button_text(&self) -> &'static str {
-        if self.permission_checks_pending() {
-            "Checking Quest Permissions..."
-        } else if self.permission_requests_pending() {
-            "Waiting for Quest Permissions..."
-        } else if self.xr_permissions_ready() {
-            "Re-check Quest Permissions"
-        } else {
-            "Allow Quest Permissions"
+    fn schedule_xr_start_if_ready(&mut self, cx: &mut Cx) {
+        if self.xr_permissions_ready() && !self.hidden_after_start && self.xr_start_next_frame.is_none()
+        {
+            self.start_xr(cx);
         }
     }
 
     fn detail_text(&self) -> &'static str {
-        if self.xr_permissions_ready() {
-            "Quest scene access and headset camera are granted. Start XR when you are ready."
+        if self.hidden_after_start || self.xr_start_next_frame.is_some() {
+            "Quest scene access and headset camera are granted. Starting XR."
+        } else if self.xr_permissions_ready() {
+            "Quest scene access and headset camera are granted. XR will start automatically."
         } else if !self.scene_access_granted() {
             "Allow Quest scene access before starting XR. This unlocks environment depth and passthrough occlusion."
         } else if !self.headset_camera_granted() {
@@ -157,6 +178,8 @@ impl XrPermissionsFlow {
     fn status_text(&self) -> &'static str {
         if self.permission_checks_pending() {
             "Checking current Quest permission status."
+        } else if self.hidden_after_start || self.xr_start_next_frame.is_some() {
+            "Quest permissions granted. Entering XR."
         } else if self.permission_requests_pending() {
             "Approve the Quest permission dialog to continue."
         } else if self.xr_permissions_ready() {
@@ -173,15 +196,25 @@ impl XrPermissionsFlow {
     fn refresh_ui(&mut self, cx: &mut Cx) {
         self.label(cx, ids!(detail_label)).set_text(cx, self.detail_text());
         self.label(cx, ids!(status_label)).set_text(cx, self.status_text());
-        let allow_button = self.button(cx, ids!(allow_button));
-        allow_button.set_enabled(
+        let scene_access_button = self.button(cx, ids!(scene_access_button));
+        scene_access_button.set_enabled(
             cx,
-            !self.permission_checks_pending() && !self.permission_requests_pending(),
+            self.pending_scene_access_check.is_none()
+                && self.pending_scene_access_request.is_none()
+                && !self.scene_access_granted(),
         );
-        self.widget(cx, ids!(allow_button))
-            .set_text(cx, self.allow_button_text());
-        self.button(cx, ids!(start_xr_button))
-            .set_enabled(cx, self.xr_permissions_ready());
+        self.widget(cx, ids!(scene_access_button))
+            .set_text(cx, self.scene_access_button_text());
+
+        let headset_camera_button = self.button(cx, ids!(headset_camera_button));
+        headset_camera_button.set_enabled(
+            cx,
+            self.pending_headset_camera_check.is_none()
+                && self.pending_headset_camera_request.is_none()
+                && !self.headset_camera_granted(),
+        );
+        self.widget(cx, ids!(headset_camera_button))
+            .set_text(cx, self.headset_camera_button_text());
     }
 
     fn begin_scene_access_check(&mut self, cx: &mut Cx) {
@@ -227,16 +260,6 @@ impl XrPermissionsFlow {
         self.begin_headset_camera_check(cx);
     }
 
-    fn request_next_missing_permission(&mut self, cx: &mut Cx) {
-        if !self.scene_access_granted() {
-            self.request_scene_access(cx);
-        } else if !self.headset_camera_granted() {
-            self.request_headset_camera(cx);
-        } else {
-            self.begin_permission_checks(cx);
-        }
-    }
-
     fn start_xr(&mut self, cx: &mut Cx) {
         self.hidden_after_start = true;
         self.xr_start_next_frame = Some(cx.new_next_frame());
@@ -253,12 +276,11 @@ impl Widget for XrPermissionsFlow {
         self.view.handle_event(cx, event, scope);
 
         if let Event::Actions(actions) = event {
-            if self.button(cx, ids!(allow_button)).clicked(actions) {
-                self.request_next_missing_permission(cx);
+            if self.button(cx, ids!(scene_access_button)).clicked(actions) {
+                self.request_scene_access(cx);
             }
-            if self.button(cx, ids!(start_xr_button)).clicked(actions) && self.xr_permissions_ready()
-            {
-                self.start_xr(cx);
+            if self.button(cx, ids!(headset_camera_button)).clicked(actions) {
+                self.request_headset_camera(cx);
             }
         }
 
@@ -285,7 +307,6 @@ impl Widget for XrPermissionsFlow {
                 }
             }
             Event::PermissionResult(result) if result.permission == Permission::SceneAccess => {
-                let was_request = self.pending_scene_access_request == Some(result.request_id);
                 if self.pending_scene_access_check == Some(result.request_id) {
                     self.pending_scene_access_check = None;
                 } else if self.pending_scene_access_request == Some(result.request_id) {
@@ -294,17 +315,10 @@ impl Widget for XrPermissionsFlow {
                     return;
                 }
                 self.scene_access = Some(result.status);
-                if was_request
-                    && result.status == PermissionStatus::Granted
-                    && !self.headset_camera_granted()
-                {
-                    self.request_next_missing_permission(cx);
-                } else {
-                    self.schedule_ui_refresh(cx);
-                }
+                self.schedule_xr_start_if_ready(cx);
+                self.schedule_ui_refresh(cx);
             }
             Event::PermissionResult(result) if result.permission == Permission::HeadsetCamera => {
-                let was_request = self.pending_headset_camera_request == Some(result.request_id);
                 if self.pending_headset_camera_check == Some(result.request_id) {
                     self.pending_headset_camera_check = None;
                 } else if self.pending_headset_camera_request == Some(result.request_id) {
@@ -313,14 +327,8 @@ impl Widget for XrPermissionsFlow {
                     return;
                 }
                 self.headset_camera = Some(result.status);
-                if was_request
-                    && result.status == PermissionStatus::Granted
-                    && !self.scene_access_granted()
-                {
-                    self.request_next_missing_permission(cx);
-                } else {
-                    self.schedule_ui_refresh(cx);
-                }
+                self.schedule_xr_start_if_ready(cx);
+                self.schedule_ui_refresh(cx);
             }
             Event::Resume if !self.permission_requests_pending() => {
                 self.begin_permission_checks(cx);

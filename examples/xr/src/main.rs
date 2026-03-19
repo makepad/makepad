@@ -39,140 +39,148 @@ script_mod! {
                     main := View{
                         width: Fill
                         height: Fill
-                        flow: Right
+                        flow: Overlay
 
-                        sidebar := RoundedView{
-                            width: 320
-                            height: Fill
-                            flow: Down
-                            spacing: 14
-                            padding: Inset{left: 20 right: 20 top: 22 bottom: 20}
-                            draw_bg.color: #x0d1520
-                            draw_bg.radius: 0.0
-
-                            title := H1{
-                                text: "XR Demo"
-                                draw_text.color: #xeff7ff
-                            }
-
-                            intro := Label{
-                                width: Fill
-                                text: "Desktop mode stays in 2D UI with the scene viewport on the right. Drag to orbit, scroll to zoom, and click the physics stack to kick cubes."
-                                draw_text.color: #xb8c8d8
-                            }
-
-                            scene_label := Label{
-                                width: Fill
-                                text: "Single GLTF object"
-                                draw_text.color: #x8fe4d6
-                            }
-
-                            show_gltf := Button{
-                                width: Fill
-                                text: "GLTF"
-                                on_click: || select_scene("gltf", "Single GLTF object")
-                            }
-
-                            show_splat := Button{
-                                width: Fill
-                                text: "Splat Trio"
-                                on_click: || select_scene("splat", "Helmet plus two splat assets")
-                            }
-
-                            show_physics := Button{
-                                width: Fill
-                                text: "Physics Cubes"
-                                on_click: || select_scene("physics", "Interactive physics cube stack")
-                            }
-
-                            filler := Filler{}
-
-                            xr_note := Label{
-                                width: Fill
-                                text: "XR presentation stays on the separate XR scene path when headset support is available."
-                                draw_text.color: #x6f8191
-                            }
-                        }
-
-                        gutter := SolidView{
-                            width: 1
-                            height: Fill
-                            draw_bg.color: #x1a2633
-                        }
-
-                        viewport := View{
+                        desktop_shell := View{
                             width: Fill
                             height: Fill
+                            flow: Right
 
-                            desktop_scene := Scene3D{
-                                width: Fill
+                            sidebar := RoundedView{
+                                width: 320
                                 height: Fill
-                                animating: true
-                                spin_speed: 0.0
-                                camera_fov_y: 46.0
-                                camera_distance: 5.8
-                                camera_near: 0.02
-                                camera_far: 400.0
-                                camera_target: vec3(0.0, 0.35, 0.0)
-                                draw_bg +: {
-                                    color: #x111823
-                                    draw_depth: -400.0
+                                flow: Down
+                                spacing: 14
+                                padding: Inset{left: 20 right: 20 top: 22 bottom: 20}
+                                draw_bg.color: #x0d1520
+                                draw_bg.radius: 0.0
+
+                                title := H1{
+                                    text: "XR Demo"
+                                    draw_text.color: #xeff7ff
                                 }
 
-                                scene_root := Node3D{
-                                    on_render: ||{
-                                        if active_scene == "gltf" {
-                                            ground := Grid3D{
-                                                size: 16.0
-                                                position: vec3(0.0, -1.25, 0.0)
-                                                color: vec4(0.56, 0.58, 0.61, 1.0)
+                                intro := Label{
+                                    width: Fill
+                                    text: "Desktop mode stays in 2D UI with the scene viewport on the right. Drag to orbit, scroll to zoom, and click the physics stack to kick cubes."
+                                    draw_text.color: #xb8c8d8
+                                }
+
+                                scene_label := Label{
+                                    width: Fill
+                                    text: "Single GLTF object"
+                                    draw_text.color: #x8fe4d6
+                                }
+
+                                show_gltf := Button{
+                                    width: Fill
+                                    text: "GLTF"
+                                    on_click: || select_scene("gltf", "Single GLTF object")
+                                }
+
+                                show_splat := Button{
+                                    width: Fill
+                                    text: "Splat Trio"
+                                    on_click: || select_scene("splat", "Helmet plus two splat assets")
+                                }
+
+                                show_physics := Button{
+                                    width: Fill
+                                    text: "Physics Cubes"
+                                    on_click: || select_scene("physics", "Interactive physics cube stack")
+                                }
+
+                                filler := Filler{}
+
+                                xr_note := Label{
+                                    width: Fill
+                                    text: "XR presentation stays on the separate XR scene path when headset support is available."
+                                    draw_text.color: #x6f8191
+                                }
+                            }
+
+                            gutter := SolidView{
+                                width: 1
+                                height: Fill
+                                draw_bg.color: #x1a2633
+                            }
+
+                            viewport := View{
+                                width: Fill
+                                height: Fill
+
+                                desktop_scene := Scene3D{
+                                    width: Fill
+                                    height: Fill
+                                    animating: true
+                                    spin_speed: 0.0
+                                    camera_fov_y: 46.0
+                                    camera_distance: 5.8
+                                    camera_near: 0.02
+                                    camera_far: 400.0
+                                    camera_target: vec3(0.0, 0.35, 0.0)
+                                    draw_bg +: {
+                                        color: #x111823
+                                        draw_depth: -400.0
+                                    }
+
+                                    scene_root := Node3D{
+                                        on_render: ||{
+                                            if active_scene == "gltf" {
+                                                ground := Grid3D{
+                                                    size: 16.0
+                                                    position: vec3(0.0, -1.25, 0.0)
+                                                    color: vec4(0.56, 0.58, 0.61, 1.0)
+                                                }
+                                                model := Gltf3D{
+                                                    src: crate_resource("self://resources/DamagedHelmet.glb")
+                                                    env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
+                                                    scale: vec3(0.82, 0.82, 0.82)
+                                                    rotation: vec3(0.0, 0.45, 0.0)
+                                                }
                                             }
-                                            model := Gltf3D{
-                                                src: crate_resource("self://resources/DamagedHelmet.glb")
-                                                env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
-                                                scale: vec3(0.82, 0.82, 0.82)
-                                                rotation: vec3(0.0, 0.45, 0.0)
+                                            else if active_scene == "splat" {
+                                                ground := Grid3D{
+                                                    size: 18.0
+                                                    position: vec3(0.0, -1.25, 0.0)
+                                                    color: vec4(0.56, 0.58, 0.61, 1.0)
+                                                }
+                                                helmet := Gltf3D{
+                                                    src: crate_resource("self://resources/DamagedHelmet.glb")
+                                                    env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
+                                                    position: vec3(0.0, -0.1, 0.0)
+                                                    rotation: vec3(0.0, 1.2, 0.0)
+                                                    scale: vec3(0.38, 0.38, 0.38)
+                                                }
+                                                sog := ViewSplat{
+                                                    src: crate_resource("self://../../local/toy-cat.sog")
+                                                    position: vec3(-1.8, 0.0, 0.0)
+                                                    scale: vec3(1.0, -1.0, 1.0)
+                                                    normalize_fit: 2.3
+                                                    max_splats: 0
+                                                    radius_scale: 1.1
+                                                    min_radius: 0.0012
+                                                }
+                                                ply := ViewSplat{
+                                                    src: crate_resource("self://../../local/biker.ply")
+                                                    position: vec3(1.8, -0.1, 0.0)
+                                                    scale: vec3(1.0, -1.0, 1.0)
+                                                    normalize_fit: 2.0
+                                                    max_splats: 0
+                                                    radius_scale: 1.1
+                                                    min_radius: 0.0012
+                                                }
                                             }
-                                        }
-                                        else if active_scene == "splat" {
-                                            ground := Grid3D{
-                                                size: 18.0
-                                                position: vec3(0.0, -1.25, 0.0)
-                                                color: vec4(0.56, 0.58, 0.61, 1.0)
+                                            else {
+                                                simulation := PhysicsWorld3D{}
                                             }
-                                            helmet := Gltf3D{
-                                                src: crate_resource("self://resources/DamagedHelmet.glb")
-                                                env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
-                                                position: vec3(0.0, -0.1, 0.0)
-                                                rotation: vec3(0.0, 1.2, 0.0)
-                                                scale: vec3(0.38, 0.38, 0.38)
-                                            }
-                                            sog := ViewSplat{
-                                                src: crate_resource("self://../../local/toy-cat.sog")
-                                                position: vec3(-1.8, 0.0, 0.0)
-                                                scale: vec3(1.0, -1.0, 1.0)
-                                                normalize_fit: 2.3
-                                                max_splats: 0
-                                                radius_scale: 1.1
-                                                min_radius: 0.0012
-                                            }
-                                            ply := ViewSplat{
-                                                src: crate_resource("self://../../local/biker.ply")
-                                                position: vec3(1.8, -0.1, 0.0)
-                                                scale: vec3(1.0, -1.0, 1.0)
-                                                normalize_fit: 2.0
-                                                max_splats: 0
-                                                radius_scale: 1.1
-                                                min_radius: 0.0012
-                                            }
-                                        }
-                                        else {
-                                            simulation := PhysicsWorld3D{}
                                         }
                                     }
                                 }
                             }
                         }
+
+                        xr_permissions := mod.widgets.XrPermissionsFlow{}
                     }
                 }
             }

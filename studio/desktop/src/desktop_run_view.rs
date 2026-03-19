@@ -367,17 +367,6 @@ impl DesktopRunView {
         self.remote_next_frame_id = frame_id.wrapping_add(1).max(1);
         self.remote_frame_request_in_flight = true;
         self.remote_requested_frame_id = Some(frame_id);
-        if frame_id <= 3 || frame_id % 30 == 0 {
-            crate::log!(
-                "runview remote request build={} window={} frame={} size={}x{} dpi={:.2}",
-                target.build_id.0,
-                target.window_id,
-                frame_id,
-                (self.last_rect.size.x * self.last_dpi_factor).ceil().max(1.0) as u32,
-                (self.last_rect.size.y * self.last_dpi_factor).ceil().max(1.0) as u32,
-                self.last_dpi_factor,
-            );
-        }
         Some(StudioToApp::RunViewFrameRequest(RunViewFrameRequest {
             window_id: target.window_id,
             frame_id,
@@ -403,16 +392,6 @@ impl DesktopRunView {
             return;
         }
         let codec = frame.codec.clone().unwrap_or(FrameCodec::Png);
-        if frame.frame_id <= 3 || frame.frame_id % 30 == 0 {
-            crate::log!(
-                "runview remote frame received build={} window={} frame={} bytes={} codec={:?}",
-                build_id.0,
-                frame.window_id,
-                frame.frame_id,
-                frame.data.len(),
-                codec,
-            );
-        }
         self.remote_mode = true;
         self.remote_frame_request_in_flight = false;
         self.remote_requested_frame_id = None;

@@ -3,7 +3,6 @@ use self::{
     depth::{DepthSurfaceMeshChunkHandle, RetainedDepthQueryHit},
     passthrough::{
         XrPassthroughCameraChoice, XrPassthroughCameraTextures, XrPassthroughEnvAtlas,
-        XrPassthroughQuadPlacement,
     },
     physics::{makepad_pose, RapierScene},
 };
@@ -81,85 +80,11 @@ script_mod! {
         }
     }
 
-    set_type_default() do #(DrawXrPassthroughQuad::script_shader(vm)){
-        vertex_pos: vertex_position(vec4f)
-        fb0: fragment_output(0, vec4f)
-        draw_call: uniform_buffer(draw.DrawCallUniforms)
-        draw_pass: uniform_buffer(draw.DrawPassUniforms)
-        draw_list: uniform_buffer(draw.DrawListUniforms)
-        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
-
-        camera_texture: texture_video()
-
-        v_uv: varying(vec2f)
-
-        vertex: fn() {
-            let world = vec4(
-                self.geom.pos_nx.x,
-                self.geom.pos_nx.y,
-                self.geom.pos_nx.z,
-                1.0
-            );
-            self.v_uv = self.geom.ny_nz_uv.zw;
-            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world);
-        }
-
-        sample_camera_rgb: fn(coord: vec2f) -> vec3f {
-            if self.camera_enabled > 0.5 {
-                let coord_90 = vec2(1.0 - coord.y, coord.x);
-                let coord_180 = vec2(1.0 - coord.x, 1.0 - coord.y);
-                let coord_270 = vec2(coord.y, 1.0 - coord.x);
-                let is_90 = step(0.5, self.rotation_steps) * step(self.rotation_steps, 1.5);
-                let is_180 = step(1.5, self.rotation_steps) * step(self.rotation_steps, 2.5);
-                let is_270 = step(2.5, self.rotation_steps);
-                let is_0 = 1.0 - is_90 - is_180 - is_270;
-                let sample_coord = coord * is_0 + coord_90 * is_90 + coord_180 * is_180 + coord_270 * is_270;
-                let sample = self.camera_texture.sample_video(sample_coord).xyz;
-                // Quest's external sampler path appears to expose the camera sample as U,Y,V.
-                let y = (sample.y * 255.0 - 16.0) / 219.0;
-                let u = (sample.x * 255.0 - 128.0) / 224.0;
-                let v = (sample.z * 255.0 - 128.0) / 224.0;
-                let r = y + 1.8556 * u;
-                let g = y - 0.1873 * u - 0.4681 * v;
-                let b = y + 1.5748 * v;
-                return vec3(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0));
-            }
-
-            return vec3(0.0, 0.0, 0.0);
-        }
-
-        frosted_offset: fn(seed: vec2f, scale: f32) -> vec2f {
-            let texel = self.scatter_pixels / max(self.source_size, vec2(1.0, 1.0));
-            let ox = Math.random_2d(seed + vec2(3.17, 9.41)) - 0.5;
-            let oy = Math.random_2d(seed.yx + vec2(5.93, 1.27)) - 0.5;
-            return vec2(ox, oy) * texel * scale;
-        }
-
-        pixel: fn() {
-            let uv = clamp(self.v_uv, vec2(0.0, 0.0), vec2(1.0, 1.0));
-            let seed = uv * self.source_size;
-            let center = self.sample_camera_rgb(uv);
-            let blur = center * 0.34
-                + self.sample_camera_rgb(clamp(uv + self.frosted_offset(seed, 1.0), vec2(0.0, 0.0), vec2(1.0, 1.0))) * 0.17
-                + self.sample_camera_rgb(clamp(uv + self.frosted_offset(seed + vec2(17.0, 11.0), 1.4), vec2(0.0, 0.0), vec2(1.0, 1.0))) * 0.17
-                + self.sample_camera_rgb(clamp(uv + self.frosted_offset(seed + vec2(31.0, 7.0), 1.9), vec2(0.0, 0.0), vec2(1.0, 1.0))) * 0.16
-                + self.sample_camera_rgb(clamp(uv + self.frosted_offset(seed + vec2(13.0, 29.0), 2.3), vec2(0.0, 0.0), vec2(1.0, 1.0))) * 0.16;
-
-            let frosted = mix(center, blur, self.frost_mix) * self.tint_color.xyz;
-            let alpha = self.tint_color.w;
-            return vec4(frosted * alpha, alpha);
-        }
-
-        fragment: fn() {
-            self.fb0 = self.pixel();
-        }
-    }
-
-    mod.widgets.XrScene = set_type_default() do mod.widgets.XrSceneBase{
-        draw_cube +: {}
-        draw_depth_mesh +: {
-            light_dir: vec3(0.28, 0.86, 0.42)
-            ambient: 0.26
+        mod.widgets.XrScene = set_type_default() do mod.widgets.XrSceneBase{
+            draw_cube +: {}
+            draw_depth_mesh +: {
+                light_dir: vec3(0.28, 0.86, 0.42)
+                ambient: 0.26
             normal_bias: 0.006
             base_color: vec4(0.76, 0.88, 0.98, 1.0)
         }
@@ -195,15 +120,6 @@ script_mod! {
             object_half_extents: vec3(0.085, 0.085, 0.085)
             object_corner_radius: 0.018
             transmission_focus_distance: 1.8
-        }
-        draw_passthrough_quad +: {
-            source_size: vec2(1280.0, 960.0)
-            tint_color: vec4(1.0, 1.0, 1.0, 1.0)
-            frost_mix: 0.84
-            scatter_pixels: 2.6
-            camera_enabled: 0.0
-            rotation_steps: 0.0
-            biplanar: 0.0
         }
         draw_passthrough_cube_atlas +: {
             source_size: vec2(1280.0, 960.0)
@@ -300,40 +216,6 @@ impl DrawDepthMeshBasic {
     }
 }
 
-#[derive(Script, ScriptHook, Debug)]
-#[repr(C)]
-pub struct DrawXrPassthroughQuad {
-    #[deref]
-    pub draw_vars: DrawVars,
-    #[live]
-    pub source_size: Vec2f,
-    #[live]
-    pub tint_color: Vec4f,
-    #[live]
-    pub frost_mix: f32,
-    #[live]
-    pub scatter_pixels: f32,
-    #[live]
-    pub camera_enabled: f32,
-    #[live]
-    pub rotation_steps: f32,
-    #[live]
-    pub biplanar: f32,
-    #[live]
-    pub yuv_enabled: f32,
-}
-
-impl DrawXrPassthroughQuad {
-    fn draw_geometry(&mut self, cx: &mut Cx2d, geometry_id: GeometryId) {
-        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
-        self.draw_vars.geometry_id = Some(geometry_id);
-        if cx.new_draw_call(&self.draw_vars).is_some() && self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
-            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
-        }
-    }
-}
-
 #[derive(Script, ScriptHook, Widget)]
 pub struct XrScene {
     #[uid]
@@ -352,9 +234,6 @@ pub struct XrScene {
     #[redraw]
     #[live]
     draw_depth_mesh: DrawDepthMeshBasic,
-    #[redraw]
-    #[live]
-    draw_passthrough_quad: DrawXrPassthroughQuad,
     #[redraw]
     #[live]
     draw_passthrough_cube_atlas: DrawPassthroughCubeAtlas,
@@ -389,11 +268,7 @@ pub struct XrScene {
     #[rust]
     passthrough_camera_has_frame: bool,
     #[rust]
-    passthrough_camera_quad: Option<Geometry>,
-    #[rust]
     passthrough_env_atlas_quad: Option<Geometry>,
-    #[rust]
-    passthrough_quad_placement: Option<XrPassthroughQuadPlacement>,
     #[rust]
     passthrough_env_atlas: Option<XrPassthroughEnvAtlas>,
 }
@@ -406,11 +281,6 @@ impl XrScene {
     fn depth_debug_enabled(&self) -> bool {
         let _ = self.depth_debug_mode;
         false
-    }
-
-    fn passthrough_debug_enabled(&self) -> bool {
-        let _ = self.depth_debug_mode;
-        true
     }
 
     fn passthrough_video_id() -> LiveId {
@@ -598,8 +468,6 @@ impl XrScene {
 
     fn reset_scene(&mut self, cx: &mut Cx, state: &XrState) {
         self.depth_debug_mode = XrDepthDebugMode::Passthrough;
-        self.passthrough_quad_placement = None;
-        self.passthrough_camera_quad = None;
         if let Some(atlas) = self.passthrough_env_atlas.as_mut() {
             atlas.reset_state();
         }
