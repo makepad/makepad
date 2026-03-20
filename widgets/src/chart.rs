@@ -34,7 +34,7 @@ script_mod! {
         }
 
         draw_grid_line +: {
-            draw_depth: 1.0
+            draw_depth: 0.1
             color: #x2a2a3e
         }
 

@@ -25,6 +25,7 @@ use makepad_studio_protocol::{
 };
 use makepad_terminal_core::{StyleFlags, Terminal};
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -160,6 +161,10 @@ const FS_SELF_SAVE_SUPPRESS: Duration = Duration::from_millis(300);
 const GIT_STATUS_CACHE_TTL: Duration = Duration::from_millis(250);
 const IN_PROCESS_UI_WEB_SOCKET_ID: u64 = 0;
 const MAX_UI_CLIENT_IDS: usize = backend_proto::QUERY_ID_CLIENT_LANES as usize;
+
+fn studio_hub_debug_enabled() -> bool {
+    env::var_os("MAKEPAD_STUDIO_HUB_DEBUG").is_some()
+}
 
 struct UiClient {
     sender: ToUISender<Vec<u8>>,
@@ -344,6 +349,12 @@ impl HubCore {
             } => self.on_ui_connected(web_socket_id, sender, typed_sender),
             HubEvent::ClientDisconnected { web_socket_id } => {
                 if let Some(client_id) = self.client_by_web_socket.remove(&web_socket_id) {
+                    if studio_hub_debug_enabled() {
+                        eprintln!(
+                            "studio hub debug: ui disconnect web_socket_id={} client_id={:?}",
+                            web_socket_id, client_id
+                        );
+                    }
                     self.ui_clients.remove(&client_id);
                     self.release_client_id(client_id);
                     for session in self.terminal_sessions.values_mut() {
@@ -527,9 +538,25 @@ impl HubCore {
         sender: ToUISender<Vec<u8>>,
         typed_sender: Option<ToUISender<HubToClient>>,
     ) {
+        if studio_hub_debug_enabled() {
+            let used_lanes = self.client_id_in_use.iter().copied().filter(|used| *used).count();
+            eprintln!(
+                "studio hub debug: on_ui_connected web_socket_id={} typed_sender={} used_lanes={} ui_clients={}",
+                web_socket_id,
+                typed_sender.is_some(),
+                used_lanes,
+                self.ui_clients.len()
+            );
+        }
         let client_id = if web_socket_id == IN_PROCESS_UI_WEB_SOCKET_ID {
             let reserved = ClientId(0);
             if !self.reserve_client_id(reserved) {
+                if studio_hub_debug_enabled() {
+                    eprintln!(
+                        "studio hub debug: ui connect failed web_socket_id={} reason=in_process_client_id_0_in_use",
+                        web_socket_id
+                    );
+                }
                 if let Some(typed_sender) = &typed_sender {
                     let _ = typed_sender.send(HubToClient::Error {
                         message: "client id 0 already in use".to_string(),
@@ -547,7 +574,19 @@ impl HubCore {
             reserved
         } else {
             let Some(client_id) = self.alloc_client_id() else {
-                // Refuse the websocket when we cannot allocate a client lane.
+                if studio_hub_debug_enabled() {
+                    let active_client_ids: Vec<u16> = self.ui_clients.keys().map(|id| id.0).collect();
+                    eprintln!(
+                        "studio hub debug: ui connect failed web_socket_id={} reason=no_client_lane active_client_ids={:?}",
+                        web_socket_id, active_client_ids
+                    );
+                }
+                let _ = sender.send(
+                    HubToClient::Error {
+                        message: "client id space exhausted".to_string(),
+                    }
+                    .serialize_bin(),
+                );
                 let _ = sender.send(Vec::new());
                 return;
             };
@@ -555,6 +594,12 @@ impl HubCore {
         };
 
         if self.ui_clients.contains_key(&client_id) {
+            if studio_hub_debug_enabled() {
+                eprintln!(
+                    "studio hub debug: ui connect failed web_socket_id={} reason=duplicate_client_id client_id={:?}",
+                    web_socket_id, client_id
+                );
+            }
             self.release_client_id(client_id);
             if let Some(typed_sender) = &typed_sender {
                 let _ = typed_sender.send(HubToClient::Error {
@@ -581,11 +626,25 @@ impl HubCore {
                 format: WireFormat::Binary,
             },
         );
+        if studio_hub_debug_enabled() {
+            eprintln!(
+                "studio hub debug: ui connected web_socket_id={} client_id={:?} ui_clients={}",
+                web_socket_id,
+                client_id,
+                self.ui_clients.len()
+            );
+        }
         self.send_ui_message(
             client_id,
             HubToClient::Hello { client_id },
             WireFormat::Binary,
         );
+        if studio_hub_debug_enabled() {
+            eprintln!(
+                "studio hub debug: ui hello sent web_socket_id={} client_id={:?}",
+                web_socket_id, client_id
+            );
+        }
     }
 
     fn on_ui_envelope(&mut self, client_id: ClientId, envelope: ClientToHubEnvelope) {
@@ -868,7 +927,10 @@ impl HubCore {
                 self.send_ui_reply(
                     client_id,
                     HubToClient::Builds {
-                        builds: self.list_all_builds(),
+                        builds: self.list_all_builds()
+                            .into_iter()
+                            .filter(|build| build.package != MAKEPAD_SPLASH_RUNNABLE)
+                            .collect(),
                     },
                 );
             }
@@ -2756,6 +2818,24 @@ impl HubCore {
 
     fn on_process_output(&mut self, build_id: QueryId, is_stderr: bool, line: String) {
         if line.is_empty() {
+            return;
+        }
+        if self.process_manager.package_for_build(build_id) == Some(MAKEPAD_SPLASH_RUNNABLE) {
+            let (index, entry) = self.log_store.append(AppendLogEntry {
+                build_id: Some(build_id),
+                level: if is_stderr {
+                    LogLevel::Error
+                } else {
+                    LogLevel::Log
+                },
+                source: LogSource::Studio,
+                message: line,
+                file_name: None,
+                line: None,
+                column: None,
+                timestamp: None,
+            });
+            self.broadcast_live_log_entry(index, entry);
             return;
         }
         match parse_cargo_output_line(&line) {
