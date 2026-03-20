@@ -329,6 +329,10 @@ impl App {
                     }
                 }
             }
+            HubToClient::BuildCleared { build_id } => {
+                self.clear_build_tabs(cx, build_id);
+                self.set_status(cx, &format!("build cleared: {}", build_id.0));
+            }
             HubToClient::RunViewCreated {
                 build_id,
                 window_id,
@@ -483,6 +487,31 @@ impl App {
                     dock.redraw_tab(cx, tab_id);
                 }
             }
+            HubToClient::RunViewKeyFocusRect {
+                build_id,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() else {
+                    return;
+                };
+                let Some(mount) = self
+                    .data
+                    .run_tab_state
+                    .get(&tab_id)
+                    .map(|state| state.mount.clone())
+                else {
+                    return;
+                };
+                if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                    dock.item(tab_id)
+                        .desktop_run_view(cx, ids!(run_view))
+                        .set_input_focus_rect(cx, x, y, width, height);
+                    dock.redraw_tab(cx, tab_id);
+                }
+            }
             HubToClient::QueryLogResults {
                 query_id,
                 entries,
@@ -511,11 +540,15 @@ impl App {
                         log_entry.clone(),
                         2_000,
                     );
-                    push_capped_deque(
-                        &mut self.mount_state_mut(&mount).log_entries,
-                        log_entry,
-                        3_000,
-                    );
+                    if self.data.build_package.get(&build_id).map(String::as_str)
+                        == Some(MAKEPAD_SPLASH_RUNNABLE)
+                    {
+                        push_capped_deque(
+                            &mut self.mount_state_mut(&mount).log_entries,
+                            log_entry,
+                            3_000,
+                        );
+                    }
                     touched_mounts.insert(mount);
 
                     if let Some(log_tab_id) = self.data.log_tab_by_build.get(&build_id).copied() {
@@ -582,6 +615,10 @@ impl App {
                         self.data.live_profiler_query_by_build.remove(&build_id);
                     }
                 }
+            }
+            HubToClient::LogCleared => {
+                self.clear_ui_log_entries(cx);
+                self.set_status(cx, "logs cleared");
             }
             HubToClient::TerminalOpened { path } => {
                 self.data.terminal_open_paths.insert(path.clone());

@@ -634,6 +634,9 @@ pub struct TextFlow {
     list_item_layout: Layout,
     #[live]
     list_item_walk: Walk,
+    /// The spacing (in pixels) between the list item marker and the content text.
+    #[live(5.0)]
+    list_item_marker_pad: f64,
     #[live]
     pub inline_code_padding: Inset,
     #[live]
@@ -1290,7 +1293,13 @@ impl TextFlow {
             .move_right_down(dvec2(-font_based_padding, 0.0));
 
         self.draw_text(cx, dot);
-        self.draw_text(cx, " ");
+        TextFlow::walk_margin(cx, self.list_item_marker_pad);
+
+        // Adjust the left padding to match the actual cursor position after the
+        // bullet marker and its trailing pad, so that wrapped lines align with
+        // the text after the marker rather than being over-indented.
+        let actual_indent = cx.turtle().pos().x - cx.turtle().origin().x;
+        cx.turtle_mut().set_padding_left(actual_indent);
 
         self.area_stack.push(self.draw_block.draw_vars.area);
     }
@@ -1305,6 +1314,18 @@ impl TextFlow {
 
     pub fn new_line_collapsed(&mut self, cx: &mut Cx2d) {
         cx.turtle_new_line();
+        self.first_thing_on_a_line = true;
+        if self.selectable {
+            self.selection_tracker.push_newline();
+        }
+    }
+
+    /// Starts a new line using the current wrap spacing, so that the vertical
+    /// gap matches the line spacing of the most recently drawn text.
+    /// This is intended for `<br>` tags in HTML rendering.
+    pub fn new_line_with_wrap_spacing(&mut self, cx: &mut Cx2d) {
+        let spacing = cx.turtle().wrap_spacing();
+        cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
         if self.selectable {
             self.selection_tracker.push_newline();
@@ -1554,11 +1575,13 @@ impl TextFlow {
             };
 
             // Apply the text style to the single draw_text instance
+            let top_drop = text_style.top_drop;
             self.draw_text.text_style = text_style;
             let font_size = self.font_sizes.last().unwrap_or(&self.font_size);
             let font_color = self.font_colors.last().unwrap_or(&self.font_color);
             self.draw_text.text_style.font_size = *font_size as _;
             self.draw_text.color = *font_color;
+            self.draw_text.temp_y_shift = top_drop;
 
             let dt = &mut self.draw_text;
 

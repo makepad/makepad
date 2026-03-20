@@ -115,6 +115,9 @@ pub enum ClientToHub {
     StopBuild {
         build_id: QueryId,
     },
+    ClearBuild {
+        build_id: QueryId,
+    },
 
     // === App Interaction (opaque payload for now) ===
     ForwardToApp {
@@ -302,6 +305,9 @@ pub enum HubToClient {
         build_id: QueryId,
         exit_code: Option<i32>,
     },
+    BuildCleared {
+        build_id: QueryId,
+    },
     AppStarted {
         build_id: QueryId,
     },
@@ -360,6 +366,13 @@ pub enum HubToClient {
         kind: RunViewInputVizKind,
         x: Option<f64>,
         y: Option<f64>,
+    },
+    RunViewKeyFocusRect {
+        build_id: QueryId,
+        x: Option<f64>,
+        y: Option<f64>,
+        width: Option<f64>,
+        height: Option<f64>,
     },
     RunViewDestroyed {
         build_id: QueryId,

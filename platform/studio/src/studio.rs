@@ -198,6 +198,7 @@ pub enum AppToStudio {
     SwapSelection(SwapSelection),
     Screenshot(ScreenshotResponse),
     RunViewFrame(RunViewFrameData),
+    RunViewKeyFocusRect(RunViewKeyFocusRect),
     WidgetTreeDump(WidgetTreeDumpResponse),
     WidgetQuery(WidgetQueryResponse),
     TweakHits(TweakHitsResponse),
@@ -241,6 +242,14 @@ pub struct RunViewFrameData {
     pub height: u32,
     pub codec: Option<FrameCodec>,
     pub data: Vec<u8>,
+}
+
+#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
+pub struct RunViewKeyFocusRect {
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
 }
 
 #[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]

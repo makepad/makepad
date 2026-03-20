@@ -620,6 +620,14 @@ impl Turtle {
         self.layout.padding
     }
 
+    /// Sets the left padding of this turtle's layout.
+    ///
+    /// This is useful for adjusting the hanging indent of list items
+    /// after measuring the actual width of the bullet/marker text.
+    pub fn set_padding_left(&mut self, left: f64) {
+        self.layout.padding.left = left;
+    }
+
     /// Returns the alignment of each walk of this turtle with respect to it's rectangle.
     pub fn align(&self) -> Align {
         self.layout.align
@@ -2248,6 +2256,13 @@ impl Turtle {
     pub fn set_used(&mut self, width_used: f64, height_used: f64) {
         self.used_width = width_used;
         self.used_height = height_used;
+    }
+
+    /// Returns the current wrap spacing, which is the extra vertical space
+    /// added between rows when text wraps (based on the line spacing of the
+    /// most recently drawn text).
+    pub fn wrap_spacing(&self) -> f64 {
+        self.wrap_spacing
     }
 
     pub fn set_wrap_spacing(&mut self, value: f64) {
