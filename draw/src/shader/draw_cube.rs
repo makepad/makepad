@@ -51,7 +51,7 @@ script_mod! {
                 return
             }
 
-            let dp = max(dot(normal, normalize(vec3(0.35, 0.8, 0.45))), 0.0);
+            let dp = max(dot(normal, normalize(self.light_dir)), 0.0);
             self.lit_color = self.get_color(dp);
             self.vertex_pos = self.draw_pass.camera_projection * view_pos;
         }
@@ -75,6 +75,8 @@ pub struct DrawCube {
     pub draw_vars: DrawVars,
     #[live]
     pub color: Vec4f,
+    #[live(vec3(0.35, 0.8, 0.45))]
+    pub light_dir: Vec3f,
     #[live]
     pub transform: Mat4f,
     #[live(vec3(1.0, 1.0, 1.0))]

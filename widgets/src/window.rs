@@ -248,39 +248,78 @@ pub enum WindowAction {
 }
 
 impl Window {
-    fn xr_window_logical_size(&self) -> Vec2d {
+    fn xr_flat_forward(orientation: Quat) -> Vec3f {
+        let mut forward = orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        forward.y = 0.0;
+        if forward.length() <= 1.0e-4 {
+            vec3f(0.0, 0.0, -1.0)
+        } else {
+            forward.normalize()
+        }
+    }
+
+    fn xr_should_reanchor_panel(update: &XrUpdateEvent) -> bool {
+        let position_delta = update.state.head_pose.position - update.last.head_pose.position;
+        if position_delta.length() > 0.35 {
+            return true;
+        }
+
+        let current_forward = Self::xr_flat_forward(update.state.head_pose.orientation);
+        let last_forward = Self::xr_flat_forward(update.last.head_pose.orientation);
+        current_forward.dot(last_forward).clamp(-1.0, 1.0) < 0.75
+    }
+
+    fn xr_window_logical_size(&self) -> DVec2 {
+        let dpi_factor = self.xr_dpi_factor.max(1.0);
         dvec2(
-            self.xr_pixel_size.x / self.xr_dpi_factor.max(1.0),
-            self.xr_pixel_size.y / self.xr_dpi_factor.max(1.0),
+            self.xr_pixel_size.x.max(1.0) / dpi_factor,
+            self.xr_pixel_size.y.max(1.0) / dpi_factor,
         )
     }
 
-    fn compute_xr_hit_matrix(&self, state: &XrState) -> Mat4f {
+    fn xr_window_logical_scale(&self) -> f32 {
+        self.xr_pixel_scale.max(0.00001) * self.xr_dpi_factor.max(1.0) as f32
+    }
+
+    fn compute_xr_panel_matrix(&self, state: &XrState, depth_scale: f32) -> Mat4f {
+        let mut forward = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        forward.y = 0.0;
+        if forward.length() <= 1.0e-4 {
+            forward = vec3f(0.0, 0.0, -1.0);
+        } else {
+            forward = forward.normalize();
+        }
+
+        let up = vec3f(0.0, 1.0, 0.0);
+        let yaw_rotation = Quat::look_rotation(forward, up);
+        let center = vec3f(0.0, state.head_pose.position.y, 0.0)
+            + forward * self.xr_forward_offset.max(0.0)
+            + yaw_rotation.rotate_vec3(&self.xr_position_offset);
+        let pose = Pose::new(Quat::look_rotation(forward.scale(-1.0), up), center);
         let size = self.xr_window_logical_size();
-        let pixel_scale = self.xr_pixel_scale;
-        let panel = Mat4f::nonuniform_scaled_translation(
-            vec3(pixel_scale, -pixel_scale, pixel_scale),
+        let scale = self.xr_window_logical_scale();
+        let local_depth_transform = Mat4f::nonuniform_scaled_translation(
+            vec3(1.0, 1.0, depth_scale.max(0.00001)),
+            vec3(0.0, 0.0, 0.0),
+        );
+        let local_panel = Mat4f::nonuniform_scaled_translation(
+            vec3(scale, -scale, scale),
             vec3(
-                -size.x as f32 * 0.5 * pixel_scale + self.xr_position_offset.x,
-                size.y as f32 * 0.5 * pixel_scale + self.xr_position_offset.y,
-                -self.xr_forward_offset + self.xr_position_offset.z,
+                -(size.x as f32) * scale * 0.5,
+                (size.y as f32) * scale * 0.5,
+                0.0,
             ),
         );
-        Mat4f::mul(&state.head_pose.to_mat4(), &panel)
+        let object_to_world = Mat4f::mul(&local_panel, &local_depth_transform);
+        Mat4f::mul(&pose.to_mat4(), &object_to_world)
     }
 
     fn compute_xr_view_matrix(&self, state: &XrState) -> Mat4f {
-        let size = self.xr_window_logical_size();
-        let pixel_scale = self.xr_pixel_scale;
-        let panel = Mat4f::nonuniform_scaled_translation(
-            vec3(pixel_scale, -pixel_scale, self.xr_depth_scale * pixel_scale),
-            vec3(
-                -size.x as f32 * 0.5 * pixel_scale + self.xr_position_offset.x,
-                size.y as f32 * 0.5 * pixel_scale + self.xr_position_offset.y,
-                -self.xr_forward_offset + self.xr_position_offset.z,
-            ),
-        );
-        Mat4f::mul(&state.head_pose.to_mat4(), &panel)
+        self.compute_xr_panel_matrix(state, self.xr_depth_scale)
+    }
+
+    fn compute_xr_hit_matrix(&self, state: &XrState) -> Mat4f {
+        self.compute_xr_panel_matrix(state, 1.0)
     }
 
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
@@ -670,10 +709,11 @@ impl Widget for Window {
                         self.xr_visible = !self.xr_visible;
                         cx.redraw_all();
                     }
-                    if !self.xr_view_matrix_initialized {
+                    if !self.xr_view_matrix_initialized || Self::xr_should_reanchor_panel(e) {
                         self.xr_view_matrix = self.compute_xr_view_matrix(&e.state);
                         self.xr_hit_matrix = self.compute_xr_hit_matrix(&e.state);
                         self.xr_view_matrix_initialized = true;
+                        self.xr_visible = true;
                     }
                     let xr_event = XrLocalEvent::from_update_event(e, &self.xr_hit_matrix);
                     if self.xr_visible {
