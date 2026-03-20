@@ -45,6 +45,8 @@ workspace.members = [
     "platform/studio",
     # "widgets/test",
     "studio/hub",
+    "libs/makepad_test",
+    "libs/makepad_test/macros",
     "studio/desktop",
     "tools/cargo_makepad",
     "tools/tui_test",

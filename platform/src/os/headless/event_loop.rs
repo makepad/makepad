@@ -81,6 +81,7 @@ impl Cx {
     }
 
     pub fn stdin_event_loop(&mut self) {
+        Cx::set_studio_stdout_mode(true);
         let (json_msg_tx, json_msg_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(std::io::stdin().lock());
@@ -103,12 +104,23 @@ impl Cx {
             }
         });
 
+        let mut windows = Vec::<HeadlessWindowState>::new();
         write_stdout_msg(&AppToStudio::BeforeStartup);
         self.call_event_handler(&Event::Startup);
+        let mut running = self.headless_handle_platform_ops(&mut windows, true);
+        if running {
+            let time_now = self.seconds_since_app_start();
+            if self.need_redrawing() {
+                self.call_draw_event(time_now);
+                self.headless_compile_shaders();
+                if self.screenshot_requests.is_empty() {
+                    self.headless_render_all_passes(time_now);
+                } else {
+                    let _ = self.headless_emit_frames(&mut windows, true, time_now);
+                }
+            }
+        }
         write_stdout_msg(&AppToStudio::AfterStartup);
-
-        let mut windows = Vec::<HeadlessWindowState>::new();
-        let mut running = true;
 
         while running {
             let msg = match json_msg_rx.recv() {
@@ -294,10 +306,49 @@ impl Cx {
                     }
 
                     let mut rendered = false;
-                    if self.need_redrawing() && !self.screenshot_requests.is_empty() {
+                    if self.need_redrawing() {
                         self.call_draw_event(time_now);
                         self.headless_compile_shaders();
-                        rendered = self.headless_emit_frames(&mut windows, true, time_now);
+                        if self.screenshot_requests.is_empty() {
+                            self.headless_render_all_passes(time_now);
+                            rendered = true;
+                        } else {
+                            rendered = self.headless_emit_frames(&mut windows, true, time_now);
+                        }
+                    }
+
+                    if rendered
+                        || !self.os.stdin_timers.timers.is_empty()
+                        || !self.new_next_frames.is_empty()
+                    {
+                        write_stdout_msg(&AppToStudio::RequestAnimationFrame);
+                    }
+                }
+                other => {
+                    if self.dispatch_studio_msg(other, CxWindowPool::id_zero(), dvec2(0.0, 0.0)) {
+                        break;
+                    }
+
+                    running = self.headless_handle_platform_ops(&mut windows, true);
+                    if !running {
+                        break;
+                    }
+
+                    let time_now = self.os.stdin_timers.time_now();
+                    if !self.new_next_frames.is_empty() {
+                        self.call_next_frame_event(time_now);
+                    }
+
+                    let mut rendered = false;
+                    if self.need_redrawing() {
+                        self.call_draw_event(time_now);
+                        self.headless_compile_shaders();
+                        if self.screenshot_requests.is_empty() {
+                            self.headless_render_all_passes(time_now);
+                            rendered = true;
+                        } else {
+                            rendered = self.headless_emit_frames(&mut windows, true, time_now);
+                        }
                     }
 
                     if rendered
@@ -364,7 +415,7 @@ impl Cx {
                 "window_{window_id}_frame_{:06}.png",
                 state.frame_id
             ));
-            if let Err(err) = std::fs::write(&png_path, png) {
+            if let Err(err) = std::fs::write(&png_path, &png) {
                 crate::error!(
                     "headless frame write failed for `{}`: {}",
                     png_path.display(),

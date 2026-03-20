@@ -72,6 +72,10 @@ pub enum HubEvent {
         web_socket_id: u64,
         data: Vec<u8>,
     },
+    ProcessAppMessage {
+        build_id: QueryId,
+        msg: AppToStudio,
+    },
     BuildBoxConnected {
         web_socket_id: u64,
         sender: Sender<Vec<u8>>,
@@ -271,6 +275,7 @@ pub struct HubCore {
     mount_suppress_fs_until: HashMap<String, Instant>,
     self_save_suppress_until_by_path: HashMap<String, Instant>,
     pending_forward_to_app_by_build: HashMap<QueryId, Vec<Vec<u8>>>,
+    stdio_ready_builds: HashSet<QueryId>,
 }
 
 impl HubCore {
@@ -327,6 +332,7 @@ impl HubCore {
             mount_suppress_fs_until: HashMap::new(),
             self_save_suppress_until_by_path: HashMap::new(),
             pending_forward_to_app_by_build: HashMap::new(),
+            stdio_ready_builds: HashSet::new(),
         };
         this.reset_fs_watcher();
         this
@@ -416,6 +422,9 @@ impl HubCore {
                     None => return true,
                 };
                 self.on_app_binary(build_id, data);
+            }
+            HubEvent::ProcessAppMessage { build_id, msg } => {
+                self.on_process_app_message(build_id, msg)
             }
             HubEvent::BuildBoxConnected {
                 web_socket_id,
@@ -539,7 +548,12 @@ impl HubCore {
         typed_sender: Option<ToUISender<HubToClient>>,
     ) {
         if studio_hub_debug_enabled() {
-            let used_lanes = self.client_id_in_use.iter().copied().filter(|used| *used).count();
+            let used_lanes = self
+                .client_id_in_use
+                .iter()
+                .copied()
+                .filter(|used| *used)
+                .count();
             eprintln!(
                 "studio hub debug: on_ui_connected web_socket_id={} typed_sender={} used_lanes={} ui_clients={}",
                 web_socket_id,
@@ -575,7 +589,8 @@ impl HubCore {
         } else {
             let Some(client_id) = self.alloc_client_id() else {
                 if studio_hub_debug_enabled() {
-                    let active_client_ids: Vec<u16> = self.ui_clients.keys().map(|id| id.0).collect();
+                    let active_client_ids: Vec<u16> =
+                        self.ui_clients.keys().map(|id| id.0).collect();
                     eprintln!(
                         "studio hub debug: ui connect failed web_socket_id={} reason=no_client_lane active_client_ids={:?}",
                         web_socket_id, active_client_ids
@@ -927,7 +942,8 @@ impl HubCore {
                 self.send_ui_reply(
                     client_id,
                     HubToClient::Builds {
-                        builds: self.list_all_builds()
+                        builds: self
+                            .list_all_builds()
                             .into_iter()
                             .filter(|build| build.package != MAKEPAD_SPLASH_RUNNABLE)
                             .collect(),
@@ -1176,7 +1192,9 @@ impl HubCore {
                 }
             }
             ClientToHub::ForwardToApp { build_id, msg_bin } => {
-                let parsed_msgs = StudioToAppVec::deserialize_bin(&msg_bin).ok().map(|msgs| msgs.0);
+                let parsed_msgs = StudioToAppVec::deserialize_bin(&msg_bin)
+                    .ok()
+                    .map(|msgs| msgs.0);
                 let is_bootstrap = parsed_msgs.as_ref().is_some_and(|msgs| {
                     msgs.iter().any(|msg| {
                         matches!(
@@ -1185,8 +1203,8 @@ impl HubCore {
                         )
                     })
                 });
-                match self.send_to_app_with_socket(build_id, msg_bin.clone()) {
-                    Ok(_) => {}
+                match self.send_to_app(build_id, msg_bin.clone()) {
+                    Ok(()) => {}
                     Err(err) if err.starts_with("no app socket for build") => {
                         self.queue_pending_forward_to_app(build_id, msg_bin, is_bootstrap);
                     }
@@ -2121,6 +2139,17 @@ impl HubCore {
         Ok(socket_id)
     }
 
+    fn send_to_process_stdin(&self, build_id: QueryId, msg_bin: Vec<u8>) -> Result<(), String> {
+        let msgs = StudioToAppVec::deserialize_bin(&msg_bin)
+            .map_err(|err| format!("failed to decode app payload: {}", err.msg))?;
+        for msg in msgs.0 {
+            let mut line = msg.serialize_json();
+            line.push('\n');
+            self.process_manager.send_stdin(build_id, &line)?;
+        }
+        Ok(())
+    }
+
     fn queue_pending_forward_to_app(
         &mut self,
         build_id: QueryId,
@@ -2187,8 +2216,8 @@ impl HubCore {
             return;
         };
         while let Some(msg_bin) = pending.first().cloned() {
-            match self.send_to_app_with_socket(build_id, msg_bin) {
-                Ok(_) => {
+            match self.send_to_app(build_id, msg_bin) {
+                Ok(()) => {
                     pending.remove(0);
                 }
                 Err(_) => {
@@ -2201,7 +2230,22 @@ impl HubCore {
     }
 
     fn send_to_app(&self, build_id: QueryId, msg_bin: Vec<u8>) -> Result<(), String> {
-        self.send_to_app_with_socket(build_id, msg_bin).map(|_| ())
+        if self.stdio_ready_builds.contains(&build_id) {
+            if studio_hub_debug_enabled() {
+                eprintln!(
+                    "studio hub debug: forwarding build {} to stdio bridge",
+                    build_id.0
+                );
+            }
+            return self.send_to_process_stdin(build_id, msg_bin);
+        }
+        match self.send_to_app_with_socket(build_id, msg_bin.clone()) {
+            Ok(_) => Ok(()),
+            Err(err) if err.starts_with("no app socket for build") => {
+                self.send_to_process_stdin(build_id, msg_bin)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn build_ids_for_virtual_path(&self, virtual_path: &str) -> Vec<QueryId> {
@@ -2692,6 +2736,18 @@ impl HubCore {
         }
     }
 
+    fn on_process_app_message(&mut self, build_id: QueryId, msg: AppToStudio) {
+        if studio_hub_debug_enabled() {
+            eprintln!(
+                "studio hub debug: process app message build {} variant {:?}",
+                build_id.0, msg
+            );
+        }
+        self.stdio_ready_builds.insert(build_id);
+        self.flush_pending_forward_to_app(build_id);
+        self.handle_app_message(build_id, msg);
+    }
+
     fn handle_app_message(&mut self, build_id: QueryId, msg: AppToStudio) {
         match msg {
             AppToStudio::LogItem(item) => {
@@ -2913,6 +2969,7 @@ impl HubCore {
         let Some(info) = self.process_manager.mark_exited(build_id, exit_code) else {
             return;
         };
+        self.stdio_ready_builds.remove(&build_id);
         self.build_mount_by_id.remove(&build_id);
         self.broadcast_ui_message(HubToClient::BuildStopped {
             build_id,

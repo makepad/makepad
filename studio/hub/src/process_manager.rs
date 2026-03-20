@@ -1,13 +1,16 @@
 use crate::dispatch::HubEvent;
+use makepad_micro_serde::DeJson;
 use makepad_script_std::makepad_network::{NetworkConfig, NetworkRuntime};
 use makepad_script_std::makepad_script::*;
 use makepad_script_std::{
     pump, pump_network_runtime, script_mod as script_std_mod, with_vm_and_async, ScriptStd,
 };
 use makepad_studio_protocol::hub_protocol::{BuildInfo, QueryId, RunItem};
+use makepad_studio_protocol::AppToStudio;
 use std::collections::HashMap;
+use std::env;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +20,10 @@ use std::thread;
 use std::time::Duration;
 
 pub const MAKEPAD_SPLASH_RUNNABLE: &str = "makepad.splash";
+
+fn studio_hub_debug_enabled() -> bool {
+    env::var_os("MAKEPAD_STUDIO_HUB_DEBUG").is_some()
+}
 
 #[cfg(windows)]
 mod process_group {
@@ -198,6 +205,29 @@ impl RunningChild {
                 }
             }
         }
+    }
+
+    fn send_stdin(&self, text: &str) -> Result<(), String> {
+        if studio_hub_debug_enabled() {
+            eprintln!(
+                "studio hub debug: child stdin write {}",
+                text.trim_end_matches(&['\r', '\n'][..])
+            );
+        }
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| "build process lock poisoned".to_string())?;
+        let Some(stdin) = child.stdin.as_mut() else {
+            return Err("build process stdin is not available".to_string());
+        };
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|err| format!("failed to write build stdin: {err}"))?;
+        stdin
+            .flush()
+            .map_err(|err| format!("failed to flush build stdin: {err}"))?;
+        Ok(())
     }
 }
 
@@ -557,8 +587,7 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
         script_args_def!(build_id = NIL),
         |vm, args| {
             let build_id = script_value!(vm, args.build_id);
-            let build_id = match script_value_to_query_id(vm, build_id, "hub.studio_ext build_id")
-            {
+            let build_id = match script_value_to_query_id(vm, build_id, "hub.studio_ext build_id") {
                 Ok(Some(build_id)) => Some(build_id),
                 Ok(None) => vm
                     .host
@@ -870,10 +899,11 @@ impl ProcessManager {
             .entry("MAKEPAD".to_string())
             .or_insert_with(|| "lines".to_string());
 
-        let resolved_studio = child_env
-            .get("STUDIO")
-            .map(String::as_str)
-            .or_else(|| inject_studio_env.then_some(studio_addr.as_deref()).flatten());
+        let resolved_studio = child_env.get("STUDIO").map(String::as_str).or_else(|| {
+            inject_studio_env
+                .then_some(studio_addr.as_deref())
+                .flatten()
+        });
         let resolved_studio = studio_url_for_app(resolved_studio, Some(build_id));
         if !resolved_studio.is_empty() {
             child_env.insert("STUDIO".to_string(), resolved_studio);
@@ -935,6 +965,23 @@ impl ProcessManager {
         event_tx: Sender<HubEvent>,
     ) -> Result<BuildInfo, String> {
         let package = parse_package_name(&args).unwrap_or_else(|| "unknown".to_string());
+        #[cfg(unix)]
+        if should_use_direct_stdio_run(&args, &env) {
+            if let Some(script) = build_direct_stdio_run_script(cwd, &package, &args, &env) {
+                return self.start_command_run(
+                    build_id,
+                    mount,
+                    package,
+                    cwd,
+                    "/bin/sh".to_string(),
+                    vec!["-lc".to_string(), script],
+                    env,
+                    false,
+                    studio_addr,
+                    event_tx,
+                );
+            }
+        }
         self.start_command_run(
             build_id,
             mount,
@@ -1069,6 +1116,16 @@ impl ProcessManager {
         Some(info)
     }
 
+    pub fn send_stdin(&self, build_id: QueryId, text: &str) -> Result<(), String> {
+        let Some(build) = self.builds.get(&build_id) else {
+            return Err(format!("unknown build: {}", build_id.0));
+        };
+        let RunningBuildHandle::Child(child) = &build.handle else {
+            return Err(format!("build {} is not a child process", build_id.0));
+        };
+        child.send_stdin(text)
+    }
+
     pub fn list_builds(&self) -> Vec<BuildInfo> {
         let mut builds: Vec<BuildInfo> = self.builds.values().map(|b| b.info.clone()).collect();
         builds.sort_by_key(|b| b.build_id.0);
@@ -1076,7 +1133,9 @@ impl ProcessManager {
     }
 
     pub fn package_for_build(&self, build_id: QueryId) -> Option<&str> {
-        self.builds.get(&build_id).map(|build| build.info.package.as_str())
+        self.builds
+            .get(&build_id)
+            .map(|build| build.info.package.as_str())
     }
 }
 
@@ -1095,6 +1154,22 @@ fn spawn_reader<R: Read + Send + 'static>(
                 Ok(0) => break,
                 Ok(_) => {
                     let line = line.trim_end_matches(&['\r', '\n'][..]).to_string();
+                    if !is_stderr {
+                        if let Ok(msg) = AppToStudio::deserialize_json(&line) {
+                            if studio_hub_debug_enabled() {
+                                eprintln!("studio hub debug: child stdout app msg {}", line);
+                            }
+                            let _ = event_tx.send(HubEvent::ProcessAppMessage { build_id, msg });
+                            continue;
+                        }
+                    }
+                    if studio_hub_debug_enabled() {
+                        eprintln!(
+                            "studio hub debug: child {} {}",
+                            if is_stderr { "stderr" } else { "stdout" },
+                            line
+                        );
+                    }
                     let _ = event_tx.send(HubEvent::ProcessOutput {
                         build_id,
                         is_stderr,
@@ -1154,6 +1229,49 @@ fn parse_package_name(args: &[String]) -> Option<String> {
         i += 1;
     }
     None
+}
+
+fn should_use_direct_stdio_run(args: &[String], env: &HashMap<String, String>) -> bool {
+    env.get("MAKEPAD").is_some_and(|value| value == "headless")
+        && args.first().is_some_and(|arg| arg == "run")
+        && args.iter().any(|arg| arg == "--stdin-loop")
+}
+
+#[cfg(unix)]
+fn build_direct_stdio_run_script(
+    cwd: &Path,
+    package: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+) -> Option<String> {
+    let app_args_index = args.iter().position(|arg| arg == "--")?;
+    let app_args = &args[app_args_index + 1..];
+    let binary_path = cargo_target_dir(cwd, env).join("release").join(package);
+    let mut script = format!(
+        "cargo build --release -p {} --message-format=json && exec {}",
+        shell_escape(package),
+        shell_escape(binary_path.to_string_lossy().as_ref())
+    );
+    for arg in app_args {
+        script.push(' ');
+        script.push_str(&shell_escape(arg));
+    }
+    Some(script)
+}
+
+#[cfg(unix)]
+fn cargo_target_dir(cwd: &Path, env: &HashMap<String, String>) -> PathBuf {
+    env.get("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.join("target"))
+}
+
+#[cfg(unix)]
+fn shell_escape(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
