@@ -842,6 +842,50 @@ impl App {
         }
     }
 
+    pub(super) fn clear_build_tabs(&mut self, cx: &mut Cx, build_id: QueryId) {
+        let run_tab_id = self.data.run_tab_by_build.remove(&build_id);
+        let log_tab_id = self.data.log_tab_by_build.remove(&build_id);
+        let profiler_tab_id = self.data.profiler_tab_by_build.remove(&build_id);
+
+        if let Some(tab_id) = run_tab_id {
+            if let Some(state) = self.data.run_tab_state.remove(&tab_id) {
+                if let Some(dock) = self.mount_workspace_dock(cx, &state.mount) {
+                    dock.close_tab(cx, tab_id);
+                }
+            }
+        }
+
+        if let Some(tab_id) = log_tab_id {
+            if let Some(state) = self.data.log_tab_state.remove(&tab_id) {
+                if self.data.active_log_build_by_mount.get(&state.mount) == Some(&build_id) {
+                    self.data.active_log_build_by_mount.remove(&state.mount);
+                }
+                if let Some(dock) = self.mount_workspace_dock(cx, &state.mount) {
+                    dock.close_tab(cx, tab_id);
+                }
+            }
+        }
+
+        if let Some(tab_id) = profiler_tab_id {
+            if let Some(state) = self.data.profiler_tab_state.remove(&tab_id) {
+                if self.data.active_log_build_by_mount.get(&state.mount) == Some(&build_id) {
+                    self.data.active_log_build_by_mount.remove(&state.mount);
+                }
+                if let Some(dock) = self.mount_workspace_dock(cx, &state.mount) {
+                    dock.close_tab(cx, tab_id);
+                }
+            }
+        }
+
+        self.stop_profiler_query_for_build(build_id);
+        self.data.profiler_running_by_build.remove(&build_id);
+        self.data.profiler_time_start_by_build.remove(&build_id);
+        self.data.profiler_samples_by_build.remove(&build_id);
+        self.data.build_log_entries.remove(&build_id);
+        self.data.build_to_mount.remove(&build_id);
+        self.data.build_package.remove(&build_id);
+    }
+
     pub(super) fn run_item(&mut self, cx: &mut Cx, mount: &str, name: &str) {
         if self.data.active_mount.as_deref() != Some(mount) {
             self.select_mount(cx, mount);
