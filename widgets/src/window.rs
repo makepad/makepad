@@ -248,6 +248,41 @@ pub enum WindowAction {
 }
 
 impl Window {
+    fn xr_window_logical_size(&self) -> Vec2d {
+        dvec2(
+            self.xr_pixel_size.x / self.xr_dpi_factor.max(1.0),
+            self.xr_pixel_size.y / self.xr_dpi_factor.max(1.0),
+        )
+    }
+
+    fn compute_xr_hit_matrix(&self, state: &XrState) -> Mat4f {
+        let size = self.xr_window_logical_size();
+        let pixel_scale = self.xr_pixel_scale;
+        let panel = Mat4f::nonuniform_scaled_translation(
+            vec3(pixel_scale, -pixel_scale, pixel_scale),
+            vec3(
+                -size.x as f32 * 0.5 * pixel_scale + self.xr_position_offset.x,
+                size.y as f32 * 0.5 * pixel_scale + self.xr_position_offset.y,
+                -self.xr_forward_offset + self.xr_position_offset.z,
+            ),
+        );
+        Mat4f::mul(&state.head_pose.to_mat4(), &panel)
+    }
+
+    fn compute_xr_view_matrix(&self, state: &XrState) -> Mat4f {
+        let size = self.xr_window_logical_size();
+        let pixel_scale = self.xr_pixel_scale;
+        let panel = Mat4f::nonuniform_scaled_translation(
+            vec3(pixel_scale, -pixel_scale, self.xr_depth_scale * pixel_scale),
+            vec3(
+                -size.x as f32 * 0.5 * pixel_scale + self.xr_position_offset.x,
+                size.y as f32 * 0.5 * pixel_scale + self.xr_position_offset.y,
+                -self.xr_forward_offset + self.xr_position_offset.z,
+            ),
+        );
+        Mat4f::mul(&state.head_pose.to_mat4(), &panel)
+    }
+
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
         let linux_custom_window_chrome =
             matches!(cx.os_type(), OsType::LinuxWindow(params) if params.custom_window_chrome);
