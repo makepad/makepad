@@ -192,6 +192,9 @@ impl MatchEvent for App {
                     workspace.text_input(cx, ids!(log_filter)).set_text(cx, "");
                     self.restart_log_query_for_mount(cx, &active_mount);
                 }
+                if workspace.button(cx, ids!(clear_log)).clicked(actions) {
+                    self.request_log_clear(cx);
+                }
                 if workspace
                     .button(cx, ids!(log_open_profiler))
                     .clicked(actions)

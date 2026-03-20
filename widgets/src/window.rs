@@ -201,8 +201,28 @@ pub struct Window {
     show_performance_view: bool,
     #[rust]
     has_focus: bool,
-    #[rust(Mat4f::nonuniform_scaled_translation(vec3(0.0004,-0.0004,-0.0004),vec3(-0.25,0.25,-0.5)))]
+    #[rust(Mat4f::nonuniform_scaled_translation(vec3(0.0004,-0.0004,0.12),vec3(-0.25,0.25,-0.5)))]
     xr_view_matrix: Mat4f,
+    #[rust(Mat4f::nonuniform_scaled_translation(vec3(0.0004,-0.0004,0.0004),vec3(-0.25,0.25,-0.5)))]
+    xr_hit_matrix: Mat4f,
+    #[rust]
+    xr_view_matrix_initialized: bool,
+    #[live(vec2(1500.0, 1200.0))]
+    xr_pixel_size: Vec2d,
+    #[live(3.0)]
+    xr_dpi_factor: f64,
+    #[live(0.0004)]
+    xr_pixel_scale: f32,
+    #[live(300.0)]
+    xr_depth_scale: f32,
+    #[live(0.7)]
+    xr_forward_offset: f32,
+    #[live(vec3(0.0, 0.0, 0.0))]
+    xr_position_offset: Vec3f,
+    #[live(false)]
+    xr_toggle_with_menu: bool,
+    #[rust(true)]
+    xr_visible: bool,
     #[deref]
     view: View,
 
@@ -228,6 +248,59 @@ pub enum WindowAction {
 }
 
 impl Window {
+    fn xr_window_logical_size(&self) -> DVec2 {
+        let dpi_factor = self.xr_dpi_factor.max(1.0);
+        dvec2(
+            self.xr_pixel_size.x.max(1.0) / dpi_factor,
+            self.xr_pixel_size.y.max(1.0) / dpi_factor,
+        )
+    }
+
+    fn xr_window_logical_scale(&self) -> f32 {
+        self.xr_pixel_scale.max(0.00001) * self.xr_dpi_factor.max(1.0) as f32
+    }
+
+    fn compute_xr_panel_matrix(&self, state: &XrState, depth_scale: f32) -> Mat4f {
+        let mut forward = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        forward.y = 0.0;
+        if forward.length() <= 1.0e-4 {
+            forward = vec3f(0.0, 0.0, -1.0);
+        } else {
+            forward = forward.normalize();
+        }
+
+        let up = vec3f(0.0, 1.0, 0.0);
+        let yaw_rotation = Quat::look_rotation(forward, up);
+        let center = vec3f(0.0, state.head_pose.position.y, 0.0)
+            + forward * self.xr_forward_offset.max(0.0)
+            + yaw_rotation.rotate_vec3(&self.xr_position_offset);
+        let pose = Pose::new(Quat::look_rotation(forward.scale(-1.0), up), center);
+        let size = self.xr_window_logical_size();
+        let scale = self.xr_window_logical_scale();
+        let local_depth_transform = Mat4f::nonuniform_scaled_translation(
+            vec3(1.0, 1.0, depth_scale.max(0.00001)),
+            vec3(0.0, 0.0, 0.0),
+        );
+        let local_panel = Mat4f::nonuniform_scaled_translation(
+            vec3(scale, -scale, scale),
+            vec3(
+                -(size.x as f32) * scale * 0.5,
+                (size.y as f32) * scale * 0.5,
+                0.0,
+            ),
+        );
+        let object_to_world = Mat4f::mul(&local_panel, &local_depth_transform);
+        Mat4f::mul(&pose.to_mat4(), &object_to_world)
+    }
+
+    fn compute_xr_view_matrix(&self, state: &XrState) -> Mat4f {
+        self.compute_xr_panel_matrix(state, self.xr_depth_scale)
+    }
+
+    fn compute_xr_hit_matrix(&self, state: &XrState) -> Mat4f {
+        self.compute_xr_panel_matrix(state, 1.0)
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         if self.initialized {
             return;
@@ -585,6 +658,11 @@ impl Widget for Window {
             _ => false,
         };
 
+        if !cx.in_xr_mode() {
+            self.xr_view_matrix_initialized = false;
+            self.xr_visible = true;
+        }
+
         if is_for_other_window {
             cx.widget_action(uid, WindowAction::EventForOtherWindow);
             return;
@@ -592,10 +670,22 @@ impl Widget for Window {
             // lets store our inverse matrix
             if cx.in_xr_mode() {
                 if let Event::XrUpdate(e) = &event {
-                    let event =
-                        Event::XrLocal(XrLocalEvent::from_update_event(e, &self.xr_view_matrix));
-                    self.view.handle_event(cx, &event, scope);
-                } else {
+                    if self.xr_toggle_with_menu && e.menu_pressed() {
+                        self.xr_visible = !self.xr_visible;
+                        cx.redraw_all();
+                    }
+                    if !self.xr_view_matrix_initialized {
+                        self.xr_view_matrix = self.compute_xr_view_matrix(&e.state);
+                        self.xr_hit_matrix = self.compute_xr_hit_matrix(&e.state);
+                        self.xr_view_matrix_initialized = true;
+                    }
+                    let xr_event = XrLocalEvent::from_update_event(e, &self.xr_hit_matrix);
+                    if self.xr_visible {
+                        self.view
+                            .handle_event(cx, &Event::XrLocal(xr_event.clone()), scope);
+                    }
+                    xr_event.process_end(cx);
+                } else if self.xr_visible {
                     self.view.handle_event(cx, event, scope);
                 }
             } else {
@@ -676,12 +766,19 @@ impl Widget for Window {
     }
 
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
+        if !self.xr_visible {
+            return DrawStep::done();
+        }
+
         // lets create a Cx2d in which we can draw. we dont support stepping here
         let cx = &mut Cx2d::new(cx.cx);
+        let previous_dpi = cx.current_dpi_factor();
+        cx.set_current_pass_dpi_factor(self.xr_dpi_factor.max(1.0));
 
         self.main_draw_list.begin_always(cx);
+        self.main_draw_list.set_view_transform(cx, &self.xr_view_matrix);
 
-        let size = dvec2(1500.0, 1200.0);
+        let size = self.xr_window_logical_size();
         cx.begin_root_turtle(size, Layout::flow_down());
 
         self.overlay.begin(cx);
@@ -690,12 +787,10 @@ impl Widget for Window {
 
         //self.debug_view.draw(cx);
 
-        self.main_draw_list
-            .set_view_transform(cx, &self.xr_view_matrix);
-
         cx.end_pass_sized_turtle();
 
         self.main_draw_list.end(cx);
+        cx.set_current_pass_dpi_factor(previous_dpi);
 
         DrawStep::done()
     }

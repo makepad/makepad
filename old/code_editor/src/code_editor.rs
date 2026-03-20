@@ -120,12 +120,12 @@ live_design! {
         scroll_bars: <ScrollBars> {}
         draw_bg: { color: (THEME_COLOR_BG_CONTAINER) }
         draw_gutter: {
-            draw_depth: 1.0,
+            draw_depth: 0.1,
             text_style: <THEME_FONT_CODE> {},
             color: (THEME_COLOR_LABEL_OUTER),
         }
         draw_text: {
-            draw_depth: 1.0,
+            draw_depth: 0.1,
             text_style: <THEME_FONT_CODE> {}
             fn get_brightness(self)->float{
                 return 1.1
@@ -142,7 +142,7 @@ live_design! {
             }
         }
         draw_indent_guide: {
-           // draw_depth: 1.0,
+           // draw_depth: 0.1,
             color: (THEME_COLOR_U_2)
         }
         draw_decoration: {

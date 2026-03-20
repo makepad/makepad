@@ -243,7 +243,7 @@ pub struct DigitId(pub LiveId);
 #[derive(Default, Clone)]
 pub struct CxDigitCapture {
     digit_id: DigitId,
-    has_long_press_occurred: bool,
+    pub(crate) has_long_press_occurred: bool,
     pub area: Area,
     pub sweep_area: Area,
     pub switch_capture: Option<Area>,

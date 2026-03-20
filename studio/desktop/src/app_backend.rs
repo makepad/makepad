@@ -297,7 +297,7 @@ impl App {
                 .filter_map(|state| state.tab_id)
                 .next()
                 .unwrap_or(id!(mount_first));
-            let (tab_bar, pos) = dock.find_tab_bar_of_tab(anchor)?;
+            let (tab_bar, pos) = Self::reachable_tab_bar_of_tab(&dock, anchor)?;
             let tab_id = dock.unique_id(LiveId::from_str(&format!("mount/{}", mount)).0);
             if dock
                 .create_tab(
@@ -527,6 +527,19 @@ impl App {
         self.refresh_active_mount_log_panels(cx);
     }
 
+    pub(super) fn clear_ui_log_entries(&mut self, cx: &mut Cx) {
+        self.data.build_log_entries.clear();
+        for mount_state in self.data.mounts.values_mut() {
+            mount_state.log_entries.clear();
+        }
+        self.refresh_active_mount_log_panels(cx);
+    }
+
+    pub(super) fn request_log_clear(&mut self, cx: &mut Cx) {
+        let _ = self.send_studio(ClientToHub::LogClear);
+        self.set_status(cx, "clearing logs...");
+    }
+
     pub(super) fn apply_mount_toolbar_state(&mut self, cx: &mut Cx, mount: &str) {
         let (file_filter, log_filter, log_tail) = self
             .mount_state(mount)
@@ -637,7 +650,8 @@ impl App {
                 tab_to_path.remove(&existing);
             }
             // Create a new terminal tab before the "+" button.
-            let Some((tab_bar, pos)) = dock.find_tab_bar_of_tab(id!(terminal_add)) else {
+            let Some((tab_bar, pos)) = Self::reachable_tab_bar_of_tab(&dock, id!(terminal_add))
+            else {
                 continue;
             };
             let tab_id = dock.unique_id(LiveId::from_str(path).0);

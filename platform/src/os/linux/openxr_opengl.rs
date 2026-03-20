@@ -63,7 +63,7 @@ impl Cx {
         }
 
         let mut zbias = 0.0;
-        let zbias_step = -0.1;
+        let zbias_step = self.passes[draw_pass_id].zbias_step;
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
 
         #[cfg(target_os = "android")]

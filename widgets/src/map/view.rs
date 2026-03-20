@@ -84,6 +84,7 @@ script_mod! {
                 self.draw_depth + self.draw_call.zbias + self.geom.zbias
                 1.
             );
+            self.v_world_clip = world;
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
         }
 
