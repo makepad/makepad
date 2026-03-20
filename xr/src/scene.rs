@@ -181,12 +181,13 @@ const XR_PBR_HAND_SPHERE_SUBDIVISIONS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum XrDepthDebugMode {
+    Off,
     Passthrough,
 }
 
 impl Default for XrDepthDebugMode {
     fn default() -> Self {
-        Self::Passthrough
+        Self::Off
     }
 }
 
@@ -279,8 +280,26 @@ impl XrScene {
     }
 
     fn depth_debug_enabled(&self) -> bool {
-        let _ = self.depth_debug_mode;
-        false
+        self.depth_mesh_visible()
+    }
+
+    pub fn depth_mesh_visible(&self) -> bool {
+        matches!(self.depth_debug_mode, XrDepthDebugMode::Passthrough)
+    }
+
+    pub fn set_depth_mesh_visible(&mut self, cx: &mut Cx, visible: bool) {
+        self.depth_debug_mode = if visible {
+            XrDepthDebugMode::Passthrough
+        } else {
+            XrDepthDebugMode::Off
+        };
+        self.redraw(cx);
+    }
+
+    pub fn toggle_depth_mesh_visible(&mut self, cx: &mut Cx) -> bool {
+        let visible = !self.depth_mesh_visible();
+        self.set_depth_mesh_visible(cx, visible);
+        visible
     }
 
     fn passthrough_video_id() -> LiveId {
@@ -442,6 +461,16 @@ impl XrScene {
             .unwrap_or_default()
     }
 
+    pub fn set_cube_light_dir(&mut self, light_dir: Vec3f) {
+        self.draw_cube.light_dir = light_dir;
+    }
+
+    pub fn reset_now(&mut self, cx: &mut Cx, state: &XrState) {
+        self.reset_scene(cx, state);
+        self.ensure_scene(state);
+        self.redraw(cx);
+    }
+
     pub fn draw_rounded_cube(
         &mut self,
         cx: &mut Cx2d,
@@ -467,7 +496,6 @@ impl XrScene {
     }
 
     fn reset_scene(&mut self, cx: &mut Cx, state: &XrState) {
-        self.depth_debug_mode = XrDepthDebugMode::Passthrough;
         if let Some(atlas) = self.passthrough_env_atlas.as_mut() {
             atlas.reset_state();
         }
