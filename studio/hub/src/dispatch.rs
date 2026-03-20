@@ -2734,6 +2734,18 @@ impl HubCore {
                     },
                 );
             }
+            AppToStudio::RunViewKeyFocusRect(rect) => {
+                self.send_runview_message(
+                    build_id,
+                    HubToClient::RunViewKeyFocusRect {
+                        build_id,
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    },
+                );
+            }
             AppToStudio::WidgetTreeDump(response) => {
                 let query_id = QueryId(response.request_id);
                 self.send_to_query_owner(
