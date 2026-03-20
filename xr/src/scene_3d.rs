@@ -16,6 +16,7 @@ pub struct SceneState3D {
     pub clip_ndc: Vec4f,
     pub depth_range: Vec2f,
     pub depth_forward_bias: f32,
+    pub use_pass_camera: bool,
     pub viewport_rect: Rect,
 }
 
@@ -244,6 +245,7 @@ pub fn apply_draw_call_reorder_for_draw_list(
 }
 
 pub fn apply_scene_to_draw_pbr(draw: &mut DrawPbr, cx: &mut Cx2d, scene: &SceneState3D) {
+    draw.set_use_pass_camera(scene.use_pass_camera);
     draw.set_camera_state(scene.view, scene.projection_viewport, scene.camera_pos);
     draw.set_clip_ndc(scene.clip_ndc);
     draw.set_depth_range(scene.depth_range.x, scene.depth_range.y);
@@ -416,6 +418,7 @@ impl Scene3D {
             clip_ndc,
             depth_range: self.depth_range,
             depth_forward_bias: self.depth_forward_bias,
+            use_pass_camera: false,
             viewport_rect: rect,
         };
 

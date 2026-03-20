@@ -141,7 +141,7 @@ script_mod! {
         }
 
         fragment: fn() {
-            self.fb0 = self.pixel();
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip);
         }
 
         sample_text_pixel: fn() {
@@ -187,7 +187,7 @@ pub struct DrawText {
     pub text_style: TextStyle,
     #[live(1.0)]
     pub font_scale: f32,
-    #[live(1.0)]
+    #[live(0.0)]
     pub draw_depth: f32,
     #[live]
     pub debug: bool,

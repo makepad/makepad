@@ -353,6 +353,17 @@ impl ShaderOutput {
                                     });
                                 }
                             }
+
+                            SHADER_IO_UNIFORM_BUFFER => {
+                                if let Some(pod_ty) = pod_ty {
+                                    self.io.push(ShaderIo {
+                                        kind: ShaderIoKind::UniformBuffer,
+                                        name: field_id,
+                                        ty: pod_ty,
+                                        buffer_index: None,
+                                    });
+                                }
+                            }
                             
                             // Fragment outputs
                             io_type if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 

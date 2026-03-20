@@ -56,6 +56,16 @@ pub struct Gltf3D {
     loaded_src_handle: Option<ScriptHandle>,
     #[rust]
     loaded_env_handle: Option<ScriptHandle>,
+    #[rust]
+    debug_logged_src_pending: bool,
+    #[rust]
+    debug_logged_src_ready: bool,
+    #[rust]
+    debug_logged_src_error: bool,
+    #[rust]
+    debug_logged_draw_without_renderer: bool,
+    #[rust]
+    debug_logged_first_draw: bool,
 }
 
 enum ResourceResolve {
@@ -169,13 +179,29 @@ impl Gltf3D {
                     GltfRenderer::load_from_bytes(&mut self.draw_pbr, cx, &data, Some(&abs_path))
                         .ok();
                 self.loaded_src_handle = Some(handle);
+                if !self.debug_logged_src_ready {
+                    self.debug_logged_src_ready = true;
+                    log!(
+                        "gltf3d renderer ready path={} renderer_loaded={}",
+                        abs_path.display(),
+                        self.renderer.is_some()
+                    );
+                }
             }
             ResourceResolve::Error { handle } => {
                 self.renderer = None;
                 self.loaded_src_handle = Some(handle);
+                if !self.debug_logged_src_error {
+                    self.debug_logged_src_error = true;
+                    log!("gltf3d renderer load error handle={:?}", handle);
+                }
             }
             ResourceResolve::Pending { handle } => {
                 let _ = handle;
+                if !self.debug_logged_src_pending {
+                    self.debug_logged_src_pending = true;
+                    log!("gltf3d renderer pending handle={:?}", handle);
+                }
             }
             ResourceResolve::Missing => {}
         }
@@ -198,8 +224,16 @@ impl Widget for Gltf3D {
         self.ensure_env_loaded(cx);
         self.ensure_renderer_loaded(cx);
         let Some(renderer) = self.renderer.as_mut() else {
+            if !self.debug_logged_draw_without_renderer {
+                self.debug_logged_draw_without_renderer = true;
+                log!("gltf3d draw skipped: renderer not loaded");
+            }
             return DrawStep::done();
         };
+        if !self.debug_logged_first_draw {
+            self.debug_logged_first_draw = true;
+            log!("gltf3d draw with renderer");
+        }
 
         apply_scene_to_draw_pbr(&mut self.draw_pbr, cx, &scene);
         let local = compose_scene_node_transform(self.position, self.rotation, self.scale);

@@ -101,6 +101,17 @@ impl<'a> CxDraw<'a> {
         self.pass_stack.last().unwrap().dpi_factor
     }
 
+    pub fn set_current_pass_dpi_factor(&mut self, dpi_factor: f64) {
+        if let Some(pass_id) = self.pass_stack.last().map(|stack_item| stack_item.pass_id) {
+            if let Some(stack_item) = self.pass_stack.last_mut() {
+                stack_item.dpi_factor = dpi_factor;
+            }
+            let cxpass = &mut self.passes[pass_id];
+            cxpass.dpi_factor = Some(dpi_factor);
+            cxpass.set_dpi_factor(dpi_factor);
+        }
+    }
+
     pub fn inside_pass(&self) -> bool {
         !self.pass_stack.is_empty()
     }

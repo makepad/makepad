@@ -1,7 +1,9 @@
 pub use makepad_widgets;
 
 use makepad_widgets::*;
-use makepad_xr::XrScene as EngineXrScene;
+use makepad_xr::{
+    apply_draw_call_reorder_for_draw_list, SceneScope3D, SceneState3D, XrScene as EngineXrScene,
+};
 
 app_main!(App);
 
@@ -9,16 +11,64 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    mod.widgets.ExampleXrSceneBase = #(ExampleXrScene::register_widget(vm))
-    mod.widgets.ExampleXrScene = set_type_default() do mod.widgets.ExampleXrSceneBase{
-        scene := mod.widgets.XrScene{}
-        cube_half_extents: vec3(0.12, 0.12, 0.12)
-        cube_color: vec4(0.88, 0.52, 0.26, 1.0)
-        cube_corner_radius: 0.018
-        cube_roughness: 0.42
+    let active_scene = "gltf"
+    let ActiveSceneContent = Node3D{
+        on_render: ||{
+            if active_scene == "gltf" {
+                ground := Grid3D{
+                    size: 16.0
+                    position: vec3(0.0, -1.25, 0.0)
+                    color: vec4(0.56, 0.58, 0.61, 1.0)
+                }
+                model := Gltf3D{
+                    src: crate_resource("self://resources/DamagedHelmet.glb")
+                    env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
+                    scale: vec3(0.82, 0.82, 0.82)
+                    rotation: vec3(0.0, 0.45, 0.0)
+                }
+            }
+            else if active_scene == "splat" {
+                ground := Grid3D{
+                    size: 18.0
+                    position: vec3(0.0, -1.25, 0.0)
+                    color: vec4(0.56, 0.58, 0.61, 1.0)
+                }
+                helmet := Gltf3D{
+                    src: crate_resource("self://resources/DamagedHelmet.glb")
+                    env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
+                    position: vec3(0.0, -0.1, 0.0)
+                    rotation: vec3(0.0, 1.2, 0.0)
+                    scale: vec3(0.38, 0.38, 0.38)
+                }
+                sog := ViewSplat{
+                    src: crate_resource("self://../../local/toy-cat.sog")
+                    position: vec3(-1.8, 0.0, 0.0)
+                    scale: vec3(1.0, -1.0, 1.0)
+                    normalize_fit: 2.3
+                    max_splats: 0
+                    radius_scale: 1.1
+                    min_radius: 0.0012
+                }
+                ply := ViewSplat{
+                    src: crate_resource("self://../../local/biker.ply")
+                    position: vec3(1.8, -0.1, 0.0)
+                    scale: vec3(1.0, -1.0, 1.0)
+                    normalize_fit: 2.0
+                    max_splats: 0
+                    radius_scale: 1.1
+                    min_radius: 0.0012
+                }
+            }
+            else {
+                simulation := PhysicsWorld3D{}
+            }
+        }
     }
 
-    let active_scene = "gltf"
+    mod.widgets.ExampleXrSceneBase = #(ExampleXrScene::register_widget(vm))
+    mod.widgets.ExampleXrScene = set_type_default() do mod.widgets.ExampleXrSceneBase{
+        world_scene: ActiveSceneContent{}
+    }
 
     fn select_scene(scene_id, label) {
         active_scene = scene_id
@@ -32,9 +82,14 @@ script_mod! {
                 ui.desktop_scene.render()
             }
 
+            xr_scene := mod.widgets.ExampleXrScene{}
+
             main_window := Window{
                 window.inner_size: vec2(1400, 900)
                 pass.clear_color: #x0b1118
+                xr_pixel_size: vec2(960, 1200)
+                xr_forward_offset: 0.78
+                xr_toggle_with_menu: true
                 body +: {
                     main := View{
                         width: Fill
@@ -73,18 +128,21 @@ script_mod! {
                                 }
 
                                 show_gltf := Button{
+                                    trigger_on_press: true
                                     width: Fill
                                     text: "GLTF"
                                     on_click: || select_scene("gltf", "Single GLTF object")
                                 }
 
                                 show_splat := Button{
+                                    trigger_on_press: true
                                     width: Fill
                                     text: "Splat Trio"
                                     on_click: || select_scene("splat", "Helmet plus two splat assets")
                                 }
 
                                 show_physics := Button{
+                                    trigger_on_press: true
                                     width: Fill
                                     text: "Physics Cubes"
                                     on_click: || select_scene("physics", "Interactive physics cube stack")
@@ -100,12 +158,14 @@ script_mod! {
                             }
 
                             gutter := SolidView{
+                                visible: true
                                 width: 1
                                 height: Fill
                                 draw_bg.color: #x1a2633
                             }
 
                             viewport := View{
+                                visible: true
                                 width: Fill
                                 height: Fill
 
@@ -124,58 +184,7 @@ script_mod! {
                                         draw_depth: -400.0
                                     }
 
-                                    scene_root := Node3D{
-                                        on_render: ||{
-                                            if active_scene == "gltf" {
-                                                ground := Grid3D{
-                                                    size: 16.0
-                                                    position: vec3(0.0, -1.25, 0.0)
-                                                    color: vec4(0.56, 0.58, 0.61, 1.0)
-                                                }
-                                                model := Gltf3D{
-                                                    src: crate_resource("self://resources/DamagedHelmet.glb")
-                                                    env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
-                                                    scale: vec3(0.82, 0.82, 0.82)
-                                                    rotation: vec3(0.0, 0.45, 0.0)
-                                                }
-                                            }
-                                            else if active_scene == "splat" {
-                                                ground := Grid3D{
-                                                    size: 18.0
-                                                    position: vec3(0.0, -1.25, 0.0)
-                                                    color: vec4(0.56, 0.58, 0.61, 1.0)
-                                                }
-                                                helmet := Gltf3D{
-                                                    src: crate_resource("self://resources/DamagedHelmet.glb")
-                                                    env_src: crate_resource("self://resources/royal_esplanade_4k.jpg")
-                                                    position: vec3(0.0, -0.1, 0.0)
-                                                    rotation: vec3(0.0, 1.2, 0.0)
-                                                    scale: vec3(0.38, 0.38, 0.38)
-                                                }
-                                                sog := ViewSplat{
-                                                    src: crate_resource("self://../../local/toy-cat.sog")
-                                                    position: vec3(-1.8, 0.0, 0.0)
-                                                    scale: vec3(1.0, -1.0, 1.0)
-                                                    normalize_fit: 2.3
-                                                    max_splats: 0
-                                                    radius_scale: 1.1
-                                                    min_radius: 0.0012
-                                                }
-                                                ply := ViewSplat{
-                                                    src: crate_resource("self://../../local/biker.ply")
-                                                    position: vec3(1.8, -0.1, 0.0)
-                                                    scale: vec3(1.0, -1.0, 1.0)
-                                                    normalize_fit: 2.0
-                                                    max_splats: 0
-                                                    radius_scale: 1.1
-                                                    min_radius: 0.0012
-                                                }
-                                            }
-                                            else {
-                                                simulation := PhysicsWorld3D{}
-                                            }
-                                        }
-                                    }
+                                    scene_root := ActiveSceneContent{}
                                 }
                             }
                         }
@@ -184,14 +193,12 @@ script_mod! {
                     }
                 }
             }
-
-            xr_scene := mod.widgets.ExampleXrScene{}
         }
     }
 }
 
-const XR_CUBE_FORWARD_OFFSET: f32 = 0.55;
-const XR_CUBE_VIEW_OFFSET_Y: f32 = 0.0;
+const XR_SCENE_FORWARD_OFFSET: f32 = 1.85;
+const XR_SCENE_VIEW_OFFSET_Y: f32 = -0.1;
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ExampleXrScene {
@@ -199,18 +206,21 @@ pub struct ExampleXrScene {
     source: ScriptObjectRef,
     #[deref]
     scene: EngineXrScene,
-    #[live(vec3(0.12, 0.12, 0.12))]
-    cube_half_extents: Vec3f,
-    #[live(vec4(0.88, 0.52, 0.26, 1.0))]
-    cube_color: Vec4f,
-    #[live(0.018)]
-    cube_corner_radius: f32,
-    #[live(0.42)]
-    cube_roughness: f32,
+    #[live]
+    draw_list_3d: DrawList2d,
+    #[find]
+    #[live]
+    world_scene: WidgetRef,
     #[rust]
-    cube_pose: Pose,
+    scene_pose: Pose,
     #[rust]
-    cube_pose_valid: bool,
+    scene_pose_valid: bool,
+    #[rust]
+    debug_logged_first_draw: bool,
+    #[rust]
+    debug_logged_empty_draw: bool,
+    #[rust]
+    debug_logged_missing_world_scene: bool,
 }
 
 impl ExampleXrScene {
@@ -224,37 +234,102 @@ impl ExampleXrScene {
         }
     }
 
-    fn compute_cube_pose(state: &XrState) -> Pose {
+    fn compute_scene_pose(state: &XrState) -> Pose {
         let forward = Self::scene_forward(state);
         let orientation = Quat::look_rotation(forward, vec3f(0.0, 1.0, 0.0));
-        Pose::new(
-            orientation,
-            state.head_pose.position
-                + forward * XR_CUBE_FORWARD_OFFSET
-                + vec3f(0.0, XR_CUBE_VIEW_OFFSET_Y, 0.0),
-        )
+        let position =
+            vec3f(0.0, state.head_pose.position.y + XR_SCENE_VIEW_OFFSET_Y, 0.0)
+                + forward * XR_SCENE_FORWARD_OFFSET;
+        Pose::new(orientation, position)
     }
 
-    fn reset_cube_anchor(&mut self, state: &XrState) {
-        self.cube_pose = Self::compute_cube_pose(state);
-        self.cube_pose_valid = true;
+    fn reset_scene_anchor(&mut self, state: &XrState) {
+        self.scene_pose = Self::compute_scene_pose(state);
+        self.scene_pose_valid = true;
     }
 
-    fn ensure_cube_anchor(&mut self, state: &XrState) {
-        if self.scene.ensure_scene(state) || !self.cube_pose_valid {
-            self.reset_cube_anchor(state);
+    fn ensure_scene_anchor(&mut self, state: &XrState) {
+        if self.scene.ensure_scene(state) || !self.scene_pose_valid {
+            self.reset_scene_anchor(state);
         }
+    }
+
+    fn scene_state(&self, cx: &Cx3d) -> Option<SceneState3D> {
+        let draw_list_id = cx.get_current_draw_list_id()?;
+        let pass_id = cx.draw_lists[draw_list_id].draw_pass_id?;
+        let pass_uniforms = cx.passes[pass_id].pass_uniforms.clone();
+        let pass_size = cx.current_pass_size();
+        if pass_size.x <= 1.0 || pass_size.y <= 1.0 {
+            return None;
+        }
+
+        let camera_world = pass_uniforms.camera_inv.transform_vec4(vec4(0.0, 0.0, 0.0, 1.0));
+        let camera_pos = if camera_world.w.abs() > 1.0e-6 {
+            vec3(
+                camera_world.x / camera_world.w,
+                camera_world.y / camera_world.w,
+                camera_world.z / camera_world.w,
+            )
+        } else {
+            vec3(0.0, 0.0, 0.0)
+        };
+
+        Some(SceneState3D {
+            time: pass_uniforms.time as f64,
+            camera_pos,
+            view: pass_uniforms.camera_view,
+            projection: pass_uniforms.camera_projection,
+            projection_viewport: pass_uniforms.camera_projection,
+            clip_ndc: vec4(-1.0, -1.0, 1.0, 1.0),
+            depth_range: vec2(0.0, 1.0),
+            depth_forward_bias: 0.0,
+            use_pass_camera: true,
+            viewport_rect: Rect {
+                pos: dvec2(0.0, 0.0),
+                size: pass_size,
+            },
+        })
     }
 }
 
 impl Widget for ExampleXrScene {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.scene.handle_event(cx, event, scope);
-        if let Event::XrUpdate(update) = event {
-            if EngineXrScene::reset_requested(update) {
-                self.reset_cube_anchor(&update.state);
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(render) || method == live_id!(render_scene) {
+            log!(
+                "xr scene render request method={:?} world_scene_empty={}",
+                method,
+                self.world_scene.is_empty()
+            );
+            let result = self.world_scene.script_call(vm, live_id!(render), args);
+            match result {
+                ScriptAsyncResult::Pending => {
+                    log!("xr scene render request accepted: pending");
+                }
+                ScriptAsyncResult::MethodNotFound => {
+                    log!("xr scene render request failed: method not found");
+                }
+                ScriptAsyncResult::Return(_) => {
+                    log!("xr scene render request returned immediately");
+                }
             }
-            self.ensure_cube_anchor(&update.state);
+            return result;
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if !cx.in_xr_mode() {
+            self.scene_pose_valid = false;
+        }
+        self.scene.handle_event(cx, event, scope);
+        self.world_scene.handle_event(cx, event, scope);
+        if let Event::XrUpdate(update) = event {
+            self.ensure_scene_anchor(&update.state);
         }
     }
 
@@ -268,16 +343,61 @@ impl Widget for ExampleXrScene {
             return DrawStep::done();
         };
 
-        self.ensure_cube_anchor(state);
-        let cx = &mut Cx2d::new(cx.cx);
-        self.scene.draw_rounded_cube(
-            cx,
-            self.cube_pose,
-            self.cube_half_extents,
-            self.cube_corner_radius,
-            self.cube_color,
-            self.cube_roughness,
-        );
+        self.ensure_scene_anchor(state);
+        let Some(scene_state) = self.scene_state(cx) else {
+            return DrawStep::done();
+        };
+        let viewport_size = scene_state.viewport_rect.size;
+        if self.world_scene.is_empty() {
+            if !self.debug_logged_missing_world_scene {
+                self.debug_logged_missing_world_scene = true;
+                log!("xr scene draw: world_scene missing");
+            }
+            return DrawStep::done();
+        }
+
+        let mut scene_scope_data = SceneScope3D {
+            scene: scene_state,
+            chart_data: None,
+            world_transform: self.scene_pose.to_mat4(),
+            draw_call_anchors: Vec::new(),
+        };
+        let mut scene_scope = Scope::with_data(&mut scene_scope_data);
+        {
+            let cx2d = &mut Cx2d::new(cx.cx);
+            self.draw_list_3d.begin_always(cx2d);
+            self.draw_list_3d
+                .set_view_transform_self_only(cx2d, &Mat4f::identity());
+        }
+        {
+            let cx3d = &mut Cx3d::new(cx.cx);
+            self.world_scene.draw_3d_all(cx3d, &mut scene_scope);
+        }
+        {
+            let cx2d = &mut Cx2d::new(cx.cx);
+            let draw_list_id = self.draw_list_3d.draw_list_id();
+            let draw_count = cx2d.cx.draw_lists[draw_list_id].draw_items.len();
+            if draw_count == 0 {
+                if !self.debug_logged_empty_draw {
+                    self.debug_logged_empty_draw = true;
+                    log!(
+                        "xr scene draw emitted 0 draw items pose={:?} pass_size={:?}",
+                        self.scene_pose.position,
+                        viewport_size
+                    );
+                }
+            } else if !self.debug_logged_first_draw {
+                self.debug_logged_first_draw = true;
+                log!(
+                    "xr scene draw emitted {} draw items pose={:?} pass_size={:?}",
+                    draw_count,
+                    self.scene_pose.position,
+                    viewport_size
+                );
+            }
+            apply_draw_call_reorder_for_draw_list(cx2d, &mut scene_scope, draw_list_id, true);
+            self.draw_list_3d.end(cx2d);
+        }
         DrawStep::done()
     }
 }
@@ -286,6 +406,40 @@ impl Widget for ExampleXrScene {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    #[rust]
+    ui_in_xr: bool,
+}
+
+impl App {
+    fn sync_mode_ui(&mut self, cx: &mut Cx) {
+        let in_xr = cx.in_xr_mode();
+        if self.ui_in_xr == in_xr {
+            return;
+        }
+        self.ui_in_xr = in_xr;
+        self.ui.view(cx, ids!(gutter)).set_visible(cx, !in_xr);
+        self.ui.view(cx, ids!(viewport)).set_visible(cx, !in_xr);
+    }
+
+    fn render_xr_world_scene(&mut self, cx: &mut Cx) {
+        let xr_scene = self.ui.widget(cx, ids!(xr_scene));
+        if xr_scene.is_empty() {
+            log!("xr scene render request skipped: xr_scene widget missing");
+            return;
+        }
+        log!("xr scene render request dispatched");
+        cx.with_vm(|vm| {
+            match xr_scene.script_call(vm, live_id!(render_scene), NIL) {
+                ScriptAsyncResult::Pending => log!("xr scene widget call pending"),
+                ScriptAsyncResult::MethodNotFound => {
+                    log!("xr scene widget call failed: method not found")
+                }
+                ScriptAsyncResult::Return(_) => {
+                    log!("xr scene widget call returned immediately")
+                }
+            }
+        });
+    }
 }
 
 impl MatchEvent for App {
@@ -294,14 +448,27 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        log!("APP STARTUP");
         crate::makepad_widgets::script_mod(vm);
         makepad_xr::script_mod(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.sync_mode_ui(cx);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        match event {
+            Event::Startup => {
+                self.render_xr_world_scene(cx);
+            }
+            Event::Actions(actions)
+                if self.ui.button(cx, ids!(show_gltf)).pressed(actions)
+                    || self.ui.button(cx, ids!(show_splat)).pressed(actions)
+                    || self.ui.button(cx, ids!(show_physics)).pressed(actions) =>
+            {
+                self.render_xr_world_scene(cx);
+            }
+            _ => {}
+        }
     }
 }

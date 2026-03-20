@@ -421,6 +421,9 @@ pub struct Button {
     #[live]
     on_click: ScriptFnRef,
 
+    #[live]
+    trigger_on_press: bool,
+
     #[action_data]
     #[rust]
     action_data: WidgetActionData,
@@ -503,6 +506,15 @@ impl Widget for Button {
                     uid,
                     ButtonAction::Pressed(fe.modifiers),
                 );
+                if self.trigger_on_press {
+                    cx.widget_to_script_call(
+                        uid,
+                        NIL,
+                        self.source.clone(),
+                        self.on_click.clone(),
+                        &[],
+                    );
+                }
                 self.animator_play(cx, ids!(hover.down));
                 self.set_key_focus(cx);
             }
@@ -533,13 +545,15 @@ impl Widget for Button {
                         uid,
                         ButtonAction::Clicked(fe.modifiers),
                     );
-                    cx.widget_to_script_call(
-                        uid,
-                        NIL,
-                        self.source.clone(),
-                        self.on_click.clone(),
-                        &[],
-                    );
+                    if !self.trigger_on_press {
+                        cx.widget_to_script_call(
+                            uid,
+                            NIL,
+                            self.source.clone(),
+                            self.on_click.clone(),
+                            &[],
+                        );
+                    }
                     if self.reset_hover_on_click {
                         self.animator_cut(cx, ids!(hover.off));
                     } else if fe.has_hovers() {

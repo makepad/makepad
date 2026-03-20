@@ -583,6 +583,10 @@ impl App {
                     }
                 }
             }
+            HubToClient::LogCleared => {
+                self.clear_ui_log_entries(cx);
+                self.set_status(cx, "logs cleared");
+            }
             HubToClient::TerminalOpened { path } => {
                 self.data.terminal_open_paths.insert(path.clone());
                 self.data.terminal_frame_id_by_path.remove(&path);

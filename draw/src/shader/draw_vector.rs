@@ -19,6 +19,7 @@ script_mod! {
 
         v_tcoord: varying(vec2f)
         v_world: varying(vec2f)
+        v_world_clip: varying(vec4f)
         v_color: varying(vec4f)
         v_stroke_mult: varying(float)
         v_stroke_dist: varying(float)
@@ -69,11 +70,12 @@ script_mod! {
                 self.draw_depth + self.draw_call.zbias + self.geom.zbias
                 1.
             );
+            self.v_world_clip = world;
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
         }
 
         fragment: fn(){
-            self.fb0 = self.pixel()
+            self.fb0 = depth_clip(self.v_world_clip, self.pixel(), self.depth_clip)
         }
 
         // --- Shadow utilities ---
@@ -315,6 +317,8 @@ pub struct DrawVector {
     #[live]
     pub draw_clip: Vec4f,
     #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
     pub draw_depth: f32,
     #[live]
     pub pad1: f32,
