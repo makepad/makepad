@@ -12,6 +12,7 @@ script_mod! {
     use mod.widgets.*
 
     let active_scene = "gltf"
+    let xr_panel_pixels = vec2(960, 1200)
     let ActiveSceneContent = Node3D{
         on_render: ||{
             if active_scene == "gltf" {
@@ -67,6 +68,7 @@ script_mod! {
 
     mod.widgets.ExampleXrSceneBase = #(ExampleXrScene::register_widget(vm))
     mod.widgets.ExampleXrScene = set_type_default() do mod.widgets.ExampleXrSceneBase{
+        xr_viewport_size: xr_panel_pixels
         world_scene: ActiveSceneContent{}
     }
 
@@ -87,7 +89,7 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(1400, 900)
                 pass.clear_color: #x0b1118
-                xr_pixel_size: vec2(960, 1200)
+                xr_pixel_size: xr_panel_pixels
                 xr_forward_offset: 0.78
                 xr_toggle_with_menu: true
                 body +: {
@@ -197,7 +199,8 @@ script_mod! {
     }
 }
 
-const XR_SCENE_FORWARD_OFFSET: f32 = 1.85;
+const XR_SCENE_FORWARD_OFFSET: f32 = 1.15;
+const XR_SCENE_SIDE_OFFSET: f32 = 0.85;
 const XR_SCENE_VIEW_OFFSET_Y: f32 = -0.1;
 
 #[derive(Script, ScriptHook, Widget)]
@@ -208,6 +211,8 @@ pub struct ExampleXrScene {
     scene: EngineXrScene,
     #[live]
     draw_list_3d: DrawList2d,
+    #[live(vec2(960.0, 1200.0))]
+    xr_viewport_size: Vec2d,
     #[find]
     #[live]
     world_scene: WidgetRef,
@@ -221,6 +226,20 @@ pub struct ExampleXrScene {
     debug_logged_empty_draw: bool,
     #[rust]
     debug_logged_missing_world_scene: bool,
+    #[rust]
+    debug_logged_first_xr_update: bool,
+    #[rust]
+    debug_logged_draw_without_xr_state: bool,
+    #[rust]
+    debug_logged_draw_with_xr_state: bool,
+    #[rust]
+    debug_logged_missing_scene_state: bool,
+    #[rust]
+    debug_logged_fallback_viewport: bool,
+    #[rust]
+    debug_xr_update_log_count: u32,
+    #[rust]
+    debug_xr_draw_log_count: u32,
 }
 
 impl ExampleXrScene {
@@ -236,10 +255,12 @@ impl ExampleXrScene {
 
     fn compute_scene_pose(state: &XrState) -> Pose {
         let forward = Self::scene_forward(state);
+        let right = Vec3f::cross(forward, vec3f(0.0, 1.0, 0.0)).normalize();
         let orientation = Quat::look_rotation(forward, vec3f(0.0, 1.0, 0.0));
         let position =
             vec3f(0.0, state.head_pose.position.y + XR_SCENE_VIEW_OFFSET_Y, 0.0)
-                + forward * XR_SCENE_FORWARD_OFFSET;
+                + forward * XR_SCENE_FORWARD_OFFSET
+                + right * XR_SCENE_SIDE_OFFSET;
         Pose::new(orientation, position)
     }
 
@@ -258,7 +279,10 @@ impl ExampleXrScene {
         let draw_list_id = cx.get_current_draw_list_id()?;
         let pass_id = cx.draw_lists[draw_list_id].draw_pass_id?;
         let pass_uniforms = cx.passes[pass_id].pass_uniforms.clone();
-        let pass_size = cx.current_pass_size();
+        let mut pass_size = cx.current_pass_size();
+        if pass_size.x <= 1.0 || pass_size.y <= 1.0 {
+            pass_size = self.xr_viewport_size;
+        }
         if pass_size.x <= 1.0 || pass_size.y <= 1.0 {
             return None;
         }
@@ -329,7 +353,32 @@ impl Widget for ExampleXrScene {
         self.scene.handle_event(cx, event, scope);
         self.world_scene.handle_event(cx, event, scope);
         if let Event::XrUpdate(update) = event {
-            self.ensure_scene_anchor(&update.state);
+            if !self.debug_logged_first_xr_update {
+                self.debug_logged_first_xr_update = true;
+                log!(
+                    "xr scene first XrUpdate head_pos={:?} head_orientation={:?}",
+                    update.state.head_pose.position,
+                    update.state.head_pose.orientation
+                );
+            }
+            if self.debug_xr_update_log_count < 12 {
+                self.debug_xr_update_log_count += 1;
+                log!(
+                    "xr scene XrUpdate #{} head_pos={:?} head_orientation={:?} scene_pose_valid={}",
+                    self.debug_xr_update_log_count,
+                    update.state.head_pose.position,
+                    update.state.head_pose.orientation,
+                    self.scene_pose_valid
+                );
+                self.ensure_scene_anchor(&update.state);
+                log!(
+                    "xr scene anchor after update #{} pose_pos={:?}",
+                    self.debug_xr_update_log_count,
+                    self.scene_pose.position
+                );
+            } else {
+                self.ensure_scene_anchor(&update.state);
+            }
         }
     }
 
@@ -339,12 +388,55 @@ impl Widget for ExampleXrScene {
 
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
         let _ = self.scene.draw_3d(cx, scope);
+        let draw_list_id = cx.get_current_draw_list_id();
+        let pass_size = cx.current_pass_size();
         let Some(state) = cx.draw_event.xr_state.as_ref() else {
+            if !self.debug_logged_draw_without_xr_state {
+                self.debug_logged_draw_without_xr_state = true;
+                log!("xr scene draw skipped: no xr_state on draw event");
+            }
             return DrawStep::done();
         };
+        if !self.debug_logged_draw_with_xr_state {
+            self.debug_logged_draw_with_xr_state = true;
+            log!(
+                "xr scene draw entered head_pos={:?} head_orientation={:?}",
+                state.head_pose.position,
+                state.head_pose.orientation
+            );
+        }
+        let log_this_draw = self.debug_xr_draw_log_count < 20;
+        if log_this_draw {
+            self.debug_xr_draw_log_count += 1;
+            let pass_id = draw_list_id.and_then(|draw_list_id| cx.cx.draw_lists[draw_list_id].draw_pass_id);
+            log!(
+                "xr scene draw #{} draw_list_id={:?} pass_id={:?} pass_size={:?} world_scene_empty={} scene_pose={:?}",
+                self.debug_xr_draw_log_count,
+                draw_list_id,
+                pass_id,
+                pass_size,
+                self.world_scene.is_empty(),
+                self.scene_pose.position
+            );
+        }
 
         self.ensure_scene_anchor(state);
+        if (pass_size.x <= 1.0 || pass_size.y <= 1.0) && !self.debug_logged_fallback_viewport {
+            self.debug_logged_fallback_viewport = true;
+            log!(
+                "xr scene draw using fallback viewport size={:?} because xr pass has no 2d pass rect",
+                self.xr_viewport_size
+            );
+        }
         let Some(scene_state) = self.scene_state(cx) else {
+            if !self.debug_logged_missing_scene_state {
+                self.debug_logged_missing_scene_state = true;
+                log!(
+                    "xr scene draw skipped: scene_state unavailable draw_list_id={:?} pass_size={:?}",
+                    cx.get_current_draw_list_id(),
+                    cx.current_pass_size()
+                );
+            }
             return DrawStep::done();
         };
         let viewport_size = scene_state.viewport_rect.size;
@@ -377,6 +469,14 @@ impl Widget for ExampleXrScene {
             let cx2d = &mut Cx2d::new(cx.cx);
             let draw_list_id = self.draw_list_3d.draw_list_id();
             let draw_count = cx2d.cx.draw_lists[draw_list_id].draw_items.len();
+            if log_this_draw {
+                log!(
+                    "xr scene world draw_count={} scene_pose={:?} viewport_size={:?}",
+                    draw_count,
+                    self.scene_pose.position,
+                    viewport_size
+                );
+            }
             if draw_count == 0 {
                 if !self.debug_logged_empty_draw {
                     self.debug_logged_empty_draw = true;
@@ -408,17 +508,22 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     ui_in_xr: bool,
+    #[rust]
+    debug_logged_mode_switch: bool,
 }
 
 impl App {
-    fn sync_mode_ui(&mut self, cx: &mut Cx) {
+    fn sync_mode_ui(&mut self, cx: &mut Cx) -> bool {
         let in_xr = cx.in_xr_mode();
         if self.ui_in_xr == in_xr {
-            return;
+            return false;
         }
+        self.debug_logged_mode_switch = true;
+        log!("xr app mode switch in_xr={}", in_xr);
         self.ui_in_xr = in_xr;
         self.ui.view(cx, ids!(gutter)).set_visible(cx, !in_xr);
         self.ui.view(cx, ids!(viewport)).set_visible(cx, !in_xr);
+        in_xr
     }
 
     fn render_xr_world_scene(&mut self, cx: &mut Cx) {
@@ -454,9 +559,13 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.sync_mode_ui(cx);
+        let entered_xr = self.sync_mode_ui(cx);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if entered_xr {
+            log!("xr scene rerender requested on xr mode entry");
+            self.render_xr_world_scene(cx);
+        }
         match event {
             Event::Startup => {
                 self.render_xr_world_scene(cx);
