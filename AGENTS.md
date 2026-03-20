@@ -2,7 +2,7 @@
 
 ## Execution Policy
 - Visual UI programs must be launched and controlled through the Makepad Studio remote protocol.
-- For any UI/app launch, first query Studio runnables and only start items returned by `LoadRunnableBuilds`.
+- Do not use mount observation or runnable discovery from the bridge client. The bridge must not claim mount ownership from Studio desktop.
 - Do not launch UI programs with raw `cargo run`, `cargo makepad`, or ad hoc cargo invocation when a runnable item exists.
 - Command-line-only tasks (builds, tests, linting, file ops, grep/ripgrep, etc.) can be run directly in the shell.
 - Prefer studio remote control for any workflow that needs screenshots, widget queries, clicks, typing, or runtime UI inspection.
@@ -19,25 +19,25 @@
   - `target/release/cargo-makepad studio --studio=127.0.0.1:8001`
 - Send newline-delimited JSON requests on stdin.
 - Read newline-delimited JSON responses on stdout.
-- Protocol shape is `UIToStudio` requests and filtered `StudioToUI` responses.
+- Protocol shape is raw `ClientToHub` requests on stdin and filtered `HubToClient` responses on stdout.
+- Do not send `ObserveMount` from the bridge. It can take `primary` UI ownership for the mount and divert RunView/framebuffer traffic away from Studio desktop.
 
 ## Request Protocol (JSON Lines)
 - `{"ListBuilds":[]}`
-- `{"LoadRunnableBuilds":{"mount":"makepad"}}`
-- `{"Run":{"mount":"makepad","process":"makepad-example-splash","args":[]}}`
-- `{"Run":{"mount":"makepad","process":"makepad-example-splash","args":["--my-app-arg"]}}`
+- `{"Run":{"mount":"makepad","process":"makepad-example-todo","args":[]}}`
+- `{"Run":{"mount":"makepad","process":"makepad-example-todo","args":["--my-app-arg"]}}`
 - `{"Cargo":{"mount":"makepad","args":["check","-p","makepad-example-splash"],"env":null,"buildbox":null}}`
-- `{"FindInFiles":{"mount":"makepad","pattern":"UIToStudio::","is_regex":false,"glob":null,"max_results":200}}`
-- `{"FindInFiles":{"mount":"makepad","pattern":"UIToStudio::(FindInFiles|ReadTextRange)","is_regex":true,"glob":"**/*.rs","max_results":200}}`
+- `{"FindInFiles":{"mount":"makepad","pattern":"ClientToHub::","is_regex":false,"glob":null,"max_results":200}}`
+- `{"FindInFiles":{"mount":"makepad","pattern":"ClientToHub::(FindInFiles|ReadTextRange)","is_regex":true,"glob":"**/*.rs","max_results":200}}`
 - `{"ReadTextRange":{"path":"makepad/studio/backend/src/dispatch.rs","start_line":640,"end_line":720}}`
-- `{"StopBuild":{"build_id":38160721318170}}`
-- `{"WidgetTreeDump":{"build_id":38160721318170}}`
-- `{"WidgetQuery":{"build_id":38160721318170,"query":"id:todo_input"}}`
-- `{"Screenshot":{"build_id":38160721318170,"kind_id":0}}` (`kind_id` optional; defaults to `0`)
-- `{"Click":{"build_id":38160721318170,"x":1274,"y":342}}`
-- `{"TypeText":{"build_id":38160721318170,"text":"hello"}}`
-- `{"Return":{"build_id":38160721318170,"auto_dump":false}}`
-- `{"ForwardToApp":{"build_id":38160721318170,"msg_bin":[...]}}` (advanced; binary payload)
+- `{"StopBuild":{"build_id":[6]}}`
+- `{"WidgetTreeDump":{"build_id":[6]}}`
+- `{"WidgetQuery":{"build_id":[6],"query":"id:todo_input"}}`
+- `{"Screenshot":{"build_id":[6],"kind_id":0}}` (`kind_id` optional; defaults to `0`)
+- `{"Click":{"build_id":[6],"x":1274,"y":342}}`
+- `{"TypeText":{"build_id":[6],"text":"hello"}}`
+- `{"Return":{"build_id":[6],"auto_dump":false}}`
+- `{"ForwardToApp":{"build_id":[6],"msg_bin":[...]}}` (advanced; binary payload)
 
 ## `StudioToApp` API (Updated)
 - The studio remote bridge supports raw app event passthrough via `UIToStudio::ForwardToApp`.
@@ -50,20 +50,21 @@
 - Use raw `StudioToApp` only for low-level event injection/debugging.
 
 ## Response Notes (Current)
-- Bridge stdout is filtered to: `Hello`, `Error`, `TextFileRead`, `TextFileRange`, `FindFileResults`, `SearchFileResults`, `Builds`, `RunnableBuilds`, `BuildStarted`, `BuildStopped`, `Screenshot`, `WidgetTreeDump`, `WidgetQuery`, `QueryCancelled`.
-- `TerminalOutput`/`TerminalOpened`/`TerminalExited` and all `RunView*` messages are suppressed by `cargo makepad studio`.
+- Bridge stdout is filtered to: `Hello`, `Error`, `TextFileRead`, `TextFileRange`, `FindFileResults`, `SearchFileResults`, `Builds`, `RunItems`, `BuildStarted`, `BuildStopped`, `AppStarted`, `RunViewCreated`, `QueryLogResults`, `Screenshot`, `WidgetTreeDump`, `WidgetQuery`, `QueryCancelled`.
+- `RunViewFrame` and the terminal stream are not exposed by the bridge.
 - `Screenshot` responses include file metadata (`path`, `width`, `height`) and not inline PNG bytes.
 - `WidgetTreeDump` responses include text dump content keyed by `request_id`.
 - `FindInFiles` responds as `SearchFileResults` with concise entries (`path`, `line`, `column`, `line_text`) and `done`.
 - `FindInFiles` defaults to searching only `.rs`, `.md`, `.toml` files unless `glob` is provided.
 - `ReadTextRange` responds as `TextFileRange` with `path`, requested `start_line`/`end_line`, `total_lines`, and `content`.
 - Query-scoped responses are lane-filtered by `query_id.client_id`; only this bridge client's query results are emitted.
+- Build ids and query ids are `QueryId` tuple structs, so JSON encodes them as one-element arrays like `[6]`.
 - `FindInFiles`/`SearchFiles` execution is worker-pooled in backend (not main dispatch thread).
 
 ## Recommended Control Flow
 1. Start studio remote process once.
-2. For app execution, call `LoadRunnableBuilds` and pick the exact runnable item you want.
-3. Start UI apps only through `Run`, and wait for `BuildStarted`.
+2. Determine the target process locally from the repo or from the user request.
+3. Start UI apps through `Run`, and wait for `BuildStarted` and `AppStarted`.
 4. For code search, use `FindInFiles` first, then `ReadTextRange` to window exact regions.
 5. Use `Cargo` only for non-launch cargo passthrough commands such as `check`, `build`, `test`, or `bench`.
 6. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
@@ -72,7 +73,7 @@
 
 ## `Run` Defaults
 - `Run` always builds a `cargo run -p <process>` command with `--release`.
-- `Run.process` should come from the current `LoadRunnableBuilds` response, not be guessed.
+- `Run.process` should be a known package name from the repo or from the user.
 - `Run` always sets cargo `--message-format=json`.
 - `Run.args` are app args placed after `--`.
 - `Run.standalone` is optional; default is `false` (in-Studio runview/framebuffer mode).
@@ -81,7 +82,7 @@
 
 ## `Cargo` Defaults
 - `Cargo` is passthrough for `args`, but injects `--message-format=json` when missing for supported subcommands (`build`, `check`, `run`, `test`, `bench`, `rustc`).
-- Do not use `Cargo` to launch UI programs when a Studio runnable exists; use `LoadRunnableBuilds` + `Run` instead.
+- Do not use `Cargo` to launch UI programs from the bridge; use `Run` instead.
 
 ## One-Flow Input Burst
 - Send this as one stdin write (multiple JSON lines, no sleeps):
@@ -123,11 +124,13 @@ grep -r "texture_2d" widgets/src/
 
 ## Running UI Programs
 
-Use the Studio runnable flow instead of launching UI apps directly from the shell:
+Use the Studio bridge `Run` flow instead of launching UI apps directly from the shell:
 
 1. Start the Studio remote bridge once.
-2. Send `{"LoadRunnableBuilds":{"mount":"makepad"}}`.
-3. Launch only a returned runnable with `{"Run":{"mount":"makepad","process":"<runnable-name>","args":[]}}`.
+2. Determine the package name locally.
+3. Launch it with `{"Run":{"mount":"makepad","process":"<package-name>","args":[]}}`.
+
+Do not use `ObserveMount` from the bridge. That call is for mount ownership/subscription and can steal RunView/framebuffer routing away from Studio desktop.
 
 Use direct shell cargo commands only for non-UI tasks such as `check`, `build`, `test`, and file/search operations.
 

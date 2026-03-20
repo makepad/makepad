@@ -361,6 +361,13 @@ pub enum HubToClient {
         x: Option<f64>,
         y: Option<f64>,
     },
+    RunViewKeyFocusRect {
+        build_id: QueryId,
+        x: Option<f64>,
+        y: Option<f64>,
+        width: Option<f64>,
+        height: Option<f64>,
+    },
     RunViewDestroyed {
         build_id: QueryId,
         window_id: usize,
