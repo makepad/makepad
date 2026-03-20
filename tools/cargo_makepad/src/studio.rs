@@ -463,6 +463,10 @@ fn emit_protocol_response(
                 },
             )
         }
+        HubToClient::BuildCleared { build_id } => {
+            state.auto_log_subscriptions.remove(&build_id);
+            write_protocol_response(out, HubToClient::BuildCleared { build_id })
+        }
         HubToClient::AppStarted { build_id } => {
             write_protocol_response(out, HubToClient::AppStarted { build_id })
         }
@@ -498,6 +502,7 @@ fn should_emit_protocol_response(msg: &HubToClient) -> bool {
             | HubToClient::RunItems { .. }
             | HubToClient::BuildStarted { .. }
             | HubToClient::BuildStopped { .. }
+            | HubToClient::BuildCleared { .. }
             | HubToClient::AppStarted { .. }
             | HubToClient::LogCleared
             | HubToClient::RunViewCreated { .. }

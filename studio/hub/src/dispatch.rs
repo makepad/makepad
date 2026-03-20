@@ -1158,6 +1158,23 @@ impl HubCore {
                     self.send_ui_error(client_id, err);
                 }
             }
+            ClientToHub::ClearBuild { build_id } => {
+                if self.process_manager.stop_build(build_id).is_ok() {
+                    self.send_build_cleanup_message(build_id);
+                    return;
+                }
+                let Some(buildbox_name) = self.remote_build_owner.get(&build_id).cloned() else {
+                    self.send_ui_error(client_id, format!("unknown build: {}", build_id.0));
+                    return;
+                };
+                if let Err(err) = self
+                    .send_to_buildbox_name(&buildbox_name, HubToBuildBox::StopBuild { build_id })
+                {
+                    self.send_ui_error(client_id, err);
+                } else {
+                    self.send_build_cleanup_message(build_id);
+                }
+            }
             ClientToHub::ForwardToApp { build_id, msg_bin } => {
                 let parsed_msgs = StudioToAppVec::deserialize_bin(&msg_bin).ok().map(|msgs| msgs.0);
                 let is_bootstrap = parsed_msgs.as_ref().is_some_and(|msgs| {
@@ -2429,6 +2446,15 @@ impl HubCore {
     fn send_runview_message(&self, build_id: QueryId, msg: HubToClient) {
         if let Some(client_id) = self.primary_ui_for_build(build_id) {
             self.send_ui_message(client_id, msg, self.ui_format(client_id));
+        } else {
+            self.broadcast_ui_message(msg);
+        }
+    }
+
+    fn send_build_cleanup_message(&self, build_id: QueryId) {
+        let msg = HubToClient::BuildCleared { build_id };
+        if let Some(client_id) = self.primary_ui_for_build(build_id) {
+            self.send_ui_reply(client_id, msg);
         } else {
             self.broadcast_ui_message(msg);
         }

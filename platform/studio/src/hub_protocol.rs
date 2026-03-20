@@ -115,6 +115,9 @@ pub enum ClientToHub {
     StopBuild {
         build_id: QueryId,
     },
+    ClearBuild {
+        build_id: QueryId,
+    },
 
     // === App Interaction (opaque payload for now) ===
     ForwardToApp {
@@ -301,6 +304,9 @@ pub enum HubToClient {
     BuildStopped {
         build_id: QueryId,
         exit_code: Option<i32>,
+    },
+    BuildCleared {
+        build_id: QueryId,
     },
     AppStarted {
         build_id: QueryId,
