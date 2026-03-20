@@ -68,22 +68,40 @@ script_mod! {
             dot_alpha: instance(0.0)
             ripple_radius: instance(5.0)
             ripple_alpha: instance(0.0)
+            shape_kind: instance(0.0)
+            corner_radius: instance(6.0)
+            stroke_width: instance(1.5)
             color: instance(vec4(0.0, 0.831, 1.0, 1.0))
             pixel: fn() {
                 if self.dot_alpha <= 0.001 && self.ripple_alpha <= 0.001 {
                     return vec4(0.0, 0.0, 0.0, 0.0)
                 }
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let c = self.rect_size * 0.5
-                let dot_r = self.dot_radius.min(self.rect_size.x * 0.5).min(self.rect_size.y * 0.5)
-                if self.dot_alpha > 0.001 {
-                    sdf.circle(c.x, c.y, dot_r)
-                    sdf.fill(vec4(self.color.xyz, self.dot_alpha))
+                if self.shape_kind < 0.5 {
+                    let c = self.rect_size * 0.5
+                    let dot_r = self.dot_radius.min(self.rect_size.x * 0.5).min(self.rect_size.y * 0.5)
+                    if self.dot_alpha > 0.001 {
+                        sdf.circle(c.x, c.y, dot_r)
+                        sdf.fill(vec4(self.color.xyz, self.dot_alpha))
+                    }
+                    if self.ripple_alpha > 0.001 {
+                        let ripple_r = self.ripple_radius.min(self.rect_size.x * 0.5).min(self.rect_size.y * 0.5)
+                        sdf.circle(c.x, c.y, ripple_r)
+                        sdf.stroke(vec4(self.color.xyz, self.ripple_alpha), self.stroke_width)
+                    }
                 }
-                if self.ripple_alpha > 0.001 {
-                    let ripple_r = self.ripple_radius.min(self.rect_size.x * 0.5).min(self.rect_size.y * 0.5)
-                    sdf.circle(c.x, c.y, ripple_r)
-                    sdf.stroke(vec4(self.color.xyz, self.ripple_alpha), 1.5)
+                else {
+                    let inset = self.stroke_width.max(0.5)
+                    let box_w = (self.rect_size.x - inset * 2.0).max(0.0)
+                    let box_h = (self.rect_size.y - inset * 2.0).max(0.0)
+                    let radius = self.corner_radius.min(box_w * 0.5).min(box_h * 0.5)
+                    sdf.box(inset, inset, box_w, box_h, radius)
+                    if self.dot_alpha > 0.001 {
+                        sdf.fill(vec4(self.color.xyz, self.dot_alpha))
+                    }
+                    if self.ripple_alpha > 0.001 {
+                        sdf.stroke(vec4(self.color.xyz, self.ripple_alpha), self.stroke_width)
+                    }
                 }
                 return sdf.result
             }
@@ -118,6 +136,7 @@ struct RunTarget {
 struct InputVizEvent {
     kind: RunViewInputVizKind,
     pos: Vec2d,
+    size: Option<Vec2d>,
 }
 
 #[derive(Clone, Debug)]
@@ -196,11 +215,19 @@ pub struct DesktopRunView {
     #[rust]
     ai_viz_pos: Vec2d,
     #[rust]
+    ai_viz_size: Option<Vec2d>,
+    #[rust]
     ai_viz_frames_left: u8,
     #[rust]
     ai_viz_total_frames: u8,
     #[rust]
     ai_viz_queue: VecDeque<InputVizEvent>,
+    #[rust]
+    pending_focus_viz_queue: VecDeque<RunViewInputVizKind>,
+    #[rust]
+    awaiting_focus_rect: bool,
+    #[rust]
+    input_focus_rect: Option<Rect>,
     #[rust]
     ime_pos: Option<Vec2d>,
     #[rust]
@@ -264,6 +291,10 @@ impl DesktopRunView {
         self.ai_viz_frames_left = 0;
         self.ai_viz_total_frames = 0;
         self.ai_viz_queue.clear();
+        self.ai_viz_size = None;
+        self.pending_focus_viz_queue.clear();
+        self.awaiting_focus_rect = false;
+        self.input_focus_rect = None;
         self.ime_pos = None;
         self.remote_mode = false;
         self.remote_frame_request_in_flight = false;
@@ -800,24 +831,43 @@ impl DesktopRunView {
         y: Option<f64>,
     ) {
         let has_target_size = self.last_rect.size.x > 0.0 && self.last_rect.size.y > 0.0;
-        let local_pos = match (x, y) {
-            (Some(x), Some(y)) => dvec2(x, y),
-            _ if has_target_size => dvec2(self.last_rect.size.x * 0.5, self.last_rect.size.y * 0.5),
-            _ => self.ai_viz_pos,
+        let event = match kind {
+            RunViewInputVizKind::ClickDown | RunViewInputVizKind::ClickUp => {
+                self.awaiting_focus_rect = true;
+                self.input_focus_rect = None;
+                let local_pos = match (x, y) {
+                    (Some(x), Some(y)) => dvec2(x, y),
+                    _ if has_target_size => {
+                        dvec2(self.last_rect.size.x * 0.5, self.last_rect.size.y * 0.5)
+                    }
+                    _ => self.ai_viz_pos,
+                };
+                let local_pos = dvec2(
+                    local_pos.x.clamp(0.0, self.last_rect.size.x.max(0.0)),
+                    local_pos.y.clamp(0.0, self.last_rect.size.y.max(0.0)),
+                );
+                InputVizEvent {
+                    kind,
+                    pos: local_pos,
+                    size: None,
+                }
+            }
+            RunViewInputVizKind::TypeText | RunViewInputVizKind::Return => {
+                if self.awaiting_focus_rect {
+                    self.pending_focus_viz_queue.push_back(kind);
+                    return;
+                }
+                let Some(focus_rect) = self.input_focus_rect else {
+                    return;
+                };
+                InputVizEvent {
+                    kind,
+                    pos: focus_rect.pos,
+                    size: Some(focus_rect.size),
+                }
+            }
         };
-        let local_pos = dvec2(
-            local_pos.x.clamp(0.0, self.last_rect.size.x.max(0.0)),
-            local_pos.y.clamp(0.0, self.last_rect.size.y.max(0.0)),
-        );
-        let event = InputVizEvent {
-            kind,
-            pos: local_pos,
-        };
-        if self.ai_viz_kind.is_some() {
-            self.ai_viz_queue.push_back(event);
-        } else {
-            self.start_input_viz(event);
-        }
+        self.enqueue_or_start_input_viz(event);
         self.redraw(cx);
     }
 
@@ -831,8 +881,49 @@ impl DesktopRunView {
         };
         self.ai_viz_kind = Some(event.kind);
         self.ai_viz_pos = event.pos;
+        self.ai_viz_size = event.size;
         self.ai_viz_frames_left = total_frames;
         self.ai_viz_total_frames = total_frames;
+    }
+
+    fn enqueue_or_start_input_viz(&mut self, event: InputVizEvent) {
+        if self.ai_viz_kind.is_some() {
+            self.ai_viz_queue.push_back(event);
+        } else {
+            self.start_input_viz(event);
+        }
+    }
+
+    fn set_input_focus_rect(
+        &mut self,
+        cx: &mut Cx,
+        x: Option<f64>,
+        y: Option<f64>,
+        width: Option<f64>,
+        height: Option<f64>,
+    ) {
+        self.input_focus_rect = match (x, y, width, height) {
+            (Some(x), Some(y), Some(width), Some(height)) if width > 0.0 && height > 0.0 => {
+                Some(Rect {
+                    pos: dvec2(x, y),
+                    size: dvec2(width, height),
+                })
+            }
+            _ => None,
+        };
+        self.awaiting_focus_rect = false;
+        if let Some(focus_rect) = self.input_focus_rect {
+            while let Some(kind) = self.pending_focus_viz_queue.pop_front() {
+                self.enqueue_or_start_input_viz(InputVizEvent {
+                    kind,
+                    pos: focus_rect.pos,
+                    size: Some(focus_rect.size),
+                });
+            }
+        } else {
+            self.pending_focus_viz_queue.clear();
+        }
+        self.redraw(cx);
     }
 
     fn local_from_area(&self, cx: &Cx, abs: Vec2d) -> Option<Vec2d> {
@@ -896,31 +987,82 @@ impl Widget for DesktopRunView {
                 let total = self.ai_viz_total_frames.max(1) as f32;
                 let frames_left = self.ai_viz_frames_left as f32;
                 let t = 1.0f32 - (frames_left / total);
-                let (color, dot_radius, dot_alpha, ripple_radius, ripple_alpha) = match kind {
-                    RunViewInputVizKind::ClickDown => {
-                        ([0.00, 0.83, 1.00, 1.0], 5.0f32, 0.95f32, 5.0f32, 0.45f32)
-                    }
-                    RunViewInputVizKind::ClickUp => (
-                        [0.00, 0.83, 1.00, 1.0],
-                        5.0f32,
-                        0.95f32 * (1.0f32 - t),
-                        5.0f32 + 17.0f32 * t,
-                        0.45f32 * (1.0f32 - t),
-                    ),
-                    RunViewInputVizKind::TypeText => (
-                        [1.00, 0.78, 0.24, 1.0],
-                        4.0f32,
-                        0.70f32 * (1.0f32 - t),
-                        8.0f32 + 16.0f32 * t,
-                        0.55f32 * (1.0f32 - t),
-                    ),
-                    RunViewInputVizKind::Return => (
-                        [0.36, 0.90, 0.50, 1.0],
-                        4.0f32,
-                        0.80f32 * (1.0f32 - t),
-                        8.0f32 + 18.0f32 * t,
-                        0.58f32 * (1.0f32 - t),
-                    ),
+                let (
+                    color,
+                    dot_radius,
+                    dot_alpha,
+                    ripple_radius,
+                    ripple_alpha,
+                    shape_kind,
+                    corner_radius,
+                    stroke_width,
+                    viz_rect,
+                ) = if let Some(size) = self.ai_viz_size {
+                    let pad = 2.0 + 4.0 * t as f64;
+                    let fill_alpha = match kind {
+                        RunViewInputVizKind::TypeText => 0.10f32 * (1.0f32 - t),
+                        RunViewInputVizKind::Return => 0.12f32 * (1.0f32 - t),
+                        _ => 0.0,
+                    };
+                    let outline_alpha = match kind {
+                        RunViewInputVizKind::TypeText => 0.70f32 * (1.0f32 - t),
+                        RunViewInputVizKind::Return => 0.80f32 * (1.0f32 - t),
+                        _ => 0.0,
+                    };
+                    let color = match kind {
+                        RunViewInputVizKind::TypeText => [1.00, 0.78, 0.24, 1.0],
+                        RunViewInputVizKind::Return => [0.36, 0.90, 0.50, 1.0],
+                        _ => [0.00, 0.83, 1.00, 1.0],
+                    };
+                    (
+                        color,
+                        0.0f32,
+                        fill_alpha,
+                        0.0f32,
+                        outline_alpha,
+                        1.0f32,
+                        6.0f32,
+                        2.0f32,
+                        Rect {
+                            pos: dvec2(
+                                rect.pos.x + self.ai_viz_pos.x - pad,
+                                rect.pos.y + self.ai_viz_pos.y - pad,
+                            ),
+                            size: dvec2(size.x + pad * 2.0, size.y + pad * 2.0),
+                        },
+                    )
+                } else {
+                    let (color, dot_radius, dot_alpha, ripple_radius, ripple_alpha) = match kind {
+                        RunViewInputVizKind::ClickDown => {
+                            ([0.00, 0.83, 1.00, 1.0], 5.0f32, 0.95f32, 5.0f32, 0.45f32)
+                        }
+                        RunViewInputVizKind::ClickUp => (
+                            [0.00, 0.83, 1.00, 1.0],
+                            5.0f32,
+                            0.95f32 * (1.0f32 - t),
+                            5.0f32 + 17.0f32 * t,
+                            0.45f32 * (1.0f32 - t),
+                        ),
+                        RunViewInputVizKind::TypeText => ([1.00, 0.78, 0.24, 1.0], 0.0, 0.0, 0.0, 0.0),
+                        RunViewInputVizKind::Return => ([0.36, 0.90, 0.50, 1.0], 0.0, 0.0, 0.0, 0.0),
+                    };
+                    (
+                        color,
+                        dot_radius,
+                        dot_alpha,
+                        ripple_radius,
+                        ripple_alpha,
+                        0.0f32,
+                        6.0f32,
+                        1.5f32,
+                        Rect {
+                            pos: dvec2(
+                                rect.pos.x + self.ai_viz_pos.x - 28.0,
+                                rect.pos.y + self.ai_viz_pos.y - 28.0,
+                            ),
+                            size: dvec2(56.0, 56.0),
+                        },
+                    )
                 };
                 self.draw_ai_viz
                     .draw_vars
@@ -942,18 +1084,21 @@ impl Widget for DesktopRunView {
                 );
                 self.draw_ai_viz
                     .draw_vars
+                    .set_dyn_instance(cx, id!(shape_kind), &[shape_kind]);
+                self.draw_ai_viz
+                    .draw_vars
+                    .set_dyn_instance(cx, id!(corner_radius), &[corner_radius]);
+                self.draw_ai_viz
+                    .draw_vars
+                    .set_dyn_instance(cx, id!(stroke_width), &[stroke_width]);
+                self.draw_ai_viz
+                    .draw_vars
                     .set_dyn_instance(cx, id!(color), &color);
-                let click_rect = Rect {
-                    pos: dvec2(
-                        rect.pos.x + self.ai_viz_pos.x - 28.0,
-                        rect.pos.y + self.ai_viz_pos.y - 28.0,
-                    ),
-                    size: dvec2(56.0, 56.0),
-                };
-                self.draw_ai_viz.draw_abs(cx, click_rect);
+                self.draw_ai_viz.draw_abs(cx, viz_rect);
                 self.ai_viz_frames_left = self.ai_viz_frames_left.saturating_sub(1);
                 if self.ai_viz_frames_left == 0 {
                     self.ai_viz_kind = None;
+                    self.ai_viz_size = None;
                     if let Some(next) = self.ai_viz_queue.pop_front() {
                         self.start_input_viz(next);
                     }
@@ -961,6 +1106,7 @@ impl Widget for DesktopRunView {
                 self.redraw(cx);
             } else {
                 self.ai_viz_kind = None;
+                self.ai_viz_size = None;
             }
         }
 
@@ -1165,6 +1311,19 @@ impl DesktopRunViewRef {
     ) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.show_input_viz(cx, kind, x, y);
+        }
+    }
+
+    pub fn set_input_focus_rect(
+        &self,
+        cx: &mut Cx,
+        x: Option<f64>,
+        y: Option<f64>,
+        width: Option<f64>,
+        height: Option<f64>,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_input_focus_rect(cx, x, y, width, height);
         }
     }
 

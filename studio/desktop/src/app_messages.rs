@@ -483,6 +483,31 @@ impl App {
                     dock.redraw_tab(cx, tab_id);
                 }
             }
+            HubToClient::RunViewKeyFocusRect {
+                build_id,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() else {
+                    return;
+                };
+                let Some(mount) = self
+                    .data
+                    .run_tab_state
+                    .get(&tab_id)
+                    .map(|state| state.mount.clone())
+                else {
+                    return;
+                };
+                if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                    dock.item(tab_id)
+                        .desktop_run_view(cx, ids!(run_view))
+                        .set_input_focus_rect(cx, x, y, width, height);
+                    dock.redraw_tab(cx, tab_id);
+                }
+            }
             HubToClient::QueryLogResults {
                 query_id,
                 entries,

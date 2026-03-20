@@ -13,8 +13,8 @@ use {
     },
     makepad_studio_protocol::{
         hub_protocol::FrameCodec, AppToStudio, EventSample, RunViewFrameData,
-        RunViewFrameRequest, ScreenshotResponse, StudioToApp, WidgetQueryResponse,
-        WidgetTreeDumpResponse,
+        RunViewFrameRequest, RunViewKeyFocusRect, ScreenshotResponse, StudioToApp,
+        WidgetQueryResponse, WidgetTreeDumpResponse,
     },
     std::cell::{Cell, RefCell},
     std::collections::{HashMap, HashSet},
@@ -290,6 +290,9 @@ impl Cx {
     #[allow(dead_code)]
     pub(crate) fn send_studio_widget_tree_dump_response(&mut self, request_id: u64) {
         self.widget_tree_dump_requests.push(request_id);
+        if self.in_draw_event || self.need_redrawing() {
+            return;
+        }
         self.try_send_studio_widget_tree_dump_responses();
     }
 
@@ -305,6 +308,29 @@ impl Cx {
             query,
             rects,
         }));
+    }
+
+    fn studio_key_focus_rect_response(&self) -> RunViewKeyFocusRect {
+        let area = self.key_focus();
+        if !area.is_valid(self) {
+            return RunViewKeyFocusRect::default();
+        }
+        let rect = area.rect(self);
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return RunViewKeyFocusRect::default();
+        }
+        RunViewKeyFocusRect {
+            x: Some(rect.pos.x),
+            y: Some(rect.pos.y),
+            width: Some(rect.size.x),
+            height: Some(rect.size.y),
+        }
+    }
+
+    fn send_studio_key_focus_rect_response(&self) {
+        Cx::send_studio_message(AppToStudio::RunViewKeyFocusRect(
+            self.studio_key_focus_rect_response(),
+        ));
     }
 
     fn widget_tree_dump_ready(dump: &str) -> bool {
@@ -338,6 +364,9 @@ impl Cx {
 
     pub(crate) fn try_send_studio_widget_tree_dump_responses(&mut self) {
         if self.widget_tree_dump_requests.is_empty() {
+            return;
+        }
+        if self.in_draw_event || self.need_redrawing() {
             return;
         }
         let dump = if let Some(callback) = self.widget_tree_dump_callback {
@@ -404,6 +433,7 @@ impl Cx {
                 self.call_event_handler(&Event::MouseUp(event));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.send_studio_key_focus_rect_response();
             }
             StudioToApp::Scroll(e) => {
                 self.call_event_handler(&Event::Scroll(crate::event::ScrollEvent {
@@ -655,6 +685,10 @@ impl Cx {
 
         self.call_event_handler(&Event::Draw(draw_event));
         self.in_draw_event = false;
+
+        if Cx::has_studio_web_socket() {
+            self.try_send_studio_widget_tree_dump_responses();
+        }
     }
 
     pub(crate) fn call_next_frame_event(&mut self, time: f64) {
