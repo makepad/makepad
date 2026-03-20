@@ -43,7 +43,7 @@ pub fn split_header_line<'a>(inp: &'a str, what: &str) -> Option<&'a str> {
     None
 }
 
-pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
+pub fn parse_url_path(url: &str, append_index_html: bool) -> Option<(String, Option<String>)> {
     // find the end_of_name skipping everything else
     let end_of_name = url.find(' ');
     end_of_name?;
@@ -58,7 +58,7 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
 
     let mut url = url[0..end_of_name].to_string();
 
-    if url.ends_with('/') {
+    if append_index_html && url.ends_with('/') {
         url.push_str("index.html");
     }
 
@@ -137,16 +137,16 @@ impl HttpServerHeaders {
         let path;
         if let Some(v) = split_header_line(&lines[0], "GET ") {
             verb = "GET";
-            path = parse_url_path(v)
+            path = parse_url_path(v, sec_websocket_key.is_none())
         } else if let Some(v) = split_header_line(&lines[0], "POST ") {
             verb = "POST";
-            path = parse_url_path(v)
+            path = parse_url_path(v, sec_websocket_key.is_none())
         } else if let Some(v) = split_header_line(&lines[0], "PUT ") {
             verb = "PUT";
-            path = parse_url_path(v)
+            path = parse_url_path(v, sec_websocket_key.is_none())
         } else if let Some(v) = split_header_line(&lines[0], "DELETE ") {
             verb = "DELETE";
-            path = parse_url_path(v)
+            path = parse_url_path(v, sec_websocket_key.is_none())
         } else {
             return None;
         }
@@ -165,5 +165,26 @@ impl HttpServerHeaders {
             accept_encoding,
             sec_websocket_key,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_url_path;
+
+    #[test]
+    fn appends_index_html_for_plain_http_directory_paths() {
+        assert_eq!(
+            parse_url_path("/ui/ HTTP/1.1\r\n", true),
+            Some(("/ui/index.html".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn preserves_trailing_slash_for_websocket_paths() {
+        assert_eq!(
+            parse_url_path("/ui/ HTTP/1.1\r\n", false),
+            Some(("/ui/".to_string(), None))
+        );
     }
 }

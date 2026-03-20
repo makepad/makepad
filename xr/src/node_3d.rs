@@ -42,6 +42,10 @@ pub struct Node3D {
     children: ComponentMap<LiveId, WidgetRef>,
     #[rust]
     child_order: Vec<LiveId>,
+    #[rust]
+    debug_logged_empty_draw: bool,
+    #[rust]
+    debug_logged_first_draw: bool,
 }
 
 impl Node3D {
@@ -192,6 +196,10 @@ impl Widget for Node3D {
         if call.method() == id!(render) && !result.is_err() {
             if let Some(me_obj) = call.me().as_object() {
                 self.script_apply(vm, &Apply::Reload, &mut Scope::empty(), me_obj.into());
+                log!(
+                    "node3d render applied children={}",
+                    self.child_order.len()
+                );
                 vm.cx_mut().redraw_all();
             }
         }
@@ -225,7 +233,15 @@ impl Widget for Node3D {
             .filter_map(|id| self.children.get(id).cloned())
             .collect();
         if child_refs.is_empty() {
+            if !self.debug_logged_empty_draw {
+                self.debug_logged_empty_draw = true;
+                log!("node3d draw skipped: no children");
+            }
             return DrawStep::done();
+        }
+        if !self.debug_logged_first_draw {
+            self.debug_logged_first_draw = true;
+            log!("node3d draw children={}", child_refs.len());
         }
 
         let parent_world = scene_node_world_transform_from_scope(scope);

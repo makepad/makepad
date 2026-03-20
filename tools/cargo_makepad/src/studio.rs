@@ -8,14 +8,20 @@ use makepad_studio_protocol::hub_protocol::{
 };
 use std::collections::{HashSet, VecDeque};
 use std::env;
-use std::io::{self, BufRead, Read, Write};
+#[cfg(unix)]
+use std::fs::File;
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_STUDIO_HOST_PORT: &str = "127.0.0.1:8001";
-const STUDIO_UI_PATH: &str = "/ui/";
+const STUDIO_UI_PATH: &str = "/ui";
+
+fn bridge_debug_enabled() -> bool {
+    env::var_os("MAKEPAD_STUDIO_BRIDGE_DEBUG").is_some()
+}
 
 struct BridgeState {
     client_id: Option<ClientId>,
@@ -49,7 +55,10 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
     let mut studio: Option<String> = None;
     while index < args.len() {
         let arg = &args[index];
-        if let Some(v) = arg.strip_prefix("--studio=") {
+        if arg == "studio_remote" {
+            index += 1;
+            continue;
+        } else if let Some(v) = arg.strip_prefix("--studio=") {
             studio = Some(v.to_string());
         } else if arg == "--studio" {
             index += 1;
@@ -112,6 +121,14 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
         connect_websocket(socket_addr, &host_header, STUDIO_UI_PATH).map_err(|err| {
             format!("failed to connect to studio websocket at {addr}{STUDIO_UI_PATH}: {err}")
         })?;
+    if bridge_debug_enabled() {
+        eprintln!(
+            "studio remote debug: connected to {}{} leftover_bytes={}",
+            addr,
+            STUDIO_UI_PATH,
+            leftover.len()
+        );
+    }
     let mut read_stream = stream
         .try_clone()
         .map_err(|e| format!("failed to clone websocket stream for reading: {e}"))?;
@@ -139,12 +156,50 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
     let (stdin_tx, stdin_rx) = mpsc::channel::<Option<String>>();
     thread::spawn(move || {
         let stdin = io::stdin();
+        let stdin_is_terminal = stdin.is_terminal();
         let mut stdin = stdin.lock();
+        #[cfg(unix)]
+        let mut tty_reader = if io::stdout().is_terminal() || io::stderr().is_terminal() {
+            File::open("/dev/tty").ok().map(io::BufReader::new)
+        } else {
+            None
+        };
         let mut line = String::new();
+        let mut received_any_input = false;
+        let mut using_tty_reader = false;
         loop {
             line.clear();
-            match stdin.read_line(&mut line) {
+            let read_result = if using_tty_reader {
+                #[cfg(unix)]
+                {
+                    if let Some(reader) = tty_reader.as_mut() {
+                        reader.read_line(&mut line)
+                    } else {
+                        Ok(0)
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    Ok(0)
+                }
+            } else {
+                stdin.read_line(&mut line)
+            };
+
+            match read_result {
                 Ok(0) => {
+                    if !using_tty_reader && !received_any_input {
+                        #[cfg(unix)]
+                        if tty_reader.is_some() {
+                            using_tty_reader = true;
+                            thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
+                    }
+                    if stdin_is_terminal || using_tty_reader {
+                        thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
                     let _ = stdin_tx.send(None);
                     break;
                 }
@@ -153,9 +208,22 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
                     if text.is_empty() {
                         continue;
                     }
+                    received_any_input = true;
                     let _ = stdin_tx.send(Some(text));
                 }
                 Err(_) => {
+                    if !using_tty_reader && !received_any_input {
+                        #[cfg(unix)]
+                        if tty_reader.is_some() {
+                            using_tty_reader = true;
+                            thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
+                    }
+                    if stdin_is_terminal || using_tty_reader {
+                        thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
                     let _ = stdin_tx.send(None);
                     break;
                 }
@@ -172,7 +240,12 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
             match line {
                 Some(line) => {
                     match ClientToHub::deserialize_json(&line) {
-                        Ok(msg) => pending_requests.push_back(msg),
+                        Ok(msg) => {
+                            if bridge_debug_enabled() {
+                                eprintln!("studio remote debug: queued request {msg:?}");
+                            }
+                            pending_requests.push_back(msg)
+                        }
                         Err(err) => {
                             eprintln!("studio remote: invalid request json (expected ClientToHub): {err:?}");
                         }
@@ -181,6 +254,9 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
                 }
                 None => {
                     stdin_closed = true;
+                    if bridge_debug_enabled() {
+                        eprintln!("studio remote debug: stdin closed");
+                    }
                     if shutdown_deadline.is_none() {
                         shutdown_deadline = Some(Instant::now() + Duration::from_millis(700));
                     }
@@ -193,7 +269,15 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
                 break;
             };
             match make_envelope(&mut state, msg) {
-                Ok(envelope) => send_ui_envelope(&write_stream, envelope)?,
+                Ok(envelope) => {
+                    if bridge_debug_enabled() {
+                        eprintln!(
+                            "studio remote debug: sending envelope query_id={:?}",
+                            envelope.query_id
+                        );
+                    }
+                    send_ui_envelope(&write_stream, envelope)?
+                }
                 Err(err) => {
                     eprintln!("studio remote: {err}");
                     break;
@@ -202,8 +286,23 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
         }
 
         let read = match read_stream.read(&mut recv_buf) {
-            Ok(0) => break,
-            Ok(n) => n,
+            Ok(0) => {
+                if bridge_debug_enabled() {
+                    eprintln!("studio remote debug: websocket read returned EOF");
+                }
+                if state.client_id.is_none() {
+                    return Err(format!(
+                        "studio websocket closed before hello at {addr}{STUDIO_UI_PATH}"
+                    ));
+                }
+                break;
+            }
+            Ok(n) => {
+                if bridge_debug_enabled() {
+                    eprintln!("studio remote debug: read {} websocket bytes", n);
+                }
+                n
+            }
             Err(err)
                 if matches!(
                     err.kind(),
@@ -234,6 +333,9 @@ fn run_studio_remote(target: (String, u16)) -> Result<(), String> {
             && pending_requests.is_empty()
             && shutdown_deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
+            if bridge_debug_enabled() {
+                eprintln!("studio remote debug: shutdown deadline reached");
+            }
             break;
         }
     }
@@ -314,6 +416,9 @@ fn emit_protocol_response(
 
     match msg {
         HubToClient::Hello { client_id } => {
+            if bridge_debug_enabled() {
+                eprintln!("studio remote debug: received Hello for client_id={client_id:?}");
+            }
             state.client_id = Some(client_id);
             state.next_counter = 0;
             state.auto_log_subscriptions.clear();
@@ -394,6 +499,7 @@ fn should_emit_protocol_response(msg: &HubToClient) -> bool {
             | HubToClient::BuildStarted { .. }
             | HubToClient::BuildStopped { .. }
             | HubToClient::AppStarted { .. }
+            | HubToClient::LogCleared
             | HubToClient::RunViewCreated { .. }
             | HubToClient::QueryLogResults { .. }
             | HubToClient::Screenshot { .. }

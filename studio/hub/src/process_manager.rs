@@ -7,7 +7,7 @@ use makepad_script_std::{
 use makepad_studio_protocol::hub_protocol::{BuildInfo, QueryId, RunItem};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -471,6 +471,21 @@ fn install_hub_script_stdio(vm: &mut ScriptVm) {
 
     vm.add_method(
         std,
+        id_lut!(log),
+        script_args_def!(what = NIL),
+        |vm, args| {
+            let what = script_value!(vm, args.what);
+            let line = script_value_to_string(vm, what);
+            vm.host
+                .downcast_mut::<ScriptBuildHost>()
+                .unwrap()
+                .emit_output(line, false);
+            NIL
+        },
+    );
+
+    vm.add_method(
+        std,
         id_lut!(print),
         script_args_def!(what = NIL),
         |vm, args| {
@@ -479,9 +494,7 @@ fn install_hub_script_stdio(vm: &mut ScriptVm) {
             vm.host
                 .downcast_mut::<ScriptBuildHost>()
                 .unwrap()
-                .emit_output(line.clone(), false);
-            print!("{line}");
-            let _ = io::stdout().flush();
+                .emit_output(line, false);
             NIL
         },
     );
@@ -496,8 +509,7 @@ fn install_hub_script_stdio(vm: &mut ScriptVm) {
             vm.host
                 .downcast_mut::<ScriptBuildHost>()
                 .unwrap()
-                .emit_output(line.clone(), false);
-            println!("{line}");
+                .emit_output(line, false);
             NIL
         },
     );
@@ -1061,6 +1073,10 @@ impl ProcessManager {
         let mut builds: Vec<BuildInfo> = self.builds.values().map(|b| b.info.clone()).collect();
         builds.sort_by_key(|b| b.build_id.0);
         builds
+    }
+
+    pub fn package_for_build(&self, build_id: QueryId) -> Option<&str> {
+        self.builds.get(&build_id).map(|build| build.info.package.as_str())
     }
 }
 

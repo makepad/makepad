@@ -92,6 +92,9 @@ script_mod! {
                 text: "x"
                 padding: Inset {left: 4.0 right: 4.0 top: 0.0 bottom: 0.0}
             }
+            clear_log := ButtonFlatter {
+                text: "Clear"
+            }
             log_open_profiler := ButtonFlatterIcon {
                 width: 24.0
                 height: 24.0
@@ -112,11 +115,7 @@ script_mod! {
         profiler_view := DesktopProfilerView {}
     }
 
-    let LogFirstPane = RectView {
-        draw_bg +: {
-            color: theme.color_bg_container
-        }
-    }
+    let LogFirstPane = LogPane {}
 
     let TerminalPane = View {
         width: Fill
@@ -373,7 +372,7 @@ script_mod! {
                         }
 
                         log_first := DockTab {
-                            name: ""
+                            name: "Logs"
                             template: @LogFirstTab
                             kind: @LogFirstPane
                         }

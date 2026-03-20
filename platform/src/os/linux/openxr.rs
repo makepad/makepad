@@ -991,6 +991,7 @@ impl CxOpenXrFrame {
         let screen_near_z = 0.05;
         #[cfg(not(use_vulkan))]
         let screen_near_z = 0.1;
+        let screen_far_z = 15.0;
 
         for eye in 0..2 {
             let head_from_eye = projections[eye].pose;
@@ -1018,7 +1019,7 @@ impl CxOpenXrFrame {
             let eye_from_local = local_from_eye.invert();
             eyes[eye].view_mat = eye_from_local.to_mat4();
             eyes[eye].proj_mat =
-                Mat4f::from_camera_fov(&projections[eye].fov, screen_near_z, 100.0);
+                Mat4f::from_camera_fov(&projections[eye].fov, screen_near_z, screen_far_z);
         }
 
         Ok(CxOpenXrFrame {
@@ -1029,7 +1030,7 @@ impl CxOpenXrFrame {
             eyes,
             swap_chain_index,
             screen_near_z,
-            screen_far_z: 10.0,
+            screen_far_z,
         })
         //projection_info
         //crate::log!("{:?}", fs);

@@ -1,10 +1,22 @@
 use {
     crate::{
-        cx::Cx, makepad_live_id::live_id_num, makepad_math::*, makepad_micro_serde::*, Area,
-        CxWindowPool, DigitDevice, FingerDownEvent, Hit, HitOptions, Inset, KeyModifiers, LiveId,
+        cx::Cx,
+        event::DigitId,
+        makepad_live_id::live_id_num,
+        makepad_math::*,
+        makepad_micro_serde::*,
+        Area,
+        CxWindowPool,
+        DigitDevice,
+        FingerDownEvent,
+        Hit,
+        HitOptions,
+        Inset,
+        KeyModifiers,
+        LiveId,
         SmallVec,
     },
-    std::rc::Rc,
+    std::{cell::Cell, rc::Rc},
 };
 
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
@@ -241,16 +253,16 @@ impl XrHand {
         self.tip_pos(0, XrHand::THUMB_KNUCKLE2)
     }
     pub fn tip_pos_index(&self) -> Vec3f {
-        self.tip_pos(0, XrHand::INDEX_KNUCKLE3)
+        self.tip_pos(Self::INDEX_TIP, XrHand::INDEX_KNUCKLE3)
     }
     pub fn tip_pos_middle(&self) -> Vec3f {
-        self.tip_pos(0, XrHand::MIDDLE_KNUCKLE3)
+        self.tip_pos(Self::MIDDLE_TIP, XrHand::MIDDLE_KNUCKLE3)
     }
     pub fn tip_pos_ring(&self) -> Vec3f {
-        self.tip_pos(0, XrHand::RING_KNUCKLE3)
+        self.tip_pos(Self::RING_TIP, XrHand::RING_KNUCKLE3)
     }
     pub fn tip_pos_little(&self) -> Vec3f {
-        self.tip_pos(0, XrHand::LITTLE_KNUCKLE3)
+        self.tip_pos(Self::LITTLE_TIP, XrHand::LITTLE_KNUCKLE3)
     }
 }
 
@@ -259,6 +271,7 @@ pub struct XrFingerTip {
     pub index: usize,
     pub is_left: bool,
     pub pos: Vec3f,
+    pub handled: Cell<Area>,
 }
 
 #[derive(Clone, Debug)]
@@ -392,28 +405,56 @@ impl XrUpdateEvent {
 }
 
 impl XrLocalEvent {
-    pub fn from_update_event(e: &XrUpdateEvent, mat: &Mat4f) -> XrLocalEvent {
-        // alright we have a matrix, take the inverse
-        // then mul all the fingertips and store them in fingertips
-        // then use that
-        let _inv = mat.invert();
-        // lets collect all fingertips
-        let finger_tips = SmallVec::new();
-        for (_hindex, hand) in [&e.state.left_hand, &e.state.right_hand].iter().enumerate() {
-            if hand.in_view() {
-                for (_index, _joint) in hand.joints.iter().enumerate() {
-                    /*if XrHand::is_tip(index){
-                        let pos = inv.transform_vec4(joint.pose.position.to_vec4()).to_vec3f();
-                        // todo, ignore all non-push orientations (probably a halfdome)
-                        finger_tips.push(XrFingerTip{
-                            index: index,
-                            is_left: hindex == 0,
-                            pos
-                        })
-                    }*/
-                }
-            }
+    const XR_TOUCH_DOWN_FRONT: f32 = 16.0;
+    const XR_TOUCH_DOWN_BACK: f32 = -20.0;
+    const XR_TOUCH_RELEASE_FRONT: f32 = 28.0;
+    const XR_TOUCH_RELEASE_BACK: f32 = -36.0;
+
+    fn fingertip_digit_id(is_left: bool) -> DigitId {
+        live_id_num!(xrfinger, if is_left { 1 } else { 0 }).into()
+    }
+
+    fn fingertip_device(is_left: bool) -> DigitDevice {
+        DigitDevice::XrHand {
+            is_left,
+            index: XrHand::INDEX_TIP,
         }
+    }
+
+    fn tip_for_digit(&self, digit_id: DigitId) -> Option<&XrFingerTip> {
+        self.finger_tips
+            .iter()
+            .find(|tip| Self::fingertip_digit_id(tip.is_left) == digit_id)
+    }
+
+    fn collect_index_tip(finger_tips: &mut SmallVec<[XrFingerTip; 10]>, hand: &XrHand, is_left: bool, inv: &Mat4f) {
+        if !hand.in_view() || !hand.tip_active(XrHand::INDEX_TIP) {
+            return;
+        }
+        let pos = inv
+            .transform_vec4(hand.tip_pos_index().to_vec4())
+            .to_vec3f();
+        finger_tips.push(XrFingerTip {
+            index: XrHand::INDEX_TIP,
+            is_left,
+            pos,
+            handled: Cell::new(Area::Empty),
+        });
+    }
+
+    fn tip_is_touching_for_down(tip: &XrFingerTip) -> bool {
+        tip.pos.z <= Self::XR_TOUCH_DOWN_FRONT && tip.pos.z >= Self::XR_TOUCH_DOWN_BACK
+    }
+
+    fn tip_is_touching_for_capture(tip: &XrFingerTip) -> bool {
+        tip.pos.z <= Self::XR_TOUCH_RELEASE_FRONT && tip.pos.z >= Self::XR_TOUCH_RELEASE_BACK
+    }
+
+    pub fn from_update_event(e: &XrUpdateEvent, mat: &Mat4f) -> XrLocalEvent {
+        let inv = mat.invert();
+        let mut finger_tips = SmallVec::new();
+        Self::collect_index_tip(&mut finger_tips, &e.state.left_hand, true, &inv);
+        Self::collect_index_tip(&mut finger_tips, &e.state.right_hand, false, &inv);
 
         XrLocalEvent {
             finger_tips,
@@ -421,6 +462,26 @@ impl XrLocalEvent {
             time: e.state.time,
             update: e.clone(),
         }
+    }
+
+    pub fn process_end(&self, cx: &mut Cx) {
+        for is_left in [true, false] {
+            let digit_id = Self::fingertip_digit_id(is_left);
+            if let Some(tip) = self
+                .finger_tips
+                .iter()
+                .find(|tip| tip.is_left == is_left)
+            {
+                cx.fingers.cycle_hover_area(digit_id);
+                if !Self::tip_is_touching_for_capture(tip) {
+                    cx.fingers.release_digit(digit_id);
+                }
+            } else {
+                cx.fingers.release_digit(digit_id);
+                cx.fingers.remove_hover(digit_id);
+            }
+        }
+        cx.fingers.switch_captures();
     }
 
     pub fn hits_with_options_and_test<F>(
@@ -433,64 +494,111 @@ impl XrLocalEvent {
     where
         F: Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
     {
-        let rect = area.clipped_rect(cx);
-        for tip in &self.finger_tips {
-            let abs = tip.pos.to_vec2().into();
-            // alright so. how do we clean this up
+        if cx.fingers.test_sweep_lock(options.sweep_area) {
+            return Hit::Nothing;
+        }
 
-            if hit_test(abs, &rect, &options.margin) {
-                if tip.pos.z < 20.0 && tip.pos.z > -30.0 {
-                    let device = DigitDevice::XrHand {
-                        is_left: tip.is_left,
-                        index: tip.index,
-                    };
-                    let digit_id = live_id_num!(
-                        xrfinger,
-                        tip.index as u64 + if tip.is_left { 10 } else { 0 }
-                    )
-                    .into();
-                    cx.fingers
-                        .capture_digit(digit_id, area, options.sweep_area, self.time, abs);
-                    return Hit::FingerDown(FingerDownEvent {
+        let rect = area.clipped_rect(cx);
+        if let Some(digit_id) = cx.fingers.find_digit_for_captured_area(area) {
+            if let Some(tip) = self.tip_for_digit(digit_id) {
+                if let Some(capture) = cx.fingers.find_digit_capture(digit_id) {
+                    let abs = tip.pos.to_vec2().into();
+                    let abs_start = capture.abs_start;
+                    let capture_time = capture.time;
+                    let has_long_press_occurred = capture.has_long_press_occurred;
+                    let tap_count = cx.fingers.tap_count();
+                    let device = Self::fingertip_device(tip.is_left);
+                    let is_over = hit_test(abs, &rect, &options.margin);
+                    if is_over {
+                        cx.fingers.new_hover_area(digit_id, area);
+                    }
+                    if Self::tip_is_touching_for_capture(tip) {
+                        return Hit::FingerMove(crate::FingerMoveEvent {
+                            window_id: CxWindowPool::id_zero(),
+                            abs,
+                            digit_id,
+                            device,
+                            has_long_press_occurred,
+                            tap_count,
+                            modifiers: self.modifiers,
+                            time: self.time,
+                            abs_start,
+                            rect,
+                            is_over,
+                        });
+                    }
+                    return Hit::FingerUp(crate::FingerUpEvent {
                         window_id: CxWindowPool::id_zero(),
                         abs,
+                        abs_start,
+                        capture_time,
+                        time: self.time,
                         digit_id,
                         device,
-                        tap_count: cx.fingers.tap_count(),
+                        has_long_press_occurred,
+                        tap_count,
                         modifiers: self.modifiers,
-                        time: self.time,
                         rect,
+                        is_over,
+                        is_sweep: false,
                     });
                 }
+            } else if let Some(capture) = cx.fingers.find_area_capture(area) {
+                let abs_start = capture.abs_start;
+                let capture_time = capture.time;
+                let has_long_press_occurred = capture.has_long_press_occurred;
+                let is_left = digit_id == Self::fingertip_digit_id(true);
+                return Hit::FingerUp(crate::FingerUpEvent {
+                    window_id: CxWindowPool::id_zero(),
+                    abs: abs_start,
+                    abs_start,
+                    capture_time,
+                    time: self.time,
+                    digit_id,
+                    device: Self::fingertip_device(is_left),
+                    has_long_press_occurred,
+                    tap_count: cx.fingers.tap_count(),
+                    modifiers: self.modifiers,
+                    rect,
+                    is_over: false,
+                    is_sweep: false,
+                });
             }
         }
-        /*
-        if let Some(capture) = cx.fingers.find_area_capture(area) {
-            let digit_id = live_id_num!(xrfinger, 0).into();
-            let device = DigitDevice::XrHand { is_left: false, index: 0 };
-            return Hit::FingerUp(FingerUpEvent {
-                abs_start: capture.abs_start,
-                rect,
-                window_id: CxWindowPool::id_zero(),
-                abs: dvec2(0.0,0.0),
-                digit_id,
-                device,
-                has_long_press_occurred: false,
-                capture_time: capture.time,
-                modifiers: self.modifiers,
-                time: self.time,
-                tap_count: 0,
-                is_over: false,
-                is_sweep: false,
-            })
-        }
-        */
-        // alright lets implement hits for XrUpdateEvent and our area.
-        // our area is a rect in space and our finger tip is a point
-        // we should multiply our orientation with the inverse of the window matrix
-        // and then we should be in the UI space
-        // then its just xy and z
 
+        for tip in &self.finger_tips {
+            if !Self::tip_is_touching_for_down(tip) {
+                continue;
+            }
+
+            let digit_id = Self::fingertip_digit_id(tip.is_left);
+            if cx.fingers.find_digit_capture(digit_id).is_some() {
+                continue;
+            }
+            if !options.capture_overload && !tip.handled.get().is_empty() {
+                continue;
+            }
+
+            let abs = tip.pos.to_vec2().into();
+            if hit_test(abs, &rect, &options.margin) {
+                let device = Self::fingertip_device(tip.is_left);
+                cx.fingers.process_tap_count(abs, self.time);
+                cx.fingers
+                    .capture_digit(digit_id, area, options.sweep_area, self.time, abs);
+                cx.fingers.new_hover_area(digit_id, area);
+                tip.handled.set(area);
+                return Hit::FingerDown(FingerDownEvent {
+                    window_id: CxWindowPool::id_zero(),
+                    abs,
+                    digit_id,
+                    device,
+                    tap_count: cx.fingers.tap_count(),
+                    modifiers: self.modifiers,
+                    time: self.time,
+                    rect,
+                });
+            }
+        }
         return Hit::Nothing;
     }
 }

@@ -2,9 +2,11 @@
 
 ## Execution Policy
 - Visual UI programs must be launched and controlled through the Makepad Studio remote protocol.
+- For any UI/app launch, first query Studio runnables and only start items returned by `LoadRunnableBuilds`.
+- Do not launch UI programs with raw `cargo run`, `cargo makepad`, or ad hoc cargo invocation when a runnable item exists.
 - Command-line-only tasks (builds, tests, linting, file ops, grep/ripgrep, etc.) can be run directly in the shell.
 - Prefer studio remote control for any workflow that needs screenshots, widget queries, clicks, typing, or runtime UI inspection.
-- Before using Studio protocol tools (`FindInFiles`, `ReadTextRange`, `WidgetTreeDump`, `WidgetQuery`, `Screenshot`, `Click`, `TypeText`, `Return`), always start one persistent `cargo makepad studio` background process and reuse it for the entire interaction.
+- Before using Studio protocol tools (`FindInFiles`, `ReadTextRange`, `WidgetTreeDump`, `WidgetQuery`, `Screenshot`, `Click`, `TypeText`, `Return`), always start one persistent Studio remote bridge process and reuse it for the entire interaction.
 
 ## Assumptions
 - Studio is started manually by the user.
@@ -14,8 +16,7 @@
 
 ## Start Studio Remote
 - Command:
-  - `cargo run -p cargo-makepad --release -- studio --studio=127.0.0.1:8001`
-  - Explicit mode: `cargo run -p cargo-makepad --release -- studio studio_remote --studio=127.0.0.1:8001`
+  - `target/release/cargo-makepad studio --studio=127.0.0.1:8001`
 - Send newline-delimited JSON requests on stdin.
 - Read newline-delimited JSON responses on stdout.
 - Protocol shape is `UIToStudio` requests and filtered `StudioToUI` responses.
@@ -23,9 +24,9 @@
 ## Request Protocol (JSON Lines)
 - `{"ListBuilds":[]}`
 - `{"LoadRunnableBuilds":{"mount":"makepad"}}`
-- `{"Cargo":{"mount":"makepad","args":["check","-p","makepad-example-splash"],"env":null,"buildbox":null}}`
 - `{"Run":{"mount":"makepad","process":"makepad-example-splash","args":[]}}`
 - `{"Run":{"mount":"makepad","process":"makepad-example-splash","args":["--my-app-arg"]}}`
+- `{"Cargo":{"mount":"makepad","args":["check","-p","makepad-example-splash"],"env":null,"buildbox":null}}`
 - `{"FindInFiles":{"mount":"makepad","pattern":"UIToStudio::","is_regex":false,"glob":null,"max_results":200}}`
 - `{"FindInFiles":{"mount":"makepad","pattern":"UIToStudio::(FindInFiles|ReadTextRange)","is_regex":true,"glob":"**/*.rs","max_results":200}}`
 - `{"ReadTextRange":{"path":"makepad/studio/backend/src/dispatch.rs","start_line":640,"end_line":720}}`
@@ -61,15 +62,17 @@
 
 ## Recommended Control Flow
 1. Start studio remote process once.
-2. For code search, use `FindInFiles` first, then `ReadTextRange` to window exact regions.
-3. Prefer `Run` for app execution and wait for `BuildStarted`.
-4. Use `Cargo` only for raw cargo passthrough commands.
-5. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
-6. For text input, click field first, then send text, then return.
-7. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
+2. For app execution, call `LoadRunnableBuilds` and pick the exact runnable item you want.
+3. Start UI apps only through `Run`, and wait for `BuildStarted`.
+4. For code search, use `FindInFiles` first, then `ReadTextRange` to window exact regions.
+5. Use `Cargo` only for non-launch cargo passthrough commands such as `check`, `build`, `test`, or `bench`.
+6. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
+7. For text input, click field first, then send text, then return.
+8. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
 
 ## `Run` Defaults
 - `Run` always builds a `cargo run -p <process>` command with `--release`.
+- `Run.process` should come from the current `LoadRunnableBuilds` response, not be guessed.
 - `Run` always sets cargo `--message-format=json`.
 - `Run.args` are app args placed after `--`.
 - `Run.standalone` is optional; default is `false` (in-Studio runview/framebuffer mode).
@@ -78,6 +81,7 @@
 
 ## `Cargo` Defaults
 - `Cargo` is passthrough for `args`, but injects `--message-format=json` when missing for supported subcommands (`build`, `check`, `run`, `test`, `bench`, `rustc`).
+- Do not use `Cargo` to launch UI programs when a Studio runnable exists; use `LoadRunnableBuilds` + `Run` instead.
 
 ## One-Flow Input Burst
 - Send this as one stdin write (multiple JSON lines, no sleeps):
@@ -119,9 +123,13 @@ grep -r "texture_2d" widgets/src/
 
 ## Running UI Programs
 
-```bash
-RUST_BACKTRACE=1 cargo run -p makepad-example-splash --release & PID=$!; sleep 15; kill $PID 2>/dev/null; echo "Process $PID killed"
-```
+Use the Studio runnable flow instead of launching UI apps directly from the shell:
+
+1. Start the Studio remote bridge once.
+2. Send `{"LoadRunnableBuilds":{"mount":"makepad"}}`.
+3. Launch only a returned runnable with `{"Run":{"mount":"makepad","process":"<runnable-name>","args":[]}}`.
+
+Use direct shell cargo commands only for non-UI tasks such as `check`, `build`, `test`, and file/search operations.
 
 ## Cargo.toml Setup
 

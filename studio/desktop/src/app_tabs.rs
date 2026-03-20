@@ -46,7 +46,7 @@ impl App {
         let Some(anchor_tab_id) = self.find_editor_anchor_tab(&dock, mount) else {
             return None;
         };
-        let (tab_bar, pos) = dock.find_tab_bar_of_tab(anchor_tab_id)?;
+        let (tab_bar, pos) = Self::reachable_tab_bar_of_tab(&dock, anchor_tab_id)?;
         let tab_id = dock.unique_id(LiveId::from_str(path).0);
         let created = if select {
             dock.create_and_select_tab(
@@ -255,6 +255,31 @@ impl App {
         self.set_status(cx, "saving...");
     }
 
+    pub(super) fn reachable_tab_bar_of_tab(
+        dock: &DockRef,
+        tab_id: LiveId,
+    ) -> Option<(LiveId, usize)> {
+        let dock_items = dock.clone_state()?;
+        let mut stack = vec![id!(root)];
+        while let Some(item_id) = stack.pop() {
+            match dock_items.get(&item_id)? {
+                DockItem::Splitter { a, b, .. } => {
+                    stack.push(*b);
+                    stack.push(*a);
+                }
+                // Anchor insertion against the live reachable dock tree, not stale runtime
+                // items that may still linger in the raw dock state map.
+                DockItem::Tabs { tabs, .. } => {
+                    if let Some(pos) = tabs.iter().position(|candidate| *candidate == tab_id) {
+                        return Some((item_id, pos));
+                    }
+                }
+                DockItem::Tab { .. } => {}
+            }
+        }
+        None
+    }
+
     fn create_dock_tab(
         dock: &DockRef,
         cx: &mut Cx,
@@ -264,7 +289,7 @@ impl App {
         title: String,
         select: bool,
     ) -> Option<()> {
-        let (tab_bar, pos) = dock.find_tab_bar_of_tab(anchor)?;
+        let (tab_bar, pos) = Self::reachable_tab_bar_of_tab(dock, anchor)?;
         let created = if select {
             dock.create_and_select_tab(
                 cx,

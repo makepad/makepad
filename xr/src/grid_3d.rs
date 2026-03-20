@@ -81,6 +81,8 @@ pub struct Grid3D {
     scale: Vec3f,
     #[live(vec4(0.58, 0.60, 0.63, 1.0))]
     color: Vec4f,
+    #[rust]
+    debug_logged_first_draw: bool,
 }
 
 impl Widget for Grid3D {
@@ -90,6 +92,19 @@ impl Widget for Grid3D {
         };
         let cx = &mut Cx2d::new(cx.cx);
         let parent_world = scene_node_world_transform_from_scope(scope);
+        if !self.debug_logged_first_draw {
+            self.debug_logged_first_draw = true;
+            log!(
+                "grid3d draw size={} position={:?} parent_world_t={:?}",
+                self.size,
+                self.position,
+                vec3(
+                    parent_world.v[12],
+                    parent_world.v[13],
+                    parent_world.v[14]
+                )
+            );
+        }
 
         apply_scene_to_draw_pbr(&mut self.draw_pbr, cx, &scene);
         self.draw_pbr.env_intensity = 0.25;
