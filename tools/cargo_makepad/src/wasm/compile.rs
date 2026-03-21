@@ -218,7 +218,8 @@ pub fn generate_html(
             let wasm = await init({{module_or_path: module}}, env);
             set_wasm(wasm);
 
-            wasm._has_thread_support = wasm.exports.memory.buffer instanceof SharedArrayBuffer;
+            wasm._has_thread_support = typeof SharedArrayBuffer !== 'undefined'
+                && wasm.exports.memory.buffer instanceof SharedArrayBuffer;
             wasm._memory = wasm.exports.memory;
             wasm._module = module;
             const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
@@ -251,6 +252,11 @@ pub fn generate_html(
     };
     let auto_reload_script = if config.hot_reload {
         "\n        <script type='module' src='./makepad_platform/auto_reload.js'></script>"
+    } else {
+        ""
+    };
+    let small_font_aliases = if config.small_fonts {
+        "\n            window.makepad_small_font_aliases = true;"
     } else {
         ""
     };
@@ -322,6 +328,7 @@ pub fn generate_html(
             }});
 
             try {{
+                {small_font_aliases}
                 {init}
                 class MyWasmApp {{
                     constructor(wasm) {{
@@ -385,6 +392,17 @@ fn remove_brotli_artifact(dest_path: &PathBuf) {
         None => return,
     };
     let _ = fs::remove_file(dest_path_br);
+}
+
+fn small_font_fallback_target(file_name: &str) -> Option<&'static str> {
+    match file_name {
+        "GoNotoKurrent-Bold.ttf" => Some("IBMPlexSans-SemiBold.ttf"),
+        "GoNotoKurrent-Regular.ttf" => Some("IBMPlexSans-Text.ttf"),
+        "LXGWWenKaiBold.ttf" => Some("IBMPlexSans-Text.ttf"),
+        "LXGWWenKaiRegular.ttf" => Some("IBMPlexSans-Text.ttf"),
+        "NotoColorEmoji.ttf" => Some("IBMPlexSans-Text.ttf"),
+        _ => None,
+    }
 }
 
 fn minify_js(input: &str) -> String {
@@ -728,44 +746,33 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         let name = name.replace("-", "_");
         let resources_path = dep_dir.join("resources");
 
-        let mut rename: HashMap<String, String> = HashMap::new();
-
-        if config.small_fonts {
-            rename.insert(
-                "GoNotoKurrent-Bold.ttf".into(),
-                "IBMPlexSans-SemiBold.ttf".into(),
-            );
-            rename.insert(
-                "GoNotoKurrent-Regular.ttf".into(),
-                "IBMPlexSans-Text.ttf".into(),
-            );
-            rename.insert("LXGWWenKaiBold.ttf".into(), "IBMPlexSans-Text.ttf".into());
-            rename.insert(
-                "LXGWWenKaiRegular.ttf".into(),
-                "IBMPlexSans-Text.ttf".into(),
-            );
-            rename.insert("NotoColorEmoji.ttf".into(), "IBMPlexSans-Text.ttf".into());
-        }
-
         if resources_path.is_dir() {
-            // alright so.. the easiest thing is to rename a bunch of resources
-
             let dst_dir = app_dir.join(&name).join("resources");
             mkdir(&dst_dir)?;
+            if config.small_fonts {
+                for file_name in [
+                    "GoNotoKurrent-Bold.ttf",
+                    "GoNotoKurrent-Regular.ttf",
+                    "LXGWWenKaiBold.ttf",
+                    "LXGWWenKaiRegular.ttf",
+                    "NotoColorEmoji.ttf",
+                ] {
+                    let stale_path = dst_dir.join(file_name);
+                    let _ = fs::remove_file(&stale_path);
+                    remove_brotli_artifact(&stale_path);
+                }
+            }
             walk_all(&resources_path, &dst_dir, &mut |source_path, dest_dir| {
                 let source_file_name = source_path
                     .file_name()
                     .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
                     .to_string_lossy()
                     .to_string();
-                let source_path2 = if let Some(tgt) = rename.get(&source_file_name) {
-                    //println!("RENAMING {} {}", source_file_name, tgt);
-                    &source_path.parent().unwrap().join(tgt)
-                } else {
-                    source_path
-                };
+                if config.small_fonts && small_font_fallback_target(&source_file_name).is_some() {
+                    return Ok(());
+                }
                 let dest_path = dest_dir.join(&source_file_name);
-                cp(&source_path2, &dest_path, false)?;
+                cp(source_path, &dest_path, false)?;
                 if config.brotli {
                     brotli_compress(&dest_path);
                 } else {
@@ -804,7 +811,32 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             .replace(
                 "imports = __wbg_get_imports();",
                 "imports = __wbg_get_imports(); imports.env = env;",
+            )
+            .replace(
+                "const imports=__wbg_get_imports(memory);",
+                "const imports=__wbg_get_imports(memory);imports.env=env;",
+            )
+            .replace(
+                "const imports = __wbg_get_imports(memory);",
+                "const imports = __wbg_get_imports(memory); imports.env = env;",
             );
+        let patched = patched
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                let is_env_import = (trimmed.starts_with("import * as __wbg_star")
+                    || trimmed.starts_with("import*as import")
+                    || trimmed.starts_with("import * as import"))
+                    && (trimmed.contains("from 'env'")
+                        || trimmed.contains("from\"env\"")
+                        || trimmed.contains("from \"env\""));
+                let is_env_mapping = (trimmed.starts_with("\"env\":")
+                    || trimmed.starts_with("'env':"))
+                    && trimmed.contains("import");
+                !is_env_import && !is_env_mapping
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -1909,34 +1941,39 @@ fn start_wasm_server(
                         path.file_name()
                             .map(|name| parent.join(format!("{}.br", name.to_string_lossy())))
                     });
+                    let wants_brotli = client_accepts_brotli(headers.accept_encoding.as_deref());
                     //println!("OPENING {:?}", path);
-                    if let Some(compressed_path) = compressed_path.as_ref() {
-                        if let Ok(mut file_handle) = File::open(compressed_path) {
-                            let mut body = Vec::<u8>::new();
-                            if file_handle.read_to_end(&mut body).is_ok() {
-                                let coop_coep_headers = if threaded {
-                                    "Cross-Origin-Embedder-Policy: require-corp\r\n\
-                                    Cross-Origin-Opener-Policy: same-origin\r\n"
-                                } else {
-                                    ""
-                                };
-                                let header = format!(
-                                    "HTTP/1.1 200 OK\r\n\
-                                    Content-Type: {}\r\n\
-                                    {}\
-                                    Content-encoding: br\r\n\
-                                    Cache-Control: {}\r\n\
-                                    {}\
-                                    Content-Length: {}\r\n\
-                                    Connection: close\r\n\r\n",
-                                    mime_type,
-                                    coop_coep_headers,
-                                    cache_control,
-                                    cache_extra,
-                                    body.len()
-                                );
-                                let _ = response_sender.send(HttpServerResponse { header, body });
-                                continue;
+                    if wants_brotli {
+                        if let Some(compressed_path) = compressed_path.as_ref() {
+                            if let Ok(mut file_handle) = File::open(compressed_path) {
+                                let mut body = Vec::<u8>::new();
+                                if file_handle.read_to_end(&mut body).is_ok() {
+                                    let coop_coep_headers = if threaded {
+                                        "Cross-Origin-Embedder-Policy: require-corp\r\n\
+                                        Cross-Origin-Opener-Policy: same-origin\r\n"
+                                    } else {
+                                        ""
+                                    };
+                                    let header = format!(
+                                        "HTTP/1.1 200 OK\r\n\
+                                        Content-Type: {}\r\n\
+                                        {}\
+                                        Vary: Accept-Encoding\r\n\
+                                        Content-Encoding: br\r\n\
+                                        Cache-Control: {}\r\n\
+                                        {}\
+                                        Content-Length: {}\r\n\
+                                        Connection: close\r\n\r\n",
+                                        mime_type,
+                                        coop_coep_headers,
+                                        cache_control,
+                                        cache_extra,
+                                        body.len()
+                                    );
+                                    let _ =
+                                        response_sender.send(HttpServerResponse { header, body });
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -1949,17 +1986,24 @@ fn start_wasm_server(
                             } else {
                                 ""
                             };
+                            let vary_header =
+                                if compressed_path.as_ref().is_some_and(|path| path.exists()) {
+                                    "Vary: Accept-Encoding\r\n"
+                                } else {
+                                    ""
+                                };
                             let header = format!(
                                 "HTTP/1.1 200 OK\r\n\
                                 Content-Type: {}\r\n\
                                 {}\
-                                Content-encoding: none\r\n\
+                                {}\
                                 Cache-Control: {}\r\n\
                                 {}\
                                 Content-Length: {}\r\n\
                                 Connection: close\r\n\r\n",
                                 mime_type,
                                 coop_coep_headers,
+                                vary_header,
                                 cache_control,
                                 cache_extra,
                                 body.len()
@@ -2019,6 +2063,30 @@ fn start_wasm_server(
         .join()
         .map_err(|_| "wasm webserver event loop thread panicked".to_string())?;
     Ok(())
+}
+
+fn client_accepts_brotli(header: Option<&str>) -> bool {
+    let Some(header) = header else {
+        return false;
+    };
+    for encoding in header.split(',') {
+        let mut parts = encoding.trim().split(';');
+        let name = parts.next().unwrap_or("").trim();
+        if !name.eq_ignore_ascii_case("br") {
+            continue;
+        }
+        let mut allowed = true;
+        for part in parts {
+            let part = part.trim();
+            if let Some(q) = part.strip_prefix("q=") {
+                allowed = q.parse::<f32>().map(|value| value > 0.0).unwrap_or(true);
+            }
+        }
+        if allowed {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -2086,5 +2154,39 @@ mod tests {
         assert!(!should_trigger_wasm_rebuild(Path::new(
             "/tmp/app/.git/index"
         )));
+    }
+
+    #[test]
+    fn brotli_negotiation_respects_accept_encoding() {
+        assert!(client_accepts_brotli(Some("gzip, br")));
+        assert!(client_accepts_brotli(Some("br;q=1.0, gzip;q=0.8")));
+        assert!(!client_accepts_brotli(Some("gzip, br;q=0")));
+        assert!(!client_accepts_brotli(Some("gzip, deflate")));
+        assert!(!client_accepts_brotli(None));
+    }
+
+    #[test]
+    fn small_font_fallbacks_cover_heavy_widget_fonts() {
+        assert_eq!(
+            small_font_fallback_target("GoNotoKurrent-Bold.ttf"),
+            Some("IBMPlexSans-SemiBold.ttf")
+        );
+        assert_eq!(
+            small_font_fallback_target("GoNotoKurrent-Regular.ttf"),
+            Some("IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            small_font_fallback_target("LXGWWenKaiBold.ttf"),
+            Some("IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            small_font_fallback_target("LXGWWenKaiRegular.ttf"),
+            Some("IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            small_font_fallback_target("NotoColorEmoji.ttf"),
+            Some("IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(small_font_fallback_target("IBMPlexSans-Text.ttf"), None);
     }
 }

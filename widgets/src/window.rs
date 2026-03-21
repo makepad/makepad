@@ -248,90 +248,42 @@ pub enum WindowAction {
 }
 
 impl Window {
-    fn xr_window_logical_size(&self) -> DVec2 {
-        let dpi_factor = self.xr_dpi_factor.max(1.0);
+    fn xr_window_logical_size(&self) -> Vec2d {
         dvec2(
-            self.xr_pixel_size.x.max(1.0) / dpi_factor,
-            self.xr_pixel_size.y.max(1.0) / dpi_factor,
+            self.xr_pixel_size.x / self.xr_dpi_factor.max(1.0),
+            self.xr_pixel_size.y / self.xr_dpi_factor.max(1.0),
         )
     }
 
-    fn xr_window_logical_scale(&self) -> f32 {
-        self.xr_pixel_scale.max(0.00001) * self.xr_dpi_factor.max(1.0) as f32
-    }
-
-    fn compute_xr_panel_matrix(&self, state: &XrState, depth_scale: f32) -> Mat4f {
-        let mut forward = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
-        forward.y = 0.0;
-        if forward.length() <= 1.0e-4 {
-            forward = vec3f(0.0, 0.0, -1.0);
-        } else {
-            forward = forward.normalize();
-        }
-
-        let up = vec3f(0.0, 1.0, 0.0);
-        let yaw_rotation = Quat::look_rotation(forward, up);
-        let center = vec3f(0.0, state.head_pose.position.y, 0.0)
-            + forward * self.xr_forward_offset.max(0.0)
-            + yaw_rotation.rotate_vec3(&self.xr_position_offset);
-        let pose = Pose::new(Quat::look_rotation(forward.scale(-1.0), up), center);
+    fn compute_xr_hit_matrix(&self, state: &XrState) -> Mat4f {
         let size = self.xr_window_logical_size();
-        let scale = self.xr_window_logical_scale();
-        let local_depth_transform = Mat4f::nonuniform_scaled_translation(
-            vec3(1.0, 1.0, depth_scale.max(0.00001)),
-            vec3(0.0, 0.0, 0.0),
-        );
-        let local_panel = Mat4f::nonuniform_scaled_translation(
-            vec3(scale, -scale, scale),
+        let pixel_scale = self.xr_pixel_scale;
+        let panel = Mat4f::nonuniform_scaled_translation(
+            vec3(pixel_scale, -pixel_scale, pixel_scale),
             vec3(
-                -(size.x as f32) * scale * 0.5,
-                (size.y as f32) * scale * 0.5,
-                0.0,
+                -size.x as f32 * 0.5 * pixel_scale + self.xr_position_offset.x,
+                size.y as f32 * 0.5 * pixel_scale + self.xr_position_offset.y,
+                -self.xr_forward_offset + self.xr_position_offset.z,
             ),
         );
-        let object_to_world = Mat4f::mul(&local_panel, &local_depth_transform);
-        Mat4f::mul(&pose.to_mat4(), &object_to_world)
+        Mat4f::mul(&state.head_pose.to_mat4(), &panel)
     }
 
     fn compute_xr_view_matrix(&self, state: &XrState) -> Mat4f {
-        self.compute_xr_panel_matrix(state, self.xr_depth_scale)
+        let size = self.xr_window_logical_size();
+        let pixel_scale = self.xr_pixel_scale;
+        let panel = Mat4f::nonuniform_scaled_translation(
+            vec3(pixel_scale, -pixel_scale, self.xr_depth_scale * pixel_scale),
+            vec3(
+                -size.x as f32 * 0.5 * pixel_scale + self.xr_position_offset.x,
+                size.y as f32 * 0.5 * pixel_scale + self.xr_position_offset.y,
+                -self.xr_forward_offset + self.xr_position_offset.z,
+            ),
+        );
+        Mat4f::mul(&state.head_pose.to_mat4(), &panel)
     }
 
-    fn compute_xr_hit_matrix(&self, state: &XrState) -> Mat4f {
-        self.compute_xr_panel_matrix(state, 1.0)
-    }
-
-    fn ensure_initialized(&mut self, cx: &mut Cx) {
-        if self.initialized {
-            return;
-        }
-        self.initialized = true;
-
-        self.window.handle.set_pass(cx, &self.pass.handle);
-        //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
-        self.depth_texture = Texture::new_with_format(
-            cx,
-            TextureFormat::DepthD32 {
-                size: TextureSize::Auto,
-                initial: true,
-            },
-        );
-        self.pass.handle.set_depth_texture(
-            cx,
-            &self.depth_texture,
-            DrawPassClearDepth::ClearWith(1.0),
-        );
-
-        // check if we are ar/vr capable
-        if cx.xr_capabilities().vr_supported {
-            // lets show a VR button
-            self.view(cx, ids!(web_xr)).set_visible(cx, true);
-        }
-
-        // OS-specific caption bar setup
-        if self.demo {
-            self.demo_next_frame = cx.new_next_frame();
-        }
+    fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
         let linux_custom_window_chrome =
             matches!(cx.os_type(), OsType::LinuxWindow(params) if params.custom_window_chrome);
 
@@ -360,14 +312,58 @@ impl Window {
             }
             _ => (),
         }
+    }
 
-        // Update the caption label with the window title if set
-        let title = cx.windows[self.window.handle.window_id()]
-            .create_title
-            .clone();
+    fn sync_caption_title(&mut self, cx: &mut Cx) {
+        let title = if self.window.title.is_empty() {
+            cx.windows[self.window.handle.window_id()]
+                .create_title
+                .clone()
+        } else {
+            self.window.title.clone()
+        };
         if !title.is_empty() {
             self.label(cx, ids!(caption_label.label))
                 .set_text(cx, &title);
+        }
+    }
+
+    fn ensure_initialized(&mut self, cx: &mut Cx) {
+        // Keep runtime chrome state aligned even if this widget is re-applied.
+        if cx.xr_capabilities().vr_supported {
+            self.view(cx, ids!(web_xr)).set_visible(cx, true);
+        }
+        self.sync_caption_bar_state(cx);
+        self.sync_caption_title(cx);
+
+        if self.initialized {
+            return;
+        }
+        self.initialized = true;
+
+        self.window.handle.set_pass(cx, &self.pass.handle);
+        //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
+        self.depth_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::DepthD32 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        self.pass.handle.set_depth_texture(
+            cx,
+            &self.depth_texture,
+            DrawPassClearDepth::ClearWith(1.0),
+        );
+
+        // check if we are ar/vr capable
+        if cx.xr_capabilities().vr_supported {
+            // lets show a VR button
+            self.view(cx, ids!(web_xr)).set_visible(cx, true);
+        }
+
+        if self.demo {
+            self.demo_next_frame = cx.new_next_frame();
         }
     }
 
