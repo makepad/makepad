@@ -1,8 +1,6 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-use crate::scene_3d::{
-    apply_scene_to_draw_pbr, scene_node_world_transform_from_scope, scene_state_from_scope,
-};
+use crate::scene_3d::{apply_scene_to_draw_pbr, scene_node_world_transform_from_cx};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -53,14 +51,11 @@ pub struct Cube3D {
 }
 
 impl Widget for Cube3D {
-    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        let Some(scene) = scene_state_from_scope(scope) else {
+    fn draw_3d(&mut self, cx: &mut Cx3d, _scope: &mut Scope) -> DrawStep {
+        if apply_scene_to_draw_pbr(&mut self.draw_pbr, cx).is_none() {
             return DrawStep::done();
-        };
-        let cx = &mut Cx2d::new(cx.cx);
-        let parent_world = scene_node_world_transform_from_scope(scope);
-
-        apply_scene_to_draw_pbr(&mut self.draw_pbr, cx, &scene);
+        }
+        let parent_world = scene_node_world_transform_from_cx(cx);
         self.draw_pbr.push_matrix();
         self.draw_pbr.apply_transform(parent_world);
         self.draw_pbr.translate_v(self.position);

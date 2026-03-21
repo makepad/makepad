@@ -1,6 +1,7 @@
 use crate::{
-    cx_2d::*, draw_list_2d::ManyInstances, geometry::geometry_gen::GeometryGen,
-    image_cache::ImageBuffer, makepad_platform::*, turtle::*,
+    cx_2d::Cx2d, cx_draw::CxDraw, draw_list_2d::ManyInstances,
+    geometry::geometry_gen::GeometryGen, image_cache::ImageBuffer, makepad_platform::*,
+    turtle::*,
 };
 use makepad_math::DecodedPrimitive;
 use std::{collections::HashMap, f32::consts::PI, path::Path};
@@ -1286,7 +1287,7 @@ impl DrawPbr {
         self.set_env_atlas_texture(material.textures.env_atlas.clone());
     }
 
-    fn apply_draw_uniforms(&mut self, cx: &mut Cx2d) {
+    fn apply_draw_uniforms(&mut self, cx: &mut CxDraw) {
         self.draw_vars
             .set_uniform(cx.cx, live_id!(view_matrix), &self.view_matrix.v);
         self.draw_vars.set_uniform(
@@ -1476,7 +1477,7 @@ impl DrawPbr {
     #[allow(clippy::too_many_arguments)]
     pub fn upload_indexed_triangles_mesh(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         positions: &[[f32; 3]],
         normals: Option<&[[f32; 3]]>,
         tangents: Option<&[[f32; 4]]>,
@@ -1486,15 +1487,15 @@ impl DrawPbr {
     ) -> Result<PbrMeshHandle, String> {
         let (verts, inds) =
             self.build_vertex_data(positions, normals, tangents, uvs, colors, indices)?;
-        let geom = Geometry::new(cx.cx.cx);
-        geom.update(cx.cx.cx, inds, verts);
+        let geom = Geometry::new(cx.cx);
+        geom.update(cx.cx, inds, verts);
         self.meshes.push(geom);
         Ok(self.meshes.len() - 1)
     }
 
     pub fn update_mesh_indices(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         mesh: PbrMeshHandle,
         indices: Vec<u32>,
     ) -> Result<(), String> {
@@ -1502,13 +1503,13 @@ impl DrawPbr {
             .meshes
             .get(mesh)
             .ok_or_else(|| format!("invalid mesh handle {mesh}"))?;
-        geom.update_indices(cx.cx.cx, indices);
+        geom.update_indices(cx.cx, indices);
         Ok(())
     }
 
     pub fn upload_decoded_primitive_mesh(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         primitive: &DecodedPrimitive,
     ) -> Result<PbrMeshHandle, String> {
         self.upload_indexed_triangles_mesh(
@@ -1529,7 +1530,7 @@ impl DrawPbr {
 
     pub fn load_default_env_equirect_from_path(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         path: impl AsRef<Path>,
     ) -> Result<(), String> {
         let path = path.as_ref();
@@ -1540,7 +1541,7 @@ impl DrawPbr {
 
     pub fn load_default_env_equirect_from_bytes(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         bytes: &[u8],
         path_hint: Option<&Path>,
     ) -> Result<(), String> {
@@ -1587,7 +1588,7 @@ impl DrawPbr {
         }
     }
 
-    pub fn default_env_texture(&mut self, cx: &mut Cx2d) -> Texture {
+    pub fn default_env_texture(&mut self, cx: &mut CxDraw) -> Texture {
         if let Some(texture) = self.default_env_texture.clone() {
             return texture;
         }
@@ -1607,7 +1608,7 @@ impl DrawPbr {
         texture
     }
 
-    pub fn default_env_atlas_texture(&mut self, cx: &mut Cx2d) -> Texture {
+    pub fn default_env_atlas_texture(&mut self, cx: &mut CxDraw) -> Texture {
         if let Some(texture) = self.default_env_atlas_texture.clone() {
             return texture;
         }
@@ -1786,7 +1787,7 @@ impl DrawPbr {
 
     pub fn draw_mesh_with_transform(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         mesh: PbrMeshHandle,
         transform: Mat4f,
     ) -> Result<(), String> {
@@ -1799,7 +1800,7 @@ impl DrawPbr {
 
     pub fn draw_mesh_with_transform_and_local_scale(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         mesh: PbrMeshHandle,
         transform: Mat4f,
         local_scale: Vec3f,
@@ -1818,7 +1819,7 @@ impl DrawPbr {
     /// Uses cached unit-cube meshes and applies size as a transform scale.
     pub fn draw_cube(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         size: Vec3f,
         subdivisions: usize,
     ) -> Result<(), String> {
@@ -1828,7 +1829,7 @@ impl DrawPbr {
 
     pub fn draw_cube_with_material(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         size: Vec3f,
         subdivisions: usize,
         material: &DrawPbrMaterialState,
@@ -1840,7 +1841,7 @@ impl DrawPbr {
     /// Draw an XZ surface patch (normal +Y) using current material/shader state.
     pub fn draw_surface(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         size: Vec2f,
         seg_u: usize,
         seg_v: usize,
@@ -1856,7 +1857,7 @@ impl DrawPbr {
 
     pub fn draw_surface_with_material(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         size: Vec2f,
         seg_u: usize,
         seg_v: usize,
@@ -1869,7 +1870,7 @@ impl DrawPbr {
     /// Draw a UV sphere using current material/shader state.
     pub fn draw_sphere(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         radius: f32,
         subdivisions: usize,
     ) -> Result<(), String> {
@@ -1887,7 +1888,7 @@ impl DrawPbr {
 
     pub fn draw_sphere_with_material(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         radius: f32,
         subdivisions: usize,
         material: &DrawPbrMaterialState,
@@ -1903,7 +1904,7 @@ impl DrawPbr {
     /// * `subdivisions` - Controls tessellation density for the hemispheres.
     pub fn draw_capsule(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         radius: f32,
         half_height: f32,
         subdivisions: usize,
@@ -1928,7 +1929,7 @@ impl DrawPbr {
 
     pub fn draw_capsule_with_material(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         radius: f32,
         half_height: f32,
         subdivisions: usize,
@@ -1946,7 +1947,7 @@ impl DrawPbr {
     /// * `corner_segments` — tessellation of the rounded edges/corners (number of arc steps).
     pub fn draw_rounded_cube(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         size: Vec3f,
         radius: f32,
         subdivisions: usize,
@@ -1972,7 +1973,7 @@ impl DrawPbr {
 
     pub fn draw_rounded_cube_with_material(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         size: Vec3f,
         radius: f32,
         subdivisions: usize,
@@ -1985,7 +1986,7 @@ impl DrawPbr {
 
     pub fn upload_uniform_rounded_cube_mesh(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         half_extent: f32,
         radius: f32,
         subdivisions: usize,
@@ -2010,7 +2011,7 @@ impl DrawPbr {
 
     fn ensure_cube_mesh(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         subdivisions: usize,
     ) -> Result<PbrMeshHandle, String> {
         let segments = subdivisions.clamp(1, 64) as u16;
@@ -2043,7 +2044,7 @@ impl DrawPbr {
 
     fn ensure_capsule_mesh(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         lat: usize,
         lon: usize,
         half_height_ratio: f32,
@@ -2077,7 +2078,7 @@ impl DrawPbr {
 
     fn ensure_surface_mesh(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         seg_u: usize,
         seg_v: usize,
     ) -> Result<PbrMeshHandle, String> {
@@ -2105,7 +2106,7 @@ impl DrawPbr {
 
     fn ensure_sphere_mesh(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         lat: usize,
         lon: usize,
     ) -> Result<PbrMeshHandle, String> {
@@ -2133,7 +2134,7 @@ impl DrawPbr {
 
     fn ensure_rounded_cube_mesh(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         subdivisions: usize,
         corner_segments: usize,
         radius_frac: f32,
@@ -2709,7 +2710,7 @@ impl DrawPbr {
         (positions, normals, uvs, indices)
     }
 
-    pub fn draw_mesh(&mut self, cx: &mut Cx2d, mesh: PbrMeshHandle) -> Result<(), String> {
+    pub fn draw_mesh(&mut self, cx: &mut CxDraw, mesh: PbrMeshHandle) -> Result<(), String> {
         if self.many_instances_mesh.is_some() {
             if self.many_instances_mesh != Some(mesh) {
                 return Err(format!(
@@ -2736,7 +2737,7 @@ impl DrawPbr {
             return Err("DrawPbr draw call failed (shader not initialized)".to_string());
         }
         if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            let new_area = cx.add_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
         Ok(())
@@ -2744,7 +2745,7 @@ impl DrawPbr {
 
     pub fn begin_many_instances_for_mesh(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         mesh: PbrMeshHandle,
     ) -> Result<(), String> {
         if self.many_instances.is_some() {
@@ -2763,7 +2764,7 @@ impl DrawPbr {
             .ok_or_else(|| format!("invalid mesh handle {mesh}"))?;
         self.draw_vars.geometry_id = Some(geom.geometry_id());
         self.apply_draw_uniforms(cx);
-        let Some(instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+        let Some(instances) = cx.begin_many_instances(&self.draw_vars) else {
             return Err("DrawPbr begin_many_instances failed".to_string());
         };
         self.many_instances = Some(instances);
@@ -2787,7 +2788,7 @@ impl DrawPbr {
         self.model_matrix = prev_model;
     }
 
-    pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
+    pub fn end_many_instances(&mut self, cx: &mut CxDraw) {
         if let Some(instances) = self.many_instances.take() {
             let new_area = cx.end_many_instances(instances);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
@@ -2795,23 +2796,23 @@ impl DrawPbr {
         self.many_instances_mesh = None;
     }
 
-    pub fn end(&mut self, cx: &mut Cx2d) {
+    pub fn end(&mut self, cx: &mut CxDraw) {
         self.flush(cx);
     }
 
     /// Submit currently accumulated geometry as one draw call and clear buffers.
     /// Useful when emitting one draw call per primitive/material.
-    pub fn flush(&mut self, cx: &mut Cx2d) {
+    pub fn flush(&mut self, cx: &mut CxDraw) {
         if self.acc_verts.is_empty() || self.acc_indices.is_empty() {
             return;
         }
-        let geom = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx.cx));
-        geom.update_with_recycled_buffers(cx.cx.cx, &mut self.acc_indices, &mut self.acc_verts);
+        let geom = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx));
+        geom.update_with_recycled_buffers(cx.cx, &mut self.acc_indices, &mut self.acc_verts);
         self.draw_vars.geometry_id = Some(geom.geometry_id());
         self.apply_draw_uniforms(cx);
         cx.new_draw_call(&self.draw_vars);
         if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            let new_area = cx.add_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }

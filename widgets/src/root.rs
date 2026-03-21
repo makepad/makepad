@@ -24,10 +24,6 @@ pub struct Root {
     area: Area,
     #[rust]
     components: ComponentMap<LiveId, WidgetRef>,
-    #[new]
-    xr_draw_list: DrawList,
-    #[live]
-    xr_pass: ScriptDrawPass,
     #[live]
     on_startup: ScriptFnRef,
     #[rust]
@@ -54,11 +50,6 @@ impl ScriptHook for Root {
             vm.vec_with(obj, |vm, vec| {
                 for kv in vec {
                     let id = kv.key.as_id().unwrap_or(LiveId(0));
-                    let cx = vm.cx_mut();
-                    // Only show xr_hands if XR mode is available
-                    if id == live_id!(xr_hands) && !cx.os_type().has_xr_mode() {
-                        continue;
-                    }
                     // Get or create widget
                     if let Some(widget) = self.components.get_mut(&id) {
                         widget.script_apply(vm, apply, scope, kv.value);
@@ -98,6 +89,16 @@ impl WidgetNode for Root {
     }
 }
 
+impl Root {
+    pub fn remove_component(&mut self, cx: &mut Cx, id: LiveId) -> Option<WidgetRef> {
+        let removed = self.components.remove(&id);
+        if removed.is_some() {
+            cx.widget_tree_mark_dirty(self.uid);
+        }
+        removed
+    }
+}
+
 impl Widget for Root {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::Startup = event {
@@ -114,26 +115,10 @@ impl Widget for Root {
             }
         }
         if let Event::Draw(e) = event {
-            if cx.in_xr_mode() {
-                if !e.xr_state.is_some() {
-                    return;
-                }
-                let mut cx_draw = CxDraw::new(cx, e);
-                let cx = &mut Cx3d::new(&mut cx_draw);
-                // lets begin a 3D drawlist in the global context
-                self.xr_pass.handle.set_as_xr_pass(cx);
-                cx.begin_pass(&self.xr_pass.handle, Some(4.0));
-                self.xr_draw_list.begin_always(cx);
-                self.draw_3d_all(cx, scope);
-                self.xr_draw_list.end(cx);
-                cx.end_pass(&self.xr_pass.handle);
-                return;
-            } else {
-                let mut cx_draw = CxDraw::new(cx, e);
-                let cx = &mut Cx2d::new(&mut cx_draw);
-                self.draw_all(cx, scope);
-                return;
-            }
+            let mut cx_draw = CxDraw::new(cx, e);
+            let cx = &mut Cx2d::new(&mut cx_draw);
+            self.draw_all(cx, scope);
+            return;
         }
 
         for (_id, component) in self.components.iter_mut() {
@@ -183,13 +168,6 @@ impl Widget for Root {
                 widget_uids: resolved_uid.into_iter().collect(),
             }));
         }
-    }
-
-    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        for (_id, component) in self.components.iter() {
-            component.draw_3d_all(cx, scope);
-        }
-        DrawStep::done()
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
