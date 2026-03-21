@@ -230,8 +230,8 @@ impl Cx {
                 }
                 StudioToApp::WindowGeomChange {
                     dpi_factor,
-                    left: _left,
-                    top: _top,
+                    left,
+                    top,
                     width,
                     height,
                     window_id,
@@ -249,7 +249,7 @@ impl Cx {
                     if self.windows.is_valid(window_id) {
                         let old_geom = self.windows[window_id].window_geom.clone();
                         let new_geom = WindowGeom {
-                            position: dvec2(0.0, 0.0),
+                            position: dvec2(left, top),
                             dpi_factor,
                             inner_size: dvec2(width, height),
                             ..Default::default()
@@ -490,8 +490,11 @@ impl Cx {
                         windows.push(Default::default());
                     }
 
-                    // Headless: use 1920x1080 at 2x DPI for high-quality output
-                    let inner_size = dvec2(1920.0, 1080.0);
+                    let window = &mut self.windows[window_id];
+                    let inner_size = window
+                        .create_inner_size
+                        .unwrap_or_else(|| dvec2(1920.0, 1080.0));
+                    let position = window.create_position.unwrap_or_else(|| dvec2(0.0, 0.0));
                     let dpi_factor = 2.0;
 
                     let state = &mut windows[window_id.id()];
@@ -500,9 +503,10 @@ impl Cx {
                     state.width = inner_size.x.max(1.0) as u32;
                     state.height = inner_size.y.max(1.0) as u32;
 
-                    let window = &mut self.windows[window_id];
                     window.is_created = true;
+                    window.window_geom.position = position;
                     window.window_geom.inner_size = inner_size;
+                    window.window_geom.outer_size = inner_size;
                     window.window_geom.dpi_factor = dpi_factor;
                     if send_protocol {
                         write_stdout_msg(&AppToStudio::CreateWindow {

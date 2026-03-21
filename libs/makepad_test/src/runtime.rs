@@ -1,12 +1,16 @@
 use crate::error::{IntoTestResult, TestError, TestResult};
 use crate::selector::Selector;
-use makepad_micro_serde::SerBin;
+use makepad_micro_serde::{SerBin, SerJson};
 use makepad_studio_hub::{HubConfig, HubConnection, MountConfig, StudioHub};
 use makepad_studio_protocol::hub_protocol::{ClientToHub, HubToClient, LogEntry, QueryId};
-use makepad_studio_protocol::{StudioToApp, StudioToAppVec};
+use makepad_studio_protocol::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, RemoteKeyModifiers, RemoteMouseDown,
+    RemoteMouseMove, RemoteMouseUp, RemoteScroll, StudioToApp, StudioToAppVec, WidgetSnapshot,
+};
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -14,12 +18,17 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(600);
-const ACTION_TIMEOUT: Duration = Duration::from_secs(5);
+const ACTION_TIMEOUT: Duration = Duration::from_secs(10);
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const STARTUP_RETRIES: usize = 2;
+const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(250);
+const DRAG_STEPS: usize = 6;
+const PUMP_TICKS: usize = 3;
+const RECENT_LOG_LINES: usize = 200;
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -35,6 +44,7 @@ pub struct WidgetMatch {
 }
 
 impl WidgetMatch {
+    #[allow(dead_code)]
     fn parse(line: &str) -> Option<Self> {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.len() != 7 {
@@ -51,6 +61,7 @@ impl WidgetMatch {
         })
     }
 
+    #[allow(dead_code)]
     fn center(&self) -> (i64, i64) {
         (self.x + self.width / 2, self.y + self.height / 2)
     }
@@ -81,7 +92,7 @@ impl TestConfig {
         let test_name = test_name.into();
         let artifacts_dir = manifest_dir
             .join("target")
-            .join("makepad-ui-tests")
+            .join("makepad_test")
             .join(sanitize_path_component(&package_name))
             .join(sanitize_path_component(&test_name));
 
@@ -144,8 +155,29 @@ pub struct TestApp {
 
 impl TestApp {
     fn start(config: TestConfig) -> TestResult<Self> {
+        if config.artifacts_dir.exists() {
+            fs::remove_dir_all(&config.artifacts_dir)?;
+        }
         fs::create_dir_all(&config.artifacts_dir)?;
 
+        let mut last_error = None;
+        for attempt in 0..STARTUP_RETRIES {
+            match Self::start_once(config.clone()) {
+                Ok(app) => return Ok(app),
+                Err(err)
+                    if attempt + 1 < STARTUP_RETRIES && startup_error_is_retryable(&err) =>
+                {
+                    last_error = Some(err);
+                    thread::sleep(STARTUP_RETRY_DELAY);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| TestError::new("failed to start test app")))
+    }
+
+    fn start_once(config: TestConfig) -> TestResult<Self> {
         let mut connection = StudioHub::start_in_process(HubConfig {
             listen_address: config.listen_address,
             mounts: vec![MountConfig {
@@ -216,6 +248,36 @@ impl TestApp {
         })
     }
 
+    pub fn press_key(&self, key_code: KeyCode) {
+        if let Err(err) = self.try_press_key(key_code) {
+            panic_for_error(err);
+        }
+    }
+
+    pub fn try_press_key(&self, key_code: KeyCode) -> TestResult<()> {
+        self.try_press_key_with_modifiers(key_code, KeyModifiers::default())
+    }
+
+    pub fn press_key_with_modifiers(&self, key_code: KeyCode, modifiers: KeyModifiers) {
+        if let Err(err) = self.try_press_key_with_modifiers(key_code, modifiers) {
+            panic_for_error(err);
+        }
+    }
+
+    pub fn try_press_key_with_modifiers(
+        &self,
+        key_code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> TestResult<()> {
+        let event = KeyEvent {
+            key_code,
+            is_repeat: false,
+            modifiers,
+            time: now_seconds(),
+        };
+        self.try_forward(vec![StudioToApp::KeyDown(event), StudioToApp::KeyUp(event)])
+    }
+
     pub fn screenshot(&self) -> PathBuf {
         match self.try_screenshot() {
             Ok(path) => path,
@@ -247,12 +309,33 @@ impl TestApp {
 
     pub fn try_widget_dump(&self) -> TestResult<String> {
         self.ensure_running()?;
+        self.try_pump_ui()?;
         let build_id = self.build_id();
         let query_id = self.send(ClientToHub::WidgetTreeDump { build_id })?;
         self.wait_for_reply(self.action_timeout(), move |msg| match msg {
             HubToClient::WidgetTreeDump {
                 query_id: id, dump, ..
             } if id == query_id => Some(Ok(dump)),
+            _ => None,
+        })
+    }
+
+    pub fn widget_snapshot(&self) -> Vec<WidgetSnapshot> {
+        match self.try_widget_snapshot() {
+            Ok(widgets) => widgets,
+            Err(err) => panic_for_error(err),
+        }
+    }
+
+    pub fn try_widget_snapshot(&self) -> TestResult<Vec<WidgetSnapshot>> {
+        self.ensure_running()?;
+        self.try_pump_ui()?;
+        let build_id = self.build_id();
+        let query_id = self.send(ClientToHub::WidgetSnapshot { build_id })?;
+        self.wait_for_reply(self.action_timeout(), move |msg| match msg {
+            HubToClient::WidgetSnapshot {
+                query_id: id, widgets, ..
+            } if id == query_id => Some(Ok(widgets)),
             _ => None,
         })
     }
@@ -294,32 +377,71 @@ impl TestApp {
         })
     }
 
-    fn try_click_center(&self, target: &WidgetMatch) -> TestResult<()> {
+    fn try_click_center(&self, target: &WidgetSnapshot) -> TestResult<()> {
         self.ensure_running()?;
-        let (x, y) = target.center();
+        let (x, y) = snapshot_center(target);
         let build_id = self.build_id();
         self.send_no_wait(ClientToHub::Click { build_id, x, y })
     }
 
-    fn query_visible_widgets(&self, selector: &Selector) -> TestResult<Vec<WidgetMatch>> {
-        self.ensure_running()?;
-        let build_id = self.build_id();
-        let query = selector.as_query();
-        let query_id = self.send(ClientToHub::WidgetQuery {
-            build_id,
-            query: query.clone(),
-        })?;
-        self.wait_for_reply(self.action_timeout(), move |msg| match msg {
-            HubToClient::WidgetQuery {
-                query_id: id,
-                rects,
-                ..
-            } if id == query_id => Some(Ok(rects
-                .into_iter()
-                .filter_map(|line| WidgetMatch::parse(&line))
-                .collect())),
-            _ => None,
-        })
+    fn try_scroll_center(&self, target: &WidgetSnapshot, sx: f64, sy: f64) -> TestResult<()> {
+        let (x, y) = snapshot_center_f64(target);
+        self.try_forward(vec![StudioToApp::Scroll(RemoteScroll {
+            time: now_seconds(),
+            sx,
+            sy,
+            x,
+            y,
+            is_mouse: true,
+            modifiers: RemoteKeyModifiers::default(),
+        })])
+    }
+
+    fn try_drag_from(&self, target: &WidgetSnapshot, dx: f64, dy: f64) -> TestResult<()> {
+        let (start_x, start_y) = snapshot_center_f64(target);
+        let button_raw_bits = MouseButton::PRIMARY.bits();
+        let mut msgs = Vec::with_capacity(DRAG_STEPS + 2);
+        msgs.push(StudioToApp::MouseDown(RemoteMouseDown {
+            button_raw_bits,
+            x: start_x,
+            y: start_y,
+            time: now_seconds(),
+            modifiers: RemoteKeyModifiers::default(),
+        }));
+        for step in 1..=DRAG_STEPS {
+            let progress = step as f64 / DRAG_STEPS as f64;
+            msgs.push(StudioToApp::MouseMove(RemoteMouseMove {
+                time: now_seconds() + progress * 0.01,
+                x: start_x + dx * progress,
+                y: start_y + dy * progress,
+                modifiers: RemoteKeyModifiers::default(),
+            }));
+        }
+        msgs.push(StudioToApp::MouseUp(RemoteMouseUp {
+            time: now_seconds() + 0.02,
+            button_raw_bits,
+            x: start_x + dx,
+            y: start_y + dy,
+            modifiers: RemoteKeyModifiers::default(),
+        }));
+        self.try_forward(msgs)
+    }
+
+    fn query_widgets(&self, selector: &Selector, visible_only: bool) -> TestResult<Vec<WidgetSnapshot>> {
+        let widgets = self.try_widget_snapshot()?;
+        let (primary_window_id, primary_window_index) = primary_window_scope(&widgets);
+        let mut matches: Vec<_> = widgets
+            .into_iter()
+            .filter(|widget| selector.matches(widget, &primary_window_id, primary_window_index))
+            .collect();
+        if visible_only {
+            matches.retain(snapshot_is_visible);
+        }
+        matches.sort_by(|left, right| snapshot_sort_key(left).cmp(&snapshot_sort_key(right)));
+        if let Some(index) = selector.nth_index() {
+            return Ok(matches.into_iter().nth(index).into_iter().collect());
+        }
+        Ok(matches)
     }
 
     fn query_logs_once(&self, pattern: Option<String>) -> TestResult<Vec<(usize, LogEntry)>> {
@@ -344,13 +466,20 @@ impl TestApp {
     }
 
     fn collect_logs_text(&self) -> TestResult<String> {
-        let entries = self.query_logs_once(None)?;
+        let mut entries = self.query_logs_once(None)?;
+        if entries.len() > RECENT_LOG_LINES {
+            let split = entries.len() - RECENT_LOG_LINES;
+            entries = entries.split_off(split);
+        }
         let mut out = String::new();
         for (index, entry) in entries {
-            out.push_str(&format!(
-                "[{index}] {:?} {:?}: {}\n",
-                entry.source, entry.level, entry.message
-            ));
+            let _ = writeln!(
+                &mut out,
+                "[{index}] {:?} {:?}: {}",
+                entry.source,
+                entry.level,
+                entry.message
+            );
         }
         Ok(out)
     }
@@ -368,6 +497,10 @@ impl TestApp {
     fn send_no_wait(&self, msg: ClientToHub) -> TestResult<()> {
         let _ = self.send(msg)?;
         Ok(())
+    }
+
+    fn try_pump_ui(&self) -> TestResult<()> {
+        self.try_forward((0..PUMP_TICKS).map(|_| StudioToApp::Tick).collect())
     }
 
     fn wait_for_reply<T, F>(&self, timeout: Duration, mut matcher: F) -> TestResult<T>
@@ -441,9 +574,40 @@ impl TestApp {
     }
 
     fn shutdown(&self) {
-        let mut inner = self.inner.borrow_mut();
-        let build_id = inner.build_id;
-        let _ = inner.connection.send(ClientToHub::ClearBuild { build_id });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        {
+            let mut inner = self.inner.borrow_mut();
+            if inner.build_stopped.is_some() {
+                return;
+            }
+            let build_id = inner.build_id;
+            let _ = inner.connection.send(ClientToHub::ClearBuild { build_id });
+        }
+
+        loop {
+            if Instant::now() >= deadline {
+                return;
+            }
+            {
+                let inner = self.inner.borrow();
+                if inner.build_stopped.is_some() {
+                    return;
+                }
+            }
+            let slice = cmp::min(
+                POLL_INTERVAL,
+                deadline.saturating_duration_since(Instant::now()),
+            );
+            let msg = {
+                let inner = self.inner.borrow();
+                inner.connection.recv_timeout(slice)
+            };
+            let Some(msg) = msg else {
+                continue;
+            };
+            let mut inner = self.inner.borrow_mut();
+            inner.observe_message(&msg);
+        }
     }
 }
 
@@ -461,10 +625,10 @@ impl Locator {
     }
 
     pub fn try_wait_visible(&self) -> TestResult<()> {
-        let query = self.selector.as_query();
+        let query = self.selector.describe();
         let deadline = Instant::now() + self.app.action_timeout();
         while Instant::now() < deadline {
-            if !self.app.query_visible_widgets(&self.selector)?.is_empty() {
+            if !self.app.query_widgets(&self.selector, true)?.is_empty() {
                 return Ok(());
             }
             thread::sleep(self.app.poll_interval());
@@ -472,6 +636,180 @@ impl Locator {
         Err(TestError::new(format!(
             "timed out waiting for selector `{query}` to become visible"
         )))
+    }
+
+    pub fn wait_hidden(self) -> Self {
+        if let Err(err) = self.try_wait_hidden() {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_wait_hidden(&self) -> TestResult<()> {
+        let query = self.selector.describe();
+        let deadline = Instant::now() + self.app.action_timeout();
+        while Instant::now() < deadline {
+            if self.app.query_widgets(&self.selector, true)?.is_empty() {
+                return Ok(());
+            }
+            thread::sleep(self.app.poll_interval());
+        }
+        Err(TestError::new(format!(
+            "timed out waiting for selector `{query}` to become hidden"
+        )))
+    }
+
+    pub fn wait_count(self, expected: usize) -> Self {
+        if let Err(err) = self.try_wait_count(expected) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_wait_count(&self, expected: usize) -> TestResult<()> {
+        let query = self.selector.describe();
+        let deadline = Instant::now() + self.app.action_timeout();
+        while Instant::now() < deadline {
+            let count = self.app.query_widgets(&self.selector, true)?.len();
+            if count == expected {
+                return Ok(());
+            }
+            thread::sleep(self.app.poll_interval());
+        }
+        Err(TestError::new(format!(
+            "timed out waiting for selector `{query}` to match {expected} visible widgets"
+        )))
+    }
+
+    pub fn assert_text(self, expected: impl AsRef<str>) -> Self {
+        if let Err(err) = self.try_assert_text(expected) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_assert_text(&self, expected: impl AsRef<str>) -> TestResult<()> {
+        let expected = expected.as_ref();
+        let widget = self.resolve_unique_visible()?;
+        match widget.text.as_deref() {
+            Some(actual) if actual == expected => Ok(()),
+            Some(actual) => Err(TestError::new(format!(
+                "selector `{}` expected text `{expected}`, found `{actual}`",
+                self.selector.describe()
+            ))),
+            None => Err(TestError::new(format!(
+                "selector `{}` does not expose text state",
+                self.selector.describe()
+            ))),
+        }
+    }
+
+    pub fn wait_text(self, expected: impl AsRef<str>) -> Self {
+        if let Err(err) = self.try_wait_text(expected) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_wait_text(&self, expected: impl AsRef<str>) -> TestResult<()> {
+        self.wait_for_state("text", expected.as_ref(), |widget| widget.text.as_deref())
+    }
+
+    pub fn assert_value(self, expected: impl AsRef<str>) -> Self {
+        if let Err(err) = self.try_assert_value(expected) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_assert_value(&self, expected: impl AsRef<str>) -> TestResult<()> {
+        let expected = expected.as_ref();
+        let widget = self.resolve_unique_visible()?;
+        match widget.value.as_deref() {
+            Some(actual) if actual == expected => Ok(()),
+            Some(actual) => Err(TestError::new(format!(
+                "selector `{}` expected value `{expected}`, found `{actual}`",
+                self.selector.describe()
+            ))),
+            None => Err(TestError::new(format!(
+                "selector `{}` does not expose value state",
+                self.selector.describe()
+            ))),
+        }
+    }
+
+    pub fn wait_value(self, expected: impl AsRef<str>) -> Self {
+        if let Err(err) = self.try_wait_value(expected) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_wait_value(&self, expected: impl AsRef<str>) -> TestResult<()> {
+        self.wait_for_state("value", expected.as_ref(), |widget| widget.value.as_deref())
+    }
+
+    pub fn assert_checked(self, expected: bool) -> Self {
+        if let Err(err) = self.try_assert_checked(expected) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_assert_checked(&self, expected: bool) -> TestResult<()> {
+        let widget = self.resolve_unique_visible()?;
+        match widget.checked {
+            Some(actual) if actual == expected => Ok(()),
+            Some(actual) => Err(TestError::new(format!(
+                "selector `{}` expected checked state `{expected}`, found `{actual}`",
+                self.selector.describe()
+            ))),
+            None => Err(TestError::new(format!(
+                "selector `{}` does not expose checked state",
+                self.selector.describe()
+            ))),
+        }
+    }
+
+    pub fn wait_checked(self, expected: bool) -> Self {
+        if let Err(err) = self.try_wait_checked(expected) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_wait_checked(&self, expected: bool) -> TestResult<()> {
+        self.wait_for_bool_state("checked", expected, |widget| widget.checked)
+    }
+
+    pub fn assert_enabled(self, expected: bool) -> Self {
+        if let Err(err) = self.try_assert_enabled(expected) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_assert_enabled(&self, expected: bool) -> TestResult<()> {
+        let widget = self.resolve_unique_visible()?;
+        if widget.enabled == expected {
+            return Ok(());
+        }
+        Err(TestError::new(format!(
+            "selector `{}` expected enabled state `{expected}`, found `{}`",
+            self.selector.describe(),
+            widget.enabled
+        )))
+    }
+
+    pub fn wait_enabled(self, expected: bool) -> Self {
+        if let Err(err) = self.try_wait_enabled(expected) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_wait_enabled(&self, expected: bool) -> TestResult<()> {
+        self.wait_for_bool_state("enabled", expected, |widget| Some(widget.enabled))
     }
 
     pub fn click(self) -> Self {
@@ -482,7 +820,7 @@ impl Locator {
     }
 
     pub fn try_click(&self) -> TestResult<()> {
-        let target = self.resolve_unique()?;
+        let target = self.resolve_unique_visible()?;
         self.app.try_click_center(&target)
     }
 
@@ -498,9 +836,195 @@ impl Locator {
         self.app.try_type_text(text)
     }
 
-    fn resolve_unique(&self) -> TestResult<WidgetMatch> {
-        let query = self.selector.as_query();
-        let matches = self.app.query_visible_widgets(&self.selector)?;
+    pub fn clear(self) -> Self {
+        if let Err(err) = self.try_clear() {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_clear(&self) -> TestResult<()> {
+        let widget = self.resolve_unique_visible()?;
+        if widget.value.is_none() {
+            return Err(TestError::new(format!(
+                "selector `{}` is not a text input",
+                self.selector.describe()
+            )));
+        }
+        self.app.try_click_center(&widget)?;
+        self.app
+            .try_press_key_with_modifiers(KeyCode::KeyA, primary_shortcut_modifiers())?;
+        self.app.try_press_key(KeyCode::Backspace)
+    }
+
+    pub fn fill(self, text: impl AsRef<str>) -> Self {
+        if let Err(err) = self.try_fill(text) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_fill(&self, text: impl AsRef<str>) -> TestResult<()> {
+        self.try_clear()?;
+        self.app.try_type_text(text)
+    }
+
+    pub fn press_key(self, key_code: KeyCode) -> Self {
+        if let Err(err) = self.try_press_key(key_code) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_press_key(&self, key_code: KeyCode) -> TestResult<()> {
+        self.try_click()?;
+        self.app.try_press_key(key_code)
+    }
+
+    pub fn press_key_with_modifiers(self, key_code: KeyCode, modifiers: KeyModifiers) -> Self {
+        if let Err(err) = self.try_press_key_with_modifiers(key_code, modifiers) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_press_key_with_modifiers(
+        &self,
+        key_code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> TestResult<()> {
+        self.try_click()?;
+        self.app.try_press_key_with_modifiers(key_code, modifiers)
+    }
+
+    pub fn scroll(self, sx: f64, sy: f64) -> Self {
+        if let Err(err) = self.try_scroll(sx, sy) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_scroll(&self, sx: f64, sy: f64) -> TestResult<()> {
+        let target = self.resolve_unique_visible()?;
+        self.app.try_scroll_center(&target, sx, sy)
+    }
+
+    pub fn drag_by(self, dx: f64, dy: f64) -> Self {
+        if let Err(err) = self.try_drag_by(dx, dy) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_drag_by(&self, dx: f64, dy: f64) -> TestResult<()> {
+        let target = self.resolve_unique_visible()?;
+        self.app.try_drag_from(&target, dx, dy)
+    }
+
+    pub fn snapshot(&self) -> WidgetSnapshot {
+        match self.try_snapshot() {
+            Ok(widget) => widget,
+            Err(err) => panic_for_error(err),
+        }
+    }
+
+    pub fn try_snapshot(&self) -> TestResult<WidgetSnapshot> {
+        self.resolve_unique_visible()
+    }
+
+    pub fn count(&self) -> usize {
+        match self.try_count() {
+            Ok(count) => count,
+            Err(err) => panic_for_error(err),
+        }
+    }
+
+    pub fn try_count(&self) -> TestResult<usize> {
+        Ok(self.app.query_widgets(&self.selector, true)?.len())
+    }
+
+    fn wait_for_state<F>(&self, field_name: &str, expected: &str, accessor: F) -> TestResult<()>
+    where
+        F: Fn(&WidgetSnapshot) -> Option<&str>,
+    {
+        let deadline = Instant::now() + self.app.action_timeout();
+        let mut last_seen = None::<String>;
+        while Instant::now() < deadline {
+            let widget = match self.resolve_unique_visible() {
+                Ok(widget) => widget,
+                Err(err) if selector_resolution_error(err.message()) => {
+                    thread::sleep(self.app.poll_interval());
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            match accessor(&widget) {
+                Some(actual) if actual == expected => return Ok(()),
+                Some(actual) => {
+                    last_seen = Some(actual.to_string());
+                    thread::sleep(self.app.poll_interval());
+                }
+                None => {
+                    thread::sleep(self.app.poll_interval());
+                }
+            }
+        }
+        let detail = last_seen
+            .map(|value| format!(" last seen `{value}`"))
+            .unwrap_or_default();
+        Err(TestError::new(format!(
+            "timed out waiting for selector `{}` {} to equal `{expected}`{}",
+            self.selector.describe(),
+            field_name,
+            detail
+        )))
+    }
+
+    fn wait_for_bool_state<F>(
+        &self,
+        field_name: &str,
+        expected: bool,
+        accessor: F,
+    ) -> TestResult<()>
+    where
+        F: Fn(&WidgetSnapshot) -> Option<bool>,
+    {
+        let deadline = Instant::now() + self.app.action_timeout();
+        let mut last_seen = None::<bool>;
+        while Instant::now() < deadline {
+            let widget = match self.resolve_unique_visible() {
+                Ok(widget) => widget,
+                Err(err) if selector_resolution_error(err.message()) => {
+                    thread::sleep(self.app.poll_interval());
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            match accessor(&widget) {
+                Some(actual) if actual == expected => return Ok(()),
+                Some(actual) => {
+                    last_seen = Some(actual);
+                    thread::sleep(self.app.poll_interval());
+                }
+                None => {
+                    thread::sleep(self.app.poll_interval());
+                }
+            }
+        }
+        let detail = last_seen
+            .map(|value| format!(" last seen `{value}`"))
+            .unwrap_or_default();
+        Err(TestError::new(format!(
+            "timed out waiting for selector `{}` {} to equal `{expected}`{}",
+            self.selector.describe(),
+            field_name,
+            detail
+        )))
+    }
+
+    fn resolve_unique_visible(&self) -> TestResult<WidgetSnapshot> {
+        let query = self.selector.describe();
+        let matches = self.app.query_widgets(&self.selector, true)?;
         match matches.as_slice() {
             [] => Err(TestError::new(format!(
                 "selector `{query}` matched no visible widgets"
@@ -510,7 +1034,7 @@ impl Locator {
                 "selector `{query}` matched multiple widgets:\n{}",
                 matches
                     .iter()
-                    .map(|item| item.raw.as_str())
+                    .map(snapshot_summary)
                     .collect::<Vec<_>>()
                     .join("\n")
             ))),
@@ -668,6 +1192,21 @@ fn capture_failure_artifacts(app: &TestApp, failure_message: &str) {
         }
     }
 
+    match app.try_widget_snapshot() {
+        Ok(snapshot) => {
+            let _ = fs::write(
+                artifact_dir.join("widget-snapshot.json"),
+                snapshot.serialize_json(),
+            );
+        }
+        Err(err) => {
+            let _ = fs::write(
+                artifact_dir.join("widget-snapshot-error.txt"),
+                err.message(),
+            );
+        }
+    }
+
     match app.collect_logs_text() {
         Ok(logs) => {
             let _ = fs::write(artifact_dir.join("logs.txt"), logs);
@@ -682,6 +1221,10 @@ fn panic_for_error(err: TestError) -> ! {
     panic!("{}", err.message())
 }
 
+fn startup_error_is_retryable(err: &TestError) -> bool {
+    err.message().contains("before startup")
+}
+
 fn sanitize_path_component(value: &str) -> String {
     let mut sanitized = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -694,11 +1237,126 @@ fn sanitize_path_component(value: &str) -> String {
     sanitized.trim_matches('_').to_string()
 }
 
+fn selector_resolution_error(message: &str) -> bool {
+    message.contains("matched no visible widgets") || message.contains("matched multiple widgets")
+}
+
+fn primary_window_scope(widgets: &[WidgetSnapshot]) -> (String, usize) {
+    if let Some(widget) = widgets
+        .iter()
+        .filter(|widget| !widget.window_id.is_empty())
+        .min_by(|left, right| snapshot_sort_key(left).cmp(&snapshot_sort_key(right)))
+    {
+        return (widget.window_id.clone(), widget.window_index);
+    }
+    (String::new(), 0)
+}
+
+fn snapshot_is_visible(widget: &WidgetSnapshot) -> bool {
+    widget.visible && widget.width > 0 && widget.height > 0
+}
+
+fn snapshot_sort_key(widget: &WidgetSnapshot) -> (usize, i64, i64, String, String) {
+    (
+        widget.window_index,
+        widget.y,
+        widget.x,
+        widget.id.clone(),
+        widget.widget_type.clone(),
+    )
+}
+
+fn snapshot_center(widget: &WidgetSnapshot) -> (i64, i64) {
+    (
+        widget.x + widget.width / 2,
+        widget.y + widget.height / 2,
+    )
+}
+
+fn snapshot_center_f64(widget: &WidgetSnapshot) -> (f64, f64) {
+    let (x, y) = snapshot_center(widget);
+    (x as f64, y as f64)
+}
+
+fn snapshot_summary(widget: &WidgetSnapshot) -> String {
+    let mut fields = Vec::new();
+    fields.push(format!(
+        "{} {} @{} {} {} {} {}",
+        widget.id,
+        widget.widget_type,
+        widget.window_id,
+        widget.x,
+        widget.y,
+        widget.width,
+        widget.height
+    ));
+    if let Some(text) = &widget.text {
+        fields.push(format!("text={text:?}"));
+    }
+    if let Some(value) = &widget.value {
+        fields.push(format!("value={value:?}"));
+    }
+    if let Some(checked) = widget.checked {
+        fields.push(format!("checked={checked}"));
+    }
+    if let Some(selected) = &widget.selected {
+        fields.push(format!("selected={selected:?}"));
+    }
+    fields.join(" ")
+}
+
+fn now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
+fn primary_shortcut_modifiers() -> KeyModifiers {
+    #[cfg(target_vendor = "apple")]
+    {
+        KeyModifiers {
+            logo: true,
+            ..Default::default()
+        }
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        KeyModifiers {
+            control: true,
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_path_component, TestError, TestResult, WidgetMatch};
+    use super::{
+        primary_window_scope, sanitize_path_component, snapshot_is_visible, snapshot_sort_key,
+        TestError, TestResult, WidgetMatch,
+    };
     use crate::{Selector, TestConfig};
+    use makepad_studio_protocol::WidgetSnapshot;
     use std::path::PathBuf;
+
+    fn snapshot(id: &str) -> WidgetSnapshot {
+        WidgetSnapshot {
+            id: id.to_string(),
+            widget_type: "Button".to_string(),
+            window_id: "main_window".to_string(),
+            window_index: 0,
+            visible: true,
+            enabled: true,
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+            text: Some(id.to_string()),
+            value: None,
+            checked: None,
+            selected: None,
+        }
+    }
 
     #[test]
     fn widget_match_parse_accepts_widget_rects() {
@@ -723,7 +1381,7 @@ mod tests {
             config.artifacts_dir,
             PathBuf::from("/tmp/example")
                 .join("target")
-                .join("makepad-ui-tests")
+                .join("makepad_test")
                 .join("makepad-example")
                 .join("ui__test")
         );
@@ -747,5 +1405,34 @@ mod tests {
     #[test]
     fn selector_queries_remain_publicly_compatible() {
         assert_eq!(Selector::id("foo").as_query(), "id:foo");
+    }
+
+    #[test]
+    fn window_scope_defaults_to_primary_window() {
+        let widgets = vec![
+            WidgetSnapshot {
+                window_id: "panel_window".to_string(),
+                window_index: 1,
+                ..snapshot("secondary")
+            },
+            snapshot("primary"),
+        ];
+        assert_eq!(primary_window_scope(&widgets), ("main_window".to_string(), 0));
+    }
+
+    #[test]
+    fn snapshot_visibility_requires_geometry() {
+        let mut widget = snapshot("hidden");
+        widget.width = 0;
+        assert!(!snapshot_is_visible(&widget));
+    }
+
+    #[test]
+    fn snapshot_sort_prefers_window_then_position() {
+        let mut left = snapshot("left");
+        let mut right = snapshot("right");
+        left.x = 10;
+        right.x = 20;
+        assert!(snapshot_sort_key(&left) < snapshot_sort_key(&right));
     }
 }

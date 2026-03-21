@@ -1,19 +1,10 @@
 # makepad_test
 
-`makepad_test` provides Rust-native UI tests for Makepad examples and apps.
-
-The intended workflow is the same one Rust developers already use for `#[test]` and `#[tokio::test]`:
-
-- add the crate as a `dev-dependency`
-- put UI tests in `tests/*.rs`
-- annotate them with `#[makepad_test]`
-- run them with `cargo test -p <package>`
-
-The crate starts a Makepad Studio hub in-process, mounts the current package, launches the current package in headless mode, and drives it through the existing studio protocol.
+`makepad_test` provides Rust-native UI regression tests for Makepad apps. Tests live next to the package they exercise, run through normal `cargo test`, and drive the app through the existing Studio protocol in headless mode.
 
 ## Quick Start
 
-Add this to your example crate:
+Add this to the package under test:
 
 ```toml
 [dev-dependencies]
@@ -26,62 +17,86 @@ Create an integration test:
 use makepad_test::{makepad_test, Selector, TestApp};
 
 #[makepad_test]
-fn return_submits(app: TestApp) {
+fn fill_and_submit(app: TestApp) {
     app.locator(Selector::id("input_singleline"))
         .wait_visible()
-        .click();
-    app.type_text("hello");
+        .fill("hello")
+        .wait_value("hello");
     app.press_return();
-    app.wait_for_log_contains("Returned from singleline: \"hello\"");
+    app.locator(Selector::id("status_label"))
+        .wait_text("Returned from singleline: \"hello\"");
 }
 ```
 
-Run it with:
+Run a package-local suite with:
 
 ```bash
-cargo test -p makepad-example-text-input --test ui -- --nocapture --test-threads=1
+cargo test -p makepad-example-text-input --test ui -- --test-threads=1
 ```
 
-## What You Get
+Run the curated repo UI suites serially on macOS with:
 
-- `#[makepad_test]` for package-local UI tests
-- `TestApp` for app-scoped actions and assertions
-- `Selector` and `Locator` for widget lookup and interaction
-- failure artifacts under `target/makepad-ui-tests/<package>/<test>/`
-- a lower-level `run_with_config` entry point when you need to bypass the macro
+```bash
+tools/run_ui_tests.sh
+```
 
-## Current Surface
+## Surface Area
 
-- selectors: `Selector::id`, `Selector::widget_type`, `Selector::raw`
-- actions: `click`, `type_text`, `press_return`
-- waits: `wait_visible`, `wait_for_log_contains`
-- inspection: `widget_dump`, `screenshot`
-- raw escape hatch: `forward(Vec<StudioToApp>)`
+- `#[makepad_test]` for current-package UI tests
+- `TestApp` for app-scoped input, waits, logs, screenshots, and raw protocol forwarding
+- `Selector` for structured snapshot matching
+- `Locator` for strict single-widget interaction and assertions
 
-Selectors are geometry-based today. They resolve through the existing widget query protocol and require exactly one visible match for interaction.
+Structured selectors support:
 
-## Artifacts
+- `Selector::all()`
+- `Selector::id("...")`
+- `Selector::widget_type("...")`
+- `Selector::raw("...")`
+- builder filters: `.text_exact(...)`, `.text_contains(...)`, `.nth(...)`, `.window(...)`, `.window_index(...)`, `.any_window()`
 
-When a `#[makepad_test]` test fails, the runtime captures artifacts in:
+Common locator actions:
+
+- `click`, `type_text`, `fill`, `clear`
+- `press_key`, `press_key_with_modifiers`
+- `scroll`, `drag_by`
+
+Common waits and assertions:
+
+- `wait_visible`, `wait_hidden`, `wait_count`
+- `wait_text`, `wait_value`, `wait_checked`, `wait_enabled`
+- `assert_text`, `assert_value`, `assert_checked`, `assert_enabled`
+
+Inspection helpers:
+
+- `widget_snapshot()`
+- `widget_dump()`
+- `screenshot()`
+- `wait_for_log_contains(...)`
+
+## Failure Artifacts
+
+Failed tests write artifacts under:
 
 ```text
-target/makepad-ui-tests/<package>/<test>/
+target/makepad_test/<package>/<test>/
 ```
 
-The runtime currently writes:
+The runtime captures:
 
 - `failure.txt`
 - `logs.txt`
+- `widget-snapshot.json`
 - `widget-tree.txt` or `widget-tree-error.txt`
 - `failure-screenshot.png` or `failure-screenshot-error.txt`
 
-## Constraints
+## Current Constraints
 
-- synchronous tests only in v1
-- current-package targeting only in v1
-- append-style `type_text`, not `fill`
-- no JS adapter, image diffing, or trace viewer
+- synchronous API only
+- current-package targeting only
+- milestone-1 repo suite is validated on macOS first
+- no visual diffing or trace viewer yet
 
 ## Guide
 
-For the authoring model, API details, artifacts, and troubleshooting, see [GUIDE.md](./GUIDE.md).
+For the full authoring model, runtime behavior, and troubleshooting notes, see [GUIDE.md](./GUIDE.md).

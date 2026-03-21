@@ -21,7 +21,8 @@ use makepad_studio_protocol::hub_protocol as backend_proto;
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent, KeyModifiers,
     LogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseUp, ScreenshotRequest,
-    StudioToApp, StudioToAppVec, TextInputEvent, WidgetQueryRequest, WidgetTreeDumpRequest,
+    StudioToApp, StudioToAppVec, TextInputEvent, WidgetQueryRequest, WidgetSnapshotRequest,
+    WidgetTreeDumpRequest,
 };
 use makepad_terminal_core::{StyleFlags, Terminal};
 use std::collections::{HashMap, HashSet};
@@ -1334,6 +1335,16 @@ impl HubCore {
                     StudioToApp::WidgetQuery(WidgetQueryRequest {
                         request_id: query_id.0,
                         query,
+                    }),
+                ) {
+                    self.send_ui_error(client_id, err);
+                }
+            }
+            ClientToHub::WidgetSnapshot { build_id } => {
+                if let Err(err) = self.send_app_msg(
+                    build_id,
+                    StudioToApp::WidgetSnapshot(WidgetSnapshotRequest {
+                        request_id: query_id.0,
                     }),
                 ) {
                     self.send_ui_error(client_id, err);
@@ -2842,6 +2853,17 @@ impl HubCore {
                         build_id,
                         query: response.query,
                         rects: response.rects,
+                    },
+                );
+            }
+            AppToStudio::WidgetSnapshot(response) => {
+                let query_id = QueryId(response.request_id);
+                self.send_to_query_owner(
+                    query_id,
+                    HubToClient::WidgetSnapshot {
+                        query_id,
+                        build_id,
+                        widgets: response.widgets,
                     },
                 );
             }

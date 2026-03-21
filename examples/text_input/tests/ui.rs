@@ -2,12 +2,18 @@ use makepad_test::{makepad_test, run_with_config, Selector, TestApp, TestConfig,
 use std::fs;
 
 #[makepad_test]
-fn return_submits(app: TestApp) {
+fn fill_clear_and_submit_singleline_input(app: TestApp) {
     app.locator(Selector::id("input_singleline"))
         .wait_visible()
-        .click();
-    app.type_text("hello");
+        .fill("hello")
+        .wait_value("hello")
+        .clear()
+        .wait_value("")
+        .fill("hello")
+        .wait_value("hello");
     app.press_return();
+    app.locator(Selector::id("status_label"))
+        .wait_text("Returned from singleline: \"hello\"");
     app.wait_for_log_contains("Returned from singleline: \"hello\"");
 }
 
@@ -61,5 +67,6 @@ fn captures_failure_artifacts() {
     assert!(artifact_dir.join("failure.txt").exists());
     assert!(artifact_dir.join("logs.txt").exists());
     assert!(artifact_dir.join("widget-tree.txt").exists());
+    assert!(artifact_dir.join("widget-snapshot.json").exists());
     assert!(artifact_dir.join("failure-screenshot.png").exists());
 }
