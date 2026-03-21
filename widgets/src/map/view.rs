@@ -20,6 +20,8 @@ script_mod! {
 
     mod.draw.DrawMapVector = mod.std.set_type_default() do #(DrawMapVector::script_shader(vm)){
         ..mod.draw.DrawVector
+        map_scale: uniform(vec2(1.0, 1.0))
+        map_offset: uniform(vec2(0.0, 0.0))
 
         vertex: fn() {
             let pos = vec2(self.geom.x, self.geom.y);
@@ -226,9 +228,9 @@ script_mod! {
 pub struct DrawMapVector {
     #[deref]
     pub draw_super: DrawVector,
-    #[live(vec2(1.0, 1.0))]
+    #[rust(vec2(1.0, 1.0))]
     pub map_scale: Vec2f,
-    #[live(vec2(0.0, 0.0))]
+    #[rust(vec2(0.0, 0.0))]
     pub map_offset: Vec2f,
 }
 
@@ -242,6 +244,12 @@ impl DrawMapVector {
     ) {
         self.map_scale = map_scale;
         self.map_offset = map_offset;
+        self.draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(map_scale), &[map_scale.x, map_scale.y]);
+        self.draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(map_offset), &[map_offset.x, map_offset.y]);
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
         if self.draw_super.draw_vars.can_instance() {

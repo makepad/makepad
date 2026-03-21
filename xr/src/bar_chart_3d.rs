@@ -2,7 +2,7 @@ use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 use super::scene_3d::{
     apply_scene_to_draw_pbr, chart_data_from_scope, register_last_draw_call_anchor,
-    scene_node_world_transform_from_scope, scene_state_from_scope,
+    scene_node_world_transform_from_cx, scene_state_from_cx,
 };
 
 script_mod! {
@@ -142,10 +142,10 @@ impl BarChart3D {
 
 impl Widget for BarChart3D {
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        let Some(scene) = scene_state_from_scope(scope) else {
+        let Some(scene) = scene_state_from_cx(cx) else {
             return DrawStep::done();
         };
-        let cx = &mut Cx2d::new(cx.cx);
+        let cx2d = &mut Cx2d::new(cx.cx);
 
         let data = chart_data_from_scope(scope).unwrap_or_default();
         if data.bars.is_empty() {
@@ -153,9 +153,9 @@ impl Widget for BarChart3D {
         }
 
         // Set up both draw shaders with the scene state
-        apply_scene_to_draw_pbr(&mut self.draw_bar.draw_super, cx, &scene);
-        apply_scene_to_draw_pbr(&mut self.draw_pbr, cx, &scene);
-        let parent_world = scene_node_world_transform_from_scope(scope);
+        let _ = apply_scene_to_draw_pbr(&mut self.draw_bar.draw_super, cx2d);
+        let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr, cx2d);
+        let parent_world = scene_node_world_transform_from_cx(cx2d);
 
         self.draw_bar.push_matrix();
         self.draw_bar.apply_transform(parent_world);
@@ -204,7 +204,7 @@ impl Widget for BarChart3D {
 
             let half = vec3(bar_size, bar_size, bar_size);
             let draw_result = self.draw_bar.draw_rounded_cube(
-                cx,
+                cx2d,
                 half,
                 corner_radius,
                 1,
@@ -215,13 +215,13 @@ impl Widget for BarChart3D {
                     self.draw_bar
                         .cur_transform
                         .transform_vec4(vec4(0.0, h * 0.5, 0.0, 1.0));
-                register_last_draw_call_anchor(cx, scope, vec3(world.x, world.y, world.z));
+                register_last_draw_call_anchor(cx2d, vec3(world.x, world.y, world.z));
             }
             self.draw_bar.pop_matrix();
         }
 
         if self.show_axes {
-            self.draw_axes(cx, x_span, z_span, y_top.max(0.05));
+            self.draw_axes(cx2d, x_span, z_span, y_top.max(0.05));
         }
         self.draw_bar.pop_matrix();
         self.draw_pbr.pop_matrix();
@@ -257,15 +257,15 @@ impl Widget for BarChart3D {
 
             let _ = self
                 .draw_text_3d
-                .draw_world_text(cx, x_label_pos, &data.x_axis_label);
+                .draw_world_text(cx2d, x_label_pos, &data.x_axis_label);
             let _ = self
                 .draw_text_3d
-                .draw_world_text(cx, z_label_pos, &data.z_axis_label);
+                .draw_world_text(cx2d, z_label_pos, &data.z_axis_label);
             let _ = self
                 .draw_text_3d
-                .draw_world_text(cx, y_label_pos, &data.y_axis_label);
+                .draw_world_text(cx2d, y_label_pos, &data.y_axis_label);
             let _ = self.draw_text_3d.draw_world_text(
-                cx,
+                cx2d,
                 top_label_pos,
                 &format!("{:.0}", data.max_value),
             );

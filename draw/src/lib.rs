@@ -12,6 +12,7 @@ pub mod image_cache;
 pub mod match_event;
 pub mod nav;
 pub mod overlay;
+pub mod scene_3d;
 pub mod shader;
 pub mod svg;
 pub mod text;
@@ -32,6 +33,7 @@ pub use crate::{
     match_event::MatchEvent,
     nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
     overlay::Overlay,
+    scene_3d::{SceneDrawCallAnchor, SceneScope3D, SceneState3D},
     shader::{
         draw_cube::DrawCube, draw_glyph::DrawGlyph, draw_pbr::DrawPbr,
         draw_pbr::DrawPbrMaterialState, draw_pbr::DrawPbrRefractive,

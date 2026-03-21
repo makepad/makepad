@@ -3,6 +3,7 @@ pub use makepad_widgets::*;
 
 pub mod bar_chart_3d;
 pub mod chart_3d;
+pub mod cube;
 pub mod cube_3d;
 #[cfg(feature = "gltf")]
 pub mod gltf_3d;
@@ -10,10 +11,13 @@ pub mod gltf_3d;
 pub mod gltf_bridge;
 pub mod grid_3d;
 pub mod mesh_generators;
+pub mod node;
 pub mod node_3d;
 pub mod passthrough_cube;
 pub mod permissions_flow;
 pub mod physics_view;
+pub mod refractive_cube;
+pub mod root;
 mod scene;
 pub mod scene_3d;
 pub mod tree;
@@ -23,16 +27,20 @@ pub mod view_splat;
 
 pub use bar_chart_3d::*;
 pub use chart_3d::*;
+pub use cube::*;
 pub use cube_3d::*;
 #[cfg(feature = "gltf")]
 pub use gltf_3d::*;
 #[cfg(feature = "gltf")]
 pub use gltf_bridge::*;
 pub use grid_3d::*;
+pub use node::*;
 pub use node_3d::*;
 pub use passthrough_cube::DrawPassthroughCubeAtlas;
 pub use permissions_flow::*;
 pub use physics_view::*;
+pub use refractive_cube::*;
+pub use root::XrRoot;
 pub use scene::XrScene;
 pub use scene_3d::*;
 pub use tree::{
@@ -54,11 +62,15 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     view_splat::script_mod(vm);
     view_3d::script_mod(vm);
 
+    node::script_mod(vm);
+    cube::script_mod(vm);
     cube_3d::script_mod(vm);
     permissions_flow::script_mod(vm);
     physics_view::script_mod(vm);
+    refractive_cube::script_mod(vm);
 
     passthrough_cube::script_mod(vm);
     tree::script_mod(vm);
-    scene::script_mod(vm)
+    scene::script_mod(vm);
+    root::script_mod(vm)
 }

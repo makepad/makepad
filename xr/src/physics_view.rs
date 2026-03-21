@@ -8,7 +8,7 @@ use makepad_widgets::*;
 use makepad_widgets::event::TouchState;
 
 use crate::scene_3d::{
-    apply_scene_to_draw_pbr, ray_from_scene_viewport, scene_state_from_scope, SceneState3D,
+    apply_scene_to_draw_pbr, ray_from_scene_viewport, scene_state_from_cx, SceneState3D,
 };
 
 script_mod! {
@@ -363,7 +363,7 @@ impl PhysicsWorld3D {
             return;
         }
 
-        apply_scene_to_draw_pbr(&mut self.draw_pbr, cx, scene_state);
+        let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr, cx);
         self.draw_pbr.set_base_color_texture(None);
         self.draw_pbr.set_metal_roughness_texture(None);
         self.draw_pbr.set_normal_texture(None);
@@ -474,8 +474,8 @@ impl Widget for PhysicsWorld3D {
         }
     }
 
-    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        let Some(scene_state) = scene_state_from_scope(scope) else {
+    fn draw_3d(&mut self, cx: &mut Cx3d, _scope: &mut Scope) -> DrawStep {
+        let Some(scene_state) = scene_state_from_cx(cx) else {
             return DrawStep::done();
         };
         let cx = &mut Cx2d::new(cx.cx);
