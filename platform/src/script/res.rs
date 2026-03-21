@@ -184,6 +184,40 @@ fn should_skip_eager_resource_load(abs_path: &str) -> bool {
     is_heavy_bundled_fallback_font_path(abs_path)
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+fn remapped_small_font_dependency_path(path: &str) -> Option<&'static str> {
+    match path.replace('\\', "/").as_str() {
+        "makepad_widgets/resources/GoNotoKurrent-Bold.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-SemiBold.ttf")
+        }
+        "makepad_widgets/resources/GoNotoKurrent-Regular.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        "makepad_widgets/resources/LXGWWenKaiRegular.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        "makepad_widgets/resources/LXGWWenKaiBold.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        "makepad_widgets/resources/NotoColorEmoji.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        _ => None,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_resource_request_path(cx: &Cx, dep_path: &str) -> String {
+    if let crate::cx::OsType::Web(params) = &cx.os_type {
+        if params.small_font_aliases {
+            if let Some(remapped) = remapped_small_font_dependency_path(dep_path) {
+                return remapped.to_string();
+            }
+        }
+    }
+    dep_path.to_string()
+}
+
 fn is_heavy_bundled_fallback_font_path(path: &str) -> bool {
     if !is_widgets_resources_path(path) {
         return false;
@@ -241,16 +275,22 @@ impl Cx {
             }
 
             #[cfg(target_arch = "wasm32")]
-            if res.web_url.is_none() {
+            if res.dependency_path.is_none() {
                 if let Some(dep_path) = resolve_dependency_path_from_manifests(
                     &res.abs_path,
                     None,
                     None,
                     crate_manifests,
                 ) {
-                    res.dependency_path = Some(dep_path.clone());
-                    res.web_url = Some(format!("/{}", dep_path));
+                    res.dependency_path = Some(dep_path);
                 }
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            if let Some(dep_path) = res.dependency_path.as_deref() {
+                res.web_url = Some(format!("/{}", web_resource_request_path(self, dep_path)));
+            } else {
+                res.web_url = None;
             }
 
             if let Some(dep_path) = res.dependency_path.as_deref() {
@@ -363,7 +403,7 @@ impl Cx {
 
 #[cfg(test)]
 mod tests {
-    use super::should_skip_eager_resource_load;
+    use super::{remapped_small_font_dependency_path, should_skip_eager_resource_load};
 
     #[test]
     fn skips_only_heavy_widgets_fallback_fonts() {
@@ -382,6 +422,30 @@ mod tests {
         assert!(!should_skip_eager_resource_load(
             "/tmp/app/resources/LXGWWenKaiRegular.ttf"
         ));
+    }
+
+    #[test]
+    fn remaps_only_known_small_font_fallback_dependency_paths() {
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiRegular.ttf"),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiBold.ttf"),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/NotoColorEmoji.ttf"),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/IBMPlexSans-Text.ttf"),
+            None
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("app/resources/LXGWWenKaiRegular.ttf"),
+            None
+        );
     }
 }
 
