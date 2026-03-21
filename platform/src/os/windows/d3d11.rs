@@ -45,7 +45,7 @@ use crate::{
                     D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH,
                     D3D11_CLEAR_STENCIL, D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_ALWAYS,
                     D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_FLAG,
-                    D3D11_CULL_NONE, D3D11_DEPTH_STENCILOP_DESC, D3D11_DEPTH_STENCIL_DESC,
+                    D3D11_CULL_BACK, D3D11_CULL_NONE, D3D11_DEPTH_STENCILOP_DESC, D3D11_DEPTH_STENCIL_DESC,
                     D3D11_DEPTH_STENCIL_VIEW_DESC, D3D11_DEPTH_WRITE_MASK_ALL,
                     D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID,
                     D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_INSTANCE_DATA,
@@ -61,6 +61,7 @@ use crate::{
                         DXGI_ALPHA_MODE_IGNORE,
                         DXGI_FORMAT,
                         DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_FORMAT_R8G8B8A8_UNORM,
                         //DXGI_FORMAT_D32_FLOAT_S8X 24_UINT,
                         DXGI_FORMAT_D32_FLOAT,
                         DXGI_FORMAT_R16_FLOAT,
@@ -1497,7 +1498,7 @@ impl CxOsPass {
         }
 
         if self.depth_stencil_state_write.is_none() {
-            let mut make_depth_stencil_state = |depth_write_mask| {
+            let make_depth_stencil_state = |depth_write_mask| {
                 let ds_desc = D3D11_DEPTH_STENCIL_DESC {
                     DepthEnable: TRUE,
                     DepthWriteMask: depth_write_mask,
