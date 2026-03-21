@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{FnArg, ItemFn, Pat, ReturnType};
+use syn::{Attribute, FnArg, ItemFn, Pat, ReturnType};
 
 #[proc_macro_attribute]
 pub fn makepad_test(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -67,15 +67,18 @@ fn expand_makepad_test(
     }
 
     let vis = function.vis.clone();
-    let attrs = function.attrs.clone();
+    let wrapper_attrs = function.attrs.clone();
+    function
+        .attrs
+        .retain(|attr| !is_wrapper_only_test_attr(attr));
     let wrapper_name = function.sig.ident.clone();
     let inner_name = format_ident!("__makepad_test_inner_{}", wrapper_name);
     function.sig.ident = inner_name.clone();
 
     Ok(quote! {
-        #(#attrs)*
         #function
 
+        #(#wrapper_attrs)*
         #[test]
         #vis fn #wrapper_name() {
             ::makepad_test::__private::run_current_package_test(
@@ -89,10 +92,15 @@ fn expand_makepad_test(
     })
 }
 
+fn is_wrapper_only_test_attr(attr: &Attribute) -> bool {
+    attr.path().is_ident("ignore") || attr.path().is_ident("should_panic")
+}
+
 #[cfg(test)]
 mod tests {
     use super::expand_makepad_test;
     use quote::quote;
+    use syn::{parse2, File, Item};
 
     #[test]
     fn expansion_wraps_test_body() {
@@ -124,5 +132,52 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("exactly one TestApp argument"));
+    }
+
+    #[test]
+    fn expansion_preserves_test_attrs_on_wrapper() {
+        let output = expand_makepad_test(
+            quote! {},
+            quote! {
+                #[cfg(target_os = "macos")]
+                #[ignore]
+                #[should_panic(expected = "boom")]
+                fn smoke(app: TestApp) {}
+            },
+        )
+        .unwrap();
+
+        let file: File = parse2(output).expect("parse expansion");
+        assert_eq!(file.items.len(), 2);
+
+        let Item::Fn(inner) = &file.items[0] else {
+            panic!("expected hidden inner function");
+        };
+        assert!(inner.attrs.iter().any(|attr| attr.path().is_ident("cfg")));
+        assert!(!inner
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("ignore")));
+        assert!(!inner
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("should_panic")));
+
+        let Item::Fn(wrapper) = &file.items[1] else {
+            panic!("expected wrapper test function");
+        };
+        assert!(wrapper.attrs.iter().any(|attr| attr.path().is_ident("cfg")));
+        assert!(wrapper
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("ignore")));
+        assert!(wrapper
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("should_panic")));
+        assert!(wrapper
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("test")));
     }
 }
