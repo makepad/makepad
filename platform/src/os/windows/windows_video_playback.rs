@@ -491,6 +491,7 @@ pub struct WindowsVideoPlayer {
     d3d11_device: ID3D11Device,
     render_texture: Option<ID3D11Texture2D>,
     render_srv: Option<ID3D11ShaderResourceView>,
+    #[allow(unused)]
     pub(crate) video_id: LiveId,
     texture_id: TextureId,
     is_prepared: bool,

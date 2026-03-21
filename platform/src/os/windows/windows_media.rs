@@ -174,7 +174,7 @@ impl CxMediaApi for Cx {
         match config.source {
             VideoEncodeSource::Camera { .. } => {
                 let camera = self.os.media.media_foundation();
-                let mut camera = camera.lock().unwrap();
+                let camera = camera.lock().unwrap();
                 *camera.video_encoder_config[index].lock().unwrap() = Some(config);
                 *camera.video_output_cb[index].lock().unwrap() = Some(f);
                 Ok(())
