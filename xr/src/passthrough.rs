@@ -93,7 +93,7 @@ impl XrPassthroughEnvAtlas {
 }
 
 impl XrScene {
-    fn passthrough_camera_center_offset_uv(&self) -> Vec2f {
+    pub(crate) fn passthrough_camera_center_offset_uv(&self) -> Vec2f {
         let source_size = self.passthrough_camera_source_size;
         let aspect = if source_size.y > 1.0 {
             source_size.x / source_size.y

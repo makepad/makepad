@@ -6,59 +6,18 @@ use std::cmp::Ordering;
 
 use super::chart_3d::Chart3DData;
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SceneState3D {
-    pub time: f64,
-    pub camera_pos: Vec3f,
-    pub view: Mat4f,
-    pub projection: Mat4f,
-    pub projection_viewport: Mat4f,
-    pub clip_ndc: Vec4f,
-    pub depth_range: Vec2f,
-    pub depth_forward_bias: f32,
-    pub use_pass_camera: bool,
-    pub viewport_rect: Rect,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct SceneScope3D {
-    pub scene: SceneState3D,
-    pub chart_data: Option<Chart3DData>,
-    pub world_transform: Mat4f,
-    pub draw_call_anchors: Vec<SceneDrawCallAnchor>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct SceneDrawCallAnchor {
-    pub area: Area,
-    pub draw_list_id: Option<DrawListId>,
-    pub draw_item_id: Option<usize>,
-    pub world_pos: Vec3f,
-}
-
-pub fn scene_state_from_scope(scope: &mut Scope) -> Option<SceneState3D> {
-    if let Some(scope_3d) = scope.data.get::<SceneScope3D>() {
-        return Some(scope_3d.scene);
-    }
-    if let Some(scene) = scope.props.get::<SceneState3D>() {
-        return Some(*scene);
-    }
-    scope.data.get::<SceneState3D>().copied()
-}
+pub use crate::makepad_draw::{SceneDrawCallAnchor, SceneScope3D, SceneState3D};
 
 pub fn chart_data_from_scope(scope: &mut Scope) -> Option<Chart3DData> {
-    if let Some(scope_3d) = scope.data.get::<SceneScope3D>() {
-        return scope_3d.chart_data.clone();
-    }
     scope.data.get::<Chart3DData>().cloned()
 }
 
-pub fn scene_node_world_transform_from_scope(scope: &mut Scope) -> Mat4f {
-    scope
-        .data
-        .get::<SceneScope3D>()
-        .map(|scope_3d| scope_3d.world_transform)
-        .unwrap_or_else(Mat4f::identity)
+pub fn scene_state_from_cx(cx: &mut CxDraw) -> Option<SceneState3D> {
+    cx.scene_state_3d()
+}
+
+pub fn scene_node_world_transform_from_cx(cx: &mut CxDraw) -> Mat4f {
+    cx.scene_world_transform_3d()
 }
 
 pub fn compose_scene_node_transform(position: Vec3f, rotation: Vec3f, scale: Vec3f) -> Mat4f {
@@ -128,23 +87,11 @@ pub fn ray_from_scene_viewport(scene: &SceneState3D, abs: DVec2) -> Option<(Vec3
     Some((scene.camera_pos, dir.normalize()))
 }
 
-pub fn register_draw_call_anchor(scope: &mut Scope, area: Area, world_pos: Vec3f) {
-    let Some(scope_3d) = scope.data.get_mut::<SceneScope3D>() else {
-        return;
-    };
-    let (draw_list_id, draw_item_id) = match area {
-        Area::Instance(inst) => (Some(inst.draw_list_id), Some(inst.draw_item_id)),
-        _ => (None, None),
-    };
-    scope_3d.draw_call_anchors.push(SceneDrawCallAnchor {
-        area,
-        draw_list_id,
-        draw_item_id,
-        world_pos,
-    });
+pub fn register_draw_call_anchor(cx: &mut CxDraw, area: Area, world_pos: Vec3f) {
+    cx.register_scene_draw_call_anchor_3d(area, world_pos);
 }
 
-pub fn register_last_draw_call_anchor(cx: &mut Cx2d, scope: &mut Scope, world_pos: Vec3f) {
+pub fn register_last_draw_call_anchor(cx: &mut CxDraw, world_pos: Vec3f) {
     let Some(draw_list_id) = cx.get_current_draw_list_id() else {
         return;
     };
@@ -156,41 +103,35 @@ pub fn register_last_draw_call_anchor(cx: &mut Cx2d, scope: &mut Scope, world_po
         }
         len - 1
     };
-
-    let Some(scope_3d) = scope.data.get_mut::<SceneScope3D>() else {
-        return;
-    };
-    scope_3d.draw_call_anchors.push(SceneDrawCallAnchor {
-        area: Area::Empty,
-        draw_list_id: Some(draw_list_id),
-        draw_item_id: Some(draw_item_id),
-        world_pos,
-    });
+    cx.register_last_scene_draw_call_anchor_3d(draw_list_id, draw_item_id, world_pos);
 }
 
 pub fn apply_draw_call_reorder_for_draw_list(
-    cx: &mut Cx2d,
-    scope: &mut Scope,
+    cx: &mut CxDraw,
     draw_list_id: DrawListId,
     enabled: bool,
 ) {
+    let scene_state = cx.scene_state_3d();
+    let draw_call_anchors = cx
+        .scene_draw_call_anchors_3d()
+        .map(|anchors| anchors.to_vec());
     let draw_list = &mut cx.cx.draw_lists[draw_list_id];
     let draw_count = draw_list.draw_items.len();
-    let scope_3d = scope.data.get::<SceneScope3D>();
 
-    if !enabled || draw_count <= 1 || scope_3d.is_none() {
+    if !enabled || draw_count <= 1 || scene_state.is_none() || draw_call_anchors.is_none() {
         draw_list.draw_item_reorder = None;
         return;
     }
 
-    let scope_3d = scope_3d.unwrap();
-    if scope_3d.draw_call_anchors.is_empty() {
+    let scene_state = scene_state.unwrap();
+    let draw_call_anchors = draw_call_anchors.unwrap();
+    if draw_call_anchors.is_empty() {
         draw_list.draw_item_reorder = None;
         return;
     }
 
     let mut depth_by_draw_item = vec![None; draw_count];
-    for anchor in &scope_3d.draw_call_anchors {
+    for anchor in &draw_call_anchors {
         let (anchor_draw_list_id, anchor_draw_item_id) = match anchor.area {
             Area::Instance(inst) => (Some(inst.draw_list_id), Some(inst.draw_item_id)),
             _ => (anchor.draw_list_id, anchor.draw_item_id),
@@ -203,7 +144,7 @@ pub fn apply_draw_call_reorder_for_draw_list(
         if anchor_draw_list_id != draw_list_id || anchor_draw_item_id >= draw_count {
             continue;
         }
-        let view = scope_3d.scene.view.transform_vec4(vec4(
+        let view = scene_state.view.transform_vec4(vec4(
             anchor.world_pos.x,
             anchor.world_pos.y,
             anchor.world_pos.z,
@@ -244,7 +185,15 @@ pub fn apply_draw_call_reorder_for_draw_list(
     draw_list.draw_item_reorder = if is_identity { None } else { Some(reorder) };
 }
 
-pub fn apply_scene_to_draw_pbr(draw: &mut DrawPbr, cx: &mut Cx2d, scene: &SceneState3D) {
+pub fn apply_scene_to_draw_cube(draw: &mut DrawCube, cx: &mut CxDraw) -> Option<SceneState3D> {
+    let scene = cx.scene_state_3d()?;
+    draw.set_use_pass_camera(scene.use_pass_camera);
+    draw.set_camera_state(scene.view, scene.projection_viewport);
+    Some(scene)
+}
+
+pub fn apply_scene_to_draw_pbr(draw: &mut DrawPbr, cx: &mut CxDraw) -> Option<SceneState3D> {
+    let scene = cx.scene_state_3d()?;
     draw.set_use_pass_camera(scene.use_pass_camera);
     draw.set_camera_state(scene.view, scene.projection_viewport, scene.camera_pos);
     draw.set_clip_ndc(scene.clip_ndc);
@@ -255,6 +204,7 @@ pub fn apply_scene_to_draw_pbr(draw: &mut DrawPbr, cx: &mut Cx2d, scene: &SceneS
         draw.set_env_texture(Some(env_texture));
     }
     draw.reset_matrix();
+    Some(scene)
 }
 
 script_mod! {
@@ -431,26 +381,21 @@ impl Scene3D {
             return;
         }
 
-        let chart_data = scope.data.get::<Chart3DData>().cloned();
-        let mut scene_scope_data = SceneScope3D {
-            scene: self.current_scene_state,
-            chart_data,
-            world_transform: Mat4f::identity(),
-            draw_call_anchors: Vec::new(),
-        };
-        let mut scene_scope = Scope::with_data(&mut scene_scope_data);
-        let cx3d = &mut Cx3d::new(cx.cx);
-        for layer in layer_refs {
-            layer.draw_3d_all(cx3d, &mut scene_scope);
-        }
+        {
+            let cx3d = &mut Cx3d::new(cx.cx);
+            cx3d.begin_scene_3d(self.current_scene_state);
+            for layer in layer_refs {
+                layer.draw_3d_all(cx3d, scope);
+            }
 
-        if let Some(draw_list_id) = cx.get_current_draw_list_id() {
-            apply_draw_call_reorder_for_draw_list(
-                cx,
-                &mut scene_scope,
-                draw_list_id,
-                self.sort_draw_calls_by_depth,
-            );
+            if let Some(draw_list_id) = cx3d.get_current_draw_list_id() {
+                apply_draw_call_reorder_for_draw_list(
+                    cx3d,
+                    draw_list_id,
+                    self.sort_draw_calls_by_depth,
+                );
+            }
+            cx3d.end_scene_3d();
         }
     }
 }
@@ -586,6 +531,8 @@ impl Widget for Scene3D {
         self.area = self.draw_bg.area();
 
         self.draw_list_3d.begin_always(cx);
+        self.draw_list_3d
+            .set_view_transform_self_only(cx.cx, &Mat4f::identity());
         self.draw_children_3d(cx, scope, rect);
         self.draw_list_3d.end(cx);
         DrawStep::done()

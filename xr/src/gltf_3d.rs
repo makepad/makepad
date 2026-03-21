@@ -5,7 +5,7 @@ use super::{
     gltf_bridge::GltfRenderer,
     scene_3d::{
         apply_scene_to_draw_pbr, compose_scene_node_transform, register_draw_call_anchor,
-        scene_node_world_transform_from_scope, scene_state_from_scope,
+        scene_node_world_transform_from_cx, scene_state_from_cx,
     },
 };
 
@@ -56,16 +56,6 @@ pub struct Gltf3D {
     loaded_src_handle: Option<ScriptHandle>,
     #[rust]
     loaded_env_handle: Option<ScriptHandle>,
-    #[rust]
-    debug_logged_src_pending: bool,
-    #[rust]
-    debug_logged_src_ready: bool,
-    #[rust]
-    debug_logged_src_error: bool,
-    #[rust]
-    debug_logged_draw_without_renderer: bool,
-    #[rust]
-    debug_logged_first_draw: bool,
 }
 
 enum ResourceResolve {
@@ -179,29 +169,13 @@ impl Gltf3D {
                     GltfRenderer::load_from_bytes(&mut self.draw_pbr, cx, &data, Some(&abs_path))
                         .ok();
                 self.loaded_src_handle = Some(handle);
-                if !self.debug_logged_src_ready {
-                    self.debug_logged_src_ready = true;
-                    log!(
-                        "gltf3d renderer ready path={} renderer_loaded={}",
-                        abs_path.display(),
-                        self.renderer.is_some()
-                    );
-                }
             }
             ResourceResolve::Error { handle } => {
                 self.renderer = None;
                 self.loaded_src_handle = Some(handle);
-                if !self.debug_logged_src_error {
-                    self.debug_logged_src_error = true;
-                    log!("gltf3d renderer load error handle={:?}", handle);
-                }
             }
             ResourceResolve::Pending { handle } => {
                 let _ = handle;
-                if !self.debug_logged_src_pending {
-                    self.debug_logged_src_pending = true;
-                    log!("gltf3d renderer pending handle={:?}", handle);
-                }
             }
             ResourceResolve::Missing => {}
         }
@@ -215,38 +189,31 @@ impl Widget for Gltf3D {
         }
     }
 
-    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        let Some(scene) = scene_state_from_scope(scope) else {
+    fn draw_3d(&mut self, cx: &mut Cx3d, _scope: &mut Scope) -> DrawStep {
+        if scene_state_from_cx(cx).is_none() {
             return DrawStep::done();
-        };
+        }
         let cx = &mut Cx2d::new(cx.cx);
 
         self.ensure_env_loaded(cx);
         self.ensure_renderer_loaded(cx);
         let Some(renderer) = self.renderer.as_mut() else {
-            if !self.debug_logged_draw_without_renderer {
-                self.debug_logged_draw_without_renderer = true;
-                log!("gltf3d draw skipped: renderer not loaded");
-            }
             return DrawStep::done();
         };
-        if !self.debug_logged_first_draw {
-            self.debug_logged_first_draw = true;
-            log!("gltf3d draw with renderer");
-        }
 
-        apply_scene_to_draw_pbr(&mut self.draw_pbr, cx, &scene);
+        let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr, cx);
         let local = compose_scene_node_transform(self.position, self.rotation, self.scale);
-        let world = Mat4f::mul(
-            &scene_node_world_transform_from_scope(scope),
-            &local,
-        );
+        let world = Mat4f::mul(&scene_node_world_transform_from_cx(cx), &local);
+        let mut anchors = Vec::new();
         let _ = renderer.draw_with_transform_anchors(
             &mut self.draw_pbr,
             cx,
             world,
-            |area, world_pos| register_draw_call_anchor(scope, area, world_pos),
+            |area, world_pos| anchors.push((area, world_pos)),
         );
+        for (area, world_pos) in anchors {
+            register_draw_call_anchor(cx, area, world_pos);
+        }
         DrawStep::done()
     }
 

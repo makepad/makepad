@@ -6,18 +6,99 @@ use crate::{
     widget_async::{CxWidgetToScriptCallExt, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult},
     widget_tree::CxWidgetExt,
 };
+use std::collections::HashMap;
 
-use super::scene_3d::{compose_scene_node_transform, scene_node_world_transform_from_cx};
+use super::scene_3d::compose_scene_node_transform;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
 
-    mod.widgets.Node3DBase = #(Node3D::register_widget(vm))
-    mod.widgets.Node3D = set_type_default() do mod.widgets.Node3DBase{}
+    let XrBodyKind = set_type_default() do #(XrBodyKind::script_api(vm))
+    mod.widgets.XrBodyKind = XrBodyKind
+
+    mod.widgets.XrNodeBase = #(XrNode::register_widget(vm))
+    mod.widgets.XrNode = set_type_default() do mod.widgets.XrNodeBase{
+        body: XrBodyKind.Disabled
+        physics_size: vec3(0.0, 0.0, 0.0)
+        density: 1.0
+        friction: 0.8
+        restitution: 0.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]
+pub enum XrBodyKind {
+    #[pick]
+    Disabled,
+    Dynamic,
+    Fixed,
+}
+
+impl Default for XrBodyKind {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+#[derive(Clone)]
+pub struct XrRuntimeBodyState {
+    pub pose: Pose,
+    pub scale: Vec3f,
+}
+
+#[derive(Clone, Default)]
+pub struct XrDrawScopeData {
+    pub runtime_bodies: HashMap<WidgetUid, XrRuntimeBodyState>,
+    pub env_texture: Option<Texture>,
+    pub camera_texture: Option<Texture>,
+    pub camera_source_size: Vec2f,
+    pub camera_rotation_steps: f32,
+    pub camera_center_offset_uv: Vec2f,
+    pub camera_enabled: bool,
+}
+
+pub fn xr_runtime_body_from_scope(
+    scope: &mut Scope,
+    uid: WidgetUid,
+) -> Option<XrRuntimeBodyState> {
+    scope
+        .data
+        .get::<XrDrawScopeData>()
+        .and_then(|scope_data| scope_data.runtime_bodies.get(&uid).cloned())
+}
+
+pub fn xr_env_texture_from_scope(scope: &mut Scope) -> Option<Texture> {
+    scope
+        .data
+        .get::<XrDrawScopeData>()
+        .and_then(|scope_data| scope_data.env_texture.clone())
+}
+
+#[derive(Clone, Default)]
+pub struct XrPassthroughScopeData {
+    pub camera_texture: Option<Texture>,
+    pub source_size: Vec2f,
+    pub rotation_steps: f32,
+    pub center_offset_uv: Vec2f,
+    pub enabled: bool,
+}
+
+pub fn xr_passthrough_from_scope(scope: &mut Scope) -> XrPassthroughScopeData {
+    scope
+        .data
+        .get::<XrDrawScopeData>()
+        .map(|scope_data| XrPassthroughScopeData {
+            camera_texture: scope_data.camera_texture.clone(),
+            source_size: scope_data.camera_source_size,
+            rotation_steps: scope_data.camera_rotation_steps,
+            center_offset_uv: scope_data.camera_center_offset_uv,
+            enabled: scope_data.camera_enabled,
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Script, WidgetRef, WidgetRegister)]
-pub struct Node3D {
+pub struct XrNode {
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -31,24 +112,30 @@ pub struct Node3D {
     #[live]
     on_render: ScriptFnRef,
     #[live(vec3(0.0, 0.0, 0.0))]
-    position: Vec3f,
+    pos: Vec3f,
     #[live(vec3(0.0, 0.0, 0.0))]
-    rotation: Vec3f,
+    rot: Vec3f,
     #[live(vec3(1.0, 1.0, 1.0))]
     scale: Vec3f,
+    #[live]
+    body: XrBodyKind,
+    #[live(vec3(0.0, 0.0, 0.0))]
+    physics_size: Vec3f,
+    #[live(1.0)]
+    density: f32,
+    #[live(0.8)]
+    friction: f32,
+    #[live(0.0)]
+    restitution: f32,
     #[rust]
     script_async: ScriptAsyncCalls,
     #[rust]
     children: ComponentMap<LiveId, WidgetRef>,
     #[rust]
     child_order: Vec<LiveId>,
-    #[rust]
-    debug_logged_empty_draw: bool,
-    #[rust]
-    debug_logged_first_draw: bool,
 }
 
-impl Node3D {
+impl XrNode {
     fn make_render_me(&self, vm: &mut ScriptVm) -> ScriptValue {
         if self.source.is_zero() {
             return NIL;
@@ -63,9 +150,53 @@ impl Node3D {
         };
         vm.bx.heap.new_with_proto_no_vec(proto).into()
     }
+
+    pub fn local_transform(&self) -> Mat4f {
+        compose_scene_node_transform(self.pos, self.rot, self.scale)
+    }
+
+    pub fn pos(&self) -> Vec3f {
+        self.pos
+    }
+
+    pub fn rot(&self) -> Vec3f {
+        self.rot
+    }
+
+    pub fn scale(&self) -> Vec3f {
+        self.scale
+    }
+
+    pub fn body_kind(&self) -> XrBodyKind {
+        self.body
+    }
+
+    pub fn physics_half_extents(&self) -> Vec3f {
+        vec3f(
+            self.physics_size.x.max(0.0) * 0.5,
+            self.physics_size.y.max(0.0) * 0.5,
+            self.physics_size.z.max(0.0) * 0.5,
+        )
+    }
+
+    pub fn density(&self) -> f32 {
+        self.density.max(0.0)
+    }
+
+    pub fn friction(&self) -> f32 {
+        self.friction.max(0.0)
+    }
+
+    pub fn restitution(&self) -> f32 {
+        self.restitution.max(0.0)
+    }
+
+    pub fn child_count(&self) -> usize {
+        self.child_order.len()
+    }
 }
 
-impl ScriptHook for Node3D {
+impl ScriptHook for XrNode {
     fn on_before_apply(
         &mut self,
         _vm: &mut ScriptVm,
@@ -127,7 +258,7 @@ impl ScriptHook for Node3D {
     }
 }
 
-impl WidgetNode for Node3D {
+impl WidgetNode for XrNode {
     fn widget_uid(&self) -> WidgetUid {
         self.uid
     }
@@ -164,7 +295,7 @@ impl WidgetNode for Node3D {
     }
 }
 
-impl Widget for Node3D {
+impl Widget for XrNode {
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
@@ -196,10 +327,6 @@ impl Widget for Node3D {
         if call.method() == id!(render) && !result.is_err() {
             if let Some(me_obj) = call.me().as_object() {
                 self.script_apply(vm, &Apply::Reload, &mut Scope::empty(), me_obj.into());
-                log!(
-                    "node3d render applied children={}",
-                    self.child_order.len()
-                );
                 vm.cx_mut().redraw_all();
             }
         }
@@ -233,21 +360,23 @@ impl Widget for Node3D {
             .filter_map(|id| self.children.get(id).cloned())
             .collect();
         if child_refs.is_empty() {
-            if !self.debug_logged_empty_draw {
-                self.debug_logged_empty_draw = true;
-                log!("node3d draw skipped: no children");
-            }
             return DrawStep::done();
         }
-        if !self.debug_logged_first_draw {
-            self.debug_logged_first_draw = true;
-            log!("node3d draw children={}", child_refs.len());
-        }
 
-        let parent_world = scene_node_world_transform_from_cx(cx);
-        let local_transform =
-            compose_scene_node_transform(self.position, self.rotation, self.scale);
-        let world_transform = Mat4f::mul(&parent_world, &local_transform);
+        let world_transform = if let Some(runtime_body) = xr_runtime_body_from_scope(scope, self.uid)
+        {
+            Mat4f::mul(
+                &runtime_body.pose.to_mat4(),
+                &Mat4f::nonuniform_scaled_translation(
+                    vec3(runtime_body.scale.x, runtime_body.scale.y, runtime_body.scale.z),
+                    vec3(0.0, 0.0, 0.0),
+                ),
+            )
+        } else {
+            let parent_world = cx.scene_world_transform_3d();
+            let local_transform = self.local_transform();
+            Mat4f::mul(&parent_world, &local_transform)
+        };
 
         let previous_world = cx.set_scene_world_transform_3d(world_transform);
 
@@ -258,6 +387,7 @@ impl Widget for Node3D {
         if let Some(previous_world) = previous_world {
             let _ = cx.set_scene_world_transform_3d(previous_world);
         }
+
         DrawStep::done()
     }
 
