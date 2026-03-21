@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::cmp;
 use std::collections::HashMap;
 use std::fs;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -99,7 +99,7 @@ impl TestConfig {
             manifest_dir,
             test_name,
             artifacts_dir,
-            listen_address: find_free_listen_address()?,
+            listen_address: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             env,
             startup_timeout: STARTUP_TIMEOUT,
             action_timeout: ACTION_TIMEOUT,
@@ -680,11 +680,6 @@ fn capture_failure_artifacts(app: &TestApp, failure_message: &str) {
 
 fn panic_for_error(err: TestError) -> ! {
     panic!("{}", err.message())
-}
-
-fn find_free_listen_address() -> TestResult<SocketAddr> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(TestError::from)?;
-    listener.local_addr().map_err(TestError::from)
 }
 
 fn sanitize_path_component(value: &str) -> String {

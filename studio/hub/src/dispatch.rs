@@ -2239,13 +2239,7 @@ impl HubCore {
             }
             return self.send_to_process_stdin(build_id, msg_bin);
         }
-        match self.send_to_app_with_socket(build_id, msg_bin.clone()) {
-            Ok(_) => Ok(()),
-            Err(err) if err.starts_with("no app socket for build") => {
-                self.send_to_process_stdin(build_id, msg_bin)
-            }
-            Err(err) => Err(err),
-        }
+        self.send_to_app_with_socket(build_id, msg_bin).map(|_| ())
     }
 
     fn build_ids_for_virtual_path(&self, virtual_path: &str) -> Vec<QueryId> {
@@ -4558,6 +4552,89 @@ mod tests {
         assert!(!secondary_messages
             .iter()
             .any(|msg| matches!(msg, HubToClient::Error { .. })));
+    }
+
+    #[test]
+    fn bootstrap_forward_is_queued_until_app_socket_connects() {
+        let dir = crate::test_support::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+        let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
+        let mut vfs = VirtualFs::new();
+        vfs.mount("repo", dir.path().to_path_buf())
+            .expect("mount repo");
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None, None);
+
+        let ui_rx = ToUIReceiver::<Vec<u8>>::default();
+        core.handle_event(HubEvent::ClientConnected {
+            web_socket_id: 1,
+            sender: ui_rx.sender(),
+            typed_sender: None,
+        });
+        let hello = HubToClient::deserialize_bin(
+            &ui_rx
+                .receiver
+                .recv_timeout(Duration::from_millis(250))
+                .expect("hello"),
+        )
+        .expect("decode hello");
+        let client_id = match hello {
+            HubToClient::Hello { client_id } => client_id,
+            other => panic!("expected Hello, got {:?}", other),
+        };
+
+        let build_id = QueryId::new(client_id, 42);
+        core.handle_event(HubEvent::ClientEnvelope {
+            web_socket_id: 1,
+            envelope: ClientToHubEnvelope {
+                query_id: QueryId::new(client_id, 0),
+                msg: ClientToHub::ForwardToApp {
+                    build_id,
+                    msg_bin: StudioToAppVec(vec![StudioToApp::WindowGeomChange {
+                        window_id: 0,
+                        dpi_factor: 1.0,
+                        left: 0.0,
+                        top: 0.0,
+                        width: 640.0,
+                        height: 480.0,
+                    }])
+                    .serialize_bin(),
+                },
+            },
+        });
+
+        let queued_messages = recv_ui_messages(&ui_rx, Duration::from_millis(150));
+        assert!(!queued_messages
+            .iter()
+            .any(|msg| matches!(msg, HubToClient::Error { .. })));
+
+        let (app_tx, app_rx) = mpsc::channel::<Vec<u8>>();
+        core.handle_event(HubEvent::AppConnected {
+            build_id,
+            web_socket_id: 77,
+            sender: app_tx,
+        });
+
+        let sent_to_app = app_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("queued bootstrap to app");
+        let StudioToAppVec(app_msgs) =
+            StudioToAppVec::deserialize_bin(&sent_to_app).expect("decode app payload");
+        assert_eq!(app_msgs.len(), 1);
+        match &app_msgs[0] {
+            StudioToApp::WindowGeomChange {
+                window_id,
+                width,
+                height,
+                ..
+            } => {
+                assert_eq!(*window_id, 0);
+                assert_eq!(*width, 640.0);
+                assert_eq!(*height, 480.0);
+            }
+            other => panic!("unexpected app message: {:?}", other),
+        }
     }
 
     #[test]

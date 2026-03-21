@@ -615,5 +615,6 @@ impl CxOsApi for Cx {
 
 fn write_stdout_msg(msg: &AppToStudio) {
     let _ = io::stdout().write_all(msg.to_json().as_bytes());
+    let _ = io::stdout().write_all(b"\n");
     let _ = io::stdout().flush();
 }
