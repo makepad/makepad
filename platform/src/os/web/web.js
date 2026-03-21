@@ -39,6 +39,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.loader_removed = false;
         this.loader_seen_animation_frame = false;
         this.loader_quiet_animation_frames = 0;
+        this.loader_after_presented_frame_id = 0;
         this.loader_fallback_timer = null;
         this.init_detection();
         this.midi_inputs = [];
@@ -86,7 +87,8 @@ export class WasmWebBrowser extends WasmBridge {
                 pathname: location.pathname + "",
                 search: location.search + "",
                 hash: location.hash + "",
-                has_thread_support: this.wasm._has_thread_support
+                has_thread_support: this.wasm._has_thread_support,
+                small_font_aliases: window.makepad_small_font_aliases === true
             },
             window_info: this.window_info,
         });
@@ -117,6 +119,10 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         this.loader_removed = true;
+        if (this.loader_after_presented_frame_id) {
+            window.cancelAnimationFrame(this.loader_after_presented_frame_id);
+            this.loader_after_presented_frame_id = 0;
+        }
         if (this.loader_fallback_timer) {
             clearTimeout(this.loader_fallback_timer);
             this.loader_fallback_timer = null;
@@ -142,14 +148,39 @@ export class WasmWebBrowser extends WasmBridge {
         }, 1500);
     }
 
+    cancel_loader_after_presented_frame() {
+        if (!this.loader_after_presented_frame_id) {
+            return;
+        }
+        window.cancelAnimationFrame(this.loader_after_presented_frame_id);
+        this.loader_after_presented_frame_id = 0;
+    }
+
+    schedule_loader_after_presented_frame() {
+        if (this.loader_removed || this.loader_after_presented_frame_id) {
+            return;
+        }
+        this.loader_after_presented_frame_id = window.requestAnimationFrame(() => {
+            this.loader_after_presented_frame_id = 0;
+            if (
+                !this.loader_removed &&
+                this.loader_seen_animation_frame &&
+                this.loader_quiet_animation_frames >= 2
+            ) {
+                this.remove_canvas_loader();
+            }
+        });
+    }
+
     update_startup_loader(pump_duration_ms) {
         if (this.loader_removed) {
             return;
         }
         this.schedule_loader_fallback();
         if (!this.in_animation_frame) {
-            if (pump_duration_ms > 32) {
+            if (this.loader_seen_animation_frame) {
                 this.loader_quiet_animation_frames = 0;
+                this.cancel_loader_after_presented_frame();
             }
             return;
         }
@@ -159,9 +190,14 @@ export class WasmWebBrowser extends WasmBridge {
         }
         else {
             this.loader_quiet_animation_frames = 0;
+            this.cancel_loader_after_presented_frame();
+            return;
         }
-        if (this.loader_seen_animation_frame && this.loader_quiet_animation_frames >= 2) {
-            this.remove_canvas_loader();
+        if (this.loader_quiet_animation_frames >= 2) {
+            this.schedule_loader_after_presented_frame();
+        }
+        else {
+            this.cancel_loader_after_presented_frame();
         }
     }
 
