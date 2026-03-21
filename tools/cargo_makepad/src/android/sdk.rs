@@ -941,8 +941,11 @@ pub fn expand_sdk(
             const NDK_IN: &str = "android-ndk-r28b/toolchains/llvm/prebuilt/linux-x86_64";
             let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64");
 
-            // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
-            // and then copy that directory it into the proper `NDK_OUT` directory location.
+            // Extract the entire NDK zip without file-pattern filters, then
+            // copy just the needed subtree.  Wildcard behavior in InfoZIP
+            // `unzip` varies across platforms (`*` matching `/` or not, `**`
+            // support), so the only portable invocation is a full extraction.
+            // The extra files are cleaned up by `remove_sdk_sources`.
             let cwd = std::env::current_dir().unwrap();
             let url_file_name = url_file_name(urls.ndk_linux);
             println!("4/5: Unzipping: {} (full NDK)", url_file_name);
@@ -955,13 +958,10 @@ pub fn expand_sdk(
                     "-q", // quiet
                     "-o", // overwrite existing files
                     src_dir.join(url_file_name).to_str().unwrap(),
-                    &format!("{NDK_IN}/*"),
-                    &format!("{NDK_IN}/**/*"), // `*` alone doesn't match `/` on some Linux unzip builds
                     "-d",
                     src_dir.to_str().unwrap(),
                 ],
-            )
-            .unwrap();
+            )?;
             shell(
                 &cwd,
                 "cp",
@@ -972,8 +972,7 @@ pub fn expand_sdk(
                     src_dir.join(NDK_IN).to_str().unwrap(),
                     ndk_out_path.parent().unwrap().to_str().unwrap(),
                 ],
-            )
-            .unwrap();
+            )?;
 
             const JDK_IN: &str = "jdk-17.0.2";
             const JDK_OUT: &str = "openjdk";

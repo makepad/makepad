@@ -324,8 +324,6 @@ pub struct DrawVector {
     pub pad1: f32,
     #[live]
     pub pad2: f32,
-    #[live]
-    pub pad3: f32,
 }
 
 impl DrawVector {
