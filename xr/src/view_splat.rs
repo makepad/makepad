@@ -4,7 +4,7 @@ use std::{mem, path::PathBuf, rc::Rc, sync::mpsc::TryRecvError};
 
 use super::scene_3d::{
     apply_scene_to_draw_pbr, compose_scene_node_transform, register_last_draw_call_anchor,
-    scene_node_world_transform_from_scope, scene_state_from_scope, SceneState3D,
+    scene_node_world_transform_from_cx, scene_state_from_cx, SceneState3D,
 };
 use crate::makepad_draw::shader::draw_pbr::PbrMeshHandle;
 
@@ -1160,8 +1160,8 @@ impl Widget for ViewSplat {
         }
     }
 
-    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        let Some(scene_state) = scene_state_from_scope(scope) else {
+    fn draw_3d(&mut self, cx: &mut Cx3d, _scope: &mut Scope) -> DrawStep {
+        let Some(scene_state) = scene_state_from_cx(cx) else {
             return DrawStep::done();
         };
         let cx = &mut Cx2d::new(cx.cx);
@@ -1172,10 +1172,10 @@ impl Widget for ViewSplat {
             return DrawStep::done();
         };
 
-        apply_scene_to_draw_pbr(&mut self.draw_splat.draw_super, cx, &scene_state);
+        let _ = apply_scene_to_draw_pbr(&mut self.draw_splat.draw_super, cx);
 
         let node_matrix = Mat4f::mul(
-            &scene_node_world_transform_from_scope(scope),
+            &scene_node_world_transform_from_cx(cx),
             &self.node_matrix(),
         );
         let render_w = scene_state.viewport_rect.size.x.max(1.0) as f32;
@@ -1205,7 +1205,7 @@ impl Widget for ViewSplat {
         let draw_result = self.draw_splat.draw_super.draw_mesh(cx, splat_mesh);
         if draw_result.is_ok() {
             let world = node_matrix.transform_vec4(vec4(0.0, 0.0, 0.0, 1.0));
-            register_last_draw_call_anchor(cx, scope, vec3(world.x, world.y, world.z));
+            register_last_draw_call_anchor(cx, vec3(world.x, world.y, world.z));
         }
 
         DrawStep::done()

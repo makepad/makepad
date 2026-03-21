@@ -41,7 +41,7 @@ impl Widget for View3D {
         self.view.draw_all(cx2d, scope);
         if self.sort_draw_calls_by_depth {
             if let Some(draw_list_id) = cx2d.get_current_draw_list_id() {
-                apply_draw_call_reorder_for_draw_list(cx2d, scope, draw_list_id, true);
+                apply_draw_call_reorder_for_draw_list(cx2d, draw_list_id, true);
             }
         }
         DrawStep::done()

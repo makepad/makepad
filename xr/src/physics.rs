@@ -12,9 +12,12 @@ pub(super) enum HandCollider {
 
 #[derive(Clone, Copy)]
 pub(super) struct PhysicsCube {
+    pub(super) widget_uid: WidgetUid,
     pub(super) body: RigidBodyHandle,
     pub(super) collider: ColliderHandle,
     pub(super) half_extents: Vec3f,
+    pub(super) scale: Vec3f,
+    pub(super) body_kind: XrBodyKind,
 }
 
 #[derive(Clone, Copy)]
@@ -83,7 +86,16 @@ pub(super) fn capsule_pose(a: Vec3f, b: Vec3f) -> (RapierPose, RapierReal) {
 }
 
 impl RapierScene {
-    pub(super) fn spawn_dynamic_box(&mut self, pose: Pose, half_extents: Vec3f) {
+    pub(super) fn spawn_dynamic_box(
+        &mut self,
+        widget_uid: WidgetUid,
+        pose: Pose,
+        half_extents: Vec3f,
+        scale: Vec3f,
+        density: f32,
+        friction: f32,
+        restitution: f32,
+    ) {
         let body = self.bodies.insert(
             RigidBodyBuilder::dynamic()
                 .pose(rapier_pose(pose))
@@ -99,34 +111,54 @@ impl RapierScene {
         }
         let collider = self.colliders.insert_with_parent(
             ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
-                .density(1.0)
-                .friction(0.8)
-                .restitution(0.0),
+                .density(density.max(0.0))
+                .friction(friction.max(0.0))
+                .restitution(restitution.max(0.0)),
             body,
             &mut self.bodies,
         );
         self.cubes.push(PhysicsCube {
+            widget_uid,
             body,
             collider,
             half_extents,
+            scale,
+            body_kind: XrBodyKind::Dynamic,
         });
     }
 
-    pub(super) fn spawn_fixed_box(&mut self, pose: Pose, half_extents: Vec3f, friction: f32) {
+    pub(super) fn spawn_fixed_box(
+        &mut self,
+        widget_uid: WidgetUid,
+        pose: Pose,
+        half_extents: Vec3f,
+        scale: Vec3f,
+        friction: f32,
+        restitution: f32,
+    ) {
         let body = self
             .bodies
             .insert(RigidBodyBuilder::fixed().pose(rapier_pose(pose)));
-        self.colliders.insert_with_parent(
+        let collider = self.colliders.insert_with_parent(
             ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
-                .friction(friction),
+                .friction(friction.max(0.0))
+                .restitution(restitution.max(0.0)),
             body,
             &mut self.bodies,
         );
+        self.cubes.push(PhysicsCube {
+            widget_uid,
+            body,
+            collider,
+            half_extents,
+            scale,
+            body_kind: XrBodyKind::Fixed,
+        });
     }
 
-    pub(super) fn new(_center: Vec3f) -> Self {
+    pub(super) fn new(gravity: f32) -> Self {
         let mut scene = Self {
-            gravity: RapierVector::new(0.0, -9.81, 0.0),
+            gravity: RapierVector::new(0.0, -gravity, 0.0),
             integration_parameters: IntegrationParameters {
                 dt: XR_SIMULATION_DT,
                 ..IntegrationParameters::default()
@@ -277,6 +309,9 @@ impl RapierScene {
         let mut to_sleep = Vec::new();
 
         for cube in &self.cubes {
+            if !matches!(cube.body_kind, XrBodyKind::Dynamic) {
+                continue;
+            }
             let has_active_contact = self
                 .narrow_phase
                 .contact_pairs_with(cube.collider)

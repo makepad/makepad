@@ -1,4 +1,4 @@
-use crate::{cx_2d::Cx2d, draw_list_2d::ManyInstances, makepad_platform::*};
+use crate::{cx_draw::CxDraw, draw_list_2d::ManyInstances, makepad_platform::*};
 
 script_mod! {
     use mod.pod.*
@@ -8,12 +8,26 @@ script_mod! {
     use mod.geom
 
     mod.draw.DrawCube = mod.std.set_type_default() do #(DrawCube::script_shader(vm)){
+        backface_culling: true
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        view_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
+        projection_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
+        use_pass_camera: uniform(float(0.0))
 
         lit_color: varying(vec4f)
         world: varying(vec4f)
@@ -32,6 +46,20 @@ script_mod! {
             return vec4(color, self.color.w);
         }
 
+        view_with_camera: fn(world: vec4) {
+            if self.use_pass_camera > 0.5 {
+                return self.draw_pass.camera_view * world
+            }
+            return self.view_matrix * world
+        }
+
+        transform_with_camera: fn(view_pos: vec4) {
+            if self.use_pass_camera > 0.5 {
+                return self.draw_pass.camera_projection * view_pos
+            }
+            return self.projection_matrix * view_pos
+        }
+
         vertex: fn() {
             let pos = self.get_size() * self.geom.geom_pos + self.get_pos();
             let model_view = self.draw_list.view_transform * self.transform;
@@ -43,17 +71,10 @@ script_mod! {
             );
             let normal = normalize(normal4.xyz);
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0);
-            let view_pos = self.draw_pass.camera_view * self.world;
-            let view_normal4 = self.draw_pass.camera_view * vec4(normal.x, normal.y, normal.z, 0.0);
-            let view_normal = normalize(view_normal4.xyz);
-            if dot(view_normal, -view_pos.xyz) <= 0.0 {
-                self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
-                return
-            }
-
+            let view_pos = self.view_with_camera(self.world);
             let dp = max(dot(normal, normalize(self.light_dir)), 0.0);
             self.lit_color = self.get_color(dp);
-            self.vertex_pos = self.draw_pass.camera_projection * view_pos;
+            self.vertex_pos = self.transform_with_camera(view_pos);
         }
 
         pixel: fn() {
@@ -71,6 +92,12 @@ script_mod! {
 pub struct DrawCube {
     #[rust]
     pub many_instances: Option<ManyInstances>,
+    #[rust(Mat4f::identity())]
+    pub view_matrix: Mat4f,
+    #[rust(Mat4f::identity())]
+    pub projection_matrix: Mat4f,
+    #[rust(0.0)]
+    pub use_pass_camera: f32,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -88,24 +115,48 @@ pub struct DrawCube {
 }
 
 impl DrawCube {
-    pub fn draw(&mut self, cx: &mut Cx2d) {
+    pub fn set_use_pass_camera(&mut self, use_pass_camera: bool) {
+        self.use_pass_camera = if use_pass_camera { 1.0 } else { 0.0 };
+    }
+
+    pub fn set_camera_state(&mut self, view: Mat4f, projection: Mat4f) {
+        self.view_matrix = view;
+        self.projection_matrix = projection;
+    }
+
+    fn apply_draw_uniforms(&mut self, cx: &mut CxDraw) {
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(view_matrix), &self.view_matrix.v);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(projection_matrix),
+            &self.projection_matrix.v,
+        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(use_pass_camera), &[self.use_pass_camera]);
+    }
+
+    pub fn draw(&mut self, cx: &mut CxDraw) {
+        self.apply_draw_uniforms(cx);
         if let Some(mi) = &mut self.many_instances {
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
         } else if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            let new_area = cx.add_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
 
-    pub fn new_draw_call(&mut self, cx: &mut Cx2d) {
+    pub fn new_draw_call(&mut self, cx: &mut CxDraw) {
+        self.apply_draw_uniforms(cx);
         cx.new_draw_call(&self.draw_vars);
     }
 
-    pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
-        self.many_instances = cx.begin_many_aligned_instances(&self.draw_vars);
+    pub fn begin_many_instances(&mut self, cx: &mut CxDraw) {
+        self.apply_draw_uniforms(cx);
+        self.many_instances = cx.begin_many_instances(&self.draw_vars);
     }
 
-    pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
+    pub fn end_many_instances(&mut self, cx: &mut CxDraw) {
         if let Some(mi) = self.many_instances.take() {
             let new_area = cx.end_many_instances(mi);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);

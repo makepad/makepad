@@ -7,7 +7,7 @@ use crate::{
     widget_tree::CxWidgetExt,
 };
 
-use super::scene_3d::{compose_scene_node_transform, scene_node_world_transform_from_scope};
+use super::scene_3d::{compose_scene_node_transform, scene_node_world_transform_from_cx};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -244,27 +244,19 @@ impl Widget for Node3D {
             log!("node3d draw children={}", child_refs.len());
         }
 
-        let parent_world = scene_node_world_transform_from_scope(scope);
+        let parent_world = scene_node_world_transform_from_cx(cx);
         let local_transform =
             compose_scene_node_transform(self.position, self.rotation, self.scale);
         let world_transform = Mat4f::mul(&parent_world, &local_transform);
 
-        let previous_world = if let Some(scene_scope) = scope.data.get_mut::<super::scene_3d::SceneScope3D>() {
-            let previous_world = scene_scope.world_transform;
-            scene_scope.world_transform = world_transform;
-            Some(previous_world)
-        } else {
-            None
-        };
+        let previous_world = cx.set_scene_world_transform_3d(world_transform);
 
         for child in child_refs {
             child.draw_3d_all(cx, scope);
         }
 
         if let Some(previous_world) = previous_world {
-            if let Some(scene_scope) = scope.data.get_mut::<super::scene_3d::SceneScope3D>() {
-                scene_scope.world_transform = previous_world;
-            }
+            let _ = cx.set_scene_world_transform_3d(previous_world);
         }
         DrawStep::done()
     }

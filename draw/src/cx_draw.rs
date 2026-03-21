@@ -1,12 +1,13 @@
 use {
     crate::{
         draw_list_2d::DrawList2d,
-        makepad_math::{dvec2, Vec2d},
+        makepad_math::{dvec2, Mat4f, Vec2d, Vec3f},
         makepad_platform::{
             Area, Cx, CxDrawPassParent, CxDrawPassRect, DrawEvent, DrawListId, DrawPass,
             DrawPassId, WindowId,
         },
         nav::CxNavTreeRc,
+        scene_3d::{Cx3dState, SceneDrawCallAnchor, SceneScope3D, SceneState3D},
         text::{fonts::Fonts, layouter, loader::FontFamilyDefinition},
     },
     rustybuzz::UnicodeBuffer,
@@ -28,6 +29,7 @@ pub struct CxDraw<'a> {
     pub fonts: Rc<RefCell<Fonts>>,
     pub nav_tree_rc: CxNavTreeRc,
     pub rustybuzz_buffer: Option<UnicodeBuffer>,
+    pub(crate) scene_3d: Cx3dState,
 }
 
 impl<'a> Deref for CxDraw<'a> {
@@ -66,11 +68,89 @@ impl<'a> CxDraw<'a> {
             draw_list_stack: Vec::with_capacity(64),
             nav_tree_rc,
             rustybuzz_buffer: Some(UnicodeBuffer::new()),
+            scene_3d: Cx3dState::default(),
         }
     }
 }
 
 impl<'a> CxDraw<'a> {
+    pub fn scene_3d(&self) -> Option<&SceneScope3D> {
+        self.scene_3d.scene_scope.as_ref()
+    }
+
+    pub fn scene_3d_mut(&mut self) -> Option<&mut SceneScope3D> {
+        self.scene_3d.scene_scope.as_mut()
+    }
+
+    pub fn begin_scene_3d(&mut self, scene: SceneState3D) {
+        self.scene_3d.scene_scope = Some(SceneScope3D::new(scene));
+    }
+
+    pub fn end_scene_3d(&mut self) {
+        self.scene_3d.scene_scope = None;
+    }
+
+    pub fn scene_state_3d(&self) -> Option<SceneState3D> {
+        self.scene_3d().map(|scope| scope.scene)
+    }
+
+    pub fn scene_world_transform_3d(&self) -> Mat4f {
+        self.scene_3d()
+            .map(|scope| scope.world_transform)
+            .unwrap_or_else(Mat4f::identity)
+    }
+
+    pub fn set_scene_world_transform_3d(&mut self, world_transform: Mat4f) -> Option<Mat4f> {
+        let scope = self.scene_3d_mut()?;
+        let previous = scope.world_transform;
+        scope.world_transform = world_transform;
+        Some(previous)
+    }
+
+    pub fn scene_draw_call_anchors_3d(&self) -> Option<&[SceneDrawCallAnchor]> {
+        self.scene_3d()
+            .map(|scope| scope.draw_call_anchors.as_slice())
+    }
+
+    pub fn clear_scene_draw_call_anchors_3d(&mut self) {
+        if let Some(scope) = self.scene_3d_mut() {
+            scope.draw_call_anchors.clear();
+        }
+    }
+
+    pub fn register_scene_draw_call_anchor_3d(&mut self, area: Area, world_pos: Vec3f) {
+        let Some(scope) = self.scene_3d_mut() else {
+            return;
+        };
+        let (draw_list_id, draw_item_id) = match area {
+            Area::Instance(inst) => (Some(inst.draw_list_id), Some(inst.draw_item_id)),
+            _ => (None, None),
+        };
+        scope.draw_call_anchors.push(SceneDrawCallAnchor {
+            area,
+            draw_list_id,
+            draw_item_id,
+            world_pos,
+        });
+    }
+
+    pub fn register_last_scene_draw_call_anchor_3d(
+        &mut self,
+        draw_list_id: DrawListId,
+        draw_item_id: usize,
+        world_pos: Vec3f,
+    ) {
+        let Some(scope) = self.scene_3d_mut() else {
+            return;
+        };
+        scope.draw_call_anchors.push(SceneDrawCallAnchor {
+            area: Area::Empty,
+            draw_list_id: Some(draw_list_id),
+            draw_item_id: Some(draw_item_id),
+            world_pos,
+        });
+    }
+
     /// Returns the time from the current draw event
     pub fn time(&self) -> f64 {
         self.draw_event.time
