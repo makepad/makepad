@@ -243,6 +243,84 @@ pub fn expand_sdk(
         Ok(())
     }
 
+    /// Extracts all entries from a zip whose paths start with `src_prefix`
+    /// into `sdk_dir/dest_prefix`, stripping `src_prefix` from each path.
+    /// Uses the Rust-based zip parser so it works identically on every OS,
+    /// avoiding platform-dependent wildcard behavior in system `unzip`.
+    #[allow(unused)]
+    fn unzip_prefix(
+        step: usize,
+        src_dir: &Path,
+        sdk_dir: &Path,
+        url: &str,
+        src_prefix: &str,
+        dest_prefix: &str,
+    ) -> Result<(), String> {
+        let url_file_name = url_file_name(url);
+        println!("{step}/5: Unzipping: {} (prefix: {src_prefix})", url_file_name);
+        let mut zip_file = File::open(src_dir.join(url_file_name))
+            .map_err(|_| format!("Cant open file {url_file_name}"))?;
+
+        let directory = zip_read_central_directory(&mut zip_file)
+            .map_err(|e| format!("Can't read zipfile {url_file_name} {:?}", e))?;
+
+        let prefix_with_slash = if src_prefix.ends_with('/') {
+            src_prefix.to_string()
+        } else {
+            format!("{src_prefix}/")
+        };
+
+        for file_header in &directory.file_headers {
+            if !file_header.file_name.starts_with(&prefix_with_slash) {
+                continue;
+            }
+            // Skip directory entries
+            if file_header.file_name.ends_with('/') {
+                continue;
+            }
+            let relative = &file_header.file_name[prefix_with_slash.len()..];
+            let output_file = sdk_dir.join(dest_prefix).join(relative);
+
+            let is_symlink =
+                (file_header.external_file_attributes >> 16) & 0o120000 == 0o120000;
+
+            let data = file_header
+                .extract(&mut zip_file)
+                .map_err(|e| format!("Can't extract {} {:?}", file_header.file_name, e))?;
+
+            mkdir(output_file.parent().unwrap())?;
+
+            if is_symlink {
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                {
+                    let link_to = std::str::from_utf8(&data).unwrap().to_string();
+                    use std::os::unix::fs::symlink;
+                    let _ = symlink(link_to, &output_file);
+                }
+            } else {
+                let mut output = File::create(&output_file)
+                    .map_err(|_| format!("Cant open output file {:?}", output_file))?;
+                output
+                    .write(&data)
+                    .map_err(|_| format!("Cant write output file {:?}", output_file))?;
+
+                // Preserve executable permission from the zip entry's Unix mode bits.
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                {
+                    let unix_mode = file_header.external_file_attributes >> 16;
+                    if unix_mode & 0o111 != 0 {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&output_file, PermissionsExt::from_mode(0o744))
+                            .map_err(|_| {
+                                format!("Cant set exec permissions {:?}", output_file)
+                            })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn untar(
         step: usize,
         src_dir: &Path,
@@ -941,39 +1019,11 @@ pub fn expand_sdk(
             const NDK_IN: &str = "android-ndk-r28b/toolchains/llvm/prebuilt/linux-x86_64";
             let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64");
 
-            // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
-            // and then copy that directory it into the proper `NDK_OUT` directory location.
-            let cwd = std::env::current_dir().unwrap();
-            let url_file_name = url_file_name(urls.ndk_linux);
-            println!("4/5: Unzipping: {} (full NDK)", url_file_name);
-            let ndk_out_path = sdk_dir.join(NDK_OUT);
-            mkdir(&ndk_out_path)?;
-            shell(
-                &cwd,
-                "unzip",
-                &[
-                    "-q", // quiet
-                    "-o", // overwrite existing files
-                    src_dir.join(url_file_name).to_str().unwrap(),
-                    &format!("{NDK_IN}/*"),
-                    &format!("{NDK_IN}/**/*"), // `*` alone doesn't match `/` on some Linux unzip builds
-                    "-d",
-                    src_dir.to_str().unwrap(),
-                ],
-            )
-            .unwrap();
-            shell(
-                &cwd,
-                "cp",
-                &[
-                    "--force",
-                    "--recursive",
-                    "--preserve",
-                    src_dir.join(NDK_IN).to_str().unwrap(),
-                    ndk_out_path.parent().unwrap().to_str().unwrap(),
-                ],
-            )
-            .unwrap();
+            // Extract only the NDK_IN subtree directly into NDK_OUT using the
+            // Rust-based zip parser.  This avoids the system `unzip` command
+            // whose wildcard behavior (`*` matching `/` or not, `**` support)
+            // varies across Linux distributions and is not portable.
+            unzip_prefix(4, src_dir, sdk_dir, urls.ndk_linux, NDK_IN, NDK_OUT)?;
 
             const JDK_IN: &str = "jdk-17.0.2";
             const JDK_OUT: &str = "openjdk";
