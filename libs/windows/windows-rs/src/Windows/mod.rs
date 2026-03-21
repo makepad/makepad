@@ -22794,6 +22794,7 @@ pub struct D3D11_CRYPTO_SESSION_STATUS(pub i32);
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct D3D11_CULL_MODE(pub i32);
 pub const D3D11_CULL_NONE: D3D11_CULL_MODE = D3D11_CULL_MODE(1i32);
+pub const D3D11_CULL_BACK: D3D11_CULL_MODE = D3D11_CULL_MODE(3i32);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct D3D11_DEPTH_STENCILOP_DESC {
@@ -32863,6 +32864,7 @@ pub struct DXGI_COLOR_SPACE_TYPE(pub i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DXGI_FORMAT(pub i32);
+pub const DXGI_FORMAT_R8G8B8A8_UNORM: DXGI_FORMAT = DXGI_FORMAT(28i32);
 pub const DXGI_FORMAT_B8G8R8A8_UNORM: DXGI_FORMAT = DXGI_FORMAT(87i32);
 pub const DXGI_FORMAT_D32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(40i32);
 pub const DXGI_FORMAT_R16_FLOAT: DXGI_FORMAT = DXGI_FORMAT(54i32);

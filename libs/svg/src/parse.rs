@@ -46,7 +46,9 @@ fn parse_svg_root(walker: &mut HtmlWalker, doc: &mut SvgDocument) {
         doc.height = parse_length(h);
     }
 
-    let default_style = SvgStyle::default();
+    // Parse style/presentation attributes from the root <svg> element
+    // so that attributes like `fill="none"` are properly inherited by children.
+    let default_style = parse_style_from_element(walker, &SvgStyle::default());
     walker.walk();
 
     while !walker.done() {
