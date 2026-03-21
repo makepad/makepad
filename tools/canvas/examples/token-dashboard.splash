@@ -1,0 +1,148 @@
+SolidView{width: Fill height: Fit draw_bg.color: #x0c0c18 flow: Down padding: Inset{left: 32. right: 32. top: 24. bottom: 24.} spacing: 20
+
+    // Header
+    View{width: Fill height: Fit flow: Right align: Align{y: 0.5}
+        Label{text: "March 2025 Token Usage" draw_text.color: #xeeeeff draw_text.text_style.font_size: 20}
+        Filler{}
+        Label{text: "Claude Code" draw_text.color: #x666688 draw_text.text_style.font_size: 12}
+    }
+
+    // Summary cards
+    View{width: Fill height: Fit flow: Right spacing: 16
+        RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 20. right: 20. top: 16. bottom: 16.} flow: Down spacing: 6
+            Label{text: "Input Tokens" draw_text.color: #x888899 draw_text.text_style.font_size: 10}
+            Label{text: "48.5M" draw_text.color: #xcc66ff draw_text.text_style.font_size: 28}
+        }
+        RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 20. right: 20. top: 16. bottom: 16.} flow: Down spacing: 6
+            Label{text: "Output Tokens" draw_text.color: #x888899 draw_text.text_style.font_size: 10}
+            Label{text: "12.3M" draw_text.color: #x66aaff draw_text.text_style.font_size: 28}
+        }
+        RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 20. right: 20. top: 16. bottom: 16.} flow: Down spacing: 6
+            Label{text: "Estimated Cost" draw_text.color: #x888899 draw_text.text_style.font_size: 10}
+            Label{text: "$186.50" draw_text.color: #x66ffaa draw_text.text_style.font_size: 28}
+        }
+        RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 20. right: 20. top: 16. bottom: 16.} flow: Down spacing: 6
+            Label{text: "Active Days" draw_text.color: #x888899 draw_text.text_style.font_size: 10}
+            Label{text: "20 / 31" draw_text.color: #xffaa66 draw_text.text_style.font_size: 28}
+        }
+    }
+
+    // Bar chart — each column is a View{flow:Down} with bar + date label
+    RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 16. right: 16. top: 16. bottom: 12.} flow: Down spacing: 6
+        Label{text: "Daily Input Tokens" draw_text.color: #xaaaacc draw_text.text_style.font_size: 12}
+        View{width: Fill height: 130 flow: Right spacing: 2 align: Align{y: 1.0}
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 38 draw_bg.color: #x7733cc draw_bg.radius: 2.}
+                Label{text: "01" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 43 draw_bg.color: #x7733cc draw_bg.radius: 2.}
+                Label{text: "02" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 33 draw_bg.color: #x7733cc draw_bg.radius: 2.}
+                Label{text: "03" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 60 draw_bg.color: #x8844dd draw_bg.radius: 2.}
+                Label{text: "04" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 81 draw_bg.color: #x9955ee draw_bg.radius: 2.}
+                Label{text: "05" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 73 draw_bg.color: #x8844dd draw_bg.radius: 2.}
+                Label{text: "06" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 29 draw_bg.color: #x6622bb draw_bg.radius: 2.}
+                Label{text: "07" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 52 draw_bg.color: #x8844dd draw_bg.radius: 2.}
+                Label{text: "08" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 65 draw_bg.color: #x8844dd draw_bg.radius: 2.}
+                Label{text: "09" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 95 draw_bg.color: #xaa66ff draw_bg.radius: 2.}
+                Label{text: "10" draw_text.color: #x666677 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 74 draw_bg.color: #x8844dd draw_bg.radius: 2.}
+                Label{text: "11" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 80 draw_bg.color: #x9955ee draw_bg.radius: 2.}
+                Label{text: "12" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 68 draw_bg.color: #x8844dd draw_bg.radius: 2.}
+                Label{text: "13" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 43 draw_bg.color: #x7733cc draw_bg.radius: 2.}
+                Label{text: "14" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 34 draw_bg.color: #x7733cc draw_bg.radius: 2.}
+                Label{text: "15" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 56 draw_bg.color: #x8844dd draw_bg.radius: 2.}
+                Label{text: "16" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 89 draw_bg.color: #x9955ee draw_bg.radius: 2.}
+                Label{text: "17" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 103 draw_bg.color: #xaa66ff draw_bg.radius: 2.}
+                Label{text: "18" draw_text.color: #x444455 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 120 draw_bg.color: #xcc66ff draw_bg.radius: 2.}
+                Label{text: "19" draw_text.color: #x888899 draw_text.text_style.font_size: 7}
+            }
+            View{width: Fill height: Fit flow: Down align: Center spacing: 4
+                RoundedView{width: 14 height: 112 draw_bg.color: #xbb55ff draw_bg.radius: 2.}
+                Label{text: "20" draw_text.color: #x666677 draw_text.text_style.font_size: 7}
+            }
+        }
+    }
+
+    // Model distribution
+    RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 20. right: 20. top: 16. bottom: 16.} flow: Down spacing: 12
+        Label{text: "Model Distribution" draw_text.color: #xaaaacc draw_text.text_style.font_size: 12}
+        View{width: Fill height: 24 flow: Right
+            RoundedView{width: 496 height: Fill draw_bg.color: #x7733cc draw_bg.radius: 4.}
+            RoundedView{width: 224 height: Fill draw_bg.color: #x3366aa draw_bg.radius: 4.}
+            RoundedView{width: 80 height: Fill draw_bg.color: #x33aa66 draw_bg.radius: 4.}
+        }
+        View{width: Fill height: Fit flow: Right spacing: 24
+            View{width: Fit height: Fit flow: Right spacing: 6 align: Align{y: 0.5}
+                RoundedView{width: 10 height: 10 draw_bg.color: #xcc66ff draw_bg.radius: 2.}
+                Label{text: "Opus 4 — 62%" draw_text.color: #xcc66ff draw_text.text_style.font_size: 11}
+            }
+            View{width: Fit height: Fit flow: Right spacing: 6 align: Align{y: 0.5}
+                RoundedView{width: 10 height: 10 draw_bg.color: #x66aaff draw_bg.radius: 2.}
+                Label{text: "Sonnet 4 — 28%" draw_text.color: #x66aaff draw_text.text_style.font_size: 11}
+            }
+            View{width: Fit height: Fit flow: Right spacing: 6 align: Align{y: 0.5}
+                RoundedView{width: 10 height: 10 draw_bg.color: #x66ffaa draw_bg.radius: 2.}
+                Label{text: "Haiku 4 — 10%" draw_text.color: #x66ffaa draw_text.text_style.font_size: 11}
+            }
+        }
+    }
+
+    // Peak day
+    RoundedView{width: Fill height: Fit draw_bg.color: #x1a1122 draw_bg.radius: 8. padding: Inset{left: 20. right: 20. top: 12. bottom: 12.} flow: Right spacing: 12 align: Align{y: 0.5}
+        Label{text: "📈" draw_text.text_style.font_size: 18}
+        View{flow: Down spacing: 2
+            Label{text: "Peak Day: March 19 — 3.1M input + 850K output" draw_text.color: #xddddee draw_text.text_style.font_size: 11}
+        }
+    }
+}

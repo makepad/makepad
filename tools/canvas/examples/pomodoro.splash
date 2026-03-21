@@ -1,0 +1,84 @@
+let pomo = { remaining: 1500 running: false sessions: 0 mode: "work" }
+
+fn fmt_time() {
+    let total = pomo.remaining
+    let m = 0
+    while total >= 60 { m = m + 1  total = total - 60 }
+    let s = total
+    let ms = if m < 10 { "0" + m } else { "" + m }
+    let ss = if s < 10 { "0" + s } else { "" + s }
+    ms + ":" + ss
+}
+
+fn mode_dur() {
+    if pomo.mode == "work" { 1500 }
+    else if pomo.mode == "break" { 300 }
+    else { 900 }
+}
+
+fn set_mode(m) {
+    pomo.mode = m
+    pomo.running = false
+    pomo.remaining = mode_dur()
+    refresh()
+}
+
+fn next_mode() {
+    if pomo.mode == "work" {
+        pomo.sessions = pomo.sessions + 1
+        if pomo.sessions >= 4 { pomo.mode = "long_break"  pomo.sessions = 0 }
+        else { pomo.mode = "break" }
+    } else { pomo.mode = "work" }
+    pomo.running = false
+    pomo.remaining = mode_dur()
+}
+
+fn refresh() {
+    ui.timer_label.set_text(fmt_time())
+    if pomo.running { ui.start_btn.set_text("Pause") }
+    else { ui.start_btn.set_text("Start") }
+    if pomo.mode == "work" { ui.mode_label.set_text("FOCUS TIME") }
+    else if pomo.mode == "break" { ui.mode_label.set_text("SHORT BREAK") }
+    else { ui.mode_label.set_text("LONG BREAK") }
+}
+
+fn tick() {
+    if pomo.running {
+        if pomo.remaining > 0 { pomo.remaining = pomo.remaining - 1 }
+        if pomo.remaining <= 0 { next_mode() }
+        refresh()
+    }
+}
+
+SolidView{width: Fill height: Fit draw_bg.color: #x0a0a12 flow: Down align: Center spacing: 20 padding: Inset{left: 40. right: 40. top: 50. bottom: 40.}
+    mode_label := Label{text: "FOCUS TIME" draw_text.color: #xff6b6b draw_text.text_style.font_size: 14}
+    timer_label := Label{text: "25:00" draw_text.color: #xffffff draw_text.text_style.font_size: 64}
+    View{height: 20}
+    View{width: Fit height: Fit flow: Right spacing: 16 align: Center
+        start_btn := Button{text: "Start" draw_bg.color: #x51cf66 draw_text.color: #x111111 padding: Inset{left: 24. right: 24. top: 12. bottom: 12.} draw_bg.radius: 6.
+            on_click: ||{
+                if pomo.running { pomo.running = false }
+                else { pomo.running = true }
+                refresh()
+            }
+        }
+        Button{text: "Reset" draw_bg.color: #x444466 draw_text.color: #xccccdd padding: Inset{left: 24. right: 24. top: 12. bottom: 12.} draw_bg.radius: 6.
+            on_click: ||{ pomo.running = false  pomo.remaining = mode_dur()  refresh() }
+        }
+        Button{text: "Skip" draw_bg.color: #x333355 draw_text.color: #x9999bb padding: Inset{left: 24. right: 24. top: 12. bottom: 12.} draw_bg.radius: 6.
+            on_click: ||{ next_mode()  refresh() }
+        }
+    }
+    View{height: 10}
+    View{width: Fit height: Fit flow: Right spacing: 12 align: Center
+        Button{text: "🍅 25min" draw_bg.color: #x331111 draw_text.color: #xff6b6b padding: Inset{left: 16. right: 16. top: 8. bottom: 8.} draw_bg.radius: 6.
+            on_click: ||{ set_mode("work") }
+        }
+        Button{text: "☕ 5min" draw_bg.color: #x113311 draw_text.color: #x51cf66 padding: Inset{left: 16. right: 16. top: 8. bottom: 8.} draw_bg.radius: 6.
+            on_click: ||{ set_mode("break") }
+        }
+        Button{text: "🌴 15min" draw_bg.color: #x111133 draw_text.color: #x339af0 padding: Inset{left: 16. right: 16. top: 8. bottom: 8.} draw_bg.radius: 6.
+            on_click: ||{ set_mode("long_break") }
+        }
+    }
+}

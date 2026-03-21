@@ -1,0 +1,107 @@
+let player = { track: 0 }
+
+let songs = [
+    {name: "Ambient Flow" artist: "SoundHelix"}
+    {name: "Electronic Pulse" artist: "SoundHelix"}
+    {name: "Synth Dream" artist: "SoundHelix"}
+]
+
+fn fmt_time(secs) {
+    let total = 0
+    while total < secs { total = total + 1 }
+    if total > secs { total = total - 1 }
+    let m = 0
+    while total >= 60 { m = m + 1  total = total - 60 }
+    let s = total
+    let ms = if m < 10 { "0" + m } else { "" + m }
+    let ss = if s < 10 { "0" + s } else { "" + s }
+    ms + ":" + ss
+}
+
+fn refresh_track() {
+    let song = songs[player.track]
+    ui.track_name.set_text(song.name)
+    ui.track_artist.set_text(song.artist)
+    ui.track_info.set_text("Track " + (player.track + 1) + " / " + songs.len())
+}
+
+fn on_audio() {
+    ui.time_cur.set_text(fmt_time(_pos))
+    ui.time_end.set_text(fmt_time(_dur))
+    if _playing { ui.play_btn.set_text("Pause") }
+    else { ui.play_btn.set_text("Play") }
+}
+
+View{width: Fill height: Fill flow: Down
+
+    Filler{}
+
+    // Album art placeholder
+    View{width: Fill height: Fit align: Center padding: Inset{left: 40. right: 40.}
+        RoundedView{width: 280 height: 280 draw_bg.color: #x16163080 draw_bg.radius: 16. align: Center
+            Label{text: "🎵" draw_text.text_style.font_size: 64}
+        }
+    }
+
+    View{height: 20}
+
+    // Track info
+    View{width: Fill height: Fit flow: Down align: Center spacing: 4 padding: Inset{left: 40. right: 40.}
+        track_name := Label{text: "Ambient Flow" draw_text.color: #xeeeeff draw_text.text_style.font_size: 22}
+        track_artist := Label{text: "SoundHelix" draw_text.color: #x888899 draw_text.text_style.font_size: 13}
+    }
+
+    View{height: 16}
+
+    // Progress bar
+    View{width: Fill height: Fit flow: Down spacing: 4 padding: Inset{left: 40. right: 40.}
+        View{width: Fill height: 6 flow: Overlay
+            RoundedView{width: Fill height: Fill draw_bg.color: #x222244 draw_bg.radius: 3.}
+            RoundedView{width: 1 height: Fill draw_bg.color: #x9966ff draw_bg.radius: 3.}
+        }
+        View{width: Fill height: Fit flow: Right
+            time_cur := Label{text: "00:00" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
+            Filler{}
+            time_end := Label{text: "00:00" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
+        }
+    }
+
+    View{height: 8}
+
+    // Controls
+    View{width: Fill height: Fit flow: Right spacing: 12 align: Center padding: Inset{left: 40. right: 40.}
+        Button{text: "Prev" draw_bg.color: #x333355 draw_text.color: #xaaaacc padding: Inset{left: 20. right: 20. top: 10. bottom: 10.} draw_bg.radius: 6. width: 80 height: 40
+            on_click: ||{
+                if player.track > 0 { player.track = player.track - 1 }
+                else { player.track = songs.len() - 1 }
+                refresh_track()
+            }
+        }
+        play_btn := Button{text: "Play" draw_bg.color: #x9966ff draw_text.color: #xffffff padding: Inset{left: 28. right: 28. top: 12. bottom: 12.} draw_bg.radius: 8. width: 100 height: 44
+            on_click: ||{
+                // play_btn name triggers audio_toggle in Canvas app
+            }
+        }
+        audio_stop := Button{text: "Stop" draw_bg.color: #x444466 draw_text.color: #xccccdd padding: Inset{left: 20. right: 20. top: 10. bottom: 10.} draw_bg.radius: 6. width: 80 height: 40
+            on_click: ||{
+                // audio_stop name triggers stop in Canvas app
+            }
+        }
+        Button{text: "Next" draw_bg.color: #x333355 draw_text.color: #xaaaacc padding: Inset{left: 20. right: 20. top: 10. bottom: 10.} draw_bg.radius: 6. width: 80 height: 40
+            on_click: ||{
+                player.track = player.track + 1
+                if player.track >= songs.len() { player.track = 0 }
+                refresh_track()
+            }
+        }
+    }
+
+    View{height: 12}
+
+    // Track info footer
+    View{width: Fill height: Fit align: Center
+        track_info := Label{text: "Track 1 / 3" draw_text.color: #x444466 draw_text.text_style.font_size: 10}
+    }
+
+    Filler{}
+}
