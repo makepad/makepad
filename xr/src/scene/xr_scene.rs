@@ -8,8 +8,10 @@ use self::{
 };
 use crate::{
     cube::Cube,
+    gltf::Gltf,
     refractive_cube::RefractiveCube,
     scene_draw::SceneState3D,
+    tree::Tree,
     xr_node::{XrBodyKind, XrDrawScopeData, XrNode, XrRuntimeBodyState},
     xr_root::xr_root_options_from_scope,
 };
@@ -295,7 +297,7 @@ pub struct XrScene {
     #[rust]
     scene: Option<RapierScene>,
     #[rust]
-    runtime_bodies: HashMap<WidgetUid, XrRuntimeBodyState>,
+    runtime_bodies: Rc<HashMap<WidgetUid, XrRuntimeBodyState>>,
     #[rust(true)]
     scene_dirty: bool,
     #[rust]
@@ -486,7 +488,7 @@ impl XrScene {
         }
         self.clear_depth_surface_mesh();
         self.scene = None;
-        self.runtime_bodies.clear();
+        Rc::make_mut(&mut self.runtime_bodies).clear();
         self.scene_dirty = true;
         self.sync_passthrough_camera(cx);
     }
@@ -503,7 +505,7 @@ impl XrScene {
             .unwrap_or(false)
     }
 
-    fn preview_scene_state(&mut self, rect: Rect, pass_size: Vec2d) -> Option<SceneState3D> {
+    fn preview_scene_state(&mut self, rect: Rect, pass_size: Vec2d, time: f64) -> Option<SceneState3D> {
         if rect.size.x <= 1.0 || rect.size.y <= 1.0 || pass_size.x <= 1.0 || pass_size.y <= 1.0 {
             return None;
         }
@@ -516,19 +518,7 @@ impl XrScene {
         let y1 = 1.0 - (2.0 * (rect.pos.y + rect.size.y) as f32 / pass_h);
         let clip_ndc = vec4(x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1));
 
-        let sx = (clip_ndc.z - clip_ndc.x) * 0.5;
-        let sy = (clip_ndc.w - clip_ndc.y) * 0.5;
-        let tx = (clip_ndc.z + clip_ndc.x) * 0.5;
-        let ty = (clip_ndc.w + clip_ndc.y) * 0.5;
-        let viewport = Mat4f {
-            v: [
-                sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0,
-            ],
-        };
-
-        let viewport_w = ((clip_ndc.z - clip_ndc.x).abs() * 0.5 * pass_size.x as f32).max(1.0);
-        let viewport_h = ((clip_ndc.w - clip_ndc.y).abs() * 0.5 * pass_size.y as f32).max(1.0);
-        let aspect = (viewport_w / viewport_h).max(0.001);
+        let aspect = (rect.size.x / rect.size.y).max(0.001) as f32;
         let preview_fov_y = self.camera_fov_y.clamp(1.0, 179.0);
         let projection = Mat4f::perspective(
             preview_fov_y,
@@ -536,7 +526,6 @@ impl XrScene {
             self.camera_near.max(0.001),
             self.camera_far.max(self.camera_near + 0.001),
         );
-        let projection_viewport = Mat4f::mul(&viewport, &projection);
         let distance = self.camera_distance.clamp(
             self.camera_distance_min.max(0.01),
             self.camera_distance_max
@@ -551,11 +540,10 @@ impl XrScene {
         let view = Mat4f::look_at(camera_pos, vec3(0.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
 
         Some(SceneState3D {
-            time: 0.0,
+            time,
             camera_pos,
             view,
             projection,
-            projection_viewport,
             clip_ndc,
             depth_range: self.depth_range,
             depth_forward_bias: self.depth_forward_bias,
@@ -571,11 +559,19 @@ impl XrScene {
         }
 
         let rect_aspect = (rect.size.x / rect.size.y).max(0.001);
-        if self.preview_aspect_fill && rect_aspect > target_aspect {
-            let height = rect.size.x / target_aspect;
-            Rect {
-                pos: dvec2(rect.pos.x, rect.pos.y + (rect.size.y - height) * 0.5),
-                size: dvec2(rect.size.x, height),
+        if self.preview_aspect_fill {
+            if rect_aspect > target_aspect {
+                let height = rect.size.x / target_aspect;
+                Rect {
+                    pos: dvec2(rect.pos.x, rect.pos.y + (rect.size.y - height) * 0.5),
+                    size: dvec2(rect.size.x, height),
+                }
+            } else {
+                let width = rect.size.y * target_aspect;
+                Rect {
+                    pos: dvec2(rect.pos.x + (rect.size.x - width) * 0.5, rect.pos.y),
+                    size: dvec2(width, rect.size.y),
+                }
             }
         } else if rect_aspect > target_aspect {
             let width = rect.size.y * target_aspect;
@@ -598,13 +594,35 @@ impl XrScene {
             camera_pos: state.head_pose.position,
             view: Mat4f::identity(),
             projection: Mat4f::identity(),
-            projection_viewport: Mat4f::identity(),
             clip_ndc: vec4(-1.0, -1.0, 1.0, 1.0),
             depth_range: self.depth_range,
             depth_forward_bias: self.depth_forward_bias,
             use_pass_camera: true,
             viewport_rect: Rect::default(),
         }
+    }
+
+    fn pointer_tip_world(hand: &XrHand) -> Option<Vec3f> {
+        if !hand.in_view() || !hand.tip_active(XrHand::INDEX_TIP) {
+            return None;
+        }
+        let tip_len = hand.tips[XrHand::INDEX_TIP].max(0.0);
+        Some(
+            hand.joints[XrHand::INDEX_KNUCKLE3]
+                .to_mat4()
+                .transform_vec4(vec4(0.0, 0.0, -tip_len, 1.0))
+                .to_vec3f(),
+        )
+    }
+
+    fn draw_scope_pointer_tips(state: Option<&XrState>) -> [Option<Vec3f>; 2] {
+        let Some(state) = state else {
+            return [None, None];
+        };
+        [
+            Self::pointer_tip_world(&state.left_hand),
+            Self::pointer_tip_world(&state.right_hand),
+        ]
     }
 
     fn rotation_quat(rot: Vec3f) -> Quat {
@@ -686,6 +704,60 @@ impl XrScene {
             return;
         }
 
+        if let Some(gltf) = widget.borrow::<Gltf>() {
+            let node = gltf.node();
+            let world = Self::transform_with_node(parent, node);
+            let half_extents = node.physics_half_extents();
+            if node.body_kind() != XrBodyKind::Disabled
+                && (half_extents.x > 0.0 || half_extents.y > 0.0 || half_extents.z > 0.0)
+            {
+                cubes.push(CollectedXrCube {
+                    uid: gltf.widget_uid(),
+                    body_kind: node.body_kind(),
+                    pose: Pose::new(world.orientation, world.position),
+                    scale: world.scale,
+                    half_extents: vec3f(
+                        half_extents.x * world.scale.x,
+                        half_extents.y * world.scale.y,
+                        half_extents.z * world.scale.z,
+                    ),
+                    density: node.density(),
+                    friction: node.friction(),
+                    restitution: node.restitution(),
+                });
+            }
+            drop(gltf);
+            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, world, cubes));
+            return;
+        }
+
+        if let Some(tree) = widget.borrow::<Tree>() {
+            let node = tree.node();
+            let world = Self::transform_with_node(parent, node);
+            let half_extents = node.physics_half_extents();
+            if node.body_kind() != XrBodyKind::Disabled
+                && (half_extents.x > 0.0 || half_extents.y > 0.0 || half_extents.z > 0.0)
+            {
+                cubes.push(CollectedXrCube {
+                    uid: tree.widget_uid(),
+                    body_kind: node.body_kind(),
+                    pose: Pose::new(world.orientation, world.position),
+                    scale: world.scale,
+                    half_extents: vec3f(
+                        half_extents.x * world.scale.x,
+                        half_extents.y * world.scale.y,
+                        half_extents.z * world.scale.z,
+                    ),
+                    density: node.density(),
+                    friction: node.friction(),
+                    restitution: node.restitution(),
+                });
+            }
+            drop(tree);
+            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, world, cubes));
+            return;
+        }
+
         if let Some(node) = widget.borrow::<XrNode>() {
             let world = Self::transform_with_node(parent, &node);
             let half_extents = node.physics_half_extents();
@@ -724,13 +796,14 @@ impl XrScene {
     }
 
     fn sync_runtime_bodies(&mut self) {
-        self.runtime_bodies.clear();
+        let runtime_bodies = Rc::make_mut(&mut self.runtime_bodies);
+        runtime_bodies.clear();
         let Some(scene) = self.scene.as_ref() else {
             return;
         };
         for cube in &scene.cubes {
             if let Some(body) = scene.bodies.get(cube.body) {
-                self.runtime_bodies.insert(
+                runtime_bodies.insert(
                     cube.widget_uid,
                     XrRuntimeBodyState {
                         pose: makepad_pose(body.position()),
@@ -1004,7 +1077,7 @@ impl Widget for XrScene {
         };
         let preview_rect = self.preview_gate_rect(preview_bounds);
 
-        if let Some(scene_state) = self.preview_scene_state(preview_rect, preview_pass_size) {
+        if let Some(scene_state) = self.preview_scene_state(preview_rect, preview_pass_size, cx.time()) {
             self.update_preview_pass_camera(cx.cx, scene_state);
             let mut draw_scope = XrDrawScopeData {
                 runtime_bodies: self.runtime_bodies.clone(),
@@ -1014,6 +1087,7 @@ impl Widget for XrScene {
                 camera_rotation_steps: 0.0,
                 camera_center_offset_uv: vec2f(0.0, 0.0),
                 camera_enabled: false,
+                pointer_tips: [None, None],
             };
             self.draw_list_3d.begin_always(cx);
             let cx3d = &mut Cx3d::new(cx.cx);
@@ -1081,6 +1155,7 @@ impl Widget for XrScene {
             camera_rotation_steps: self.passthrough_camera_video.rotation_steps,
             camera_center_offset_uv: self.passthrough_camera_center_offset_uv(),
             camera_enabled: self.passthrough_camera_has_frame,
+            pointer_tips: Self::draw_scope_pointer_tips(Some(state.as_ref())),
         };
         cx.begin_scene_3d(scene_state);
         let mut scene_scope = Scope::with_data(&mut draw_scope);
