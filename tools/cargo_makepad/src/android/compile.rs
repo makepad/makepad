@@ -759,6 +759,9 @@ fn build_dex(
         ));
     }
 
+    let _ = rmdir(&build_paths.out_dir);
+    mkdir(&build_paths.out_dir)?;
+
     let d8_jar = d8_jar_path(sdk_dir, urls);
     let android_jar = android_jar_path(sdk_dir, urls);
 

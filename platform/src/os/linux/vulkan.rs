@@ -327,18 +327,9 @@ impl CxVulkan {
 
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
         let android_surface_loader = ash::khr::android_surface::Instance::new(&entry, &instance);
+        let surface = vk::SurfaceKHR::null();
 
         unsafe { ANativeWindow_acquire(window) };
-
-        let create_surface_result = Self::create_surface(&android_surface_loader, window);
-        let surface = match create_surface_result {
-            Ok(surface) => surface,
-            Err(err) => {
-                unsafe { ndk_sys::ANativeWindow_release(window) };
-                unsafe { instance.destroy_instance(None) };
-                return Err(err);
-            }
-        };
 
         let pick_result = Self::pick_device_and_queue_family(&instance, &surface_loader, surface);
         let (physical_device, queue_family_index) = match pick_result {
@@ -646,16 +637,7 @@ impl CxVulkan {
         let android_surface_loader = ash::khr::android_surface::Instance::new(&entry, &instance);
 
         unsafe { ANativeWindow_acquire(window) };
-
-        let create_surface_result = Self::create_surface(&android_surface_loader, window);
-        let surface = match create_surface_result {
-            Ok(surface) => surface,
-            Err(err) => {
-                unsafe { ndk_sys::ANativeWindow_release(window) };
-                unsafe { instance.destroy_instance(None) };
-                return Err(err);
-            }
-        };
+        let surface = vk::SurfaceKHR::null();
 
         let get_info = XrVulkanGraphicsDeviceGetInfoKHR {
             system_id: xr_system_id,
@@ -679,12 +661,8 @@ impl CxVulkan {
         }
         let physical_device = vk::PhysicalDevice::from_raw(runtime_physical_device as _);
 
-        let queue_family_index = match Self::pick_queue_family_for_device(
-            &instance,
-            &surface_loader,
-            surface,
-            physical_device,
-        ) {
+        let queue_family_index =
+            match Self::pick_graphics_queue_family_for_device(&instance, physical_device) {
             Ok(index) => index,
             Err(err) => {
                 unsafe {
@@ -694,7 +672,7 @@ impl CxVulkan {
                 }
                 return Err(err);
             }
-        };
+            };
 
         let props = unsafe { instance.get_physical_device_properties(physical_device) };
         let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
@@ -908,12 +886,6 @@ impl CxVulkan {
             xr_depth_dummy: None,
         };
 
-        if let Err(err) = vulkan.recreate_swapchain() {
-            return Err(format!(
-                "Android Vulkan XR init failed: recreate_swapchain: {err}"
-            ));
-        }
-
         vulkan.try_enable_debug_messenger(&entry);
 
         Ok(vulkan)
@@ -996,6 +968,78 @@ impl CxVulkan {
         self.queue_family_index
     }
 
+    fn ensure_xr_render_pass_for_format(&mut self, color_format: vk::Format) -> Result<(), String> {
+        if self.depth_format == vk::Format::UNDEFINED {
+            self.depth_format = self.pick_depth_format()?;
+        }
+        if self.swapchain_format == color_format && self.xr_render_pass != vk::RenderPass::null() {
+            return Ok(());
+        }
+
+        if self.xr_render_pass != vk::RenderPass::null() {
+            unsafe {
+                self.device.destroy_render_pass(self.xr_render_pass, None);
+            }
+            self.xr_render_pass = vk::RenderPass::null();
+        }
+
+        self.swapchain_format = color_format;
+
+        let color_attachment = vk::AttachmentDescription::default()
+            .format(color_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        let depth_attachment = vk::AttachmentDescription::default()
+            .format(self.depth_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        let color_ref = vk::AttachmentReference::default()
+            .attachment(0)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        let depth_ref = vk::AttachmentReference::default()
+            .attachment(1)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        let color_refs = [color_ref];
+        let subpass = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_refs)
+            .depth_stencil_attachment(&depth_ref);
+        let dependencies = [vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )];
+        let attachments = [color_attachment, depth_attachment];
+        let subpasses = [subpass];
+        let xr_render_pass_info = vk::RenderPassCreateInfo::default()
+            .attachments(&attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+        self.xr_render_pass = unsafe { self.device.create_render_pass(&xr_render_pass_info, None) }
+            .map_err(|e| format!("create_render_pass(openxr) failed: {e:?}"))?;
+        Ok(())
+    }
+
     pub(crate) fn create_openxr_session_data(
         &mut self,
         color_images: &[vk::Image],
@@ -1006,15 +1050,7 @@ impl CxVulkan {
         depth_width: u32,
         depth_height: u32,
     ) -> Result<CxVulkanOpenXrSessionData, String> {
-        if self.xr_render_pass == vk::RenderPass::null() {
-            return Err("Android Vulkan XR init failed: render pass is not ready".to_string());
-        }
-        if self.swapchain_format != color_format {
-            return Err(format!(
-                "Android Vulkan XR init failed: XR swapchain format {:?} does not match window render pass format {:?}",
-                color_format, self.swapchain_format
-            ));
-        }
+        self.ensure_xr_render_pass_for_format(color_format)?;
 
         self.ensure_xr_depth_dummy()?;
 
@@ -1808,6 +1844,10 @@ impl CxVulkan {
                 self.recreate_swapchain()?;
                 return Ok(());
             }
+            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => {
+                self.suspend_surface();
+                return Ok(());
+            }
             Err(err) => {
                 return Err(format!("acquire_next_image failed: {err:?}"));
             }
@@ -2063,6 +2103,10 @@ impl CxVulkan {
             Ok(suboptimal) => suboptimal,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.recreate_swapchain()?;
+                return Ok(());
+            }
+            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => {
+                self.suspend_surface();
                 return Ok(());
             }
             Err(err) => {
@@ -5753,6 +5797,20 @@ impl CxVulkan {
             }
         }
         Err("No Vulkan queue family with graphics+present support found".to_string())
+    }
+
+    fn pick_graphics_queue_family_for_device(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<u32, String> {
+        let queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        for (index, family) in queue_families.iter().enumerate() {
+            if family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                return Ok(index as u32);
+            }
+        }
+        Err("No graphics queue family found for OpenXR Vulkan device".to_string())
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), String> {

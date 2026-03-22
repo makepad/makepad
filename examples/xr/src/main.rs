@@ -1,4 +1,4 @@
-pub use makepad_widgets;
+pub use ::makepad_widgets;
 
 use makepad_widgets::*;
 use makepad_xr::*;
@@ -90,6 +90,7 @@ script_mod! {
                             physics: XrPhysics{gravity: 9.8}
                             camera_fov_y: 26.0
                             camera_distance: 3.6
+                            camera_aspect_ratio_tweak: 1.0
                             preview_aspect_fill: true
                             on_render: ||{
                                 Platform{pos: vec3(0.05, -0.06, -0.10)}
@@ -148,6 +149,7 @@ script_mod! {
                             physics: XrPhysics{gravity: 9.8}
                             camera_fov_y: 24.0
                             camera_distance: 6.2
+                            camera_aspect_ratio_tweak: 1.0
                             preview_aspect_fill: true
                             on_render: ||{
                                 Platform{pos: vec3(0.05, -0.06, -0.10)}
@@ -155,6 +157,16 @@ script_mod! {
                                     body: mod.widgets.XrBodyKind.Fixed
                                     physics_size: vec3(0.34, 0.92, 0.34)
                                     pos: vec3(0.05, -0.02, -0.10)
+                                    child_scale: 0.57735026
+                                    length_scale_0: 0.60
+                                    length_scale_1: 1.78
+                                    length_scale_2: 1.88
+                                    length_scale_3: 0.97
+                                    length_scale_4: 1.03
+                                    length_scale_rest: 1.08
+                                    branch_split_angle: 0.70
+                                    branch_yaw_step: 2.0943952
+                                    branch_yaw_phase_step: 1.0471976
                                 }
                             }
                         }
@@ -163,6 +175,7 @@ script_mod! {
                             physics: XrPhysics{gravity: 9.8}
                             camera_fov_y: 26.0
                             camera_distance: 3.6
+                            camera_aspect_ratio_tweak: 1.0
                             preview_aspect_fill: true
                             on_render: ||{
                                 Platform{pos: vec3(0.05, -0.06, -0.10)}
