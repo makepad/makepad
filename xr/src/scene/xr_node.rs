@@ -8,7 +8,7 @@ use crate::{
 };
 use std::collections::HashMap;
 
-use super::scene_3d::compose_scene_node_transform;
+use super::scene_draw::compose_scene_node_transform;
 
 script_mod! {
     use mod.prelude.widgets_internal.*

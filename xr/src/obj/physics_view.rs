@@ -7,7 +7,7 @@ use ::rapier3d::prelude::{
 use makepad_widgets::*;
 use makepad_widgets::event::TouchState;
 
-use crate::scene_3d::{
+use crate::scene_draw::{
     apply_scene_to_draw_pbr, ray_from_scene_viewport, scene_state_from_cx, SceneState3D,
 };
 

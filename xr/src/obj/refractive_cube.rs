@@ -1,8 +1,8 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 use super::{
-    node::{xr_env_texture_from_scope, xr_passthrough_from_scope, xr_runtime_body_from_scope, XrNode},
-    scene_3d::{apply_scene_to_draw_pbr, scene_state_from_cx},
+    xr_node::{xr_env_texture_from_scope, xr_passthrough_from_scope, xr_runtime_body_from_scope, XrNode},
+    scene_draw::{apply_scene_to_draw_pbr, scene_state_from_cx},
 };
 
 const XR_REFRACTIVE_CAMERA_FOV_Y_DEGREES: f32 = 92.0;
@@ -14,8 +14,8 @@ const XR_REFRACTIVE_CORNER_SEGMENTS: usize = 3;
 script_mod! {
     use mod.prelude.widgets_internal.*
 
-    mod.widgets.XrRefractiveCubeBase = #(XrRefractiveCube::register_widget(vm))
-    mod.widgets.XrRefractiveCube = set_type_default() do mod.widgets.XrRefractiveCubeBase{
+    mod.widgets.RefractiveCubeBase = #(RefractiveCube::register_widget(vm))
+    mod.widgets.RefractiveCube = set_type_default() do mod.widgets.RefractiveCubeBase{
         body: mod.widgets.XrBodyKind.Dynamic
         size: vec3(0.12, 0.12, 0.12)
         color: vec4(0.80, 0.92, 1.0, 0.18)
@@ -39,7 +39,7 @@ script_mod! {
 }
 
 #[derive(Script, ScriptHook, Widget)]
-pub struct XrRefractiveCube {
+pub struct RefractiveCube {
     #[redraw]
     #[live]
     preview_cube: DrawCube,
@@ -64,7 +64,7 @@ pub struct XrRefractiveCube {
     node: XrNode,
 }
 
-impl XrRefractiveCube {
+impl RefractiveCube {
     pub fn half_extents(&self) -> Vec3f {
         vec3f(
             self.size.x.max(0.0) * 0.5,
@@ -93,7 +93,7 @@ impl XrRefractiveCube {
     }
 }
 
-impl Widget for XrRefractiveCube {
+impl Widget for RefractiveCube {
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
         let Some(scene) = scene_state_from_cx(cx) else {
             return DrawStep::done();

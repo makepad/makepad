@@ -9,14 +9,14 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    let Block = XrCube{
+    let Block = Cube{
         size: vec3(0.145, 0.082, 0.075)
         corner_radius: 0.018
         roughness: 0.28
         metallic: 0.02
     }
 
-    let Platform = XrCube{
+    let Platform = Cube{
         body: mod.widgets.XrBodyKind.Fixed
         size: vec3(1.45, 0.08, 0.44)
         corner_radius: 0.022
@@ -73,6 +73,9 @@ script_mod! {
 
                         block_scene := XrScene{
                             physics: XrPhysics{gravity: 9.8}
+                            camera_fov_y: 26.0
+                            camera_distance: 3.6
+                            preview_aspect_fill: true
                             on_render: ||{
                                 Platform{pos: vec3(0.05, -0.06, -0.10)}
                                 for row in 0..8 {
@@ -102,10 +105,13 @@ script_mod! {
 
                         helmet_scene := XrScene{
                             physics: XrPhysics{gravity: 9.8}
+                            camera_fov_y: 26.0
+                            camera_distance: 4.0
+                            preview_aspect_fill: true
                             on_render: ||{
                                 Platform{pos: vec3(0.05, -0.06, -0.10)}
-                                for row in 0..2 {
-                                    for col in 0..3 {
+                                for row in 0..1 {
+                                    for col in 0..1 {
                                         XrNode{
                                             body: mod.widgets.XrBodyKind.Dynamic
                                             physics_size: vec3(0.17, 0.21, 0.17)
@@ -117,7 +123,7 @@ script_mod! {
                                                 src: crate_resource("self://resources/DamagedHelmet.glb")
                                                 scale: vec3(0.38, 0.38, 0.38)
                                                 rotation: vec3(0.0, 1.5708, 0.0)
-                                                position: vec3(0.0, -0.02, 0.0)
+                                                position: vec3(0.0, 0.32, 0.0)
                                             }
                                         }
                                     }
@@ -127,12 +133,15 @@ script_mod! {
 
                         refraction_scene := XrScene{
                             physics: XrPhysics{gravity: 9.8}
+                            camera_fov_y: 26.0
+                            camera_distance: 3.6
+                            preview_aspect_fill: true
                             on_render: ||{
                                 Platform{pos: vec3(0.05, -0.06, -0.10)}
                                 for row in 0..4 {
                                     for col in 0..4 {
                                         let offset = if row % 2 == 0 {0.0} else {0.06}
-                                        XrRefractiveCube{
+                                        RefractiveCube{
                                             pos: vec3(-0.22 + col * 0.12 + offset, 0.05 + row * 0.11, -0.10)
                                             size: vec3(0.115, 0.105, 0.085)
                                             color: vec4(0.82, 0.93, 1.0, 0.12)

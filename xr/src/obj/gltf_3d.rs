@@ -3,7 +3,7 @@ use std::{path::PathBuf, rc::Rc};
 
 use super::{
     gltf_bridge::GltfRenderer,
-    scene_3d::{
+    scene_draw::{
         apply_scene_to_draw_pbr, compose_scene_node_transform, register_draw_call_anchor,
         scene_node_world_transform_from_cx, scene_state_from_cx,
     },

@@ -1,5 +1,5 @@
 use super::*;
-use super::depth::{
+use super::xr_depth::{
     DepthQuerySurfaceCollider, DepthQuerySurfaceShape, DepthQuerySurfaceTarget,
 };
 
