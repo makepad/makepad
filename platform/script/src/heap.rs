@@ -213,8 +213,11 @@ impl ScriptHeap {
     }
 
     pub fn set_type_default(&mut self, obj: ScriptObject) -> bool {
-        let object = &self.objects[obj];
+        let object = &mut self.objects[obj];
         if let Some(ty_index) = object.tag.as_type_index() {
+            // Mark as auto so vec entries (named children like code_block)
+            // are copied to instances created from this type default.
+            object.tag.set_auto();
             // Add to type_defaults mapping (GC will scan this table)
             self.type_defaults.insert(ty_index, obj);
             true
@@ -225,6 +228,37 @@ impl ScriptHeap {
 
     pub fn type_default(&self, ty_index: ScriptTypeIndex) -> Option<ScriptObject> {
         self.type_defaults.get(&ty_index).copied()
+    }
+
+    /// Copy vec entries from the type default to a newly created object,
+    /// if the object's proto has a type_default with auto-flagged vec entries.
+    /// This handles set_type_default() named children (e.g. code_block := View{...}).
+    pub fn copy_type_default_vec(&mut self, obj: ScriptObject) {
+        // Skip if object already has vec entries (from auto proto copy)
+        if !self.objects[obj].vec.is_empty() {
+            return;
+        }
+        let proto_val = self.objects[obj].proto;
+        let proto_ptr = match proto_val.as_object() {
+            Some(p) => p,
+            None => return,
+        };
+        // Only needed when proto is NOT auto (auto case handled in new_with_proto_impl)
+        if self.objects[proto_ptr].tag.is_auto() {
+            return;
+        }
+        let ty_index = match self.objects[proto_ptr].tag.as_type_index() {
+            Some(t) => t,
+            None => return,
+        };
+        let td = match self.type_defaults.get(&ty_index).copied() {
+            Some(t) => t,
+            None => return,
+        };
+        if self.objects[td].tag.is_auto() && !self.objects[td].vec.is_empty() {
+            let vec_copy: Vec<_> = self.objects[td].vec.clone();
+            self.objects[obj].vec.extend_from_slice(&vec_copy);
+        }
     }
 
     pub fn type_default_for_id(&self, type_id: ScriptTypeId) -> Option<ScriptObject> {

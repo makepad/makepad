@@ -20,6 +20,8 @@ pub enum CanvasCommand {
     AudioPause,
     AudioStop,
     AudioToggle,
+    /// Save current app with a name
+    SaveApp { name: String },
     /// CLI connected/disconnected
     ConnectionState {
         connected: bool,

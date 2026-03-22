@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
+makepad-code-editor = { path = "../../code_editor" }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 futures-util = "0.3"

@@ -1,79 +1,4 @@
-let state = { tab: "session" elapsed: 0 }
-
-fn show_session() {
-    state.tab = "session"
-    ui.tab_s.set_text("> Session")
-    ui.tab_t.set_text("Tools")
-    ui.tab_x.set_text("Stats")
-    ui.c1t.set_text("Input")
-    ui.c1v.set_text("475")
-    ui.c2t.set_text("Output")
-    ui.c2v.set_text("117.4K")
-    ui.c3t.set_text("Cache Read")
-    ui.c3v.set_text("47.2M")
-    ui.c4t.set_text("Cache Write")
-    ui.c4v.set_text("680.8K")
-    ui.ctx_label.set_text("47.2M / 1M  (100%)")
-    ui.sec_title.set_text("Session Activity")
-    ui.d1t.set_text("Human")
-    ui.d1v.set_text("249")
-    ui.d2t.set_text("Assistant")
-    ui.d2v.set_text("374")
-    ui.d3t.set_text("Tool Use")
-    ui.d3v.set_text("218")
-    ui.d4t.set_text("Session")
-    ui.d4v.set_text(fmt_elapsed())
-}
-
-fn show_tools() {
-    state.tab = "tools"
-    ui.tab_s.set_text("Session")
-    ui.tab_t.set_text("> Tools")
-    ui.tab_x.set_text("Stats")
-    ui.c1t.set_text("Top Tool")
-    ui.c1v.set_text("")
-    ui.c2t.set_text("Uses")
-    ui.c2v.set_text("")
-    ui.c3t.set_text("Total Calls")
-    ui.c3v.set_text("218")
-    ui.c4t.set_text("Agents")
-    ui.c4v.set_text("")
-    ui.ctx_label.set_text("Write 6  |  ToolSearch 1  |  TaskOutput 3  |  Skill 3  |  Read 46  |  Grep 35  |  Glob 1  |  Edit 25")
-    ui.sec_title.set_text("Agents")
-    ui.d1t.set_text("No agents")
-    ui.d1v.set_text("")
-    ui.d2t.set_text("")
-    ui.d2v.set_text("")
-    ui.d3t.set_text("")
-    ui.d3v.set_text("")
-    ui.d4t.set_text("")
-    ui.d4v.set_text("")
-}
-
-fn show_stats() {
-    state.tab = "stats"
-    ui.tab_s.set_text("Session")
-    ui.tab_t.set_text("Tools")
-    ui.tab_x.set_text("> Stats")
-    ui.c1t.set_text("Today In")
-    ui.c1v.set_text("19.4K")
-    ui.c2t.set_text("Today Out")
-    ui.c2v.set_text("135.4K")
-    ui.c3t.set_text("Messages")
-    ui.c3v.set_text("1064")
-    ui.c4t.set_text("API Equiv")
-    ui.c4v.set_text("$398.45")
-    ui.ctx_label.set_text("haiku-4-5 31%  |  opus-4-6 68%")
-    ui.sec_title.set_text("Usage by Period")
-    ui.d1t.set_text("Today: 19.4K in / 135.4K out | 1064 msgs | ~$398.45")
-    ui.d1v.set_text("")
-    ui.d2t.set_text("Week: 293.1K in / 1.3M out | 8904 msgs | ~$2417.95")
-    ui.d2v.set_text("")
-    ui.d3t.set_text("Month: 891.5K in / 2.2M out | 23429 msgs | ~$5203.55")
-    ui.d3v.set_text("")
-    ui.d4t.set_text("")
-    ui.d4v.set_text("")
-}
+let state = { elapsed: 75161 }
 
 fn fmt_elapsed() {
     let t = state.elapsed
@@ -90,86 +15,69 @@ fn fmt_elapsed() {
 
 fn tick() {
     state.elapsed = state.elapsed + 1
-    if state.tab == "session" {
-        ui.d4v.set_text(fmt_elapsed())
-    }
+    ui.dur_val.set_text(fmt_elapsed())
 }
 
 SolidView{width: Fill height: Fit draw_bg.color: #x0c0c18 flow: Down padding: Inset{left: 32. right: 32. top: 24. bottom: 24.} spacing: 16
 
-    // Header
     View{width: Fill height: Fit flow: Right align: Align{y: 0.5}
         Label{text: "Claude Code Monitor" draw_text.color: #xeeeeff draw_text.text_style.font_size: 20}
         Filler{}
-        Label{text: "claude-opus-4-6" draw_text.color: #xcc66ff draw_text.text_style.font_size: 11}
+        Label{text: "gstack-rs" draw_text.color: #x66ffaa draw_text.text_style.font_size: 11}
+        View{width: 12}
+        Label{text: "claude-opus-4-6[1m]" draw_text.color: #xcc66ff draw_text.text_style.font_size: 11}
     }
 
-    // Tab buttons
-    View{width: Fill height: Fit flow: Right spacing: 8
-        tab_s := Button{text: "> Session" draw_bg.color: #x222244 draw_text.color: #xeeeeff padding: Inset{left: 16. right: 16. top: 8. bottom: 8.} draw_bg.radius: 6. width: 90 height: 36
-            on_click: ||{ show_session() }
-        }
-        tab_t := Button{text: "Tools" draw_bg.color: #x222244 draw_text.color: #x8888aa padding: Inset{left: 16. right: 16. top: 8. bottom: 8.} draw_bg.radius: 6. width: 70 height: 36
-            on_click: ||{ show_tools() }
-        }
-        tab_x := Button{text: "Stats" draw_bg.color: #x222244 draw_text.color: #x8888aa padding: Inset{left: 16. right: 16. top: 8. bottom: 8.} draw_bg.radius: 6. width: 70 height: 36
-            on_click: ||{ show_stats() }
-        }
-    }
-
-    // 4 metric cards
     View{width: Fill height: Fit flow: Right spacing: 12
         RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 16. right: 16. top: 14. bottom: 14.} flow: Down spacing: 4
-            c1t := Label{text: "Input" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
-            c1v := Label{text: "475" draw_text.color: #xcc66ff draw_text.text_style.font_size: 24}
+            Label{text: "Input" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
+            Label{text: "32.9K" draw_text.color: #xcc66ff draw_text.text_style.font_size: 24}
         }
         RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 16. right: 16. top: 14. bottom: 14.} flow: Down spacing: 4
-            c2t := Label{text: "Output" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
-            c2v := Label{text: "117.4K" draw_text.color: #x66aaff draw_text.text_style.font_size: 24}
+            Label{text: "Output" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
+            Label{text: "319.3K" draw_text.color: #x66aaff draw_text.text_style.font_size: 24}
         }
         RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 16. right: 16. top: 14. bottom: 14.} flow: Down spacing: 4
-            c3t := Label{text: "Cache Read" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
-            c3v := Label{text: "47.2M" draw_text.color: #x66ffaa draw_text.text_style.font_size: 24}
+            Label{text: "Cache Read" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
+            Label{text: "655.5K" draw_text.color: #x66ffaa draw_text.text_style.font_size: 24}
         }
         RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 16. right: 16. top: 14. bottom: 14.} flow: Down spacing: 4
-            c4t := Label{text: "Cache Write" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
-            c4v := Label{text: "680.8K" draw_text.color: #xffaa66 draw_text.text_style.font_size: 24}
+            Label{text: "Cache Write" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
+            Label{text: "174" draw_text.color: #xffaa66 draw_text.text_style.font_size: 24}
         }
     }
 
-    // Context / info bar
     RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 20. right: 20. top: 14. bottom: 14.} flow: Down spacing: 8
         View{width: Fill height: Fit flow: Right align: Align{y: 0.5}
             Label{text: "Context Window" draw_text.color: #xaaaacc draw_text.text_style.font_size: 11}
             Filler{}
-            ctx_label := Label{text: "47.2M / 1M  (100%)" draw_text.color: #x888899 draw_text.text_style.font_size: 10}
+            Label{text: "688.4K / 1M  (66%)" draw_text.color: #x888899 draw_text.text_style.font_size: 10}
         }
         View{width: Fill height: 8 flow: Overlay
             RoundedView{width: Fill height: Fill draw_bg.color: #x222233 draw_bg.radius: 4.}
-            RoundedView{width: 400 height: Fill draw_bg.color: #xff6b6b draw_bg.radius: 4.}
+            RoundedView{width: 264 height: Fill draw_bg.color: #xffaa66 draw_bg.radius: 4.}
         }
     }
 
-    // Detail section (4 stat pairs in a row)
     RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 20. right: 20. top: 14. bottom: 14.} flow: Down spacing: 8
-        sec_title := Label{text: "Session Activity" draw_text.color: #xaaaacc draw_text.text_style.font_size: 11}
+        Label{text: "Session" draw_text.color: #xaaaacc draw_text.text_style.font_size: 11}
         View{width: Fill height: Fit flow: Right spacing: 24
             View{width: Fit height: Fit flow: Down spacing: 2
-                d1t := Label{text: "Human" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
-                d1v := Label{text: "249" draw_text.color: #xffaa66 draw_text.text_style.font_size: 20}
+                Label{text: "Duration" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
+                dur_val := Label{text: "20:52:41" draw_text.color: #xeeeeff draw_text.text_style.font_size: 20}
             }
             View{width: Fit height: Fit flow: Down spacing: 2
-                d2t := Label{text: "Assistant" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
-                d2v := Label{text: "374" draw_text.color: #x66aaff draw_text.text_style.font_size: 20}
+                Label{text: "Cost" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
+                Label{text: "$137.21" draw_text.color: #x66ffaa draw_text.text_style.font_size: 20}
             }
             View{width: Fit height: Fit flow: Down spacing: 2
-                d3t := Label{text: "Tool Use" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
-                d3v := Label{text: "218" draw_text.color: #xcc66ff draw_text.text_style.font_size: 20}
+                Label{text: "Lines +/-" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
+                Label{text: "+2477 / -827" draw_text.color: #xffaa66 draw_text.text_style.font_size: 20}
             }
             Filler{}
             View{width: Fit height: Fit flow: Down spacing: 2
-                d4t := Label{text: "Session" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
-                d4v := Label{text: "00:00:00" draw_text.color: #xeeeeff draw_text.text_style.font_size: 20}
+                Label{text: "Rate (5h/7d)" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
+                Label{text: "2% / 7%" draw_text.color: #x66aaff draw_text.text_style.font_size: 20}
             }
         }
     }

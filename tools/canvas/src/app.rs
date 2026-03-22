@@ -1,4 +1,5 @@
 use makepad_widgets::*;
+use makepad_code_editor;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -15,6 +16,97 @@ use crate::ws::types::CanvasCommand;
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
+
+
+    // Override Markdown with code_block for syntax highlighting.
+    // This works because set_type_default now marks objects as auto,
+    // so vec entries (named children) are copied to instances.
+    mod.widgets.Markdown = set_type_default() do mod.widgets.MarkdownBase{
+        width: Fill height: Fit
+        flow: Flow.Right{wrap: true}
+        padding: theme.mspace_1
+        font_size: theme.font_size_p
+        font_color: theme.color_label_inner
+        paragraph_spacing: 16
+        pre_code_spacing: 8
+        inline_code_padding: theme.mspace_1
+        inline_code_margin: theme.mspace_1
+        heading_base_scale: 1.8
+        draw_text +: { color: theme.color_label_inner }
+        text_style_normal: theme.font_regular{ font_size: theme.font_size_p }
+        text_style_italic: theme.font_italic{ font_size: theme.font_size_p }
+        text_style_bold: theme.font_bold{ font_size: theme.font_size_p }
+        text_style_bold_italic: theme.font_bold_italic{ font_size: theme.font_size_p }
+        text_style_fixed: theme.font_code{ font_size: theme.font_size_p }
+        code_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: 10}
+        }
+        code_walk: Walk{width: Fill height: Fit}
+        quote_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
+        }
+        quote_walk: Walk{width: Fill height: Fit}
+        list_item_layout: Layout{ flow: Flow.Right{wrap: true} padding: theme.mspace_1 }
+        list_item_walk: Walk{ height: Fit width: Fill }
+        sep_walk: Walk{ width: Fill height: 4. margin: theme.mspace_v_1 }
+        draw_block +: {
+            line_color: theme.color_label_inner
+            sep_color: theme.color_shadow
+            quote_bg_color: theme.color_bg_highlight
+            quote_fg_color: theme.color_label_inner
+            code_color: theme.color_bg_highlight
+            selection_color: theme.color_selection_focus
+            space_1: uniform(theme.space_1)
+            space_2: uniform(theme.space_2)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                match self.block_type {
+                    FlowBlockType.Quote => {
+                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
+                        sdf.fill(self.quote_bg_color)
+                        sdf.box(self.space_1 self.space_1 self.space_1 self.rect_size.y-self.space_2 1.5)
+                        sdf.fill(self.quote_fg_color)
+                        return sdf.result
+                    }
+                    FlowBlockType.Sep => {
+                        sdf.box(0. 1. self.rect_size.x-1. self.rect_size.y-2. 2.)
+                        sdf.fill(self.sep_color)
+                        return sdf.result
+                    }
+                    FlowBlockType.Code => {
+                        // Return transparent - CodeView handles its own background
+                        return #0000
+                    }
+                    FlowBlockType.InlineCode => {
+                        sdf.box(1. 1. self.rect_size.x-2. self.rect_size.y-2. 2.)
+                        sdf.fill(self.code_color)
+                        return sdf.result
+                    }
+                    FlowBlockType.Underline => {
+                        sdf.box(0. self.rect_size.y-2. self.rect_size.x 2.0 0.5)
+                        sdf.fill(self.line_color)
+                        return sdf.result
+                    }
+                    FlowBlockType.Strikethrough => {
+                        sdf.box(0. self.rect_size.y * 0.45 self.rect_size.x 2.0 0.5)
+                        sdf.fill(self.line_color)
+                        return sdf.result
+                    }
+                    FlowBlockType.Selection => {
+                        return vec4(self.selection_color.rgb * self.selection_color.a, self.selection_color.a)
+                    }
+                }
+                return #f00
+            }
+        }
+        link := mod.widgets.MarkdownLink{}
+        use_code_block_widget: true
+        code_block := View{width: Fill height: Fit new_batch: true
+            code_view := CodeView{}
+        }
+    }
 
     startup() do #(App::script_component(vm)){
         ui: Root{
@@ -311,8 +403,21 @@ impl MatchEvent for App {
                         }
                         self.ui.widget(cx, ids!(placeholder)).set_visible(cx, false);
 
-                        // Save to history
-                        self.add_to_history(cx, &code);
+                        // Save to history only if this is a genuinely new app.
+                        // Detect data refreshes by comparing extracted title with
+                        // the last history entry's title (same title = same app, just updated data).
+                        let new_title = extract_app_title(&code);
+                        let is_refresh = self.history.last().map_or(false, |(old_name, _)| {
+                            new_title.as_deref() == Some(old_name.as_str())
+                        });
+                        if is_refresh {
+                            // Update the last history entry in-place (no new sidebar item)
+                            if let Some(last) = self.history.last_mut() {
+                                last.1 = code.clone();
+                            }
+                        } else {
+                            self.add_to_history(cx, &code);
+                        }
                     }
                 }
 
@@ -368,6 +473,9 @@ impl MatchEvent for App {
                 CanvasCommand::AudioToggle => {
                     get_audio_state().toggle();
                 }
+                CanvasCommand::SaveApp { name } => {
+                    self.save_app(cx, &name);
+                }
             }
         }
 
@@ -409,9 +517,10 @@ fn extract_widget_names(code: &str) -> Vec<String> {
 // ============================================================================
 
 impl App {
-    /// Directory for persisting history files.
-    fn history_dir() -> PathBuf {
-        let dir = PathBuf::from("/tmp/canvas_history");
+    /// Directory for persisting saved apps.
+    fn apps_dir() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let dir = PathBuf::from(home).join(".canvas-apps");
         let _ = std::fs::create_dir_all(&dir);
         dir
     }
@@ -457,7 +566,7 @@ impl App {
         self.uid_map_dirty = true;
 
         if let Some(mut splash) = self.ui.widget(cx, ids!(splash_panel)).borrow_mut::<Splash>() {
-            splash.set_text(cx, code);
+            splash.set_text(cx, &code);
             splash.view.set_visible(cx, true);
         }
         self.ui.widget(cx, ids!(placeholder)).set_visible(cx, false);
@@ -467,11 +576,12 @@ impl App {
     /// Add code to history, save to disk, and update the sidebar list.
     fn add_to_history(&mut self, cx: &mut Cx, code: &str) {
         self.history_counter += 1;
-        let name = format!("App #{}", self.history_counter);
+        let name = extract_app_title(code)
+            .unwrap_or_else(|| format!("App #{}", self.history_counter));
         self.history.push((name.clone(), code.to_string()));
 
         // Persist to disk
-        let dir = Self::history_dir();
+        let dir = Self::apps_dir();
         let filename = format!("{:04}_{}.splash", self.history_counter, slug(&name));
         let _ = std::fs::write(dir.join(&filename), code);
 
@@ -481,6 +591,27 @@ impl App {
         }
 
         self.rebuild_history_ui(cx);
+    }
+
+    /// Save current app with an explicit name.
+    fn save_app(&mut self, cx: &mut Cx, name: &str) {
+        if self.current_code.is_empty() { return; }
+        let app_name = if name.is_empty() {
+            extract_app_title(&self.current_code)
+                .unwrap_or_else(|| format!("App #{}", self.history_counter + 1))
+        } else {
+            name.to_string()
+        };
+
+        self.history_counter += 1;
+        self.history.push((app_name.clone(), self.current_code.clone()));
+
+        let dir = Self::apps_dir();
+        let filename = format!("{:04}_{}.splash", self.history_counter, slug(&app_name));
+        let _ = std::fs::write(dir.join(&filename), &self.current_code);
+
+        self.rebuild_history_ui(cx);
+        log!("Canvas: saved app '{}'", app_name);
     }
 
     /// Rebuild the history list buttons in the sidebar.
@@ -523,9 +654,9 @@ impl App {
         None
     }
 
-    /// Load history from disk on startup.
+    /// Load saved apps from disk on startup.
     fn load_history(&mut self) {
-        let dir = Self::history_dir();
+        let dir = Self::apps_dir();
         if !dir.is_dir() { return; }
 
         let mut entries: Vec<_> = match std::fs::read_dir(&dir) {
@@ -539,11 +670,49 @@ impl App {
             if path.extension().and_then(|e| e.to_str()) != Some("splash") { continue; }
             if let Ok(code) = std::fs::read_to_string(&path) {
                 self.history_counter += 1;
-                let name = format!("App #{}", self.history_counter);
+                let name = extract_app_title(&code)
+                    .unwrap_or_else(|| format!("App #{}", self.history_counter));
                 self.history.push((name, code));
             }
         }
     }
+}
+
+/// Extract a title from Splash code by finding the first Label with font_size >= 16.
+/// Skips Labels that look like data values (pure numbers, time formats like "25:00").
+fn extract_app_title(code: &str) -> Option<String> {
+    for line in code.lines() {
+        let trimmed = line.trim();
+        if !trimmed.contains("Label") { continue; }
+        // Check for font_size >= 12 (skip tiny labels like font_size: 9 or 10)
+        let has_title_font = trimmed.contains("font_size: 12")
+            || trimmed.contains("font_size: 13")
+            || trimmed.contains("font_size: 14")
+            || trimmed.contains("font_size: 15")
+            || trimmed.contains("font_size: 16")
+            || trimmed.contains("font_size: 17")
+            || trimmed.contains("font_size: 18")
+            || trimmed.contains("font_size: 19")
+            || trimmed.contains("font_size: 2")
+            || trimmed.contains("font_size: 3")
+            || trimmed.contains("font_size: 4")
+            || trimmed.contains("font_size: 5")
+            || trimmed.contains("font_size: 6");
+        if !has_title_font { continue; }
+        // Extract text: "..."
+        if let Some(start) = trimmed.find("text: \"") {
+            let after = &trimmed[start + 7..];
+            if let Some(end) = after.find('"') {
+                let title = &after[..end];
+                // Skip values that look like data (numbers, time, etc.)
+                if title.is_empty() { continue; }
+                let is_data = title.chars().all(|c| c.is_ascii_digit() || c == ':' || c == '.' || c == '%' || c == '$' || c == ',' || c == ' ');
+                if is_data { continue; }
+                return Some(title.to_string());
+                }
+        }
+    }
+    None
 }
 
 /// Create a simple slug from a name for filenames.
@@ -556,6 +725,7 @@ fn slug(name: &str) -> String {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
+        makepad_code_editor::script_mod(vm);
         crate::visualizer::script_mod(vm);
         self::script_mod(vm)
     }

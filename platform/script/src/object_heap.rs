@@ -44,7 +44,12 @@ impl ScriptHeap {
     }
 
     pub fn new_with_proto(&mut self, proto: ScriptValue) -> ScriptObject {
-        self.new_with_proto_impl(proto, true)
+        let obj = self.new_with_proto_impl(proto, true);
+        // If proto is not auto but has a type_default with vec entries,
+        // copy those entries. This handles set_type_default() named children
+        // (like code_block := View{...}) that need to appear on every instance.
+        self.copy_type_default_vec(obj);
+        obj
     }
 
     pub fn new_with_proto_no_vec(&mut self, proto: ScriptValue) -> ScriptObject {
@@ -86,7 +91,7 @@ impl ScriptHeap {
             object.tag.set_alloced();
             object.tag.set_proto_fwd(proto_fwd);
             object.proto = proto;
-            // only copy vec if we are 'auto' otherwise we proto inherit normally
+            // only copy vec if proto is 'auto' (e.g. function call args)
             if copy_vec_from_auto_proto && proto_object.tag.is_auto() {
                 object.vec.extend_from_slice(&proto_object.vec);
             }

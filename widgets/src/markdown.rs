@@ -1,6 +1,6 @@
 use crate::{
     link_label::LinkLabel, makepad_derive_widget::*, makepad_draw::*, text_flow::TextFlow,
-    widget::*, WidgetMatchEvent,
+    widget::*, widget_async::ScriptAsyncResult, WidgetMatchEvent,
 };
 
 use pulldown_cmark::{CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -241,7 +241,7 @@ struct ListState {
     start_number: Option<u64>,
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct Markdown {
     #[source]
     source: ScriptObjectRef,
@@ -276,12 +276,48 @@ impl Widget for Markdown {
         false
     }
 
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(self.body.as_ref());
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        if method == live_id!(set_text) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    let new_text = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(value, out);
+                        out.to_string()
+                    });
+                    vm.with_cx_mut(|cx| {
+                        self.set_text(cx, &new_text);
+                    });
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.text_flow.handle_event(cx, event, scope);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.auto_id = 0;
+
+        // If use_code_block_widget is true but no code_block template registered,
+        // fall back to default monospace rendering. Template must be provided
+        // as a named child in the DSL instance (e.g., code_block := View{...}).
+        if self.use_code_block_widget && !self.text_flow.has_template(live_id!(code_block)) {
+            self.use_code_block_widget = false;
+        }
 
         self.begin(cx, walk);
         self.process_markdown_doc(cx);
@@ -298,6 +334,53 @@ impl Widget for Markdown {
         if self.body.as_ref() != v {
             self.body.set(v);
             self.redraw(cx);
+        }
+    }
+}
+
+impl ScriptHook for Markdown {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        // Forward to TextFlow's ScriptHook (handles 'link' template)
+        self.text_flow.on_after_apply(vm, apply, scope, value);
+
+        // Also check map properties for named children like code_block, splash_block
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                // Debug: log what's in the map
+                vm.map_mut_with(obj, |vm, map| {
+                    log!("[Markdown] ScriptHook map entries: {}", map.len());
+                    for (key, map_val) in map.iter() {
+                        if let Some(id) = key.as_id() {
+                            log!("[Markdown]   map key: {:?}", id);
+                        }
+                    }
+                });
+                // Check map for templates
+                vm.map_mut_with(obj, |vm, map| {
+                    for (key, map_val) in map.iter() {
+                        if let Some(id) = key.as_id() {
+                            if id == live_id!(code_block)
+                                || id == live_id!(splash_block)
+                                || id == live_id!(inline_math)
+                                || id == live_id!(display_math)
+                            {
+                                let val = map_val.value;
+                                if let Some(template_obj) = val.as_object() {
+                                    self.text_flow.apply_template(
+                                        vm, apply, scope, id, template_obj,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                });
+            }
         }
     }
 }

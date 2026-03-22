@@ -316,6 +316,12 @@ impl StdioBridge {
                 self.push_cmd(CanvasCommand::AudioStop);
                 http_response(200, r#"{"ok":true}"#)
             }
+            ("POST", "/save") => {
+                // Body is the app name. If empty, auto-extract from current splash.
+                let name = if body.is_empty() { String::new() } else { body.clone() };
+                self.push_cmd(CanvasCommand::SaveApp { name });
+                http_response(200, r#"{"ok":true}"#)
+            }
             ("GET", "/ping") => {
                 http_response(200, r#"{"ok":true}"#)
             }

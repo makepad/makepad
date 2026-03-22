@@ -707,7 +707,15 @@ pub struct TextFlow {
 }
 
 impl TextFlow {
-    fn apply_template(
+    pub fn has_template(&self, id: LiveId) -> bool {
+        self.templates.contains_key(&id)
+    }
+
+    pub fn register_template(&mut self, id: LiveId, template_ref: ScriptObjectRef) {
+        self.templates.insert(id, template_ref);
+    }
+
+    pub fn apply_template(
         &mut self,
         vm: &mut ScriptVm,
         apply: &Apply,
