@@ -314,6 +314,7 @@ impl Cx {
                     self.demo_time_repaint = true;
                 }
                 let shp = &mut self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
+                shp.ensure_gl_shader_sources(self.os.gl(), &self.os_type);
 
                 let shader_variant = self.passes[draw_pass_id].os.shader_variant;
 
@@ -1036,6 +1037,27 @@ pub struct GlShader {
 }
 
 impl GlShader {
+    fn shader_source_len(source: &str) -> i32 {
+        source
+            .as_bytes()
+            .strip_suffix(b"\0")
+            .map_or(source.len(), |bytes| bytes.len()) as i32
+    }
+
+    fn shader_source_hash(source: &str) -> LiveId {
+        live_id!(glsl_source).str_append(source)
+    }
+
+    fn shader_source_preview(source: &str) -> String {
+        source
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect()
+    }
+
     pub fn new(
         gl: &LibGl,
         vertex: &str,
@@ -1154,15 +1176,79 @@ impl GlShader {
             let program = if let Some(program) = read_cache(gl, &vertex, &pixel, os_type) {
                 program
             } else {
+                let vertex_len = Self::shader_source_len(vertex);
+                let pixel_len = Self::shader_source_len(pixel);
+                let vertex_hash = Self::shader_source_hash(vertex);
+                let pixel_hash = Self::shader_source_hash(pixel);
+
+                #[cfg(target_os = "android")]
+                if matches!(os_type, OsType::Android(_)) {
+                    crate::log!(
+                        "GL shader build start renderer={} vertex_hash={:016x} vertex_len={} fragment_hash={:016x} fragment_len={} vertex_preview={:?} fragment_preview={:?}",
+                        get_gl_string(gl, gl_sys::RENDERER),
+                        vertex_hash.0,
+                        vertex_len,
+                        pixel_hash.0,
+                        pixel_len,
+                        Self::shader_source_preview(vertex),
+                        Self::shader_source_preview(pixel)
+                    );
+                }
+
                 let vs = (gl.glCreateShader)(gl_sys::VERTEX_SHADER);
-                (gl.glShaderSource)(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
+                let vertex_ptr = vertex.as_ptr() as *const _;
+                let vertex_ptrs = [vertex_ptr];
+                let vertex_lengths = [vertex_len];
+                #[cfg(target_os = "android")]
+                if matches!(os_type, OsType::Android(_)) {
+                    crate::log!(
+                        "GL shader upload vertex shader={} hash={:016x} len={}",
+                        vs,
+                        vertex_hash.0,
+                        vertex_len
+                    );
+                }
+                (gl.glShaderSource)(
+                    vs,
+                    1,
+                    vertex_ptrs.as_ptr(),
+                    vertex_lengths.as_ptr(),
+                );
+                #[cfg(target_os = "android")]
+                if matches!(os_type, OsType::Android(_)) {
+                    crate::log!(
+                        "GL shader compile vertex shader={} hash={:016x}",
+                        vs,
+                        vertex_hash.0
+                    );
+                }
                 (gl.glCompileShader)(vs);
                 Self::opengl_log_shader_info(gl, true, vs as usize, "vertex", vertex);
                 if let Some(error) = Self::opengl_has_shader_error(gl, true, vs as usize, &vertex) {
                     panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
                 }
                 let fs = (gl.glCreateShader)(gl_sys::FRAGMENT_SHADER);
-                (gl.glShaderSource)(fs, 1, [pixel.as_ptr() as *const _].as_ptr(), ptr::null());
+                let pixel_ptr = pixel.as_ptr() as *const _;
+                let pixel_ptrs = [pixel_ptr];
+                let pixel_lengths = [pixel_len];
+                #[cfg(target_os = "android")]
+                if matches!(os_type, OsType::Android(_)) {
+                    crate::log!(
+                        "GL shader upload fragment shader={} hash={:016x} len={}",
+                        fs,
+                        pixel_hash.0,
+                        pixel_len
+                    );
+                }
+                (gl.glShaderSource)(fs, 1, pixel_ptrs.as_ptr(), pixel_lengths.as_ptr());
+                #[cfg(target_os = "android")]
+                if matches!(os_type, OsType::Android(_)) {
+                    crate::log!(
+                        "GL shader compile fragment shader={} hash={:016x}",
+                        fs,
+                        pixel_hash.0
+                    );
+                }
                 (gl.glCompileShader)(fs);
                 Self::opengl_log_shader_info(gl, true, fs as usize, "fragment", pixel);
                 if let Some(error) = Self::opengl_has_shader_error(gl, true, fs as usize, &pixel) {
@@ -1573,6 +1659,29 @@ impl GlShader {
 }
 
 impl CxOsDrawShader {
+    fn ensure_gl_shader_sources(&mut self, gl: &LibGl, os_type: &OsType) {
+        let has_gl_sources = self.vertex.iter().all(|source| !source.is_empty())
+            && self.pixel.iter().all(|source| !source.is_empty());
+        if has_gl_sources {
+            return;
+        }
+
+        crate::log!(
+            "GL fallback materializing shader sources from stored GLSL vertex_hash={:016x} fragment_hash={:016x}",
+            live_id!(glsl_source).str_append(&self.in_vertex).0,
+            live_id!(glsl_source).str_append(&self.in_pixel).0
+        );
+
+        let mut hydrated = CxOsDrawShader::new(gl, &self.in_vertex, &self.in_pixel, os_type);
+        #[cfg(use_vulkan)]
+        {
+            hydrated.vulkan_shader = self.vulkan_shader.clone();
+        }
+        hydrated.gl_shader = std::mem::take(&mut self.gl_shader);
+        hydrated.live_uniforms = std::mem::take(&mut self.live_uniforms);
+        *self = hydrated;
+    }
+
     #[cfg(use_vulkan)]
     pub fn new_vulkan_only(in_vertex: &str, in_pixel: &str) -> Self {
         CxOsDrawShader {
