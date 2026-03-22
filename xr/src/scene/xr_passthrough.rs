@@ -298,7 +298,7 @@ impl XrScene {
 
         let Self {
             passthrough_env_atlas,
-            draw_passthrough_cube_atlas,
+            draw_passthrough_env_atlas,
             ..
         } = self;
         let atlas =
@@ -322,28 +322,28 @@ impl XrScene {
         cx.begin_pass(&atlas.pass, Some(1.0));
         atlas.draw_list.begin_always(cx);
 
-        draw_passthrough_cube_atlas.draw_vars.options.depth_write = false;
-        draw_passthrough_cube_atlas.source_size = source_size;
-        draw_passthrough_cube_atlas.camera_enabled = camera_enabled;
-        draw_passthrough_cube_atlas.rotation_steps = rotation_steps;
-        draw_passthrough_cube_atlas.bootstrap_mix = bootstrap_mix;
-        draw_passthrough_cube_atlas.update_strength = XR_PASSTHROUGH_ENV_UPDATE_STRENGTH;
-        draw_passthrough_cube_atlas.camera_fov_y_degrees =
+        draw_passthrough_env_atlas.draw_vars.options.depth_write = false;
+        draw_passthrough_env_atlas.source_size = source_size;
+        draw_passthrough_env_atlas.camera_enabled = camera_enabled;
+        draw_passthrough_env_atlas.rotation_steps = rotation_steps;
+        draw_passthrough_env_atlas.bootstrap_mix = bootstrap_mix;
+        draw_passthrough_env_atlas.update_strength = XR_PASSTHROUGH_ENV_UPDATE_STRENGTH;
+        draw_passthrough_env_atlas.camera_fov_y_degrees =
             XR_PASSTHROUGH_ENV_CAMERA_FOV_Y_DEGREES;
-        draw_passthrough_cube_atlas.camera_projection_scale =
+        draw_passthrough_env_atlas.camera_projection_scale =
             XR_PASSTHROUGH_ENV_CAMERA_PROJECTION_SCALE;
-        draw_passthrough_cube_atlas.camera_exposure = XR_PASSTHROUGH_CAMERA_EXPOSURE;
-        draw_passthrough_cube_atlas.camera_center_offset_uv = camera_center_offset_uv;
-        draw_passthrough_cube_atlas.camera_right = camera_right;
-        draw_passthrough_cube_atlas.camera_up = camera_up;
-        draw_passthrough_cube_atlas.camera_forward = camera_forward;
-        draw_passthrough_cube_atlas
+        draw_passthrough_env_atlas.camera_exposure = XR_PASSTHROUGH_CAMERA_EXPOSURE;
+        draw_passthrough_env_atlas.camera_center_offset_uv = camera_center_offset_uv;
+        draw_passthrough_env_atlas.camera_right = camera_right;
+        draw_passthrough_env_atlas.camera_up = camera_up;
+        draw_passthrough_env_atlas.camera_forward = camera_forward;
+        draw_passthrough_env_atlas
             .draw_vars
             .set_texture(0, &camera_texture);
-        draw_passthrough_cube_atlas
+        draw_passthrough_env_atlas
             .draw_vars
             .set_texture(1, &previous_texture);
-        draw_passthrough_cube_atlas.draw_geometry(cx, geometry_id);
+        draw_passthrough_env_atlas.draw_geometry(cx, geometry_id);
 
         atlas.draw_list.end(cx);
         cx.end_pass(&atlas.pass);

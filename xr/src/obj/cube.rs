@@ -1,12 +1,12 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-use super::{node::xr_runtime_body_from_scope, scene_3d::apply_scene_to_draw_cube, XrNode};
+use super::{xr_node::xr_runtime_body_from_scope, scene_draw::apply_scene_to_draw_cube, XrNode};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
 
-    mod.widgets.XrCubeBase = #(XrCube::register_widget(vm))
-    mod.widgets.XrCube = set_type_default() do mod.widgets.XrCubeBase{
+    mod.widgets.CubeBase = #(Cube::register_widget(vm))
+    mod.widgets.Cube = set_type_default() do mod.widgets.CubeBase{
         body: mod.widgets.XrBodyKind.Dynamic
         size: vec3(0.1, 0.1, 0.1)
         color: vec4(0.82, 0.48, 0.28, 1.0)
@@ -17,7 +17,7 @@ script_mod! {
 }
 
 #[derive(Script, ScriptHook, Widget)]
-pub struct XrCube {
+pub struct Cube {
     #[redraw]
     #[live]
     draw_cube: DrawCube,
@@ -37,7 +37,7 @@ pub struct XrCube {
     node: XrNode,
 }
 
-impl XrCube {
+impl Cube {
     pub fn half_extents(&self) -> Vec3f {
         vec3f(
             self.size.x.max(0.0) * 0.5,
@@ -51,7 +51,7 @@ impl XrCube {
     }
 }
 
-impl Widget for XrCube {
+impl Widget for Cube {
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
         let Some(_scene) = apply_scene_to_draw_cube(&mut self.draw_cube, cx) else {
             return DrawStep::done();

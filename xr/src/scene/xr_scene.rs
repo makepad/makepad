@@ -1,17 +1,17 @@
-use super::passthrough_cube::DrawPassthroughCubeAtlas;
+use super::passthrough_env::DrawPassthroughEnvAtlas;
 use self::{
-    depth::{DepthSurfaceMeshChunkHandle, RetainedDepthQueryHit},
-    passthrough::{
+    xr_depth::{DepthSurfaceMeshChunkHandle, RetainedDepthQueryHit},
+    xr_passthrough::{
         XrPassthroughCameraChoice, XrPassthroughCameraTextures, XrPassthroughEnvAtlas,
     },
-    physics::{makepad_pose, RapierScene},
+    xr_physics::{makepad_pose, RapierScene},
 };
 use crate::{
-    cube::XrCube,
-    node::{XrBodyKind, XrDrawScopeData, XrNode, XrRuntimeBodyState},
-    refractive_cube::XrRefractiveCube,
-    root::xr_root_options_from_scope,
-    scene_3d::SceneState3D,
+    cube::Cube,
+    refractive_cube::RefractiveCube,
+    scene_draw::SceneState3D,
+    xr_node::{XrBodyKind, XrDrawScopeData, XrNode, XrRuntimeBodyState},
+    xr_root::xr_root_options_from_scope,
 };
 use makepad_widgets::makepad_platform::{
     event::{CameraPreviewMode, VideoSource, VideoYuvMetadata},
@@ -27,14 +27,14 @@ use rapier3d::prelude::{
 };
 use std::{collections::HashMap, rc::Rc};
 
-#[path = "depth.rs"]
-mod depth;
-#[path = "hands.rs"]
-mod hands;
-#[path = "passthrough.rs"]
-mod passthrough;
-#[path = "physics.rs"]
-mod physics;
+#[path = "xr_depth.rs"]
+mod xr_depth;
+#[path = "xr_hands.rs"]
+mod xr_hands;
+#[path = "xr_passthrough.rs"]
+mod xr_passthrough;
+#[path = "xr_physics.rs"]
+mod xr_physics;
 
 script_mod! {
     use mod.pod.*
@@ -137,7 +137,7 @@ script_mod! {
             object_corner_radius: 0.018
             transmission_focus_distance: 1.8
         }
-        draw_passthrough_cube_atlas +: {
+        draw_passthrough_env_atlas +: {
             source_size: vec2(1280.0, 960.0)
             camera_enabled: 0.0
             rotation_steps: 0.0
@@ -288,7 +288,7 @@ pub struct XrScene {
     draw_depth_mesh: DrawDepthMeshBasic,
     #[redraw]
     #[live]
-    draw_passthrough_cube_atlas: DrawPassthroughCubeAtlas,
+    draw_passthrough_env_atlas: DrawPassthroughEnvAtlas,
     #[area]
     #[rust]
     area: Area,
@@ -308,9 +308,9 @@ pub struct XrScene {
     orbit_yaw: f32,
     #[rust(0.45)]
     orbit_pitch: f32,
-    #[live(40.0)]
+    #[live(28.0)]
     camera_fov_y: f32,
-    #[live(2.5)]
+    #[live(3.4)]
     camera_distance: f32,
     #[live(0.25)]
     camera_distance_min: f32,
@@ -318,6 +318,10 @@ pub struct XrScene {
     camera_distance_max: f32,
     #[live(0.08)]
     wheel_zoom_step: f32,
+    #[live(1.3333334)]
+    preview_aspect_ratio: f32,
+    #[live(false)]
+    preview_aspect_fill: bool,
     #[live(0.05)]
     camera_near: f32,
     #[live(200.0)]
@@ -499,7 +503,7 @@ impl XrScene {
             .unwrap_or(false)
     }
 
-    fn preview_scene_state(&self, rect: Rect, pass_size: Vec2d) -> Option<SceneState3D> {
+    fn preview_scene_state(&mut self, rect: Rect, pass_size: Vec2d) -> Option<SceneState3D> {
         if rect.size.x <= 1.0 || rect.size.y <= 1.0 || pass_size.x <= 1.0 || pass_size.y <= 1.0 {
             return None;
         }
@@ -525,8 +529,9 @@ impl XrScene {
         let viewport_w = ((clip_ndc.z - clip_ndc.x).abs() * 0.5 * pass_size.x as f32).max(1.0);
         let viewport_h = ((clip_ndc.w - clip_ndc.y).abs() * 0.5 * pass_size.y as f32).max(1.0);
         let aspect = (viewport_w / viewport_h).max(0.001);
+        let preview_fov_y = self.camera_fov_y.clamp(1.0, 179.0);
         let projection = Mat4f::perspective(
-            self.camera_fov_y.clamp(1.0, 179.0),
+            preview_fov_y,
             aspect,
             self.camera_near.max(0.001),
             self.camera_far.max(self.camera_near + 0.001),
@@ -557,6 +562,34 @@ impl XrScene {
             use_pass_camera: false,
             viewport_rect: rect,
         })
+    }
+
+    fn preview_gate_rect(&self, rect: Rect) -> Rect {
+        let target_aspect = self.preview_aspect_ratio as f64;
+        if target_aspect <= 0.0 || rect.size.x <= 1.0 || rect.size.y <= 1.0 {
+            return rect;
+        }
+
+        let rect_aspect = (rect.size.x / rect.size.y).max(0.001);
+        if self.preview_aspect_fill && rect_aspect > target_aspect {
+            let height = rect.size.x / target_aspect;
+            Rect {
+                pos: dvec2(rect.pos.x, rect.pos.y + (rect.size.y - height) * 0.5),
+                size: dvec2(rect.size.x, height),
+            }
+        } else if rect_aspect > target_aspect {
+            let width = rect.size.y * target_aspect;
+            Rect {
+                pos: dvec2(rect.pos.x + (rect.size.x - width) * 0.5, rect.pos.y),
+                size: dvec2(width, rect.size.y),
+            }
+        } else {
+            let height = rect.size.x / target_aspect;
+            Rect {
+                pos: dvec2(rect.pos.x, rect.pos.y + (rect.size.y - height) * 0.5),
+                size: dvec2(rect.size.x, height),
+            }
+        }
     }
 
     fn xr_scene_state(&self, state: &XrState) -> SceneState3D {
@@ -605,7 +638,7 @@ impl XrScene {
         parent: XrTransformState,
         cubes: &mut Vec<CollectedXrCube>,
     ) {
-        if let Some(cube) = widget.borrow::<XrCube>() {
+        if let Some(cube) = widget.borrow::<Cube>() {
             let node = cube.node();
             let world = Self::transform_with_node(parent, node);
             let half_extents = cube.half_extents();
@@ -629,7 +662,7 @@ impl XrScene {
             return;
         }
 
-        if let Some(cube) = widget.borrow::<XrRefractiveCube>() {
+        if let Some(cube) = widget.borrow::<RefractiveCube>() {
             let node = cube.node();
             let world = Self::transform_with_node(parent, node);
             let half_extents = cube.half_extents();
@@ -757,7 +790,7 @@ impl XrScene {
             self.preview_pass.set_color_texture(
                 cx,
                 &texture,
-                DrawPassClearColor::ClearWith(vec4(0.09, 0.13, 0.18, 1.0)),
+                DrawPassClearColor::ClearWith(vec4(0.0902, 0.1137, 0.1490, 1.0)),
             );
             self.preview_color_texture = Some(texture);
         }
@@ -965,10 +998,11 @@ impl Widget for XrScene {
         cx.begin_pass(&self.preview_pass, None);
 
         let preview_pass_size = cx.current_pass_size();
-        let preview_rect = Rect {
+        let preview_bounds = Rect {
             pos: dvec2(0.0, 0.0),
             size: preview_pass_size,
         };
+        let preview_rect = self.preview_gate_rect(preview_bounds);
 
         if let Some(scene_state) = self.preview_scene_state(preview_rect, preview_pass_size) {
             self.update_preview_pass_camera(cx.cx, scene_state);

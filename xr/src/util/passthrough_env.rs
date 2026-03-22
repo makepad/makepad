@@ -7,7 +7,7 @@ script_mod! {
     use mod.draw
     use mod.geom
 
-    mod.draw.DrawPassthroughCubeAtlas = mod.std.set_type_default() do #(DrawPassthroughCubeAtlas::script_shader(vm)){
+    mod.draw.DrawPassthroughEnvAtlas = mod.std.set_type_default() do #(DrawPassthroughEnvAtlas::script_shader(vm)){
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -154,7 +154,7 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
-pub struct DrawPassthroughCubeAtlas {
+pub struct DrawPassthroughEnvAtlas {
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -183,7 +183,7 @@ pub struct DrawPassthroughCubeAtlas {
     pub camera_forward: Vec3f,
 }
 
-impl DrawPassthroughCubeAtlas {
+impl DrawPassthroughEnvAtlas {
     pub fn draw_geometry(&mut self, cx: &mut Cx2d, geometry_id: GeometryId) {
         self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         self.draw_vars.geometry_id = Some(geometry_id);

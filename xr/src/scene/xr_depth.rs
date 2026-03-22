@@ -1,5 +1,5 @@
 use super::*;
-use super::physics::{makepad_pose, RapierScene};
+use super::xr_physics::{makepad_pose, RapierScene};
 use std::{
     collections::{hash_map::DefaultHasher, HashSet},
     hash::{Hash, Hasher},
