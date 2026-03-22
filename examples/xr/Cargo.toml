@@ -8,4 +8,4 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
-makepad-xr = { path = "../../xr", version = "1.0.0", features = ["gltf", "splat"] }
+makepad-xr = { path = "../../xr", version = "1.0.0" }
