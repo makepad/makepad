@@ -27,6 +27,7 @@ script_mod! {
             0.0, 0.0, 1.0, 0.0,
             0.0, 0.0, 0.0, 1.0
         ))
+        clip_ndc: uniform(vec4(-1.0, -1.0, 1.0, 1.0))
         use_pass_camera: uniform(float(0.0))
 
         lit_color: varying(vec4f)
@@ -54,10 +55,22 @@ script_mod! {
         }
 
         transform_with_camera: fn(view_pos: vec4) {
+            let clip = if self.use_pass_camera > 0.5 {
+                self.draw_pass.camera_projection * view_pos
+            } else {
+                self.projection_matrix * view_pos
+            };
             if self.use_pass_camera > 0.5 {
-                return self.draw_pass.camera_projection * view_pos
+                return clip
             }
-            return self.projection_matrix * view_pos
+            let inv_w = 1.0 / max(abs(clip.w), 0.00001);
+            let ndc = vec2(clip.x * inv_w, clip.y * inv_w);
+            let clip_min = vec2(self.clip_ndc.x, self.clip_ndc.y);
+            let clip_max = vec2(self.clip_ndc.z, self.clip_ndc.w);
+            let clip_scale = (clip_max - clip_min) * 0.5;
+            let clip_center = (clip_max + clip_min) * 0.5;
+            let remapped_ndc = ndc * clip_scale + clip_center;
+            return vec4(remapped_ndc.x * clip.w, remapped_ndc.y * clip.w, clip.z, clip.w)
         }
 
         vertex: fn() {
@@ -96,6 +109,8 @@ pub struct DrawCube {
     pub view_matrix: Mat4f,
     #[rust(Mat4f::identity())]
     pub projection_matrix: Mat4f,
+    #[rust(vec4(-1.0, -1.0, 1.0, 1.0))]
+    pub clip_ndc: Vec4f,
     #[rust(0.0)]
     pub use_pass_camera: f32,
     #[deref]
@@ -124,6 +139,10 @@ impl DrawCube {
         self.projection_matrix = projection;
     }
 
+    pub fn set_clip_ndc(&mut self, clip_ndc: Vec4f) {
+        self.clip_ndc = clip_ndc;
+    }
+
     fn apply_draw_uniforms(&mut self, cx: &mut CxDraw) {
         self.draw_vars
             .set_uniform(cx.cx, live_id!(view_matrix), &self.view_matrix.v);
@@ -131,6 +150,16 @@ impl DrawCube {
             cx.cx,
             live_id!(projection_matrix),
             &self.projection_matrix.v,
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(clip_ndc),
+            &[
+                self.clip_ndc.x,
+                self.clip_ndc.y,
+                self.clip_ndc.z,
+                self.clip_ndc.w,
+            ],
         );
         self.draw_vars
             .set_uniform(cx.cx, live_id!(use_pass_camera), &[self.use_pass_camera]);
