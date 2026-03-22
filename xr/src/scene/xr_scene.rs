@@ -320,6 +320,8 @@ pub struct XrScene {
     camera_distance_max: f32,
     #[live(0.08)]
     wheel_zoom_step: f32,
+    #[live(1.0)]
+    camera_aspect_ratio_tweak: f32,
     #[live(1.3333334)]
     preview_aspect_ratio: f32,
     #[live(false)]
@@ -358,6 +360,8 @@ pub struct XrScene {
     passthrough_camera_permission: Option<PermissionStatus>,
     #[rust]
     passthrough_camera_source_size: Vec2f,
+    #[rust]
+    xr_draw_logged: bool,
     #[rust]
     passthrough_camera_playback_requested: bool,
     #[rust]
@@ -518,7 +522,8 @@ impl XrScene {
         let y1 = 1.0 - (2.0 * (rect.pos.y + rect.size.y) as f32 / pass_h);
         let clip_ndc = vec4(x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1));
 
-        let aspect = (rect.size.x / rect.size.y).max(0.001) as f32;
+        let aspect = ((pass_size.x / pass_size.y).max(0.001) as f32)
+            * self.camera_aspect_ratio_tweak.max(0.01);
         let preview_fov_y = self.camera_fov_y.clamp(1.0, 179.0);
         let projection = Mat4f::perspective(
             preview_fov_y,
@@ -552,41 +557,7 @@ impl XrScene {
         })
     }
 
-    fn preview_gate_rect(&self, rect: Rect) -> Rect {
-        let target_aspect = self.preview_aspect_ratio as f64;
-        if target_aspect <= 0.0 || rect.size.x <= 1.0 || rect.size.y <= 1.0 {
-            return rect;
-        }
 
-        let rect_aspect = (rect.size.x / rect.size.y).max(0.001);
-        if self.preview_aspect_fill {
-            if rect_aspect > target_aspect {
-                let height = rect.size.x / target_aspect;
-                Rect {
-                    pos: dvec2(rect.pos.x, rect.pos.y + (rect.size.y - height) * 0.5),
-                    size: dvec2(rect.size.x, height),
-                }
-            } else {
-                let width = rect.size.y * target_aspect;
-                Rect {
-                    pos: dvec2(rect.pos.x + (rect.size.x - width) * 0.5, rect.pos.y),
-                    size: dvec2(width, rect.size.y),
-                }
-            }
-        } else if rect_aspect > target_aspect {
-            let width = rect.size.y * target_aspect;
-            Rect {
-                pos: dvec2(rect.pos.x + (rect.size.x - width) * 0.5, rect.pos.y),
-                size: dvec2(width, rect.size.y),
-            }
-        } else {
-            let height = rect.size.x / target_aspect;
-            Rect {
-                pos: dvec2(rect.pos.x, rect.pos.y + (rect.size.y - height) * 0.5),
-                size: dvec2(rect.size.x, height),
-            }
-        }
-    }
 
     fn xr_scene_state(&self, state: &XrState) -> SceneState3D {
         SceneState3D {
@@ -938,6 +909,7 @@ impl Widget for XrScene {
             }
             Event::XrUpdate(update) => {
                 self.last_xr_state = Some(update.state.clone());
+                self.xr_draw_logged = false;
                 if Self::reset_requested(update) {
                     self.reset_scene(cx);
                 }
@@ -1071,11 +1043,10 @@ impl Widget for XrScene {
         cx.begin_pass(&self.preview_pass, None);
 
         let preview_pass_size = cx.current_pass_size();
-        let preview_bounds = Rect {
+        let preview_rect = Rect {
             pos: dvec2(0.0, 0.0),
             size: preview_pass_size,
         };
-        let preview_rect = self.preview_gate_rect(preview_bounds);
 
         if let Some(scene_state) = self.preview_scene_state(preview_rect, preview_pass_size, cx.time()) {
             self.update_preview_pass_camera(cx.cx, scene_state);
@@ -1111,10 +1082,24 @@ impl Widget for XrScene {
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
         self.ensure_runtime_scene(cx.cx);
         let Some(state) = self.last_xr_state.clone() else {
+            if !self.xr_draw_logged {
+                self.xr_draw_logged = true;
+                crate::log!("XrScene draw_3d skipped: no last_xr_state");
+            }
             return DrawStep::done();
         };
         let root_options = xr_root_options_from_scope(scope);
         self.xr_depth_mesh_enabled = root_options.depth_mesh;
+        if !self.xr_draw_logged {
+            self.xr_draw_logged = true;
+            crate::log!(
+                "XrScene draw_3d state time={} scene_dirty={} runtime_bodies={} child_count={}",
+                state.time,
+                self.scene_dirty,
+                self.runtime_bodies.len(),
+                self.node.child_count()
+            );
+        }
 
         let cx2d = &mut Cx2d::new(cx.cx);
         if self.depth_debug_enabled() {

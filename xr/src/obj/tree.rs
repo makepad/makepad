@@ -8,7 +8,7 @@ use super::{
     mesh_generators::{stylized_leaf_mesh, tree_branch_segment_mesh},
     scene_draw::scene_state_from_cx,
 };
-use std::f32::consts::{FRAC_1_SQRT_2, PI};
+use std::f32::consts::PI;
 
 pub const PYTHAGOREAN_TREE_ROOT_DROP: f32 = 0.60;
 
@@ -16,15 +16,19 @@ const TREE_BRANCH_SIDES: usize = 4;
 const TREE_MAX_DEPTH: usize = 9;
 const TREE_BASE_LENGTH: f32 = 0.46;
 const TREE_BASE_RADIUS: f32 = 0.026;
-const TREE_CHILD_SCALE: f32 = FRAC_1_SQRT_2;
+const TREE_CHILD_SCALE: f32 = 0.57735026;
 const TREE_RADIUS_SCALE: f32 = 0.74;
 const TREE_BRANCH_SPLIT_ANGLE: f32 = 0.70;
+const TREE_BRANCH_YAW_STEP: f32 = PI * 2.0 / 3.0;
+const TREE_BRANCH_YAW_PHASE_STEP: f32 = PI / 3.0;
 const TREE_POINTER_RADIUS: f32 = 0.40;
 const TREE_BRANCH_PARENT_DRAG: f32 = 0.42;
 const TREE_BRANCH_HAND_GAIN: f32 = 0.19;
 const TREE_LEAF_HAND_GAIN: f32 = 0.34;
 const TREE_MAX_POINT_PUSH: f32 = 0.24;
 const TREE_LEAF_BASE_SCALE: f32 = 0.056;
+const TREE_LEAF_PITCH_ANGLE: f32 = -0.34;
+const TREE_LEAF_TILT_ANGLE: f32 = 0.50;
 const TREE_BRANCH_LIGHT_DIR: Vec3f = Vec3f {
     x: 0.34,
     y: 0.88,
@@ -386,10 +390,55 @@ struct LeafInstance {
     flutter: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TreeTemplateConfig {
+    branch_split_angle: f32,
+    branch_yaw_step: f32,
+    branch_yaw_phase_step: f32,
+    child_scale: f32,
+    length_scale_0: f32,
+    length_scale_1: f32,
+    length_scale_2: f32,
+    length_scale_3: f32,
+    length_scale_4: f32,
+    length_scale_rest: f32,
+}
+
+impl Default for TreeTemplateConfig {
+    fn default() -> Self {
+        Self {
+            branch_split_angle: TREE_BRANCH_SPLIT_ANGLE,
+            branch_yaw_step: TREE_BRANCH_YAW_STEP,
+            branch_yaw_phase_step: TREE_BRANCH_YAW_PHASE_STEP,
+            child_scale: TREE_CHILD_SCALE,
+            length_scale_0: 0.70,
+            length_scale_1: 0.78,
+            length_scale_2: 0.88,
+            length_scale_3: 0.97,
+            length_scale_4: 1.03,
+            length_scale_rest: 1.08,
+        }
+    }
+}
+
+impl TreeTemplateConfig {
+    fn length_scale(self, level: usize) -> f32 {
+        match level {
+            0 => self.length_scale_0,
+            1 => self.length_scale_1,
+            2 => self.length_scale_2,
+            3 => self.length_scale_3,
+            4 => self.length_scale_4,
+            _ => self.length_scale_rest,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CpuPythagoreanTree {
     branch_geometry: Option<Geometry>,
     leaf_geometry: Option<Geometry>,
+    template_config: Option<TreeTemplateConfig>,
     branch_templates: Vec<BranchTemplate>,
     leaf_templates: Vec<LeafTemplate>,
     branch_runtime: Vec<BranchRuntime>,
@@ -398,9 +447,10 @@ pub struct CpuPythagoreanTree {
 }
 
 impl CpuPythagoreanTree {
-    pub fn ensure_geometry(&mut self, cx: &mut Cx2d) {
-        if self.branch_templates.is_empty() {
-            self.rebuild_templates();
+    fn ensure_geometry(&mut self, cx: &mut Cx2d, config: TreeTemplateConfig) {
+        if self.template_config != Some(config) || self.branch_templates.is_empty() {
+            self.rebuild_templates(config);
+            self.template_config = Some(config);
         }
         if self.branch_geometry.is_none() {
             self.branch_geometry =
@@ -411,14 +461,14 @@ impl CpuPythagoreanTree {
         }
     }
 
-    pub fn rebuild_instances(
+    fn rebuild_instances(
         &mut self,
         root_transform: Mat4f,
         time: f32,
         pointer_tips_world: [Option<Vec3f>; 2],
     ) {
         if self.branch_templates.is_empty() {
-            self.rebuild_templates();
+            self.rebuild_templates(self.template_config.unwrap_or_default());
         }
         self.branch_instances.clear();
         self.leaf_instances.clear();
@@ -616,7 +666,7 @@ impl CpuPythagoreanTree {
         }
     }
 
-    pub fn draw(
+    fn draw(
         &mut self,
         cx: &mut Cx2d,
         draw_branches: &mut DrawTreeBranches,
@@ -637,10 +687,17 @@ impl CpuPythagoreanTree {
         draw_leaves.draw_instances(cx, leaf_geometry.geometry_id(), camera_pos, &self.leaf_instances);
     }
 
-    fn rebuild_templates(&mut self) {
+    fn rebuild_templates(&mut self, config: TreeTemplateConfig) {
         self.branch_templates.clear();
         self.leaf_templates.clear();
-        self.push_branch(None, Quat::default(), TREE_BASE_LENGTH, TREE_BASE_RADIUS, 0, 0.137);
+        self.push_branch(
+            None,
+            Quat::default(),
+            TREE_BASE_LENGTH,
+            TREE_BASE_RADIUS,
+            0,
+            config,
+        );
     }
 
     fn push_branch(
@@ -650,62 +707,48 @@ impl CpuPythagoreanTree {
         length: f32,
         radius: f32,
         level: usize,
-        seed: f32,
+        config: TreeTemplateConfig,
     ) {
+        let stored_length = length * config.length_scale(level);
         let branch_index = self.branch_templates.len();
         self.branch_templates.push(BranchTemplate {
             parent,
             local_rotation,
-            length,
+            length: stored_length,
             radius,
             level: level as u8,
-            seed,
+            seed: 0.0,
         });
 
         if level + 2 >= TREE_MAX_DEPTH {
-            self.append_leaf_cluster(branch_index, level, seed);
+            self.append_leaf_cluster(branch_index, level);
         }
         if level + 1 >= TREE_MAX_DEPTH {
             return;
         }
 
-        let split_angle = TREE_BRANCH_SPLIT_ANGLE + (seed * 5.31).sin() * 0.08;
-        let twist = 0.42 + (seed * 9.17).cos() * 0.34 + level as f32 * 0.07;
-        let tilt_axis = if level.is_multiple_of(2) {
-            vec3f(1.0, 0.0, 0.0)
-        } else {
-            vec3f(0.0, 0.0, 1.0)
-        };
-        let left_rotation = Quat::multiply(
-            &Quat::from_axis_angle(tilt_axis, split_angle),
-            &Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), twist),
-        );
-        let right_rotation = Quat::multiply(
-            &Quat::from_axis_angle(tilt_axis, -split_angle * 0.97),
-            &Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), -twist * 0.92),
-        );
-        let child_length = length * TREE_CHILD_SCALE;
+        let child_length = stored_length * config.child_scale;
         let child_radius = (radius * TREE_RADIUS_SCALE).max(0.004);
-
-        self.push_branch(
-            Some(branch_index),
-            left_rotation,
-            child_length,
-            child_radius,
-            level + 1,
-            seed * 1.71 + 0.23,
-        );
-        self.push_branch(
-            Some(branch_index),
-            right_rotation,
-            child_length,
-            child_radius,
-            level + 1,
-            seed * 1.47 + 0.61,
-        );
+        let tilt = Quat::from_axis_angle(vec3f(1.0, 0.0, 0.0), config.branch_split_angle);
+        let yaw_phase = level as f32 * config.branch_yaw_phase_step;
+        for child_index in 0..3 {
+            let yaw = Quat::from_axis_angle(
+                vec3f(0.0, 1.0, 0.0),
+                yaw_phase + child_index as f32 * config.branch_yaw_step,
+            );
+            let child_rotation = Quat::multiply(&tilt, &yaw);
+            self.push_branch(
+                Some(branch_index),
+                child_rotation,
+                child_length,
+                child_radius,
+                level + 1,
+                config,
+            );
+        }
     }
 
-    fn append_leaf_cluster(&mut self, branch: usize, level: usize, seed: f32) {
+    fn append_leaf_cluster(&mut self, branch: usize, level: usize) {
         let density = match level {
             0..=3 => 0,
             4 => 2,
@@ -716,14 +759,12 @@ impl CpuPythagoreanTree {
         };
         let branch_depth = level as f32 / (TREE_MAX_DEPTH.saturating_sub(1)).max(1) as f32;
         for index in 0..density {
-            let angle = (index as f32 / density as f32) * PI * 2.0 + seed * 7.3;
-            let roll = (index as f32 * 1.618 + seed * 13.7).sin() * 0.55;
-            let pitch = -0.42 + (index as f32 * 0.87 + seed * 3.9).cos() * 0.18;
+            let angle = (index as f32 / density as f32) * PI * 2.0;
             let tilt_axis = vec3f(angle.cos(), 0.0, angle.sin()).normalize();
             let local_rotation = Quat::multiply(
-                &Quat::from_axis_angle(vec3f(0.0, 0.0, 1.0), pitch),
+                &Quat::from_axis_angle(vec3f(0.0, 0.0, 1.0), TREE_LEAF_PITCH_ANGLE),
                 &Quat::multiply(
-                    &Quat::from_axis_angle(tilt_axis, 0.48 + roll * 0.18),
+                    &Quat::from_axis_angle(tilt_axis, TREE_LEAF_TILT_ANGLE),
                     &Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), angle),
                 ),
             );
@@ -736,10 +777,9 @@ impl CpuPythagoreanTree {
                     angle.sin() * spread,
                 ),
                 local_rotation,
-                scale: TREE_LEAF_BASE_SCALE * (0.88 + branch_depth * 0.24)
-                    * (0.86 + (index as f32 * 1.31 + seed * 8.1).sin().abs() * 0.24),
-                tint: (0.35 + 0.5 * (seed * 11.9 + index as f32 * 0.73).sin()).clamp(0.0, 1.0),
-                seed: seed * 2.13 + index as f32 * 0.37,
+                scale: TREE_LEAF_BASE_SCALE * (0.94 + branch_depth * 0.18),
+                tint: 0.56,
+                seed: 0.0,
             });
         }
     }
@@ -844,6 +884,26 @@ pub struct Tree {
     #[redraw]
     #[live]
     draw_leaves: DrawTreeLeaves,
+    #[live(TREE_BRANCH_SPLIT_ANGLE)]
+    branch_split_angle: f32,
+    #[live(TREE_BRANCH_YAW_STEP)]
+    branch_yaw_step: f32,
+    #[live(TREE_BRANCH_YAW_PHASE_STEP)]
+    branch_yaw_phase_step: f32,
+    #[live(TREE_CHILD_SCALE)]
+    child_scale: f32,
+    #[live(0.70)]
+    length_scale_0: f32,
+    #[live(0.78)]
+    length_scale_1: f32,
+    #[live(0.88)]
+    length_scale_2: f32,
+    #[live(0.97)]
+    length_scale_3: f32,
+    #[live(1.03)]
+    length_scale_4: f32,
+    #[live(1.08)]
+    length_scale_rest: f32,
     #[rust]
     cpu_tree: CpuPythagoreanTree,
     #[deref]
@@ -853,6 +913,21 @@ pub struct Tree {
 impl Tree {
     pub fn node(&self) -> &XrNode {
         &self.node
+    }
+
+    fn template_config(&self) -> TreeTemplateConfig {
+        TreeTemplateConfig {
+            branch_split_angle: self.branch_split_angle,
+            branch_yaw_step: self.branch_yaw_step,
+            branch_yaw_phase_step: self.branch_yaw_phase_step,
+            child_scale: self.child_scale,
+            length_scale_0: self.length_scale_0,
+            length_scale_1: self.length_scale_1,
+            length_scale_2: self.length_scale_2,
+            length_scale_3: self.length_scale_3,
+            length_scale_4: self.length_scale_4,
+            length_scale_rest: self.length_scale_rest,
+        }
     }
 }
 
@@ -868,10 +943,11 @@ impl Widget for Tree {
         } else {
             0.0
         };
+        let template_config = self.template_config();
 
         {
             let cx2d = &mut Cx2d::new(cx.cx);
-            self.cpu_tree.ensure_geometry(cx2d);
+            self.cpu_tree.ensure_geometry(cx2d, template_config);
             self.cpu_tree.rebuild_instances(world, time, pointer_tips);
             self.draw_branches.set_use_pass_camera(scene.use_pass_camera);
             self.draw_branches.set_camera_state(scene.view, scene.projection);

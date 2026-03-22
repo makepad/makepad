@@ -267,10 +267,6 @@ impl Window {
     }
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
-        // Keep runtime chrome state aligned even if this widget is re-applied.
-        if cx.xr_capabilities().vr_supported {
-            self.view(cx, ids!(web_xr)).set_visible(cx, true);
-        }
         self.sync_caption_bar_state(cx);
         self.sync_caption_title(cx);
 
@@ -293,12 +289,6 @@ impl Window {
             &self.depth_texture,
             DrawPassClearDepth::ClearWith(1.0),
         );
-
-        // check if we are ar/vr capable
-        if cx.xr_capabilities().vr_supported {
-            // lets show a VR button
-            self.view(cx, ids!(web_xr)).set_visible(cx, true);
-        }
 
         if self.demo {
             self.demo_next_frame = cx.new_next_frame();

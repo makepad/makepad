@@ -135,6 +135,12 @@ impl CxOpenXrSession {
         vulkan: &mut CxVulkan,
         options: CxOpenXrOptions,
     ) -> Result<CxOpenXrSession, String> {
+        crate::log!(
+            "OpenXR Vulkan create_session start queue_family={} buffer_scale={} multisamples={}",
+            vulkan.queue_family_index(),
+            options.buffer_scale,
+            options.multisamples
+        );
         let mut graphics_requirements = XrGraphicsRequirementsVulkanKHR::default();
         unsafe {
             (xr.xrGetVulkanGraphicsRequirements2KHR)(
@@ -277,6 +283,16 @@ impl CxOpenXrSession {
             depth_swapchain_state.width,
             depth_swapchain_state.height,
         )?;
+        crate::log!(
+            "OpenXR Vulkan create_session swapchain size={}x{} color_format={:?} color_images={} depth_images={} depth={}x{}",
+            width,
+            height,
+            color_format,
+            color_images.len(),
+            depth_images.len(),
+            depth_swapchain_state.width,
+            depth_swapchain_state.height
+        );
 
         unsafe { (xr.xrStartEnvironmentDepthProviderMETA)(depth_provider) }
             .to_result("xrStartEnvironmentDepthProviderMETA")?;
@@ -306,6 +322,9 @@ impl CxOpenXrSession {
             local_space,
             active: false,
             anchor: CxOpenXrAnchor::default(),
+            debug_inactive_begin_frame_logs: 0,
+            debug_begin_frame_count: 0,
+            debug_end_frame_count: 0,
             depth_swap_chain_index: 0,
             frame_state: XrFrameState::default(),
             inputs,
