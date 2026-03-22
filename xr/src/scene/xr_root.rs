@@ -448,6 +448,21 @@ impl Widget for XrRoot {
             let _ = scene_widget.script_call(vm, live_id!(render), NIL);
             return ScriptAsyncResult::Return(ScriptValue::from_id(next_scene));
         }
+        if method == live_id!(select_scene) {
+            let Some(scene_id) = args.as_id() else {
+                return ScriptAsyncResult::MethodNotFound;
+            };
+            let mut activated = false;
+            vm.with_cx_mut(|cx| {
+                activated = self.activate_scene_id(cx, scene_id);
+            });
+            if !activated {
+                return ScriptAsyncResult::MethodNotFound;
+            }
+            let scene_widget = self.active_scene_widget();
+            let _ = scene_widget.script_call(vm, live_id!(render), NIL);
+            return ScriptAsyncResult::Return(ScriptValue::from_id(scene_id));
+        }
         ScriptAsyncResult::MethodNotFound
     }
 

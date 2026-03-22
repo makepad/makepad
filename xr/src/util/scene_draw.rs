@@ -99,14 +99,15 @@ pub fn register_last_draw_call_anchor(cx: &mut CxDraw, world_pos: Vec3f) {
 pub fn apply_scene_to_draw_cube(draw: &mut DrawCube, cx: &mut CxDraw) -> Option<SceneState3D> {
     let scene = cx.scene_state_3d()?;
     draw.set_use_pass_camera(scene.use_pass_camera);
-    draw.set_camera_state(scene.view, scene.projection_viewport);
+    draw.set_camera_state(scene.view, scene.projection);
+    draw.set_clip_ndc(scene.clip_ndc);
     Some(scene)
 }
 
 pub fn apply_scene_to_draw_pbr(draw: &mut DrawPbr, cx: &mut CxDraw) -> Option<SceneState3D> {
     let scene = cx.scene_state_3d()?;
     draw.set_use_pass_camera(scene.use_pass_camera);
-    draw.set_camera_state(scene.view, scene.projection_viewport, scene.camera_pos);
+    draw.set_camera_state(scene.view, scene.projection, scene.camera_pos);
     draw.set_clip_ndc(scene.clip_ndc);
     draw.set_depth_range(scene.depth_range.x, scene.depth_range.y);
     draw.set_depth_forward_bias(scene.depth_forward_bias);

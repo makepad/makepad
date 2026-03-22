@@ -1,6 +1,6 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-use super::{xr_node::xr_runtime_body_from_scope, scene_draw::apply_scene_to_draw_cube, XrNode};
+use super::{scene_draw::apply_scene_to_draw_cube, xr_node::xr_widget_world_transform, XrNode};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -62,22 +62,8 @@ impl Widget for Cube {
             self.corner_radius,
             self.corner_segments,
         );
-        if let Some(runtime_body) = xr_runtime_body_from_scope(scope, self.widget_uid()) {
-            self.draw_cube.transform = Mat4f::mul(
-                &runtime_body.pose.to_mat4(),
-                &Mat4f::nonuniform_scaled_translation(
-                    vec3(
-                        runtime_body.scale.x,
-                        runtime_body.scale.y,
-                        runtime_body.scale.z,
-                    ),
-                    vec3(0.0, 0.0, 0.0),
-                ),
-            );
-        } else {
-            let parent_world = cx.scene_world_transform_3d();
-            self.draw_cube.transform = Mat4f::mul(&parent_world, &self.node.local_transform());
-        }
+        self.draw_cube.transform =
+            xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
         self.draw_cube.cube_pos = vec3(0.0, 0.0, 0.0);
         self.draw_cube.cube_size = self.size;
         self.draw_cube.color = self.color;

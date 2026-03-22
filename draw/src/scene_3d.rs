@@ -9,7 +9,6 @@ pub struct SceneState3D {
     pub camera_pos: Vec3f,
     pub view: Mat4f,
     pub projection: Mat4f,
-    pub projection_viewport: Mat4f,
     pub clip_ndc: Vec4f,
     pub depth_range: Vec2f,
     pub depth_forward_bias: f32,

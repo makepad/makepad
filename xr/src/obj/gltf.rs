@@ -5,15 +5,17 @@ use super::{
     gltf_bridge::GltfRenderer,
     scene_draw::{
         apply_scene_to_draw_pbr, compose_scene_node_transform, register_draw_call_anchor,
-        scene_node_world_transform_from_cx, scene_state_from_cx,
+        scene_state_from_cx,
     },
+    xr_node::xr_widget_world_transform,
+    XrNode,
 };
 
 script_mod! {
     use mod.prelude.widgets_internal.*
 
-    mod.widgets.Gltf3DBase = #(Gltf3D::register_widget(vm))
-    mod.widgets.Gltf3D = set_type_default() do mod.widgets.Gltf3DBase{
+    mod.widgets.GltfBase = #(Gltf::register_widget(vm))
+    mod.widgets.Gltf = set_type_default() do mod.widgets.GltfBase{
         draw_pbr +: {
             light_dir: vec3(0.35, 0.8, 0.45)
             light_color: vec3(1.0, 1.0, 1.0)
@@ -25,15 +27,7 @@ script_mod! {
 }
 
 #[derive(Script, ScriptHook, Widget)]
-pub struct Gltf3D {
-    #[uid]
-    uid: WidgetUid,
-    #[source]
-    source: ScriptObjectRef,
-    #[walk]
-    walk: Walk,
-    #[layout]
-    layout: Layout,
+pub struct Gltf {
     #[redraw]
     #[live]
     draw_pbr: DrawPbr,
@@ -42,13 +36,14 @@ pub struct Gltf3D {
     src: Option<ScriptHandleRef>,
     #[live]
     env_src: Option<ScriptHandleRef>,
-
     #[live(vec3(0.0, 0.0, 0.0))]
-    position: Vec3f,
+    mesh_position: Vec3f,
     #[live(vec3(0.0, 0.0, 0.0))]
-    rotation: Vec3f,
+    mesh_rotation: Vec3f,
     #[live(vec3(1.0, 1.0, 1.0))]
-    scale: Vec3f,
+    mesh_scale: Vec3f,
+    #[deref]
+    node: XrNode,
 
     #[rust]
     renderer: Option<GltfRenderer>,
@@ -73,7 +68,15 @@ enum ResourceResolve {
     Missing,
 }
 
-impl Gltf3D {
+impl Gltf {
+    pub fn node(&self) -> &XrNode {
+        &self.node
+    }
+
+    fn mesh_transform(&self) -> Mat4f {
+        compose_scene_node_transform(self.mesh_position, self.mesh_rotation, self.mesh_scale)
+    }
+
     fn resource_metadata_by_handle(cx: &mut Cx, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
         let resources = cx.script_data.resources.resources.borrow();
         let resource = resources
@@ -182,39 +185,37 @@ impl Gltf3D {
     }
 }
 
-impl Widget for Gltf3D {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+impl Widget for Gltf {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.handle_event(cx, event);
         }
+        self.node.handle_event(cx, event, scope);
     }
 
-    fn draw_3d(&mut self, cx: &mut Cx3d, _scope: &mut Scope) -> DrawStep {
-        if scene_state_from_cx(cx).is_none() {
-            return DrawStep::done();
-        }
-        let cx = &mut Cx2d::new(cx.cx);
-
-        self.ensure_env_loaded(cx);
-        self.ensure_renderer_loaded(cx);
-        let Some(renderer) = self.renderer.as_mut() else {
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
+        let Some(_scene) = scene_state_from_cx(cx) else {
             return DrawStep::done();
         };
+        let object_world = xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
+        let world = Mat4f::mul(&object_world, &self.mesh_transform());
 
-        let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr, cx);
-        let local = compose_scene_node_transform(self.position, self.rotation, self.scale);
-        let world = Mat4f::mul(&scene_node_world_transform_from_cx(cx), &local);
-        let mut anchors = Vec::new();
-        let _ = renderer.draw_with_transform_anchors(
-            &mut self.draw_pbr,
-            cx,
-            world,
-            |area, world_pos| anchors.push((area, world_pos)),
-        );
-        for (area, world_pos) in anchors {
-            register_draw_call_anchor(cx, area, world_pos);
+        {
+            let cx2d = &mut Cx2d::new(cx.cx);
+            self.ensure_env_loaded(cx2d);
+            self.ensure_renderer_loaded(cx2d);
+            if let Some(renderer) = self.renderer.as_mut() {
+                let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr, cx2d);
+                let _ = renderer.draw_with_transform_anchors(
+                    &mut self.draw_pbr,
+                    cx2d,
+                    world,
+                    |cx, area, world_pos| register_draw_call_anchor(cx, area, world_pos),
+                );
+            }
         }
-        DrawStep::done()
+
+        self.node.draw_3d(cx, scope)
     }
 
     fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {

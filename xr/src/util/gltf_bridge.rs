@@ -370,7 +370,7 @@ impl GltfRenderer {
         mut on_draw_call: F,
     ) -> Result<(), GltfError>
     where
-        F: FnMut(Area, Vec3f),
+        F: FnMut(&mut Cx2d, Area, Vec3f),
     {
         self.poll_textures(cx);
 
@@ -386,7 +386,7 @@ impl GltfRenderer {
                 object.local_centroid.z,
                 1.0,
             ));
-            on_draw_call(draw.draw_vars.area, vec3(world.x, world.y, world.z));
+            on_draw_call(cx, draw.draw_vars.area, vec3(world.x, world.y, world.z));
         }
         Ok(())
     }

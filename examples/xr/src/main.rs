@@ -34,7 +34,7 @@ script_mod! {
                     xr_root := XrRoot{
                         control_2d: @block_ctrl
                         control_xr: @block_ctrl
-                        scene: @block_scene
+                        scene: @tree_scene
                         env_cube: true
                         depth_mesh: false
 
@@ -51,7 +51,7 @@ script_mod! {
 
                             detail := Label{
                                 width: Fill
-                                text: "Cycle between blocks, helmets, and a refractive stack. Reset rebuilds the current scene."
+                                text: "Pick a scene directly. Reset rebuilds only the active scene."
                                 draw_text.color: #xb8c8d8
                             }
 
@@ -60,9 +60,24 @@ script_mod! {
                                 text: "Reset Scene"
                             }
 
-                            switch_scene := Button{
+                            show_blocks := Button{
                                 width: Fill
-                                text: "Switch Scene"
+                                text: "Blocks"
+                            }
+
+                            show_helmet := Button{
+                                width: Fill
+                                text: "Helmet"
+                            }
+
+                            show_tree := Button{
+                                width: Fill
+                                text: "Tree"
+                            }
+
+                            show_refraction := Button{
+                                width: Fill
+                                text: "Refraction"
                             }
 
                             depth_toggle := Button{
@@ -112,21 +127,34 @@ script_mod! {
                                 Platform{pos: vec3(0.05, -0.06, -0.10)}
                                 for row in 0..1 {
                                     for col in 0..1 {
-                                        XrNode{
+                                        Gltf{
                                             body: mod.widgets.XrBodyKind.Dynamic
                                             physics_size: vec3(0.17, 0.21, 0.17)
                                             density: 0.9
                                             friction: 0.7
                                             restitution: 0.08
                                             pos: vec3(-0.23 + col * 0.22 + if row % 2 == 0 {0.0} else {0.08}, 0.08 + row * 0.22, -0.10)
-                                            Gltf3D{
-                                                src: crate_resource("self://resources/DamagedHelmet.glb")
-                                                scale: vec3(0.38, 0.38, 0.38)
-                                                rotation: vec3(0.0, 1.5708, 0.0)
-                                                position: vec3(0.0, 0.32, 0.0)
-                                            }
+                                            src: crate_resource("self://resources/DamagedHelmet.glb")
+                                            mesh_scale: vec3(0.38, 0.38, 0.38)
+                                            mesh_rotation: vec3(0.0, 1.5708, 0.0)
+                                            mesh_position: vec3(0.0, 0.32, 0.0)
                                         }
                                     }
+                                }
+                            }
+                        }
+
+                        tree_scene := XrScene{
+                            physics: XrPhysics{gravity: 9.8}
+                            camera_fov_y: 24.0
+                            camera_distance: 6.2
+                            preview_aspect_fill: true
+                            on_render: ||{
+                                Platform{pos: vec3(0.05, -0.06, -0.10)}
+                                fractal_tree := FractalTree{
+                                    body: mod.widgets.XrBodyKind.Fixed
+                                    physics_size: vec3(0.34, 0.92, 0.34)
+                                    pos: vec3(0.05, -0.02, -0.10)
                                 }
                             }
                         }
@@ -165,6 +193,13 @@ pub struct App {
 }
 
 impl App {
+    fn button_clicked(&self, cx: &Cx, actions: &Actions, button_id: LiveId) -> bool {
+        self.ui
+            .widget_flood(cx, &[button_id])
+            .borrow::<Button>()
+            .is_some_and(|button| button.clicked(actions))
+    }
+
     fn xr_root_widget(&self, cx: &Cx) -> WidgetRef {
         let path_body = self.ui.widget(cx, ids!(main_window.body.xr_root));
         if path_body.borrow::<XrRoot>().is_some() {
@@ -192,6 +227,14 @@ impl App {
         cx.with_vm(|vm| xr_root.script_call(vm, method, NIL))
     }
 
+    fn select_scene(&self, cx: &mut Cx, scene_id: LiveId) -> ScriptAsyncResult {
+        let xr_root = self.xr_root_widget(cx);
+        if xr_root.borrow::<XrRoot>().is_none() {
+            return ScriptAsyncResult::MethodNotFound;
+        }
+        cx.with_vm(|vm| xr_root.script_call(vm, live_id!(select_scene), ScriptValue::from_id(scene_id)))
+    }
+
     fn sync_depth_toggle_label(&self, cx: &mut Cx, visible: bool) {
         let label = if visible {
             "Hide Depth Mesh"
@@ -205,15 +248,27 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(cx, ids!(reset)).clicked(actions) {
+        if self.button_clicked(cx, actions, live_id!(reset)) {
             let _ = self.call_xr_root(cx, live_id!(render_scene));
         }
 
-        if self.ui.button(cx, ids!(switch_scene)).clicked(actions) {
-            let _ = self.call_xr_root(cx, live_id!(switch_scene));
+        if self.button_clicked(cx, actions, live_id!(show_blocks)) {
+            let _ = self.select_scene(cx, live_id!(block_scene));
         }
 
-        if self.ui.button(cx, ids!(depth_toggle)).clicked(actions) {
+        if self.button_clicked(cx, actions, live_id!(show_helmet)) {
+            let _ = self.select_scene(cx, live_id!(helmet_scene));
+        }
+
+        if self.button_clicked(cx, actions, live_id!(show_tree)) {
+            let _ = self.select_scene(cx, live_id!(tree_scene));
+        }
+
+        if self.button_clicked(cx, actions, live_id!(show_refraction)) {
+            let _ = self.select_scene(cx, live_id!(refraction_scene));
+        }
+
+        if self.button_clicked(cx, actions, live_id!(depth_toggle)) {
             if let ScriptAsyncResult::Return(value) =
                 self.call_xr_root(cx, live_id!(toggle_depth_mesh))
             {

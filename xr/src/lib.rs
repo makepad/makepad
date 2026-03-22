@@ -3,8 +3,8 @@ pub use makepad_widgets::*;
 
 #[path = "obj/cube.rs"]
 pub mod cube;
-#[path = "obj/gltf_3d.rs"]
-pub mod gltf_3d;
+#[path = "obj/gltf.rs"]
+pub mod gltf;
 #[path = "util/gltf_bridge.rs"]
 pub mod gltf_bridge;
 #[path = "util/mesh_generators.rs"]
@@ -31,7 +31,7 @@ pub mod tree;
 pub mod view_splat;
 
 pub use cube::*;
-pub use gltf_3d::*;
+pub use gltf::*;
 pub use gltf_bridge::*;
 pub use xr_node::*;
 pub use passthrough_env::DrawPassthroughEnvAtlas;
@@ -41,15 +41,13 @@ pub use refractive_cube::*;
 pub use xr_root::XrRoot;
 pub use xr_scene::XrScene;
 pub use tree::{
-    CpuPythagoreanTree, DrawTreeBranches, DrawTreeLeaves, PYTHAGOREAN_TREE_ROOT_DROP,
+    CpuPythagoreanTree, DrawTreeBranches, DrawTreeLeaves, Tree, PYTHAGOREAN_TREE_ROOT_DROP,
 };
 pub use view_splat::*;
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-    gltf_3d::script_mod(vm);
-    view_splat::script_mod(vm);
-
     xr_node::script_mod(vm);
+    gltf::script_mod(vm);
     cube::script_mod(vm);
     xr_permissions_flow::script_mod(vm);
     physics_view::script_mod(vm);
@@ -57,6 +55,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
 
     passthrough_env::script_mod(vm);
     tree::script_mod(vm);
+    view_splat::script_mod(vm);
     xr_scene::script_mod(vm);
     xr_root::script_mod(vm)
 }

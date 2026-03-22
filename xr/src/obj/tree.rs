@@ -1,5 +1,13 @@
-use super::mesh_generators::{stylized_leaf_mesh, tree_branch_segment_mesh};
-use makepad_widgets::{draw_list_2d::ManyInstances, *};
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
+    xr_node::{xr_pointer_tips_from_scope, xr_widget_world_transform, XrNode},
+};
+use super::{
+    mesh_generators::{stylized_leaf_mesh, tree_branch_segment_mesh},
+    scene_draw::scene_state_from_cx,
+};
 use std::f32::consts::{FRAC_1_SQRT_2, PI};
 
 pub const PYTHAGOREAN_TREE_ROOT_DROP: f32 = 0.60;
@@ -65,6 +73,7 @@ const TREE_LEAF_GLOW: Vec3f = Vec3f {
 const TREE_LEAF_WIND_ORBIT: f32 = 0.015;
 
 script_mod! {
+    use mod.prelude.widgets_internal.*
     use mod.pod.*
     use mod.math.*
     use mod.shader.*
@@ -85,6 +94,20 @@ script_mod! {
         u_tree_bark_light: uniform(vec3(0.42, 0.26, 0.13))
         u_tree_ambient: uniform(float(0.22))
         u_tree_camera_pos: uniform(vec3(0.0, 0.0, 0.0))
+        view_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
+        projection_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
+        clip_ndc: uniform(vec4(-1.0, -1.0, 1.0, 1.0))
+        use_pass_camera: uniform(float(0.0))
 
         v_world_clip: varying(vec4f)
         v_world: varying(vec3f)
@@ -108,6 +131,37 @@ script_mod! {
             );
         }
 
+        view_with_camera: fn(world: vec4f) -> vec4f {
+            if self.use_pass_camera > 0.5 {
+                return self.draw_pass.camera_view * world
+            }
+            return self.view_matrix * world
+        }
+
+        transform_with_camera: fn(view_pos: vec4f) -> vec4f {
+            let clip = if self.use_pass_camera > 0.5 {
+                self.draw_pass.camera_projection * view_pos
+            } else {
+                self.projection_matrix * view_pos
+            };
+            if self.use_pass_camera > 0.5 {
+                return clip
+            }
+            let inv_w = 1.0 / max(abs(clip.w), 0.00001);
+            let ndc = vec2(clip.x * inv_w, clip.y * inv_w);
+            let clip_min = vec2(self.clip_ndc.x, self.clip_ndc.y);
+            let clip_max = vec2(self.clip_ndc.z, self.clip_ndc.w);
+            let clip_scale = (clip_max - clip_min) * 0.5;
+            let clip_center = (clip_max + clip_min) * 0.5;
+            let remapped_ndc = ndc * clip_scale + clip_center;
+            return vec4(
+                remapped_ndc.x * clip.w,
+                remapped_ndc.y * clip.w,
+                clip.z,
+                clip.w
+            )
+        }
+
         vertex: fn() {
             let local_pos = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z);
             let local_normal = normalize(vec3(
@@ -121,8 +175,8 @@ script_mod! {
             self.v_level = self.level;
             self.v_seed = self.seed;
             self.v_world_clip = vec4(self.v_world.x, self.v_world.y, self.v_world.z, 1.0);
-            let view_pos = self.draw_pass.camera_view * self.v_world_clip;
-            self.vertex_pos = self.draw_pass.camera_projection * view_pos;
+            let view_pos = self.view_with_camera(self.v_world_clip);
+            self.vertex_pos = self.transform_with_camera(view_pos);
         }
 
         pixel: fn() {
@@ -164,6 +218,20 @@ script_mod! {
         u_tree_leaf_glow: uniform(vec3(0.72, 0.88, 0.28))
         u_tree_ambient: uniform(float(0.18))
         u_tree_camera_pos: uniform(vec3(0.0, 0.0, 0.0))
+        view_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
+        projection_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
+        clip_ndc: uniform(vec4(-1.0, -1.0, 1.0, 1.0))
+        use_pass_camera: uniform(float(0.0))
 
         v_world_clip: varying(vec4f)
         v_world: varying(vec3f)
@@ -187,6 +255,37 @@ script_mod! {
             );
         }
 
+        view_with_camera: fn(world: vec4f) -> vec4f {
+            if self.use_pass_camera > 0.5 {
+                return self.draw_pass.camera_view * world
+            }
+            return self.view_matrix * world
+        }
+
+        transform_with_camera: fn(view_pos: vec4f) -> vec4f {
+            let clip = if self.use_pass_camera > 0.5 {
+                self.draw_pass.camera_projection * view_pos
+            } else {
+                self.projection_matrix * view_pos
+            };
+            if self.use_pass_camera > 0.5 {
+                return clip
+            }
+            let inv_w = 1.0 / max(abs(clip.w), 0.00001);
+            let ndc = vec2(clip.x * inv_w, clip.y * inv_w);
+            let clip_min = vec2(self.clip_ndc.x, self.clip_ndc.y);
+            let clip_max = vec2(self.clip_ndc.z, self.clip_ndc.w);
+            let clip_scale = (clip_max - clip_min) * 0.5;
+            let clip_center = (clip_max + clip_min) * 0.5;
+            let remapped_ndc = ndc * clip_scale + clip_center;
+            return vec4(
+                remapped_ndc.x * clip.w,
+                remapped_ndc.y * clip.w,
+                clip.z,
+                clip.w
+            )
+        }
+
         vertex: fn() {
             let local_pos = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z);
             let local_normal = normalize(vec3(
@@ -200,8 +299,8 @@ script_mod! {
             self.v_tint = self.tint;
             self.v_flutter = self.flutter;
             self.v_world_clip = vec4(self.v_world.x, self.v_world.y, self.v_world.z, 1.0);
-            let view_pos = self.draw_pass.camera_view * self.v_world_clip;
-            self.vertex_pos = self.draw_pass.camera_projection * view_pos;
+            let view_pos = self.view_with_camera(self.v_world_clip);
+            self.vertex_pos = self.transform_with_camera(view_pos);
         }
 
         pixel: fn() {
@@ -227,6 +326,13 @@ script_mod! {
             self.fb0 = depth_clip(self.v_world_clip, self.pixel(), self.depth_clip);
         }
     }
+
+    mod.widgets.TreeBase = #(Tree::register_widget(vm))
+    mod.widgets.Tree = set_type_default() do mod.widgets.TreeBase{
+        draw_branches +: {}
+        draw_leaves +: {}
+    }
+    mod.widgets.FractalTree = set_type_default() do mod.widgets.Tree{}
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -305,7 +411,12 @@ impl CpuPythagoreanTree {
         }
     }
 
-    pub fn rebuild_instances(&mut self, root: Pose, state: &XrState) {
+    pub fn rebuild_instances(
+        &mut self,
+        root_transform: Mat4f,
+        time: f32,
+        pointer_tips_world: [Option<Vec3f>; 2],
+    ) {
         if self.branch_templates.is_empty() {
             self.rebuild_templates();
         }
@@ -314,13 +425,15 @@ impl CpuPythagoreanTree {
         self.branch_runtime
             .resize(self.branch_templates.len(), BranchRuntime::default());
 
-        let root_inverse = root.invert();
-        let mut pointer_tips = [None, None];
-        pointer_tips[0] = Self::pointer_tip_world(&state.left_hand)
-            .map(|tip_world| root_inverse.transform_vec3(&tip_world));
-        pointer_tips[1] = Self::pointer_tip_world(&state.right_hand)
-            .map(|tip_world| root_inverse.transform_vec3(&tip_world));
-        let time = state.time as f32;
+        let root_inverse = root_transform.invert();
+        let pointer_tips = pointer_tips_world.map(|pointer_tip| {
+            pointer_tip.map(|tip_world| {
+                root_inverse
+                    .transform_vec4(vec4(tip_world.x, tip_world.y, tip_world.z, 1.0))
+                    .to_vec3f()
+            })
+        });
+        let animate = time.abs() > f32::EPSILON || pointer_tips.iter().any(|tip| tip.is_some());
         let level_den = (TREE_MAX_DEPTH.saturating_sub(1)).max(1) as f32;
 
         for (index, branch) in self.branch_templates.iter().enumerate() {
@@ -362,21 +475,23 @@ impl CpuPythagoreanTree {
             let midpoint = start + (nominal_tip - start) * 0.55;
             let level_t = branch.level as f32 / level_den;
 
-            let mut point_push =
-                Self::branch_wind_force(branch.seed, level_t, time) + inherited_push;
-            for pointer_tip in pointer_tips.into_iter().flatten() {
-                point_push += Self::pointer_force(
-                    nominal_tip,
-                    pointer_tip,
-                    TREE_BRANCH_HAND_GAIN * (0.70 + level_t * 0.95),
-                    0.82,
-                );
-                point_push += Self::pointer_force(
-                    midpoint,
-                    pointer_tip,
-                    TREE_BRANCH_HAND_GAIN * (0.34 + level_t * 0.38),
-                    0.56,
-                ) * 0.38;
+            let mut point_push = vec3f(0.0, 0.0, 0.0);
+            if animate {
+                point_push = Self::branch_wind_force(branch.seed, level_t, time) + inherited_push;
+                for pointer_tip in pointer_tips.into_iter().flatten() {
+                    point_push += Self::pointer_force(
+                        nominal_tip,
+                        pointer_tip,
+                        TREE_BRANCH_HAND_GAIN * (0.70 + level_t * 0.95),
+                        0.82,
+                    );
+                    point_push += Self::pointer_force(
+                        midpoint,
+                        pointer_tip,
+                        TREE_BRANCH_HAND_GAIN * (0.34 + level_t * 0.38),
+                        0.56,
+                    ) * 0.38;
+                }
             }
             point_push = Self::clamp_len(point_push, TREE_MAX_POINT_PUSH);
 
@@ -393,13 +508,19 @@ impl CpuPythagoreanTree {
                 point_push: tip - nominal_tip,
             };
 
-            let origin_world = root.transform_vec3(&start);
+            let branch_basis_x = Self::transform_direction(root_transform, basis_x);
+            let branch_basis_y = Self::transform_direction(root_transform, basis_y);
+            let branch_basis_z = Self::transform_direction(root_transform, basis_z);
             self.branch_instances.push(BranchInstance {
-                origin: origin_world,
-                basis_x: root.orientation.rotate_vec3(&basis_x),
-                basis_y: root.orientation.rotate_vec3(&basis_y),
-                basis_z: root.orientation.rotate_vec3(&basis_z),
-                scale: vec3f(branch.radius, branch.length, branch.radius),
+                origin: Self::transform_point(root_transform, start),
+                basis_x: Self::normalize_or(branch_basis_x, vec3f(1.0, 0.0, 0.0)),
+                basis_y: Self::normalize_or(branch_basis_y, vec3f(0.0, 1.0, 0.0)),
+                basis_z: Self::normalize_or(branch_basis_z, vec3f(0.0, 0.0, 1.0)),
+                scale: vec3f(
+                    branch.radius * branch_basis_x.length().max(0.0001),
+                    branch.length * branch_basis_y.length().max(0.0001),
+                    branch.radius * branch_basis_z.length().max(0.0001),
+                ),
                 level: level_t,
                 seed: branch.seed,
             });
@@ -442,40 +563,53 @@ impl CpuPythagoreanTree {
                 branch_runtime.basis_z,
             );
 
-            let orbit_phase = time * (1.45 + level_t * 0.55) + leaf.seed * 8.7;
-            let anchor_offset =
-                branch_runtime.basis_x * (orbit_phase.cos() * TREE_LEAF_WIND_ORBIT * leaf.scale * 1.8)
+            let anchor_offset = if animate {
+                let orbit_phase = time * (1.45 + level_t * 0.55) + leaf.seed * 8.7;
+                branch_runtime.basis_x
+                    * (orbit_phase.cos() * TREE_LEAF_WIND_ORBIT * leaf.scale * 1.8)
                     + branch_runtime.basis_y
                         * (orbit_phase.sin() * TREE_LEAF_WIND_ORBIT * leaf.scale * 0.7)
                     + branch_runtime.basis_z
-                        * ((orbit_phase * 1.31).sin() * TREE_LEAF_WIND_ORBIT * leaf.scale * 1.6);
+                        * ((orbit_phase * 1.31).sin() * TREE_LEAF_WIND_ORBIT * leaf.scale * 1.6)
+            } else {
+                vec3f(0.0, 0.0, 0.0)
+            };
             let origin = anchor + anchor_offset;
             let leaf_center = origin + nominal_leaf_y * (leaf.scale * 0.78);
 
-            let mut leaf_push = Self::leaf_wind_force(leaf.seed, level_t, time)
-                + branch_runtime.point_push * (1.35 + level_t * 0.2);
-            for pointer_tip in pointer_tips.into_iter().flatten() {
-                leaf_push += Self::pointer_force(
-                    leaf_center,
-                    pointer_tip,
-                    TREE_LEAF_HAND_GAIN * (0.74 + level_t * 0.58),
-                    1.0,
-                );
+            let mut leaf_push = vec3f(0.0, 0.0, 0.0);
+            if animate {
+                leaf_push = Self::leaf_wind_force(leaf.seed, level_t, time)
+                    + branch_runtime.point_push * (1.35 + level_t * 0.2);
+                for pointer_tip in pointer_tips.into_iter().flatten() {
+                    leaf_push += Self::pointer_force(
+                        leaf_center,
+                        pointer_tip,
+                        TREE_LEAF_HAND_GAIN * (0.74 + level_t * 0.58),
+                        1.0,
+                    );
+                }
             }
             leaf_push = Self::clamp_len(leaf_push, TREE_MAX_POINT_PUSH * 1.35);
 
             let leaf_y = Self::normalize_or(nominal_leaf_y + leaf_push * 1.6, nominal_leaf_y);
             let (basis_x, basis_y, basis_z) = Self::orthonormal_frame(leaf_y, leaf_z_hint);
-            let origin_world = root.transform_vec3(&origin);
+            let leaf_basis_x = Self::transform_direction(root_transform, basis_x);
+            let leaf_basis_y = Self::transform_direction(root_transform, basis_y);
+            let leaf_basis_z = Self::transform_direction(root_transform, basis_z);
             let flutter = ((leaf_y - nominal_leaf_y).length() * 1.45 + leaf_push.length() * 0.3)
                 .clamp(0.0, 1.0);
 
             self.leaf_instances.push(LeafInstance {
-                origin: origin_world,
-                basis_x: root.orientation.rotate_vec3(&basis_x),
-                basis_y: root.orientation.rotate_vec3(&basis_y),
-                basis_z: root.orientation.rotate_vec3(&basis_z),
-                scale: vec3f(leaf.scale, leaf.scale, leaf.scale),
+                origin: Self::transform_point(root_transform, origin),
+                basis_x: Self::normalize_or(leaf_basis_x, vec3f(1.0, 0.0, 0.0)),
+                basis_y: Self::normalize_or(leaf_basis_y, vec3f(0.0, 1.0, 0.0)),
+                basis_z: Self::normalize_or(leaf_basis_z, vec3f(0.0, 0.0, 1.0)),
+                scale: vec3f(
+                    leaf.scale * leaf_basis_x.length().max(0.0001),
+                    leaf.scale * leaf_basis_y.length().max(0.0001),
+                    leaf.scale * leaf_basis_z.length().max(0.0001),
+                ),
                 tint: leaf.tint,
                 flutter,
             });
@@ -610,19 +744,6 @@ impl CpuPythagoreanTree {
         }
     }
 
-    fn pointer_tip_world(hand: &XrHand) -> Option<Vec3f> {
-        if !hand.in_view() || !hand.tip_active(XrHand::INDEX_TIP) {
-            return None;
-        }
-        let tip_len = hand.tips[XrHand::INDEX_TIP].max(0.0);
-        Some(
-            hand.joints[XrHand::INDEX_KNUCKLE3]
-                .to_mat4()
-                .transform_vec4(vec4(0.0, 0.0, -tip_len, 1.0))
-                .to_vec3f(),
-        )
-    }
-
     fn branch_wind_force(seed: f32, level_t: f32, time: f32) -> Vec3f {
         let sway = 0.012 + level_t * 0.040;
         vec3f(
@@ -685,6 +806,18 @@ impl CpuPythagoreanTree {
         basis_x * local.x + basis_y * local.y + basis_z * local.z
     }
 
+    fn transform_point(transform: Mat4f, point: Vec3f) -> Vec3f {
+        transform
+            .transform_vec4(vec4(point.x, point.y, point.z, 1.0))
+            .to_vec3f()
+    }
+
+    fn transform_direction(transform: Mat4f, direction: Vec3f) -> Vec3f {
+        transform
+            .transform_vec4(vec4(direction.x, direction.y, direction.z, 0.0))
+            .to_vec3f()
+    }
+
     fn orthonormal_frame(y_axis: Vec3f, z_hint: Vec3f) -> (Vec3f, Vec3f, Vec3f) {
         let y = Self::normalize_or(y_axis, vec3f(0.0, 1.0, 0.0));
         let mut projected_z = z_hint - y * y.dot(z_hint);
@@ -703,11 +836,76 @@ impl CpuPythagoreanTree {
     }
 }
 
+#[derive(Script, ScriptHook, Widget)]
+pub struct Tree {
+    #[redraw]
+    #[live]
+    draw_branches: DrawTreeBranches,
+    #[redraw]
+    #[live]
+    draw_leaves: DrawTreeLeaves,
+    #[rust]
+    cpu_tree: CpuPythagoreanTree,
+    #[deref]
+    node: XrNode,
+}
+
+impl Tree {
+    pub fn node(&self) -> &XrNode {
+        &self.node
+    }
+}
+
+impl Widget for Tree {
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
+        let Some(scene) = scene_state_from_cx(cx) else {
+            return DrawStep::done();
+        };
+        let world = xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
+        let pointer_tips = xr_pointer_tips_from_scope(scope);
+        let time = if scene.use_pass_camera {
+            scene.time as f32
+        } else {
+            0.0
+        };
+
+        {
+            let cx2d = &mut Cx2d::new(cx.cx);
+            self.cpu_tree.ensure_geometry(cx2d);
+            self.cpu_tree.rebuild_instances(world, time, pointer_tips);
+            self.draw_branches.set_use_pass_camera(scene.use_pass_camera);
+            self.draw_branches.set_camera_state(scene.view, scene.projection);
+            self.draw_branches.clip_ndc = scene.clip_ndc;
+            self.draw_leaves.set_use_pass_camera(scene.use_pass_camera);
+            self.draw_leaves.set_camera_state(scene.view, scene.projection);
+            self.draw_leaves.clip_ndc = scene.clip_ndc;
+            self.cpu_tree.draw(
+                cx2d,
+                &mut self.draw_branches,
+                &mut self.draw_leaves,
+                scene.camera_pos,
+            );
+        }
+
+        self.node.draw_3d(cx, scope)
+    }
+
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
+        DrawStep::done()
+    }
+}
+
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawTreeBranches {
-    #[rust]
-    many_instances: Option<ManyInstances>,
+    #[rust(Mat4f::identity())]
+    view_matrix: Mat4f,
+    #[rust(Mat4f::identity())]
+    projection_matrix: Mat4f,
+    #[rust(0.0)]
+    use_pass_camera: f32,
+    #[rust(vec4(-1.0, -1.0, 1.0, 1.0))]
+    clip_ndc: Vec4f,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -729,6 +927,15 @@ pub struct DrawTreeBranches {
 }
 
 impl DrawTreeBranches {
+    fn set_use_pass_camera(&mut self, use_pass_camera: bool) {
+        self.use_pass_camera = if use_pass_camera { 1.0 } else { 0.0 };
+    }
+
+    fn set_camera_state(&mut self, view: Mat4f, projection: Mat4f) {
+        self.view_matrix = view;
+        self.projection_matrix = projection;
+    }
+
     fn apply_uniforms(&mut self, cx: &mut Cx2d, camera_pos: Vec3f) {
         let light_dir = TREE_BRANCH_LIGHT_DIR.normalize();
         self.draw_vars.set_uniform(
@@ -766,6 +973,25 @@ impl DrawTreeBranches {
             live_id!(u_tree_camera_pos),
             &[camera_pos.x, camera_pos.y, camera_pos.z],
         );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(view_matrix), &self.view_matrix.v);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(projection_matrix),
+            &self.projection_matrix.v,
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(clip_ndc),
+            &[
+                self.clip_ndc.x,
+                self.clip_ndc.y,
+                self.clip_ndc.z,
+                self.clip_ndc.w,
+            ],
+        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(use_pass_camera), &[self.use_pass_camera]);
     }
 
     fn draw_instances(
@@ -783,7 +1009,6 @@ impl DrawTreeBranches {
         self.draw_vars.options.depth_write = true;
         self.depth_clip = 1.0;
         self.apply_uniforms(cx, camera_pos);
-        self.many_instances = cx.begin_many_aligned_instances(&self.draw_vars);
         for instance in instances {
             self.origin = instance.origin;
             self.basis_x = instance.basis_x;
@@ -792,14 +1017,7 @@ impl DrawTreeBranches {
             self.scale = instance.scale;
             self.level = instance.level;
             self.seed = instance.seed;
-            if let Some(many_instances) = self.many_instances.as_mut() {
-                many_instances
-                    .instances
-                    .extend_from_slice(self.draw_vars.as_slice());
-            }
-        }
-        if let Some(many_instances) = self.many_instances.take() {
-            let new_area = cx.end_many_instances(many_instances);
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
@@ -808,8 +1026,14 @@ impl DrawTreeBranches {
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawTreeLeaves {
-    #[rust]
-    many_instances: Option<ManyInstances>,
+    #[rust(Mat4f::identity())]
+    view_matrix: Mat4f,
+    #[rust(Mat4f::identity())]
+    projection_matrix: Mat4f,
+    #[rust(0.0)]
+    use_pass_camera: f32,
+    #[rust(vec4(-1.0, -1.0, 1.0, 1.0))]
+    clip_ndc: Vec4f,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -831,6 +1055,15 @@ pub struct DrawTreeLeaves {
 }
 
 impl DrawTreeLeaves {
+    fn set_use_pass_camera(&mut self, use_pass_camera: bool) {
+        self.use_pass_camera = if use_pass_camera { 1.0 } else { 0.0 };
+    }
+
+    fn set_camera_state(&mut self, view: Mat4f, projection: Mat4f) {
+        self.view_matrix = view;
+        self.projection_matrix = projection;
+    }
+
     fn apply_uniforms(&mut self, cx: &mut Cx2d, camera_pos: Vec3f) {
         let light_dir = TREE_LEAF_LIGHT_DIR.normalize();
         self.draw_vars.set_uniform(
@@ -865,6 +1098,25 @@ impl DrawTreeLeaves {
             live_id!(u_tree_camera_pos),
             &[camera_pos.x, camera_pos.y, camera_pos.z],
         );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(view_matrix), &self.view_matrix.v);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(projection_matrix),
+            &self.projection_matrix.v,
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(clip_ndc),
+            &[
+                self.clip_ndc.x,
+                self.clip_ndc.y,
+                self.clip_ndc.z,
+                self.clip_ndc.w,
+            ],
+        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(use_pass_camera), &[self.use_pass_camera]);
     }
 
     fn draw_instances(
@@ -882,7 +1134,6 @@ impl DrawTreeLeaves {
         self.draw_vars.options.depth_write = true;
         self.depth_clip = 1.0;
         self.apply_uniforms(cx, camera_pos);
-        self.many_instances = cx.begin_many_aligned_instances(&self.draw_vars);
         for instance in instances {
             self.origin = instance.origin;
             self.basis_x = instance.basis_x;
@@ -891,14 +1142,7 @@ impl DrawTreeLeaves {
             self.scale = instance.scale;
             self.tint = instance.tint;
             self.flutter = instance.flutter;
-            if let Some(many_instances) = self.many_instances.as_mut() {
-                many_instances
-                    .instances
-                    .extend_from_slice(self.draw_vars.as_slice());
-            }
-        }
-        if let Some(many_instances) = self.many_instances.take() {
-            let new_area = cx.end_many_instances(many_instances);
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
