@@ -6,7 +6,7 @@ use crate::{
     widget_async::{CxWidgetToScriptCallExt, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult},
     widget_tree::CxWidgetExt,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use super::scene_draw::compose_scene_node_transform;
 
@@ -48,13 +48,14 @@ pub struct XrRuntimeBodyState {
 
 #[derive(Clone, Default)]
 pub struct XrDrawScopeData {
-    pub runtime_bodies: HashMap<WidgetUid, XrRuntimeBodyState>,
+    pub runtime_bodies: Rc<HashMap<WidgetUid, XrRuntimeBodyState>>,
     pub env_texture: Option<Texture>,
     pub camera_texture: Option<Texture>,
     pub camera_source_size: Vec2f,
     pub camera_rotation_steps: f32,
     pub camera_center_offset_uv: Vec2f,
     pub camera_enabled: bool,
+    pub pointer_tips: [Option<Vec3f>; 2],
 }
 
 pub fn xr_runtime_body_from_scope(
@@ -65,6 +66,14 @@ pub fn xr_runtime_body_from_scope(
         .data
         .get::<XrDrawScopeData>()
         .and_then(|scope_data| scope_data.runtime_bodies.get(&uid).cloned())
+}
+
+pub fn xr_pointer_tips_from_scope(scope: &mut Scope) -> [Option<Vec3f>; 2] {
+    scope
+        .data
+        .get::<XrDrawScopeData>()
+        .map(|scope_data| scope_data.pointer_tips)
+        .unwrap_or([None, None])
 }
 
 pub fn xr_env_texture_from_scope(scope: &mut Scope) -> Option<Texture> {
@@ -196,6 +205,26 @@ impl XrNode {
     }
 }
 
+pub fn xr_widget_world_transform(
+    cx: &mut Cx3d,
+    scope: &mut Scope,
+    uid: WidgetUid,
+    node: &XrNode,
+) -> Mat4f {
+    if let Some(runtime_body) = xr_runtime_body_from_scope(scope, uid) {
+        Mat4f::mul(
+            &runtime_body.pose.to_mat4(),
+            &Mat4f::nonuniform_scaled_translation(
+                vec3(runtime_body.scale.x, runtime_body.scale.y, runtime_body.scale.z),
+                vec3(0.0, 0.0, 0.0),
+            ),
+        )
+    } else {
+        let parent_world = cx.scene_world_transform_3d();
+        Mat4f::mul(&parent_world, &node.local_transform())
+    }
+}
+
 impl ScriptHook for XrNode {
     fn on_before_apply(
         &mut self,
@@ -234,7 +263,8 @@ impl ScriptHook for XrNode {
                         let Some(id) = id else {
                             continue;
                         };
-                        if !WidgetRef::value_is_newable_widget(vm, kv.value) {
+                        let can_new = WidgetRef::value_is_newable_widget(vm, kv.value);
+                        if !can_new {
                             continue;
                         }
                         self.child_order.push(id);
@@ -338,14 +368,15 @@ impl Widget for XrNode {
         }
 
         let uid = self.uid;
-        let child_order = self.child_order.clone();
-        for id in child_order {
-            if let Some(child) = self.children.get_mut(&id) {
-                let child_uid = child.widget_uid();
-                cx.group_widget_actions(uid, child_uid, |cx| {
-                    child.handle_event(cx, event, scope);
-                });
-            }
+        for index in 0..self.child_order.len() {
+            let id = self.child_order[index];
+            let Some(child) = self.children.get(&id).cloned() else {
+                continue;
+            };
+            let child_uid = child.widget_uid();
+            cx.group_widget_actions(uid, child_uid, |cx| {
+                child.handle_event(cx, event, scope);
+            });
         }
     }
 
@@ -354,33 +385,18 @@ impl Widget for XrNode {
             return DrawStep::done();
         }
 
-        let child_refs: Vec<WidgetRef> = self
-            .child_order
-            .iter()
-            .filter_map(|id| self.children.get(id).cloned())
-            .collect();
-        if child_refs.is_empty() {
+        if !self.child_order.iter().any(|id| self.children.contains_key(id)) {
             return DrawStep::done();
         }
 
-        let world_transform = if let Some(runtime_body) = xr_runtime_body_from_scope(scope, self.uid)
-        {
-            Mat4f::mul(
-                &runtime_body.pose.to_mat4(),
-                &Mat4f::nonuniform_scaled_translation(
-                    vec3(runtime_body.scale.x, runtime_body.scale.y, runtime_body.scale.z),
-                    vec3(0.0, 0.0, 0.0),
-                ),
-            )
-        } else {
-            let parent_world = cx.scene_world_transform_3d();
-            let local_transform = self.local_transform();
-            Mat4f::mul(&parent_world, &local_transform)
-        };
-
+        let world_transform = xr_widget_world_transform(cx, scope, self.uid, self);
         let previous_world = cx.set_scene_world_transform_3d(world_transform);
 
-        for child in child_refs {
+        for index in 0..self.child_order.len() {
+            let id = self.child_order[index];
+            let Some(child) = self.children.get(&id).cloned() else {
+                continue;
+            };
             child.draw_3d_all(cx, scope);
         }
 
