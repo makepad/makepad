@@ -2,7 +2,7 @@ use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 use makepad_splat::{load_splat_from_bytes, SplatFileFormat, SplatScene};
 use std::{mem, path::PathBuf, rc::Rc, sync::mpsc::TryRecvError};
 
-use super::scene_3d::{
+use super::scene_draw::{
     apply_scene_to_draw_pbr, compose_scene_node_transform, register_last_draw_call_anchor,
     scene_node_world_transform_from_cx, scene_state_from_cx, SceneState3D,
 };

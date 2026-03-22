@@ -1,5 +1,5 @@
 use super::*;
-use super::physics::{capsule_pose, makepad_pose, HandCollider, HandColliderBody, RapierScene};
+use super::xr_physics::{capsule_pose, makepad_pose, HandCollider, HandColliderBody, RapierScene};
 
 impl XrScene {
     fn pose_point_world(pose: Pose, local: Vec3f) -> Vec3f {
