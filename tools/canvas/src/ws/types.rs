@@ -16,12 +16,16 @@ pub enum CanvasCommand {
         code: String,
     },
     /// Audio playback commands
-    AudioPlay { url: String },
+    AudioPlay {
+        url: String,
+    },
     AudioPause,
     AudioStop,
     AudioToggle,
     /// Save current app with a name
-    SaveApp { name: String },
+    SaveApp {
+        name: String,
+    },
     /// CLI connected/disconnected
     ConnectionState {
         connected: bool,

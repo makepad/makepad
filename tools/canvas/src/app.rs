@@ -1,9 +1,9 @@
-use makepad_widgets::*;
 use makepad_code_editor;
+use makepad_widgets::*;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::path::PathBuf;
 
 use crate::audio::{self, get_audio_state};
 use crate::ws::stdio_bridge::StdioBridge;
@@ -76,8 +76,9 @@ script_mod! {
                         return sdf.result
                     }
                     FlowBlockType.Code => {
-                        // Return transparent - CodeView handles its own background
-                        return #0000
+                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
+                        sdf.fill(self.code_color)
+                        return sdf.result
                     }
                     FlowBlockType.InlineCode => {
                         sdf.box(1. 1. self.rect_size.x-2. self.rect_size.y-2. 2.)
@@ -103,8 +104,13 @@ script_mod! {
         }
         link := mod.widgets.MarkdownLink{}
         use_code_block_widget: true
-        code_block := View{width: Fill height: Fit new_batch: true
-            code_view := CodeView{}
+        code_block := View{width: Fill height: Fit flow: Overlay
+            code_view := CodeView{
+                editor +: {
+                    height: Fit
+                    draw_bg +: { color: #x1a1a2e }
+                }
+            }
         }
     }
 
@@ -213,7 +219,9 @@ pub struct App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        if self.initialized { return; }
+        if self.initialized {
+            return;
+        }
         self.initialized = true;
 
         self.sidebar_visible = true;
@@ -221,7 +229,6 @@ impl MatchEvent for App {
         let bridge = Arc::new(StdioBridge::new(self.signal.clone()));
         bridge.start();
         self.bridge = Some(bridge);
-
 
         // Initialize audio output
         let audio_state = get_audio_state();
@@ -243,12 +250,22 @@ impl MatchEvent for App {
         for action in actions {
             if let Some(wa) = action.as_widget_action() {
                 if let Some(ButtonAction::Clicked(_)) = wa.action.downcast_ref::<ButtonAction>() {
-                    let name = self.uid_map.get(&wa.widget_uid).cloned().unwrap_or_default();
+                    let name = self
+                        .uid_map
+                        .get(&wa.widget_uid)
+                        .cloned()
+                        .unwrap_or_default();
 
                     // Generic audio control: buttons named audio_* route to audio service
                     match name.as_str() {
-                        "audio_toggle" | "play_btn" => { get_audio_state().toggle(); continue; }
-                        "audio_stop" => { get_audio_state().stop(); continue; }
+                        "audio_toggle" | "play_btn" => {
+                            get_audio_state().toggle();
+                            continue;
+                        }
+                        "audio_stop" => {
+                            get_audio_state().stop();
+                            continue;
+                        }
                         _ => {}
                     }
 
@@ -264,7 +281,9 @@ impl MatchEvent for App {
                     if wa.widget_uid == self.ui.widget(cx, ids!(sidebar_open)).widget_uid() {
                         self.sidebar_visible = true;
                         self.ui.widget(cx, ids!(sidebar)).set_visible(cx, true);
-                        self.ui.widget(cx, ids!(sidebar_open)).set_visible(cx, false);
+                        self.ui
+                            .widget(cx, ids!(sidebar_open))
+                            .set_visible(cx, false);
                         self.ui.redraw(cx);
                         continue;
                     }
@@ -304,7 +323,11 @@ impl MatchEvent for App {
                     }
 
                     if let Some(bridge) = &self.bridge {
-                        let event_name = if !name.is_empty() { name } else { format!("uid_{:?}", wa.widget_uid) };
+                        let event_name = if !name.is_empty() {
+                            name
+                        } else {
+                            format!("uid_{:?}", wa.widget_uid)
+                        };
                         bridge.send_event(&event_name);
                     }
                 }
@@ -325,23 +348,48 @@ impl MatchEvent for App {
 
             // Inject spectrum data into VM globals so Splash code can read them
             let band_ids = [
-                id!(_b0), id!(_b1), id!(_b2), id!(_b3),
-                id!(_b4), id!(_b5), id!(_b6), id!(_b7),
-                id!(_b8), id!(_b9), id!(_b10), id!(_b11),
-                id!(_b12), id!(_b13), id!(_b14), id!(_b15),
+                id!(_b0),
+                id!(_b1),
+                id!(_b2),
+                id!(_b3),
+                id!(_b4),
+                id!(_b5),
+                id!(_b6),
+                id!(_b7),
+                id!(_b8),
+                id!(_b9),
+                id!(_b10),
+                id!(_b11),
+                id!(_b12),
+                id!(_b13),
+                id!(_b14),
+                id!(_b15),
             ];
             cx.with_vm(|vm| {
                 for (i, &bid) in band_ids.iter().enumerate() {
                     vm.set_injected_global(bid, ScriptValue::from(spectrum[i] as f64));
                 }
                 vm.set_injected_global(id!(_amp), ScriptValue::from(amplitude));
-                vm.set_injected_global(id!(_playing), ScriptValue::from(audio_state.is_playing.load(Ordering::Relaxed)));
-                vm.set_injected_global(id!(_pos), ScriptValue::from(audio_state.position_secs.get()));
-                vm.set_injected_global(id!(_dur), ScriptValue::from(audio_state.duration_secs.get()));
+                vm.set_injected_global(
+                    id!(_playing),
+                    ScriptValue::from(audio_state.is_playing.load(Ordering::Relaxed)),
+                );
+                vm.set_injected_global(
+                    id!(_pos),
+                    ScriptValue::from(audio_state.position_secs.get()),
+                );
+                vm.set_injected_global(
+                    id!(_dur),
+                    ScriptValue::from(audio_state.duration_secs.get()),
+                );
             });
 
             // Call on_audio() in Splash scope if defined
-            if let Some(mut splash) = self.ui.widget(cx, ids!(splash_panel)).borrow_mut::<Splash>() {
+            if let Some(mut splash) = self
+                .ui
+                .widget(cx, ids!(splash_panel))
+                .borrow_mut::<Splash>()
+            {
                 splash.call_fn(cx, id!(on_audio));
             }
 
@@ -364,7 +412,9 @@ impl MatchEvent for App {
             self.ui.redraw(cx);
         }
 
-        if !self.signal.check_and_clear() { return; }
+        if !self.signal.check_and_clear() {
+            return;
+        }
 
         let bridge = match &self.bridge {
             Some(b) => b.clone(),
@@ -385,7 +435,11 @@ impl MatchEvent for App {
 
                 CanvasCommand::SplashRender { code } => {
                     if code.is_empty() {
-                        if let Some(mut splash) = self.ui.widget(cx, ids!(splash_panel)).borrow_mut::<Splash>() {
+                        if let Some(mut splash) = self
+                            .ui
+                            .widget(cx, ids!(splash_panel))
+                            .borrow_mut::<Splash>()
+                        {
                             splash.view.set_visible(cx, false);
                         }
                         self.ui.widget(cx, ids!(placeholder)).set_visible(cx, true);
@@ -396,7 +450,11 @@ impl MatchEvent for App {
                         self.widget_names = extract_widget_names(&code);
                         self.uid_map_dirty = true;
 
-                        if let Some(mut splash) = self.ui.widget(cx, ids!(splash_panel)).borrow_mut::<Splash>() {
+                        if let Some(mut splash) = self
+                            .ui
+                            .widget(cx, ids!(splash_panel))
+                            .borrow_mut::<Splash>()
+                        {
                             splash.set_text(cx, &code);
                             // set_text may replace self.view, so set visible AFTER
                             splash.view.set_visible(cx, true);
@@ -423,7 +481,11 @@ impl MatchEvent for App {
 
                 CanvasCommand::SplashStreamBegin => {
                     self.stream_code.clear();
-                    if let Some(mut splash) = self.ui.widget(cx, ids!(splash_panel)).borrow_mut::<Splash>() {
+                    if let Some(mut splash) = self
+                        .ui
+                        .widget(cx, ids!(splash_panel))
+                        .borrow_mut::<Splash>()
+                    {
                         splash.view.set_visible(cx, true);
                         splash.stream_begin(cx);
                     }
@@ -432,7 +494,11 @@ impl MatchEvent for App {
 
                 CanvasCommand::SplashStreamAppend { code } => {
                     self.stream_code.push_str(&code);
-                    if let Some(mut splash) = self.ui.widget(cx, ids!(splash_panel)).borrow_mut::<Splash>() {
+                    if let Some(mut splash) = self
+                        .ui
+                        .widget(cx, ids!(splash_panel))
+                        .borrow_mut::<Splash>()
+                    {
                         splash.stream_append(cx, &code);
                     }
                 }
@@ -456,7 +522,11 @@ impl MatchEvent for App {
                     let audio_state = get_audio_state();
                     audio::download_and_decode(url, audio_state, self.audio_signal.clone());
                     // Show visualizer
-                    if let Some(mut v) = self.ui.widget(cx, ids!(audio_vis)).borrow_mut::<crate::visualizer::Visualizer>() {
+                    if let Some(mut v) = self
+                        .ui
+                        .widget(cx, ids!(audio_vis))
+                        .borrow_mut::<crate::visualizer::Visualizer>()
+                    {
                         v.visible = true;
                     }
                 }
@@ -466,7 +536,11 @@ impl MatchEvent for App {
                 CanvasCommand::AudioStop => {
                     get_audio_state().stop();
                     // Hide visualizer
-                    if let Some(mut v) = self.ui.widget(cx, ids!(audio_vis)).borrow_mut::<crate::visualizer::Visualizer>() {
+                    if let Some(mut v) = self
+                        .ui
+                        .widget(cx, ids!(audio_vis))
+                        .borrow_mut::<crate::visualizer::Visualizer>()
+                    {
                         v.visible = false;
                     }
                 }
@@ -494,9 +568,13 @@ fn extract_widget_names(code: &str) -> Vec<String> {
         if i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b'=' {
             // Walk backwards to find the name
             let mut end = i;
-            while end > 0 && bytes[end - 1] == b' ' { end -= 1; }
+            while end > 0 && bytes[end - 1] == b' ' {
+                end -= 1;
+            }
             let mut start = end;
-            while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            while start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+            {
                 start -= 1;
             }
             if start < end {
@@ -565,7 +643,11 @@ impl App {
         self.widget_names = extract_widget_names(code);
         self.uid_map_dirty = true;
 
-        if let Some(mut splash) = self.ui.widget(cx, ids!(splash_panel)).borrow_mut::<Splash>() {
+        if let Some(mut splash) = self
+            .ui
+            .widget(cx, ids!(splash_panel))
+            .borrow_mut::<Splash>()
+        {
             splash.set_text(cx, &code);
             splash.view.set_visible(cx, true);
         }
@@ -576,8 +658,8 @@ impl App {
     /// Add code to history, save to disk, and update the sidebar list.
     fn add_to_history(&mut self, cx: &mut Cx, code: &str) {
         self.history_counter += 1;
-        let name = extract_app_title(code)
-            .unwrap_or_else(|| format!("App #{}", self.history_counter));
+        let name =
+            extract_app_title(code).unwrap_or_else(|| format!("App #{}", self.history_counter));
         self.history.push((name.clone(), code.to_string()));
 
         // Persist to disk
@@ -595,7 +677,9 @@ impl App {
 
     /// Save current app with an explicit name.
     fn save_app(&mut self, cx: &mut Cx, name: &str) {
-        if self.current_code.is_empty() { return; }
+        if self.current_code.is_empty() {
+            return;
+        }
         let app_name = if name.is_empty() {
             extract_app_title(&self.current_code)
                 .unwrap_or_else(|| format!("App #{}", self.history_counter + 1))
@@ -604,7 +688,8 @@ impl App {
         };
 
         self.history_counter += 1;
-        self.history.push((app_name.clone(), self.current_code.clone()));
+        self.history
+            .push((app_name.clone(), self.current_code.clone()));
 
         let dir = Self::apps_dir();
         let filename = format!("{:04}_{}.splash", self.history_counter, slug(&app_name));
@@ -626,7 +711,11 @@ impl App {
             ));
         }
 
-        if let Some(mut history_list) = self.ui.widget(cx, ids!(history_list)).borrow_mut::<Splash>() {
+        if let Some(mut history_list) = self
+            .ui
+            .widget(cx, ids!(history_list))
+            .borrow_mut::<Splash>()
+        {
             if items.len() <= 25 {
                 // Only the prefix, no actual items
                 history_list.set_text(cx, "Label{text: \"No history yet\" draw_text.color: #x444466 draw_text.text_style.font_size: 9}");
@@ -657,7 +746,9 @@ impl App {
     /// Load saved apps from disk on startup.
     fn load_history(&mut self) {
         let dir = Self::apps_dir();
-        if !dir.is_dir() { return; }
+        if !dir.is_dir() {
+            return;
+        }
 
         let mut entries: Vec<_> = match std::fs::read_dir(&dir) {
             Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
@@ -667,7 +758,9 @@ impl App {
 
         for entry in entries {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("splash") { continue; }
+            if path.extension().and_then(|e| e.to_str()) != Some("splash") {
+                continue;
+            }
             if let Ok(code) = std::fs::read_to_string(&path) {
                 self.history_counter += 1;
                 let name = extract_app_title(&code)
@@ -681,9 +774,17 @@ impl App {
 /// Extract a title from Splash code by finding the first Label with font_size >= 16.
 /// Skips Labels that look like data values (pure numbers, time formats like "25:00").
 fn extract_app_title(code: &str) -> Option<String> {
+    // Try extracting from Markdown body: "# Title" heading
+    if let Some(title) = extract_markdown_title(code) {
+        return Some(title);
+    }
+
+    // Try extracting from Label widgets with large font size
     for line in code.lines() {
         let trimmed = line.trim();
-        if !trimmed.contains("Label") { continue; }
+        if !trimmed.contains("Label") {
+            continue;
+        }
         // Check for font_size >= 12 (skip tiny labels like font_size: 9 or 10)
         let has_title_font = trimmed.contains("font_size: 12")
             || trimmed.contains("font_size: 13")
@@ -698,18 +799,53 @@ fn extract_app_title(code: &str) -> Option<String> {
             || trimmed.contains("font_size: 4")
             || trimmed.contains("font_size: 5")
             || trimmed.contains("font_size: 6");
-        if !has_title_font { continue; }
+        if !has_title_font {
+            continue;
+        }
         // Extract text: "..."
         if let Some(start) = trimmed.find("text: \"") {
             let after = &trimmed[start + 7..];
             if let Some(end) = after.find('"') {
                 let title = &after[..end];
                 // Skip values that look like data (numbers, time, etc.)
-                if title.is_empty() { continue; }
-                let is_data = title.chars().all(|c| c.is_ascii_digit() || c == ':' || c == '.' || c == '%' || c == '$' || c == ',' || c == ' ');
-                if is_data { continue; }
-                return Some(title.to_string());
+                if title.is_empty() {
+                    continue;
                 }
+                let is_data = title.chars().all(|c| {
+                    c.is_ascii_digit()
+                        || c == ':'
+                        || c == '.'
+                        || c == '%'
+                        || c == '$'
+                        || c == ','
+                        || c == ' '
+                });
+                if is_data {
+                    continue;
+                }
+                return Some(title.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extract title from Markdown body content (first # heading).
+fn extract_markdown_title(code: &str) -> Option<String> {
+    // Look for body: "..." containing a markdown heading
+    let body_start = code.find("body: \"")?;
+    let after = &code[body_start + 7..];
+    let body_end = after.find('"')?;
+    let body = &after[..body_end];
+
+    // Unescape \n and find first # heading
+    for segment in body.split("\\n") {
+        let trimmed = segment.trim();
+        if trimmed.starts_with("# ") {
+            let title = trimmed[2..].trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
         }
     }
     None
@@ -718,7 +854,13 @@ fn extract_app_title(code: &str) -> Option<String> {
 /// Create a simple slug from a name for filenames.
 fn slug(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

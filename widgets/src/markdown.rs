@@ -312,9 +312,36 @@ impl Widget for Markdown {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.auto_id = 0;
 
+        // If code_block template is missing, try to inherit it from the type default.
+        // This handles Splash eval where the Markdown is created with only `body`
+        // but the type default (set_type_default) includes code_block and use_code_block_widget.
+        if !self.text_flow.has_template(live_id!(code_block)) && !self.source.is_zero() {
+            let source_obj = self.source.as_object();
+            cx.with_vm(|vm| {
+                if let Some(td) = vm.bx.heap.type_default_for_object(source_obj) {
+                    vm.vec_with(td, |vm, vec| {
+                        for kv in vec {
+                            if let Some(id) = kv.key.as_id() {
+                                if !self.text_flow.has_template(id) {
+                                    if let Some(template_obj) = kv.value.as_object() {
+                                        self.text_flow.register_template(id,
+                                            vm.bx.heap.new_object_ref(template_obj));
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        // If code_block template exists (from type default or explicit), enable it
+        if !self.use_code_block_widget && self.text_flow.has_template(live_id!(code_block)) {
+            self.use_code_block_widget = true;
+        }
+
         // If use_code_block_widget is true but no code_block template registered,
-        // fall back to default monospace rendering. Template must be provided
-        // as a named child in the DSL instance (e.g., code_block := View{...}).
+        // fall back to default monospace rendering.
         if self.use_code_block_widget && !self.text_flow.has_template(live_id!(code_block)) {
             self.use_code_block_widget = false;
         }
@@ -346,36 +373,17 @@ impl ScriptHook for Markdown {
         scope: &mut Scope,
         value: ScriptValue,
     ) {
-        // Forward to TextFlow's ScriptHook (handles 'link' template)
+        // Forward to TextFlow's ScriptHook (handles templates from apply value)
         self.text_flow.on_after_apply(vm, apply, scope, value);
 
-        // Also check map properties for named children like code_block, splash_block
+        // Also register templates from the apply value's vec (for compiled path)
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
-                // Debug: log what's in the map
-                vm.map_mut_with(obj, |vm, map| {
-                    log!("[Markdown] ScriptHook map entries: {}", map.len());
-                    for (key, map_val) in map.iter() {
-                        if let Some(id) = key.as_id() {
-                            log!("[Markdown]   map key: {:?}", id);
-                        }
-                    }
-                });
-                // Check map for templates
-                vm.map_mut_with(obj, |vm, map| {
-                    for (key, map_val) in map.iter() {
-                        if let Some(id) = key.as_id() {
-                            if id == live_id!(code_block)
-                                || id == live_id!(splash_block)
-                                || id == live_id!(inline_math)
-                                || id == live_id!(display_math)
-                            {
-                                let val = map_val.value;
-                                if let Some(template_obj) = val.as_object() {
-                                    self.text_flow.apply_template(
-                                        vm, apply, scope, id, template_obj,
-                                    );
-                                }
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        if let Some(id) = kv.key.as_id() {
+                            if let Some(template_obj) = kv.value.as_object() {
+                                self.text_flow.apply_template(vm, apply, scope, id, template_obj);
                             }
                         }
                     }
@@ -386,6 +394,7 @@ impl ScriptHook for Markdown {
 }
 
 impl Markdown {
+
     fn process_markdown_doc(&mut self, cx: &mut Cx2d) {
         let tf = &mut self.text_flow;
         // Track state for nested formatting

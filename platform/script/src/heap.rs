@@ -261,6 +261,24 @@ impl ScriptHeap {
         }
     }
 
+    /// Find the type default for an object by walking its proto chain.
+    /// Returns the type default object if one exists for this type.
+    pub fn type_default_for_object(&self, obj: ScriptObject) -> Option<ScriptObject> {
+        // Try the object's own type index
+        if let Some(ti) = self.objects[obj].tag.as_type_index() {
+            if let Some(td) = self.type_defaults.get(&ti).copied() {
+                return Some(td);
+            }
+        }
+        // Try the proto's type index
+        if let Some(proto) = self.objects[obj].proto.as_object() {
+            if let Some(ti) = self.objects[proto].tag.as_type_index() {
+                return self.type_defaults.get(&ti).copied();
+            }
+        }
+        None
+    }
+
     pub fn type_default_for_id(&self, type_id: ScriptTypeId) -> Option<ScriptObject> {
         if let Some(ty_index) = self.type_index.get(&type_id) {
             self.type_defaults.get(ty_index).copied()

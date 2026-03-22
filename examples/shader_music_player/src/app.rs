@@ -1,6 +1,6 @@
 use makepad_widgets::*;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::audio::{self, AudioPlaybackState};
 
@@ -9,9 +9,18 @@ use crate::audio::{self, AudioPlaybackState};
 // ============================================================================
 
 const SONGS: &[(&str, &str)] = &[
-    ("Ambient Flow", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"),
-    ("Electronic Pulse", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3"),
-    ("Synth Dream", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3"),
+    (
+        "Ambient Flow",
+        "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+    ),
+    (
+        "Electronic Pulse",
+        "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
+    ),
+    (
+        "Synth Dream",
+        "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3",
+    ),
 ];
 
 // ============================================================================
@@ -21,7 +30,9 @@ const SONGS: &[(&str, &str)] = &[
 fn get_audio_state() -> Arc<AudioPlaybackState> {
     use std::sync::OnceLock;
     static AUDIO_STATE: OnceLock<Arc<AudioPlaybackState>> = OnceLock::new();
-    AUDIO_STATE.get_or_init(|| Arc::new(AudioPlaybackState::new())).clone()
+    AUDIO_STATE
+        .get_or_init(|| Arc::new(AudioPlaybackState::new()))
+        .clone()
 }
 
 // ============================================================================
@@ -859,10 +870,38 @@ pub struct DrawVisualizer {
     amplitude: f32,
     #[live]
     mode: f32,
-    #[live] b0: f32, #[live] b1: f32, #[live] b2: f32, #[live] b3: f32,
-    #[live] b4: f32, #[live] b5: f32, #[live] b6: f32, #[live] b7: f32,
-    #[live] b8: f32, #[live] b9: f32, #[live] b10: f32, #[live] b11: f32,
-    #[live] b12: f32, #[live] b13: f32, #[live] b14: f32, #[live] b15: f32,
+    #[live]
+    b0: f32,
+    #[live]
+    b1: f32,
+    #[live]
+    b2: f32,
+    #[live]
+    b3: f32,
+    #[live]
+    b4: f32,
+    #[live]
+    b5: f32,
+    #[live]
+    b6: f32,
+    #[live]
+    b7: f32,
+    #[live]
+    b8: f32,
+    #[live]
+    b9: f32,
+    #[live]
+    b10: f32,
+    #[live]
+    b11: f32,
+    #[live]
+    b12: f32,
+    #[live]
+    b13: f32,
+    #[live]
+    b14: f32,
+    #[live]
+    b15: f32,
 }
 
 // ============================================================================
@@ -951,7 +990,8 @@ const SHADER_PROMPT_PATH: &str = "/tmp/shader_music_player_prompt.txt";
 const SHADER_RESPONSE_PATH: &str = "/tmp/shader_music_player_response.splash";
 
 static PENDING_SHADER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-static SHADER_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> = std::sync::Mutex::new(None);
+static SHADER_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
 
 #[derive(Script, ScriptHook)]
 pub struct App {
@@ -1024,15 +1064,16 @@ impl MatchEvent for App {
             self.set_vis_mode(cx, 9);
         }
         // Apply effect: from button click or Enter key in TextInput (only one trigger)
-        let apply_prompt = if let Some((text, _)) = self.ui.text_input(cx, ids!(effect_input)).returned(actions) {
-            log!("[APP] Enter pressed in effect input");
-            Some(text)
-        } else if self.ui.button(cx, ids!(apply_effect_btn)).clicked(actions) {
-            log!("[APP] Apply button clicked");
-            Some(self.ui.text_input(cx, ids!(effect_input)).text())
-        } else {
-            None
-        };
+        let apply_prompt =
+            if let Some((text, _)) = self.ui.text_input(cx, ids!(effect_input)).returned(actions) {
+                log!("[APP] Enter pressed in effect input");
+                Some(text)
+            } else if self.ui.button(cx, ids!(apply_effect_btn)).clicked(actions) {
+                log!("[APP] Apply button clicked");
+                Some(self.ui.text_input(cx, ids!(effect_input)).text())
+            } else {
+                None
+            };
         if let Some(prompt) = apply_prompt {
             log!("[APP] Applying effect prompt: '{}'", prompt);
             self.apply_effect(cx, &prompt);
@@ -1050,7 +1091,10 @@ impl MatchEvent for App {
     }
 
     fn handle_audio_devices(&mut self, cx: &mut Cx, devices: &AudioDevicesEvent) {
-        log!("[APP] handle_audio_devices: {} devices", devices.descs.len());
+        log!(
+            "[APP] handle_audio_devices: {} devices",
+            devices.descs.len()
+        );
         let default_output = devices.default_output();
         if !default_output.is_empty() {
             cx.use_audio_outputs(&default_output);
@@ -1090,36 +1134,46 @@ impl MatchEvent for App {
                 None
             };
             if let Some(shader_code) = shader_code {
-                    log!("[APP] AI shader received, {} bytes", shader_code.len());
+                log!("[APP] AI shader received, {} bytes", shader_code.len());
 
-                    // Hide all predefined visualizers
-                    let vis_ids: &[&[LiveId]] = &[
-                        ids!(vis_bars), ids!(vis_circle), ids!(vis_wave),
-                        ids!(vis_fire), ids!(vis_stars),
-                        ids!(vis_ice), ids!(vis_lava), ids!(vis_desert),
-                        ids!(vis_sky), ids!(vis_cloud),
-                    ];
-                    for vid in vis_ids.iter() {
-                        if let Some(mut v) = self.ui.widget(cx, vid).borrow_mut::<Visualizer>() {
-                            v.visible = false;
-                        }
+                // Hide all predefined visualizers
+                let vis_ids: &[&[LiveId]] = &[
+                    ids!(vis_bars),
+                    ids!(vis_circle),
+                    ids!(vis_wave),
+                    ids!(vis_fire),
+                    ids!(vis_stars),
+                    ids!(vis_ice),
+                    ids!(vis_lava),
+                    ids!(vis_desert),
+                    ids!(vis_sky),
+                    ids!(vis_cloud),
+                ];
+                for vid in vis_ids.iter() {
+                    if let Some(mut v) = self.ui.widget(cx, vid).borrow_mut::<Visualizer>() {
+                        v.visible = false;
                     }
+                }
 
-                    // Show Splash container and set shader
-                    let splash_widget = self.ui.widget(cx, ids!(vis_dynamic));
-                    if let Some(mut splash) = splash_widget.borrow_mut::<Splash>() {
-                        splash.view.set_visible(cx, true);
-                        splash.set_text(cx, &shader_code);
-                        log!("[APP] Dynamic shader rendered via set_text");
-                    } else {
-                        log!("[APP] ERROR: Could not borrow Splash widget!");
-                    }
-                    self.ui.label(cx, ids!(song_label)).set_text(cx, "AI Shader Active");
-                    self.ui.redraw(cx);
+                // Show Splash container and set shader
+                let splash_widget = self.ui.widget(cx, ids!(vis_dynamic));
+                if let Some(mut splash) = splash_widget.borrow_mut::<Splash>() {
+                    splash.view.set_visible(cx, true);
+                    splash.set_text(cx, &shader_code);
+                    log!("[APP] Dynamic shader rendered via set_text");
+                } else {
+                    log!("[APP] ERROR: Could not borrow Splash widget!");
+                }
+                self.ui
+                    .label(cx, ids!(song_label))
+                    .set_text(cx, "AI Shader Active");
+                self.ui.redraw(cx);
             } else {
-                    log!("[APP] Shader signal received but no pending shader code");
-                    self.ui.label(cx, ids!(song_label)).set_text(cx, "Shader generation failed");
-                    self.ui.redraw(cx);
+                log!("[APP] Shader signal received but no pending shader code");
+                self.ui
+                    .label(cx, ids!(song_label))
+                    .set_text(cx, "Shader generation failed");
+                self.ui.redraw(cx);
             }
         }
     }
@@ -1127,19 +1181,19 @@ impl MatchEvent for App {
 
 impl App {
     fn load_song(&mut self, cx: &mut Cx, index: usize) {
-        if index >= SONGS.len() { return; }
+        if index >= SONGS.len() {
+            return;
+        }
         let (name, url) = SONGS[index];
         let state = get_audio_state();
         state.stop();
 
-        self.ui.label(cx, ids!(song_label)).set_text(cx, &format!("Loading: {}...", name));
+        self.ui
+            .label(cx, ids!(song_label))
+            .set_text(cx, &format!("Loading: {}...", name));
         self.ui.redraw(cx);
 
-        audio::download_and_decode(
-            url.to_string(),
-            state,
-            self.audio_signal.clone(),
-        );
+        audio::download_and_decode(url.to_string(), state, self.audio_signal.clone());
     }
 
     fn apply_effect(&mut self, cx: &mut Cx, prompt: &str) {
@@ -1147,8 +1201,13 @@ impl App {
         // Try predefined effects first
         if let Some(m) = match_effect_prompt(&prompt_lower) {
             self.set_vis_mode(cx, m);
-            let names = ["Bars", "Circle", "Wave", "Fire", "Stars", "Ice", "Lava", "Desert", "Sky", "CloudSea"];
-            self.ui.label(cx, ids!(song_label)).set_text(cx, &format!("Effect: {}", names[m as usize]));
+            let names = [
+                "Bars", "Circle", "Wave", "Fire", "Stars", "Ice", "Lava", "Desert", "Sky",
+                "CloudSea",
+            ];
+            self.ui
+                .label(cx, ids!(song_label))
+                .set_text(cx, &format!("Effect: {}", names[m as usize]));
             self.ui.redraw(cx);
             return;
         }
@@ -1164,7 +1223,9 @@ impl App {
                     }
                     self.waiting_for_shader = true;
                     self.shader_signal.set();
-                    self.ui.label(cx, ids!(song_label)).set_text(cx, &format!("Cached: {}", prompt));
+                    self.ui
+                        .label(cx, ids!(song_label))
+                        .set_text(cx, &format!("Cached: {}", prompt));
                     self.ui.redraw(cx);
                     return;
                 }
@@ -1187,7 +1248,9 @@ impl App {
             return;
         }
         self.waiting_for_shader = true;
-        self.ui.label(cx, ids!(song_label)).set_text(cx, &format!("AI generating: {}...", prompt));
+        self.ui
+            .label(cx, ids!(song_label))
+            .set_text(cx, &format!("AI generating: {}...", prompt));
         self.ui.redraw(cx);
 
         // Spawn a thread to poll for response file and read it
@@ -1207,7 +1270,8 @@ impl App {
                             // Store in cache
                             {
                                 let mut cache_guard = SHADER_CACHE.lock().unwrap();
-                                let cache = cache_guard.get_or_insert_with(std::collections::HashMap::new);
+                                let cache =
+                                    cache_guard.get_or_insert_with(std::collections::HashMap::new);
                                 cache.insert(prompt_for_cache, code.clone());
                                 log!("[APP] Shader cached for prompt");
                             }
@@ -1235,10 +1299,16 @@ impl App {
         log!("[APP] set_vis_mode({})", mode);
         self.vis_mode = mode;
         let vis_ids: &[&[LiveId]] = &[
-            ids!(vis_bars), ids!(vis_circle), ids!(vis_wave),
-            ids!(vis_fire), ids!(vis_stars),
-            ids!(vis_ice), ids!(vis_lava), ids!(vis_desert),
-            ids!(vis_sky), ids!(vis_cloud),
+            ids!(vis_bars),
+            ids!(vis_circle),
+            ids!(vis_wave),
+            ids!(vis_fire),
+            ids!(vis_stars),
+            ids!(vis_ice),
+            ids!(vis_lava),
+            ids!(vis_desert),
+            ids!(vis_sky),
+            ids!(vis_cloud),
         ];
         for (i, vid) in vis_ids.iter().enumerate() {
             if let Some(mut v) = self.ui.widget(cx, vid).borrow_mut::<Visualizer>() {
@@ -1254,7 +1324,12 @@ impl App {
 }
 
 fn _removed_generate_dynamic_shader(prompt: &str) -> Option<String> {
-    let pixel_fn = if prompt.contains("ice") || prompt.contains("冰") || prompt.contains("frost") || prompt.contains("crystal") || prompt.contains("冻") {
+    let pixel_fn = if prompt.contains("ice")
+        || prompt.contains("冰")
+        || prompt.contains("frost")
+        || prompt.contains("crystal")
+        || prompt.contains("冻")
+    {
         // Ice / Crystal shader
         r#"pixel: fn() {
                 let uv = self.pos
@@ -1293,7 +1368,10 @@ fn _removed_generate_dynamic_shader(prompt: &str) -> Option<String> {
 
                 return Pal.premul(vec4(r * v, g * v, b * v, 1.0))
             }"#
-    } else if prompt.contains("aurora") || prompt.contains("极光") || prompt.contains("northern light") {
+    } else if prompt.contains("aurora")
+        || prompt.contains("极光")
+        || prompt.contains("northern light")
+    {
         // Aurora Borealis shader
         r#"pixel: fn() {
                 let uv = self.pos
@@ -1329,7 +1407,11 @@ fn _removed_generate_dynamic_shader(prompt: &str) -> Option<String> {
                     1.0
                 ))
             }"#
-    } else if prompt.contains("ocean") || prompt.contains("海") || prompt.contains("water") || prompt.contains("水") {
+    } else if prompt.contains("ocean")
+        || prompt.contains("海")
+        || prompt.contains("water")
+        || prompt.contains("水")
+    {
         // Ocean waves shader
         r#"pixel: fn() {
                 let uv = self.pos
@@ -1367,7 +1449,11 @@ fn _removed_generate_dynamic_shader(prompt: &str) -> Option<String> {
                     1.0
                 ))
             }"#
-    } else if prompt.contains("neon") || prompt.contains("霓虹") || prompt.contains("cyber") || prompt.contains("赛博") {
+    } else if prompt.contains("neon")
+        || prompt.contains("霓虹")
+        || prompt.contains("cyber")
+        || prompt.contains("赛博")
+    {
         // Neon / Cyberpunk shader
         r#"pixel: fn() {
                 let uv = self.pos
@@ -1394,7 +1480,13 @@ fn _removed_generate_dynamic_shader(prompt: &str) -> Option<String> {
                     1.0
                 ))
             }"#
-    } else if prompt.contains("grass") || prompt.contains("prairie") || prompt.contains("草") || prompt.contains("原") || prompt.contains("meadow") || prompt.contains("field") {
+    } else if prompt.contains("grass")
+        || prompt.contains("prairie")
+        || prompt.contains("草")
+        || prompt.contains("原")
+        || prompt.contains("meadow")
+        || prompt.contains("field")
+    {
         // Grassland / Prairie shader
         r#"pixel: fn() {
                 let uv = self.pos
@@ -1473,61 +1565,91 @@ fn _removed_generate_dynamic_shader(prompt: &str) -> Option<String> {
 /// Match user's effect prompt to a visualization mode
 fn match_effect_prompt(prompt: &str) -> Option<u8> {
     // Ice/crystal keywords
-    if prompt.contains("ice") || prompt.contains("frost") || prompt.contains("crystal")
-        || prompt.contains("冰") || prompt.contains("霜") || prompt.contains("冻") || prompt.contains("水晶")
+    if prompt.contains("ice")
+        || prompt.contains("frost")
+        || prompt.contains("crystal")
+        || prompt.contains("冰")
+        || prompt.contains("霜")
+        || prompt.contains("冻")
+        || prompt.contains("水晶")
     {
         return Some(5);
     }
     // Lava/magma keywords
-    if prompt.contains("lava") || prompt.contains("magma") || prompt.contains("volcano")
-        || prompt.contains("岩浆") || prompt.contains("熔岩") || prompt.contains("火山")
+    if prompt.contains("lava")
+        || prompt.contains("magma")
+        || prompt.contains("volcano")
+        || prompt.contains("岩浆")
+        || prompt.contains("熔岩")
+        || prompt.contains("火山")
     {
         return Some(6);
     }
     // Desert keywords
-    if prompt.contains("desert") || prompt.contains("sand") || prompt.contains("dune")
-        || prompt.contains("沙漠") || prompt.contains("沙丘") || prompt.contains("荒漠")
+    if prompt.contains("desert")
+        || prompt.contains("sand")
+        || prompt.contains("dune")
+        || prompt.contains("沙漠")
+        || prompt.contains("沙丘")
+        || prompt.contains("荒漠")
     {
         return Some(7);
     }
     // Sky keywords (before cloud sea, more specific)
-    if prompt.contains("sky") || prompt.contains("蓝天") || prompt.contains("天空")
-    {
+    if prompt.contains("sky") || prompt.contains("蓝天") || prompt.contains("天空") {
         return Some(8);
     }
     // Cloud sea keywords
-    if prompt.contains("cloud") || prompt.contains("云海") || prompt.contains("云")
-    {
+    if prompt.contains("cloud") || prompt.contains("云海") || prompt.contains("云") {
         return Some(9);
     }
     // Fire keywords
-    if prompt.contains("fire") || prompt.contains("flame") || prompt.contains("burn")
-        || prompt.contains("火") || prompt.contains("焰") || prompt.contains("燃")
+    if prompt.contains("fire")
+        || prompt.contains("flame")
+        || prompt.contains("burn")
+        || prompt.contains("火")
+        || prompt.contains("焰")
+        || prompt.contains("燃")
     {
         return Some(3);
     }
     // Stars/space keywords
-    if prompt.contains("star") || prompt.contains("space") || prompt.contains("galaxy")
-        || prompt.contains("nebula") || prompt.contains("cosmos")
-        || prompt.contains("星") || prompt.contains("宇宙") || prompt.contains("银河")
+    if prompt.contains("star")
+        || prompt.contains("space")
+        || prompt.contains("galaxy")
+        || prompt.contains("nebula")
+        || prompt.contains("cosmos")
+        || prompt.contains("星")
+        || prompt.contains("宇宙")
+        || prompt.contains("银河")
     {
         return Some(4);
     }
     // Wave/particle keywords
-    if prompt.contains("wave") || prompt.contains("particle")
-        || prompt.contains("波") || prompt.contains("粒子")
+    if prompt.contains("wave")
+        || prompt.contains("particle")
+        || prompt.contains("波")
+        || prompt.contains("粒子")
     {
         return Some(2);
     }
     // Circle/ring keywords
-    if prompt.contains("circle") || prompt.contains("ring") || prompt.contains("radar")
-        || prompt.contains("环") || prompt.contains("圆") || prompt.contains("雷达")
+    if prompt.contains("circle")
+        || prompt.contains("ring")
+        || prompt.contains("radar")
+        || prompt.contains("环")
+        || prompt.contains("圆")
+        || prompt.contains("雷达")
     {
         return Some(1);
     }
     // Bars/spectrum keywords
-    if prompt.contains("bar") || prompt.contains("spectrum") || prompt.contains("equalizer")
-        || prompt.contains("柱") || prompt.contains("频谱") || prompt.contains("均衡")
+    if prompt.contains("bar")
+        || prompt.contains("spectrum")
+        || prompt.contains("equalizer")
+        || prompt.contains("柱")
+        || prompt.contains("频谱")
+        || prompt.contains("均衡")
     {
         return Some(0);
     }

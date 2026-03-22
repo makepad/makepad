@@ -1,4 +1,4 @@
-let state = { elapsed: 75161 }
+let state = { elapsed: 27365 }
 
 fn fmt_elapsed() {
     let t = state.elapsed
@@ -23,7 +23,7 @@ SolidView{width: Fill height: Fit draw_bg.color: #x0c0c18 flow: Down padding: In
     View{width: Fill height: Fit flow: Right align: Align{y: 0.5}
         Label{text: "Claude Code Monitor" draw_text.color: #xeeeeff draw_text.text_style.font_size: 20}
         Filler{}
-        Label{text: "gstack-rs" draw_text.color: #x66ffaa draw_text.text_style.font_size: 11}
+        Label{text: "rustcoach" draw_text.color: #x66ffaa draw_text.text_style.font_size: 11}
         View{width: 12}
         Label{text: "claude-opus-4-6[1m]" draw_text.color: #xcc66ff draw_text.text_style.font_size: 11}
     }
@@ -31,19 +31,19 @@ SolidView{width: Fill height: Fit draw_bg.color: #x0c0c18 flow: Down padding: In
     View{width: Fill height: Fit flow: Right spacing: 12
         RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 16. right: 16. top: 14. bottom: 14.} flow: Down spacing: 4
             Label{text: "Input" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
-            Label{text: "32.9K" draw_text.color: #xcc66ff draw_text.text_style.font_size: 24}
+            Label{text: "66.2K" draw_text.color: #xcc66ff draw_text.text_style.font_size: 24}
         }
         RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 16. right: 16. top: 14. bottom: 14.} flow: Down spacing: 4
             Label{text: "Output" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
-            Label{text: "319.3K" draw_text.color: #x66aaff draw_text.text_style.font_size: 24}
+            Label{text: "75.3K" draw_text.color: #x66aaff draw_text.text_style.font_size: 24}
         }
         RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 16. right: 16. top: 14. bottom: 14.} flow: Down spacing: 4
             Label{text: "Cache Read" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
-            Label{text: "655.5K" draw_text.color: #x66ffaa draw_text.text_style.font_size: 24}
+            Label{text: "188.9K" draw_text.color: #x66ffaa draw_text.text_style.font_size: 24}
         }
         RoundedView{width: Fill height: Fit draw_bg.color: #x161628 draw_bg.radius: 8. padding: Inset{left: 16. right: 16. top: 14. bottom: 14.} flow: Down spacing: 4
             Label{text: "Cache Write" draw_text.color: #x888899 draw_text.text_style.font_size: 9}
-            Label{text: "174" draw_text.color: #xffaa66 draw_text.text_style.font_size: 24}
+            Label{text: "427" draw_text.color: #xffaa66 draw_text.text_style.font_size: 24}
         }
     }
 
@@ -51,11 +51,11 @@ SolidView{width: Fill height: Fit draw_bg.color: #x0c0c18 flow: Down padding: In
         View{width: Fill height: Fit flow: Right align: Align{y: 0.5}
             Label{text: "Context Window" draw_text.color: #xaaaacc draw_text.text_style.font_size: 11}
             Filler{}
-            Label{text: "688.4K / 1M  (66%)" draw_text.color: #x888899 draw_text.text_style.font_size: 10}
+            Label{text: "255.1K / 1M  (19%)" draw_text.color: #x888899 draw_text.text_style.font_size: 10}
         }
         View{width: Fill height: 8 flow: Overlay
             RoundedView{width: Fill height: Fill draw_bg.color: #x222233 draw_bg.radius: 4.}
-            RoundedView{width: 264 height: Fill draw_bg.color: #xffaa66 draw_bg.radius: 4.}
+            RoundedView{width: 76 height: Fill draw_bg.color: #x3366aa draw_bg.radius: 4.}
         }
     }
 
@@ -64,20 +64,20 @@ SolidView{width: Fill height: Fit draw_bg.color: #x0c0c18 flow: Down padding: In
         View{width: Fill height: Fit flow: Right spacing: 24
             View{width: Fit height: Fit flow: Down spacing: 2
                 Label{text: "Duration" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
-                dur_val := Label{text: "20:52:41" draw_text.color: #xeeeeff draw_text.text_style.font_size: 20}
+                dur_val := Label{text: "07:36:05" draw_text.color: #xeeeeff draw_text.text_style.font_size: 20}
             }
             View{width: Fit height: Fit flow: Down spacing: 2
                 Label{text: "Cost" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
-                Label{text: "$137.21" draw_text.color: #x66ffaa draw_text.text_style.font_size: 20}
+                Label{text: "$9.92" draw_text.color: #x66ffaa draw_text.text_style.font_size: 20}
             }
             View{width: Fit height: Fit flow: Down spacing: 2
                 Label{text: "Lines +/-" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
-                Label{text: "+2477 / -827" draw_text.color: #xffaa66 draw_text.text_style.font_size: 20}
+                Label{text: "+616 / -146" draw_text.color: #xffaa66 draw_text.text_style.font_size: 20}
             }
             Filler{}
             View{width: Fit height: Fit flow: Down spacing: 2
                 Label{text: "Rate (5h/7d)" draw_text.color: #x666688 draw_text.text_style.font_size: 9}
-                Label{text: "2% / 7%" draw_text.color: #x66aaff draw_text.text_style.font_size: 20}
+                Label{text: "28% / 12%" draw_text.color: #x66aaff draw_text.text_style.font_size: 20}
             }
         }
     }

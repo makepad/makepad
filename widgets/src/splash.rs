@@ -41,9 +41,7 @@ fn is_full_script(body: &str) -> bool {
     // Only treat as full script if it starts with scripting keywords
     // (let/fn/mod) — these can't appear inside a View{} property list.
     // Uppercase widget names (View{, SolidView{, Label{) stay in View-children mode.
-    trimmed.starts_with("let ")
-        || trimmed.starts_with("fn ")
-        || trimmed.starts_with("mod.")
+    trimmed.starts_with("let ") || trimmed.starts_with("fn ") || trimmed.starts_with("mod.")
 }
 
 impl Splash {
@@ -69,7 +67,11 @@ impl Splash {
         self.last_unique_id = unique_id;
 
         // Choose prefix based on code style
-        let prefix = if is_full_script(body) { SPLASH_PREFIX_SCRIPT } else { SPLASH_PREFIX_VIEW };
+        let prefix = if is_full_script(body) {
+            SPLASH_PREFIX_SCRIPT
+        } else {
+            SPLASH_PREFIX_VIEW
+        };
         let code = format!("{}{}", prefix, body);
 
         let script_mod = ScriptMod {
@@ -82,7 +84,15 @@ impl Splash {
             values: vec![],
         };
 
-        log!("[SPLASH] eval_body: {} bytes, prefix={}", body.len(), if is_full_script(body) { "script" } else { "view" });
+        log!(
+            "[SPLASH] eval_body: {} bytes, prefix={}",
+            body.len(),
+            if is_full_script(body) {
+                "script"
+            } else {
+                "view"
+            }
+        );
 
         let mut replaced = false;
         cx.with_vm(|vm| {
@@ -105,7 +115,9 @@ impl Splash {
     /// Call a named function defined in the Splash code's scope.
     pub fn call_fn(&mut self, cx: &mut Cx, name: LiveId) {
         let unique_id = self.last_unique_id;
-        if unique_id == 0 { return; }
+        if unique_id == 0 {
+            return;
+        }
 
         cx.with_vm(|vm| {
             // Find the body by matching the unique_id we used during eval
@@ -155,7 +167,11 @@ impl Splash {
         current.push_str(chunk);
         self.body.set(&current);
 
-        let prefix = if is_full_script(&current) { SPLASH_PREFIX_SCRIPT } else { SPLASH_PREFIX_VIEW };
+        let prefix = if is_full_script(&current) {
+            SPLASH_PREFIX_SCRIPT
+        } else {
+            SPLASH_PREFIX_VIEW
+        };
         let code = format!("{}{}", prefix, current);
 
         // Use a fixed line ID (based on self_id + current generation)

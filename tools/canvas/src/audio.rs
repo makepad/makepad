@@ -2,7 +2,7 @@ use makepad_widgets::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::spectrum::{SpectrumAnalyzer, NUM_BANDS};
+use crate::spectrum::{NUM_BANDS, SpectrumAnalyzer};
 
 // ============================================================================
 // Shared audio state singleton
@@ -11,7 +11,9 @@ use crate::spectrum::{SpectrumAnalyzer, NUM_BANDS};
 static AUDIO_STATE: OnceLock<Arc<AudioPlaybackState>> = OnceLock::new();
 
 pub fn get_audio_state() -> Arc<AudioPlaybackState> {
-    AUDIO_STATE.get_or_init(|| Arc::new(AudioPlaybackState::new())).clone()
+    AUDIO_STATE
+        .get_or_init(|| Arc::new(AudioPlaybackState::new()))
+        .clone()
 }
 
 // ============================================================================
@@ -123,7 +125,12 @@ pub fn decode_audio_bytes(data: Vec<u8>) -> Result<(Vec<f32>, u32, usize), Strin
     hint.with_extension("mp3");
 
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .map_err(|e| format!("Probe failed: {}", e))?;
 
     let mut format = probed.format;
@@ -277,7 +284,11 @@ pub fn start_audio_output(cx: &mut Cx, state: Arc<AudioPlaybackState>, signal: S
         if fft_counter >= 4 {
             fft_counter = 0;
             // Grab samples around current position for FFT
-            let fft_start = if new_cursor >= FFT_SIZE { new_cursor - FFT_SIZE } else { 0 };
+            let fft_start = if new_cursor >= FFT_SIZE {
+                new_cursor - FFT_SIZE
+            } else {
+                0
+            };
             let available = total_src_frames.saturating_sub(fft_start);
             if available >= FFT_SIZE {
                 let slice_start = fft_start * src_channels;
@@ -305,7 +316,8 @@ pub fn start_audio_output(cx: &mut Cx, state: Arc<AudioPlaybackState>, signal: S
 // ============================================================================
 
 /// In-memory cache of decoded audio: URL -> (samples, sample_rate, channels)
-static AUDIO_CACHE: Mutex<Option<std::collections::HashMap<String, (Vec<f32>, u32, usize)>>> = Mutex::new(None);
+static AUDIO_CACHE: Mutex<Option<std::collections::HashMap<String, (Vec<f32>, u32, usize)>>> =
+    Mutex::new(None);
 
 const DISK_CACHE_DIR: &str = "/tmp/canvas_audio_cache";
 
@@ -319,11 +331,7 @@ fn disk_cache_path(url: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(DISK_CACHE_DIR).join(format!("{:x}.mp3", hash))
 }
 
-pub fn download_and_decode(
-    url: String,
-    state: Arc<AudioPlaybackState>,
-    signal: SignalToUI,
-) {
+pub fn download_and_decode(url: String, state: Arc<AudioPlaybackState>, signal: SignalToUI) {
     // Check in-memory cache first
     {
         let cache_guard = AUDIO_CACHE.lock().unwrap();
@@ -374,7 +382,12 @@ pub fn download_and_decode(
         eprintln!("[AUDIO] Decoding {} bytes...", data.len());
         match decode_audio_bytes(data) {
             Ok((samples, rate, channels)) => {
-                eprintln!("[AUDIO] Decoded: {} samples, {}Hz, {} ch", samples.len(), rate, channels);
+                eprintln!(
+                    "[AUDIO] Decoded: {} samples, {}Hz, {} ch",
+                    samples.len(),
+                    rate,
+                    channels
+                );
                 // Memory cache
                 {
                     let mut cache_guard = AUDIO_CACHE.lock().unwrap();

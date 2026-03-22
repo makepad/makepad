@@ -1,4 +1,4 @@
-use rustfft::{num_complex::Complex, Fft, FftPlanner};
+use rustfft::{Fft, FftPlanner, num_complex::Complex};
 use std::sync::Arc;
 
 pub const NUM_BANDS: usize = 16;

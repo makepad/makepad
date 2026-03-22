@@ -174,7 +174,10 @@ impl StdioBridge {
     }
 
     /// Read a full HTTP request from the stream (consuming bytes).
-    async fn read_http_request(&self, mut stream: tokio::net::TcpStream) -> (String, tokio::net::TcpStream) {
+    async fn read_http_request(
+        &self,
+        mut stream: tokio::net::TcpStream,
+    ) -> (String, tokio::net::TcpStream) {
         use tokio::io::AsyncReadExt;
 
         let mut raw = Vec::with_capacity(8192);
@@ -183,22 +186,28 @@ impl StdioBridge {
         match tokio::time::timeout(
             std::time::Duration::from_secs(2),
             stream.read(&mut read_buf),
-        ).await {
-            Ok(Ok(0)) => {},
+        )
+        .await
+        {
+            Ok(Ok(0)) => {}
             Ok(Ok(n)) => raw.extend_from_slice(&read_buf[..n]),
-            _ => {},
+            _ => {}
         }
         // Subsequent reads: short timeout (data already flowing)
         loop {
             match tokio::time::timeout(
                 std::time::Duration::from_millis(50),
                 stream.read(&mut read_buf),
-            ).await {
+            )
+            .await
+            {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => raw.extend_from_slice(&read_buf[..n]),
                 _ => break,
             }
-            if raw.len() > 512 * 1024 { break; }
+            if raw.len() > 512 * 1024 {
+                break;
+            }
         }
         let request = String::from_utf8_lossy(&raw).to_string();
         (request, stream)
@@ -227,11 +236,15 @@ impl StdioBridge {
             let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             std::thread::spawn(move || {
                 while let Ok(msg) = std_rx.recv() {
-                    if tokio_tx.send(msg).is_err() { break; }
+                    if tokio_tx.send(msg).is_err() {
+                        break;
+                    }
                 }
             });
             while let Some(msg) = tokio_rx.recv().await {
-                if ws_write.send(Message::Text(msg)).await.is_err() { break; }
+                if ws_write.send(Message::Text(msg)).await.is_err() {
+                    break;
+                }
             }
         });
 
@@ -240,10 +253,14 @@ impl StdioBridge {
                 Ok(Message::Text(text)) => {
                     for line in text.split('\n') {
                         let line = line.trim();
-                        if line.is_empty() { continue; }
+                        if line.is_empty() {
+                            continue;
+                        }
                         match serde_json::from_str::<Value>(line) {
                             Ok(json) => self.handle_message(&json),
-                            Err(_) => self.push_cmd(CanvasCommand::SplashRender { code: line.to_string() }),
+                            Err(_) => self.push_cmd(CanvasCommand::SplashRender {
+                                code: line.to_string(),
+                            }),
                         }
                     }
                 }
@@ -292,7 +309,9 @@ impl StdioBridge {
                 http_response(200, r#"{"ok":true}"#)
             }
             ("POST", "/clear") => {
-                self.push_cmd(CanvasCommand::SplashRender { code: String::new() });
+                self.push_cmd(CanvasCommand::SplashRender {
+                    code: String::new(),
+                });
                 http_response(200, r#"{"ok":true}"#)
             }
             ("GET", "/event") => {
@@ -318,16 +337,16 @@ impl StdioBridge {
             }
             ("POST", "/save") => {
                 // Body is the app name. If empty, auto-extract from current splash.
-                let name = if body.is_empty() { String::new() } else { body.clone() };
+                let name = if body.is_empty() {
+                    String::new()
+                } else {
+                    body.clone()
+                };
                 self.push_cmd(CanvasCommand::SaveApp { name });
                 http_response(200, r#"{"ok":true}"#)
             }
-            ("GET", "/ping") => {
-                http_response(200, r#"{"ok":true}"#)
-            }
-            _ => {
-                http_response(404, r#"{"error":"not found"}"#)
-            }
+            ("GET", "/ping") => http_response(200, r#"{"ok":true}"#),
+            _ => http_response(404, r#"{"error":"not found"}"#),
         };
 
         // Use write_all for complete response delivery
@@ -347,7 +366,9 @@ impl StdioBridge {
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             self.event_notify.notified(),
-        ).await {
+        )
+        .await
+        {
             Ok(()) => {
                 if let Ok(mut q) = self.event_queue.lock() {
                     q.pop_front()
@@ -361,24 +382,32 @@ impl StdioBridge {
 
     fn handle_message(&self, msg: &Value) {
         if let Some(code) = msg.get("splash").and_then(|v| v.as_str()) {
-            self.push_cmd(CanvasCommand::SplashRender { code: code.to_string() });
+            self.push_cmd(CanvasCommand::SplashRender {
+                code: code.to_string(),
+            });
         } else if let Some(action) = msg.get("splash_stream").and_then(|v| v.as_str()) {
             match action {
                 "begin" => self.push_cmd(CanvasCommand::SplashStreamBegin),
                 "append" => {
                     if let Some(code) = msg.get("code").and_then(|v| v.as_str()) {
-                        self.push_cmd(CanvasCommand::SplashStreamAppend { code: code.to_string() });
+                        self.push_cmd(CanvasCommand::SplashStreamAppend {
+                            code: code.to_string(),
+                        });
                     }
                 }
                 "end" => self.push_cmd(CanvasCommand::SplashStreamEnd),
                 _ => {}
             }
         } else if let Some(code) = msg.get("eval").and_then(|v| v.as_str()) {
-            self.push_cmd(CanvasCommand::SplashEval { code: code.to_string() });
+            self.push_cmd(CanvasCommand::SplashEval {
+                code: code.to_string(),
+            });
         } else if let Some(audio) = msg.get("audio") {
             if let Some(obj) = audio.as_object() {
                 if let Some(url) = obj.get("play").and_then(|v| v.as_str()) {
-                    self.push_cmd(CanvasCommand::AudioPlay { url: url.to_string() });
+                    self.push_cmd(CanvasCommand::AudioPlay {
+                        url: url.to_string(),
+                    });
                 }
             } else if let Some(action) = audio.as_str() {
                 match action {
@@ -389,7 +418,9 @@ impl StdioBridge {
                 }
             }
         } else if msg.get("clear").and_then(|v| v.as_bool()) == Some(true) {
-            self.push_cmd(CanvasCommand::SplashRender { code: String::new() });
+            self.push_cmd(CanvasCommand::SplashRender {
+                code: String::new(),
+            });
         }
     }
 
@@ -429,6 +460,9 @@ fn http_response(status: u16, body: &str) -> String {
     };
     format!(
         "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
-        status, status_text, body.len(), body
+        status,
+        status_text,
+        body.len(),
+        body
     )
 }

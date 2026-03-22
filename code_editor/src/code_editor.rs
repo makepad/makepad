@@ -523,16 +523,16 @@ impl CodeEditor {
         // Get the normalized cursor position. To go from normalized to screen position, multiply by
         // the cell size, then shift by the viewport origin.
 
-        cx.turtle_mut().set_used(
-            session.layout().width() * self.cell_size.x + self.pad_left_top.x,
-            self.height_scale * session.layout().height() * self.cell_size.y
+        let used_width = session.layout().width() * self.cell_size.x + self.pad_left_top.x;
+        let used_height = self.height_scale * session.layout().height() * self.cell_size.y
                 + if height_is_fit || !self.empty_page_at_end {
                     0.0
                 } else {
                     self.viewport_rect.size.y
                 }
-                + self.pad_left_top.y * self.height_scale,
-        );
+                + self.pad_left_top.y * self.height_scale;
+
+        cx.turtle_mut().set_used(used_width, used_height);
 
         self.draw_cursor.end_many_instances(cx);
 

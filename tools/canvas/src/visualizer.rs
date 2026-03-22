@@ -129,10 +129,38 @@ pub struct DrawVisualizer {
     amplitude: f32,
     #[live]
     mode: f32,
-    #[live] b0: f32, #[live] b1: f32, #[live] b2: f32, #[live] b3: f32,
-    #[live] b4: f32, #[live] b5: f32, #[live] b6: f32, #[live] b7: f32,
-    #[live] b8: f32, #[live] b9: f32, #[live] b10: f32, #[live] b11: f32,
-    #[live] b12: f32, #[live] b13: f32, #[live] b14: f32, #[live] b15: f32,
+    #[live]
+    b0: f32,
+    #[live]
+    b1: f32,
+    #[live]
+    b2: f32,
+    #[live]
+    b3: f32,
+    #[live]
+    b4: f32,
+    #[live]
+    b5: f32,
+    #[live]
+    b6: f32,
+    #[live]
+    b7: f32,
+    #[live]
+    b8: f32,
+    #[live]
+    b9: f32,
+    #[live]
+    b10: f32,
+    #[live]
+    b11: f32,
+    #[live]
+    b12: f32,
+    #[live]
+    b13: f32,
+    #[live]
+    b14: f32,
+    #[live]
+    b15: f32,
 }
 
 // Visualizer Widget
@@ -169,14 +197,22 @@ impl Widget for Visualizer {
                 let state = get_audio_state();
                 self.draw_bg.amplitude = state.amplitude.get() as f32;
                 if let Ok(bands) = state.spectrum.lock() {
-                    self.draw_bg.b0 = bands[0]; self.draw_bg.b1 = bands[1];
-                    self.draw_bg.b2 = bands[2]; self.draw_bg.b3 = bands[3];
-                    self.draw_bg.b4 = bands[4]; self.draw_bg.b5 = bands[5];
-                    self.draw_bg.b6 = bands[6]; self.draw_bg.b7 = bands[7];
-                    self.draw_bg.b8 = bands[8]; self.draw_bg.b9 = bands[9];
-                    self.draw_bg.b10 = bands[10]; self.draw_bg.b11 = bands[11];
-                    self.draw_bg.b12 = bands[12]; self.draw_bg.b13 = bands[13];
-                    self.draw_bg.b14 = bands[14]; self.draw_bg.b15 = bands[15];
+                    self.draw_bg.b0 = bands[0];
+                    self.draw_bg.b1 = bands[1];
+                    self.draw_bg.b2 = bands[2];
+                    self.draw_bg.b3 = bands[3];
+                    self.draw_bg.b4 = bands[4];
+                    self.draw_bg.b5 = bands[5];
+                    self.draw_bg.b6 = bands[6];
+                    self.draw_bg.b7 = bands[7];
+                    self.draw_bg.b8 = bands[8];
+                    self.draw_bg.b9 = bands[9];
+                    self.draw_bg.b10 = bands[10];
+                    self.draw_bg.b11 = bands[11];
+                    self.draw_bg.b12 = bands[12];
+                    self.draw_bg.b13 = bands[13];
+                    self.draw_bg.b14 = bands[14];
+                    self.draw_bg.b15 = bands[15];
                 }
                 self.area.redraw(cx);
                 self.next_frame = cx.new_next_frame();
@@ -189,7 +225,9 @@ impl Widget for Visualizer {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        if !self.visible { return DrawStep::done(); }
+        if !self.visible {
+            return DrawStep::done();
+        }
         // Ensure next_frame is running (may have missed Startup if created dynamically)
         if !self.frame_started {
             self.next_frame = cx.new_next_frame();

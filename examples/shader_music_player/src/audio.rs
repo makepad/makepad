@@ -113,7 +113,12 @@ pub fn decode_audio_bytes(data: Vec<u8>) -> Result<(Vec<f32>, u32, usize), Strin
     hint.with_extension("mp3");
 
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .map_err(|e| format!("Probe failed: {}", e))?;
 
     let mut format = probed.format;
@@ -267,7 +272,11 @@ pub fn start_audio_output(cx: &mut Cx, state: Arc<AudioPlaybackState>, signal: S
         if fft_counter >= 4 {
             fft_counter = 0;
             // Grab samples around current position for FFT
-            let fft_start = if new_cursor >= FFT_SIZE { new_cursor - FFT_SIZE } else { 0 };
+            let fft_start = if new_cursor >= FFT_SIZE {
+                new_cursor - FFT_SIZE
+            } else {
+                0
+            };
             let available = total_src_frames.saturating_sub(fft_start);
             if available >= FFT_SIZE {
                 let slice_start = fft_start * src_channels;
@@ -295,13 +304,10 @@ pub fn start_audio_output(cx: &mut Cx, state: Arc<AudioPlaybackState>, signal: S
 // ============================================================================
 
 /// Cache of decoded audio: URL → (samples, sample_rate, channels)
-static AUDIO_CACHE: Mutex<Option<std::collections::HashMap<String, (Vec<f32>, u32, usize)>>> = Mutex::new(None);
+static AUDIO_CACHE: Mutex<Option<std::collections::HashMap<String, (Vec<f32>, u32, usize)>>> =
+    Mutex::new(None);
 
-pub fn download_and_decode(
-    url: String,
-    state: Arc<AudioPlaybackState>,
-    signal: SignalToUI,
-) {
+pub fn download_and_decode(url: String, state: Arc<AudioPlaybackState>, signal: SignalToUI) {
     // Check cache first
     {
         let cache_guard = AUDIO_CACHE.lock().unwrap();
@@ -324,11 +330,17 @@ pub fn download_and_decode(
                 eprintln!("[AUDIO] Downloaded {} bytes, decoding...", data.len());
                 match decode_audio_bytes(data) {
                     Ok((samples, rate, channels)) => {
-                        eprintln!("[AUDIO] Decoded: {} samples, {}Hz, {} ch", samples.len(), rate, channels);
+                        eprintln!(
+                            "[AUDIO] Decoded: {} samples, {}Hz, {} ch",
+                            samples.len(),
+                            rate,
+                            channels
+                        );
                         // Cache the decoded audio
                         {
                             let mut cache_guard = AUDIO_CACHE.lock().unwrap();
-                            let cache = cache_guard.get_or_insert_with(std::collections::HashMap::new);
+                            let cache =
+                                cache_guard.get_or_insert_with(std::collections::HashMap::new);
                             cache.insert(url.clone(), (samples.clone(), rate, channels));
                             eprintln!("[AUDIO] Cached: {}", url);
                         }
