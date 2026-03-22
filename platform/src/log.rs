@@ -2,6 +2,28 @@ use crate::cx::Cx;
 pub use crate::makepad_error_log::*;
 use makepad_studio_protocol::{AppToStudio, StudioLogItem};
 
+#[cfg(target_os = "android")]
+fn android_logcat_write(file_name: &str, line_start: u32, column_start: u32, message: &str, level: LogLevel) {
+    use std::ffi::c_int;
+    extern "C" {
+        pub fn __android_log_write(prio: c_int, tag: *const u8, text: *const u8) -> c_int;
+    }
+
+    let prio: c_int = match level {
+        LogLevel::Error | LogLevel::Panic => 6,
+        LogLevel::Warning => 5,
+        _ => 4,
+    };
+    let msg = format!(
+        "{}:{}:{} - {}\0",
+        file_name,
+        line_start + 1,
+        column_start + 1,
+        message
+    );
+    unsafe { __android_log_write(prio, "Makepad\0".as_ptr(), msg.as_ptr()) };
+}
+
 impl Cx {
     pub fn init_log() {
         let mut logger = LOG_WITH_LEVEL.write().expect("Logger lock poisoned");
@@ -37,6 +59,9 @@ pub(crate) fn log_with_level_makepad_platform(
         }
     }
 
+    #[cfg(target_os = "android")]
+    android_logcat_write(file_name, line_start, column_start, &message, level);
+
     let studio_enabled = Cx::has_studio_web_socket();
     let studio_connected = Cx::has_studio_web_socket_connected();
 
@@ -63,26 +88,6 @@ pub(crate) fn log_with_level_makepad_platform(
                 message
             );
             unsafe { NSLog(str_to_nsstring(&msg)) };
-        }
-        // if android, also log to ADB
-        #[cfg(target_os = "android")]
-        {
-            use std::ffi::c_int;
-            extern "C" {
-                pub fn __android_log_write(prio: c_int, tag: *const u8, text: *const u8) -> c_int;
-            }
-            // Android log priorities: 2=VERBOSE, 3=DEBUG, 4=INFO, 5=WARN, 6=ERROR
-            // Some devices (e.g. Motorola/MediaTek) suppress DEBUG by default.
-            let prio: c_int = match level {
-                LogLevel::Error | LogLevel::Panic => 6,
-                LogLevel::Warning => 5,
-                _ => 4,
-            };
-            let msg = format!(
-                "{}:{}:{} - {}\0",
-                file_name, line_start, column_start, message
-            );
-            unsafe { __android_log_write(prio, "Makepad\0".as_ptr(), msg.as_ptr()) };
         }
         #[cfg(target_env = "ohos")]
         {

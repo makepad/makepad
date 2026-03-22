@@ -86,6 +86,10 @@ pub struct XrRoot {
     xr_hit_matrix: Mat4f,
     #[rust]
     xr_view_matrix_initialized: bool,
+    #[rust]
+    xr_runtime_active: bool,
+    #[rust]
+    xr_draw_logged: bool,
     #[live(vec2(960.0, 1200.0))]
     xr_panel_pixels: Vec2d,
     #[live(3.0)]
@@ -107,6 +111,10 @@ pub struct XrRoot {
 }
 
 impl XrRoot {
+    fn xr_is_active(&self, cx: &Cx) -> bool {
+        cx.in_xr_mode() && self.xr_runtime_active
+    }
+
     fn options(&self) -> XrRootOptions {
         XrRootOptions {
             depth_mesh: self.depth_mesh,
@@ -295,9 +303,9 @@ impl XrRoot {
             return;
         }
 
-        let in_xr_mode = cx.in_xr_mode();
-        let control_widget = self.active_control_widget(in_xr_mode);
-        let control_id = self.active_control_id(in_xr_mode);
+        let xr_is_active = self.xr_is_active(cx);
+        let control_widget = self.active_control_widget(xr_is_active);
+        let control_id = self.active_control_id(xr_is_active);
         let scene_id = self.active_scene_id();
         let scene_widget = self.active_scene_widget();
 
@@ -467,23 +475,39 @@ impl Widget for XrRoot {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.sync_pending {
-            self.try_sync_hosts(cx);
-        }
-
         if !cx.in_xr_mode() {
+            self.xr_runtime_active = false;
             self.xr_view_matrix_initialized = false;
             self.xr_visible = true;
+            self.xr_draw_logged = false;
+        }
+
+        if matches!(event, Event::XrUpdate(_)) && !self.xr_runtime_active {
+            self.xr_runtime_active = true;
+            self.sync_pending = true;
         }
 
         if let Event::Draw(e) = event {
+            if e.xr_state.is_some() && !self.xr_runtime_active {
+                self.xr_runtime_active = true;
+                self.sync_pending = true;
+            }
             self.try_sync_hosts(cx);
-            if !cx.in_xr_mode() {
+            if !self.xr_is_active(cx) {
                 self.view.handle_event(cx, event, scope);
                 return;
             }
             if e.xr_state.is_none() {
                 return;
+            }
+            if !self.xr_draw_logged {
+                self.xr_draw_logged = true;
+                crate::log!(
+                    "XrRoot XR draw active scene={:?} control_2d={:?} control_xr={:?}",
+                    self.active_scene_id(),
+                    self.control_2d,
+                    self.control_xr
+                );
             }
 
             let mut cx_draw = CxDraw::new(cx, e);
@@ -504,9 +528,12 @@ impl Widget for XrRoot {
             return;
         }
 
+        if self.sync_pending {
+            self.try_sync_hosts(cx);
+        }
         self.view.handle_event(cx, event, scope);
 
-        if !cx.in_xr_mode() {
+        if !self.xr_is_active(cx) {
             return;
         }
 

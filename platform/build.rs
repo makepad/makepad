@@ -74,6 +74,7 @@ pub static CUSTOM_ICON_ICO: &'static [u8] = {};\n",
                 "quest" => {
                     println!("cargo:rustc-cfg=quest");
                     println!("cargo:rustc-cfg=use_gles_3");
+                    println!("cargo:rustc-cfg=use_vulkan");
                 }
                 "apple_bundle" => println!("cargo:rustc-cfg=apple_bundle"),
                 "ohos_sim" => println!("cargo:rustc-cfg=ohos_sim"),
