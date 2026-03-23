@@ -1,4 +1,4 @@
-pub use ::makepad_widgets;
+pub use makepad_widgets;
 
 use makepad_widgets::*;
 use makepad_xr::*;
@@ -25,38 +25,53 @@ script_mod! {
         color: #x2b3643
     }
 
-    startup() do #(App::script_component(vm)){
-        ui: Root{
-            xr_root := XrRoot{
-                window.inner_size: vec2(1400, 900)
-                pass.clear_color: #x0b1118
-                control_2d: @block_ctrl
-                control_xr: @block_ctrl
-                scene: @tree_scene
-                env_cube: true
-                depth_mesh: false
+    let TestPedestal = Cube{
+        body: mod.widgets.XrBodyKind.Fixed
+        size: vec3(0.28, 0.18, 0.28)
+        corner_radius: 0.026
+        roughness: 0.18
+        metallic: 0.04
+    }
 
-                block_ctrl := View{
+    startup() do #(App::script_component(vm)){
+        ui:  XrRoot{
+            window.inner_size: vec2(1400, 900)
+            pass.clear_color: #x0b1118
+            camera_fov_y: 52.0
+            camera_distance: 2.8
+            env.gravity: 9.8
+            env.env_cube: true
+            env.depth_mesh: false
+
+            block_ctrl := XrView{
+                RoundedView{
                     width: Fill
                     height: Fit
                     flow: Down
-                    padding: 10
+                    padding: 16
                     spacing: 12
+                    draw_bg.color: #x162331ee
+                    draw_bg.border_radius: 18.0
 
                     title := H1{
-                        text: "XR Blocks"
+                        text: "XR Simulator"
                         draw_text.color: #xeff7ff
                     }
 
                     detail := Label{
                         width: Fill
-                        text: "Pick a scene directly. Reset rebuilds only the active scene."
+                        text: "Drag the background to orbit the fake headset camera around the 3D scene."
                         draw_text.color: #xb8c8d8
                     }
 
                     reset := Button{
                         width: Fill
                         text: "Reset Scene"
+                    }
+
+                    show_test := Button{
+                        width: Fill
+                        text: "XR Test"
                     }
 
                     show_blocks := Button{
@@ -81,17 +96,84 @@ script_mod! {
 
                     depth_toggle := Button{
                         width: Fill
-                        text: "Toggle Depth Mesh"
+                        text: "Show Depth Mesh"
                     }
                 }
-
-                block_scene := XrScene{
-                    physics: XrPhysics{gravity: 9.8}
-                    xr_anchor_to_head: true
-                    camera_fov_y: 26.0
-                    camera_distance: 3.6
-                    camera_aspect_ratio_tweak: 1.0
-                    preview_aspect_fill: true
+            }
+                
+            xr_test_scene := XrNode{
+                visible: false
+                on_render: ||{
+                    Cube{
+                        body: mod.widgets.XrBodyKind.Fixed
+                        size: vec3(1.65, 0.08, 1.18)
+                        corner_radius: 0.04
+                        roughness: 0.92
+                        metallic: 0.0
+                        color: #x243444
+                        pos: vec3(0.42, -0.22, -0.72)
+                    }
+        
+                    Cube{
+                        body: mod.widgets.XrBodyKind.Fixed
+                        size: vec3(0.18, 0.72, 1.16)
+                        corner_radius: 0.04
+                        roughness: 0.88
+                        metallic: 0.0
+                        color: #x1c2733
+                        pos: vec3(1.20, 0.10, -0.72)
+                    }
+        
+                    Cube{
+                        body: mod.widgets.XrBodyKind.Fixed
+                        size: vec3(1.62, 0.72, 0.18)
+                        corner_radius: 0.04
+                        roughness: 0.88
+                        metallic: 0.0
+                        color: #x1a2430
+                        pos: vec3(0.42, 0.10, -1.22)
+                    }
+        
+                    TestPedestal{
+                        pos: vec3(0.05, -0.05, -0.76)
+                        color: #xff6a4d
+                    }
+        
+                    TestPedestal{
+                        pos: vec3(0.42, 0.02, -0.76)
+                        color: #x58d68d
+                        size: vec3(0.24, 0.32, 0.24)
+                    }
+        
+                    TestPedestal{
+                        pos: vec3(0.78, -0.01, -0.76)
+                        color: #x68a8ff
+                        size: vec3(0.24, 0.26, 0.24)
+                    }
+        
+                    Cube{
+                        body: mod.widgets.XrBodyKind.Fixed
+                        size: vec3(0.24, 0.24, 0.24)
+                        corner_radius: 0.024
+                        roughness: 0.12
+                        metallic: 0.02
+                        color: #xffff7a
+                        pos: vec3(0.42, 0.34, -0.76)
+                    }
+        
+                    Cube{
+                        body: mod.widgets.XrBodyKind.Fixed
+                        size: vec3(0.16, 0.82, 0.16)
+                        corner_radius: 0.03
+                        roughness: 0.22
+                        metallic: 0.04
+                        color: #xff8a54
+                        pos: vec3(0.42, 0.34, -1.02)
+                    }
+                }
+    
+                block_scene := XrNode{
+                    visible: true
                     on_render: ||{
                         Platform{pos: vec3(0.05, -0.06, -0.10)}
                         for row in 0..8 {
@@ -118,13 +200,9 @@ script_mod! {
                         }
                     }
                 }
-
-                helmet_scene := XrScene{
-                    physics: XrPhysics{gravity: 9.8}
-                    xr_anchor_to_head: true
-                    camera_fov_y: 26.0
-                    camera_distance: 4.0
-                    preview_aspect_fill: true
+    
+                helmet_scene := XrNode{
+                    visible: false
                     on_render: ||{
                         Platform{pos: vec3(0.05, -0.06, -0.10)}
                         for row in 0..1 {
@@ -145,14 +223,9 @@ script_mod! {
                         }
                     }
                 }
-
-                tree_scene := XrScene{
-                    physics: XrPhysics{gravity: 9.8}
-                    xr_anchor_to_head: true
-                    camera_fov_y: 24.0
-                    camera_distance: 6.2
-                    camera_aspect_ratio_tweak: 1.0
-                    preview_aspect_fill: true
+    
+                tree_scene := XrNode{
+                    visible: false
                     on_render: ||{
                         Platform{pos: vec3(0.05, -0.06, -0.10)}
                         fractal_tree := FractalTree{
@@ -172,14 +245,9 @@ script_mod! {
                         }
                     }
                 }
-
-                refraction_scene := XrScene{
-                    physics: XrPhysics{gravity: 9.8}
-                    xr_anchor_to_head: true
-                    camera_fov_y: 26.0
-                    camera_distance: 3.6
-                    camera_aspect_ratio_tweak: 1.0
-                    preview_aspect_fill: true
+    
+                refraction_scene := XrNode{
+                    visible: false
                     on_render: ||{
                         Platform{pos: vec3(0.05, -0.06, -0.10)}
                         for row in 0..4 {
@@ -259,6 +327,10 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.button_clicked(cx, actions, live_id!(reset)) {
             let _ = self.call_xr_root(cx, live_id!(render_scene));
+        }
+
+        if self.button_clicked(cx, actions, live_id!(show_test)) {
+            let _ = self.select_scene(cx, live_id!(xr_test_scene));
         }
 
         if self.button_clicked(cx, actions, live_id!(show_blocks)) {

@@ -2,11 +2,11 @@ use crate::makepad_draw::*;
 
 pub use crate::makepad_draw::SceneState3D;
 
-pub fn scene_state_from_cx(cx: &mut CxDraw) -> Option<SceneState3D> {
+pub fn scene_state_from_cx(cx: &mut Cx3d) -> Option<SceneState3D> {
     cx.scene_state_3d()
 }
 
-pub fn scene_node_world_transform_from_cx(cx: &mut CxDraw) -> Mat4f {
+pub fn scene_node_world_transform_from_cx(cx: &mut Cx3d) -> Mat4f {
     cx.scene_world_transform_3d()
 }
 
@@ -77,16 +77,16 @@ pub fn ray_from_scene_viewport(scene: &SceneState3D, abs: DVec2) -> Option<(Vec3
     Some((scene.camera_pos, dir.normalize()))
 }
 
-pub fn register_draw_call_anchor(cx: &mut CxDraw, area: Area, world_pos: Vec3f) {
+pub fn register_draw_call_anchor(cx: &mut Cx3d, area: Area, world_pos: Vec3f) {
     cx.register_scene_draw_call_anchor_3d(area, world_pos);
 }
 
-pub fn register_last_draw_call_anchor(cx: &mut CxDraw, world_pos: Vec3f) {
+pub fn register_last_draw_call_anchor(cx: &mut Cx3d, world_pos: Vec3f) {
     let Some(draw_list_id) = cx.get_current_draw_list_id() else {
         return;
     };
     let draw_item_id = {
-        let draw_list = &cx.cx.draw_lists[draw_list_id];
+        let draw_list = &cx.draw_lists[draw_list_id];
         let len = draw_list.draw_items.len();
         if len == 0 {
             return;
@@ -96,7 +96,7 @@ pub fn register_last_draw_call_anchor(cx: &mut CxDraw, world_pos: Vec3f) {
     cx.register_last_scene_draw_call_anchor_3d(draw_list_id, draw_item_id, world_pos);
 }
 
-pub fn apply_scene_to_draw_cube(draw: &mut DrawCube, cx: &mut CxDraw) -> Option<SceneState3D> {
+pub fn apply_scene_to_draw_cube(draw: &mut DrawCube, cx: &mut Cx3d) -> Option<SceneState3D> {
     let scene = cx.scene_state_3d()?;
     draw.set_use_pass_camera(scene.use_pass_camera);
     draw.set_camera_state(scene.view, scene.projection);
@@ -104,7 +104,7 @@ pub fn apply_scene_to_draw_cube(draw: &mut DrawCube, cx: &mut CxDraw) -> Option<
     Some(scene)
 }
 
-pub fn apply_scene_to_draw_pbr(draw: &mut DrawPbr, cx: &mut CxDraw) -> Option<SceneState3D> {
+pub fn apply_scene_to_draw_pbr(draw: &mut DrawPbr, cx: &mut Cx3d) -> Option<SceneState3D> {
     let scene = cx.scene_state_3d()?;
     draw.set_use_pass_camera(scene.use_pass_camera);
     draw.set_camera_state(scene.view, scene.projection, scene.camera_pos);

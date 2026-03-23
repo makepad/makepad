@@ -122,7 +122,7 @@ impl Gltf {
         ResourceResolve::Missing
     }
 
-    fn ensure_env_loaded(&mut self, cx: &mut Cx2d) {
+    fn ensure_env_loaded(&mut self, cx: &mut CxDraw) {
         let Some(handle_ref) = self.env_src.as_ref() else {
             return;
         };
@@ -152,7 +152,7 @@ impl Gltf {
         }
     }
 
-    fn ensure_renderer_loaded(&mut self, cx: &mut Cx2d) {
+    fn ensure_renderer_loaded(&mut self, cx: &mut CxDraw) {
         let Some(handle_ref) = self.src.as_ref() else {
             return;
         };
@@ -200,19 +200,15 @@ impl Widget for Gltf {
         let object_world = xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
         let world = Mat4f::mul(&object_world, &self.mesh_transform());
 
-        {
-            let cx2d = &mut Cx2d::new(cx.cx);
-            self.ensure_env_loaded(cx2d);
-            self.ensure_renderer_loaded(cx2d);
-            if let Some(renderer) = self.renderer.as_mut() {
-                let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr, cx2d);
-                let _ = renderer.draw_with_transform_anchors(
-                    &mut self.draw_pbr,
-                    cx2d,
-                    world,
-                    |cx, area, world_pos| register_draw_call_anchor(cx, area, world_pos),
-                );
-            }
+        let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr, cx);
+        self.ensure_env_loaded(cx);
+        self.ensure_renderer_loaded(cx);
+        if let Some(renderer) = self.renderer.as_mut() {
+            let _ = renderer.draw_with_transform(
+                &mut self.draw_pbr,
+                cx,
+                world,
+            );
         }
 
         self.node.draw_3d(cx, scope)
