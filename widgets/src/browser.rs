@@ -427,7 +427,13 @@ impl Browser {
         }
     }
 
-    fn ensure_browser(&mut self, cx: &mut Cx2d, width: usize, height: usize, scale_factor: f32) {
+    fn ensure_browser(
+        &mut self,
+        _cx: &mut Cx2d,
+        width: usize,
+        height: usize,
+        scale_factor: f32,
+    ) {
         if self.browser.is_none() && self.init_error.is_none() {
             match makepad_cef::Browser::new(self.url.as_ref(), width, height, scale_factor) {
                 Ok(browser) => {

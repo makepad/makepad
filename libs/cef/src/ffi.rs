@@ -5,7 +5,6 @@
 use std::ffi::{c_char, c_void};
 use std::os::raw::c_int;
 
-pub type cef_command_line_t = c_void;
 pub type cef_dictionary_value_t = c_void;
 pub type cef_preference_registrar_t = c_void;
 pub type cef_preferences_type_t = c_int;
@@ -16,6 +15,8 @@ pub type cef_resource_bundle_handler_t = c_void;
 pub type cef_scheme_registrar_t = c_void;
 pub type cef_window_handle_t = *mut c_void;
 pub type cef_string_userfree_t = *mut cef_string_t;
+pub type cef_string_list_t = *mut c_void;
+pub type cef_string_map_t = *mut c_void;
 pub type cef_accessibility_handler_t = c_void;
 pub type cef_color_t = u32;
 pub type cef_drag_data_t = c_void;
@@ -81,6 +82,97 @@ pub struct cef_base_ref_counted_t {
     pub has_one_ref: Option<unsafe extern "system" fn(self_: *mut cef_base_ref_counted_t) -> c_int>,
     pub has_at_least_one_ref:
         Option<unsafe extern "system" fn(self_: *mut cef_base_ref_counted_t) -> c_int>,
+}
+
+#[repr(C)]
+pub struct cef_command_line_t {
+    pub base: cef_base_ref_counted_t,
+    pub is_valid: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> c_int>,
+    pub is_read_only: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> c_int>,
+    pub copy: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> *mut cef_command_line_t>,
+    pub init_from_argv: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            argc: c_int,
+            argv: *const *const c_char,
+        ),
+    >,
+    pub init_from_string: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            command_line: *const cef_string_t,
+        ),
+    >,
+    pub reset: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t)>,
+    pub get_argv: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            argv: cef_string_list_t,
+        ),
+    >,
+    pub get_command_line_string: Option<
+        unsafe extern "system" fn(self_: *mut cef_command_line_t) -> cef_string_userfree_t,
+    >,
+    pub get_program: Option<
+        unsafe extern "system" fn(self_: *mut cef_command_line_t) -> cef_string_userfree_t,
+    >,
+    pub set_program: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            program: *const cef_string_t,
+        ),
+    >,
+    pub has_switches: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> c_int>,
+    pub has_switch: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            name: *const cef_string_t,
+        ) -> c_int,
+    >,
+    pub get_switch_value: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            name: *const cef_string_t,
+        ) -> cef_string_userfree_t,
+    >,
+    pub get_switches: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            switches: cef_string_map_t,
+        ),
+    >,
+    pub append_switch: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            name: *const cef_string_t,
+        ),
+    >,
+    pub append_switch_with_value: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            name: *const cef_string_t,
+            value: *const cef_string_t,
+        ),
+    >,
+    pub has_arguments: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> c_int>,
+    pub get_arguments: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            arguments: cef_string_list_t,
+        ),
+    >,
+    pub append_argument: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            argument: *const cef_string_t,
+        ),
+    >,
+    pub prepend_wrapper: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_command_line_t,
+            wrapper: *const cef_string_t,
+        ),
+    >,
 }
 
 #[repr(C)]
