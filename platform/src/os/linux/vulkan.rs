@@ -1882,7 +1882,9 @@ impl CxVulkan {
         {
             let pass = &mut cx.passes[draw_pass_id];
             pass.paint_dirty = false;
-            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            if !pass.keep_camera_matrix {
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            }
             pass.set_dpi_factor(dpi_factor);
         }
 
@@ -2436,7 +2438,9 @@ impl CxVulkan {
         {
             let pass = &mut cx.passes[draw_pass_id];
             pass.paint_dirty = false;
-            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            if !pass.keep_camera_matrix {
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            }
             pass.set_dpi_factor(dpi_factor);
         }
 

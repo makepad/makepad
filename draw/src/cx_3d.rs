@@ -3,13 +3,14 @@ use {
         cx_draw::CxDraw,
         makepad_math::{Mat4f, Vec3f},
         makepad_platform::{Area, DrawListId},
-        scene_3d::{SceneDrawCallAnchor, SceneScope3D, SceneState3D},
+        scene_3d::{Cx3dState, SceneDrawCallAnchor, SceneScope3D, SceneState3D},
     },
     std::{ops::Deref, ops::DerefMut},
 };
 
 pub struct Cx3d<'a, 'b> {
     pub cx: &'b mut CxDraw<'a>,
+    scene_3d: Cx3dState,
 }
 
 impl<'a, 'b> Deref for Cx3d<'a, 'b> {
@@ -26,23 +27,26 @@ impl<'a, 'b> DerefMut for Cx3d<'a, 'b> {
 
 impl<'a, 'b> Cx3d<'a, 'b> {
     pub fn new(cx: &'b mut CxDraw<'a>) -> Self {
-        Self { cx }
+        Self {
+            cx,
+            scene_3d: Cx3dState::default(),
+        }
     }
 
     pub fn scene_3d(&self) -> Option<&SceneScope3D> {
-        self.cx.scene_3d.scene_scope.as_ref()
+        self.scene_3d.scene_scope.as_ref()
     }
 
     pub fn scene_3d_mut(&mut self) -> Option<&mut SceneScope3D> {
-        self.cx.scene_3d.scene_scope.as_mut()
+        self.scene_3d.scene_scope.as_mut()
     }
 
     pub fn begin_scene_3d(&mut self, scene: SceneState3D) {
-        self.cx.scene_3d.scene_scope = Some(SceneScope3D::new(scene));
+        self.scene_3d.scene_scope = Some(SceneScope3D::new(scene));
     }
 
     pub fn end_scene_3d(&mut self) {
-        self.cx.scene_3d.scene_scope = None;
+        self.scene_3d.scene_scope = None;
     }
 
     pub fn scene_state_3d(&self) -> Option<SceneState3D> {

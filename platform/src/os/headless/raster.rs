@@ -633,7 +633,9 @@ impl Cx {
                     let height = (size.y * dpi_factor).round().max(1.0) as usize;
 
                     // Set up pass uniforms
-                    self.passes[*draw_pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size);
+                    if !self.passes[*draw_pass_id].keep_camera_matrix {
+                        self.passes[*draw_pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size);
+                    }
                     self.passes[*draw_pass_id].set_dpi_factor(dpi_factor);
                     self.passes[*draw_pass_id].set_time(time as f32);
 

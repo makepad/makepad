@@ -612,7 +612,9 @@ impl Cx {
             )
             .unwrap();
 
-        self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        if !self.passes[draw_pass_id].keep_camera_matrix {
+            self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        }
 
         self.passes[draw_pass_id].paint_dirty = false;
 
