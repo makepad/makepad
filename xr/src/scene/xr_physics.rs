@@ -1,7 +1,5 @@
+use super::xr_depth::{DepthQuerySurfaceCollider, DepthQuerySurfaceShape, DepthQuerySurfaceTarget};
 use super::*;
-use super::xr_depth::{
-    DepthQuerySurfaceCollider, DepthQuerySurfaceShape, DepthQuerySurfaceTarget,
-};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum HandCollider {

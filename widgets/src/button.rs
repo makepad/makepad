@@ -422,6 +422,10 @@ pub struct Button {
     on_click: ScriptFnRef,
 
     #[live]
+    on_press: ScriptFnRef,
+
+    /// Legacy compatibility flag that fires `on_click` on press instead of click.
+    #[live]
     trigger_on_press: bool,
 
     #[action_data]
@@ -460,6 +464,13 @@ impl Widget for Button {
             let uid = self.widget_uid();
             vm.with_cx_mut(|cx| {
                 cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+            });
+            return ScriptAsyncResult::Return(TRUE);
+        }
+        if method == live_id!(on_press) {
+            let uid = self.widget_uid();
+            vm.with_cx_mut(|cx| {
+                cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_press.clone(), &[]);
             });
             return ScriptAsyncResult::Return(TRUE);
         }
@@ -506,6 +517,7 @@ impl Widget for Button {
                     uid,
                     ButtonAction::Pressed(fe.modifiers),
                 );
+                cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_press.clone(), &[]);
                 if self.trigger_on_press {
                     cx.widget_to_script_call(
                         uid,

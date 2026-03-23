@@ -4,8 +4,11 @@ The basic button control.
 ### Attributes
 - enable_long_press (bool)
 - grab_key_focus (bool)
+- on_click (fn)
+- on_press (fn)
 - reset_hover_on_click (bool)
 - text (String)
+- trigger_on_press (bool)
 
 ### Styling Attributes
 #### draw_bg

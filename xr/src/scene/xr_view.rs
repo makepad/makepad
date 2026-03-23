@@ -1,0 +1,230 @@
+use crate::xr_node::{xr_widget_world_transform, XrNode};
+use crate::*;
+use makepad_widgets::event::XrFingerTip;
+use std::cell::Cell;
+
+script_mod! {
+    use mod.prelude.widgets.*
+    use mod.widgets.*
+
+    mod.widgets.XrViewBase = #(XrView::register_widget(vm))
+    mod.widgets.XrView = set_type_default() do mod.widgets.XrViewBase{
+        pixel_scale: 0.0004
+        dpi_factor: 3.0
+        logical_size: vec2(320, 400)
+        depth_scale: 300.0
+    }
+}
+
+#[derive(Script, WidgetRef, WidgetRegister)]
+pub struct XrView {
+    #[uid] uid: WidgetUid,
+    #[source] source: ScriptObjectRef,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
+    #[rust] area: Area,
+
+    // 3D placement
+    #[deref] node: XrNode,
+
+    // Panel rendering
+    #[live(vec2(320.0, 400.0))] logical_size: Vec2d,
+    #[live(0.0004)] pixel_scale: f32,
+    #[live(3.0)] dpi_factor: f64,
+    #[live(300.0)] depth_scale: f32,
+    #[new] draw_list: DrawList2d,
+
+    // 2D children
+    #[rust] child_widgets: Vec<(LiveId, WidgetRef)>,
+}
+
+impl XrView {
+    fn panel_matrix(&self, world_transform: Mat4f) -> Mat4f {
+        let scale = self.pixel_scale.max(0.00001) * self.dpi_factor.max(1.0) as f32;
+        let local_depth = Mat4f::nonuniform_scaled_translation(
+            vec3(1.0, 1.0, self.depth_scale.max(0.00001)),
+            vec3(0.0, 0.0, 0.0),
+        );
+        let local_panel = Mat4f::nonuniform_scaled_translation(
+            vec3(scale, -scale, scale),
+            vec3(
+                -(self.logical_size.x as f32) * scale * 0.5,
+                (self.logical_size.y as f32) * scale * 0.5,
+                0.0,
+            ),
+        );
+        let object_to_world = Mat4f::mul(&local_panel, &local_depth);
+        Mat4f::mul(&world_transform, &object_to_world)
+    }
+
+    fn hit_matrix(&self, world_transform: Mat4f) -> Mat4f {
+        let scale = self.pixel_scale.max(0.00001) * self.dpi_factor.max(1.0) as f32;
+        let local_panel = Mat4f::nonuniform_scaled_translation(
+            vec3(scale, -scale, scale),
+            vec3(
+                -(self.logical_size.x as f32) * scale * 0.5,
+                (self.logical_size.y as f32) * scale * 0.5,
+                0.0,
+            ),
+        );
+        Mat4f::mul(&world_transform, &local_panel)
+    }
+
+    fn panel_local_from_ray(
+        hit_matrix: &Mat4f,
+        ray_origin: Vec3f,
+        ray_dir: Vec3f,
+    ) -> Option<Vec3f> {
+        let inv = hit_matrix.invert();
+        let origin = inv.transform_vec4(vec4(ray_origin.x, ray_origin.y, ray_origin.z, 1.0)).to_vec3f();
+        let dir = inv.transform_vec4(vec4(ray_dir.x, ray_dir.y, ray_dir.z, 0.0)).to_vec3f();
+        if dir.z.abs() <= 1.0e-6 { return None; }
+        let t = -origin.z / dir.z;
+        if t < 0.0 { return None; }
+        Some(origin + dir * t)
+    }
+
+    fn contains_local(&self, local: Vec3f) -> bool {
+        local.x >= 0.0
+            && local.y >= 0.0
+            && local.x <= self.logical_size.x as f32
+            && local.y <= self.logical_size.y as f32
+    }
+}
+
+impl ScriptHook for XrView {
+    fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        if apply.is_reload() {
+            self.child_widgets.clear();
+        }
+    }
+
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                self.child_widgets.clear();
+                let mut anon_index = 0usize;
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        let id = if let Some(id) = kv.key.as_id() {
+                            Some(id)
+                        } else if kv.key.is_nil() {
+                            let id = LiveId(anon_index as u64);
+                            anon_index += 1;
+                            Some(id)
+                        } else {
+                            None
+                        };
+                        let Some(id) = id else { continue };
+                        if !WidgetRef::value_is_newable_widget(vm, kv.value) { continue }
+                        let child = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
+                        self.child_widgets.push((id, child));
+                    }
+                });
+            }
+        }
+        vm.with_cx_mut(|cx| {
+            cx.widget_tree_mark_dirty(self.uid);
+        });
+    }
+}
+
+impl WidgetNode for XrView {
+    fn widget_uid(&self) -> WidgetUid { self.uid }
+    fn walk(&mut self, _cx: &mut Cx) -> Walk { self.walk }
+    fn area(&self) -> Area { self.area }
+
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        for (id, child) in &self.child_widgets {
+            visit(*id, child.clone());
+        }
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) { cx.redraw_all(); }
+
+    fn visible(&self) -> bool { self.node.visible() }
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) { self.node.set_visible(cx, visible); }
+}
+
+impl Widget for XrView {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if !self.node.visible() && event.requires_visibility() { return; }
+
+        // Forward XrLocal events — transform finger tips to panel-local 2D coords
+        if let Event::XrLocal(xr_event) = event {
+            let world_transform = self.node.local_transform();
+            let hit_mat = self.hit_matrix(world_transform);
+            // Build a new XrLocal with transformed tips
+            let mut local_tips = SmallVec::new();
+            for tip in &xr_event.finger_tips {
+                if let Some(local) = Self::panel_local_from_ray(
+                    &hit_mat,
+                    tip.pos,
+                    vec3f(0.0, 0.0, -1.0), // tips are already in local space for XrLocal
+                ) {
+                    if self.contains_local(local) {
+                        local_tips.push(XrFingerTip {
+                            index: tip.index,
+                            is_left: tip.is_left,
+                            pos: vec3f(local.x, local.y, tip.pos.z),
+                            handled: Cell::new(Area::Empty),
+                        });
+                    }
+                }
+            }
+            if !local_tips.is_empty() {
+                let local_event = XrLocalEvent {
+                    finger_tips: local_tips,
+                    update: xr_event.update.clone(),
+                    modifiers: xr_event.modifiers,
+                    time: xr_event.time,
+                };
+                let event = Event::XrLocal(local_event.clone());
+                for i in 0..self.child_widgets.len() {
+                    let child = self.child_widgets[i].1.clone();
+                    child.handle_event(cx, &event, scope);
+                }
+                local_event.process_end(cx);
+            }
+            return;
+        }
+
+        // Forward other events to children
+        for i in 0..self.child_widgets.len() {
+            let child = self.child_widgets[i].1.clone();
+            child.handle_event(cx, event, scope);
+        }
+    }
+
+    fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
+        DrawStep::done()
+    }
+
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
+        if !self.node.visible() { return DrawStep::done(); }
+
+        let world_transform = xr_widget_world_transform(cx, scope, self.uid, &self.node);
+        let matrix = self.panel_matrix(world_transform);
+
+        // Draw 2D children into a DrawList2d with the panel transform
+        let cx2d = &mut Cx2d::new(cx.cx);
+        let previous_dpi = cx2d.current_dpi_factor();
+        cx2d.set_current_pass_dpi_factor(self.dpi_factor.max(1.0));
+
+        self.draw_list.begin_always(cx2d);
+        self.draw_list.set_view_transform(cx2d, &matrix);
+        let size = dvec2(self.logical_size.x.max(1.0), self.logical_size.y.max(1.0));
+        cx2d.begin_root_turtle(size, Layout::flow_down());
+
+        for i in 0..self.child_widgets.len() {
+            let child = self.child_widgets[i].1.clone();
+            child.draw_walk_all(cx2d, scope, Walk::default());
+        }
+
+        cx2d.end_pass_sized_turtle();
+        self.draw_list.end(cx2d);
+        cx2d.set_current_pass_dpi_factor(previous_dpi);
+
+        DrawStep::done()
+    }
+}

@@ -23,14 +23,14 @@ pub mod refractive_cube;
 pub mod xr_root;
 #[path = "scene/xr_env.rs"]
 pub mod xr_env;
-#[path = "scene/xr_scene.rs"]
-mod xr_scene;
 #[path = "util/scene_draw.rs"]
 mod scene_draw;
 #[path = "obj/tree.rs"]
 pub mod tree;
 #[path = "obj/view_splat.rs"]
 pub mod view_splat;
+#[path = "scene/xr_view.rs"]
+pub mod xr_view;
 
 pub use cube::*;
 pub use gltf::*;
@@ -42,7 +42,7 @@ pub use physics_view::*;
 pub use refractive_cube::*;
 pub use xr_env::XrEnv;
 pub use xr_root::XrRoot;
-pub use xr_scene::XrScene;
+pub use xr_view::XrView;
 pub use tree::{
     CpuPythagoreanTree, DrawTreeBranches, DrawTreeLeaves, Tree, PYTHAGOREAN_TREE_ROOT_DROP,
 };
@@ -60,6 +60,6 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     tree::script_mod(vm);
     view_splat::script_mod(vm);
     xr_env::script_mod(vm);
-    xr_scene::script_mod(vm);
+    xr_view::script_mod(vm);
     xr_root::script_mod(vm)
 }

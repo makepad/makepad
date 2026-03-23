@@ -38,7 +38,7 @@ impl GltfMeshObjects {
     /// Unsupported primitives (for example non-triangle mode) are skipped.
     pub fn upload_all(
         draw: &mut DrawPbr,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         loaded: &LoadedGltf,
     ) -> Result<Self, GltfError> {
         let mut out = Self::default();
@@ -73,7 +73,7 @@ impl GltfMeshObjects {
 
     /// Render retained primitive objects. The caller should configure DrawPbr
     /// per-draw state (for example transform/material constants) around calls here.
-    pub fn draw_all(&self, draw: &mut DrawPbr, cx: &mut Cx2d) -> Result<(), GltfError> {
+    pub fn draw_all(&self, draw: &mut DrawPbr, cx: &mut CxDraw) -> Result<(), GltfError> {
         for primitive in &self.primitives {
             draw.draw_mesh(cx, primitive.mesh_handle)
                 .map_err(GltfError::Validation)?;
@@ -87,7 +87,7 @@ impl GltfMeshObjects {
     pub fn draw_all_with_setup<F>(
         &self,
         draw: &mut DrawPbr,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         mut setup: F,
     ) -> Result<(), GltfError>
     where
@@ -143,7 +143,7 @@ impl GltfDecodedMeshes {
     pub fn upload_all(
         &self,
         draw: &mut DrawPbr,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
     ) -> Result<GltfMeshObjects, GltfError> {
         let mut out = GltfMeshObjects::default();
         for primitive in &self.primitives {
@@ -235,7 +235,7 @@ pub struct GltfRenderer {
 impl GltfRenderer {
     pub fn load_from_bytes(
         draw: &mut DrawPbr,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         bytes: &[u8],
         source_path: Option<&Path>,
     ) -> Result<Self, GltfError> {
@@ -248,7 +248,7 @@ impl GltfRenderer {
 
     pub fn load_from_path(
         draw: &mut DrawPbr,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         path: impl AsRef<Path>,
     ) -> Result<Self, GltfError> {
         let loaded = load_gltf_from_path(path)?;
@@ -257,7 +257,7 @@ impl GltfRenderer {
 
     pub fn from_loaded(
         draw: &mut DrawPbr,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         loaded: &LoadedGltf,
     ) -> Result<Self, GltfError> {
         let mesh_objects = GltfMeshObjects::upload_all(draw, cx, loaded)?;
@@ -266,7 +266,7 @@ impl GltfRenderer {
 
     pub fn from_loaded_predecoded(
         draw: &mut DrawPbr,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         loaded: &LoadedGltf,
         decoded_meshes: &GltfDecodedMeshes,
     ) -> Result<Self, GltfError> {
@@ -275,7 +275,7 @@ impl GltfRenderer {
     }
 
     fn from_loaded_with_mesh_objects(
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         loaded: &LoadedGltf,
         mesh_objects: GltfMeshObjects,
     ) -> Result<Self, GltfError> {
@@ -333,7 +333,7 @@ impl GltfRenderer {
         }
     }
 
-    pub fn draw(&mut self, draw: &mut DrawPbr, cx: &mut Cx2d) -> Result<(), GltfError> {
+    pub fn draw(&mut self, draw: &mut DrawPbr, cx: &mut CxDraw) -> Result<(), GltfError> {
         self.poll_textures(cx);
 
         for object in &self.draw_objects {
@@ -348,7 +348,7 @@ impl GltfRenderer {
     pub fn draw_with_transform(
         &mut self,
         draw: &mut DrawPbr,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         transform: Mat4f,
     ) -> Result<(), GltfError> {
         self.poll_textures(cx);
@@ -365,12 +365,12 @@ impl GltfRenderer {
     pub fn draw_with_transform_anchors<F>(
         &mut self,
         draw: &mut DrawPbr,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         transform: Mat4f,
         mut on_draw_call: F,
     ) -> Result<(), GltfError>
     where
-        F: FnMut(&mut Cx2d, Area, Vec3f),
+        F: FnMut(&mut CxDraw, Area, Vec3f),
     {
         self.poll_textures(cx);
 
@@ -391,7 +391,7 @@ impl GltfRenderer {
         Ok(())
     }
 
-    fn apply_material(&self, draw: &mut DrawPbr, cx: &mut Cx2d, material_index: Option<usize>) {
+    fn apply_material(&self, draw: &mut DrawPbr, cx: &mut CxDraw, material_index: Option<usize>) {
         let material = material_index
             .and_then(|index| self.materials.get(index))
             .cloned()
@@ -494,7 +494,7 @@ fn build_materials(loaded: &LoadedGltf) -> Vec<GltfMaterialState> {
 }
 
 fn request_material_textures(
-    cx: &mut Cx2d,
+    cx: &mut CxDraw,
     loaded: &LoadedGltf,
 ) -> Result<(Vec<Option<Texture>>, Vec<Option<PathBuf>>), GltfError> {
     let mut textures = vec![None; loaded.document.textures_slice().len()];

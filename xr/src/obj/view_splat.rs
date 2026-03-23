@@ -698,7 +698,7 @@ impl ViewSplat {
         self.next_sort_generation();
     }
 
-    fn ensure_depth_sort_thread(&mut self, cx: &mut Cx2d) {
+    fn ensure_depth_sort_thread(&mut self, cx: &mut CxDraw) {
         if self.depth_sort_thread_started {
             return;
         }
@@ -709,7 +709,7 @@ impl ViewSplat {
         self.depth_sort_thread_started = true;
     }
 
-    fn upload_sort_scene_to_worker(&mut self, cx: &mut Cx2d) -> bool {
+    fn upload_sort_scene_to_worker(&mut self, cx: &mut CxDraw) -> bool {
         if self.depth_sort_centers_local.is_empty() {
             return false;
         }
@@ -790,7 +790,7 @@ impl ViewSplat {
 
     fn request_depth_sort_if_needed(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         scene_state: &SceneState3D,
         view_matrix: Mat4f,
         model_matrix: Mat4f,
@@ -869,7 +869,7 @@ impl ViewSplat {
         }
     }
 
-    fn apply_pending_depth_sort(&mut self, cx: &mut Cx2d, mesh: PbrMeshHandle) {
+    fn apply_pending_depth_sort(&mut self, cx: &mut CxDraw, mesh: PbrMeshHandle) {
         let Some(result) = self.depth_sort_pending_result.take() else {
             return;
         };
@@ -898,7 +898,7 @@ impl ViewSplat {
         }
     }
 
-    fn restore_base_indices_if_needed(&mut self, cx: &mut Cx2d, mesh: PbrMeshHandle) {
+    fn restore_base_indices_if_needed(&mut self, cx: &mut CxDraw, mesh: PbrMeshHandle) {
         if self.base_indices_applied || self.base_indices.is_empty() {
             return;
         }
@@ -916,7 +916,7 @@ impl ViewSplat {
         }
     }
 
-    fn ensure_env_loaded(&mut self, cx: &mut Cx2d) {
+    fn ensure_env_loaded(&mut self, cx: &mut CxDraw) {
         let Some(handle_ref) = self.env_src.as_ref() else {
             return;
         };
@@ -947,7 +947,7 @@ impl ViewSplat {
         }
     }
 
-    fn ensure_scene_loaded(&mut self, cx: &mut Cx2d) {
+    fn ensure_scene_loaded(&mut self, cx: &mut CxDraw) {
         let Some(handle_ref) = self.src.as_ref() else {
             return;
         };
@@ -992,7 +992,7 @@ impl ViewSplat {
         }
     }
 
-    fn ensure_splat_mesh(&mut self, cx: &mut Cx2d) -> Option<PbrMeshHandle> {
+    fn ensure_splat_mesh(&mut self, cx: &mut CxDraw) -> Option<PbrMeshHandle> {
         if let Some(mesh) = self.splat_mesh {
             return Some(mesh);
         }
@@ -1164,7 +1164,11 @@ impl Widget for ViewSplat {
         let Some(scene_state) = scene_state_from_cx(cx) else {
             return DrawStep::done();
         };
-        let cx = &mut Cx2d::new(cx.cx);
+        let _ = apply_scene_to_draw_pbr(&mut self.draw_splat.draw_super, cx);
+        let node_matrix = Mat4f::mul(
+            &scene_node_world_transform_from_cx(cx),
+            &self.node_matrix(),
+        );
 
         self.ensure_env_loaded(cx);
         self.ensure_scene_loaded(cx);
@@ -1172,12 +1176,6 @@ impl Widget for ViewSplat {
             return DrawStep::done();
         };
 
-        let _ = apply_scene_to_draw_pbr(&mut self.draw_splat.draw_super, cx);
-
-        let node_matrix = Mat4f::mul(
-            &scene_node_world_transform_from_cx(cx),
-            &self.node_matrix(),
-        );
         let render_w = scene_state.viewport_rect.size.x.max(1.0) as f32;
         let render_h = scene_state.viewport_rect.size.y.max(1.0) as f32;
         self.draw_splat.render_size = vec2(render_w, render_h);
@@ -1202,11 +1200,7 @@ impl Widget for ViewSplat {
             self.restore_base_indices_if_needed(cx, splat_mesh);
         }
 
-        let draw_result = self.draw_splat.draw_super.draw_mesh(cx, splat_mesh);
-        if draw_result.is_ok() {
-            let world = node_matrix.transform_vec4(vec4(0.0, 0.0, 0.0, 1.0));
-            register_last_draw_call_anchor(cx, vec3(world.x, world.y, world.z));
-        }
+        self.draw_splat.draw_super.draw_mesh(cx, splat_mesh).ok();
 
         DrawStep::done()
     }
