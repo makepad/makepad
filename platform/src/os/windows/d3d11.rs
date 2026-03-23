@@ -408,7 +408,9 @@ impl Cx {
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
 
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
-        self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        if !self.passes[pass_id].keep_camera_matrix {
+            self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        }
         self.passes[pass_id].paint_dirty = false;
 
         self.passes[pass_id].set_dpi_factor(dpi_factor);

@@ -271,6 +271,8 @@ pub struct XrFingerTip {
     pub index: usize,
     pub is_left: bool,
     pub pos: Vec3f,
+    pub ray_dir: Vec3f,
+    pub touch_z: f32,
     pub handled: Cell<Area>,
 }
 
@@ -438,16 +440,18 @@ impl XrLocalEvent {
             index: XrHand::INDEX_TIP,
             is_left,
             pos,
+            ray_dir: vec3f(0.0, 0.0, -1.0),
+            touch_z: pos.z,
             handled: Cell::new(Area::Empty),
         });
     }
 
     fn tip_is_touching_for_down(tip: &XrFingerTip) -> bool {
-        tip.pos.z <= Self::XR_TOUCH_DOWN_FRONT && tip.pos.z >= Self::XR_TOUCH_DOWN_BACK
+        tip.touch_z <= Self::XR_TOUCH_DOWN_FRONT && tip.touch_z >= Self::XR_TOUCH_DOWN_BACK
     }
 
     fn tip_is_touching_for_capture(tip: &XrFingerTip) -> bool {
-        tip.pos.z <= Self::XR_TOUCH_RELEASE_FRONT && tip.pos.z >= Self::XR_TOUCH_RELEASE_BACK
+        tip.touch_z <= Self::XR_TOUCH_RELEASE_FRONT && tip.touch_z >= Self::XR_TOUCH_RELEASE_BACK
     }
 
     pub fn from_update_event(e: &XrUpdateEvent, mat: &Mat4f) -> XrLocalEvent {

@@ -292,7 +292,9 @@ impl Cx {
             );
             pass.pass_uniforms.camera_view = Mat4f::identity();
         } else {
-            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            if !pass.keep_camera_matrix {
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            }
         }
         pass_rect.size
     }

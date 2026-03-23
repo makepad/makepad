@@ -7,7 +7,6 @@ use {
             DrawPassId, WindowId,
         },
         nav::CxNavTreeRc,
-        scene_3d::Cx3dState,
         text::{fonts::Fonts, layouter, loader::FontFamilyDefinition},
     },
     rustybuzz::UnicodeBuffer,
@@ -29,7 +28,6 @@ pub struct CxDraw<'a> {
     pub fonts: Rc<RefCell<Fonts>>,
     pub nav_tree_rc: CxNavTreeRc,
     pub rustybuzz_buffer: Option<UnicodeBuffer>,
-    pub(crate) scene_3d: Cx3dState,
 }
 
 impl<'a> Deref for CxDraw<'a> {
@@ -68,7 +66,6 @@ impl<'a> CxDraw<'a> {
             draw_list_stack: Vec::with_capacity(64),
             nav_tree_rc,
             rustybuzz_buffer: Some(UnicodeBuffer::new()),
-            scene_3d: Cx3dState::default(),
         }
     }
 }

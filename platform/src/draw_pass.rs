@@ -94,6 +94,8 @@ pub struct ScriptDrawPass {
     pub clear_color: Vec4f,
     #[live]
     pub dont_clear: bool,
+    #[live]
+    pub keep_camera_matrix: bool,
 }
 
 impl std::ops::Deref for ScriptDrawPass {
@@ -113,6 +115,8 @@ impl ScriptHook for ScriptDrawPass {
     ) {
         vm.host.cx_mut().passes[self.handle.draw_pass_id()].clear_color = self.clear_color;
         vm.host.cx_mut().passes[self.handle.draw_pass_id()].dont_clear = self.dont_clear;
+        vm.host.cx_mut().passes[self.handle.draw_pass_id()].keep_camera_matrix =
+            self.keep_camera_matrix;
     }
 }
 
@@ -363,6 +367,7 @@ pub struct CxDrawPass {
     pub depth_texture: Option<Texture>,
     pub clear_depth: DrawPassClearDepth,
     pub dont_clear: bool,
+    pub keep_camera_matrix: bool,
     pub depth_init: f64,
     pub clear_color: Vec4f,
     pub dpi_factor: Option<f64>,
@@ -382,6 +387,7 @@ impl Default for CxDrawPass {
         CxDrawPass {
             debug: false,
             dont_clear: false,
+            keep_camera_matrix: false,
             debug_name: String::new(),
             zbias_step: 0.001,
             pass_uniforms: DrawPassUniforms::default(),

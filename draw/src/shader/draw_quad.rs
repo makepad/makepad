@@ -38,7 +38,7 @@ script_mod! {
                 1.
             );
             // only pass the clipped position forward
-            return self.draw_pass.camera_projection * (self.draw_pass.camera_view * (self.world))
+            return self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
         }
 
         transform_vertex: fn(rect_pos, rect_size){
