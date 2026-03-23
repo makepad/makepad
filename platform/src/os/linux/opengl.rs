@@ -1044,10 +1044,12 @@ impl GlShader {
             .map_or(source.len(), |bytes| bytes.len()) as i32
     }
 
+    #[cfg(target_os = "android")]
     fn shader_source_hash(source: &str) -> LiveId {
         live_id!(glsl_source).str_append(source)
     }
 
+    #[cfg(target_os = "android")]
     fn shader_source_preview(source: &str) -> String {
         source
             .lines()
@@ -1178,7 +1180,9 @@ impl GlShader {
             } else {
                 let vertex_len = Self::shader_source_len(vertex);
                 let pixel_len = Self::shader_source_len(pixel);
+                #[cfg(target_os = "android")]
                 let vertex_hash = Self::shader_source_hash(vertex);
+                #[cfg(target_os = "android")]
                 let pixel_hash = Self::shader_source_hash(pixel);
 
                 #[cfg(target_os = "android")]
