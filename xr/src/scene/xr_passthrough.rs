@@ -243,21 +243,8 @@ impl XrEnv {
         let mut vertices = Vec::with_capacity(4 * 16);
         for (corner, uv) in corners.iter().zip(uvs.iter()) {
             vertices.extend_from_slice(&[
-                corner[0],
-                corner[1],
-                corner[2],
-                normal[0],
-                normal[1],
-                normal[2],
-                uv[0],
-                uv[1],
-                color[0],
-                color[1],
-                color[2],
-                color[3],
-                tangent[0],
-                tangent[1],
-                tangent[2],
+                corner[0], corner[1], corner[2], normal[0], normal[1], normal[2], uv[0], uv[1],
+                color[0], color[1], color[2], color[3], tangent[0], tangent[1], tangent[2],
                 tangent[3],
             ]);
         }
@@ -309,7 +296,9 @@ impl XrEnv {
         if atlas.pending_swap {
             atlas.finish_frame();
         }
-        atlas.pass.set_size(cx.cx.cx, dvec2(atlas_width, atlas_height));
+        atlas
+            .pass
+            .set_size(cx.cx.cx, dvec2(atlas_width, atlas_height));
         let previous_texture = atlas.current_texture().clone();
         let display_texture = atlas.initialized.then_some(previous_texture.clone());
         let target_texture = atlas.target_texture().clone();
@@ -331,8 +320,7 @@ impl XrEnv {
         draw_passthrough_env_atlas.rotation_steps = rotation_steps;
         draw_passthrough_env_atlas.bootstrap_mix = bootstrap_mix;
         draw_passthrough_env_atlas.update_strength = XR_PASSTHROUGH_ENV_UPDATE_STRENGTH;
-        draw_passthrough_env_atlas.camera_fov_y_degrees =
-            XR_PASSTHROUGH_ENV_CAMERA_FOV_Y_DEGREES;
+        draw_passthrough_env_atlas.camera_fov_y_degrees = XR_PASSTHROUGH_ENV_CAMERA_FOV_Y_DEGREES;
         draw_passthrough_env_atlas.camera_projection_scale =
             XR_PASSTHROUGH_ENV_CAMERA_PROJECTION_SCALE;
         draw_passthrough_env_atlas.camera_exposure = XR_PASSTHROUGH_CAMERA_EXPOSURE;
@@ -353,5 +341,4 @@ impl XrEnv {
         atlas.pending_swap = true;
         display_texture
     }
-
 }

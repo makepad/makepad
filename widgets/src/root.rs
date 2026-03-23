@@ -24,10 +24,6 @@ pub struct Root {
     area: Area,
     #[rust]
     components: ComponentMap<LiveId, WidgetRef>,
-    #[new]
-    xr_draw_list: DrawList,
-    #[live]
-    xr_pass: ScriptDrawPass,
     #[live]
     on_startup: ScriptFnRef,
     #[rust]
@@ -94,12 +90,6 @@ impl WidgetNode for Root {
 }
 
 impl Root {
-    fn ensure_xr_pass_ready(&mut self, cx: &mut Cx) {
-        self.xr_pass.handle.set_as_xr_pass(cx);
-        self.xr_pass.handle.set_pass_name(cx, "root_xr");
-        cx.repaint_pass(self.xr_pass.handle.draw_pass_id());
-    }
-
     pub fn remove_component(&mut self, cx: &mut Cx, id: LiveId) -> Option<WidgetRef> {
         let removed = self.components.remove(&id);
         if removed.is_some() {
@@ -124,28 +114,10 @@ impl Widget for Root {
                 );
             }
         }
-        if matches!(event, Event::XrUpdate(_)) {
-            self.ensure_xr_pass_ready(cx);
-        }
         if let Event::Draw(e) = event {
-            if cx.in_xr_mode() {
-                if e.xr_state.is_none() {
-                    return;
-                }
-                self.ensure_xr_pass_ready(cx);
-                let mut cx_draw = CxDraw::new(cx, e);
-                let cx = &mut Cx3d::new(&mut cx_draw);
-                self.xr_pass.handle.set_as_xr_pass(cx);
-                cx.begin_pass(&self.xr_pass.handle, Some(4.0));
-                self.xr_draw_list.begin_always(cx);
-                self.draw_3d_all(cx, scope);
-                self.xr_draw_list.end(cx);
-                cx.end_pass(&self.xr_pass.handle);
-            } else {
-                let mut cx_draw = CxDraw::new(cx, e);
-                let cx = &mut Cx2d::new(&mut cx_draw);
-                self.draw_all(cx, scope);
-            }
+            let mut cx_draw = CxDraw::new(cx, e);
+            let cx = &mut Cx2d::new(&mut cx_draw);
+            self.draw_all(cx, scope);
             return;
         }
 
@@ -196,13 +168,6 @@ impl Widget for Root {
                 widget_uids: resolved_uid.into_iter().collect(),
             }));
         }
-    }
-
-    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        for (_id, component) in self.components.iter() {
-            component.draw_3d_all(cx, scope);
-        }
-        DrawStep::done()
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {

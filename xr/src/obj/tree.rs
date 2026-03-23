@@ -447,17 +447,17 @@ pub struct CpuPythagoreanTree {
 }
 
 impl CpuPythagoreanTree {
-    fn ensure_geometry(&mut self, cx: &mut Cx2d, config: TreeTemplateConfig) {
+    fn ensure_geometry(&mut self, cx: &mut CxDraw, config: TreeTemplateConfig) {
         if self.template_config != Some(config) || self.branch_templates.is_empty() {
             self.rebuild_templates(config);
             self.template_config = Some(config);
         }
         if self.branch_geometry.is_none() {
             self.branch_geometry =
-                Some(tree_branch_segment_mesh(TREE_BRANCH_SIDES, 0.84).into_geometry(cx.cx.cx));
+                Some(tree_branch_segment_mesh(TREE_BRANCH_SIDES, 0.84).into_geometry(cx.cx));
         }
         if self.leaf_geometry.is_none() {
-            self.leaf_geometry = Some(stylized_leaf_mesh().into_geometry(cx.cx.cx));
+            self.leaf_geometry = Some(stylized_leaf_mesh().into_geometry(cx.cx));
         }
     }
 
@@ -668,7 +668,7 @@ impl CpuPythagoreanTree {
 
     fn draw(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         draw_branches: &mut DrawTreeBranches,
         draw_leaves: &mut DrawTreeLeaves,
         camera_pos: Vec3f,
@@ -945,23 +945,20 @@ impl Widget for Tree {
         };
         let template_config = self.template_config();
 
-        {
-            let cx2d = &mut Cx2d::new(cx.cx);
-            self.cpu_tree.ensure_geometry(cx2d, template_config);
-            self.cpu_tree.rebuild_instances(world, time, pointer_tips);
-            self.draw_branches.set_use_pass_camera(scene.use_pass_camera);
-            self.draw_branches.set_camera_state(scene.view, scene.projection);
-            self.draw_branches.clip_ndc = scene.clip_ndc;
-            self.draw_leaves.set_use_pass_camera(scene.use_pass_camera);
-            self.draw_leaves.set_camera_state(scene.view, scene.projection);
-            self.draw_leaves.clip_ndc = scene.clip_ndc;
-            self.cpu_tree.draw(
-                cx2d,
-                &mut self.draw_branches,
-                &mut self.draw_leaves,
-                scene.camera_pos,
-            );
-        }
+        self.cpu_tree.ensure_geometry(cx, template_config);
+        self.cpu_tree.rebuild_instances(world, time, pointer_tips);
+        self.draw_branches.set_use_pass_camera(scene.use_pass_camera);
+        self.draw_branches.set_camera_state(scene.view, scene.projection);
+        self.draw_branches.clip_ndc = scene.clip_ndc;
+        self.draw_leaves.set_use_pass_camera(scene.use_pass_camera);
+        self.draw_leaves.set_camera_state(scene.view, scene.projection);
+        self.draw_leaves.clip_ndc = scene.clip_ndc;
+        self.cpu_tree.draw(
+            cx,
+            &mut self.draw_branches,
+            &mut self.draw_leaves,
+            scene.camera_pos,
+        );
 
         self.node.draw_3d(cx, scope)
     }
@@ -1012,7 +1009,7 @@ impl DrawTreeBranches {
         self.projection_matrix = projection;
     }
 
-    fn apply_uniforms(&mut self, cx: &mut Cx2d, camera_pos: Vec3f) {
+    fn apply_uniforms(&mut self, cx: &mut CxDraw, camera_pos: Vec3f) {
         let light_dir = TREE_BRANCH_LIGHT_DIR.normalize();
         self.draw_vars.set_uniform(
             cx.cx,
@@ -1072,7 +1069,7 @@ impl DrawTreeBranches {
 
     fn draw_instances(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         geometry_id: GeometryId,
         camera_pos: Vec3f,
         instances: &[BranchInstance],
@@ -1080,20 +1077,23 @@ impl DrawTreeBranches {
         if instances.is_empty() {
             return;
         }
-        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         self.draw_vars.geometry_id = Some(geometry_id);
         self.draw_vars.options.depth_write = true;
         self.depth_clip = 1.0;
         self.apply_uniforms(cx, camera_pos);
-        for instance in instances {
-            self.origin = instance.origin;
-            self.basis_x = instance.basis_x;
-            self.basis_y = instance.basis_y;
-            self.basis_z = instance.basis_z;
-            self.scale = instance.scale;
-            self.level = instance.level;
-            self.seed = instance.seed;
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+        let mi = cx.begin_many_instances(&self.draw_vars);
+        if let Some(mut mi) = mi {
+            for instance in instances {
+                self.origin = instance.origin;
+                self.basis_x = instance.basis_x;
+                self.basis_y = instance.basis_y;
+                self.basis_z = instance.basis_z;
+                self.scale = instance.scale;
+                self.level = instance.level;
+                self.seed = instance.seed;
+                mi.instances.extend_from_slice(self.draw_vars.as_slice());
+            }
+            let new_area = cx.end_many_instances(mi);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
@@ -1140,7 +1140,7 @@ impl DrawTreeLeaves {
         self.projection_matrix = projection;
     }
 
-    fn apply_uniforms(&mut self, cx: &mut Cx2d, camera_pos: Vec3f) {
+    fn apply_uniforms(&mut self, cx: &mut CxDraw, camera_pos: Vec3f) {
         let light_dir = TREE_LEAF_LIGHT_DIR.normalize();
         self.draw_vars.set_uniform(
             cx.cx,
@@ -1197,7 +1197,7 @@ impl DrawTreeLeaves {
 
     fn draw_instances(
         &mut self,
-        cx: &mut Cx2d,
+        cx: &mut CxDraw,
         geometry_id: GeometryId,
         camera_pos: Vec3f,
         instances: &[LeafInstance],
@@ -1205,20 +1205,23 @@ impl DrawTreeLeaves {
         if instances.is_empty() {
             return;
         }
-        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         self.draw_vars.geometry_id = Some(geometry_id);
         self.draw_vars.options.depth_write = true;
         self.depth_clip = 1.0;
         self.apply_uniforms(cx, camera_pos);
-        for instance in instances {
-            self.origin = instance.origin;
-            self.basis_x = instance.basis_x;
-            self.basis_y = instance.basis_y;
-            self.basis_z = instance.basis_z;
-            self.scale = instance.scale;
-            self.tint = instance.tint;
-            self.flutter = instance.flutter;
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+        let mi = cx.begin_many_instances(&self.draw_vars);
+        if let Some(mut mi) = mi {
+            for instance in instances {
+                self.origin = instance.origin;
+                self.basis_x = instance.basis_x;
+                self.basis_y = instance.basis_y;
+                self.basis_z = instance.basis_z;
+                self.scale = instance.scale;
+                self.tint = instance.tint;
+                self.flutter = instance.flutter;
+                mi.instances.extend_from_slice(self.draw_vars.as_slice());
+            }
+            let new_area = cx.end_many_instances(mi);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
