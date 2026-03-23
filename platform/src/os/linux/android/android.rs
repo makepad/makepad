@@ -798,6 +798,12 @@ impl Cx {
                 request_id,
                 status,
             } => {
+                crate::log!(
+                    "Android PermissionResult raw permission={} request_id={} status_code={}",
+                    permission,
+                    request_id,
+                    status
+                );
                 // Convert string permission back to enum
                 let perm = string_to_permission(&permission);
                 if let Some(perm) = perm {
@@ -1089,6 +1095,30 @@ impl Cx {
             || !self.new_next_frames.is_empty()
             || self.demo_time_repaint
         {
+            if self.os.debug_window_draw_count < 8 {
+                #[cfg(use_vulkan)]
+                let has_vulkan = self.os.vulkan.is_some();
+                #[cfg(not(use_vulkan))]
+                let has_vulkan = false;
+                let window = &self.windows[CxWindowPool::id_zero()];
+                crate::log!(
+                    "Android handle_drawing[{}] in_xr_mode={} has_openxr_session={} any_passes_dirty={} need_redrawing={} next_frames={} has_vulkan={} window_created={} main_pass={:?} window_size={}x{} display_size={}x{}",
+                    self.os.debug_window_draw_count,
+                    self.os.in_xr_mode,
+                    self.os.openxr.session.is_some(),
+                    self.any_passes_dirty(),
+                    self.need_redrawing(),
+                    self.new_next_frames.len(),
+                    has_vulkan,
+                    window.is_created,
+                    window.main_pass_id,
+                    window.window_geom.inner_size.x,
+                    window.window_geom.inner_size.y,
+                    self.os.display_size.x,
+                    self.os.display_size.y
+                );
+                self.os.debug_window_draw_count += 1;
+            }
             let time_now = self.os.timers.time_now();
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(time_now);
@@ -1779,6 +1809,24 @@ impl Cx {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
+        if self.os.debug_repaint_count < 8 {
+            let window_passes = passes_todo
+                .iter()
+                .filter(|draw_pass_id| {
+                    matches!(self.passes[**draw_pass_id].parent, CxDrawPassParent::Window(_))
+                })
+                .count();
+            crate::log!(
+                "Android handle_repaint[{}] passes_todo={} window_passes={} offscreen_passes={} in_xr_mode={} has_openxr_session={}",
+                self.os.debug_repaint_count,
+                passes_todo.len(),
+                window_passes,
+                passes_todo.len().saturating_sub(window_passes),
+                self.os.in_xr_mode,
+                self.os.openxr.session.is_some()
+            );
+            self.os.debug_repaint_count += 1;
+        }
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
@@ -2038,12 +2086,22 @@ impl Cx {
                     permission,
                     request_id,
                 } => {
+                    crate::log!(
+                        "Android CheckPermission permission={:?} request_id={}",
+                        permission,
+                        request_id
+                    );
                     self.handle_permission_check(permission, request_id);
                 }
                 CxOsOp::RequestPermission {
                     permission,
                     request_id,
                 } => {
+                    crate::log!(
+                        "Android RequestPermission permission={:?} request_id={}",
+                        permission,
+                        request_id
+                    );
                     self.handle_permission_request(permission, request_id);
                 }
                 CxOsOp::HttpRequest {
@@ -2572,6 +2630,12 @@ impl Cx {
         request_id: i32,
     ) {
         let status = self.check_android_permission_status(permission);
+        crate::log!(
+            "Android permission check result permission={:?} request_id={} status={:?}",
+            permission,
+            request_id,
+            status
+        );
 
         self.call_event_handler(&Event::PermissionResult(
             crate::permission::PermissionResult {
@@ -2588,6 +2652,12 @@ impl Cx {
         request_id: i32,
     ) {
         let status = self.check_android_permission_status(permission);
+        crate::log!(
+            "Android permission request entry permission={:?} request_id={} status_before_request={:?}",
+            permission,
+            request_id,
+            status
+        );
         match status {
             crate::permission::PermissionStatus::Granted => {
                 self.call_event_handler(&Event::PermissionResult(
@@ -2600,6 +2670,11 @@ impl Cx {
             }
             crate::permission::PermissionStatus::DeniedCanRetry
             | crate::permission::PermissionStatus::NotDetermined => unsafe {
+                crate::log!(
+                    "Android permission request dispatching Java dialog permission={:?} request_id={}",
+                    permission,
+                    request_id
+                );
                 android_jni::to_java_request_permission(
                     to_android_permission(permission),
                     request_id,
@@ -2659,6 +2734,8 @@ impl Default for CxOs {
             xr_pending_surface_width: 0,
             xr_pending_surface_height: 0,
             xr_retry_surface_after_destroy: false,
+            debug_window_draw_count: 0,
+            debug_repaint_count: 0,
         }
     }
 }
@@ -2711,6 +2788,8 @@ pub struct CxOs {
     pub(crate) xr_pending_surface_width: i32,
     pub(crate) xr_pending_surface_height: i32,
     pub(crate) xr_retry_surface_after_destroy: bool,
+    pub(crate) debug_window_draw_count: u32,
+    pub(crate) debug_repaint_count: u32,
 }
 
 impl CxOs {

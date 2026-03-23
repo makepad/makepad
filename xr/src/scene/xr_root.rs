@@ -1,4 +1,5 @@
 use crate::*;
+use crate::xr_env::XrEnv;
 use std::collections::HashMap;
 
 script_mod! {
@@ -7,35 +8,25 @@ script_mod! {
 
     mod.widgets.XrRootBase = #(XrRoot::register_widget(vm))
     mod.widgets.XrRoot = set_type_default() do mod.widgets.XrRootBase{
-        xr_panel_pixels: vec2(960.0, 1200.0)
         width: Fill
         height: Fill
         flow: Overlay
+        xr_panel_pixels: vec2(960.0, 1200.0)
+        desktop_control_width: 360.0
+        desktop_padding: 0.0
+        desktop_spacing: 0.0
 
-        desktop := View{
-            width: Fill
-            height: Fill
-            flow: Right
-            spacing: 0
-
-            control_host := View{
-                width: 360
-                height: Fill
-                flow: Down
-                padding: Inset{left: 20 right: 20 top: 20 bottom: 20}
-                spacing: 12
-                show_bg: true
-                draw_bg.color: #x0d1520
-            }
-
-            scene_host := View{
-                width: Fill
-                height: Fill
-                show_bg: true
-                draw_bg.color: #x10161f
-            }
+        window +: {
+            inner_size: vec2(1400 900)
         }
 
+        pass +: {
+            clear_color: #x0b1118
+        }
+
+        draw_control_bg.color: #x0d1520
+        draw_scene_bg.color: #x10161f
+        env: mod.widgets.XrEnv{}
         xr_permissions := mod.widgets.XrPermissionsFlow{}
     }
 }
@@ -54,8 +45,23 @@ pub fn xr_root_options_from_scope(scope: &mut Scope) -> XrRootOptions {
         .unwrap_or_default()
 }
 
-#[derive(Script, Widget)]
+#[derive(Clone)]
+enum DrawState {
+    Drawing,
+}
+
+#[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct XrRoot {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[rust]
+    area: Area,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
     #[live]
     control_2d: LiveId,
     #[live]
@@ -66,6 +72,20 @@ pub struct XrRoot {
     depth_mesh: bool,
     #[live(false)]
     env_cube: bool,
+    #[live]
+    env: XrEnv,
+    #[live]
+    window: ScriptWindowHandle,
+    #[live]
+    pass: ScriptDrawPass,
+    #[new]
+    depth_texture: Texture,
+    #[new]
+    main_draw_list: DrawList2d,
+    #[live]
+    draw_control_bg: DrawColor,
+    #[live]
+    draw_scene_bg: DrawColor,
     #[rust]
     template_widgets: HashMap<LiveId, WidgetRef>,
     #[rust]
@@ -73,13 +93,11 @@ pub struct XrRoot {
     #[rust]
     active_scene: LiveId,
     #[rust]
-    sync_pending: bool,
+    permissions_widget: WidgetRef,
     #[new]
     xr_draw_list: DrawList,
     #[new]
     xr_control_draw_list: DrawList2d,
-    #[live]
-    xr_pass: ScriptDrawPass,
     #[rust(Mat4f::nonuniform_scaled_translation(vec3(0.0004,-0.0004,0.12),vec3(-0.25,0.25,-0.5)))]
     xr_view_matrix: Mat4f,
     #[rust(Mat4f::nonuniform_scaled_translation(vec3(0.0004,-0.0004,0.0004),vec3(-0.25,0.25,-0.5)))]
@@ -90,6 +108,10 @@ pub struct XrRoot {
     xr_runtime_active: bool,
     #[rust]
     xr_draw_logged: bool,
+    #[rust]
+    xr_panel_log_count: u32,
+    #[rust(0u32)]
+    desktop_draw_log_count: u32,
     #[live(vec2(960.0, 1200.0))]
     xr_panel_pixels: Vec2d,
     #[live(3.0)]
@@ -106,8 +128,16 @@ pub struct XrRoot {
     xr_toggle_with_menu: bool,
     #[rust(true)]
     xr_visible: bool,
-    #[deref]
-    view: View,
+    #[live(360.0)]
+    desktop_control_width: f64,
+    #[live(0.0)]
+    desktop_padding: f64,
+    #[live(20.0)]
+    desktop_spacing: f64,
+    #[rust]
+    initialized: bool,
+    #[rust]
+    draw_state: DrawStateWrap<DrawState>,
 }
 
 impl XrRoot {
@@ -203,24 +233,62 @@ impl XrRoot {
         Mat4f::mul(&pose.to_mat4(), &object_to_world)
     }
 
-    fn active_control_id(&self, in_xr_mode: bool) -> LiveId {
-        if in_xr_mode
-            && self.control_xr != LiveId(0)
-            && self.template_widget(self.control_xr).is_some()
-        {
+    fn log_xr_panel_pose(&mut self, state: &XrState, panel_matrix: &Mat4f, hit_matrix: &Mat4f) {
+        if self.xr_panel_log_count >= 8 {
+            return;
+        }
+        let mut forward = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        forward.y = 0.0;
+        forward = if forward.length() <= 1.0e-4 {
+            vec3f(0.0, 0.0, -1.0)
+        } else {
+            forward.normalize()
+        };
+        let up = vec3f(0.0, 1.0, 0.0);
+        let yaw_rotation = Quat::look_rotation(forward, up);
+        let center = vec3f(0.0, state.head_pose.position.y, 0.0)
+            + forward * self.xr_forward_offset.max(0.0)
+            + yaw_rotation.rotate_vec3(&self.xr_position_offset);
+        crate::log!(
+            "XrRoot panel[{}] head=({:.3},{:.3},{:.3}) forward=({:.3},{:.3},{:.3}) center=({:.3},{:.3},{:.3}) panel_t=({:.3},{:.3},{:.3}) hit_t=({:.3},{:.3},{:.3}) logical_size=({:.1},{:.1}) scale={:.6} depth_scale={:.3}",
+            self.xr_panel_log_count,
+            state.head_pose.position.x,
+            state.head_pose.position.y,
+            state.head_pose.position.z,
+            forward.x,
+            forward.y,
+            forward.z,
+            center.x,
+            center.y,
+            center.z,
+            panel_matrix.v[12],
+            panel_matrix.v[13],
+            panel_matrix.v[14],
+            hit_matrix.v[12],
+            hit_matrix.v[13],
+            hit_matrix.v[14],
+            self.xr_window_logical_size().x,
+            self.xr_window_logical_size().y,
+            self.xr_window_logical_scale(),
+            self.xr_depth_scale
+        );
+        self.xr_panel_log_count += 1;
+    }
+
+    fn current_control_is_xr(&self) -> bool {
+        self.xr_runtime_active && self.control_xr != LiveId(0)
+    }
+
+    fn active_control_id(&self) -> LiveId {
+        if self.current_control_is_xr() && self.template_widget(self.control_xr).is_some() {
             self.control_xr
         } else {
             self.control_2d
         }
     }
 
-    fn active_control_widget(&self, in_xr_mode: bool) -> WidgetRef {
-        if in_xr_mode && self.control_xr != LiveId(0) {
-            if let Some(widget) = self.template_widget(self.control_xr) {
-                return widget;
-            }
-        }
-        self.template_widget(self.control_2d)
+    fn active_control_widget(&self) -> WidgetRef {
+        self.template_widget(self.active_control_id())
             .unwrap_or_else(WidgetRef::empty)
     }
 
@@ -252,8 +320,7 @@ impl XrRoot {
             return true;
         }
         self.active_scene = scene_id;
-        self.sync_pending = true;
-        self.try_sync_hosts(cx);
+        cx.widget_tree_mark_dirty(self.uid);
         cx.redraw_all();
         true
     }
@@ -273,56 +340,71 @@ impl XrRoot {
         next_scene
     }
 
-    fn set_host_child(&self, cx: &mut Cx, host: WidgetRef, child_id: LiveId, child: WidgetRef) -> bool {
-        let Some(mut host_view) = host.borrow_mut::<View>() else {
-            return false;
-        };
-        let parent_uid = host_view.widget_uid();
-        let replace = host_view.children.len() != 1
-            || host_view.children[0].0 != child_id
-            || host_view.children[0].1 != child;
-        if !replace {
-            return true;
-        }
-        host_view.children.clear();
-        if !child.is_empty() {
-            host_view.children.push((child_id, child.clone()));
-        }
-        drop(host_view);
-        cx.widget_tree_mark_dirty(parent_uid);
-        if !child.is_empty() {
-            cx.widget_tree_insert_child_deep(parent_uid, child_id, child);
-        }
-        true
-    }
-
-    fn try_sync_hosts(&mut self, cx: &mut Cx) {
-        let control_host = self.widget(cx, ids!(control_host));
-        let scene_host = self.widget(cx, ids!(scene_host));
-        if control_host.is_empty() || scene_host.is_empty() {
+    fn log_desktop_state(&mut self, label: &str) {
+        if self.desktop_draw_log_count >= 8 {
             return;
         }
-
-        let xr_is_active = self.xr_is_active(cx);
-        let control_widget = self.active_control_widget(xr_is_active);
-        let control_id = self.active_control_id(xr_is_active);
-        let scene_id = self.active_scene_id();
+        let control_widget = self.active_control_widget();
         let scene_widget = self.active_scene_widget();
+        crate::log!(
+            "XrRoot {label}[{}]: xr_runtime_active={} active_scene={:?} template_widgets={} scene_order={} control_widget_empty={} scene_widget_empty={} permissions_empty={}",
+            self.desktop_draw_log_count,
+            self.xr_runtime_active,
+            self.active_scene_id(),
+            self.template_widgets.len(),
+            self.scene_order.len(),
+            control_widget.is_empty(),
+            scene_widget.is_empty(),
+            self.permissions_widget.is_empty()
+        );
+        self.desktop_draw_log_count += 1;
+    }
 
-        if control_id != LiveId(0) {
-            self.set_host_child(cx, control_host, control_id, control_widget);
+    fn ensure_initialized(&mut self, cx: &mut Cx) {
+        if self.initialized {
+            return;
         }
-        if scene_id != LiveId(0) {
-            self.set_host_child(cx, scene_host, scene_id, scene_widget);
+        self.initialized = true;
+        self.window.handle.set_pass(cx, &self.pass.handle);
+        self.pass.handle.set_pass_name(cx, "xr_root_window");
+        self.depth_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::DepthD32 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        self.pass.handle.set_depth_texture(
+            cx,
+            &self.depth_texture,
+            DrawPassClearDepth::ClearWith(1.0),
+        );
+    }
+
+    fn begin_preview(&mut self, cx: &mut Cx2d) -> Redrawing {
+        self.ensure_initialized(cx.cx);
+        let will_redraw = cx.will_redraw(&mut self.main_draw_list, Walk::default());
+        if !will_redraw {
+            return Redrawing::no();
         }
-        self.sync_pending = false;
+        cx.begin_pass(&self.pass.handle, None);
+        self.main_draw_list.begin_always(cx);
+        let size = cx.current_pass_size();
+        cx.begin_root_turtle(size, Layout::flow_down());
+        Redrawing::yes()
+    }
+
+    fn end_preview(&mut self, cx: &mut Cx2d) {
+        cx.end_pass_sized_turtle();
+        self.main_draw_list.end(cx);
+        cx.end_pass(&self.pass.handle);
     }
 
     fn draw_xr_controls(&mut self, cx: &mut Cx2d, scope: &mut Scope) {
         if !self.xr_visible {
             return;
         }
-        let control_widget = self.active_control_widget(true);
+        let control_widget = self.active_control_widget();
         if control_widget.is_empty() {
             return;
         }
@@ -339,6 +421,41 @@ impl XrRoot {
         self.xr_control_draw_list.end(cx);
         cx.set_current_pass_dpi_factor(previous_dpi);
     }
+
+    fn draw_xr_content(&mut self, cx: &mut Cx3d, scope: &mut Scope) {
+        if !self.xr_draw_logged {
+            self.xr_draw_logged = true;
+            crate::log!(
+                "XrRoot XR draw active scene={:?} control_2d={:?} control_xr={:?}",
+                self.active_scene_id(),
+                self.control_2d,
+                self.control_xr
+            );
+        }
+
+        self.xr_draw_list.begin_always(cx);
+        let scene_widget = self.active_scene_widget();
+        if !scene_widget.is_empty() {
+            let options = self.options();
+            let mut draw_scope = scene_widget
+                .borrow_mut::<XrScene>()
+                .and_then(|mut scene| {
+                    let cx2d = &mut Cx2d::new(cx.cx);
+                    self.env.prepare_draw_scope(cx2d, &mut scene, options)
+                });
+            if let Some(draw_scope) = draw_scope.as_mut() {
+                let mut scene_scope = Scope::with_data_props(draw_scope, &options);
+                scene_widget.draw_3d_all(cx, &mut scene_scope);
+            } else {
+                let mut scene_scope = Scope::with_props(&options);
+                scene_widget.draw_3d_all(cx, &mut scene_scope);
+            }
+        }
+        self.xr_draw_list.end(cx);
+
+        let cx2d = &mut Cx2d::new(cx.cx);
+        self.draw_xr_controls(cx2d, scope);
+    }
 }
 
 impl ScriptHook for XrRoot {
@@ -353,6 +470,7 @@ impl ScriptHook for XrRoot {
             self.template_widgets.clear();
             self.scene_order.clear();
             self.active_scene = LiveId(0);
+            self.permissions_widget = WidgetRef::empty();
         }
     }
 
@@ -365,6 +483,8 @@ impl ScriptHook for XrRoot {
     ) {
         let mut template_ids = Vec::new();
         let mut scene_order = Vec::new();
+        self.permissions_widget = WidgetRef::empty();
+
         if let Some(obj) = value.as_object() {
             vm.vec_with(obj, |vm, vec| {
                 for kv in vec {
@@ -382,6 +502,14 @@ impl ScriptHook for XrRoot {
                         self.template_widgets.insert(id, widget.clone());
                         widget
                     };
+
+                    if id == live_id!(xr_permissions)
+                        || widget.borrow::<XrPermissionsFlow>().is_some()
+                    {
+                        self.permissions_widget = widget;
+                        continue;
+                    }
+
                     let is_scene = widget.borrow::<XrScene>().is_some();
                     let is_control = id == self.control_2d || id == self.control_xr;
                     if !is_control && !is_scene {
@@ -406,17 +534,50 @@ impl ScriptHook for XrRoot {
             };
         }
 
-        self.view
-            .children
-            .retain(|(id, _)| !template_ids.contains(id));
-        vm.cx_mut().widget_tree_mark_dirty(self.widget_uid());
-
-        self.sync_pending = true;
-        self.try_sync_hosts(vm.cx_mut());
+        vm.cx_mut().widget_tree_mark_dirty(self.uid);
+        crate::log!(
+            "XrRoot on_after_apply template_widgets={} scene_order={:?} active_scene={:?} permissions_empty={}",
+            self.template_widgets.len(),
+            self.scene_order,
+            self.active_scene_id(),
+            self.permissions_widget.is_empty()
+        );
         let scene_widget = self.active_scene_widget();
         if !scene_widget.is_empty() {
             let _ = scene_widget.script_call(vm, live_id!(render), NIL);
         }
+    }
+}
+
+impl WidgetNode for XrRoot {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+
+    fn area(&self) -> Area {
+        self.area
+    }
+
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        if !self.permissions_widget.is_empty() {
+            visit(live_id!(xr_permissions), self.permissions_widget.clone());
+        }
+        let control_id = self.active_control_id();
+        if let Some(control) = self.template_widget(control_id) {
+            visit(control_id, control);
+        }
+        let scene_id = self.active_scene_id();
+        if let Some(scene) = self.template_widget(scene_id) {
+            visit(scene_id, scene);
+        }
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        cx.redraw_all();
     }
 }
 
@@ -475,63 +636,52 @@ impl Widget for XrRoot {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.ensure_initialized(cx);
+
         if !cx.in_xr_mode() {
-            self.xr_runtime_active = false;
+            if self.xr_runtime_active {
+                self.xr_runtime_active = false;
+                cx.widget_tree_mark_dirty(self.uid);
+            }
             self.xr_view_matrix_initialized = false;
             self.xr_visible = true;
             self.xr_draw_logged = false;
+            self.xr_panel_log_count = 0;
         }
 
         if matches!(event, Event::XrUpdate(_)) && !self.xr_runtime_active {
             self.xr_runtime_active = true;
-            self.sync_pending = true;
+            cx.widget_tree_mark_dirty(self.uid);
+            cx.redraw_all();
         }
 
-        if let Event::Draw(e) = event {
-            if e.xr_state.is_some() && !self.xr_runtime_active {
-                self.xr_runtime_active = true;
-                self.sync_pending = true;
-            }
-            self.try_sync_hosts(cx);
-            if !self.xr_is_active(cx) {
-                self.view.handle_event(cx, event, scope);
-                return;
-            }
-            if e.xr_state.is_none() {
-                return;
-            }
-            if !self.xr_draw_logged {
-                self.xr_draw_logged = true;
-                crate::log!(
-                    "XrRoot XR draw active scene={:?} control_2d={:?} control_xr={:?}",
-                    self.active_scene_id(),
-                    self.control_2d,
-                    self.control_xr
-                );
-            }
+        if !self.permissions_widget.is_empty() {
+            self.permissions_widget.handle_event(cx, event, scope);
+        }
 
-            let mut cx_draw = CxDraw::new(cx, e);
-            let cx3d = &mut Cx3d::new(&mut cx_draw);
-            self.xr_pass.handle.set_as_xr_pass(cx3d);
-            cx3d.begin_pass(&self.xr_pass.handle, Some(4.0));
-            self.xr_draw_list.begin_always(cx3d);
+        let control_widget = self.active_control_widget();
+        if !control_widget.is_empty() {
+            control_widget.handle_event(cx, event, scope);
+        }
+
+        let scene_widget = self.active_scene_widget();
+        if !scene_widget.is_empty() {
+            scene_widget.handle_event(cx, event, scope);
+        }
+
+        let handled_scene_env = {
             let scene_widget = self.active_scene_widget();
-            if !scene_widget.is_empty() {
-                let options = self.options();
-                let mut scene_scope = Scope::with_props(&options);
-                scene_widget.draw_3d_all(cx3d, &mut scene_scope);
-            }
-            self.xr_draw_list.end(cx3d);
-            let cx2d = &mut Cx2d::new(cx3d.cx);
-            self.draw_xr_controls(cx2d, scope);
-            cx3d.end_pass(&self.xr_pass.handle);
-            return;
+            let handled = if let Some(mut scene) = scene_widget.borrow_mut::<XrScene>() {
+                self.env.handle_event(cx, event, Some(&mut scene));
+                true
+            } else {
+                false
+            };
+            handled
+        };
+        if !handled_scene_env {
+            self.env.handle_event(cx, event, None);
         }
-
-        if self.sync_pending {
-            self.try_sync_hosts(cx);
-        }
-        self.view.handle_event(cx, event, scope);
 
         if !self.xr_is_active(cx) {
             return;
@@ -546,11 +696,13 @@ impl Widget for XrRoot {
                 self.xr_view_matrix =
                     self.compute_xr_panel_matrix(update.state.as_ref(), self.xr_depth_scale);
                 self.xr_hit_matrix = self.compute_xr_panel_matrix(update.state.as_ref(), 1.0);
+                let panel_matrix = self.xr_view_matrix;
+                let hit_matrix = self.xr_hit_matrix;
+                self.log_xr_panel_pose(update.state.as_ref(), &panel_matrix, &hit_matrix);
                 self.xr_view_matrix_initialized = true;
                 self.xr_visible = true;
             }
 
-            let control_widget = self.active_control_widget(true);
             if !control_widget.is_empty() {
                 let xr_event = XrLocalEvent::from_update_event(update, &self.xr_hit_matrix);
                 if self.xr_visible {
@@ -558,12 +710,91 @@ impl Widget for XrRoot {
                 }
                 xr_event.process_end(cx);
             }
-            self.try_sync_hosts(cx);
+        }
+
+        if matches!(event, Event::Startup) {
+            cx.with_vm(|vm| {
+                let scene_widget = self.active_scene_widget();
+                if !scene_widget.is_empty() {
+                    let _ = scene_widget.script_call(vm, live_id!(render), NIL);
+                }
+            });
+            cx.redraw_all();
         }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.try_sync_hosts(cx.cx);
-        self.view.draw_walk(cx, scope, walk)
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        if self.xr_is_active(cx.cx) && cx.draw_event.xr_state.is_some() {
+            return DrawStep::done();
+        }
+
+        if self.draw_state.begin(cx, DrawState::Drawing) {
+            if self.begin_preview(cx).is_not_redrawing() {
+                self.draw_state.end();
+                return DrawStep::done();
+            }
+        }
+
+        if let Some(DrawState::Drawing) = self.draw_state.get() {
+            self.log_desktop_state("draw_walk");
+            let padding = self.desktop_padding.max(0.0);
+            let preview_layout = Layout {
+                spacing: self.desktop_spacing.max(0.0),
+                padding: Inset {
+                    left: padding,
+                    right: padding,
+                    top: padding,
+                    bottom: padding,
+                },
+                ..Layout::flow_right()
+            };
+            cx.begin_turtle(Walk::new(Size::fill(), Size::fill()), preview_layout);
+
+            let control_walk =
+                Walk::new(Size::Fixed(self.desktop_control_width.max(0.0)), Size::fill());
+            let control_rect = cx.peek_walk_turtle(control_walk);
+            self.draw_control_bg.draw_abs(cx, control_rect);
+            let control_widget = self.active_control_widget();
+            if !control_widget.is_empty() {
+                control_widget.draw_walk_all(cx, scope, control_walk);
+            } else {
+                cx.walk_turtle(control_walk);
+            }
+
+            let scene_walk = Walk::new(Size::fill(), Size::fill());
+            let scene_rect = cx.peek_walk_turtle(scene_walk);
+            self.draw_scene_bg.draw_abs(cx, scene_rect);
+            self.area = self.draw_scene_bg.area();
+            let scene_widget = self.active_scene_widget();
+            if !scene_widget.is_empty() {
+                scene_widget.draw_walk_all(cx, scope, scene_walk);
+            } else {
+                cx.walk_turtle(scene_walk);
+            }
+
+            cx.end_turtle();
+
+            if !self.permissions_widget.is_empty() {
+                self.permissions_widget.draw_walk_all(
+                    cx,
+                    scope,
+                    Walk::new(Size::fill(), Size::fill()),
+                );
+            }
+
+            self.draw_state.end();
+            self.end_preview(cx);
+        }
+
+        DrawStep::done()
+    }
+
+    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
+        if !self.xr_runtime_active {
+            self.xr_runtime_active = true;
+            cx.cx.widget_tree_mark_dirty(self.uid);
+        }
+        self.draw_xr_content(cx, scope);
+        DrawStep::done()
     }
 }

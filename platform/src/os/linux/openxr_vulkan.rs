@@ -4,6 +4,9 @@ use crate::{
     os::linux::vulkan::{CxVulkan, CxVulkanOpenXrSessionData},
     xr_depth_mesh::xr_depth_mesh_store,
 };
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static OPENXR_VULKAN_EYE_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 pub(super) struct CxOpenXrVulkanSession {
     _color_images: Vec<XrSwapchainImageVulkanKHR>,
@@ -62,6 +65,32 @@ impl Cx {
             }
             pass.pass_uniforms.depth_projection_r = pass.pass_uniforms.depth_projection;
             pass.pass_uniforms.depth_view_r = pass.pass_uniforms.depth_view;
+            let eye_log_index = OPENXR_VULKAN_EYE_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+            if eye_log_index < 12 {
+                let eye_pose = frame.eyes[eye].local_from_eye.position;
+                crate::log!(
+                    "OpenXR Vulkan eye[{}] log[{}] swapchain_index={} depth_image={} eye_local_pos=({:.3},{:.3},{:.3}) proj=({:.4},{:.4},{:.4},{:.4},{:.4},{:.4}) view_t=({:.3},{:.3},{:.3}) camera_inv_t=({:.3},{:.3},{:.3})",
+                    eye,
+                    eye_log_index,
+                    color_image_index,
+                    depth_image_index.is_some(),
+                    eye_pose.x,
+                    eye_pose.y,
+                    eye_pose.z,
+                    frame.eyes[eye].proj_mat.v[0],
+                    frame.eyes[eye].proj_mat.v[5],
+                    frame.eyes[eye].proj_mat.v[8],
+                    frame.eyes[eye].proj_mat.v[9],
+                    frame.eyes[eye].proj_mat.v[10],
+                    frame.eyes[eye].proj_mat.v[14],
+                    frame.eyes[eye].view_mat.v[12],
+                    frame.eyes[eye].view_mat.v[13],
+                    frame.eyes[eye].view_mat.v[14],
+                    camera_inv.v[12],
+                    camera_inv.v[13],
+                    camera_inv.v[14]
+                );
+            }
 
             let mut vulkan =
                 self.os.vulkan.take().ok_or_else(|| {
@@ -128,6 +157,26 @@ impl CxOpenXrVulkanSession {
 }
 
 impl CxOpenXrSession {
+    fn pick_vulkan_color_format(
+        supported_formats: &[i64],
+        preferred_format: vk::Format,
+    ) -> Option<vk::Format> {
+        let is_supported = |format: vk::Format| supported_formats.contains(&i64::from(format.as_raw()));
+
+        if preferred_format != vk::Format::UNDEFINED && is_supported(preferred_format) {
+            return Some(preferred_format);
+        }
+
+        [
+            vk::Format::B8G8R8A8_UNORM,
+            vk::Format::R8G8B8A8_UNORM,
+            vk::Format::B8G8R8A8_SRGB,
+            vk::Format::R8G8B8A8_SRGB,
+        ]
+        .into_iter()
+        .find(|format| is_supported(*format))
+    }
+
     pub(super) fn create_session_vulkan(
         xr: &LibOpenXr,
         system_id: XrSystemId,
@@ -199,8 +248,22 @@ impl CxOpenXrSession {
             unsafe { (xr.xrEnumerateSwapchainFormats)(session, cap, len, buf) }
                 .to_result("xrEnumerateSwapchainFormats")
         })?;
-        let color_format = vulkan.swapchain_format();
+        let preferred_color_format = vulkan.swapchain_format();
+        let color_format =
+            Self::pick_vulkan_color_format(&swapchain_formats, preferred_color_format)
+                .ok_or_else(|| {
+                    format!(
+                        "OpenXR Vulkan found no supported 32-bit RGBA swapchain format; preferred={preferred_color_format:?} runtime={swapchain_formats:?}"
+                    )
+                })?;
         let color_format_raw = i64::from(color_format.as_raw());
+        if color_format != preferred_color_format {
+            crate::log!(
+                "OpenXR Vulkan selected runtime color format {:?} (preferred {:?})",
+                color_format,
+                preferred_color_format
+            );
+        }
         if !swapchain_formats.contains(&color_format_raw) {
             return Err(format!(
                 "OpenXR Vulkan swapchain format {:?} not supported by runtime: {:?}",
