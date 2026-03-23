@@ -11,13 +11,13 @@ pub(super) enum HandCollider {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct PhysicsCube {
-    pub(super) widget_uid: WidgetUid,
-    pub(super) body: RigidBodyHandle,
-    pub(super) collider: ColliderHandle,
-    pub(super) half_extents: Vec3f,
-    pub(super) scale: Vec3f,
-    pub(super) body_kind: XrBodyKind,
+pub(crate) struct PhysicsCube {
+    pub(crate) widget_uid: WidgetUid,
+    pub(crate) body: RigidBodyHandle,
+    pub(crate) collider: ColliderHandle,
+    pub(crate) half_extents: Vec3f,
+    pub(crate) scale: Vec3f,
+    pub(crate) body_kind: XrBodyKind,
 }
 
 #[derive(Clone, Copy)]
@@ -26,19 +26,19 @@ pub(super) struct HandColliderBody {
     pub(super) collider: ColliderHandle,
 }
 
-pub(super) struct RapierScene {
+pub(crate) struct RapierScene {
     gravity: RapierVector,
     integration_parameters: IntegrationParameters,
     pipeline: PhysicsPipeline,
     islands: IslandManager,
     broad_phase: BroadPhaseBvh,
     narrow_phase: NarrowPhase,
-    pub(super) bodies: RigidBodySet,
+    pub(crate) bodies: RigidBodySet,
     pub(super) colliders: ColliderSet,
     impulse_joints: ImpulseJointSet,
     multibody_joints: MultibodyJointSet,
     ccd_solver: CCDSolver,
-    pub(super) cubes: Vec<PhysicsCube>,
+    pub(crate) cubes: Vec<PhysicsCube>,
     depth_query_surfaces: Vec<DepthQuerySurfaceCollider>,
     pub(super) left_hand: Vec<HandColliderBody>,
     pub(super) right_hand: Vec<HandColliderBody>,
@@ -59,7 +59,7 @@ fn rapier_pose(pose: Pose) -> RapierPose {
     )
 }
 
-pub(super) fn makepad_pose(pose: &RapierPose) -> Pose {
+pub(crate) fn makepad_pose(pose: &RapierPose) -> Pose {
     Pose::new(
         Quat {
             x: pose.rotation.x,
@@ -86,7 +86,7 @@ pub(super) fn capsule_pose(a: Vec3f, b: Vec3f) -> (RapierPose, RapierReal) {
 }
 
 impl RapierScene {
-    pub(super) fn spawn_dynamic_box(
+    pub(crate) fn spawn_dynamic_box(
         &mut self,
         widget_uid: WidgetUid,
         pose: Pose,
@@ -127,7 +127,7 @@ impl RapierScene {
         });
     }
 
-    pub(super) fn spawn_fixed_box(
+    pub(crate) fn spawn_fixed_box(
         &mut self,
         widget_uid: WidgetUid,
         pose: Pose,
@@ -156,7 +156,7 @@ impl RapierScene {
         });
     }
 
-    pub(super) fn new(gravity: f32) -> Self {
+    pub(crate) fn new(gravity: f32) -> Self {
         let mut scene = Self {
             gravity: RapierVector::new(0.0, -gravity, 0.0),
             integration_parameters: IntegrationParameters {
@@ -285,7 +285,7 @@ impl RapierScene {
         }
     }
 
-    pub(super) fn step(&mut self) {
+    pub(crate) fn step(&mut self) {
         self.pipeline.step(
             self.gravity,
             &self.integration_parameters,

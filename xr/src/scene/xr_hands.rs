@@ -1,7 +1,7 @@
 use super::*;
 use super::xr_physics::{capsule_pose, makepad_pose, HandCollider, HandColliderBody, RapierScene};
 
-impl XrScene {
+impl XrEnv {
     fn pose_point_world(pose: Pose, local: Vec3f) -> Vec3f {
         pose.to_mat4().transform_vec4(local.to_vec4()).to_vec3f()
     }
@@ -295,12 +295,12 @@ impl XrScene {
         self.draw_cube.end_many_instances(cx);
     }
 
-    pub(super) fn sync_hands(&mut self, state: &XrState) {
+    pub(super) fn sync_hands(&mut self, scene: Option<&mut RapierScene>, state: &XrState) {
         if !XR_ENABLE_HAND_PHYSICS {
             return;
         }
 
-        let Some(scene) = self.scene.as_mut() else {
+        let Some(scene) = scene else {
             return;
         };
 

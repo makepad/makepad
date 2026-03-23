@@ -21,6 +21,8 @@ pub mod physics_view;
 pub mod refractive_cube;
 #[path = "scene/xr_root.rs"]
 pub mod xr_root;
+#[path = "scene/xr_env.rs"]
+pub mod xr_env;
 #[path = "scene/xr_scene.rs"]
 mod xr_scene;
 #[path = "util/scene_draw.rs"]
@@ -38,6 +40,7 @@ pub use passthrough_env::DrawPassthroughEnvAtlas;
 pub use xr_permissions_flow::*;
 pub use physics_view::*;
 pub use refractive_cube::*;
+pub use xr_env::XrEnv;
 pub use xr_root::XrRoot;
 pub use xr_scene::XrScene;
 pub use tree::{
@@ -56,6 +59,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     passthrough_env::script_mod(vm);
     tree::script_mod(vm);
     view_splat::script_mod(vm);
+    xr_env::script_mod(vm);
     xr_scene::script_mod(vm);
     xr_root::script_mod(vm)
 }

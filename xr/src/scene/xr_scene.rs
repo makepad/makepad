@@ -1,95 +1,21 @@
-use super::passthrough_env::DrawPassthroughEnvAtlas;
-use self::{
-    xr_depth::{DepthSurfaceMeshChunkHandle, RetainedDepthQueryHit},
-    xr_passthrough::{
-        XrPassthroughCameraChoice, XrPassthroughCameraTextures, XrPassthroughEnvAtlas,
-    },
-    xr_physics::{makepad_pose, RapierScene},
-};
 use crate::{
     cube::Cube,
     gltf::Gltf,
     refractive_cube::RefractiveCube,
     scene_draw::SceneState3D,
     tree::Tree,
+    xr_env::{makepad_pose, RapierScene},
     xr_node::{XrBodyKind, XrDrawScopeData, XrNode, XrRuntimeBodyState},
-    xr_root::xr_root_options_from_scope,
-};
-use makepad_widgets::makepad_platform::{
-    event::{CameraPreviewMode, VideoSource, VideoYuvMetadata},
-    permission::{Permission, PermissionStatus},
-    video::{VideoFormatId, VideoInputId, VideoInputsEvent, VideoPixelFormat},
 };
 use makepad_widgets::*;
-use rapier3d::prelude::{
-    BroadPhaseBvh, CCDSolver, ColliderBuilder, ColliderHandle, ColliderSet, ImpulseJointSet,
-    IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
-    Pose as RapierPose, Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
-    Rotation as RapierRotation, SharedShape, Vector as RapierVector,
-};
 use std::{collections::HashMap, rc::Rc};
 
-#[path = "xr_depth.rs"]
-mod xr_depth;
-#[path = "xr_hands.rs"]
-mod xr_hands;
-#[path = "xr_passthrough.rs"]
-mod xr_passthrough;
-#[path = "xr_physics.rs"]
-mod xr_physics;
-
 script_mod! {
-    use mod.pod.*
-    use mod.math.*
-    use mod.shader.*
-    use mod.draw
-    use mod.geom
     use mod.prelude.widgets.*
     use mod.widgets.*
 
     mod.widgets.XrPhysics = set_type_default() do #(XrPhysics::script_component(vm))
     mod.widgets.XrSceneBase = #(XrScene::register_widget(vm))
-
-    set_type_default() do #(DrawDepthMeshBasic::script_shader(vm)){
-        vertex_pos: vertex_position(vec4f)
-        fb0: fragment_output(0, vec4f)
-        draw_call: uniform_buffer(draw.DrawCallUniforms)
-        draw_pass: uniform_buffer(draw.DrawPassUniforms)
-        draw_list: uniform_buffer(draw.DrawListUniforms)
-        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
-
-        v_world: varying(vec3f)
-        v_normal: varying(vec3f)
-
-        vertex: fn() {
-            let world = vec4(
-                self.geom.pos_nx.x,
-                self.geom.pos_nx.y,
-                self.geom.pos_nx.z,
-                1.0
-            );
-            self.v_normal = normalize(vec3(
-                self.geom.pos_nx.w,
-                self.geom.ny_nz_uv.x,
-                self.geom.ny_nz_uv.y
-            ));
-            let biased_world = vec4(world.xyz + self.v_normal * self.normal_bias, 1.0);
-            self.v_world = biased_world.xyz;
-            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * biased_world);
-        }
-
-        pixel: fn() {
-            let n = normalize(self.v_normal);
-            let l = normalize(self.light_dir);
-            let diffuse = max(dot(n, l), 0.0);
-            let lit = self.ambient + diffuse * (1.0 - self.ambient);
-            return vec4(self.base_color.xyz * lit, self.base_color.w);
-        }
-
-        fragment: fn() {
-            self.fb0 = self.pixel();
-        }
-    }
 
     mod.widgets.XrScene = set_type_default() do mod.widgets.XrSceneBase{
         width: Fill
@@ -99,100 +25,8 @@ script_mod! {
             color: #x171d26
             draw_depth: -99.0
         }
-        draw_cube +: {}
-        draw_depth_mesh +: {
-            light_dir: vec3(0.28, 0.86, 0.42)
-            ambient: 0.26
-            normal_bias: 0.006
-            base_color: vec4(0.76, 0.88, 0.98, 1.0)
-        }
-        draw_pbr +: {
-            light_dir: vec3(0.35, 0.8, 0.45)
-            light_color: vec3(1.0, 1.0, 1.0)
-            ambient: 0.04
-            spec_power: 128.0
-            spec_strength: 1.0
-            env_intensity: 1.25
-        }
-        draw_pbr_refractive +: {
-            light_dir: vec3(0.35, 0.8, 0.45)
-            light_color: vec3(1.0, 1.0, 1.0)
-            ambient: 0.02
-            spec_power: 128.0
-            spec_strength: 1.0
-            env_intensity: 1.2
-            source_size: vec2(1280.0, 960.0)
-            camera_enabled: 0.0
-            rotation_steps: 0.0
-            camera_fov_y_degrees: 92.0
-            camera_projection_scale: 1.12
-            camera_center_offset_uv: vec2(0.0, 0.0)
-            camera_world_pos: vec3(0.0, 0.0, 0.0)
-            camera_right: vec3(1.0, 0.0, 0.0)
-            camera_up: vec3(0.0, 1.0, 0.0)
-            camera_forward: vec3(0.0, 0.0, -1.0)
-            object_center: vec3(0.0, 0.0, 0.0)
-            object_right: vec3(1.0, 0.0, 0.0)
-            object_up: vec3(0.0, 1.0, 0.0)
-            object_forward: vec3(0.0, 0.0, -1.0)
-            object_half_extents: vec3(0.085, 0.085, 0.085)
-            object_corner_radius: 0.018
-            transmission_focus_distance: 1.8
-        }
-        draw_passthrough_env_atlas +: {
-            source_size: vec2(1280.0, 960.0)
-            camera_enabled: 0.0
-            rotation_steps: 0.0
-            bootstrap_mix: 1.0
-            update_strength: 0.92
-            camera_fov_y_degrees: 92.0
-            camera_projection_scale: 1.12
-            camera_center_offset_uv: vec2(0.0, 0.0)
-            camera_right: vec3(1.0, 0.0, 0.0)
-            camera_up: vec3(0.0, 1.0, 0.0)
-            camera_forward: vec3(0.0, 0.0, -1.0)
-        }
     }
 }
-
-const XR_SIMULATION_DT: f32 = 1.0 / 120.0;
-const XR_ENABLE_HAND_PHYSICS: bool = true;
-const XR_ENABLE_DEPTH_QUERY_PHYSICS: bool = true;
-const XR_RENDER_HAND_GEOMETRY: bool = false;
-const XR_PASSTHROUGH_QUAD_DISTANCE: f32 = 0.78;
-const XR_PASSTHROUGH_QUAD_WORLD_OFFSET_Y: f32 = -0.145;
-const XR_PASSTHROUGH_QUAD_WORLD_OFFSET_X: f32 = 0.0;
-const XR_PASSTHROUGH_ENV_ATLAS_WIDTH: usize = 2048;
-const XR_PASSTHROUGH_ENV_ATLAS_HEIGHT: usize = 1024;
-const XR_PASSTHROUGH_ENV_CAMERA_FOV_Y_DEGREES: f32 = 92.0;
-const XR_PASSTHROUGH_ENV_CAMERA_PROJECTION_SCALE: f32 = 0.6825;
-const XR_PASSTHROUGH_CAMERA_EXPOSURE: f32 = 0.68;
-const XR_PASSTHROUGH_ENV_UPDATE_STRENGTH: f32 = 0.92;
-const XR_DEPTH_QUERY_MAX_DISTANCE: f32 = 0.12;
-const XR_DEPTH_QUERY_FRICTION: f32 = 0.9;
-const XR_DEPTH_QUERY_LOOKAHEAD_SECONDS: f32 = 0.18;
-const XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE: f32 = 0.32;
-const XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE: usize = 48;
-const XR_DEPTH_QUERY_FINGERPRINT_QUANTIZATION_METERS: f32 = 0.01;
-const XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES: u8 = 6;
-const XR_HAND_COLLIDER_SLOTS_PER_HAND: usize = 25;
-const XR_HAND_COLLIDER_FRICTION: f32 = 0.8;
-const XR_HAND_PLATE_HALF_WIDTH: f32 = 0.045;
-const XR_HAND_PLATE_HALF_HEIGHT: f32 = 0.005;
-const XR_HAND_PLATE_HALF_DEPTH: f32 = 0.028;
-const XR_HAND_PLATE_FORWARD_OFFSET: f32 = 0.004;
-const XR_HAND_TIP_RADIUS_SCALE: f32 = 0.72;
-const XR_BODY_LINEAR_DAMPING: f32 = 1.5;
-const XR_BODY_ANGULAR_DAMPING: f32 = 6.0;
-const XR_BODY_ADDITIONAL_SOLVER_ITERATIONS: usize = 4;
-const XR_BODY_SLEEP_ANGULAR_THRESHOLD: f32 = 2.0;
-const XR_BODY_SLEEP_TIME: f32 = 0.35;
-const XR_BODY_SNAP_SLEEP_LINEAR_SPEED: f32 = 0.03;
-const XR_BODY_SNAP_SLEEP_ANGULAR_SPEED: f32 = 1.0;
-const XR_PBR_FACE_SUBDIVISIONS: usize = 1;
-const XR_PBR_CORNER_SEGMENTS: usize = 3;
-const XR_PBR_HAND_CAPSULE_SUBDIVISIONS: usize = 8;
-const XR_PBR_HAND_SPHERE_SUBDIVISIONS: usize = 8;
 
 #[derive(Script, ScriptHook, Clone, Copy)]
 pub struct XrPhysics {
@@ -203,32 +37,6 @@ pub struct XrPhysics {
 impl Default for XrPhysics {
     fn default() -> Self {
         Self { gravity: 9.81 }
-    }
-}
-
-#[derive(Script, ScriptHook, Debug)]
-#[repr(C)]
-pub struct DrawDepthMeshBasic {
-    #[deref]
-    pub draw_vars: DrawVars,
-    #[live]
-    pub base_color: Vec4f,
-    #[live]
-    pub light_dir: Vec3f,
-    #[live(0.006)]
-    pub normal_bias: f32,
-    #[live(0.26)]
-    pub ambient: f32,
-}
-
-impl DrawDepthMeshBasic {
-    fn draw_geometry(&mut self, cx: &mut Cx2d, geometry_id: GeometryId) {
-        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
-        self.draw_vars.geometry_id = Some(geometry_id);
-        if cx.new_draw_call(&self.draw_vars).is_some() && self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
-            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
-        }
     }
 }
 
@@ -276,21 +84,6 @@ pub struct XrScene {
     preview_pass: DrawPass,
     #[live]
     physics: XrPhysics,
-    #[redraw]
-    #[live]
-    draw_cube: DrawCube,
-    #[redraw]
-    #[live]
-    draw_pbr: DrawPbr,
-    #[redraw]
-    #[live]
-    draw_pbr_refractive: DrawPbrRefractive,
-    #[redraw]
-    #[live]
-    draw_depth_mesh: DrawDepthMeshBasic,
-    #[redraw]
-    #[live]
-    draw_passthrough_env_atlas: DrawPassthroughEnvAtlas,
     #[area]
     #[rust]
     area: Area,
@@ -302,8 +95,6 @@ pub struct XrScene {
     scene_dirty: bool,
     #[rust]
     last_xr_state: Option<Rc<XrState>>,
-    #[rust(false)]
-    xr_depth_mesh_enabled: bool,
     #[rust]
     drag_last_abs: Option<DVec2>,
     #[rust(0.0)]
@@ -334,44 +125,30 @@ pub struct XrScene {
     depth_range: Vec2f,
     #[live(0.0)]
     depth_forward_bias: f32,
+    #[live(false)]
+    xr_anchor_to_head: bool,
+    #[live(0.78)]
+    xr_anchor_forward_offset: f32,
+    #[live(vec3(0.0, -0.26, 0.0))]
+    xr_anchor_position_offset: Vec3f,
     #[rust]
     next_frame: NextFrame,
-    #[rust]
-    depth_surface_mesh_generation: u64,
-    #[rust]
-    depth_surface_mesh_update_sequence: u64,
-    #[rust]
-    depth_surface_mesh_chunks: HashMap<(i32, i32, i32), (Geometry, DepthSurfaceMeshChunkHandle)>,
-    #[rust]
-    depth_surface_mesh_upload_count: usize,
     #[rust]
     preview_color_texture: Option<Texture>,
     #[rust]
     preview_depth_texture: Option<Texture>,
     #[rust]
-    depth_query_retained_hits: HashMap<u64, RetainedDepthQueryHit>,
-    #[rust]
-    passthrough_camera_choice: Option<XrPassthroughCameraChoice>,
-    #[rust]
-    passthrough_camera_textures: Option<XrPassthroughCameraTextures>,
-    #[rust]
-    passthrough_camera_video: VideoYuvMetadata,
-    #[rust]
-    passthrough_camera_permission: Option<PermissionStatus>,
-    #[rust]
-    passthrough_camera_source_size: Vec2f,
-    #[rust]
     xr_draw_logged: bool,
+    #[rust(0u32)]
+    xr_anchor_log_count: u32,
+    #[rust(0u32)]
+    preview_draw_log_count: u32,
+    #[rust(false)]
+    preview_resources_logged: bool,
     #[rust]
-    passthrough_camera_playback_requested: bool,
-    #[rust]
-    passthrough_camera_failed: bool,
-    #[rust]
-    passthrough_camera_has_frame: bool,
-    #[rust]
-    passthrough_env_atlas_quad: Option<Geometry>,
-    #[rust]
-    passthrough_env_atlas: Option<XrPassthroughEnvAtlas>,
+    xr_anchor_pose: Pose,
+    #[rust(false)]
+    xr_anchor_initialized: bool,
     #[deref]
     node: XrNode,
 }
@@ -381,120 +158,11 @@ impl XrScene {
         update.clicked_menu()
     }
 
-    fn depth_debug_enabled(&self) -> bool {
-        self.xr_depth_mesh_enabled
-    }
-
-    fn passthrough_video_id() -> LiveId {
-        live_id!(xr_passthrough_camera)
-    }
-
-    fn draw_pose_box(
-        &mut self,
-        cx: &mut Cx2d,
-        pose: Pose,
-        size: Vec3f,
-        color: Vec4f,
-        depth_clip: f32,
-    ) {
-        self.draw_cube.set_use_pass_camera(true);
-        self.draw_cube.transform = pose.to_mat4();
-        self.draw_cube.cube_pos = vec3(0.0, 0.0, 0.0);
-        self.draw_cube.cube_size = size;
-        self.draw_cube.color = color;
-        self.draw_cube.depth_clip = depth_clip;
-        self.draw_cube.draw(cx);
-    }
-
-    fn prepare_pbr(&mut self, cx: &mut Cx2d) {
-        Self::prepare_draw_pbr_common(&mut self.draw_pbr, cx);
-    }
-
-    fn prepare_refractive_pbr(&mut self, cx: &mut Cx2d) {
-        Self::prepare_draw_pbr_common(&mut self.draw_pbr_refractive.draw_super, cx);
-    }
-
-    fn prepare_draw_pbr_common(draw_pbr: &mut DrawPbr, cx: &mut Cx2d) {
-        draw_pbr.begin();
-        draw_pbr.set_use_pass_camera(true);
-        draw_pbr.set_depth_clip(1.0);
-        draw_pbr.set_base_color_texture(None);
-        draw_pbr.set_metal_roughness_texture(None);
-        draw_pbr.set_normal_texture(None);
-        draw_pbr.set_occlusion_texture(None);
-        draw_pbr.set_emissive_texture(None);
-        let env_tex = draw_pbr.default_env_texture(cx);
-        draw_pbr.set_env_texture(Some(env_tex));
-    }
-
-    fn prepare_depth_mesh(&mut self, _cx: &mut Cx2d) {
-        self.draw_depth_mesh.draw_vars.options.depth_write = true;
-    }
-
-    fn draw_pbr_rounded_cube(
-        &mut self,
-        cx: &mut Cx2d,
-        pose: Pose,
-        half_extents: Vec3f,
-        radius: f32,
-        color: Vec4f,
-        roughness: f32,
-    ) {
-        self.draw_pbr.set_transform(pose.to_mat4());
-        self.draw_pbr.set_base_color_factor(color);
-        self.draw_pbr.set_metal_roughness(0.0, roughness);
-        let _ = self.draw_pbr.draw_rounded_cube(
-            cx,
-            half_extents,
-            radius,
-            XR_PBR_FACE_SUBDIVISIONS,
-            XR_PBR_CORNER_SEGMENTS,
-        );
-    }
-
-    fn draw_pbr_capsule(
-        &mut self,
-        cx: &mut Cx2d,
-        pose: Pose,
-        radius: f32,
-        half_height: f32,
-        color: Vec4f,
-        roughness: f32,
-    ) {
-        self.draw_pbr.set_transform(pose.to_mat4());
-        self.draw_pbr.set_base_color_factor(color);
-        self.draw_pbr.set_metal_roughness(0.0, roughness);
-        let _ =
-            self.draw_pbr
-                .draw_capsule(cx, radius, half_height, XR_PBR_HAND_CAPSULE_SUBDIVISIONS);
-    }
-
-    fn draw_pbr_sphere(
-        &mut self,
-        cx: &mut Cx2d,
-        center: Vec3f,
-        radius: f32,
-        color: Vec4f,
-        roughness: f32,
-    ) {
-        self.draw_pbr
-            .set_transform(Pose::new(Quat::default(), center).to_mat4());
-        self.draw_pbr.set_base_color_factor(color);
-        self.draw_pbr.set_metal_roughness(0.0, roughness);
-        let _ = self
-            .draw_pbr
-            .draw_sphere(cx, radius, XR_PBR_HAND_SPHERE_SUBDIVISIONS);
-    }
-
     fn reset_scene(&mut self, cx: &mut Cx) {
-        if let Some(atlas) = self.passthrough_env_atlas.as_mut() {
-            atlas.reset_state();
-        }
-        self.clear_depth_surface_mesh();
         self.scene = None;
         Rc::make_mut(&mut self.runtime_bodies).clear();
         self.scene_dirty = true;
-        self.sync_passthrough_camera(cx);
+        self.redraw(cx);
     }
 
     fn should_preview_step(&self) -> bool {
@@ -573,27 +241,105 @@ impl XrScene {
         }
     }
 
-    fn pointer_tip_world(hand: &XrHand) -> Option<Vec3f> {
-        if !hand.in_view() || !hand.tip_active(XrHand::INDEX_TIP) {
-            return None;
+    fn xr_anchor_pose_from_state(&self, state: &XrState) -> Pose {
+        let mut forward = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        forward.y = 0.0;
+        if forward.length() <= 1.0e-4 {
+            forward = vec3f(0.0, 0.0, -1.0);
+        } else {
+            forward = forward.normalize();
         }
-        let tip_len = hand.tips[XrHand::INDEX_TIP].max(0.0);
-        Some(
-            hand.joints[XrHand::INDEX_KNUCKLE3]
-                .to_mat4()
-                .transform_vec4(vec4(0.0, 0.0, -tip_len, 1.0))
-                .to_vec3f(),
-        )
+
+        let up = vec3f(0.0, 1.0, 0.0);
+        let yaw_rotation = Quat::look_rotation(forward, up);
+        let center = vec3f(0.0, state.head_pose.position.y, 0.0)
+            + forward * self.xr_anchor_forward_offset.max(0.0)
+            + yaw_rotation.rotate_vec3(&self.xr_anchor_position_offset);
+        Pose::new(Quat::look_rotation(forward.scale(-1.0), up), center)
     }
 
-    fn draw_scope_pointer_tips(state: Option<&XrState>) -> [Option<Vec3f>; 2] {
-        let Some(state) = state else {
-            return [None, None];
+    fn xr_should_reanchor_anchor(update: &XrUpdateEvent) -> bool {
+        let position_delta = update.state.head_pose.position - update.last.head_pose.position;
+        if position_delta.length() > 0.35 {
+            return true;
+        }
+
+        let mut current_forward = update
+            .state
+            .head_pose
+            .orientation
+            .rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        current_forward.y = 0.0;
+        current_forward = if current_forward.length() <= 1.0e-4 {
+            vec3f(0.0, 0.0, -1.0)
+        } else {
+            current_forward.normalize()
         };
-        [
-            Self::pointer_tip_world(&state.left_hand),
-            Self::pointer_tip_world(&state.right_hand),
-        ]
+
+        let mut last_forward = update
+            .last
+            .head_pose
+            .orientation
+            .rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        last_forward.y = 0.0;
+        last_forward = if last_forward.length() <= 1.0e-4 {
+            vec3f(0.0, 0.0, -1.0)
+        } else {
+            last_forward.normalize()
+        };
+
+        current_forward.dot(last_forward).clamp(-1.0, 1.0) < 0.75
+    }
+
+    fn update_xr_anchor_pose(&mut self, state: &XrState) {
+        if !self.xr_anchor_to_head {
+            return;
+        }
+        self.xr_anchor_pose = self.xr_anchor_pose_from_state(state);
+        self.xr_anchor_initialized = true;
+        if self.xr_anchor_log_count < 8 {
+            let mut forward = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+            forward.y = 0.0;
+            forward = if forward.length() <= 1.0e-4 {
+                vec3f(0.0, 0.0, -1.0)
+            } else {
+                forward.normalize()
+            };
+            crate::log!(
+                "XrScene anchor[{}] head=({:.3},{:.3},{:.3}) forward=({:.3},{:.3},{:.3}) anchor_pos=({:.3},{:.3},{:.3}) anchor_quat=({:.3},{:.3},{:.3},{:.3}) offset=({:.3},{:.3},{:.3}) forward_offset={:.3}",
+                self.xr_anchor_log_count,
+                state.head_pose.position.x,
+                state.head_pose.position.y,
+                state.head_pose.position.z,
+                forward.x,
+                forward.y,
+                forward.z,
+                self.xr_anchor_pose.position.x,
+                self.xr_anchor_pose.position.y,
+                self.xr_anchor_pose.position.z,
+                self.xr_anchor_pose.orientation.x,
+                self.xr_anchor_pose.orientation.y,
+                self.xr_anchor_pose.orientation.z,
+                self.xr_anchor_pose.orientation.w,
+                self.xr_anchor_position_offset.x,
+                self.xr_anchor_position_offset.y,
+                self.xr_anchor_position_offset.z,
+                self.xr_anchor_forward_offset
+            );
+            self.xr_anchor_log_count += 1;
+        }
+    }
+
+    fn xr_root_transform_state(&self) -> XrTransformState {
+        if self.xr_anchor_to_head && self.xr_anchor_initialized {
+            XrTransformState {
+                position: self.xr_anchor_pose.position,
+                orientation: self.xr_anchor_pose.orientation,
+                scale: vec3f(1.0, 1.0, 1.0),
+            }
+        } else {
+            XrTransformState::default()
+        }
     }
 
     fn rotation_quat(rot: Vec3f) -> Quat {
@@ -760,7 +506,7 @@ impl XrScene {
 
     fn collect_rendered_cubes(&self) -> Vec<CollectedXrCube> {
         let mut cubes = Vec::new();
-        let root = XrTransformState::default();
+        let root = self.xr_root_transform_state();
         self.node
             .children(&mut |_, child| Self::collect_cubes_from_widget(&child, root, &mut cubes));
         cubes
@@ -787,6 +533,21 @@ impl XrScene {
 
     fn rebuild_runtime_scene(&mut self, cx: &mut Cx) {
         let cubes = self.collect_rendered_cubes();
+        let dynamic_count = cubes
+            .iter()
+            .filter(|cube| matches!(cube.body_kind, XrBodyKind::Dynamic))
+            .count();
+        let fixed_count = cubes
+            .iter()
+            .filter(|cube| matches!(cube.body_kind, XrBodyKind::Fixed))
+            .count();
+        crate::log!(
+            "XrScene rebuild_runtime_scene cubes={} dynamic={} fixed={} child_count={}",
+            cubes.len(),
+            dynamic_count,
+            fixed_count,
+            self.node.child_count()
+        );
         let mut scene = RapierScene::new(self.physics.gravity);
         for cube in cubes {
             match cube.body_kind {
@@ -816,10 +577,22 @@ impl XrScene {
         self.redraw(cx);
     }
 
-    fn ensure_runtime_scene(&mut self, cx: &mut Cx) {
+    pub(crate) fn ensure_runtime_scene(&mut self, cx: &mut Cx) {
         if self.scene_dirty || self.scene.is_none() {
             self.rebuild_runtime_scene(cx);
         }
+    }
+
+    pub(crate) fn runtime_scene_mut(&mut self) -> Option<&mut RapierScene> {
+        self.scene.as_mut()
+    }
+
+    pub(crate) fn runtime_scene_ref(&self) -> Option<&RapierScene> {
+        self.scene.as_ref()
+    }
+
+    pub(crate) fn runtime_bodies_clone(&self) -> Rc<HashMap<WidgetUid, XrRuntimeBodyState>> {
+        self.runtime_bodies.clone()
     }
 
     fn ensure_preview_pass_resources(&mut self, cx: &mut Cx) {
@@ -849,6 +622,13 @@ impl XrScene {
             self.preview_pass
                 .set_depth_texture(cx, &texture, DrawPassClearDepth::ClearWith(1.0));
             self.preview_depth_texture = Some(texture);
+        }
+        if !self.preview_resources_logged
+            && self.preview_color_texture.is_some()
+            && self.preview_depth_texture.is_some()
+        {
+            self.preview_resources_logged = true;
+            crate::log!("XrScene preview pass resources created");
         }
     }
 
@@ -890,9 +670,24 @@ impl Widget for XrScene {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.node.handle_event(cx, event, scope);
+        if !cx.in_xr_mode() {
+            self.xr_anchor_initialized = false;
+            self.xr_anchor_log_count = 0;
+        }
 
         match event {
             Event::Startup => {
+                crate::log!(
+                    "XrScene startup child_count={} camera_distance={} fov_y={} xr_anchor_to_head={} anchor_offset=({:.3},{:.3},{:.3}) forward_offset={:.3}",
+                    self.node.child_count(),
+                    self.camera_distance,
+                    self.camera_fov_y,
+                    self.xr_anchor_to_head,
+                    self.xr_anchor_position_offset.x,
+                    self.xr_anchor_position_offset.y,
+                    self.xr_anchor_position_offset.z,
+                    self.xr_anchor_forward_offset
+                );
                 self.next_frame = cx.new_next_frame();
                 self.ensure_runtime_scene(cx);
             }
@@ -910,62 +705,20 @@ impl Widget for XrScene {
             Event::XrUpdate(update) => {
                 self.last_xr_state = Some(update.state.clone());
                 self.xr_draw_logged = false;
+                if self.xr_anchor_to_head
+                    && (!self.xr_anchor_initialized || Self::xr_should_reanchor_anchor(update))
+                {
+                    self.update_xr_anchor_pose(update.state.as_ref());
+                    self.scene_dirty = true;
+                }
                 if Self::reset_requested(update) {
                     self.reset_scene(cx);
                 }
                 self.ensure_runtime_scene(cx);
-                self.sync_hands(&update.state);
-                self.sync_depth_query_surfaces(cx);
                 if let Some(scene) = self.scene.as_mut() {
                     scene.step();
                 }
                 self.sync_runtime_bodies();
-                self.sync_passthrough_camera(cx);
-                self.redraw(cx);
-            }
-            Event::PermissionResult(result) if result.permission == Permission::HeadsetCamera => {
-                self.passthrough_camera_permission = Some(result.status);
-                self.sync_passthrough_camera(cx);
-                self.redraw(cx);
-            }
-            Event::VideoInputs(ev) => {
-                self.passthrough_camera_failed = false;
-                self.passthrough_camera_choice = Self::pick_passthrough_camera_choice(ev);
-                if self.passthrough_camera_choice.is_none() {
-                    crate::warning!("XR passthrough camera: no suitable camera choice found");
-                }
-                self.sync_passthrough_camera(cx);
-                self.redraw(cx);
-            }
-            Event::VideoYuvTexturesReady(ev) if ev.video_id == Self::passthrough_video_id() => {
-                if let Some(textures) = self.passthrough_camera_textures.as_mut() {
-                    textures.tex_y = Some(ev.tex_y.clone());
-                    textures.tex_u = Some(ev.tex_u.clone());
-                    textures.tex_v = Some(ev.tex_v.clone());
-                }
-                self.redraw(cx);
-            }
-            Event::VideoTextureUpdated(ev) if ev.video_id == Self::passthrough_video_id() => {
-                self.passthrough_camera_video = ev.yuv;
-                self.passthrough_camera_has_frame = true;
-                self.redraw(cx);
-            }
-            Event::VideoPlaybackPrepared(ev) if ev.video_id == Self::passthrough_video_id() => {
-                self.passthrough_camera_source_size =
-                    vec2f(ev.video_width as f32, ev.video_height as f32);
-                self.redraw(cx);
-            }
-            Event::VideoPlaybackResourcesReleased(ev)
-                if ev.video_id == Self::passthrough_video_id() =>
-            {
-                self.reset_passthrough_camera_state();
-                self.redraw(cx);
-            }
-            Event::VideoDecodingError(ev) if ev.video_id == Self::passthrough_video_id() => {
-                crate::warning!("XR passthrough camera error: {}", ev.error);
-                self.passthrough_camera_playback_requested = false;
-                self.passthrough_camera_failed = true;
-                self.passthrough_camera_has_frame = false;
                 self.redraw(cx);
             }
             _ => {}
@@ -1047,8 +800,25 @@ impl Widget for XrScene {
             pos: dvec2(0.0, 0.0),
             size: preview_pass_size,
         };
+        let scene_state = self.preview_scene_state(preview_rect, preview_pass_size, cx.time());
+        if self.preview_draw_log_count < 10 {
+            crate::log!(
+                "XrScene preview draw[{}] rect={}x{} pass_size={}x{} scene_state={} runtime_bodies={} child_count={} has_preview_color={} has_preview_depth={}",
+                self.preview_draw_log_count,
+                rect.size.x,
+                rect.size.y,
+                preview_pass_size.x,
+                preview_pass_size.y,
+                scene_state.is_some(),
+                self.runtime_bodies.len(),
+                self.node.child_count(),
+                self.preview_color_texture.is_some(),
+                self.preview_depth_texture.is_some()
+            );
+            self.preview_draw_log_count += 1;
+        }
 
-        if let Some(scene_state) = self.preview_scene_state(preview_rect, preview_pass_size, cx.time()) {
+        if let Some(scene_state) = scene_state {
             self.update_preview_pass_camera(cx.cx, scene_state);
             let mut draw_scope = XrDrawScopeData {
                 runtime_bodies: self.runtime_bodies.clone(),
@@ -1088,63 +858,33 @@ impl Widget for XrScene {
             }
             return DrawStep::done();
         };
-        let root_options = xr_root_options_from_scope(scope);
-        self.xr_depth_mesh_enabled = root_options.depth_mesh;
         if !self.xr_draw_logged {
             self.xr_draw_logged = true;
             crate::log!(
-                "XrScene draw_3d state time={} scene_dirty={} runtime_bodies={} child_count={}",
+                "XrScene draw_3d state time={} scene_dirty={} runtime_bodies={} child_count={} xr_anchor_to_head={} xr_anchor_initialized={} anchor_pos=({:.3},{:.3},{:.3})",
                 state.time,
                 self.scene_dirty,
                 self.runtime_bodies.len(),
-                self.node.child_count()
+                self.node.child_count(),
+                self.xr_anchor_to_head,
+                self.xr_anchor_initialized,
+                self.xr_anchor_pose.position.x,
+                self.xr_anchor_pose.position.y,
+                self.xr_anchor_pose.position.z
             );
         }
 
-        let cx2d = &mut Cx2d::new(cx.cx);
-        if self.depth_debug_enabled() {
-            self.prepare_depth_mesh(cx2d);
-            self.sync_depth_surface_mesh(cx2d);
-            self.draw_depth_surface_mesh(cx2d);
-        }
-
-        if XR_RENDER_HAND_GEOMETRY {
-            self.prepare_pbr(cx2d);
-            let left_colliders = self
-                .scene
-                .as_ref()
-                .map(|scene| Self::collect_live_hand_colliders(scene, &scene.left_hand));
-            let right_colliders = self
-                .scene
-                .as_ref()
-                .map(|scene| Self::collect_live_hand_colliders(scene, &scene.right_hand));
-            self.draw_hand(cx2d, &state.left_hand, left_colliders.as_deref(), true);
-            self.draw_hand(cx2d, &state.right_hand, right_colliders.as_deref(), false);
-        }
-
-        let env_texture = if root_options.env_cube {
-            self.render_passthrough_env_atlas(cx2d, state.as_ref())
+        let scene_state = self.xr_scene_state(state.as_ref());
+        cx.begin_scene_3d(scene_state);
+        let previous_world = if self.xr_anchor_to_head && self.xr_anchor_initialized {
+            cx.set_scene_world_transform_3d(self.xr_anchor_pose.to_mat4())
         } else {
             None
         };
-
-        let scene_state = self.xr_scene_state(state.as_ref());
-        let mut draw_scope = XrDrawScopeData {
-            runtime_bodies: self.runtime_bodies.clone(),
-            env_texture,
-            camera_texture: self
-                .passthrough_camera_textures
-                .as_ref()
-                .map(|textures| textures.camera.clone()),
-            camera_source_size: self.passthrough_camera_source_size,
-            camera_rotation_steps: self.passthrough_camera_video.rotation_steps,
-            camera_center_offset_uv: self.passthrough_camera_center_offset_uv(),
-            camera_enabled: self.passthrough_camera_has_frame,
-            pointer_tips: Self::draw_scope_pointer_tips(Some(state.as_ref())),
-        };
-        cx.begin_scene_3d(scene_state);
-        let mut scene_scope = Scope::with_data(&mut draw_scope);
-        self.node.draw_3d_all(cx, &mut scene_scope);
+        self.node.draw_3d_all(cx, scope);
+        if let Some(previous_world) = previous_world {
+            let _ = cx.set_scene_world_transform_3d(previous_world);
+        }
         cx.end_scene_3d();
         DrawStep::done()
     }

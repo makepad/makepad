@@ -27,168 +27,169 @@ script_mod! {
 
     startup() do #(App::script_component(vm)){
         ui: Root{
-            main_window := Window{
+            xr_root := XrRoot{
                 window.inner_size: vec2(1400, 900)
                 pass.clear_color: #x0b1118
-                body +: {
-                    xr_root := XrRoot{
-                        control_2d: @block_ctrl
-                        control_xr: @block_ctrl
-                        scene: @tree_scene
-                        env_cube: true
-                        depth_mesh: false
+                control_2d: @block_ctrl
+                control_xr: @block_ctrl
+                scene: @tree_scene
+                env_cube: true
+                depth_mesh: false
 
-                        block_ctrl := View{
-                            width: Fill
-                            height: Fit
-                            flow: Down
-                            spacing: 12
+                block_ctrl := View{
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    padding: 10
+                    spacing: 12
 
-                            title := H1{
-                                text: "XR Blocks"
-                                draw_text.color: #xeff7ff
-                            }
+                    title := H1{
+                        text: "XR Blocks"
+                        draw_text.color: #xeff7ff
+                    }
 
-                            detail := Label{
-                                width: Fill
-                                text: "Pick a scene directly. Reset rebuilds only the active scene."
-                                draw_text.color: #xb8c8d8
-                            }
+                    detail := Label{
+                        width: Fill
+                        text: "Pick a scene directly. Reset rebuilds only the active scene."
+                        draw_text.color: #xb8c8d8
+                    }
 
-                            reset := Button{
-                                width: Fill
-                                text: "Reset Scene"
-                            }
+                    reset := Button{
+                        width: Fill
+                        text: "Reset Scene"
+                    }
 
-                            show_blocks := Button{
-                                width: Fill
-                                text: "Blocks"
-                            }
+                    show_blocks := Button{
+                        width: Fill
+                        text: "Blocks"
+                    }
 
-                            show_helmet := Button{
-                                width: Fill
-                                text: "Helmet"
-                            }
+                    show_helmet := Button{
+                        width: Fill
+                        text: "Helmet"
+                    }
 
-                            show_tree := Button{
-                                width: Fill
-                                text: "Tree"
-                            }
+                    show_tree := Button{
+                        width: Fill
+                        text: "Tree"
+                    }
 
-                            show_refraction := Button{
-                                width: Fill
-                                text: "Refraction"
-                            }
+                    show_refraction := Button{
+                        width: Fill
+                        text: "Refraction"
+                    }
 
-                            depth_toggle := Button{
-                                width: Fill
-                                text: "Toggle Depth Mesh"
-                            }
-                        }
+                    depth_toggle := Button{
+                        width: Fill
+                        text: "Toggle Depth Mesh"
+                    }
+                }
 
-                        block_scene := XrScene{
-                            physics: XrPhysics{gravity: 9.8}
-                            camera_fov_y: 26.0
-                            camera_distance: 3.6
-                            camera_aspect_ratio_tweak: 1.0
-                            preview_aspect_fill: true
-                            on_render: ||{
-                                Platform{pos: vec3(0.05, -0.06, -0.10)}
-                                for row in 0..8 {
-                                    for col in 0..8 {
-                                        let offset = if row % 2 == 0 {0.0} else {0.0725}
-                                        let color = if (row + col) % 6 == 0 {
-                                            #xff5a4f
-                                        } else if (row + col) % 6 == 1 {
-                                            #x3ecf8e
-                                        } else if (row + col) % 6 == 2 {
-                                            #x57a1ff
-                                        } else if (row + col) % 6 == 3 {
-                                            #xffc857
-                                        } else if (row + col) % 6 == 4 {
-                                            #xff8f3f
-                                        } else {
-                                            #xd16dff
-                                        }
-                                        Block{
-                                            pos: vec3(-0.46 + col * 0.145 + offset, 0.028 + row * 0.084, -0.10)
-                                            color: color
-                                        }
-                                    }
+                block_scene := XrScene{
+                    physics: XrPhysics{gravity: 9.8}
+                    xr_anchor_to_head: true
+                    camera_fov_y: 26.0
+                    camera_distance: 3.6
+                    camera_aspect_ratio_tweak: 1.0
+                    preview_aspect_fill: true
+                    on_render: ||{
+                        Platform{pos: vec3(0.05, -0.06, -0.10)}
+                        for row in 0..8 {
+                            for col in 0..8 {
+                                let offset = if row % 2 == 0 {0.0} else {0.0725}
+                                let color = if (row + col) % 6 == 0 {
+                                    #xff5a4f
+                                } else if (row + col) % 6 == 1 {
+                                    #x3ecf8e
+                                } else if (row + col) % 6 == 2 {
+                                    #x57a1ff
+                                } else if (row + col) % 6 == 3 {
+                                    #xffc857
+                                } else if (row + col) % 6 == 4 {
+                                    #xff8f3f
+                                } else {
+                                    #xd16dff
+                                }
+                                Block{
+                                    pos: vec3(-0.46 + col * 0.145 + offset, 0.028 + row * 0.084, -0.10)
+                                    color: color
                                 }
                             }
                         }
+                    }
+                }
 
-                        helmet_scene := XrScene{
-                            physics: XrPhysics{gravity: 9.8}
-                            camera_fov_y: 26.0
-                            camera_distance: 4.0
-                            preview_aspect_fill: true
-                            on_render: ||{
-                                Platform{pos: vec3(0.05, -0.06, -0.10)}
-                                for row in 0..1 {
-                                    for col in 0..1 {
-                                        Gltf{
-                                            body: mod.widgets.XrBodyKind.Dynamic
-                                            physics_size: vec3(0.17, 0.21, 0.17)
-                                            density: 0.9
-                                            friction: 0.7
-                                            restitution: 0.08
-                                            pos: vec3(-0.23 + col * 0.22 + if row % 2 == 0 {0.0} else {0.08}, 0.08 + row * 0.22, -0.10)
-                                            src: crate_resource("self://resources/DamagedHelmet.glb")
-                                            mesh_scale: vec3(0.38, 0.38, 0.38)
-                                            mesh_rotation: vec3(0.0, 1.5708, 0.0)
-                                            mesh_position: vec3(0.0, 0.32, 0.0)
-                                        }
-                                    }
+                helmet_scene := XrScene{
+                    physics: XrPhysics{gravity: 9.8}
+                    xr_anchor_to_head: true
+                    camera_fov_y: 26.0
+                    camera_distance: 4.0
+                    preview_aspect_fill: true
+                    on_render: ||{
+                        Platform{pos: vec3(0.05, -0.06, -0.10)}
+                        for row in 0..1 {
+                            for col in 0..1 {
+                                Gltf{
+                                    body: mod.widgets.XrBodyKind.Dynamic
+                                    physics_size: vec3(0.17, 0.21, 0.17)
+                                    density: 0.9
+                                    friction: 0.7
+                                    restitution: 0.08
+                                    pos: vec3(-0.23 + col * 0.22 + if row % 2 == 0 {0.0} else {0.08}, 0.08 + row * 0.22, -0.10)
+                                    src: crate_resource("self://resources/DamagedHelmet.glb")
+                                    mesh_scale: vec3(0.38, 0.38, 0.38)
+                                    mesh_rotation: vec3(0.0, 1.5708, 0.0)
+                                    mesh_position: vec3(0.0, 0.32, 0.0)
                                 }
                             }
                         }
+                    }
+                }
 
-                        tree_scene := XrScene{
-                            physics: XrPhysics{gravity: 9.8}
-                            camera_fov_y: 24.0
-                            camera_distance: 6.2
-                            camera_aspect_ratio_tweak: 1.0
-                            preview_aspect_fill: true
-                            on_render: ||{
-                                Platform{pos: vec3(0.05, -0.06, -0.10)}
-                                fractal_tree := FractalTree{
-                                    body: mod.widgets.XrBodyKind.Fixed
-                                    physics_size: vec3(0.34, 0.92, 0.34)
-                                    pos: vec3(0.05, -0.02, -0.10)
-                                    child_scale: 0.57735026
-                                    length_scale_0: 0.60
-                                    length_scale_1: 1.78
-                                    length_scale_2: 1.88
-                                    length_scale_3: 0.97
-                                    length_scale_4: 1.03
-                                    length_scale_rest: 1.08
-                                    branch_split_angle: 0.70
-                                    branch_yaw_step: 2.0943952
-                                    branch_yaw_phase_step: 1.0471976
-                                }
-                            }
+                tree_scene := XrScene{
+                    physics: XrPhysics{gravity: 9.8}
+                    xr_anchor_to_head: true
+                    camera_fov_y: 24.0
+                    camera_distance: 6.2
+                    camera_aspect_ratio_tweak: 1.0
+                    preview_aspect_fill: true
+                    on_render: ||{
+                        Platform{pos: vec3(0.05, -0.06, -0.10)}
+                        fractal_tree := FractalTree{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            physics_size: vec3(0.34, 0.92, 0.34)
+                            pos: vec3(0.05, -0.02, -0.10)
+                            child_scale: 0.57735026
+                            length_scale_0: 0.60
+                            length_scale_1: 1.78
+                            length_scale_2: 1.88
+                            length_scale_3: 0.97
+                            length_scale_4: 1.03
+                            length_scale_rest: 1.08
+                            branch_split_angle: 0.70
+                            branch_yaw_step: 2.0943952
+                            branch_yaw_phase_step: 1.0471976
                         }
+                    }
+                }
 
-                        refraction_scene := XrScene{
-                            physics: XrPhysics{gravity: 9.8}
-                            camera_fov_y: 26.0
-                            camera_distance: 3.6
-                            camera_aspect_ratio_tweak: 1.0
-                            preview_aspect_fill: true
-                            on_render: ||{
-                                Platform{pos: vec3(0.05, -0.06, -0.10)}
-                                for row in 0..4 {
-                                    for col in 0..4 {
-                                        let offset = if row % 2 == 0 {0.0} else {0.06}
-                                        RefractiveCube{
-                                            pos: vec3(-0.22 + col * 0.12 + offset, 0.05 + row * 0.11, -0.10)
-                                            size: vec3(0.115, 0.105, 0.085)
-                                            color: vec4(0.82, 0.93, 1.0, 0.12)
-                                            focus_distance: 1.6
-                                        }
-                                    }
+                refraction_scene := XrScene{
+                    physics: XrPhysics{gravity: 9.8}
+                    xr_anchor_to_head: true
+                    camera_fov_y: 26.0
+                    camera_distance: 3.6
+                    camera_aspect_ratio_tweak: 1.0
+                    preview_aspect_fill: true
+                    on_render: ||{
+                        Platform{pos: vec3(0.05, -0.06, -0.10)}
+                        for row in 0..4 {
+                            for col in 0..4 {
+                                let offset = if row % 2 == 0 {0.0} else {0.06}
+                                RefractiveCube{
+                                    pos: vec3(-0.22 + col * 0.12 + offset, 0.05 + row * 0.11, -0.10)
+                                    size: vec3(0.115, 0.105, 0.085)
+                                    color: vec4(0.82, 0.93, 1.0, 0.12)
+                                    focus_distance: 1.6
                                 }
                             }
                         }
@@ -214,11 +215,6 @@ impl App {
     }
 
     fn xr_root_widget(&self, cx: &Cx) -> WidgetRef {
-        let path_body = self.ui.widget(cx, ids!(main_window.body.xr_root));
-        if path_body.borrow::<XrRoot>().is_some() {
-            return path_body;
-        }
-
         let direct = self.ui.widget(cx, ids!(xr_root));
         if direct.borrow::<XrRoot>().is_some() {
             return direct;

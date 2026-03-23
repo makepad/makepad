@@ -31,6 +31,10 @@ use {
     std::sync::mpsc,
 };
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static OPENXR_REPAINT_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+
 impl Cx {
     pub(crate) fn openxr_render_loop(
         &mut self,
@@ -64,6 +68,7 @@ impl Cx {
     }
 
     pub(crate) fn openxr_handle_events(&mut self) {
+        let mut redraw_requested = false;
         let openxr = &mut self.os.openxr;
         loop {
             let mut event_buffer = XrEventDataBuffer {
@@ -102,6 +107,7 @@ impl Cx {
                                 self.os.activity_thread_id.unwrap(),
                                 self.os.render_thread_id.unwrap(),
                             );
+                            redraw_requested = true;
                         }
                         XrSessionState::STOPPING => {
                             openxr
@@ -140,6 +146,9 @@ impl Cx {
                 }
             }*/
         }
+        if redraw_requested {
+            self.redraw_all();
+        }
     }
 
     pub(crate) fn openxr_handle_repaint(&mut self, frame: &CxOpenXrFrame) {
@@ -155,6 +164,29 @@ impl Cx {
             .as_ref()
             .and_then(|session| session.vulkan.as_ref())
             .is_some();
+        let repaint_log_index = OPENXR_REPAINT_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+        if repaint_log_index < 16 {
+            let mut summary = Vec::new();
+            for draw_pass_id in &passes_todo {
+                let pass = &self.passes[*draw_pass_id];
+                summary.push(format!(
+                    "{}:'{}' parent={:?} dirty={} main_list={} dpi={:?}",
+                    draw_pass_id.0,
+                    pass.debug_name,
+                    pass.parent,
+                    pass.paint_dirty,
+                    pass.main_draw_list_id.is_some(),
+                    pass.dpi_factor
+                ));
+            }
+            crate::log!(
+                "OpenXR repaint[{}] use_vulkan_xr={} passes_todo={} [{}]",
+                repaint_log_index,
+                use_vulkan_xr,
+                passes_todo.len(),
+                summary.join(" | ")
+            );
+        }
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
             match self.passes[*draw_pass_id].parent.clone() {

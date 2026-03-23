@@ -50,7 +50,7 @@ impl App {
             );
         }
 
-        self.apply_pending_log_jump(&path, tab_id);
+        self.apply_pending_log_jump(cx, &path, tab_id);
         if let Some(mount) = Self::mount_from_virtual_path(&path) {
             if let Some(dock) = self.mount_workspace_dock(cx, mount) {
                 dock.item(tab_id).redraw(cx);
