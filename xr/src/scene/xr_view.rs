@@ -131,7 +131,9 @@ impl ScriptHook for XrView {
                         let Some(id) = id else { continue };
                         if !WidgetRef::value_is_newable_widget(vm, kv.value) { continue }
                         let child = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
-                        self.child_widgets.push((id, child));
+                        self.child_widgets.push((id, child.clone()));
+                        vm.cx_mut()
+                            .widget_tree_insert_child_deep(self.uid, id, child);
                     }
                 });
             }

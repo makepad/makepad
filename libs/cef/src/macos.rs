@@ -1,11 +1,10 @@
 use crate::{ffi, BootstrapResult, Error, Frame, Result, TEXT_INPUT_MODE_NONE};
 use libloading::Library;
-use makepad_objc_sys::declare::{ClassDecl, MethodImplementation};
+use makepad_objc_sys::declare::ClassDecl;
 use makepad_objc_sys::runtime::{
     self, Class, ObjcId, Object, Protocol, Sel, BOOL, NO, YES,
 };
 use makepad_objc_sys::{class, msg_send, sel, sel_impl};
-use makepad_objc_sys::{Encode, EncodeArguments, Encoding};
 use std::env;
 use std::ffi::{c_char, c_void, CString};
 use std::os::raw::c_int;
@@ -34,6 +33,7 @@ const PKGINFO_CONTENTS: &str = "APPL????";
 const RTLD_FIRST: c_int = 0x100;
 const EXTERNAL_PUMP_TIMER_PLACEHOLDER: i64 = i32::MAX as i64;
 const EXTERNAL_PUMP_MAX_DELAY_MS: i64 = 1000 / 30;
+const MOCK_KEYCHAIN_SWITCH: &str = "use-mock-keychain";
 
 const fn parse_api_version(value: &str) -> c_int {
     let bytes = value.as_bytes();
@@ -84,13 +84,13 @@ struct CefApi {
 struct RuntimePaths {
     framework_bin: PathBuf,
     framework_dir: PathBuf,
-    resources_dir: PathBuf,
+    _resources_dir: PathBuf,
 }
 
 struct Runtime {
     _library: Library,
     api: CefApi,
-    paths: RuntimePaths,
+    _paths: RuntimePaths,
     state: Mutex<RuntimeState>,
 }
 
@@ -102,10 +102,10 @@ struct RuntimeState {
 }
 
 struct SyntheticAppBundle {
-    bundle_dir: PathBuf,
+    _bundle_dir: PathBuf,
     bundle_executable: PathBuf,
-    framework_dir: PathBuf,
-    resources_dir: PathBuf,
+    _framework_dir: PathBuf,
+    _resources_dir: PathBuf,
     helper_executable: PathBuf,
     log_file: PathBuf,
 }
@@ -235,7 +235,7 @@ fn distribution_runtime_paths() -> RuntimePaths {
     RuntimePaths {
         framework_bin,
         framework_dir,
-        resources_dir,
+        _resources_dir: resources_dir,
     }
 }
 
@@ -248,7 +248,7 @@ fn runtime_paths() -> RuntimePaths {
                 return RuntimePaths {
                     framework_bin,
                     framework_dir,
-                    resources_dir,
+                    _resources_dir: resources_dir,
                 };
             }
         }
@@ -307,47 +307,13 @@ fn runtime() -> Result<&'static Runtime> {
         Ok(Runtime {
             _library: library,
             api,
-            paths,
+            _paths: paths,
             state: Mutex::new(RuntimeState::default()),
         })
     });
     runtime_result
         .as_ref()
         .map_err(|err| Error::new(err.to_string()))
-}
-
-fn objc_method_type_encoding(ret: &Encoding, args: &[Encoding]) -> CString {
-    let mut types = ret.as_str().to_owned();
-    types.push_str(<*mut Object>::encode().as_str());
-    types.push_str(Sel::encode().as_str());
-    types.extend(args.iter().map(|encoding| encoding.as_str()));
-    CString::new(types).unwrap()
-}
-
-unsafe fn objc_add_instance_method<F>(class: *mut Class, selector: Sel, func: F) -> Result<()>
-where
-    F: MethodImplementation<Callee = Object>,
-{
-    let arg_encodings = F::Args::encodings();
-    let arg_encodings = arg_encodings.as_ref();
-    let expected_args = selector.name().chars().filter(|&ch| ch == ':').count();
-    if expected_args != arg_encodings.len() {
-        return Err(Error::new(format!(
-            "Objective-C selector {} expects {} arguments but function encodes {}",
-            selector.name(),
-            expected_args,
-            arg_encodings.len()
-        )));
-    }
-    let types = objc_method_type_encoding(&F::Ret::encode(), arg_encodings);
-    if runtime::class_addMethod(class, selector, func.imp(), types.as_ptr()) == NO {
-        return Err(Error::new(format!(
-            "failed to add Objective-C method {} to {}",
-            selector.name(),
-            (&*class).name()
-        )));
-    }
-    Ok(())
 }
 
 fn objc_bool(value: bool) -> BOOL {
@@ -1175,10 +1141,10 @@ fn ensure_synthetic_app_bundle(
         helper_executable.ok_or_else(|| Error::new("failed to create CEF helper bundle"))?;
 
     Ok(SyntheticAppBundle {
-        bundle_dir,
+        _bundle_dir: bundle_dir,
         bundle_executable: main_bundle_executable,
-        framework_dir: framework_dir.clone(),
-        resources_dir: framework_dir.join("Resources"),
+        _framework_dir: framework_dir.clone(),
+        _resources_dir: framework_dir.join("Resources"),
         helper_executable,
         log_file,
     })
@@ -1421,6 +1387,26 @@ unsafe extern "system" fn app_get_browser_process_handler(
         add_ref(base);
     }
     &mut (*handler).cef_browser_process_handler
+}
+
+unsafe extern "system" fn app_on_before_command_line_processing(
+    _self: *mut ffi::cef_app_t,
+    _process_type: *const ffi::cef_string_t,
+    command_line: *mut ffi::cef_command_line_t,
+) {
+    if command_line.is_null() {
+        return;
+    }
+    let Ok(runtime) = runtime() else {
+        return;
+    };
+    let Ok(switch_name) = CefString::new(&runtime.api, MOCK_KEYCHAIN_SWITCH) else {
+        return;
+    };
+    let switch_name_raw = switch_name.raw();
+    if let Some(append_switch) = (*command_line).append_switch {
+        append_switch(command_line, &switch_name_raw);
+    }
 }
 
 unsafe extern "system" fn client_null_handler(_self: *mut ffi::cef_client_t) -> *mut c_void {
@@ -1686,7 +1672,7 @@ impl AppHandler {
                     has_one_ref: Some(app_has_one_ref),
                     has_at_least_one_ref: Some(app_has_at_least_one_ref),
                 },
-                on_before_command_line_processing: None,
+                on_before_command_line_processing: Some(app_on_before_command_line_processing),
                 on_register_custom_schemes: None,
                 get_resource_bundle_handler: None,
                 get_browser_process_handler: Some(app_get_browser_process_handler),
