@@ -1,5 +1,5 @@
-use super::*;
 use super::xr_physics::{makepad_pose, RapierScene};
+use super::*;
 use std::{
     collections::{hash_map::DefaultHasher, HashSet},
     hash::{Hash, Hasher},
@@ -198,7 +198,7 @@ fn pack_depth_mesh_vertices(chunk: &XrDepthMeshChunk) -> Vec<f32> {
 
 impl XrEnv {
     pub(super) fn depth_debug_enabled(&self) -> bool {
-        self.xr_depth_mesh_enabled
+        self.depth_mesh
     }
 
     pub(super) fn clear_depth_surface_mesh(&mut self) {
@@ -233,7 +233,8 @@ impl XrEnv {
                 geometry_id: geometry.geometry_id(),
                 fingerprint: chunk.fingerprint,
             };
-            self.depth_surface_mesh_chunks.insert(key, (geometry, handle));
+            self.depth_surface_mesh_chunks
+                .insert(key, (geometry, handle));
             self.depth_surface_mesh_upload_count =
                 self.depth_surface_mesh_upload_count.saturating_add(1);
         }
@@ -271,8 +272,7 @@ impl XrEnv {
         let mut lookahead = velocity.scale(XR_DEPTH_QUERY_LOOKAHEAD_SECONDS);
         let lookahead_length = lookahead.length();
         if lookahead_length > XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE && lookahead_length > 1.0e-6 {
-            lookahead =
-                lookahead.scale(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / lookahead_length);
+            lookahead = lookahead.scale(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / lookahead_length);
         }
         XrDepthMeshQuery {
             key,

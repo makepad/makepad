@@ -640,6 +640,15 @@ impl MainArgsStorage {
             filtered_args.push(arg);
         }
 
+        // Chromium's default ANGLE/Metal path crashes in our windowless macOS embedding.
+        if !filtered_args
+            .iter()
+            .skip(1)
+            .any(|arg| arg.to_string_lossy().starts_with("--use-angle="))
+        {
+            filtered_args.push("--use-angle=gl".into());
+        }
+
         let mut args = Vec::new();
         for arg in filtered_args {
             let bytes = arg.into_vec();

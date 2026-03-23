@@ -322,7 +322,7 @@ pub struct PhysicsWorld3D {
 }
 
 impl PhysicsWorld3D {
-    fn ensure_initialized(&mut self, cx: &mut Cx2d) {
+    fn ensure_initialized(&mut self, cx: &mut Cx3d) {
         if self.initialized {
             return;
         }
@@ -358,12 +358,11 @@ impl PhysicsWorld3D {
         scene.apply_kick(ray_origin, ray_dir, self.time)
     }
 
-    fn draw_scene(&mut self, cx: &mut Cx2d, scene_state: &SceneState3D) {
+    fn draw_scene(&mut self, cx: &mut Cx3d, scene_state: &SceneState3D) {
         if scene_state.viewport_rect.size.x <= 1.0 || scene_state.viewport_rect.size.y <= 1.0 {
             return;
         }
 
-        let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr, cx);
         self.draw_pbr.set_base_color_texture(None);
         self.draw_pbr.set_metal_roughness_texture(None);
         self.draw_pbr.set_normal_texture(None);
@@ -478,7 +477,7 @@ impl Widget for PhysicsWorld3D {
         let Some(scene_state) = scene_state_from_cx(cx) else {
             return DrawStep::done();
         };
-        let cx = &mut Cx2d::new(cx.cx);
+        let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr, cx);
         self.ensure_initialized(cx);
         self.last_scene_state = Some(scene_state);
         self.draw_scene(cx, &scene_state);
