@@ -196,7 +196,11 @@ fn pack_depth_mesh_vertices(chunk: &XrDepthMeshChunk) -> Vec<f32> {
     vertices
 }
 
-impl XrScene {
+impl XrEnv {
+    pub(super) fn depth_debug_enabled(&self) -> bool {
+        self.xr_depth_mesh_enabled
+    }
+
     pub(super) fn clear_depth_surface_mesh(&mut self) {
         self.depth_surface_mesh_generation = 0;
         self.depth_surface_mesh_update_sequence = 0;
@@ -281,11 +285,15 @@ impl XrScene {
         }
     }
 
-    pub(super) fn sync_depth_query_surfaces(&mut self, cx: &mut Cx) {
+    pub(super) fn sync_depth_query_surfaces(
+        &mut self,
+        scene: Option<&mut RapierScene>,
+        cx: &mut Cx,
+    ) {
         if !XR_ENABLE_DEPTH_QUERY_PHYSICS {
             return;
         }
-        let Some(scene) = self.scene.as_mut() else {
+        let Some(scene) = scene else {
             return;
         };
         let depth_mesh = cx.xr_depth_mesh();

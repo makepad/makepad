@@ -693,29 +693,65 @@ impl App {
         });
     }
 
-    pub(super) fn apply_cursor_jump(session: &CodeSession, line: usize, column: usize) {
-        session.set_selection(
-            Position {
-                line_index: line.saturating_sub(1),
-                byte_index: column.saturating_sub(1),
-            },
-            Affinity::Before,
-            SelectionMode::Simple,
-            NewGroup::Yes,
-        );
+    pub(super) fn log_jump_position(session: &CodeSession, line: usize, column: usize) -> Position {
+        let text = session.document().as_text();
+        let lines = text.as_lines();
+        let line_index = line
+            .saturating_sub(1)
+            .min(lines.len().saturating_sub(1));
+        let byte_index = lines
+            .get(line_index)
+            .map(|line_text| {
+                line_text
+                    .char_indices()
+                    .nth(column.saturating_sub(1))
+                    .map(|(byte_index, _)| byte_index)
+                    .unwrap_or_else(|| line_text.len())
+            })
+            .unwrap_or(0);
+        Position {
+            line_index,
+            byte_index,
+        }
     }
 
-    pub(super) fn apply_pending_log_jump(&mut self, path: &str, tab_id: LiveId) {
+    pub(super) fn try_apply_log_jump(
+        &mut self,
+        cx: &mut Cx,
+        tab_id: LiveId,
+        line: usize,
+        column: usize,
+    ) -> bool {
+        let Some(path) = self.data.tab_to_path.get(&tab_id).cloned() else {
+            return false;
+        };
+        let Some(mount) = Self::mount_from_virtual_path(&path) else {
+            return false;
+        };
+        let Some(dock) = self.mount_workspace_dock(cx, mount) else {
+            return false;
+        };
+        let editor = dock.item(tab_id).desktop_code_editor(cx, ids!(code_editor));
+        let Some(session) = self.data.sessions.get_mut(&tab_id) else {
+            return false;
+        };
+        let pos = Self::log_jump_position(session, line, column);
+        if !editor.set_cursor_and_scroll(cx, pos, session) {
+            return false;
+        }
+        dock.redraw_tab(cx, tab_id);
+        true
+    }
+
+    pub(super) fn apply_pending_log_jump(&mut self, cx: &mut Cx, path: &str, tab_id: LiveId) {
         let Some((line, column)) = self.data.pending_log_jumps.remove(path) else {
             return;
         };
-        let Some(session) = self.data.sessions.get(&tab_id) else {
+        if !self.try_apply_log_jump(cx, tab_id, line, column) {
             self.data
                 .pending_log_jumps
                 .insert(path.to_string(), (line, column));
-            return;
         };
-        Self::apply_cursor_jump(session, line, column);
     }
 
     pub(super) fn open_log_location(
@@ -730,13 +766,7 @@ impl App {
             return;
         };
 
-        if let Some(session) = self.data.sessions.get(&tab_id) {
-            Self::apply_cursor_jump(session, line, column);
-            if let Some(mount) = Self::mount_from_virtual_path(path) {
-                if let Some(dock) = self.mount_workspace_dock(cx, mount) {
-                    dock.redraw_tab(cx, tab_id);
-                }
-            }
+        if self.try_apply_log_jump(cx, tab_id, line, column) {
             self.set_status(cx, &format!("opened {}:{}:{}", path, line, column));
             return;
         }
@@ -899,6 +929,24 @@ impl App {
         };
         self.close_mount_run_and_log_tabs(cx, mount);
         self.set_status(cx, &format!("running {} on {}", name, mount));
+    }
+
+    pub(super) fn handle_log_view_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for action in actions {
+            let Some(widget_action) = action.as_widget_action() else {
+                continue;
+            };
+            let Some(log_action) = widget_action.action.downcast_ref::<DesktopLogViewAction>()
+            else {
+                continue;
+            };
+            match log_action {
+                DesktopLogViewAction::OpenLocation { path, line, column } => {
+                    self.open_log_location(cx, path, *line, *column);
+                }
+                DesktopLogViewAction::None => {}
+            }
+        }
     }
 
     pub(super) fn handle_run_view_actions(&mut self, actions: &Actions) {

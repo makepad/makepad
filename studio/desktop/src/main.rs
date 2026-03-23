@@ -20,6 +20,7 @@ pub use makepad_widgets::makepad_script::makepad_micro_serde;
 
 use crate::{
     app_data::*,
+    desktop_code_editor::*,
     desktop_file_tree::*,
     desktop_log_view::*,
     desktop_profiler_view::*,
@@ -27,8 +28,8 @@ use crate::{
     desktop_run_view::*,
     desktop_terminal_view::*,
     makepad_code_editor::{
-        code_editor::CodeEditorAction, decoration::DecorationSet, history::NewGroup,
-        selection::Affinity, session::SelectionMode, text::Position, CodeDocument, CodeSession,
+        code_editor::CodeEditorAction, decoration::DecorationSet, text::Position, CodeDocument,
+        CodeSession,
     },
     makepad_studio_hub::{HubConfig, MountConfig, StudioHub},
     makepad_widgets::*,
@@ -155,12 +156,6 @@ impl MatchEvent for App {
                 if workspace.button(cx, ids!(run_stop_all)).clicked(actions) {
                     self.request_stop_all_builds_for_mount(cx, &active_mount);
                 }
-                if let Some((path, line, column)) = workspace
-                    .desktop_log_view(cx, ids!(log_view))
-                    .open_location_requested(actions)
-                {
-                    self.open_log_location(cx, &path, line, column);
-                }
                 if let Some(tail) = workspace
                     .check_box(cx, ids!(log_tail_toggle))
                     .changed(actions)
@@ -204,6 +199,7 @@ impl MatchEvent for App {
             }
         }
 
+        self.handle_log_view_actions(cx, actions);
         self.handle_run_view_actions(actions);
         self.handle_profiler_actions(cx, actions);
         self.handle_terminal_actions(actions);
