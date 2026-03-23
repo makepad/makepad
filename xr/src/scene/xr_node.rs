@@ -142,8 +142,6 @@ pub struct XrNode {
     children: ComponentMap<LiveId, WidgetRef>,
     #[rust]
     child_order: Vec<LiveId>,
-    #[rust]
-    xr_draw_logged: bool,
 }
 
 impl XrNode {
@@ -388,20 +386,7 @@ impl Widget for XrNode {
         }
 
         if !self.child_order.iter().any(|id| self.children.contains_key(id)) {
-            if !self.xr_draw_logged && cx.scene_state_3d().is_some_and(|scene| scene.use_pass_camera) {
-                self.xr_draw_logged = true;
-                crate::log!("XrNode draw_3d empty uid={:?} child_order_len=0", self.uid);
-            }
             return DrawStep::done();
-        }
-        if !self.xr_draw_logged && cx.scene_state_3d().is_some_and(|scene| scene.use_pass_camera) {
-            self.xr_draw_logged = true;
-            crate::log!(
-                "XrNode draw_3d uid={:?} child_order_len={} first_child={:?}",
-                self.uid,
-                self.child_order.len(),
-                self.child_order.first()
-            );
         }
 
         let world_transform = xr_widget_world_transform(cx, scope, self.uid, self);

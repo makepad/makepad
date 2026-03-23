@@ -4,8 +4,7 @@ use std::{path::PathBuf, rc::Rc};
 use super::{
     gltf_bridge::GltfRenderer,
     scene_draw::{
-        apply_scene_to_draw_pbr, compose_scene_node_transform, register_draw_call_anchor,
-        scene_state_from_cx,
+        apply_scene_to_draw_pbr, compose_scene_node_transform, scene_state_from_cx,
     },
     xr_node::xr_widget_world_transform,
     XrNode,
