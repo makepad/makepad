@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::xr_depth::{DepthQuerySurfaceCollider, DepthQuerySurfaceShape, DepthQuerySurfaceTarget};
 use super::*;
 

@@ -295,6 +295,7 @@ impl XrEnv {
         self.draw_cube.end_many_instances(cx);
     }
 
+    #[allow(dead_code)]
     pub(super) fn sync_hands(&mut self, scene: Option<&mut RapierScene>, state: &XrState) {
         if !XR_ENABLE_HAND_PHYSICS {
             return;

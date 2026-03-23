@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::xr_physics::{makepad_pose, RapierScene};
 use super::*;
 use std::{

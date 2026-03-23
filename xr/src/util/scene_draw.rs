@@ -77,10 +77,12 @@ pub fn ray_from_scene_viewport(scene: &SceneState3D, abs: DVec2) -> Option<(Vec3
     Some((scene.camera_pos, dir.normalize()))
 }
 
+#[allow(dead_code)]
 pub fn register_draw_call_anchor(cx: &mut Cx3d, area: Area, world_pos: Vec3f) {
     cx.register_scene_draw_call_anchor_3d(area, world_pos);
 }
 
+#[allow(dead_code)]
 pub fn register_last_draw_call_anchor(cx: &mut Cx3d, world_pos: Vec3f) {
     let Some(draw_list_id) = cx.get_current_draw_list_id() else {
         return;

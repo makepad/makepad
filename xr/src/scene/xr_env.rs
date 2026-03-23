@@ -129,12 +129,17 @@ const XR_PASSTHROUGH_ENV_CAMERA_FOV_Y_DEGREES: f32 = 92.0;
 const XR_PASSTHROUGH_ENV_CAMERA_PROJECTION_SCALE: f32 = 0.6825;
 const XR_PASSTHROUGH_CAMERA_EXPOSURE: f32 = 0.68;
 const XR_PASSTHROUGH_ENV_UPDATE_STRENGTH: f32 = 0.92;
+#[allow(dead_code)]
 const XR_DEPTH_QUERY_MAX_DISTANCE: f32 = 0.12;
 const XR_DEPTH_QUERY_FRICTION: f32 = 0.9;
+#[allow(dead_code)]
 const XR_DEPTH_QUERY_LOOKAHEAD_SECONDS: f32 = 0.18;
+#[allow(dead_code)]
 const XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE: f32 = 0.32;
 const XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE: usize = 48;
+#[allow(dead_code)]
 const XR_DEPTH_QUERY_FINGERPRINT_QUANTIZATION_METERS: f32 = 0.01;
+#[allow(dead_code)]
 const XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES: u8 = 6;
 const XR_HAND_COLLIDER_SLOTS_PER_HAND: usize = 25;
 const XR_HAND_COLLIDER_FRICTION: f32 = 0.8;
@@ -191,6 +196,7 @@ pub struct XrEnv {
     depth_surface_mesh_chunks: HashMap<(i32, i32, i32), (Geometry, DepthSurfaceMeshChunkHandle)>,
     #[rust]
     depth_surface_mesh_upload_count: usize,
+    #[allow(dead_code)]
     #[rust]
     depth_query_retained_hits: HashMap<u64, RetainedDepthQueryHit>,
     #[rust]
@@ -223,6 +229,7 @@ pub struct XrEnv {
     runtime_bodies: Rc<HashMap<WidgetUid, XrRuntimeBodyState>>,
     #[rust(true)]
     scene_dirty: bool,
+    #[allow(dead_code)]
     #[rust]
     next_frame: NextFrame,
 }
@@ -232,6 +239,7 @@ impl XrEnv {
         self.depth_mesh
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_depth_mesh_visible(&mut self, visible: bool) {
         self.depth_mesh = visible;
     }
@@ -613,6 +621,7 @@ impl XrEnv {
         self.scene_dirty = true;
     }
 
+    #[allow(dead_code)]
     fn has_dynamic_bodies(&self) -> bool {
         self.scene.as_ref().map(|scene| {
             scene.cubes.iter().any(|cube| matches!(cube.body_kind, XrBodyKind::Dynamic))
@@ -634,10 +643,12 @@ impl XrEnv {
         cx.redraw_all();
     }
 
+    #[allow(dead_code)]
     pub(crate) fn runtime_scene_ref(&self) -> Option<&RapierScene> {
         self.scene.as_ref()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn runtime_scene_mut(&mut self) -> Option<&mut RapierScene> {
         self.scene.as_mut()
     }

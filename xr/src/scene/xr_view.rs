@@ -39,6 +39,10 @@ pub struct XrView {
 }
 
 impl XrView {
+    pub(crate) fn node(&self) -> &XrNode {
+        &self.node
+    }
+
     fn panel_matrix(&self, world_transform: Mat4f) -> Mat4f {
         let scale = self.pixel_scale.max(0.00001) * self.dpi_factor.max(1.0) as f32;
         let local_depth = Mat4f::nonuniform_scaled_translation(
@@ -89,6 +93,15 @@ impl XrView {
             && local.y >= 0.0
             && local.x <= self.logical_size.x as f32
             && local.y <= self.logical_size.y as f32
+    }
+
+    pub(crate) fn hits_parent_ray(&self, ray_origin: Vec3f, ray_dir: Vec3f) -> bool {
+        if !self.node.visible() {
+            return false;
+        }
+        let hit_mat = self.hit_matrix(self.node.local_transform());
+        Self::panel_local_from_ray(&hit_mat, ray_origin, ray_dir)
+            .is_some_and(|local| self.contains_local(local))
     }
 }
 
@@ -154,38 +167,35 @@ impl Widget for XrView {
         if let Event::XrLocal(xr_event) = event {
             let world_transform = self.node.local_transform();
             let hit_mat = self.hit_matrix(world_transform);
-            // Build a new XrLocal with transformed tips
             let mut local_tips = SmallVec::new();
             for tip in &xr_event.finger_tips {
                 if let Some(local) = Self::panel_local_from_ray(
                     &hit_mat,
                     tip.pos,
-                    vec3f(0.0, 0.0, -1.0), // tips are already in local space for XrLocal
+                    tip.ray_dir,
                 ) {
-                    if self.contains_local(local) {
-                        local_tips.push(XrFingerTip {
-                            index: tip.index,
-                            is_left: tip.is_left,
-                            pos: vec3f(local.x, local.y, tip.pos.z),
-                            handled: Cell::new(Area::Empty),
-                        });
-                    }
+                    local_tips.push(XrFingerTip {
+                        index: tip.index,
+                        is_left: tip.is_left,
+                        pos: vec3f(local.x, local.y, tip.touch_z),
+                        ray_dir: vec3f(0.0, 0.0, -1.0),
+                        touch_z: tip.touch_z,
+                        handled: Cell::new(Area::Empty),
+                    });
                 }
             }
-            if !local_tips.is_empty() {
-                let local_event = XrLocalEvent {
-                    finger_tips: local_tips,
-                    update: xr_event.update.clone(),
-                    modifiers: xr_event.modifiers,
-                    time: xr_event.time,
-                };
-                let event = Event::XrLocal(local_event.clone());
-                for i in 0..self.child_widgets.len() {
-                    let child = self.child_widgets[i].1.clone();
-                    child.handle_event(cx, &event, scope);
-                }
-                local_event.process_end(cx);
+            let local_event = XrLocalEvent {
+                finger_tips: local_tips,
+                update: xr_event.update.clone(),
+                modifiers: xr_event.modifiers,
+                time: xr_event.time,
+            };
+            let event = Event::XrLocal(local_event.clone());
+            for i in 0..self.child_widgets.len() {
+                let child = self.child_widgets[i].1.clone();
+                child.handle_event(cx, &event, scope);
             }
+            local_event.process_end(cx);
             return;
         }
 
@@ -218,7 +228,7 @@ impl Widget for XrView {
 
         for i in 0..self.child_widgets.len() {
             let child = self.child_widgets[i].1.clone();
-            child.draw_walk_all(cx2d, scope, Walk::default());
+            child.draw_all(cx2d, scope);
         }
 
         cx2d.end_pass_sized_turtle();

@@ -25,244 +25,97 @@ script_mod! {
         color: #x2b3643
     }
 
-    let TestPedestal = Cube{
-        body: mod.widgets.XrBodyKind.Fixed
-        size: vec3(0.28, 0.18, 0.28)
-        corner_radius: 0.026
-        roughness: 0.18
-        metallic: 0.04
-    }
-
     startup() do #(App::script_component(vm)){
         ui:  XrRoot{
             window.inner_size: vec2(1400, 900)
             pass.clear_color: #x0b1118
-            camera_fov_y: 52.0
-            camera_distance: 2.8
+            camera.fov_y: 52.0
+            camera.distance: 2.8
             env.gravity: 9.8
-            env.env_cube: true
+            env.env_cube: false
             env.depth_mesh: false
 
-            block_ctrl := XrView{
+            control_strip := XrView{
+                pos: vec3(0.0, 0.62, -0.86)
+                logical_size: vec2(560, 92)
+                pixel_scale: 0.0009
+                dpi_factor: 2.0
                 RoundedView{
                     width: Fill
-                    height: Fit
-                    flow: Down
+                    height: Fill
+                    flow: Right
                     padding: 16
                     spacing: 12
+                    align: Align{y: 0.5}
                     draw_bg.color: #x162331ee
                     draw_bg.border_radius: 18.0
 
-                    title := H1{
-                        text: "XR Simulator"
+                    title := Label{
+                        text: "XR Preview"
                         draw_text.color: #xeff7ff
+                        draw_text.text_style.font_size: 18.0
                     }
 
                     detail := Label{
                         width: Fill
-                        text: "Drag the background to orbit the fake headset camera around the 3D scene."
+                        text: "Forward-facing fake headset view with a 3D-hosted UI strip."
                         draw_text.color: #xb8c8d8
                     }
 
-                    reset := Button{
-                        width: Fill
-                        text: "Reset Scene"
-                    }
-
-                    show_test := Button{
-                        width: Fill
-                        text: "XR Test"
-                    }
-
-                    show_blocks := Button{
-                        width: Fill
-                        text: "Blocks"
-                    }
-
-                    show_helmet := Button{
-                        width: Fill
-                        text: "Helmet"
-                    }
-
-                    show_tree := Button{
-                        width: Fill
-                        text: "Tree"
-                    }
-
-                    show_refraction := Button{
-                        width: Fill
-                        text: "Refraction"
-                    }
-
-                    depth_toggle := Button{
-                        width: Fill
-                        text: "Show Depth Mesh"
+                    depth_toggle_button := Button{
+                        width: 160
+                        text: "Toggle Depth Mesh"
+                        on_press: || ui.depth_toggle()
                     }
                 }
             }
-                
-            xr_test_scene := XrNode{
-                visible: false
-                on_render: ||{
-                    Cube{
-                        body: mod.widgets.XrBodyKind.Fixed
-                        size: vec3(1.65, 0.08, 1.18)
-                        corner_radius: 0.04
-                        roughness: 0.92
-                        metallic: 0.0
-                        color: #x243444
-                        pos: vec3(0.42, -0.22, -0.72)
-                    }
-        
-                    Cube{
-                        body: mod.widgets.XrBodyKind.Fixed
-                        size: vec3(0.18, 0.72, 1.16)
-                        corner_radius: 0.04
-                        roughness: 0.88
-                        metallic: 0.0
-                        color: #x1c2733
-                        pos: vec3(1.20, 0.10, -0.72)
-                    }
-        
-                    Cube{
-                        body: mod.widgets.XrBodyKind.Fixed
-                        size: vec3(1.62, 0.72, 0.18)
-                        corner_radius: 0.04
-                        roughness: 0.88
-                        metallic: 0.0
-                        color: #x1a2430
-                        pos: vec3(0.42, 0.10, -1.22)
-                    }
-        
-                    TestPedestal{
-                        pos: vec3(0.05, -0.05, -0.76)
-                        color: #xff6a4d
-                    }
-        
-                    TestPedestal{
-                        pos: vec3(0.42, 0.02, -0.76)
-                        color: #x58d68d
-                        size: vec3(0.24, 0.32, 0.24)
-                    }
-        
-                    TestPedestal{
-                        pos: vec3(0.78, -0.01, -0.76)
-                        color: #x68a8ff
-                        size: vec3(0.24, 0.26, 0.24)
-                    }
-        
-                    Cube{
-                        body: mod.widgets.XrBodyKind.Fixed
-                        size: vec3(0.24, 0.24, 0.24)
-                        corner_radius: 0.024
-                        roughness: 0.12
-                        metallic: 0.02
-                        color: #xffff7a
-                        pos: vec3(0.42, 0.34, -0.76)
-                    }
-        
-                    Cube{
-                        body: mod.widgets.XrBodyKind.Fixed
-                        size: vec3(0.16, 0.82, 0.16)
-                        corner_radius: 0.03
-                        roughness: 0.22
-                        metallic: 0.04
-                        color: #xff8a54
-                        pos: vec3(0.42, 0.34, -1.02)
-                    }
-                }
-    
-                block_scene := XrNode{
-                    visible: true
-                    on_render: ||{
-                        Platform{pos: vec3(0.05, -0.06, -0.10)}
-                        for row in 0..8 {
-                            for col in 0..8 {
-                                let offset = if row % 2 == 0 {0.0} else {0.0725}
-                                let color = if (row + col) % 6 == 0 {
-                                    #xff5a4f
-                                } else if (row + col) % 6 == 1 {
-                                    #x3ecf8e
-                                } else if (row + col) % 6 == 2 {
-                                    #x57a1ff
-                                } else if (row + col) % 6 == 3 {
-                                    #xffc857
-                                } else if (row + col) % 6 == 4 {
-                                    #xff8f3f
-                                } else {
-                                    #xd16dff
-                                }
-                                Block{
-                                    pos: vec3(-0.46 + col * 0.145 + offset, 0.028 + row * 0.084, -0.10)
-                                    color: color
-                                }
-                            }
-                        }
-                    }
-                }
-    
-                helmet_scene := XrNode{
-                    visible: false
-                    on_render: ||{
-                        Platform{pos: vec3(0.05, -0.06, -0.10)}
-                        for row in 0..1 {
-                            for col in 0..1 {
-                                Gltf{
-                                    body: mod.widgets.XrBodyKind.Dynamic
-                                    physics_size: vec3(0.17, 0.21, 0.17)
-                                    density: 0.9
-                                    friction: 0.7
-                                    restitution: 0.08
-                                    pos: vec3(-0.23 + col * 0.22 + if row % 2 == 0 {0.0} else {0.08}, 0.08 + row * 0.22, -0.10)
-                                    src: crate_resource("self://resources/DamagedHelmet.glb")
-                                    mesh_scale: vec3(0.38, 0.38, 0.38)
-                                    mesh_rotation: vec3(0.0, 1.5708, 0.0)
-                                    mesh_position: vec3(0.0, 0.32, 0.0)
-                                }
-                            }
-                        }
-                    }
-                }
-    
-                tree_scene := XrNode{
-                    visible: false
-                    on_render: ||{
-                        Platform{pos: vec3(0.05, -0.06, -0.10)}
-                        fractal_tree := FractalTree{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            physics_size: vec3(0.34, 0.92, 0.34)
-                            pos: vec3(0.05, -0.02, -0.10)
-                            child_scale: 0.57735026
-                            length_scale_0: 0.60
-                            length_scale_1: 1.78
-                            length_scale_2: 1.88
-                            length_scale_3: 0.97
-                            length_scale_4: 1.03
-                            length_scale_rest: 1.08
-                            branch_split_angle: 0.70
-                            branch_yaw_step: 2.0943952
-                            branch_yaw_phase_step: 1.0471976
-                        }
-                    }
-                }
-    
-                refraction_scene := XrNode{
-                    visible: false
-                    on_render: ||{
-                        Platform{pos: vec3(0.05, -0.06, -0.10)}
-                        for row in 0..4 {
-                            for col in 0..4 {
-                                let offset = if row % 2 == 0 {0.0} else {0.06}
-                                RefractiveCube{
-                                    pos: vec3(-0.22 + col * 0.12 + offset, 0.05 + row * 0.11, -0.10)
-                                    size: vec3(0.115, 0.105, 0.085)
-                                    color: vec4(0.82, 0.93, 1.0, 0.12)
-                                    focus_distance: 1.6
-                                }
-                            }
-                        }
-                    }
-                }
+
+            platform := Platform{
+                size: vec3(2.2, 0.08, 1.08)
+                corner_radius: 0.03
+                color: #x2d455d
+                pos: vec3(0.0, -0.48, -1.42)
+            }
+
+            back_wall := Cube{
+                body: mod.widgets.XrBodyKind.Fixed
+                size: vec3(2.4, 1.3, 0.08)
+                corner_radius: 0.05
+                roughness: 0.88
+                metallic: 0.0
+                color: #x152538
+                pos: vec3(0.0, 0.12, -2.12)
+            }
+
+            left_stack := Block{
+                body: mod.widgets.XrBodyKind.Fixed
+                color: #xff6a4d
+                size: vec3(0.24, 0.24, 0.24)
+                pos: vec3(-0.72, -0.20, -1.18)
+            }
+
+            center_stack := Block{
+                body: mod.widgets.XrBodyKind.Fixed
+                color: #x58d68d
+                size: vec3(0.26, 0.36, 0.26)
+                pos: vec3(0.0, -0.14, -1.34)
+            }
+
+            right_stack := Block{
+                body: mod.widgets.XrBodyKind.Fixed
+                color: #x68a8ff
+                size: vec3(0.24, 0.24, 0.24)
+                pos: vec3(0.74, -0.20, -1.18)
+            }
+
+            accent_cube := Cube{
+                body: mod.widgets.XrBodyKind.Fixed
+                size: vec3(0.20, 0.20, 0.20)
+                corner_radius: 0.02
+                roughness: 0.12
+                metallic: 0.04
+                color: #xffff7a
+                pos: vec3(0.0, 0.34, -1.12)
             }
         }
     }
@@ -274,93 +127,6 @@ pub struct App {
     ui: WidgetRef,
 }
 
-impl App {
-    fn button_clicked(&self, cx: &Cx, actions: &Actions, button_id: LiveId) -> bool {
-        self.ui
-            .widget_flood(cx, &[button_id])
-            .borrow::<Button>()
-            .is_some_and(|button| button.clicked(actions))
-    }
-
-    fn xr_root_widget(&self, cx: &Cx) -> WidgetRef {
-        let direct = self.ui.widget(cx, ids!(xr_root));
-        if direct.borrow::<XrRoot>().is_some() {
-            return direct;
-        }
-
-        let flood = self.ui.widget_flood(cx, ids!(xr_root));
-        if flood.borrow::<XrRoot>().is_some() {
-            return flood;
-        }
-
-        WidgetRef::empty()
-    }
-
-    fn call_xr_root(&self, cx: &mut Cx, method: LiveId) -> ScriptAsyncResult {
-        let xr_root = self.xr_root_widget(cx);
-        if xr_root.borrow::<XrRoot>().is_none() {
-            return ScriptAsyncResult::MethodNotFound;
-        }
-        cx.with_vm(|vm| xr_root.script_call(vm, method, NIL))
-    }
-
-    fn select_scene(&self, cx: &mut Cx, scene_id: LiveId) -> ScriptAsyncResult {
-        let xr_root = self.xr_root_widget(cx);
-        if xr_root.borrow::<XrRoot>().is_none() {
-            return ScriptAsyncResult::MethodNotFound;
-        }
-        cx.with_vm(|vm| xr_root.script_call(vm, live_id!(select_scene), ScriptValue::from_id(scene_id)))
-    }
-
-    fn sync_depth_toggle_label(&self, cx: &mut Cx, visible: bool) {
-        let label = if visible {
-            "Hide Depth Mesh"
-        } else {
-            "Show Depth Mesh"
-        };
-        let button = self.ui.widget_flood(cx, ids!(depth_toggle));
-        button.set_text(cx, label);
-    }
-}
-
-impl MatchEvent for App {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.button_clicked(cx, actions, live_id!(reset)) {
-            let _ = self.call_xr_root(cx, live_id!(render_scene));
-        }
-
-        if self.button_clicked(cx, actions, live_id!(show_test)) {
-            let _ = self.select_scene(cx, live_id!(xr_test_scene));
-        }
-
-        if self.button_clicked(cx, actions, live_id!(show_blocks)) {
-            let _ = self.select_scene(cx, live_id!(block_scene));
-        }
-
-        if self.button_clicked(cx, actions, live_id!(show_helmet)) {
-            let _ = self.select_scene(cx, live_id!(helmet_scene));
-        }
-
-        if self.button_clicked(cx, actions, live_id!(show_tree)) {
-            let _ = self.select_scene(cx, live_id!(tree_scene));
-        }
-
-        if self.button_clicked(cx, actions, live_id!(show_refraction)) {
-            let _ = self.select_scene(cx, live_id!(refraction_scene));
-        }
-
-        if self.button_clicked(cx, actions, live_id!(depth_toggle)) {
-            if let ScriptAsyncResult::Return(value) =
-                self.call_xr_root(cx, live_id!(toggle_depth_mesh))
-            {
-                if let Some(visible) = value.as_bool() {
-                    self.sync_depth_toggle_label(cx, visible);
-                }
-            }
-        }
-    }
-}
-
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
@@ -369,7 +135,6 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
