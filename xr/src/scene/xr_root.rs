@@ -1,5 +1,6 @@
 use crate::scene_draw::{ray_from_scene_viewport, SceneState3D};
 use crate::xr_env::XrEnv;
+use crate::xr_select::XrSelect;
 use crate::*;
 use makepad_widgets::event::XrFingerTip;
 use makepad_widgets::makepad_script::ScriptFnRef;
@@ -367,6 +368,9 @@ impl XrRoot {
     }
 
     fn child_world_sort_center(child: &WidgetRef) -> Option<Vec3f> {
+        if let Some(select) = child.borrow::<XrSelect>() {
+            return Some(select.node().pos());
+        }
         if let Some(view) = child.borrow::<XrView>() {
             return Some(view.node().pos());
         }
@@ -551,7 +555,9 @@ impl ScriptHook for XrRoot {
                         let Some(id) = kv.key.as_id() else { continue };
                         if !WidgetRef::value_is_newable_widget(vm, kv.value) { continue }
                         let child = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
-                        self.children.push((id, child));
+                        self.children.push((id, child.clone()));
+                        vm.cx_mut()
+                            .widget_tree_insert_child_deep(self.uid, id, child);
                     }
                 });
             }
