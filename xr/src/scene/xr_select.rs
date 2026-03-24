@@ -9,6 +9,13 @@ script_mod! {
     mod.widgets.XrSelect = mod.widgets.XrSelectBase{}
 }
 
+#[derive(Clone, Debug, Default)]
+pub enum XrSelectAction {
+    ActiveChildChanged(LiveId),
+    #[default]
+    None,
+}
+
 #[derive(Script, WidgetRef, WidgetRegister)]
 pub struct XrSelect {
     #[uid]
@@ -72,6 +79,7 @@ impl XrSelect {
             self.active_child = child_id;
             self.sync_child_visibility(cx);
             cx.with_vm(|vm| self.render_child(vm, child_id));
+            cx.widget_action(self.uid, XrSelectAction::ActiveChildChanged(child_id));
             self.redraw(cx);
         } else {
             child.set_visible(cx, true);

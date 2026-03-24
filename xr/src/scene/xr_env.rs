@@ -3,6 +3,7 @@ use crate::gltf::Gltf;
 use crate::refractive_cube::RefractiveCube;
 use crate::tree::Tree;
 use crate::xr_node::{XrBodyKind, XrNode, XrRuntimeBodyState, XrDrawScopeData};
+use crate::xr_select::XrSelect;
 use crate::*;
 use makepad_widgets::makepad_platform::{
     event::{CameraPreviewMode, VideoSource, VideoYuvMetadata},
@@ -461,6 +462,9 @@ impl XrEnv {
         parent_scale: Vec3f,
         cubes: &mut Vec<CollectedXrCube>,
     ) {
+        if !widget.visible() {
+            return;
+        }
         if let Some(cube) = widget.borrow::<Cube>() {
             let node = cube.node();
             let (pos, ori, scale) = Self::transform_with_node(parent_pos, parent_ori, parent_scale, node);
@@ -536,6 +540,27 @@ impl XrEnv {
                 });
             }
             drop(tree);
+            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes));
+            return;
+        }
+        if let Some(select) = widget.borrow::<XrSelect>() {
+            let node = select.node();
+            let (pos, ori, scale) =
+                Self::transform_with_node(parent_pos, parent_ori, parent_scale, node);
+            let half = node.physics_half_extents();
+            if node.body_kind() != XrBodyKind::Disabled && (half.x > 0.0 || half.y > 0.0 || half.z > 0.0) {
+                cubes.push(CollectedXrCube {
+                    uid: select.widget_uid(),
+                    body_kind: node.body_kind(),
+                    pose: Pose::new(ori, pos),
+                    scale,
+                    half_extents: vec3f(half.x * scale.x, half.y * scale.y, half.z * scale.z),
+                    density: node.density(),
+                    friction: node.friction(),
+                    restitution: node.restitution(),
+                });
+            }
+            drop(select);
             widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes));
             return;
         }
@@ -641,6 +666,10 @@ impl XrEnv {
     }
 
     pub fn step_physics(&mut self, cx: &mut Cx) {
+        if let Some(state) = self.last_xr_state.clone() {
+            Self::sync_hands(self.scene.as_mut(), &state);
+        }
+        Self::sync_depth_query_surfaces(&mut self.depth_query_retained_hits, self.scene.as_mut(), cx);
         if let Some(scene) = self.scene.as_mut() {
             scene.step();
         }

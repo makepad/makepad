@@ -1,6 +1,6 @@
 use crate::scene_draw::{ray_from_scene_viewport, SceneState3D};
 use crate::xr_env::XrEnv;
-use crate::xr_select::XrSelect;
+use crate::xr_select::{XrSelect, XrSelectAction};
 use crate::*;
 use makepad_widgets::event::XrFingerTip;
 use makepad_widgets::makepad_script::ScriptFnRef;
@@ -210,6 +210,14 @@ pub struct XrRoot {
 }
 
 impl XrRoot {
+    fn set_depth_mesh_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
+        self.env.set_depth_mesh_visible(visible);
+        self.env.mark_scene_dirty();
+        self.env.ensure_physics(cx, &self.children);
+        cx.redraw_all();
+        visible
+    }
+
     fn permissions_ui_visible(&self) -> bool {
         self.permissions_widget
             .borrow::<XrPermissionsFlow>()
@@ -688,6 +696,17 @@ impl WidgetNode for XrRoot {
 
 impl Widget for XrRoot {
     fn script_call(&mut self, vm: &mut ScriptVm, method: LiveId, args: ScriptValue) -> ScriptAsyncResult {
+        if method == live_id!(set_depth) || method == live_id!(set_depth_mesh) {
+            let mut visible = self.depth_mesh_visible();
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                visible = vm.bx.heap.cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+            }
+            vm.with_cx_mut(|cx| {
+                visible = self.set_depth_mesh_visible(cx, visible);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(visible));
+        }
         if method == live_id!(depth_toggle) || method == live_id!(toggle_depth_mesh) {
             let mut visible = self.depth_mesh_visible();
             vm.with_cx_mut(|cx| {
@@ -722,6 +741,8 @@ impl Widget for XrRoot {
         if !cx.in_xr_mode() {
             self.clear_xr_content_pose(cx);
         }
+
+        self.env.handle_event(cx, event);
 
         match event {
             Event::Startup => {
@@ -758,7 +779,21 @@ impl Widget for XrRoot {
             _ => {}
         }
 
-        self.env.handle_event(cx, event);
+        if let Event::Actions(actions) = event {
+            if actions.iter().any(|action| {
+                action
+                    .as_widget_action()
+                    .is_some_and(|action| {
+                        matches!(
+                            action.cast::<XrSelectAction>(),
+                            XrSelectAction::ActiveChildChanged(_)
+                        )
+                    })
+            }) {
+                self.env.mark_scene_dirty();
+                self.env.ensure_physics(cx, &self.children);
+            }
+        }
 
         let desktop_scene_interaction = !cx.in_xr_mode() && !self.permissions_ui_visible();
         let handled_desktop_xr_pointer = if desktop_scene_interaction {
