@@ -29,6 +29,12 @@ pub const None: u32 = 0;
 pub const True: u32 = 1;
 pub const False: u32 = 0;
 
+// XSizeHints flags: user/program-specified position and size
+pub const USPosition: c_long = 1 << 0; // user-specified x, y
+pub const USSize: c_long = 1 << 1; // user-specified width, height
+pub const PPosition: c_long = 1 << 2; // program-specified position
+pub const PSize: c_long = 1 << 3; // program-specified size
+
 pub const VisualIDMask: u32 = 1;
 
 pub const CurrentTime: u32 = 0;
@@ -397,6 +403,17 @@ extern "C" {
         arg1: *mut Display,
         arg2: Window,
         arg3: *mut XWindowAttributes,
+    ) -> c_int;
+
+    pub fn XTranslateCoordinates(
+        display: *mut Display,
+        src_window: Window,
+        dest_window: Window,
+        src_x: c_int,
+        src_y: c_int,
+        dest_x_return: *mut c_int,
+        dest_y_return: *mut c_int,
+        child_return: *mut Window,
     ) -> c_int;
 
     pub fn XResourceManagerString(arg1: *mut Display) -> *mut c_char;

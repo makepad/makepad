@@ -5,7 +5,7 @@ use {
         cell::Cell,
         ffi::{CStr, CString, OsStr},
         mem,
-        os::raw::{c_char, c_long, c_ulong, c_void},
+        os::raw::{c_char, c_int, c_long, c_ulong, c_void},
         ptr,
         rc::Rc,
     },
@@ -165,6 +165,17 @@ impl XlibWindow {
             // The title should be set prior to mapping the window.
             let title_bytes = format!("{}\0", title);
             let title_ptr = title_bytes.as_ptr() as *mut c_char;
+
+            // Set USPosition so the WM (e.g. GNOME/Mutter) honors our requested position.
+            // Without this hint many WMs ignore the position from XCreateWindow and apply
+            // their own smart-placement algorithm instead.
+            let mut size_hints = mem::zeroed::<x11_sys::XSizeHints>();
+            if let Some(pos) = position {
+                size_hints.flags = x11_sys::USPosition | x11_sys::PPosition;
+                size_hints.x = pos.x as c_int;
+                size_hints.y = pos.y as c_int;
+            }
+
             x11_sys::Xutf8SetWMProperties(
                 display,
                 window,
@@ -172,7 +183,7 @@ impl XlibWindow {
                 title_ptr,
                 ptr::null_mut(),
                 0,
-                ptr::null_mut(),
+                &mut size_hints,
                 ptr::null_mut(),
                 ptr::null_mut(),
             );
@@ -209,17 +220,19 @@ impl XlibWindow {
             // Set window icon via _NET_WM_ICON
             Self::set_x11_icon(display, window);
 
+            // Reinforce the requested position before mapping. Calling XMoveWindow before
+            // XMapWindow ensures the coordinates are root-relative (the window's parent is
+            // still the root window at this point). After XMapWindow the WM reparents the
+            // window into a decoration frame, and any subsequent XMoveWindow would be
+            // interpreted relative to that frame rather than the root, which can cause the
+            // client area to end up at an unexpected position inside the WM frame.
+            if let Some(pos) = position {
+                x11_sys::XMoveWindow(display, window, pos.x as i32, pos.y as i32);
+            }
+
             // Map the window to the screen
             x11_sys::XMapWindow(display, window);
             x11_sys::XFlush(display);
-
-            // Explicitly set the window position after mapping
-            // This is necessary because some window managers might ignore the initial position
-            // and override it with their own heuristics.
-            if let Some(pos) = position {
-                x11_sys::XMoveWindow(display, window, pos.x as i32, pos.y as i32);
-                x11_sys::XFlush(display);
-            }
 
             let xic = if !get_xlib_app_global().xim.is_null() {
                 Some(x11_sys::XCreateIC(
@@ -564,22 +577,29 @@ impl XlibWindow {
 
     pub fn get_position(&self) -> Vec2d {
         unsafe {
-            let mut xwa = mem::MaybeUninit::uninit();
             let display = get_xlib_app_global().display;
-            x11_sys::XGetWindowAttributes(display, self.window.unwrap(), xwa.as_mut_ptr());
-            let xwa = xwa.assume_init();
-            return Vec2d {
-                x: xwa.x as f64,
-                y: xwa.y as f64,
-            };
-            /*
-            let mut child = mem::uninitialized();
-            let default_screen = X11_sys::XDefaultScreen(display);
-            let root_window = X11_sys::XRootWindow(display, default_screen);
-            let mut x:c_int = 0;
-            let mut y:c_int = 0;
-            X11_sys::XTranslateCoordinates(display, self.window.unwrap(), root_window, 0, 0, &mut x, &mut y, &mut child );
-            */
+            let default_screen = x11_sys::XDefaultScreen(display);
+            let root_window = x11_sys::XRootWindow(display, default_screen);
+            let mut x: c_int = 0;
+            let mut y: c_int = 0;
+            let mut child = mem::MaybeUninit::uninit();
+            // XGetWindowAttributes returns position relative to the parent window,
+            // which after WM reparenting is the decoration frame (not the root).
+            // XTranslateCoordinates gives the correct root-relative (screen) position.
+            x11_sys::XTranslateCoordinates(
+                display,
+                self.window.unwrap(),
+                root_window,
+                0,
+                0,
+                &mut x,
+                &mut y,
+                child.as_mut_ptr(),
+            );
+            Vec2d {
+                x: x as f64,
+                y: y as f64,
+            }
         }
     }
 

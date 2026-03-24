@@ -553,6 +553,16 @@ impl ShaderFnCompiler {
                         )
                         .ok();
                     }
+                    ShaderBackend::Glsl => {
+                        // GLSL ES 3.0 disallows implicit casts from int to uint,
+                        // so we must explicitly cast the bounds to the loop variable type.
+                        write!(
+                            self.out,
+                            "for({3} {0} = {3}({1}); {0} < {3}({2}); {0}++){{\n",
+                            loop_var_name, start, end, ty_name
+                        )
+                        .ok();
+                    }
                     _ => {
                         write!(
                             self.out,
