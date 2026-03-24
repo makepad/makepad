@@ -299,6 +299,8 @@ script_mod! {
                     }
                 }
             }
+
+            xr_permissions := mod.widgets.XrPermissionsFlow{}
         }
     }
 }

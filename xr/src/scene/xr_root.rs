@@ -193,6 +193,7 @@ pub struct XrRoot {
     #[live] pass: ScriptDrawPass,
     #[new] depth_texture: Texture,
     #[new] draw_list: DrawList,
+    #[new] permissions_draw_list: DrawList2d,
 
     // Environment (physics + env draws)
     #[live] env: XrEnv,
@@ -206,6 +207,7 @@ pub struct XrRoot {
     // Children (from := declarations)
     #[rust] children: Vec<(LiveId, WidgetRef)>,
     #[rust] child_draw_lists: Vec<DrawList>,
+    #[rust] permissions_widget: WidgetRef,
 
     // State
     #[rust] initialized: bool,
@@ -216,6 +218,18 @@ pub struct XrRoot {
 }
 
 impl XrRoot {
+    fn permissions_overlay_active(&self) -> bool {
+        self.permissions_widget
+            .borrow::<XrPermissionsFlow>()
+            .is_some_and(|widget| widget.shows_desktop_overlay())
+    }
+
+    fn permissions_overlay_blocks_input(&self) -> bool {
+        self.permissions_widget
+            .borrow::<XrPermissionsFlow>()
+            .is_some_and(|widget| widget.blocks_desktop_input())
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         if self.initialized { return; }
         self.initialized = true;
@@ -512,6 +526,20 @@ impl XrRoot {
 
     fn handle_draw_event(&mut self, cx: &mut Cx, e: &DrawEvent, scope: &mut Scope) {
         self.ensure_initialized(cx);
+        cx.passes[self.pass.handle.draw_pass_id()].keep_camera_matrix =
+            if cx.in_xr_mode() || !self.permissions_overlay_active() {
+                self.pass.keep_camera_matrix
+            } else {
+                false
+            };
+        self.pass.handle.set_window_clear_color(
+            cx,
+            if cx.in_xr_mode() {
+                vec4(0.0, 0.0, 0.0, 0.0)
+            } else {
+                self.pass.clear_color
+            },
+        );
         if cx.in_xr_mode() {
             if e.xr_state.is_none() { return; }
             let mut cx_draw = CxDraw::new(cx, e);
@@ -543,6 +571,7 @@ impl ScriptHook for XrRoot {
         if apply.is_reload() {
             self.children.clear();
             self.child_draw_lists.clear();
+            self.permissions_widget = WidgetRef::empty();
         }
     }
 
@@ -550,11 +579,17 @@ impl ScriptHook for XrRoot {
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 self.children.clear();
+                self.permissions_widget = WidgetRef::empty();
                 vm.vec_with(obj, |vm, vec| {
                     for kv in vec {
                         let Some(id) = kv.key.as_id() else { continue };
                         if !WidgetRef::value_is_newable_widget(vm, kv.value) { continue }
                         let child = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
+                        if id == live_id!(xr_permissions)
+                            || child.borrow::<XrPermissionsFlow>().is_some()
+                        {
+                            self.permissions_widget = child.clone();
+                        }
                         self.children.push((id, child.clone()));
                         vm.cx_mut()
                             .widget_tree_insert_child_deep(self.uid, id, child);
@@ -657,6 +692,8 @@ impl Widget for XrRoot {
 
         let handled_desktop_ui = if cx.in_xr_mode() {
             false
+        } else if self.permissions_overlay_blocks_input() {
+            false
         } else {
             self.handle_desktop_xr_pointer(cx, event, scope)
         };
@@ -666,7 +703,10 @@ impl Widget for XrRoot {
             child.handle_event(cx, event, scope);
         }
 
-        if !cx.in_xr_mode() && !handled_desktop_ui {
+        if !cx.in_xr_mode()
+            && !handled_desktop_ui
+            && !self.permissions_overlay_blocks_input()
+        {
             self.camera.handle_desktop_interaction(cx, event);
         }
     }
@@ -677,6 +717,16 @@ impl Widget for XrRoot {
         self.ensure_initialized(cx.cx);
         cx.begin_pass(&self.pass.handle, None);
         let size = cx.current_pass_size();
+
+        if self.permissions_overlay_active() {
+            self.permissions_draw_list.begin_always(cx);
+            cx.begin_root_turtle(size, Layout::flow_down());
+            self.permissions_widget.draw_walk_all(cx, scope, Walk::fill());
+            cx.end_pass_sized_turtle();
+            self.permissions_draw_list.end(cx);
+            cx.end_pass(&self.pass.handle);
+            return DrawStep::done();
+        }
 
         let pass_rect = Rect { pos: dvec2(0.0, 0.0), size };
         self.camera.set_desktop_viewport_rect(pass_rect);
