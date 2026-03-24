@@ -390,6 +390,7 @@ fn wgsl_unpack_expr_for_field(
 fn build_draw_shader_wgsl(
     vm: &ScriptVm,
     output: &mut ShaderOutput,
+    xr_multiview: bool,
 ) -> (String, u32, u32, u32, u32) {
     let mut out = String::new();
 
@@ -482,6 +483,7 @@ fn build_draw_shader_wgsl(
         .ok();
     }
 
+    writeln!(out, "var<private> VIEW_ID: i32;").ok();
     writeln!(out, "var<private> vtx_pos: vec4f;").ok();
 
     for io in &output.io {
@@ -619,12 +621,20 @@ fn build_draw_shader_wgsl(
     let xr_depth_binding = next_binding;
     writeln!(
         out,
-        "@group(0) @binding({}) var tex_xr_depth: texture_depth_2d;",
-        xr_depth_binding
+        "@group(0) @binding({}) var tex_xr_depth: {};",
+        xr_depth_binding,
+        if xr_multiview {
+            "texture_depth_2d_array"
+        } else {
+            "texture_depth_2d"
+        }
     )
     .ok();
 
     writeln!(out, "struct VertexMainIn {{").ok();
+    if xr_multiview {
+        writeln!(out, "    @builtin(view_index) view_index: i32,").ok();
+    }
     let mut location = 0u32;
     let geometry_slots = geometry_fields
         .last()
@@ -660,6 +670,15 @@ fn build_draw_shader_wgsl(
         writeln!(out, "    @location({}) packed_varying_{}: vec4f,", idx, idx).ok();
     }
     writeln!(out, "}}").ok();
+    writeln!(out, "struct FragmentMainIn {{").ok();
+    if xr_multiview {
+        writeln!(out, "    @builtin(view_index) view_index: i32,").ok();
+    }
+    writeln!(out, "    @builtin(position) position: vec4f,").ok();
+    for idx in 0..wgsl_num_packed_vec4s(varying_slots) {
+        writeln!(out, "    @location({}) packed_varying_{}: vec4f,", idx, idx).ok();
+    }
+    writeln!(out, "}}").ok();
 
     let mut fragment_outputs = output
         .io
@@ -682,6 +701,47 @@ fn build_draw_shader_wgsl(
     }
 
     writeln!(out).ok();
+    writeln!(out, "fn mp_draw_pass_camera_projection() -> mat4x4f {{").ok();
+    if xr_multiview {
+        writeln!(out, "    if (VIEW_ID != 0) {{").ok();
+        writeln!(out, "        return unibuf_draw_pass.camera_projection_r;").ok();
+        writeln!(out, "    }}").ok();
+    }
+    writeln!(out, "    return unibuf_draw_pass.camera_projection;").ok();
+    writeln!(out, "}}").ok();
+    writeln!(out, "fn mp_draw_pass_camera_view() -> mat4x4f {{").ok();
+    if xr_multiview {
+        writeln!(out, "    if (VIEW_ID != 0) {{").ok();
+        writeln!(out, "        return unibuf_draw_pass.camera_view_r;").ok();
+        writeln!(out, "    }}").ok();
+    }
+    writeln!(out, "    return unibuf_draw_pass.camera_view;").ok();
+    writeln!(out, "}}").ok();
+    writeln!(out, "fn mp_draw_pass_depth_projection() -> mat4x4f {{").ok();
+    if xr_multiview {
+        writeln!(out, "    if (VIEW_ID != 0) {{").ok();
+        writeln!(out, "        return unibuf_draw_pass.depth_projection_r;").ok();
+        writeln!(out, "    }}").ok();
+    }
+    writeln!(out, "    return unibuf_draw_pass.depth_projection;").ok();
+    writeln!(out, "}}").ok();
+    writeln!(out, "fn mp_draw_pass_depth_view() -> mat4x4f {{").ok();
+    if xr_multiview {
+        writeln!(out, "    if (VIEW_ID != 0) {{").ok();
+        writeln!(out, "        return unibuf_draw_pass.depth_view_r;").ok();
+        writeln!(out, "    }}").ok();
+    }
+    writeln!(out, "    return unibuf_draw_pass.depth_view;").ok();
+    writeln!(out, "}}").ok();
+    writeln!(out, "fn mp_draw_pass_camera_inv() -> mat4x4f {{").ok();
+    if xr_multiview {
+        writeln!(out, "    if (VIEW_ID != 0) {{").ok();
+        writeln!(out, "        return unibuf_draw_pass.camera_inv_r;").ok();
+        writeln!(out, "    }}").ok();
+    }
+    writeln!(out, "    return unibuf_draw_pass.camera_inv;").ok();
+    writeln!(out, "}}").ok();
+    writeln!(out).ok();
     output.create_functions(&mut out);
     writeln!(out).ok();
     writeln!(
@@ -692,16 +752,18 @@ fn build_draw_shader_wgsl(
     writeln!(out, "    if (clip < 0.5) {{").ok();
     writeln!(out, "        return color;").ok();
     writeln!(out, "    }}").ok();
+    writeln!(out, "    let depth_projection = mp_draw_pass_depth_projection();").ok();
+    writeln!(out, "    let depth_view = mp_draw_pass_depth_view();").ok();
     writeln!(
         out,
-        "    if (abs(unibuf_draw_pass.depth_view[3].w - 1.0) > 0.5) {{"
+        "    if (abs(depth_view[3].w - 1.0) > 0.5) {{"
     )
     .ok();
     writeln!(out, "        return color;").ok();
     writeln!(out, "    }}").ok();
     writeln!(
         out,
-        "    let depth_pos = unibuf_draw_pass.depth_projection * unibuf_draw_pass.depth_view * world;"
+        "    let depth_pos = depth_projection * depth_view * world;"
     )
     .ok();
     writeln!(out, "    if (abs(depth_pos.w) < 0.000001) {{").ok();
@@ -726,11 +788,19 @@ fn build_draw_shader_wgsl(
         "    let depth_y = clamp(i32(depth_hc.y * f32(dims.y)), 0, max(i32(dims.y) - 1, 0));"
     )
     .ok();
-    writeln!(
-        out,
-        "    let depth_view_eye_z = textureLoad(tex_xr_depth, vec2i(depth_x, depth_y), 0);"
-    )
-    .ok();
+    if xr_multiview {
+        writeln!(
+            out,
+            "    let depth_view_eye_z = textureLoad(tex_xr_depth, vec2i(depth_x, depth_y), VIEW_ID, 0);"
+        )
+        .ok();
+    } else {
+        writeln!(
+            out,
+            "    let depth_view_eye_z = textureLoad(tex_xr_depth, vec2i(depth_x, depth_y), 0);"
+        )
+        .ok();
+    }
     writeln!(out, "    if (depth_view_eye_z >= depth_hc.z) {{").ok();
     writeln!(out, "        return color;").ok();
     writeln!(out, "    }}").ok();
@@ -749,6 +819,11 @@ fn build_draw_shader_wgsl(
 
     writeln!(out, "@vertex").ok();
     writeln!(out, "fn vertex_main(in: VertexMainIn) -> VertexMainOut {{").ok();
+    if xr_multiview {
+        writeln!(out, "    VIEW_ID = in.view_index;").ok();
+    } else {
+        writeln!(out, "    VIEW_ID = 0;").ok();
+    }
     for field in &geometry_fields {
         let value_expr = wgsl_unpack_expr_for_field(
             output,
@@ -822,7 +897,12 @@ fn build_draw_shader_wgsl(
 
     if fragment_outputs.is_empty() {
         writeln!(out, "@fragment").ok();
-        writeln!(out, "fn fragment_main(in: VertexMainOut) {{").ok();
+        writeln!(out, "fn fragment_main(in: FragmentMainIn) {{").ok();
+        if xr_multiview {
+            writeln!(out, "    VIEW_ID = in.view_index;").ok();
+        } else {
+            writeln!(out, "    VIEW_ID = 0;").ok();
+        }
         for field in &varying_fields {
             let value_expr = wgsl_unpack_expr_for_field(
                 output,
@@ -867,9 +947,14 @@ fn build_draw_shader_wgsl(
         writeln!(out, "@fragment").ok();
         writeln!(
             out,
-            "fn fragment_main(in: VertexMainOut) -> FragmentMainOut {{"
+            "fn fragment_main(in: FragmentMainIn) -> FragmentMainOut {{"
         )
         .ok();
+        if xr_multiview {
+            writeln!(out, "    VIEW_ID = in.view_index;").ok();
+        } else {
+            writeln!(out, "    VIEW_ID = 0;").ok();
+        }
         for field in &varying_fields {
             let value_expr = wgsl_unpack_expr_for_field(
                 output,
@@ -945,6 +1030,7 @@ pub fn compile_draw_shader_wgsl_source(
     vm: &mut ScriptVm,
     io_self: ScriptObject,
     layout_source: &ShaderOutput,
+    xr_multiview: bool,
 ) -> Result<WgslDrawShaderSource, String> {
     let mut output = ShaderOutput::default();
     output.backend = ShaderBackend::Wgsl;
@@ -1017,7 +1103,7 @@ pub fn compile_draw_shader_wgsl_source(
         .unwrap_or(0);
 
     let (wgsl, dyn_uniform_binding, texture_binding_base, sampler_binding_base, xr_depth_binding) =
-        build_draw_shader_wgsl(vm, &mut output);
+        build_draw_shader_wgsl(vm, &mut output, xr_multiview);
 
     Ok(WgslDrawShaderSource {
         wgsl,

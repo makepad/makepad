@@ -111,26 +111,37 @@ impl DrawVars {
             output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
 
             #[cfg(use_vulkan)]
-            let mut compiled_vulkan_shader: Option<CxVulkanShaderBinary> = None;
+            let mut compiled_vulkan_shader: [Option<CxVulkanShaderBinary>; NUM_SHADER_VARIANTS] =
+                std::array::from_fn(|_| None);
 
             #[cfg(use_vulkan)]
             {
-                match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
-                    vm, io_self, &output,
-                ) {
-                    Ok(vk_shader) => compiled_vulkan_shader = Some(vk_shader),
-                    Err(err) => {
-                        use std::sync::atomic::{AtomicUsize, Ordering};
-                        static ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
-                        const MAX_ERROR_LOGS: usize = 1;
-                        let index = ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
-                        if index < MAX_ERROR_LOGS {
-                            crate::error!("Vulkan WGSL/SPIR-V compilation failed: {}", err);
-                        } else if index == MAX_ERROR_LOGS {
-                            crate::warning!(
-                                "Suppressing further Vulkan WGSL/SPIR-V compilation logs after {} errors",
-                                MAX_ERROR_LOGS
-                            );
+                for (shader_variant, xr_multiview) in [false, true].into_iter().enumerate() {
+                    match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
+                        vm,
+                        io_self,
+                        &output,
+                        xr_multiview,
+                    ) {
+                        Ok(vk_shader) => compiled_vulkan_shader[shader_variant] = Some(vk_shader),
+                        Err(err) => {
+                            use std::sync::atomic::{AtomicUsize, Ordering};
+                            static ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
+                            const MAX_ERROR_LOGS: usize = 2;
+                            let index = ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                            if index < MAX_ERROR_LOGS {
+                                let variant_name = if xr_multiview { "xr" } else { "window" };
+                                crate::error!(
+                                    "Vulkan WGSL/SPIR-V compilation failed for {} variant: {}",
+                                    variant_name,
+                                    err
+                                );
+                            } else if index == MAX_ERROR_LOGS {
+                                crate::warning!(
+                                    "Suppressing further Vulkan WGSL/SPIR-V compilation logs after {} errors",
+                                    MAX_ERROR_LOGS
+                                );
+                            }
                         }
                     }
                 }
@@ -208,21 +219,21 @@ impl DrawVars {
             let os_shader_id = {
                 #[cfg(use_vulkan)]
                 {
-                    if let Some(vk_shader) = compiled_vulkan_shader.clone() {
+                    if compiled_vulkan_shader.iter().any(|shader| shader.is_some()) {
                         let cx = vm.host.cx_mut();
                         let mut os_shader_id = None;
                         for (shader_index, os_shader) in
                             cx.draw_shaders.os_shaders.iter_mut().enumerate()
                         {
                             if os_shader.in_vertex == vertex && os_shader.in_pixel == fragment {
-                                os_shader.vulkan_shader = Some(vk_shader.clone());
+                                os_shader.vulkan_shader = compiled_vulkan_shader.clone();
                                 os_shader_id = Some(shader_index);
                                 break;
                             }
                         }
                         if os_shader_id.is_none() {
                             let mut os_shader = CxOsDrawShader::new_vulkan_only(&vertex, &fragment);
-                            os_shader.vulkan_shader = Some(vk_shader);
+                            os_shader.vulkan_shader = compiled_vulkan_shader;
                             os_shader_id = Some(cx.draw_shaders.os_shaders.len());
                             cx.draw_shaders.os_shaders.push(os_shader);
                         }
@@ -970,7 +981,7 @@ pub struct CxOsDrawShader {
     //pub const_table_uniforms: OpenglBuffer,
     pub live_uniforms: OpenglBuffer,
     #[cfg(use_vulkan)]
-    pub vulkan_shader: Option<CxVulkanShaderBinary>,
+    pub vulkan_shader: [Option<CxVulkanShaderBinary>; NUM_SHADER_VARIANTS],
 }
 
 pub struct GlShaderUniforms {
@@ -1697,7 +1708,7 @@ impl CxOsDrawShader {
             pixel: [String::new(), String::new()],
             gl_shader: [None, None],
             live_uniforms: Default::default(),
-            vulkan_shader: None,
+            vulkan_shader: [None, None],
         }
     }
 
@@ -1856,7 +1867,7 @@ impl CxOsDrawShader {
             //const_table_uniforms: Default::default(),
             live_uniforms: Default::default(),
             #[cfg(use_vulkan)]
-            vulkan_shader: None,
+            vulkan_shader: [None, None],
         }
     }
 
