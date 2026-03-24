@@ -4,7 +4,7 @@
 - Visual UI programs must be launched and controlled through the Makepad Studio remote protocol.
 - Do not use mount observation or runnable discovery from the bridge client. The bridge must not claim mount ownership from Studio desktop.
 - Do not launch UI programs with raw `cargo run`, `cargo makepad`, or ad hoc cargo invocation when a runnable item exists.
-- Do not use bridge `Cargo` requests to run applications. Only launch apps from runnables via bridge `Run`.
+- Do not use bridge `Cargo` requests to run applications. Only launch apps from runnable items via bridge `RunItem`.
 - Before starting a new UI run for the same target, send `ClearBuild` for the previous build so Studio stops it and removes its run/log/profiler tabs.
 - `cargo check` or `cargo build` never counts as UI verification. After changing UI/runtime code, you must clear the old build and start a fresh Studio run before trusting screenshots, widget dumps, or interaction results.
 - Do not keep inspecting an older already-running app after code changes. Re-run the target and verify against the new `build_id`.
@@ -30,8 +30,8 @@
 - `{"ListBuilds":[]}`
 - `{"ClearBuild":{"build_id":[6]}}` stops a running build and immediately clears its Studio UI tabs; use this before rerunning the same app.
 - `{"StopBuild":{"build_id":[6]}}` stops/kills a running build but does not clear Studio tabs.
-- `{"Run":{"mount":"makepad","process":"makepad-example-todo","args":[]}}`
-- `{"Run":{"mount":"makepad","process":"makepad-example-todo","args":["--my-app-arg"]}}`
+- `{"RunItem":{"mount":"makepad","name":"makepad-example-todo"}}`
+- `{"RunItem":{"mount":"makepad","name":"makepad-example-xr-quest"}}`
 - `{"FindInFiles":{"mount":"makepad","pattern":"ClientToHub::","is_regex":false,"glob":null,"max_results":200}}`
 - `{"FindInFiles":{"mount":"makepad","pattern":"ClientToHub::(FindInFiles|ReadTextRange)","is_regex":true,"glob":"**/*.rs","max_results":200}}`
 - `{"ReadTextRange":{"path":"makepad/studio/backend/src/dispatch.rs","start_line":640,"end_line":720}}`
@@ -68,10 +68,10 @@
 
 ## Recommended Control Flow
 1. Start studio remote process once.
-2. Determine the target process locally from the repo or from the user request.
-3. Call `ListBuilds` and find any existing build for the same package/process.
+2. Determine the target runnable item name locally from the repo or from the user request.
+3. Call `ListBuilds` and find any existing build for the same runnable item.
 4. Send `ClearBuild` for that old `build_id`; do not wait for an acknowledgment before the next launch.
-5. Start the new UI app through `Run`, and wait for `BuildStarted` and `AppStarted`.
+5. Start the new UI app through `RunItem`, and wait for `BuildStarted` and `AppStarted`.
 6. After any code change that affects runtime/UI behavior, repeat steps 3-5 before doing screenshots, widget dumps, clicks, or visual conclusions.
 7. For code search, use `FindInFiles` first, then `ReadTextRange` to window exact regions.
 8. Use direct shell cargo commands for non-launch tasks such as `check`, `build`, `test`, or `bench`.
@@ -79,15 +79,10 @@
 10. For text input, click field first, then send text, then return.
 11. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
 
-## `Run` Defaults
-- `Run` always builds a `cargo run -p <process>` command with `--release`.
-- `Run.process` should be a known package name from the repo or from the user.
-- `Run` always sets cargo `--message-format=json`.
-- `Run.args` are app args placed after `--`.
-- `Run.standalone` is optional; default is `false` (in-Studio runview/framebuffer mode).
-- `Run` injects app `--message-format=json` when missing.
-- `Run` injects `--stdin-loop` unless `standalone:true`.
-- `Run` does not implicitly replace an older build tab; agents should clear the old build themselves first with `ClearBuild`.
+## `RunItem` Launch
+- `RunItem` executes a Studio-defined runnable item by name.
+- Use the runnable item name shown in Studio, not a Cargo package name.
+- `RunItem` does not implicitly replace an older build tab; agents should clear the old build themselves first with `ClearBuild`.
 
 ## One-Flow Input Burst
 - Send this as one stdin write (multiple JSON lines, no sleeps):
@@ -129,12 +124,12 @@ grep -r "texture_2d" widgets/src/
 
 ## Running UI Programs
 
-Use the Studio bridge `Run` flow instead of launching UI apps directly from the shell:
+Use the Studio bridge runnable-item flow instead of launching UI apps directly from the shell:
 
 1. Start the Studio remote bridge once.
-2. Determine the package name locally.
+2. Determine the runnable item name locally.
 3. If an older instance is still running, clear it with `{"ClearBuild":{"build_id":[N]}}` and launch the replacement immediately without waiting for an acknowledgment.
-4. Launch it with `{"Run":{"mount":"makepad","process":"<package-name>","args":[]}}`.
+4. Launch it with `{"RunItem":{"mount":"makepad","name":"<runnable-name>"}}`.
 5. After editing UI/runtime code, do not inspect the previously running build. Always verify against the newly started build id from step 4.
 
 Do not use `ObserveMount` from the bridge. That call is for mount ownership/subscription and can steal RunView/framebuffer routing away from Studio desktop.

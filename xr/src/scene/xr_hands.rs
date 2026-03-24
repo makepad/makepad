@@ -296,7 +296,7 @@ impl XrEnv {
     }
 
     #[allow(dead_code)]
-    pub(super) fn sync_hands(&mut self, scene: Option<&mut RapierScene>, state: &XrState) {
+    pub(super) fn sync_hands(scene: Option<&mut RapierScene>, state: &XrState) {
         if !XR_ENABLE_HAND_PHYSICS {
             return;
         }
