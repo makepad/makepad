@@ -31,23 +31,12 @@ use {
     std::sync::mpsc,
 };
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
-static OPENXR_REPAINT_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
-
 impl Cx {
     pub(crate) fn openxr_render_loop(
         &mut self,
         from_java_rx: &mpsc::Receiver<FromJavaMessage>,
     ) -> bool {
         if self.os.openxr.session.is_some() {
-            if self.os.openxr.debug_render_loop_tick_count < 5 {
-                crate::log!(
-                    "OpenXR render loop tick={} active_session=true",
-                    self.os.openxr.debug_render_loop_tick_count
-                );
-                self.os.openxr.debug_render_loop_tick_count += 1;
-            }
             loop {
                 match from_java_rx.try_recv() {
                     Ok(FromJavaMessage::RenderLoop) => {} // ignore this one
@@ -91,12 +80,6 @@ impl Cx {
                     let edssc = &unsafe {
                         *(&event_buffer as *const _ as *const XrEventDataSessionStateChanged)
                     };
-                    crate::log!(
-                        "OpenXR session state changed -> {:?} session_present={} active={}",
-                        edssc.state,
-                        openxr.session.is_some(),
-                        openxr.session.as_ref().map(|session| session.active).unwrap_or(false)
-                    );
                     match edssc.state {
                         XrSessionState::IDLE => {}
                         XrSessionState::FOCUSED => {}
@@ -164,29 +147,6 @@ impl Cx {
             .as_ref()
             .and_then(|session| session.vulkan.as_ref())
             .is_some();
-        let repaint_log_index = OPENXR_REPAINT_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
-        if repaint_log_index < 16 {
-            let mut summary = Vec::new();
-            for draw_pass_id in &passes_todo {
-                let pass = &self.passes[*draw_pass_id];
-                summary.push(format!(
-                    "{}:'{}' parent={:?} dirty={} main_list={} dpi={:?}",
-                    draw_pass_id.0,
-                    pass.debug_name,
-                    pass.parent,
-                    pass.paint_dirty,
-                    pass.main_draw_list_id.is_some(),
-                    pass.dpi_factor
-                ));
-            }
-            crate::log!(
-                "OpenXR repaint[{}] use_vulkan_xr={} passes_todo={} [{}]",
-                repaint_log_index,
-                use_vulkan_xr,
-                passes_todo.len(),
-                summary.join(" | ")
-            );
-        }
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
             match self.passes[*draw_pass_id].parent.clone() {
@@ -290,19 +250,13 @@ pub struct CxOpenXr {
     system_id: Option<XrSystemId>,
     pub session: Option<CxOpenXrSession>,
     pub(crate) logged_waiting_for_session: bool,
-    debug_render_loop_tick_count: u32,
 }
 
 impl CxOpenXr {
     pub fn create_instance(&mut self, activity_handle: jni_sys::jobject) -> Result<(), String> {
         if self.instance.is_some() && self.libxr.is_some() && self.system_id.is_some() {
-            crate::log!("OpenXR create_instance reused existing instance");
             return Ok(());
         }
-        crate::log!(
-            "OpenXR create_instance start activity_handle={:?}",
-            activity_handle as usize
-        );
 
         self.loader = Some(LibOpenXrLoader::try_load()?);
 
@@ -434,14 +388,6 @@ impl CxOpenXr {
             loader.destroy_instance(instance);
             return Err(err);
         }
-        crate::log!(
-            "OpenXR runtime loaded: {} version={}.{}.{} available_extensions={}",
-            xr_string(&instance_props.runtime_name),
-            instance_props.runtime_version.major(),
-            instance_props.runtime_version.minor(),
-            instance_props.runtime_version.patch(),
-            exts.len()
-        );
 
         let mut sys_info = XrSystemGetInfo::default();
         sys_info.form_factor = XrFormFactor::HEAD_MOUNTED_DISPLAY;
@@ -461,19 +407,6 @@ impl CxOpenXr {
             loader.destroy_instance(instance);
             return Err(err);
         }
-        crate::log!(
-            "OpenXR system {} vendor={} graphics max={}x{} layers={}",
-            xr_string(&sys_props.system_name),
-            sys_props.vendor_id,
-            sys_props.graphics_properties.max_swapchain_image_height,
-            sys_props.graphics_properties.max_swapchain_image_width,
-            sys_props.graphics_properties.max_layer_count
-        );
-        crate::log!(
-            "OpenXR tracking orientation={} position={}",
-            sys_props.tracking_properties.orientation_tracking.as_bool(),
-            sys_props.tracking_properties.position_tracking.as_bool(),
-        );
 
         #[cfg(not(use_vulkan))]
         {
@@ -508,9 +441,6 @@ impl CxOpenXr {
         self.system_id = Some(sys_id);
         self.libxr = Some(xr);
         self.logged_waiting_for_session = false;
-        self.debug_render_loop_tick_count = 0;
-        crate::log!("OpenXR create_instance success system_id={:?}", sys_id);
-
         Ok(())
     }
 
@@ -547,17 +477,6 @@ impl CxOpenXr {
         if self.libxr.is_none() {
             return Err("create session called before libxr load?".into());
         }
-        #[cfg(use_vulkan)]
-        let backend = if vulkan.is_some() { "vulkan" } else { "gles-fallback" };
-        #[cfg(not(use_vulkan))]
-        let backend = "gles";
-        crate::log!(
-            "OpenXR create_session start backend={} buffer_scale={} multisamples={} remove_hands_from_depth={}",
-            backend,
-            options.buffer_scale,
-            options.multisamples,
-            options.remove_hands_from_depth
-        );
         self.session = Some(CxOpenXrSession::create_session(
             self.libxr.as_ref().unwrap(),
             self.system_id.unwrap(),
@@ -569,26 +488,8 @@ impl CxOpenXr {
         )?);
         if let Some(session) = &mut self.session {
             session.get_local_anchor(self.libxr.as_ref().unwrap(), os_type);
-            crate::log!(
-                "OpenXR create_session success handle={:?} size={}x{} active={} has_vulkan={}",
-                session.handle,
-                session.width,
-                session.height,
-                session.active,
-                {
-                    #[cfg(use_vulkan)]
-                    {
-                        session.vulkan.is_some()
-                    }
-                    #[cfg(not(use_vulkan))]
-                    {
-                        false
-                    }
-                }
-            );
         }
         self.logged_waiting_for_session = false;
-        self.debug_render_loop_tick_count = 0;
         // self.get_local_anchor();
         Ok(())
     }
@@ -667,8 +568,6 @@ pub struct CxOpenXrSession {
     pub anchor: CxOpenXrAnchor,
     pub inputs: CxOpenXrInputs,
     debug_inactive_begin_frame_logs: u32,
-    debug_begin_frame_count: u32,
-    debug_end_frame_count: u32,
 
     // leaked from Frame onto state
     pub depth_swap_chain_index: usize,
@@ -910,13 +809,6 @@ impl CxOpenXrSession {
 
     fn begin_session(&mut self, xr: &LibOpenXr, activity_thread: u64, render_thread: u64) {
         assert!(self.active == false);
-        crate::log!(
-            "OpenXR begin_session requested handle={:?} activity_thread={} render_thread={}",
-            self.handle,
-            activity_thread,
-            render_thread
-        );
-
         let session_begin_info = XrSessionBeginInfo {
             ty: XrStructureType::SESSION_BEGIN_INFO,
             next: 0 as *const _,
@@ -930,8 +822,6 @@ impl CxOpenXrSession {
         }
 
         self.active = true;
-        crate::log!("OpenXR begin_session succeeded handle={:?}", self.handle);
-
         unsafe {
             (xr.xrPerfSettingsSetPerformanceLevelEXT)(
                 self.handle,
@@ -1139,19 +1029,6 @@ impl CxOpenXrFrame {
                 Mat4f::from_camera_fov(&projections[eye].fov, screen_near_z, screen_far_z);
         }
 
-        if session.debug_begin_frame_count < 8 {
-            crate::log!(
-                "OpenXR begin_frame[{}] predicted_display_time_secs={:.6} swapchain_index={} depth_image={} near_z={} far_z={}",
-                session.debug_begin_frame_count,
-                frame_state.predicted_display_time.as_secs_f64(),
-                swap_chain_index,
-                depth_image.is_some(),
-                screen_near_z,
-                screen_far_z
-            );
-        }
-        session.debug_begin_frame_count += 1;
-
         Ok(CxOpenXrFrame {
             projections,
             local_from_head,
@@ -1218,22 +1095,12 @@ impl CxOpenXrFrame {
 
         let fei = XrFrameEndInfo {
             display_time: self.frame_state.predicted_display_time,
-            environment_blend_mode: XrEnvironmentBlendMode::ALPHA_BLEND,
+            environment_blend_mode: XrEnvironmentBlendMode::OPAQUE,
             layer_count: layers.len() as _,
             layers: &layers as *const *const _,
             ..Default::default()
         };
 
-        if session.debug_end_frame_count < 8 {
-            crate::log!(
-                "OpenXR end_frame[{}] swapchain_index={} depth_image={} layers={}",
-                session.debug_end_frame_count,
-                self.swap_chain_index,
-                self.depth_image.is_some(),
-                layers.len()
-            );
-        }
-        session.debug_end_frame_count += 1;
         unsafe { (xr.xrEndFrame)(session.handle, &fei) }.log_error("xrEndFrame");
     }
 }

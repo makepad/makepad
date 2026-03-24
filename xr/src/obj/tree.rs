@@ -98,20 +98,6 @@ script_mod! {
         u_tree_bark_light: uniform(vec3(0.42, 0.26, 0.13))
         u_tree_ambient: uniform(float(0.22))
         u_tree_camera_pos: uniform(vec3(0.0, 0.0, 0.0))
-        view_matrix: uniform(mat4x4f(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        ))
-        projection_matrix: uniform(mat4x4f(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        ))
-        clip_ndc: uniform(vec4(-1.0, -1.0, 1.0, 1.0))
-        use_pass_camera: uniform(float(0.0))
 
         v_world_clip: varying(vec4f)
         v_world: varying(vec3f)
@@ -135,37 +121,6 @@ script_mod! {
             );
         }
 
-        view_with_camera: fn(world: vec4f) -> vec4f {
-            if self.use_pass_camera > 0.5 {
-                return self.draw_pass.camera_view * world
-            }
-            return self.view_matrix * world
-        }
-
-        transform_with_camera: fn(view_pos: vec4f) -> vec4f {
-            let clip = if self.use_pass_camera > 0.5 {
-                self.draw_pass.camera_projection * view_pos
-            } else {
-                self.projection_matrix * view_pos
-            };
-            if self.use_pass_camera > 0.5 {
-                return clip
-            }
-            let inv_w = 1.0 / max(abs(clip.w), 0.00001);
-            let ndc = vec2(clip.x * inv_w, clip.y * inv_w);
-            let clip_min = vec2(self.clip_ndc.x, self.clip_ndc.y);
-            let clip_max = vec2(self.clip_ndc.z, self.clip_ndc.w);
-            let clip_scale = (clip_max - clip_min) * 0.5;
-            let clip_center = (clip_max + clip_min) * 0.5;
-            let remapped_ndc = ndc * clip_scale + clip_center;
-            return vec4(
-                remapped_ndc.x * clip.w,
-                remapped_ndc.y * clip.w,
-                clip.z,
-                clip.w
-            )
-        }
-
         vertex: fn() {
             let local_pos = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z);
             let local_normal = normalize(vec3(
@@ -179,8 +134,8 @@ script_mod! {
             self.v_level = self.level;
             self.v_seed = self.seed;
             self.v_world_clip = vec4(self.v_world.x, self.v_world.y, self.v_world.z, 1.0);
-            let view_pos = self.view_with_camera(self.v_world_clip);
-            self.vertex_pos = self.transform_with_camera(view_pos);
+            let view_pos = self.draw_pass.camera_view * self.v_world_clip;
+            self.vertex_pos = self.draw_pass.camera_projection * view_pos;
         }
 
         pixel: fn() {
@@ -222,20 +177,6 @@ script_mod! {
         u_tree_leaf_glow: uniform(vec3(0.72, 0.88, 0.28))
         u_tree_ambient: uniform(float(0.18))
         u_tree_camera_pos: uniform(vec3(0.0, 0.0, 0.0))
-        view_matrix: uniform(mat4x4f(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        ))
-        projection_matrix: uniform(mat4x4f(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        ))
-        clip_ndc: uniform(vec4(-1.0, -1.0, 1.0, 1.0))
-        use_pass_camera: uniform(float(0.0))
 
         v_world_clip: varying(vec4f)
         v_world: varying(vec3f)
@@ -259,37 +200,6 @@ script_mod! {
             );
         }
 
-        view_with_camera: fn(world: vec4f) -> vec4f {
-            if self.use_pass_camera > 0.5 {
-                return self.draw_pass.camera_view * world
-            }
-            return self.view_matrix * world
-        }
-
-        transform_with_camera: fn(view_pos: vec4f) -> vec4f {
-            let clip = if self.use_pass_camera > 0.5 {
-                self.draw_pass.camera_projection * view_pos
-            } else {
-                self.projection_matrix * view_pos
-            };
-            if self.use_pass_camera > 0.5 {
-                return clip
-            }
-            let inv_w = 1.0 / max(abs(clip.w), 0.00001);
-            let ndc = vec2(clip.x * inv_w, clip.y * inv_w);
-            let clip_min = vec2(self.clip_ndc.x, self.clip_ndc.y);
-            let clip_max = vec2(self.clip_ndc.z, self.clip_ndc.w);
-            let clip_scale = (clip_max - clip_min) * 0.5;
-            let clip_center = (clip_max + clip_min) * 0.5;
-            let remapped_ndc = ndc * clip_scale + clip_center;
-            return vec4(
-                remapped_ndc.x * clip.w,
-                remapped_ndc.y * clip.w,
-                clip.z,
-                clip.w
-            )
-        }
-
         vertex: fn() {
             let local_pos = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z);
             let local_normal = normalize(vec3(
@@ -303,8 +213,8 @@ script_mod! {
             self.v_tint = self.tint;
             self.v_flutter = self.flutter;
             self.v_world_clip = vec4(self.v_world.x, self.v_world.y, self.v_world.z, 1.0);
-            let view_pos = self.view_with_camera(self.v_world_clip);
-            self.vertex_pos = self.transform_with_camera(view_pos);
+            let view_pos = self.draw_pass.camera_view * self.v_world_clip;
+            self.vertex_pos = self.draw_pass.camera_projection * view_pos;
         }
 
         pixel: fn() {
@@ -938,21 +848,11 @@ impl Widget for Tree {
         };
         let world = xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
         let pointer_tips = xr_pointer_tips_from_scope(scope);
-        let time = if scene.use_pass_camera {
-            scene.time as f32
-        } else {
-            0.0
-        };
+        let time = scene.time as f32;
         let template_config = self.template_config();
 
         self.cpu_tree.ensure_geometry(cx, template_config);
         self.cpu_tree.rebuild_instances(world, time, pointer_tips);
-        self.draw_branches.set_use_pass_camera(scene.use_pass_camera);
-        self.draw_branches.set_camera_state(scene.view, scene.projection);
-        self.draw_branches.clip_ndc = scene.clip_ndc;
-        self.draw_leaves.set_use_pass_camera(scene.use_pass_camera);
-        self.draw_leaves.set_camera_state(scene.view, scene.projection);
-        self.draw_leaves.clip_ndc = scene.clip_ndc;
         self.cpu_tree.draw(
             cx,
             &mut self.draw_branches,
@@ -971,14 +871,6 @@ impl Widget for Tree {
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawTreeBranches {
-    #[rust(Mat4f::identity())]
-    view_matrix: Mat4f,
-    #[rust(Mat4f::identity())]
-    projection_matrix: Mat4f,
-    #[rust(0.0)]
-    use_pass_camera: f32,
-    #[rust(vec4(-1.0, -1.0, 1.0, 1.0))]
-    clip_ndc: Vec4f,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -1000,15 +892,6 @@ pub struct DrawTreeBranches {
 }
 
 impl DrawTreeBranches {
-    fn set_use_pass_camera(&mut self, use_pass_camera: bool) {
-        self.use_pass_camera = if use_pass_camera { 1.0 } else { 0.0 };
-    }
-
-    fn set_camera_state(&mut self, view: Mat4f, projection: Mat4f) {
-        self.view_matrix = view;
-        self.projection_matrix = projection;
-    }
-
     fn apply_uniforms(&mut self, cx: &mut CxDraw, camera_pos: Vec3f) {
         let light_dir = TREE_BRANCH_LIGHT_DIR.normalize();
         self.draw_vars.set_uniform(
@@ -1046,25 +929,6 @@ impl DrawTreeBranches {
             live_id!(u_tree_camera_pos),
             &[camera_pos.x, camera_pos.y, camera_pos.z],
         );
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(view_matrix), &self.view_matrix.v);
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(projection_matrix),
-            &self.projection_matrix.v,
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(clip_ndc),
-            &[
-                self.clip_ndc.x,
-                self.clip_ndc.y,
-                self.clip_ndc.z,
-                self.clip_ndc.w,
-            ],
-        );
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(use_pass_camera), &[self.use_pass_camera]);
     }
 
     fn draw_instances(
@@ -1102,14 +966,6 @@ impl DrawTreeBranches {
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawTreeLeaves {
-    #[rust(Mat4f::identity())]
-    view_matrix: Mat4f,
-    #[rust(Mat4f::identity())]
-    projection_matrix: Mat4f,
-    #[rust(0.0)]
-    use_pass_camera: f32,
-    #[rust(vec4(-1.0, -1.0, 1.0, 1.0))]
-    clip_ndc: Vec4f,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -1131,15 +987,6 @@ pub struct DrawTreeLeaves {
 }
 
 impl DrawTreeLeaves {
-    fn set_use_pass_camera(&mut self, use_pass_camera: bool) {
-        self.use_pass_camera = if use_pass_camera { 1.0 } else { 0.0 };
-    }
-
-    fn set_camera_state(&mut self, view: Mat4f, projection: Mat4f) {
-        self.view_matrix = view;
-        self.projection_matrix = projection;
-    }
-
     fn apply_uniforms(&mut self, cx: &mut CxDraw, camera_pos: Vec3f) {
         let light_dir = TREE_LEAF_LIGHT_DIR.normalize();
         self.draw_vars.set_uniform(
@@ -1174,25 +1021,6 @@ impl DrawTreeLeaves {
             live_id!(u_tree_camera_pos),
             &[camera_pos.x, camera_pos.y, camera_pos.z],
         );
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(view_matrix), &self.view_matrix.v);
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(projection_matrix),
-            &self.projection_matrix.v,
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(clip_ndc),
-            &[
-                self.clip_ndc.x,
-                self.clip_ndc.y,
-                self.clip_ndc.z,
-                self.clip_ndc.w,
-            ],
-        );
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(use_pass_camera), &[self.use_pass_camera]);
     }
 
     fn draw_instances(

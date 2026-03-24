@@ -1,5 +1,5 @@
 use crate::{
-    makepad_math::{Mat4f, Rect, Vec2f, Vec3f, Vec4f},
+    makepad_math::{Mat4f, Rect, Vec3f},
     makepad_platform::{Area, DrawListId},
 };
 
@@ -9,10 +9,6 @@ pub struct SceneState3D {
     pub camera_pos: Vec3f,
     pub view: Mat4f,
     pub projection: Mat4f,
-    pub clip_ndc: Vec4f,
-    pub depth_range: Vec2f,
-    pub depth_forward_bias: f32,
-    pub use_pass_camera: bool,
     pub viewport_rect: Rect,
 }
 
