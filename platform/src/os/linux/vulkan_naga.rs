@@ -120,11 +120,13 @@ pub(crate) fn compile_draw_shader_wgsl_to_spirv(
     vm: &mut ScriptVm,
     io_self: ScriptObject,
     layout_source: &ShaderOutput,
+    xr_multiview: bool,
 ) -> Result<CxVulkanShaderBinary, String> {
-    let wgsl_source = compile_draw_shader_wgsl_source(vm, io_self, layout_source)?;
+    let wgsl_source = compile_draw_shader_wgsl_source(vm, io_self, layout_source, xr_multiview)?;
 
     if std::env::var_os("MAKEPAD_DUMP_VULKAN_WGSL").is_some() {
-        crate::log!("---- Vulkan WGSL ----\n{}", wgsl_source.wgsl);
+        let variant = if xr_multiview { "xr" } else { "window" };
+        crate::log!("---- Vulkan WGSL ({variant}) ----\n{}", wgsl_source.wgsl);
     }
 
     let (vertex_spirv, fragment_spirv) = compile_wgsl_to_spirv(&wgsl_source.wgsl)
