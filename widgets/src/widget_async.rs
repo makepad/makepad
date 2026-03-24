@@ -565,16 +565,24 @@ fn register_ui_handle(vm: &mut ScriptVm) {
 
     vm.set_handle_getter(ui_type, move |vm, pself, prop| {
         if let Some(handle) = pself.as_handle() {
-            let Some(parent_uid) = vm
+            let Some(target_uid) = vm
                 .downcast_handle_gc::<CxWidgetHandleGc>(handle)
                 .map(|gc| gc.uid)
             else {
                 return script_err_not_found!(vm.trap(), "invalid ui handle");
             };
 
+            if prop == live_id!(root) {
+                let root_uid = vm.with_cx(|cx| cx.widget_tree().root_uid());
+                if root_uid == WidgetUid(0) {
+                    return script_err_not_found!(vm.trap(), "ui root not found");
+                }
+                return vm.build_ui_handle_for_uid(root_uid);
+            }
+
             // Script UI handles intentionally use upward flood search semantics:
             // look in current subtree first, then expand outward through ancestors.
-            let child_ref = vm.with_cx(|cx| cx.widget_tree().find_flood(parent_uid, &[prop]));
+            let child_ref = vm.with_cx(|cx| cx.widget_tree().find_flood(target_uid, &[prop]));
             if child_ref.is_empty() {
                 return script_err_not_found!(vm.trap(), "widget '{:?}' not found in tree", prop);
             }

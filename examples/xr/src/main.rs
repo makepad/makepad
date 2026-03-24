@@ -1,4 +1,4 @@
-pub use makepad_widgets;
+use makepad_widgets;
 
 use makepad_widgets::*;
 use makepad_xr::*;
@@ -38,13 +38,14 @@ script_mod! {
             window.inner_size: vec2(1400, 900)
             pass.clear_color: #x0b1118
             camera.fov_y: 52.0
-            camera.distance: 2.8
+            camera.distance: 1.8
             env.gravity: 9.8
             env.env_cube: true
             env.depth_mesh: false
 
             scene_select := XrSelect{
                 pos: vec3(0.0, -0.02, -0.62)
+                scale: vec3(0.5, 0.5, 0.5)
                 active_child: @block_scene
 
                 test_scene := XrNode{
@@ -119,6 +120,8 @@ script_mod! {
                 }
 
                 block_scene := XrNode{
+                    pos: vec3(0.0, -0.16, 0.0)
+                    scale: vec3(0.62, 0.62, 0.62)
                     on_render: ||{
                         Platform{pos: vec3(0.05, -0.06, -0.10)}
                         for row in 0..8 {
@@ -175,6 +178,7 @@ script_mod! {
                             body: mod.widgets.XrBodyKind.Fixed
                             physics_size: vec3(0.34, 0.92, 0.34)
                             pos: vec3(0.05, -0.02, -0.10)
+                            scale: vec3(0.72, 0.72, 0.72)
                             child_scale: 0.57735026
                             length_scale_0: 0.60
                             length_scale_1: 1.78
@@ -182,7 +186,7 @@ script_mod! {
                             length_scale_3: 0.97
                             length_scale_4: 1.03
                             length_scale_rest: 1.08
-                            branch_split_angle: 0.70
+                            branch_split_angle: 0.58
                             branch_yaw_step: 2.0943952
                             branch_yaw_phase_step: 1.0471976
                         }
@@ -208,35 +212,35 @@ script_mod! {
             }
 
             control_strip := XrView{
-                pos: vec3(0.0, 0.72, -0.88)
-                logical_size: vec2(760, 156)
-                pixel_scale: 0.00078
+                pos: vec3(0.0, 0.46, -0.84)
+                logical_size: vec2(620, 124)
+                pixel_scale: 0.00062
                 dpi_factor: 2.0
                 RoundedView{
                     width: Fill
                     height: Fill
                     flow: Down
-                    padding: 16
-                    spacing: 12
+                    padding: 12
+                    spacing: 10
                     draw_bg.color: #x162331ee
-                    draw_bg.border_radius: 18.0
+                    draw_bg.border_radius: 16.0
 
                     View{
                         width: Fill
                         height: Fit
                         flow: Right
-                        spacing: 12
+                        spacing: 10
                         align: Align{y: 0.5}
 
                         title := Label{
                             text: "XR Scene Picker"
                             draw_text.color: #xeff7ff
-                            draw_text.text_style.font_size: 18.0
+                            draw_text.text_style.font_size: 16.0
                         }
 
                         detail := Label{
                             width: Fill
-                            text: "Desktop XR preview with script-driven scene switching."
+                            text: "Script-driven scene switching."
                             draw_text.color: #xb8c8d8
                         }
                     }
@@ -248,31 +252,31 @@ script_mod! {
                         spacing: 8
 
                         test_scene_button := Button{
-                            width: 106
+                            width: 88
                             text: "XR Test"
                             on_press: || ui.scene_select.test_scene()
                         }
 
                         block_scene_button := Button{
-                            width: 106
+                            width: 88
                             text: "Blocks"
                             on_press: || ui.scene_select.block_scene()
                         }
 
                         helmet_scene_button := Button{
-                            width: 106
+                            width: 88
                             text: "Helmet"
                             on_press: || ui.scene_select.helmet_scene()
                         }
 
                         tree_scene_button := Button{
-                            width: 106
+                            width: 88
                             text: "Tree"
                             on_press: || ui.scene_select.tree_scene()
                         }
 
                         refraction_scene_button := Button{
-                            width: 120
+                            width: 104
                             text: "Refraction"
                             on_press: || ui.scene_select.refraction_scene()
                         }
@@ -286,9 +290,9 @@ script_mod! {
                         align: Align{y: 0.5}
 
                         depth_toggle_button := Button{
-                            width: 170
+                            width: 144
                             text: "Toggle Depth Mesh"
-                            on_press: || ui.depth_toggle()
+                            on_press: || ui.root.set_depth(!ui.root.depth_mesh_visible())
                         }
 
                         scene_status := Label{

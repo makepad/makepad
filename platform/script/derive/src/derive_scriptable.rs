@@ -113,6 +113,15 @@ fn derive_script_impl_inner(
         tb.add("           if <Self as ScriptHook>::on_custom_apply(self, vm, apply, scope, value) || value.is_nil(){return};");
         tb.add("           <Self as ScriptHookDeref>::on_deref_before_apply(self, vm, apply, scope, value);");
 
+        let ui_root_field = fields.iter().find_map(|field| {
+            let ty = field.ty.to_string().replace(' ', "");
+            if field.name == "ui" && (ty == "WidgetRef" || ty.ends_with("::WidgetRef")) {
+                Some(field.name.clone())
+            } else {
+                None
+            }
+        });
+
         // Declare variables for apply_default fields to store their dirty values
 
         for field in &fields {
@@ -162,6 +171,10 @@ fn derive_script_impl_inner(
                     .ident(&field.name)
                     .add(", vm, apply, scope, value);");
             }
+        }
+
+        if let Some(field_name) = &ui_root_field {
+            tb.add("self.").ident(field_name).add(".register_as_ui_root(vm);");
         }
 
         for field in &fields {
