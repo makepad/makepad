@@ -4,10 +4,6 @@ use crate::{
     os::linux::vulkan::{CxVulkan, CxVulkanOpenXrSessionData},
     xr_depth_mesh::xr_depth_mesh_store,
 };
-use std::sync::atomic::{AtomicU32, Ordering};
-
-static OPENXR_VULKAN_EYE_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
-
 pub(super) struct CxOpenXrVulkanSession {
     _color_images: Vec<XrSwapchainImageVulkanKHR>,
     _depth_images: Vec<XrSwapchainImageVulkanKHR>,
@@ -65,33 +61,7 @@ impl Cx {
             }
             pass.pass_uniforms.depth_projection_r = pass.pass_uniforms.depth_projection;
             pass.pass_uniforms.depth_view_r = pass.pass_uniforms.depth_view;
-            let eye_log_index = OPENXR_VULKAN_EYE_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
-            if eye_log_index < 12 {
-                let eye_pose = frame.eyes[eye].local_from_eye.position;
-                crate::log!(
-                    "OpenXR Vulkan eye[{}] log[{}] swapchain_index={} depth_image={} eye_local_pos=({:.3},{:.3},{:.3}) proj=({:.4},{:.4},{:.4},{:.4},{:.4},{:.4}) view_t=({:.3},{:.3},{:.3}) camera_inv_t=({:.3},{:.3},{:.3})",
-                    eye,
-                    eye_log_index,
-                    color_image_index,
-                    depth_image_index.is_some(),
-                    eye_pose.x,
-                    eye_pose.y,
-                    eye_pose.z,
-                    frame.eyes[eye].proj_mat.v[0],
-                    frame.eyes[eye].proj_mat.v[5],
-                    frame.eyes[eye].proj_mat.v[8],
-                    frame.eyes[eye].proj_mat.v[9],
-                    frame.eyes[eye].proj_mat.v[10],
-                    frame.eyes[eye].proj_mat.v[14],
-                    frame.eyes[eye].view_mat.v[12],
-                    frame.eyes[eye].view_mat.v[13],
-                    frame.eyes[eye].view_mat.v[14],
-                    camera_inv.v[12],
-                    camera_inv.v[13],
-                    camera_inv.v[14]
-                );
-            }
-
+            
             let mut vulkan =
                 self.os.vulkan.take().ok_or_else(|| {
                     "OpenXR Vulkan render failed: backend unavailable".to_string()
@@ -184,12 +154,6 @@ impl CxOpenXrSession {
         vulkan: &mut CxVulkan,
         options: CxOpenXrOptions,
     ) -> Result<CxOpenXrSession, String> {
-        crate::log!(
-            "OpenXR Vulkan create_session start queue_family={} buffer_scale={} multisamples={}",
-            vulkan.queue_family_index(),
-            options.buffer_scale,
-            options.multisamples
-        );
         let mut graphics_requirements = XrGraphicsRequirementsVulkanKHR::default();
         unsafe {
             (xr.xrGetVulkanGraphicsRequirements2KHR)(
@@ -257,13 +221,6 @@ impl CxOpenXrSession {
                     )
                 })?;
         let color_format_raw = i64::from(color_format.as_raw());
-        if color_format != preferred_color_format {
-            crate::log!(
-                "OpenXR Vulkan selected runtime color format {:?} (preferred {:?})",
-                color_format,
-                preferred_color_format
-            );
-        }
         if !swapchain_formats.contains(&color_format_raw) {
             return Err(format!(
                 "OpenXR Vulkan swapchain format {:?} not supported by runtime: {:?}",
@@ -346,17 +303,6 @@ impl CxOpenXrSession {
             depth_swapchain_state.width,
             depth_swapchain_state.height,
         )?;
-        crate::log!(
-            "OpenXR Vulkan create_session swapchain size={}x{} color_format={:?} color_images={} depth_images={} depth={}x{}",
-            width,
-            height,
-            color_format,
-            color_images.len(),
-            depth_images.len(),
-            depth_swapchain_state.width,
-            depth_swapchain_state.height
-        );
-
         unsafe { (xr.xrStartEnvironmentDepthProviderMETA)(depth_provider) }
             .to_result("xrStartEnvironmentDepthProviderMETA")?;
         let inputs = CxOpenXrInputs::new_inputs(xr, session, instance)?;
@@ -386,8 +332,6 @@ impl CxOpenXrSession {
             active: false,
             anchor: CxOpenXrAnchor::default(),
             debug_inactive_begin_frame_logs: 0,
-            debug_begin_frame_count: 0,
-            debug_end_frame_count: 0,
             depth_swap_chain_index: 0,
             frame_state: XrFrameState::default(),
             inputs,

@@ -36,7 +36,7 @@ script_mod! {
             let center_world4 = self.model_matrix * vec4(center_local.x, center_local.y, center_local.z, 1.0);
             let center_world = vec3(center_world4.x, center_world4.y, center_world4.z);
             self.v_world_clip = self.draw_list.view_transform * center_world4;
-            let center_view4 = self.view_matrix * center_world4;
+            let center_view4 = self.draw_pass.camera_view * center_world4;
             let center_view = center_view4.xyz;
             if center_view.z >= -0.000001 {
                 self.v_world = center_world;
@@ -49,7 +49,7 @@ script_mod! {
                 return;
             }
 
-            let clip_center = self.projection_matrix * center_view4;
+            let clip_center = self.draw_pass.camera_projection * center_view4;
             let center_inv_w = 1.0 / max(abs(clip_center.w), 0.000001);
             let center_ndc = clip_center.xy * center_inv_w;
 
@@ -91,14 +91,14 @@ script_mod! {
 
             let axis_world_0 = (self.model_matrix * vec4(axis_local_0.x, axis_local_0.y, axis_local_0.z, 0.0)).xyz;
             let axis_world_1 = (self.model_matrix * vec4(axis_local_1.x, axis_local_1.y, axis_local_1.z, 0.0)).xyz;
-            let axis_view_0 = (self.view_matrix * vec4(axis_world_0.x, axis_world_0.y, axis_world_0.z, 0.0)).xyz;
-            let axis_view_1 = (self.view_matrix * vec4(axis_world_1.x, axis_world_1.y, axis_world_1.z, 0.0)).xyz;
+            let axis_view_0 = (self.draw_pass.camera_view * vec4(axis_world_0.x, axis_world_0.y, axis_world_0.z, 0.0)).xyz;
+            let axis_view_1 = (self.draw_pass.camera_view * vec4(axis_world_1.x, axis_world_1.y, axis_world_1.z, 0.0)).xyz;
 
             let max_radius = if self.max_pixel_radius > 0.0 { self.max_pixel_radius } else { 1000000.0 };
             if self.fast_project_mode > 0.5 {
-                let clip_axis_0 = self.projection_matrix
+                let clip_axis_0 = self.draw_pass.camera_projection
                     * (center_view4 + vec4(axis_view_0.x, axis_view_0.y, axis_view_0.z, 0.0));
-                let clip_axis_1 = self.projection_matrix
+                let clip_axis_1 = self.draw_pass.camera_projection
                     * (center_view4 + vec4(axis_view_1.x, axis_view_1.y, axis_view_1.z, 0.0));
 
                 let inv_w0 = 1.0 / max(abs(clip_axis_0.w), 0.000001);
@@ -156,7 +156,7 @@ script_mod! {
                 vec3(0.0, 0.0, axis_2_len)
             };
             let axis_world_2 = (self.model_matrix * vec4(axis_local_2.x, axis_local_2.y, axis_local_2.z, 0.0)).xyz;
-            let axis_view_2 = (self.view_matrix * vec4(axis_world_2.x, axis_world_2.y, axis_world_2.z, 0.0)).xyz;
+            let axis_view_2 = (self.draw_pass.camera_view * vec4(axis_world_2.x, axis_world_2.y, axis_world_2.z, 0.0)).xyz;
 
             let c00 = axis_view_0.x * axis_view_0.x + axis_view_1.x * axis_view_1.x + axis_view_2.x * axis_view_2.x;
             let c01 = axis_view_0.x * axis_view_0.y + axis_view_1.x * axis_view_1.y + axis_view_2.x * axis_view_2.y;
@@ -1179,7 +1179,7 @@ impl Widget for ViewSplat {
         let render_w = scene_state.viewport_rect.size.x.max(1.0) as f32;
         let render_h = scene_state.viewport_rect.size.y.max(1.0) as f32;
         self.draw_splat.render_size = vec2(render_w, render_h);
-        let proj = self.draw_splat.draw_super.projection_matrix;
+        let proj = scene_state.projection;
         self.draw_splat.focal_pixels = vec2(
             proj.v[0].abs().max(0.00001) * render_w * 0.5,
             proj.v[5].abs().max(0.00001) * render_h * 0.5,

@@ -8,9 +8,12 @@ use std::{cell::Cell, cmp::Ordering, collections::HashSet, rc::Rc};
 
 const DESKTOP_TOUCH_DOWN_Z: f32 = 0.0;
 const DESKTOP_TOUCH_UP_Z: f32 = 64.0;
+const XR_CONTENT_FORWARD_OFFSET: f32 = 0.28;
+const XR_CONTENT_VERTICAL_OFFSET: f32 = -0.58;
 
 script_mod! {
     use mod.prelude.widgets.*
+    use mod.math.*
     use mod.widgets.*
 
     mod.widgets.XrCamera = set_type_default() do #(XrCamera::script_component(vm))
@@ -42,8 +45,6 @@ pub struct XrCamera {
     #[live(0.25)] pub distance_min: f32,
     #[live(30.0)] pub distance_max: f32,
     #[live(0.08)] pub wheel_zoom_step: f32,
-    #[live(vec2(0.0, 1.0))] pub depth_range: Vec2f,
-    #[live(0.0)] pub depth_forward_bias: f32,
     #[rust(0.0)] pub orbit_yaw: f32,
     #[rust(0.0)] pub orbit_pitch: f32,
     #[rust] pub orbit_last_abs: Option<DVec2>,
@@ -60,8 +61,6 @@ impl Default for XrCamera {
             distance_min: 0.25,
             distance_max: 30.0,
             wheel_zoom_step: 0.08,
-            depth_range: vec2f(0.0, 1.0),
-            depth_forward_bias: 0.0,
             orbit_yaw: 0.0,
             orbit_pitch: 0.0,
             orbit_last_abs: None,
@@ -101,10 +100,6 @@ impl XrCamera {
             camera_pos,
             view,
             projection,
-            clip_ndc: vec4(-1.0, -1.0, 1.0, 1.0),
-            depth_range: self.depth_range,
-            depth_forward_bias: self.depth_forward_bias,
-            use_pass_camera: true,
             viewport_rect,
         })
     }
@@ -115,10 +110,6 @@ impl XrCamera {
             camera_pos: state.head_pose.position,
             view: Mat4f::identity(),
             projection: Mat4f::identity(),
-            clip_ndc: vec4(-1.0, -1.0, 1.0, 1.0),
-            depth_range: self.depth_range,
-            depth_forward_bias: self.depth_forward_bias,
-            use_pass_camera: true,
             viewport_rect: Rect::default(),
         }
     }
@@ -213,21 +204,16 @@ pub struct XrRoot {
     #[rust] initialized: bool,
     #[rust] started: bool,
     #[rust] last_xr_state: Option<Rc<XrState>>,
+    #[rust] xr_content_pose: Option<Pose>,
     #[rust] next_frame: NextFrame,
     #[rust] desktop_ui_pointer_active: bool,
 }
 
 impl XrRoot {
-    fn permissions_overlay_active(&self) -> bool {
+    fn permissions_ui_visible(&self) -> bool {
         self.permissions_widget
             .borrow::<XrPermissionsFlow>()
-            .is_some_and(|widget| widget.shows_desktop_overlay())
-    }
-
-    fn permissions_overlay_blocks_input(&self) -> bool {
-        self.permissions_widget
-            .borrow::<XrPermissionsFlow>()
-            .is_some_and(|widget| widget.blocks_desktop_input())
+            .is_some_and(|widget| widget.desktop_preflight_visible())
     }
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
@@ -332,6 +318,79 @@ impl XrRoot {
             }
         }
         false
+    }
+
+    fn xr_flat_forward(orientation: Quat) -> Vec3f {
+        let mut forward = orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        forward.y = 0.0;
+        if forward.length() <= 1.0e-6 {
+            vec3f(0.0, 0.0, -1.0)
+        } else {
+            forward.normalize()
+        }
+    }
+
+    fn xr_content_pose_from_state(state: &XrState) -> Pose {
+        let forward = Self::xr_flat_forward(state.head_pose.orientation);
+        Pose {
+            position: state.head_pose.position
+                + forward.scale(XR_CONTENT_FORWARD_OFFSET)
+                + vec3f(0.0, XR_CONTENT_VERTICAL_OFFSET, 0.0),
+            orientation: Quat::look_rotation(forward.scale(-1.0), vec3f(0.0, 1.0, 0.0)),
+        }
+    }
+
+    fn ensure_xr_content_pose(&mut self, cx: &mut Cx, state: &XrState) {
+        if self.xr_content_pose.is_some() {
+            return;
+        }
+        let pose = Self::xr_content_pose_from_state(state);
+        self.xr_content_pose = Some(pose);
+        self.env.set_root_pose(cx, Some(pose));
+    }
+
+    fn clear_xr_content_pose(&mut self, cx: &mut Cx) {
+        if self.xr_content_pose.is_none() {
+            return;
+        }
+        self.xr_content_pose = None;
+        self.env.set_root_pose(cx, None);
+    }
+
+    fn xr_content_transform(&self, state: Option<&XrState>) -> Mat4f {
+        self.xr_content_pose
+            .or_else(|| state.map(Self::xr_content_pose_from_state))
+            .map(|pose| pose.to_mat4())
+            .unwrap_or_else(Mat4f::identity)
+    }
+
+    fn transform_point(transform: &Mat4f, point: Vec3f) -> Vec3f {
+        let point = transform.transform_vec4(vec4f(point.x, point.y, point.z, 1.0));
+        if point.w.abs() > 1.0e-6 {
+            vec3f(point.x / point.w, point.y / point.w, point.z / point.w)
+        } else {
+            point.to_vec3f()
+        }
+    }
+
+    fn dispatch_xr_local_to_views(
+        &mut self,
+        cx: &mut Cx,
+        scope: &mut Scope,
+        update: &XrUpdateEvent,
+    ) {
+        let xr_local = XrLocalEvent::from_update_event(
+            update,
+            &self.xr_content_transform(Some(&update.state)),
+        );
+        let event = Event::XrLocal(xr_local.clone());
+        for i in 0..self.children.len() {
+            let child = self.children[i].1.clone();
+            if child.borrow::<XrView>().is_some() {
+                child.handle_event(cx, &event, scope);
+            }
+        }
+        xr_local.process_end(cx);
     }
 
     fn handle_desktop_xr_pointer(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) -> bool {
@@ -475,33 +534,30 @@ impl XrRoot {
         &mut self,
         cx: &mut Cx3d,
         _scope: &mut Scope,
-        scene_override: Option<SceneState3D>,
+        scene_state: SceneState3D,
     ) {
         self.draw_list.begin_always(cx);
-
-        let scene_state = if let Some(scene_state) = scene_override {
-            scene_state
-        } else if let Some(state) = self.last_xr_state.as_ref() {
-            self.camera.xr_scene_state(state)
-        } else if let Some(ss) = cx.scene_state_3d() {
-            ss
+        let root_transform = if cx.cx.in_xr_mode() {
+            self.xr_content_transform(self.last_xr_state.as_deref())
         } else {
-            SceneState3D::default()
-        };
-
-        // Prepare env draws + get scope data
-        let mut draw_scope = {
-            let cx2d = &mut Cx2d::new(cx.cx);
-            self.env.prepare_and_draw(cx2d)
+            Mat4f::identity()
         };
 
         let root_draw_list_id = self.draw_list.id();
         cx.begin_scene_3d(scene_state);
         cx.clear_scene_draw_call_anchors_3d();
+        let previous_world = cx.set_scene_world_transform_3d(root_transform);
+
+        let mut draw_scope = {
+            let cx2d = &mut Cx2d::new(cx.cx);
+            self.env.prepare_and_draw(cx2d)
+        };
+
         let mut scene_scope = Scope::with_data(&mut draw_scope);
         for i in 0..self.children.len() {
             let child = self.children[i].1.clone();
-            let child_center = Self::child_world_sort_center(&child);
+            let child_center = Self::child_world_sort_center(&child)
+                .map(|center| Self::transform_point(&root_transform, center));
             let child_draw_list = &mut self.child_draw_lists[i];
             child_draw_list.begin_always(cx);
             let root_draw_item_id = cx.draw_lists[root_draw_list_id]
@@ -518,7 +574,11 @@ impl XrRoot {
                 );
             }
         }
+
         self.apply_child_draw_list_depth_sort(cx, root_draw_list_id, &scene_state);
+        if let Some(previous_world) = previous_world {
+            let _ = cx.set_scene_world_transform_3d(previous_world);
+        }
         cx.end_scene_3d();
 
         self.draw_list.end(cx);
@@ -527,26 +587,31 @@ impl XrRoot {
     fn handle_draw_event(&mut self, cx: &mut Cx, e: &DrawEvent, scope: &mut Scope) {
         self.ensure_initialized(cx);
         cx.passes[self.pass.handle.draw_pass_id()].keep_camera_matrix =
-            if cx.in_xr_mode() || !self.permissions_overlay_active() {
+            if cx.in_xr_mode() || !self.permissions_ui_visible() {
                 self.pass.keep_camera_matrix
             } else {
                 false
             };
         self.pass.handle.set_window_clear_color(
             cx,
-            if cx.in_xr_mode() {
+            if cx.in_xr_mode() { 
                 vec4(0.0, 0.0, 0.0, 0.0)
             } else {
                 self.pass.clear_color
             },
         );
         if cx.in_xr_mode() {
-            if e.xr_state.is_none() { return; }
+            if let Some(xr_state) = e.xr_state.as_ref() {
+                self.last_xr_state = Some(xr_state.clone());
+            }
+            let Some(xr_state) = self.last_xr_state.as_ref() else {
+                return;
+            };
             let mut cx_draw = CxDraw::new(cx, e);
             let cx3d = &mut Cx3d::new(&mut cx_draw);
             self.pass.handle.set_as_xr_pass(cx3d);
             cx3d.begin_pass(&self.pass.handle, Some(4.0));
-            self.draw_3d_content(cx3d, scope, None);
+            self.draw_3d_content(cx3d, scope, self.camera.xr_scene_state(xr_state));
             cx3d.end_pass(&self.pass.handle);
         } else {
             let mut cx_draw = CxDraw::new(cx, e);
@@ -654,6 +719,10 @@ impl Widget for XrRoot {
             return;
         }
 
+        if !cx.in_xr_mode() {
+            self.clear_xr_content_pose(cx);
+        }
+
         match event {
             Event::Startup => {
                 if !self.started {
@@ -671,6 +740,7 @@ impl Widget for XrRoot {
                 }
             }
             Event::XrUpdate(update) => {
+                self.ensure_xr_content_pose(cx, &update.state);
                 self.last_xr_state = Some(update.state.clone());
                 if update.clicked_menu() {
                     self.env.reset_physics(cx);
@@ -690,12 +760,12 @@ impl Widget for XrRoot {
 
         self.env.handle_event(cx, event);
 
-        let handled_desktop_ui = if cx.in_xr_mode() {
-            false
-        } else if self.permissions_overlay_blocks_input() {
-            false
-        } else {
+        let desktop_scene_interaction = !cx.in_xr_mode() && !self.permissions_ui_visible();
+        let handled_desktop_xr_pointer = if desktop_scene_interaction {
             self.handle_desktop_xr_pointer(cx, event, scope)
+        } else {
+            self.desktop_ui_pointer_active = false;
+            false
         };
 
         for i in 0..self.children.len() {
@@ -703,10 +773,13 @@ impl Widget for XrRoot {
             child.handle_event(cx, event, scope);
         }
 
-        if !cx.in_xr_mode()
-            && !handled_desktop_ui
-            && !self.permissions_overlay_blocks_input()
-        {
+        if cx.in_xr_mode() {
+            if let Event::XrUpdate(update) = event {
+                self.dispatch_xr_local_to_views(cx, scope, update);
+            }
+        }
+
+        if desktop_scene_interaction && !handled_desktop_xr_pointer {
             self.camera.handle_desktop_interaction(cx, event);
         }
     }
@@ -718,7 +791,7 @@ impl Widget for XrRoot {
         cx.begin_pass(&self.pass.handle, None);
         let size = cx.current_pass_size();
 
-        if self.permissions_overlay_active() {
+        if self.permissions_ui_visible() {
             self.permissions_draw_list.begin_always(cx);
             cx.begin_root_turtle(size, Layout::flow_down());
             self.permissions_widget.draw_walk_all(cx, scope, Walk::fill());
@@ -734,7 +807,7 @@ impl Widget for XrRoot {
         if let Some(scene_state) = self.camera.desktop_scene_state(pass_rect, cx.time()) {
             self.set_pass_camera(cx.cx, &scene_state);
             let cx3d = &mut Cx3d::new(cx.cx);
-            self.draw_3d_content(cx3d, scope, Some(scene_state));
+            self.draw_3d_content(cx3d, scope, scene_state);
         }
 
         cx.end_pass(&self.pass.handle);
