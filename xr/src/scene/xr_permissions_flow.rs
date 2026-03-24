@@ -98,26 +98,8 @@ pub struct XrPermissionsFlow {
 }
 
 impl XrPermissionsFlow {
-    pub(crate) fn shows_desktop_overlay(&self) -> bool {
+    pub(crate) fn desktop_preflight_visible(&self) -> bool {
         Self::is_android_preflight() && !self.hidden_after_start
-    }
-
-    pub(crate) fn blocks_desktop_input(&self) -> bool {
-        self.shows_desktop_overlay()
-    }
-
-    fn log_state(&self, label: &str) {
-        crate::log!(
-            "XrPermissionsFlow {label}: scene_access={:?} headset_camera={:?} pending_checks=({}, {}) pending_requests=({}, {}) hidden_after_start={} xr_start_pending={}",
-            self.scene_access,
-            self.headset_camera,
-            self.pending_scene_access_check.is_some(),
-            self.pending_headset_camera_check.is_some(),
-            self.pending_scene_access_request.is_some(),
-            self.pending_headset_camera_request.is_some(),
-            self.hidden_after_start,
-            self.xr_start_next_frame.is_some()
-        );
     }
 
     fn is_android_preflight() -> bool {
@@ -258,10 +240,6 @@ impl XrPermissionsFlow {
             return;
         }
         self.pending_scene_access_check = Some(cx.check_permission(Permission::SceneAccess));
-        crate::log!(
-            "XrPermissionsFlow begin_scene_access_check request_id={:?}",
-            self.pending_scene_access_check
-        );
         self.schedule_ui_refresh(cx);
     }
 
@@ -270,10 +248,6 @@ impl XrPermissionsFlow {
             return;
         }
         self.pending_headset_camera_check = Some(cx.check_permission(Permission::HeadsetCamera));
-        crate::log!(
-            "XrPermissionsFlow begin_headset_camera_check request_id={:?}",
-            self.pending_headset_camera_check
-        );
         self.schedule_ui_refresh(cx);
     }
 
@@ -285,10 +259,6 @@ impl XrPermissionsFlow {
             return;
         }
         self.pending_scene_access_request = Some(cx.request_permission(Permission::SceneAccess));
-        crate::log!(
-            "XrPermissionsFlow request_scene_access request_id={:?}",
-            self.pending_scene_access_request
-        );
         self.schedule_ui_refresh(cx);
     }
 
@@ -313,10 +283,18 @@ impl XrPermissionsFlow {
     }
 
     fn start_xr(&mut self, cx: &mut Cx) {
-        self.log_state("start_xr");
         self.hidden_after_start = true;
         self.xr_start_next_frame = Some(cx.new_next_frame());
         self.redraw(cx);
+    }
+
+    fn maybe_start_xr(&mut self, cx: &mut Cx) {
+        if self.xr_permissions_ready()
+            && !self.hidden_after_start
+            && self.xr_start_next_frame.is_none()
+        {
+            self.start_xr(cx);
+        }
     }
 }
 
@@ -346,7 +324,6 @@ impl Widget for XrPermissionsFlow {
 
         match event {
             Event::Startup => {
-                self.log_state("startup");
                 self.schedule_ui_refresh(cx);
                 self.begin_permission_checks(cx);
             }
@@ -364,18 +341,10 @@ impl Widget for XrPermissionsFlow {
                     .is_some_and(|next_frame| ne.set.contains(&next_frame))
                 {
                     self.xr_start_next_frame = None;
-                    self.log_state("xr_start_next_frame");
                     cx.xr_start_presenting();
                 }
             }
-            Event::PermissionResult(result) if result.permission == Permission::SceneAccess => {
-                crate::log!(
-                    "XrPermissionsFlow scene_access result request_id={} status={:?} pending_check={:?} pending_request={:?}",
-                    result.request_id,
-                    result.status,
-                    self.pending_scene_access_check,
-                    self.pending_scene_access_request
-                );
+            Event::PermissionResult(result) if result.permission == Permission::SceneAccess => { 
                 if self.pending_scene_access_check == Some(result.request_id) {
                     self.pending_scene_access_check = None;
                 } else if self.pending_scene_access_request == Some(result.request_id) {
@@ -384,17 +353,10 @@ impl Widget for XrPermissionsFlow {
                     return;
                 }
                 self.scene_access = Some(result.status);
+                self.maybe_start_xr(cx);
                 self.schedule_ui_refresh(cx);
-                self.log_state("scene_access_result_applied");
             }
             Event::PermissionResult(result) if result.permission == Permission::HeadsetCamera => {
-                crate::log!(
-                    "XrPermissionsFlow headset_camera result request_id={} status={:?} pending_check={:?} pending_request={:?}",
-                    result.request_id,
-                    result.status,
-                    self.pending_headset_camera_check,
-                    self.pending_headset_camera_request
-                );
                 if self.pending_headset_camera_check == Some(result.request_id) {
                     self.pending_headset_camera_check = None;
                 } else if self.pending_headset_camera_request == Some(result.request_id) {
@@ -403,8 +365,8 @@ impl Widget for XrPermissionsFlow {
                     return;
                 }
                 self.headset_camera = Some(result.status);
+                self.maybe_start_xr(cx);
                 self.schedule_ui_refresh(cx);
-                self.log_state("headset_camera_result_applied");
             }
             Event::Resume if !self.permission_requests_pending() => {
                 self.begin_permission_checks(cx);
@@ -414,7 +376,7 @@ impl Widget for XrPermissionsFlow {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if !Self::is_android_preflight() || self.hidden_after_start {
+        if !self.desktop_preflight_visible() {
             return DrawStep::done();
         }
         self.view.draw_walk(cx, scope, walk)

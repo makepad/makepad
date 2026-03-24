@@ -227,6 +227,8 @@ pub struct XrEnv {
     scene: Option<RapierScene>,
     #[rust]
     runtime_bodies: Rc<HashMap<WidgetUid, XrRuntimeBodyState>>,
+    #[rust]
+    root_pose: Option<Pose>,
     #[rust(true)]
     scene_dirty: bool,
     #[allow(dead_code)]
@@ -261,7 +263,6 @@ impl XrEnv {
         color: Vec4f,
         depth_clip: f32,
     ) {
-        self.draw_cube.set_use_pass_camera(true);
         self.draw_cube.transform = pose.to_mat4();
         self.draw_cube.cube_pos = vec3(0.0, 0.0, 0.0);
         self.draw_cube.cube_size = size;
@@ -276,7 +277,6 @@ impl XrEnv {
 
     fn prepare_draw_pbr_common(draw_pbr: &mut DrawPbr, cx: &mut Cx2d) {
         draw_pbr.begin();
-        draw_pbr.set_use_pass_camera(true);
         draw_pbr.set_depth_clip(1.0);
         draw_pbr.set_base_color_texture(None);
         draw_pbr.set_metal_roughness_texture(None);
@@ -563,8 +563,11 @@ impl XrEnv {
 
     fn collect_cubes_from_children(&self, children: &[(LiveId, WidgetRef)]) -> Vec<CollectedXrCube> {
         let mut cubes = Vec::new();
-        let root_pos = vec3f(0.0, 0.0, 0.0);
-        let root_ori = Quat::default();
+        let (root_pos, root_ori) = if let Some(root_pose) = self.root_pose {
+            (root_pose.position, root_pose.orientation)
+        } else {
+            (vec3f(0.0, 0.0, 0.0), Quat::default())
+        };
         let root_scale = vec3f(1.0, 1.0, 1.0);
         for (_, child) in children {
             Self::collect_cubes_from_widget(child, root_pos, root_ori, root_scale, &mut cubes);
@@ -619,6 +622,15 @@ impl XrEnv {
 
     pub fn mark_scene_dirty(&mut self) {
         self.scene_dirty = true;
+    }
+
+    pub fn set_root_pose(&mut self, cx: &mut Cx, pose: Option<Pose>) {
+        if self.root_pose == pose {
+            return;
+        }
+        self.root_pose = pose;
+        self.scene_dirty = true;
+        cx.redraw_all();
     }
 
     #[allow(dead_code)]
