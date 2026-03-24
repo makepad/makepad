@@ -13,15 +13,15 @@ use std::f32::consts::PI;
 pub const PYTHAGOREAN_TREE_ROOT_DROP: f32 = 0.60;
 
 const TREE_BRANCH_SIDES: usize = 4;
-const TREE_MAX_DEPTH: usize = 9;
+const TREE_MAX_DEPTH: usize = 7;
 const TREE_BASE_LENGTH: f32 = 0.46;
 const TREE_BASE_RADIUS: f32 = 0.026;
 const TREE_CHILD_SCALE: f32 = 0.57735026;
 const TREE_RADIUS_SCALE: f32 = 0.74;
-const TREE_BRANCH_SPLIT_ANGLE: f32 = 0.70;
+const TREE_BRANCH_SPLIT_ANGLE: f32 = 0.58;
 const TREE_BRANCH_YAW_STEP: f32 = PI * 2.0 / 3.0;
 const TREE_BRANCH_YAW_PHASE_STEP: f32 = PI / 3.0;
-const TREE_POINTER_RADIUS: f32 = 0.40;
+const TREE_POINTER_RADIUS: f32 = 0.18;
 const TREE_BRANCH_PARENT_DRAG: f32 = 0.42;
 const TREE_BRANCH_HAND_GAIN: f32 = 0.19;
 const TREE_LEAF_HAND_GAIN: f32 = 0.34;
@@ -74,7 +74,7 @@ const TREE_LEAF_GLOW: Vec3f = Vec3f {
     y: 0.88,
     z: 0.28,
 };
-const TREE_LEAF_WIND_ORBIT: f32 = 0.015;
+const TREE_LEAF_WIND_ORBIT: f32 = 0.007;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -695,7 +695,7 @@ impl CpuPythagoreanTree {
     }
 
     fn branch_wind_force(seed: f32, level_t: f32, time: f32) -> Vec3f {
-        let sway = 0.012 + level_t * 0.040;
+        let sway = 0.006 + level_t * 0.018;
         vec3f(
             (time * 0.77 + seed * 6.7).sin() * 0.75 + (time * 1.33 + seed * 2.3).cos() * 0.25,
             0.0,
@@ -704,10 +704,10 @@ impl CpuPythagoreanTree {
     }
 
     fn leaf_wind_force(seed: f32, level_t: f32, time: f32) -> Vec3f {
-        let sway = 0.045 + level_t * 0.075;
+        let sway = 0.018 + level_t * 0.030;
         vec3f(
             (time * 1.87 + seed * 9.4).sin() * 0.6 + (time * 2.41 + seed * 3.7).cos() * 0.4,
-            0.06 + (time * 2.93 + seed * 7.2).sin() * 0.12,
+            0.02 + (time * 2.93 + seed * 7.2).sin() * 0.05,
             (time * 2.13 + seed * 5.1).cos() * 0.7 + (time * 1.61 + seed * 1.9).sin() * 0.3,
         ) * sway
     }

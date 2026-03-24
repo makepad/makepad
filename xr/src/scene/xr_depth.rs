@@ -288,7 +288,7 @@ impl XrEnv {
     }
 
     pub(super) fn sync_depth_query_surfaces(
-        &mut self,
+        retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
         scene: Option<&mut RapierScene>,
         cx: &mut Cx,
     ) {
@@ -303,7 +303,6 @@ impl XrEnv {
         let mut query_requests = Vec::new();
         let mut query_results = Vec::new();
         let mut expired_retained_keys = Vec::new();
-        let retained_hits = &mut self.depth_query_retained_hits;
 
         for (index, cube) in scene.cubes.iter().enumerate() {
             let key = RapierScene::depth_query_key(index);

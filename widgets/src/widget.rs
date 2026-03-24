@@ -780,6 +780,13 @@ impl WidgetRef {
         let _ = self.try_children(visit);
     }
 
+    pub fn register_as_ui_root(&self, vm: &mut ScriptVm) {
+        if self.is_empty() {
+            return;
+        }
+        vm.with_cx_mut(|cx| set_ui_root(cx, self));
+    }
+
     pub fn try_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         let Ok(inner) = self.0.try_borrow() else {
             return false;

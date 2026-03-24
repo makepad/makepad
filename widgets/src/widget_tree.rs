@@ -1748,6 +1748,7 @@ impl WidgetTree {
     }
 
     pub fn root_uid(&self) -> WidgetUid {
+        self.sync_dirty();
         self.inner.borrow().root_uid
     }
 

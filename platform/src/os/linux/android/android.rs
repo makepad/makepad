@@ -368,8 +368,12 @@ impl Cx {
                             }
                         }
                     }
-                    if let Some(vulkan) = self.os.vulkan.as_mut() {
-                        vulkan.suspend_surface();
+                    let keep_xr_backend_alive =
+                        self.os.in_xr_mode && self.os.openxr.session.is_some();
+                    if !keep_xr_backend_alive {
+                        if let Some(vulkan) = self.os.vulkan.as_mut() {
+                            vulkan.suspend_surface();
+                        }
                     }
                     if self.os.in_xr_mode
                         && self.os.openxr.session.is_none()
@@ -1736,15 +1740,6 @@ impl Cx {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
-        if self.os.debug_repaint_count < 8 {
-            let window_passes = passes_todo
-                .iter()
-                .filter(|draw_pass_id| {
-                    matches!(self.passes[**draw_pass_id].parent, CxDrawPassParent::Window(_))
-                })
-                .count();
-            self.os.debug_repaint_count += 1;
-        }
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
@@ -2617,8 +2612,6 @@ impl Default for CxOs {
             xr_pending_surface_width: 0,
             xr_pending_surface_height: 0,
             xr_retry_surface_after_destroy: false,
-            debug_window_draw_count: 0,
-            debug_repaint_count: 0,
         }
     }
 }
@@ -2671,8 +2664,6 @@ pub struct CxOs {
     pub(crate) xr_pending_surface_width: i32,
     pub(crate) xr_pending_surface_height: i32,
     pub(crate) xr_retry_surface_after_destroy: bool,
-    pub(crate) debug_window_draw_count: u32,
-    pub(crate) debug_repaint_count: u32,
 }
 
 impl CxOs {
