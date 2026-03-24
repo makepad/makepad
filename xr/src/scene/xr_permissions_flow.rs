@@ -11,8 +11,8 @@ script_mod! {
         height: Fill
         flow: Down
         align: Align{x: 0.5 y: 0.5}
-        padding: Inset{left: 36 right: 36 top: 36 bottom: 36}
-        spacing: 14
+        padding: Inset{left: 40 right: 40 top: 40 bottom: 40}
+        spacing: 18
         show_bg: true
         draw_bg +: {
             color_top: uniform(#x0b1422)
@@ -27,40 +27,39 @@ script_mod! {
         }
 
         panel := RoundedView{
-            width: 560
+            width: 620
             height: Fit
             flow: Down
-            spacing: 10
-            padding: Inset{left: 22 right: 22 top: 20 bottom: 20}
+            spacing: 14
+            padding: Inset{left: 24 right: 24 top: 22 bottom: 22}
+            show_bg: true
             draw_bg.color: #x09131cdd
-            draw_bg.radius: 16.0
+            draw_bg.border_radius: 18.0
 
             title := H1{
-                text: "XR Preflight"
+                text: "Mixed Reality Permissions"
                 draw_text.color: #xeff7ff
             }
 
             detail_label := Label{
                 width: Fill
-                text: "Allow Quest scene access before starting XR. This unlocks environment depth and passthrough occlusion."
+                text: "Grant the two Quest permissions below, then use the third button to enter mixed reality."
                 draw_text.color: #xb8c8d8
             }
 
-            View{
+            scene_access_button := Button{
                 width: Fill
-                height: Fit
-                flow: Right
-                spacing: 10
+                text: "Allow Scene Access"
+            }
 
-                scene_access_button := Button{
-                    width: Fill
-                    text: "Allow Scene Access"
-                }
+            headset_camera_button := Button{
+                width: Fill
+                text: "Allow Headset Camera"
+            }
 
-                headset_camera_button := Button{
-                    width: Fill
-                    text: "Allow Headset Camera"
-                }
+            enter_mr_button := Button{
+                width: Fill
+                text: "Enter Mixed Reality"
             }
 
             status_label := Label{
@@ -99,6 +98,14 @@ pub struct XrPermissionsFlow {
 }
 
 impl XrPermissionsFlow {
+    pub(crate) fn shows_desktop_overlay(&self) -> bool {
+        Self::is_android_preflight() && !self.hidden_after_start
+    }
+
+    pub(crate) fn blocks_desktop_input(&self) -> bool {
+        self.shows_desktop_overlay()
+    }
+
     fn log_state(&self, label: &str) {
         crate::log!(
             "XrPermissionsFlow {label}: scene_access={:?} headset_camera={:?} pending_checks=({}, {}) pending_requests=({}, {}) hidden_after_start={} xr_start_pending={}",
@@ -163,29 +170,34 @@ impl XrPermissionsFlow {
         }
     }
 
+    fn enter_mr_button_text(&self) -> &'static str {
+        if self.hidden_after_start || self.xr_start_next_frame.is_some() {
+            "Starting Mixed Reality..."
+        } else if self.permission_checks_pending() || self.permission_requests_pending() {
+            "Waiting For Permissions..."
+        } else if self.xr_permissions_ready() {
+            "Enter Mixed Reality"
+        } else {
+            "Grant Permissions First"
+        }
+    }
+
     fn schedule_ui_refresh(&mut self, cx: &mut Cx) {
         self.ui_refresh_next_frame = Some(cx.new_next_frame());
         self.redraw(cx);
     }
 
-    fn schedule_xr_start_if_ready(&mut self, cx: &mut Cx) {
-        if self.xr_permissions_ready() && !self.hidden_after_start && self.xr_start_next_frame.is_none()
-        {
-            self.start_xr(cx);
-        }
-    }
-
     fn detail_text(&self) -> &'static str {
         if self.hidden_after_start || self.xr_start_next_frame.is_some() {
-            "Quest scene access and headset camera are granted. Starting XR."
+            "Quest scene access and headset camera are granted. Starting mixed reality."
         } else if self.xr_permissions_ready() {
-            "Quest scene access and headset camera are granted. XR will start automatically."
+            "Both Quest permissions are granted. Press Enter Mixed Reality when you are ready."
         } else if !self.scene_access_granted() {
-            "Allow Quest scene access before starting XR. This unlocks environment depth and passthrough occlusion."
+            "Allow Scene Access first. This unlocks environment depth and passthrough occlusion."
         } else if !self.headset_camera_granted() {
-            "Allow Quest headset camera access before starting XR. This unlocks the passthrough texture overlay."
+            "Allow Headset Camera next. This unlocks the passthrough texture overlay."
         } else {
-            "Allow Quest permissions before starting XR."
+            "Grant the required Quest permissions before entering mixed reality."
         }
     }
 
@@ -193,11 +205,11 @@ impl XrPermissionsFlow {
         if self.permission_checks_pending() {
             "Checking current Quest permission status."
         } else if self.hidden_after_start || self.xr_start_next_frame.is_some() {
-            "Quest permissions granted. Entering XR."
+            "Quest permissions granted. Entering mixed reality."
         } else if self.permission_requests_pending() {
             "Approve the Quest permission dialog to continue."
         } else if self.xr_permissions_ready() {
-            "Quest scene access and headset camera granted."
+            "Quest scene access and headset camera granted. Ready to enter mixed reality."
         } else if !self.scene_access_granted() {
             "Quest scene access has not been granted yet."
         } else if !self.headset_camera_granted() {
@@ -229,6 +241,16 @@ impl XrPermissionsFlow {
         );
         self.widget(cx, ids!(headset_camera_button))
             .set_text(cx, self.headset_camera_button_text());
+
+        let enter_mr_button = self.button(cx, ids!(enter_mr_button));
+        enter_mr_button.set_enabled(
+            cx,
+            self.xr_permissions_ready()
+                && !self.hidden_after_start
+                && self.xr_start_next_frame.is_none(),
+        );
+        self.widget(cx, ids!(enter_mr_button))
+            .set_text(cx, self.enter_mr_button_text());
     }
 
     fn begin_scene_access_check(&mut self, cx: &mut Cx) {
@@ -313,6 +335,13 @@ impl Widget for XrPermissionsFlow {
             if self.button(cx, ids!(headset_camera_button)).clicked(actions) {
                 self.request_headset_camera(cx);
             }
+            if self.button(cx, ids!(enter_mr_button)).clicked(actions)
+                && self.xr_permissions_ready()
+                && !self.hidden_after_start
+                && self.xr_start_next_frame.is_none()
+            {
+                self.start_xr(cx);
+            }
         }
 
         match event {
@@ -355,7 +384,6 @@ impl Widget for XrPermissionsFlow {
                     return;
                 }
                 self.scene_access = Some(result.status);
-                self.schedule_xr_start_if_ready(cx);
                 self.schedule_ui_refresh(cx);
                 self.log_state("scene_access_result_applied");
             }
@@ -375,7 +403,6 @@ impl Widget for XrPermissionsFlow {
                     return;
                 }
                 self.headset_camera = Some(result.status);
-                self.schedule_xr_start_if_ready(cx);
                 self.schedule_ui_refresh(cx);
                 self.log_state("headset_camera_result_applied");
             }

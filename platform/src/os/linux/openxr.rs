@@ -1218,7 +1218,7 @@ impl CxOpenXrFrame {
 
         let fei = XrFrameEndInfo {
             display_time: self.frame_state.predicted_display_time,
-            environment_blend_mode: XrEnvironmentBlendMode::OPAQUE,
+            environment_blend_mode: XrEnvironmentBlendMode::ALPHA_BLEND,
             layer_count: layers.len() as _,
             layers: &layers as *const *const _,
             ..Default::default()
