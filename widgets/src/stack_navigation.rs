@@ -292,9 +292,16 @@ impl StackNavigationViewRef {
     pub fn show(&self, cx: &mut Cx, root_width: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.view.visible = true;
-            inner.offset = root_width;
             inner.offset_to_hide = root_width;
-            inner.animator_play(cx, ids!(slide.show));
+            inner.state = StackNavigationViewState::Inactive;
+
+            // Force-reset the animator by cutting to show (offset=0) first,
+            // then cutting to hide, then playing show. This ensures the animator
+            // always sees a state change regardless of its current state.
+            inner.animator_cut(cx, ids!(slide.show));  // force to show state
+            inner.animator_cut(cx, ids!(slide.hide));  // then to hide state
+            inner.offset = root_width;                 // set actual start offset
+            inner.animator_play(cx, ids!(slide.show)); // now animate hide -> show
             inner.redraw(cx);
         }
     }
@@ -377,6 +384,7 @@ impl NavigationStack {
         self.stack.clear();
     }
 
+    #[allow(dead_code)]
     fn remove_all(&mut self, view_id: LiveId) {
         self.stack.retain(|entry| entry.view_id != view_id);
     }
@@ -517,7 +525,6 @@ impl WidgetMatchEvent for StackNavigation {
 
 impl StackNavigation {
     fn push_view(&mut self, view_id: LiveId, cx: &mut Cx) {
-        self.navigation_stack.remove_all(view_id);
         self.navigation_stack.push(view_id);
 
         let stack_view_ref = self.stack_navigation_view(cx, &[view_id]);
@@ -540,6 +547,11 @@ impl StackNavigation {
         self.redraw(cx);
     }
 
+    /// Ensures the given view is visible and at offset 0 with Active state.
+    /// This is needed when a view that was reused at a deeper stack depth
+    /// (and subsequently hidden when that depth was popped) becomes the
+    /// current view again after further pops.
+    /// Ensures the given view is visible and at offset 0 with Active state.
     fn pop_to_root(&mut self, cx: &mut Cx) {
         if let Some(current_entry) = self.navigation_stack.current() {
             let stack_view_ref = self.stack_navigation_view(cx, &[current_entry.view_id]);
