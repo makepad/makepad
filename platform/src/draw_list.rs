@@ -848,6 +848,7 @@ impl CxDrawList {
     pub fn clear_draw_items(&mut self, redraw_id: u64) {
         self.redraw_id = redraw_id;
         self.draw_items.clear();
+        self.draw_item_reorder = None;
         self.rect_areas.clear();
         self.find_appendable_draw_shader_check.clear();
     }

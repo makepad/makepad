@@ -94,21 +94,6 @@ script_mod! {
         emissive_texture: texture_2d(float)
         env_texture: texture_cube(float)
         env_atlas_texture: texture_2d(float)
-        view_matrix: uniform(mat4x4f(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        ))
-        projection_matrix: uniform(mat4x4f(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0
-        ))
-        clip_ndc: uniform(vec4(-1.0, -1.0, 1.0, 1.0))
-        depth_range: uniform(vec2(0.0, 1.0))
-        depth_forward_bias: uniform(float(0.0))
         u_base_color_factor: uniform(vec4(1.0, 1.0, 1.0, 1.0))
         u_metallic_factor: uniform(float(1.0))
         u_roughness_factor: uniform(float(1.0))
@@ -134,8 +119,6 @@ script_mod! {
         u_ambient: uniform(float(0.15))
         u_spec_strength: uniform(float(0.9))
         u_env_intensity: uniform(float(1.8))
-        u_camera_pos: uniform(vec3(0.0, 0.0, 5.0))
-        use_pass_camera: uniform(float(0.0))
 
         v_world_clip: varying(vec4f)
         v_world: varying(vec3f)
@@ -149,42 +132,13 @@ script_mod! {
             return vec3(0.0, 0.0, 0.0)
         }
 
-        view_with_camera: fn(world: vec4) {
-            if self.use_pass_camera > 0.5 {
-                return self.draw_pass.camera_view * world
-            }
-            return self.view_matrix * world
-        }
-
-        transform_with_camera: fn(view_pos: vec4) {
-            let clip = if self.use_pass_camera > 0.5 {
-                self.draw_pass.camera_projection * view_pos
-            } else {
-                self.projection_matrix * view_pos
-            };
-            if self.use_pass_camera > 0.5 {
-                return clip
-            }
-            let inv_w = 1.0 / max(abs(clip.w), 0.00001);
-            let ndc = vec2(clip.x * inv_w, clip.y * inv_w);
-            let clip_min = vec2(self.clip_ndc.x, self.clip_ndc.y);
-            let clip_max = vec2(self.clip_ndc.z, self.clip_ndc.w);
-            let clip_scale = (clip_max - clip_min) * 0.5;
-            let clip_center = (clip_max + clip_min) * 0.5;
-            let remapped_ndc = ndc * clip_scale + clip_center;
-            return vec4(remapped_ndc.x * clip.w, remapped_ndc.y * clip.w, clip.z, clip.w)
-        }
-
         active_camera_world_pos: fn() -> vec3f {
-            if self.use_pass_camera > 0.5 {
-                let camera_world = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0);
-                return vec3(
-                    camera_world.x / max(camera_world.w, 0.00001),
-                    camera_world.y / max(camera_world.w, 0.00001),
-                    camera_world.z / max(camera_world.w, 0.00001)
-                )
-            }
-            return self.u_camera_pos
+            let camera_world = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0);
+            return vec3(
+                camera_world.x / max(camera_world.w, 0.00001),
+                camera_world.y / max(camera_world.w, 0.00001),
+                camera_world.z / max(camera_world.w, 0.00001)
+            )
         }
 
         world_with_model_matrix: fn(local_pos: vec4) {
@@ -242,9 +196,9 @@ script_mod! {
 
             let world = vec4(model_pos.x, model_pos.y, model_pos.z, 1.0);
             self.v_world_clip = world;
-            let view_pos = self.view_with_camera(world);
+            let view_pos = self.draw_pass.camera_view * world;
             self.v_view_pos = vec3(view_pos.x, view_pos.y, view_pos.z);
-            self.vertex_pos = self.transform_with_camera(view_pos);
+            self.vertex_pos = self.draw_pass.camera_projection * view_pos;
         }
 
         pow5: fn(x: float) {
@@ -884,17 +838,6 @@ pub struct DrawPbr {
     pub transform_stack: Vec<Mat4f>,
     #[rust(vec4(1.0, 1.0, 1.0, 1.0))]
     pub cur_color: Vec4f,
-    #[rust(Mat4f::identity())]
-    pub view_matrix: Mat4f,
-    #[rust(Mat4f::identity())]
-    pub projection_matrix: Mat4f,
-    #[rust(vec4(-1.0, -1.0, 1.0, 1.0))]
-    pub clip_ndc: Vec4f,
-    #[rust(vec2(0.0, 1.0))]
-    pub depth_range: Vec2f,
-    /// Positive values move the 3D content forward in depth (towards 0.0).
-    #[rust(0.0)]
-    pub depth_forward_bias: f32,
     #[rust(vec4(1.0, 1.0, 1.0, 1.0))]
     pub base_color_factor: Vec4f,
     #[rust(1.0)]
@@ -933,10 +876,6 @@ pub struct DrawPbr {
     pub spec_strength: f32,
     #[rust(1.8)]
     pub env_intensity: f32,
-    #[rust(vec3(0.0, 0.0, 5.0))]
-    pub camera_pos: Vec3f,
-    #[rust(0.0)]
-    pub use_pass_camera: f32,
     #[rust(0.0)]
     pub pad1: f32,
     #[deref]
@@ -1178,11 +1117,6 @@ impl DrawPbr {
         self.fill(vec4(r, g, b, a));
     }
 
-    pub fn set_view_projection(&mut self, view: Mat4f, projection: Mat4f) {
-        self.view_matrix = view;
-        self.projection_matrix = projection;
-    }
-
     pub fn set_color(&mut self, color: Vec4f) {
         self.cur_color = color;
     }
@@ -1251,37 +1185,12 @@ impl DrawPbr {
         self.draw_vars.texture_slots[6] = texture;
     }
 
-    pub fn set_clip_ndc(&mut self, clip_ndc: Vec4f) {
-        self.clip_ndc = clip_ndc;
-    }
-
-    pub fn set_depth_range(&mut self, min_depth: f32, max_depth: f32) {
-        self.depth_range = vec2(
-            min_depth.min(max_depth).clamp(0.0, 1.0),
-            max_depth.max(min_depth).clamp(0.0, 1.0),
-        );
-    }
-
-    pub fn set_depth_forward_bias(&mut self, bias: f32) {
-        self.depth_forward_bias = bias.clamp(0.0, 1.0);
-    }
-
     pub fn set_depth_write(&mut self, depth_write: bool) {
         self.draw_vars.options.depth_write = depth_write;
     }
 
     pub fn set_depth_clip(&mut self, depth_clip: f32) {
         self.depth_clip = depth_clip;
-    }
-
-    pub fn set_use_pass_camera(&mut self, use_pass_camera: bool) {
-        self.use_pass_camera = if use_pass_camera { 1.0 } else { 0.0 };
-    }
-
-    pub fn set_camera_state(&mut self, view: Mat4f, projection: Mat4f, camera_pos: Vec3f) {
-        self.view_matrix = view;
-        self.projection_matrix = projection;
-        self.camera_pos = camera_pos;
     }
 
     pub fn apply_material_state(&mut self, material: &DrawPbrMaterialState) {
@@ -1300,33 +1209,6 @@ impl DrawPbr {
     }
 
     fn apply_draw_uniforms(&mut self, cx: &mut CxDraw) {
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(view_matrix), &self.view_matrix.v);
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(projection_matrix),
-            &self.projection_matrix.v,
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(clip_ndc),
-            &[
-                self.clip_ndc.x,
-                self.clip_ndc.y,
-                self.clip_ndc.z,
-                self.clip_ndc.w,
-            ],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(depth_range),
-            &[self.depth_range.x, self.depth_range.y],
-        );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(depth_forward_bias),
-            &[self.depth_forward_bias],
-        );
         self.draw_vars.set_uniform(
             cx.cx,
             live_id!(u_base_color_factor),
@@ -1443,13 +1325,6 @@ impl DrawPbr {
             .set_uniform(cx.cx, live_id!(u_spec_strength), &[self.spec_strength]);
         self.draw_vars
             .set_uniform(cx.cx, live_id!(u_env_intensity), &[self.env_intensity]);
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(u_camera_pos),
-            &[self.camera_pos.x, self.camera_pos.y, self.camera_pos.z],
-        );
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(use_pass_camera), &[self.use_pass_camera]);
     }
 
     pub fn add_decoded_primitive(&mut self, primitive: &DecodedPrimitive) -> Result<(), String> {

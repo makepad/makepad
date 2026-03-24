@@ -22,7 +22,6 @@ use ash::vk::{self, Handle};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 #[link(name = "nativewindow")]
 extern "C" {
@@ -66,10 +65,6 @@ fn vulkan_debug_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT<
         )
         .pfn_user_callback(Some(vulkan_debug_callback))
 }
-
-static VULKAN_DEBUG_WINDOW_PASS_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
-static VULKAN_DEBUG_OFFSCREEN_PASS_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
-static VULKAN_DEBUG_OPENXR_PASS_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy)]
 struct VulkanBuffer {
@@ -130,7 +125,6 @@ struct VulkanPipelineKey {
     shader_index: usize,
     render_pass: VulkanRenderPassKey,
     backface_culling: bool,
-    depth_test: bool,
 }
 
 struct VulkanDrawPacket {
@@ -227,49 +221,6 @@ struct VulkanDrawStats {
     skipped_zero_instances: usize,
     skipped_no_geometry_id: usize,
     skipped_empty_geometry: usize,
-    packet_summaries: Vec<String>,
-}
-
-fn maybe_log_vulkan_draw_stats(
-    counter: &AtomicU32,
-    kind: &str,
-    cx: &Cx,
-    draw_pass_id: DrawPassId,
-    target_width: u32,
-    target_height: u32,
-    clear_depth: f32,
-    depth_format: vk::Format,
-    draw_stats: &VulkanDrawStats,
-    zbias_end: f32,
-) {
-    let attempt = counter.fetch_add(1, Ordering::Relaxed);
-    if attempt >= 12 {
-        return;
-    }
-    crate::log!(
-        "Vulkan {kind} pass[{}] name='{}' target={}x{} clear_depth={:.3} depth_format={:?} draw_items={} draw_calls={} packets={} skipped_non_draw_call={} skipped_no_os_shader={} skipped_no_vulkan_shader={} skipped_missing_spirv={} skipped_no_instance_slots={} skipped_no_instances_buffer={} skipped_instances_too_short={} skipped_zero_instances={} skipped_no_geometry_id={} skipped_empty_geometry={} zbias_end={:.6} packets_detail=[{}]",
-        attempt,
-        cx.get_pass_name(draw_pass_id),
-        target_width,
-        target_height,
-        clear_depth,
-        depth_format,
-        draw_stats.draw_items,
-        draw_stats.draw_calls,
-        draw_stats.packets_recorded,
-        draw_stats.skipped_non_draw_call,
-        draw_stats.skipped_no_os_shader,
-        draw_stats.skipped_no_vulkan_shader,
-        draw_stats.skipped_missing_spirv,
-        draw_stats.skipped_no_instance_slots,
-        draw_stats.skipped_no_instances_buffer,
-        draw_stats.skipped_instances_too_short,
-        draw_stats.skipped_zero_instances,
-        draw_stats.skipped_no_geometry_id,
-        draw_stats.skipped_empty_geometry,
-        zbias_end,
-        draw_stats.packet_summaries.join(" | ")
-    );
 }
 
 pub struct CxVulkan {
@@ -1812,28 +1763,11 @@ impl CxVulkan {
             draw_pass_id,
             draw_list_id,
             &render_pass_key,
-            true,
             &mut zbias,
             zbias_step,
             &mut draw_stats,
             xr_depth_view,
         )?;
-        maybe_log_vulkan_draw_stats(
-            &VULKAN_DEBUG_OPENXR_PASS_LOG_COUNT,
-            if eye_index == 0 {
-                "openxr-left"
-            } else {
-                "openxr-right"
-            },
-            cx,
-            draw_pass_id,
-            session.width,
-            session.height,
-            clear_depth,
-            self.depth_format,
-            &draw_stats,
-            zbias,
-        );
 
         unsafe {
             self.device.cmd_end_render_pass(self.command_buffer);
@@ -2025,25 +1959,11 @@ impl CxVulkan {
             draw_pass_id,
             draw_list_id,
             &render_pass_key,
-            true,
             &mut zbias,
             zbias_step,
             &mut draw_stats,
             xr_depth_view,
         )?;
-        maybe_log_vulkan_draw_stats(
-            &VULKAN_DEBUG_WINDOW_PASS_LOG_COUNT,
-            "window",
-            cx,
-            draw_pass_id,
-            self.swapchain_extent.width,
-            self.swapchain_extent.height,
-            clear_depth,
-            self.depth_format,
-            &draw_stats,
-            zbias,
-        );
-
         unsafe {
             self.device.cmd_end_render_pass(self.command_buffer);
         }
@@ -2324,7 +2244,13 @@ impl CxVulkan {
         key: &VulkanRenderPassKey,
     ) -> Result<vk::RenderPass, String> {
         if *key == self.main_render_pass_key() {
-            return Ok(self.render_pass);
+            if self.render_pass != vk::RenderPass::null() {
+                return Ok(self.render_pass);
+            }
+            if self.xr_render_pass != vk::RenderPass::null() {
+                return Ok(self.xr_render_pass);
+            }
+            return Err("main/XR Vulkan render pass is not ready".to_string());
         }
         if let Some(render_pass) = self.offscreen_render_passes.get(key) {
             return Ok(*render_pass);
@@ -2767,27 +2693,11 @@ impl CxVulkan {
             draw_pass_id,
             draw_list_id,
             &render_pass_key,
-            true,
             &mut zbias,
             zbias_step,
             &mut draw_stats,
             xr_depth_view,
         )?;
-        maybe_log_vulkan_draw_stats(
-            &VULKAN_DEBUG_OFFSCREEN_PASS_LOG_COUNT,
-            "offscreen",
-            cx,
-            draw_pass_id,
-            target_width as u32,
-            target_height as u32,
-            clear_depth_value,
-            depth_attachment
-                .map(|depth| depth.format)
-                .unwrap_or(vk::Format::UNDEFINED),
-            &draw_stats,
-            zbias,
-        );
-
         unsafe {
             self.device.cmd_end_render_pass(self.command_buffer);
             self.device
@@ -4654,7 +4564,6 @@ impl CxVulkan {
         draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
         render_pass_key: &VulkanRenderPassKey,
-        depth_test: bool,
         zbias: &mut f32,
         zbias_step: f32,
         draw_stats: &mut VulkanDrawStats,
@@ -4679,7 +4588,6 @@ impl CxVulkan {
                     draw_pass_id,
                     sub_list_id,
                     render_pass_key,
-                    depth_test,
                     zbias,
                     zbias_step,
                     draw_stats,
@@ -4747,12 +4655,11 @@ impl CxVulkan {
                     cx.demo_time_repaint = true;
                 }
 
-                let packet_zbias = *zbias;
-                draw_call.draw_call_uniforms.set_zbias(packet_zbias);
+                draw_call.draw_call_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
                 draw_call.instance_dirty = false;
                 draw_call.uniforms_dirty = false;
-                let texture_ids: Vec<TextureId> = (0..sh.mapping.textures.len())
+                let texture_ids = (0..sh.mapping.textures.len())
                     .map(|i| {
                         draw_call.texture_slots[i]
                             .as_ref()
@@ -4770,26 +4677,6 @@ impl CxVulkan {
                     })
                     .collect();
                 let texture_types = sh.mapping.textures.iter().map(|t| t.tex_type).collect();
-                if draw_stats.packet_summaries.len() < 24 {
-                    let non_null_texture_count = texture_ids
-                        .iter()
-                        .filter(|texture_id| {
-                            **texture_id != null_texture_id && **texture_id != null_cube_texture_id
-                        })
-                        .count();
-                    draw_stats.packet_summaries.push(format!(
-                        "{} sid:{} inst:{} group:{} depth_write:{} cull:{} tex:{}/{} zbias:{:.6}",
-                        draw_call.options.debug_id.unwrap_or(sh.debug_id),
-                        draw_call.draw_shader_id.index,
-                        instance_count,
-                        draw_call.append_group_id,
-                        draw_call.options.depth_write,
-                        draw_call.options.backface_culling,
-                        non_null_texture_count,
-                        texture_ids.len(),
-                        packet_zbias
-                    ));
-                }
 
                 VulkanDrawPacket {
                     shader_index: draw_call.draw_shader_id.index,
@@ -4843,7 +4730,6 @@ impl CxVulkan {
                 cx,
                 &packet,
                 render_pass_key,
-                depth_test,
                 geometry_resource,
                 index_count,
                 &pass_uniforms,
@@ -4860,7 +4746,6 @@ impl CxVulkan {
         cx: &Cx,
         packet: &VulkanDrawPacket,
         render_pass_key: &VulkanRenderPassKey,
-        depth_test: bool,
         geometry_resource: VulkanGeometryResource,
         index_count: u32,
         pass_uniforms: &[f32],
@@ -4872,7 +4757,6 @@ impl CxVulkan {
             packet.shader_index,
             render_pass_key,
             packet.backface_culling,
-            depth_test,
         )?;
         let (
             pipeline_handle,
@@ -4885,7 +4769,6 @@ impl CxVulkan {
                 shader_index: packet.shader_index,
                 render_pass: render_pass_key.clone(),
                 backface_culling: packet.backface_culling,
-                depth_test,
             };
             let pipeline = self.pipelines.get(&pipeline_key).ok_or_else(|| {
                 format!("missing Vulkan pipeline for shader {}", packet.shader_index)
@@ -5198,13 +5081,11 @@ impl CxVulkan {
         shader_index: usize,
         render_pass_key: &VulkanRenderPassKey,
         backface_culling: bool,
-        depth_test: bool,
     ) -> Result<(), String> {
         let pipeline_key = VulkanPipelineKey {
             shader_index,
             render_pass: render_pass_key.clone(),
             backface_culling,
-            depth_test,
         };
         if self.pipelines.contains_key(&pipeline_key) {
             return Ok(());
@@ -5447,7 +5328,7 @@ impl CxVulkan {
         let color_blend_attachments = [color_blend_attachment];
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
-        let has_depth = render_pass_key.depth_format.is_some() && depth_test;
+        let has_depth = render_pass_key.depth_format.is_some();
         let make_depth_stencil = |depth_write| {
             vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(has_depth)

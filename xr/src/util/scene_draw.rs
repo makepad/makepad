@@ -98,21 +98,13 @@ pub fn register_last_draw_call_anchor(cx: &mut Cx3d, world_pos: Vec3f) {
     cx.register_last_scene_draw_call_anchor_3d(draw_list_id, draw_item_id, world_pos);
 }
 
-pub fn apply_scene_to_draw_cube(draw: &mut DrawCube, cx: &mut Cx3d) -> Option<SceneState3D> {
+pub fn apply_scene_to_draw_cube(_draw: &mut DrawCube, cx: &mut Cx3d) -> Option<SceneState3D> {
     let scene = cx.scene_state_3d()?;
-    draw.set_use_pass_camera(scene.use_pass_camera);
-    draw.set_camera_state(scene.view, scene.projection);
-    draw.set_clip_ndc(scene.clip_ndc);
     Some(scene)
 }
 
 pub fn apply_scene_to_draw_pbr(draw: &mut DrawPbr, cx: &mut Cx3d) -> Option<SceneState3D> {
     let scene = cx.scene_state_3d()?;
-    draw.set_use_pass_camera(scene.use_pass_camera);
-    draw.set_camera_state(scene.view, scene.projection, scene.camera_pos);
-    draw.set_clip_ndc(scene.clip_ndc);
-    draw.set_depth_range(scene.depth_range.x, scene.depth_range.y);
-    draw.set_depth_forward_bias(scene.depth_forward_bias);
     if draw.has_env_texture < 0.5 {
         let env_texture = draw.default_env_texture(cx);
         draw.set_env_texture(Some(env_texture));
