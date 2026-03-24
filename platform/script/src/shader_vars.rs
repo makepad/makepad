@@ -711,6 +711,52 @@ impl ShaderFnCompiler {
                         self.stack.free_string(instance_s);
                         return;
                     }
+                    if matches!(output.backend, ShaderBackend::Wgsl)
+                        && instance_s == "unibuf_draw_pass"
+                    {
+                        let mut s = self.stack.new_string();
+                        match field_id {
+                            id!(camera_projection) => {
+                                write!(s, "mp_draw_pass_camera_projection()").ok();
+                            }
+                            id!(camera_view) => {
+                                write!(s, "mp_draw_pass_camera_view()").ok();
+                            }
+                            id!(depth_projection) => {
+                                write!(s, "mp_draw_pass_depth_projection()").ok();
+                            }
+                            id!(depth_view) => {
+                                write!(s, "mp_draw_pass_depth_view()").ok();
+                            }
+                            id!(camera_inv) => {
+                                write!(s, "mp_draw_pass_camera_inv()").ok();
+                            }
+                            _ => {
+                                self.stack.free_string(s);
+                                let mut s = self.stack.new_string();
+                                let is_vec = vm.bx.heap.pod_types[pod_ty.index as usize]
+                                    .ty
+                                    .is_float_type()
+                                    && !matches!(
+                                        vm.bx.heap.pod_types[pod_ty.index as usize].ty,
+                                        crate::pod::ScriptPodTy::Struct { .. }
+                                    );
+                                let field_name =
+                                    output.backend.map_field_name_typed(field_id, is_vec);
+                                write!(s, "{}.{}", instance_s, field_name).ok();
+                                self.stack
+                                    .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
+                                self.stack.free_string(field_s);
+                                self.stack.free_string(instance_s);
+                                return;
+                            }
+                        }
+                        self.stack
+                            .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
+                        self.stack.free_string(field_s);
+                        self.stack.free_string(instance_s);
+                        return;
+                    }
                     let mut s = self.stack.new_string();
                     let is_vec = vm.bx.heap.pod_types[pod_ty.index as usize]
                         .ty
