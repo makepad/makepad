@@ -58,6 +58,7 @@ struct XrFingerCursor {
 #[derive(Clone, Copy, Debug)]
 struct XrPanelRayHit {
     projected: Vec3f,
+    cursor_depth: f32,
     touch_z: f32,
 }
 
@@ -130,6 +131,7 @@ impl XrView {
         hit_matrix: &Mat4f,
         ray_origin: Vec3f,
         ray_dir: Vec3f,
+        touch_z: f32,
     ) -> Option<XrPanelRayHit> {
         let inv = hit_matrix.invert();
         let origin = inv.transform_vec4(vec4(ray_origin.x, ray_origin.y, ray_origin.z, 1.0)).to_vec3f();
@@ -139,7 +141,8 @@ impl XrView {
         if t < 0.0 { return None; }
         Some(XrPanelRayHit {
             projected: origin + dir * t,
-            touch_z: origin.z,
+            cursor_depth: origin.z,
+            touch_z,
         })
     }
 
@@ -150,6 +153,7 @@ impl XrView {
             .to_vec3f();
         XrPanelRayHit {
             projected: vec3f(local.x, local.y, 0.0),
+            cursor_depth: local.z,
             touch_z: local.z,
         }
     }
@@ -166,7 +170,7 @@ impl XrView {
             return false;
         }
         let hit_mat = self.hit_matrix(self.node.local_transform());
-        Self::panel_ray_hit(&hit_mat, ray_origin, ray_dir)
+        Self::panel_ray_hit(&hit_mat, ray_origin, ray_dir, 0.0)
             .is_some_and(|hit| self.contains_local(hit.projected))
     }
 
@@ -174,17 +178,17 @@ impl XrView {
         if !self.contains_local(hit.projected) {
             return None;
         }
-        if hit.touch_z > Self::XR_CURSOR_HOVER_FRONT || hit.touch_z < Self::XR_CURSOR_HOVER_BACK {
+        if hit.cursor_depth > Self::XR_CURSOR_HOVER_FRONT || hit.cursor_depth < Self::XR_CURSOR_HOVER_BACK {
             return None;
         }
-        let distance = hit.touch_z.abs().min(Self::XR_CURSOR_HOVER_FRONT);
+        let distance = hit.cursor_depth.abs().min(Self::XR_CURSOR_HOVER_FRONT);
         let proximity = 1.0 - (distance / Self::XR_CURSOR_HOVER_FRONT);
         let size =
             Self::XR_CURSOR_SIZE_FAR + (Self::XR_CURSOR_SIZE_NEAR - Self::XR_CURSOR_SIZE_FAR) * proximity as f64;
         Some(XrFingerCursor {
             pos: dvec2(hit.projected.x as f64, hit.projected.y as f64),
             size,
-            depth: hit.touch_z,
+            depth: hit.cursor_depth,
             is_left,
         })
     }
@@ -276,7 +280,7 @@ impl Widget for XrView {
                 let hit = if use_normal_projection {
                     Some(Self::panel_normal_hit(&hit_mat, tip.pos))
                 } else {
-                    Self::panel_ray_hit(&hit_mat, tip.pos, tip.ray_dir)
+                    Self::panel_ray_hit(&hit_mat, tip.pos, tip.ray_dir, tip.touch_z)
                 };
 
                 if let Some(hit) = hit {

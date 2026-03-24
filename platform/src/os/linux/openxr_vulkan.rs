@@ -39,47 +39,44 @@ impl Cx {
                 })?;
                 &vulkan_session.render_targets as *const CxVulkanOpenXrSessionData
             };
-
-        for eye in 0..2 {
-            let pass = &mut self.passes[draw_pass_id];
-            let camera_inv = frame.eyes[eye].view_mat.invert();
-            pass.set_dpi_factor(dpi_factor);
-            pass.paint_dirty = true;
-            pass.os.shader_variant = SHADER_VARIANT_XR;
-            pass.pass_uniforms.camera_projection = frame.eyes[eye].proj_mat;
-            pass.pass_uniforms.camera_view = frame.eyes[eye].view_mat;
-            pass.pass_uniforms.camera_projection_r = frame.eyes[eye].proj_mat;
-            pass.pass_uniforms.camera_view_r = frame.eyes[eye].view_mat;
-            pass.pass_uniforms.camera_inv = camera_inv;
-            pass.pass_uniforms.camera_inv_r = camera_inv;
-            if depth_image_index.is_some() {
-                pass.pass_uniforms.depth_projection = frame.eyes[eye].depth_proj_mat;
-                pass.pass_uniforms.depth_view = frame.eyes[eye].depth_view_mat;
-            } else {
-                pass.pass_uniforms.depth_projection = zero_mat;
-                pass.pass_uniforms.depth_view = zero_mat;
-            }
-            pass.pass_uniforms.depth_projection_r = pass.pass_uniforms.depth_projection;
-            pass.pass_uniforms.depth_view_r = pass.pass_uniforms.depth_view;
-            
-            let mut vulkan =
-                self.os.vulkan.take().ok_or_else(|| {
-                    "OpenXR Vulkan render failed: backend unavailable".to_string()
-                })?;
-            let result = unsafe {
-                vulkan.draw_openxr_view(
-                    self,
-                    draw_pass_id,
-                    draw_list_id,
-                    &*render_targets,
-                    color_image_index,
-                    eye,
-                    depth_image_index,
-                )
-            };
-            self.os.vulkan = Some(vulkan);
-            result?;
+        let pass = &mut self.passes[draw_pass_id];
+        pass.set_dpi_factor(dpi_factor);
+        pass.paint_dirty = true;
+        pass.os.shader_variant = SHADER_VARIANT_XR;
+        pass.pass_uniforms.camera_projection = frame.eyes[0].proj_mat;
+        pass.pass_uniforms.camera_view = frame.eyes[0].view_mat;
+        pass.pass_uniforms.camera_projection_r = frame.eyes[1].proj_mat;
+        pass.pass_uniforms.camera_view_r = frame.eyes[1].view_mat;
+        pass.pass_uniforms.camera_inv = frame.eyes[0].view_mat.invert();
+        pass.pass_uniforms.camera_inv_r = frame.eyes[1].view_mat.invert();
+        if depth_image_index.is_some() {
+            pass.pass_uniforms.depth_projection = frame.eyes[0].depth_proj_mat;
+            pass.pass_uniforms.depth_view = frame.eyes[0].depth_view_mat;
+            pass.pass_uniforms.depth_projection_r = frame.eyes[1].depth_proj_mat;
+            pass.pass_uniforms.depth_view_r = frame.eyes[1].depth_view_mat;
+        } else {
+            pass.pass_uniforms.depth_projection = zero_mat;
+            pass.pass_uniforms.depth_view = zero_mat;
+            pass.pass_uniforms.depth_projection_r = zero_mat;
+            pass.pass_uniforms.depth_view_r = zero_mat;
         }
+
+        let mut vulkan =
+            self.os.vulkan.take().ok_or_else(|| {
+                "OpenXR Vulkan render failed: backend unavailable".to_string()
+            })?;
+        let result = unsafe {
+            vulkan.draw_openxr_view(
+                self,
+                draw_pass_id,
+                draw_list_id,
+                &*render_targets,
+                color_image_index,
+                depth_image_index,
+            )
+        };
+        self.os.vulkan = Some(vulkan);
+        result?;
 
         #[cfg(target_os = "android")]
         if let Some(request) = self.take_studio_run_view_frame_request(0) {

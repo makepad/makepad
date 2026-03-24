@@ -123,12 +123,14 @@ impl VulkanRenderPassKey {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct VulkanPipelineKey {
     shader_index: usize,
+    shader_variant: usize,
     render_pass: VulkanRenderPassKey,
     backface_culling: bool,
 }
 
 struct VulkanDrawPacket {
     shader_index: usize,
+    shader_variant: usize,
     geometry_id: GeometryId,
     depth_write: bool,
     backface_culling: bool,
@@ -178,7 +180,7 @@ struct VulkanTextureUpload {
 
 type VulkanTextureKey = usize;
 
-pub(crate) struct CxVulkanOpenXrEyeTarget {
+pub(crate) struct CxVulkanOpenXrMultiviewTarget {
     framebuffer: vk::Framebuffer,
     color_view: vk::ImageView,
     depth_target: VulkanTextureResource,
@@ -186,12 +188,13 @@ pub(crate) struct CxVulkanOpenXrEyeTarget {
 
 pub(crate) struct CxVulkanOpenXrSwapchainImage {
     image: vk::Image,
-    eyes: [CxVulkanOpenXrEyeTarget; 2],
+    target: CxVulkanOpenXrMultiviewTarget,
 }
 
 pub(crate) struct CxVulkanOpenXrDepthImage {
     image: vk::Image,
     views: [vk::ImageView; 2],
+    multiview_view: vk::ImageView,
 }
 
 pub(crate) struct CxVulkanOpenXrSessionData {
@@ -265,7 +268,9 @@ pub struct CxVulkan {
     debug_utils_enabled: bool,
     debug_utils_loader: Option<ash::ext::debug_utils::Instance>,
     debug_messenger: vk::DebugUtilsMessengerEXT,
+    xr_multiview_enabled: bool,
     xr_depth_dummy: Option<VulkanTextureResource>,
+    xr_depth_dummy_multiview: Option<VulkanTextureResource>,
 }
 
 impl CxVulkan {
@@ -362,7 +367,6 @@ impl CxVulkan {
                 "Android Vulkan: SwiftShader/software device detected; expect very low performance"
             );
         }
-
         let queue_priorities = [1.0f32];
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
@@ -541,7 +545,9 @@ impl CxVulkan {
             debug_utils_enabled: has_debug_utils_ext,
             debug_utils_loader: None,
             debug_messenger: vk::DebugUtilsMessengerEXT::null(),
+            xr_multiview_enabled: false,
             xr_depth_dummy: None,
+            xr_depth_dummy_multiview: None,
         };
 
         if let Err(err) = vulkan.recreate_swapchain() {
@@ -692,6 +698,18 @@ impl CxVulkan {
                 "Android Vulkan: SwiftShader/software device detected; expect very low performance"
             );
         }
+        let xr_multiview_enabled = Self::query_multiview_support(&instance, physical_device);
+        if !xr_multiview_enabled {
+            unsafe {
+                surface_loader.destroy_surface(surface, None);
+                ndk_sys::ANativeWindow_release(window);
+                instance.destroy_instance(None);
+            }
+            return Err(
+                "Android Vulkan XR init failed: the OpenXR Vulkan backend requires multiview support"
+                    .to_string(),
+            );
+        }
 
         let queue_priorities = [1.0f32];
         let queue_info = [vk::DeviceQueueCreateInfo::default()
@@ -701,13 +719,16 @@ impl CxVulkan {
             vk::KHR_SWAPCHAIN_NAME.as_ptr(),
             vk::ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_NAME.as_ptr(),
         ];
+        let mut multiview_features = vk::PhysicalDeviceMultiviewFeatures::default()
+            .multiview(xr_multiview_enabled);
         let mut sampler_ycbcr_features =
             vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default()
                 .sampler_ycbcr_conversion(true);
-        let device_create_info = vk::DeviceCreateInfo::default()
-            .push_next(&mut sampler_ycbcr_features)
+        let mut device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
             .enabled_extension_names(&device_extensions);
+        device_create_info = device_create_info.push_next(&mut sampler_ycbcr_features);
+        device_create_info = device_create_info.push_next(&mut multiview_features);
 
         let mut xr_vk_device = std::ptr::null();
         let mut xr_vk_device_result = 0;
@@ -892,7 +913,9 @@ impl CxVulkan {
             debug_utils_enabled: has_debug_utils_ext,
             debug_utils_loader: None,
             debug_messenger: vk::DebugUtilsMessengerEXT::null(),
+            xr_multiview_enabled,
             xr_depth_dummy: None,
+            xr_depth_dummy_multiview: None,
         };
 
         vulkan.try_enable_debug_messenger(&entry);
@@ -977,6 +1000,26 @@ impl CxVulkan {
         self.queue_family_index
     }
 
+    fn query_multiview_support(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+    ) -> bool {
+        let mut multiview_features = vk::PhysicalDeviceMultiviewFeatures::default();
+        let mut features2 =
+            vk::PhysicalDeviceFeatures2::default().push_next(&mut multiview_features);
+        unsafe {
+            instance.get_physical_device_features2(physical_device, &mut features2);
+        }
+
+        let mut multiview_props = vk::PhysicalDeviceMultiviewProperties::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut multiview_props);
+        unsafe {
+            instance.get_physical_device_properties2(physical_device, &mut props2);
+        }
+
+        multiview_features.multiview == vk::TRUE && multiview_props.max_multiview_view_count >= 2
+    }
+
     fn ensure_xr_render_pass_for_format(&mut self, color_format: vk::Format) -> Result<(), String> {
         if self.depth_format == vk::Format::UNDEFINED {
             self.depth_format = self.pick_depth_format()?;
@@ -1040,10 +1083,18 @@ impl CxVulkan {
             )];
         let attachments = [color_attachment, depth_attachment];
         let subpasses = [subpass];
-        let xr_render_pass_info = vk::RenderPassCreateInfo::default()
+        let mut xr_render_pass_info = vk::RenderPassCreateInfo::default()
             .attachments(&attachments)
             .subpasses(&subpasses)
             .dependencies(&dependencies);
+        let view_masks = [0b11u32];
+        let correlation_masks = [0b11u32];
+        let mut multiview_info = vk::RenderPassMultiviewCreateInfo::default()
+            .view_masks(&view_masks)
+            .correlation_masks(&correlation_masks);
+        if self.xr_multiview_enabled {
+            xr_render_pass_info = xr_render_pass_info.push_next(&mut multiview_info);
+        }
         self.xr_render_pass = unsafe { self.device.create_render_pass(&xr_render_pass_info, None) }
             .map_err(|e| format!("create_render_pass(openxr) failed: {e:?}"))?;
         Ok(())
@@ -1060,8 +1111,7 @@ impl CxVulkan {
         depth_height: u32,
     ) -> Result<CxVulkanOpenXrSessionData, String> {
         self.ensure_xr_render_pass_for_format(color_format)?;
-
-        self.ensure_xr_depth_dummy()?;
+        self.ensure_xr_depth_dummy_multiview()?;
 
         let depth_readback_buffer = if depth_width > 0 && depth_height > 0 {
             let byte_len = depth_width as vk::DeviceSize
@@ -1080,11 +1130,11 @@ impl CxVulkan {
 
         let mut xr_color_images = Vec::with_capacity(color_images.len());
         for &image in color_images {
-            let eyes = [
-                self.create_openxr_eye_target(image, 0, color_format, width, height)?,
-                self.create_openxr_eye_target(image, 1, color_format, width, height)?,
-            ];
-            xr_color_images.push(CxVulkanOpenXrSwapchainImage { image, eyes });
+            let target = self.create_openxr_multiview_target(image, color_format, width, height)?;
+            xr_color_images.push(CxVulkanOpenXrSwapchainImage {
+                image,
+                target,
+            });
         }
 
         let mut xr_depth_images = Vec::with_capacity(depth_images.len());
@@ -1116,7 +1166,23 @@ impl CxVulkan {
                     break;
                 }
             };
-            xr_depth_images.push(CxVulkanOpenXrDepthImage { image, views });
+            let multiview_view = match self.create_openxr_depth_array_view(image, vk::Format::D16_UNORM) {
+                Ok(view) => view,
+                Err(err) => {
+                    for view in views {
+                        unsafe {
+                            self.device.destroy_image_view(view, None);
+                        }
+                    }
+                    depth_view_error = Some(err);
+                    break;
+                }
+            };
+            xr_depth_images.push(CxVulkanOpenXrDepthImage {
+                image,
+                views,
+                multiview_view,
+            });
         }
         if let Some(err) = depth_view_error {
             crate::warning!(
@@ -1138,44 +1204,44 @@ impl CxVulkan {
         })
     }
 
-    fn create_openxr_eye_target(
+    fn create_openxr_multiview_target(
         &self,
         image: vk::Image,
-        eye: usize,
         color_format: vk::Format,
         width: u32,
         height: u32,
-    ) -> Result<CxVulkanOpenXrEyeTarget, String> {
+    ) -> Result<CxVulkanOpenXrMultiviewTarget, String> {
         let color_view = unsafe {
             self.device.create_image_view(
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
                     .format(color_format)
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(vk::ImageAspectFlags::COLOR)
                             .base_mip_level(0)
                             .level_count(1)
-                            .base_array_layer(eye as u32)
-                            .layer_count(1),
+                            .base_array_layer(0)
+                            .layer_count(2),
                     ),
                 None,
             )
         }
-        .map_err(|e| format!("create_image_view(openxr color eye {eye}) failed: {e:?}"))?;
+        .map_err(|e| format!("create_image_view(openxr color multiview) failed: {e:?}"))?;
 
-        let depth_target = match self.create_depth_target(width, height, self.depth_format) {
-            Ok(depth_target) => depth_target,
-            Err(err) => {
-                unsafe {
-                    self.device.destroy_image_view(color_view, None);
+        let depth_target =
+            match self.create_depth_target_layers(width, height, self.depth_format, 2) {
+                Ok(depth_target) => depth_target,
+                Err(err) => {
+                    unsafe {
+                        self.device.destroy_image_view(color_view, None);
+                    }
+                    return Err(format!(
+                        "create_depth_target(openxr multiview) failed: {err}"
+                    ));
                 }
-                return Err(format!(
-                    "create_depth_target(openxr eye {eye}) failed: {err}"
-                ));
-            }
-        };
+            };
 
         let attachments = [color_view, depth_target.view];
         let framebuffer = match unsafe {
@@ -1196,12 +1262,12 @@ impl CxVulkan {
                 }
                 self.destroy_texture_resource(depth_target);
                 return Err(format!(
-                    "create_framebuffer(openxr eye {eye}) failed: {e:?}"
+                    "create_framebuffer(openxr multiview) failed: {e:?}"
                 ));
             }
         };
 
-        Ok(CxVulkanOpenXrEyeTarget {
+        Ok(CxVulkanOpenXrMultiviewTarget {
             framebuffer,
             color_view,
             depth_target,
@@ -1234,19 +1300,42 @@ impl CxVulkan {
         .map_err(|e| format!("create_image_view(openxr depth eye {eye}) failed: {e:?}"))
     }
 
+    fn create_openxr_depth_array_view(
+        &self,
+        image: vk::Image,
+        format: vk::Format,
+    ) -> Result<vk::ImageView, String> {
+        unsafe {
+            self.device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+                    .format(format)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(2),
+                    ),
+                None,
+            )
+        }
+        .map_err(|e| format!("create_image_view(openxr depth multiview) failed: {e:?}"))
+    }
+
     pub(crate) fn destroy_openxr_session_data(&mut self, session: CxVulkanOpenXrSessionData) {
         for image in session.color_images {
-            for eye in image.eyes {
-                unsafe {
-                    if eye.framebuffer != vk::Framebuffer::null() {
-                        self.device.destroy_framebuffer(eye.framebuffer, None);
-                    }
-                    if eye.color_view != vk::ImageView::null() {
-                        self.device.destroy_image_view(eye.color_view, None);
-                    }
+            unsafe {
+                if image.target.framebuffer != vk::Framebuffer::null() {
+                    self.device.destroy_framebuffer(image.target.framebuffer, None);
                 }
-                self.destroy_texture_resource(eye.depth_target);
+                if image.target.color_view != vk::ImageView::null() {
+                    self.device.destroy_image_view(image.target.color_view, None);
+                }
             }
+            self.destroy_texture_resource(image.target.depth_target);
         }
         for image in session.depth_images {
             for view in image.views {
@@ -1254,6 +1343,11 @@ impl CxVulkan {
                     if view != vk::ImageView::null() {
                         self.device.destroy_image_view(view, None);
                     }
+                }
+            }
+            unsafe {
+                if image.multiview_view != vk::ImageView::null() {
+                    self.device.destroy_image_view(image.multiview_view, None);
                 }
             }
         }
@@ -1649,7 +1743,6 @@ impl CxVulkan {
         draw_list_id: DrawListId,
         session: &CxVulkanOpenXrSessionData,
         color_image_index: usize,
-        eye_index: usize,
         depth_image_index: Option<usize>,
     ) -> Result<(), String> {
         let color_target = session
@@ -1658,8 +1751,9 @@ impl CxVulkan {
             .ok_or_else(|| format!("invalid OpenXR color image index {color_image_index}"))?;
         let xr_depth_view = depth_image_index
             .and_then(|index| session.depth_images.get(index))
-            .map(|image| image.views[eye_index])
-            .unwrap_or(self.ensure_xr_depth_dummy()?);
+            .map(|image| image.multiview_view)
+            .unwrap_or(self.ensure_xr_depth_dummy_multiview()?);
+        let framebuffer = color_target.target.framebuffer;
 
         unsafe {
             self.device
@@ -1718,7 +1812,7 @@ impl CxVulkan {
                 self.command_buffer,
                 &vk::RenderPassBeginInfo::default()
                     .render_pass(self.xr_render_pass)
-                    .framebuffer(color_target.eyes[eye_index].framebuffer)
+                    .framebuffer(framebuffer)
                     .render_area(vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: vk::Extent2D {
@@ -3359,6 +3453,16 @@ impl CxVulkan {
         height: u32,
         format: vk::Format,
     ) -> Result<VulkanTextureResource, String> {
+        self.create_depth_target_layers(width, height, format, 1)
+    }
+
+    fn create_depth_target_layers(
+        &self,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        layers: u32,
+    ) -> Result<VulkanTextureResource, String> {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -3368,7 +3472,7 @@ impl CxVulkan {
                 depth: 1,
             })
             .mip_levels(1)
-            .array_layers(1)
+            .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
@@ -3415,7 +3519,11 @@ impl CxVulkan {
         }
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(if layers > 1 {
+                vk::ImageViewType::TYPE_2D_ARRAY
+            } else {
+                vk::ImageViewType::TYPE_2D
+            })
             .format(format)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
@@ -3423,7 +3531,7 @@ impl CxVulkan {
                     .base_mip_level(0)
                     .level_count(1)
                     .base_array_layer(0)
-                    .layer_count(1),
+                    .layer_count(layers.max(1)),
             );
         let view = match unsafe { self.device.create_image_view(&view_info, None) } {
             Ok(view) => view,
@@ -3442,7 +3550,7 @@ impl CxVulkan {
             view,
             width: width.max(1),
             height: height.max(1),
-            layers: 1,
+            layers: layers.max(1),
             is_cube: false,
             format,
             layout: vk::ImageLayout::UNDEFINED,
@@ -3459,6 +3567,16 @@ impl CxVulkan {
         height: u32,
         format: vk::Format,
     ) -> Result<VulkanTextureResource, String> {
+        self.create_sampled_depth_resource_layers(width, height, format, 1)
+    }
+
+    fn create_sampled_depth_resource_layers(
+        &self,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        layers: u32,
+    ) -> Result<VulkanTextureResource, String> {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -3468,7 +3586,7 @@ impl CxVulkan {
                 depth: 1,
             })
             .mip_levels(1)
-            .array_layers(1)
+            .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(vk::ImageUsageFlags::SAMPLED)
@@ -3511,7 +3629,11 @@ impl CxVulkan {
 
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(if layers > 1 {
+                vk::ImageViewType::TYPE_2D_ARRAY
+            } else {
+                vk::ImageViewType::TYPE_2D
+            })
             .format(format)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
@@ -3519,7 +3641,7 @@ impl CxVulkan {
                     .base_mip_level(0)
                     .level_count(1)
                     .base_array_layer(0)
-                    .layer_count(1),
+                    .layer_count(layers.max(1)),
             );
         let view = match unsafe { self.device.create_image_view(&view_info, None) } {
             Ok(view) => view,
@@ -3538,7 +3660,7 @@ impl CxVulkan {
             view,
             width: width.max(1),
             height: height.max(1),
-            layers: 1,
+            layers: layers.max(1),
             is_cube: false,
             format,
             layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
@@ -3555,6 +3677,18 @@ impl CxVulkan {
                 Some(self.create_sampled_depth_resource(1, 1, vk::Format::D16_UNORM)?);
         }
         Ok(self.xr_depth_dummy.as_ref().unwrap().view)
+    }
+
+    fn ensure_xr_depth_dummy_multiview(&mut self) -> Result<vk::ImageView, String> {
+        if self.xr_depth_dummy_multiview.is_none() {
+            self.xr_depth_dummy_multiview = Some(self.create_sampled_depth_resource_layers(
+                1,
+                1,
+                vk::Format::D16_UNORM,
+                2,
+            )?);
+        }
+        Ok(self.xr_depth_dummy_multiview.as_ref().unwrap().view)
     }
 
     fn destroy_texture_resource(&self, resource: VulkanTextureResource) {
@@ -4596,6 +4730,7 @@ impl CxVulkan {
                 continue;
             }
 
+            let shader_variant = cx.passes[draw_pass_id].os.shader_variant;
             let packet = {
                 let draw_list = &mut cx.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
@@ -4615,7 +4750,7 @@ impl CxVulkan {
                     continue;
                 };
                 let os_shader = &cx.draw_shaders.os_shaders[os_shader_id];
-                let vk_shader = if let Some(vk) = &os_shader.vulkan_shader {
+                let vk_shader = if let Some(vk) = &os_shader.vulkan_shader[shader_variant] {
                     vk
                 } else {
                     draw_stats.skipped_no_vulkan_shader += 1;
@@ -4680,6 +4815,7 @@ impl CxVulkan {
 
                 VulkanDrawPacket {
                     shader_index: draw_call.draw_shader_id.index,
+                    shader_variant,
                     geometry_id,
                     depth_write: draw_call.options.depth_write,
                     backface_culling: draw_call.options.backface_culling,
@@ -4755,6 +4891,7 @@ impl CxVulkan {
         self.ensure_pipeline(
             cx,
             packet.shader_index,
+            packet.shader_variant,
             render_pass_key,
             packet.backface_culling,
         )?;
@@ -4767,6 +4904,7 @@ impl CxVulkan {
         ) = {
             let pipeline_key = VulkanPipelineKey {
                 shader_index: packet.shader_index,
+                shader_variant: packet.shader_variant,
                 render_pass: render_pass_key.clone(),
                 backface_culling: packet.backface_culling,
             };
@@ -4792,7 +4930,7 @@ impl CxVulkan {
             .ok_or_else(|| format!("shader {} missing os_shader_id", packet.shader_index))?;
         let os_shader = &cx.draw_shaders.os_shaders[os_shader_id];
         let vk_shader = os_shader
-            .vulkan_shader
+            .vulkan_shader[packet.shader_variant]
             .as_ref()
             .ok_or_else(|| format!("shader {} missing Vulkan binary", packet.shader_index))?;
         let geometry_stride =
@@ -5079,11 +5217,13 @@ impl CxVulkan {
         &mut self,
         cx: &Cx,
         shader_index: usize,
+        shader_variant: usize,
         render_pass_key: &VulkanRenderPassKey,
         backface_culling: bool,
     ) -> Result<(), String> {
         let pipeline_key = VulkanPipelineKey {
             shader_index,
+            shader_variant,
             render_pass: render_pass_key.clone(),
             backface_culling,
         };
@@ -5097,7 +5237,7 @@ impl CxVulkan {
             .ok_or_else(|| format!("shader {} missing os_shader_id", shader_index))?;
         let os_shader = &cx.draw_shaders.os_shaders[os_shader_id];
         let vk_shader = os_shader
-            .vulkan_shader
+            .vulkan_shader[shader_variant]
             .as_ref()
             .ok_or_else(|| format!("shader {} missing Vulkan binary", shader_index))?;
         let vs_spv = vk_shader
@@ -6165,6 +6305,9 @@ impl CxVulkan {
             self.destroy_texture_resource(resource);
         }
         if let Some(resource) = self.xr_depth_dummy.take() {
+            self.destroy_texture_resource(resource);
+        }
+        if let Some(resource) = self.xr_depth_dummy_multiview.take() {
             self.destroy_texture_resource(resource);
         }
     }
