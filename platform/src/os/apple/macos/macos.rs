@@ -20,6 +20,7 @@ use {
                 apple_sys::*,
                 apple_util::str_to_nsstring,
                 apple_video_player::AppleUnifiedVideoPlayer,
+                apple_webview::MacosSystemBrowser,
                 macos::{
                     macos_app::{init_macos_app_global, with_macos_app, MacosApp},
                     macos_event::MacosEvent,
@@ -1119,6 +1120,74 @@ impl Cx {
                         preview.detach_preview();
                     }
                 }
+                CxOsOp::SpawnSystemBrowser { browser_id, url } => {
+                    self.os
+                        .system_browsers
+                        .entry(browser_id)
+                        .or_insert_with(|| MacosSystemBrowser::new(&url))
+                        .set_url(&url, false);
+                }
+                CxOsOp::UpdateSystemBrowser {
+                    browser_id,
+                    area,
+                    visible,
+                } => {
+                    let Some(draw_list_id) = area.draw_list_id() else {
+                        continue;
+                    };
+                    let Some(draw_pass_id) = self.draw_lists[draw_list_id].draw_pass_id else {
+                        continue;
+                    };
+                    let Some(window_id) = self.get_pass_window_id(draw_pass_id) else {
+                        continue;
+                    };
+                    let Some(metal_window) =
+                        metal_windows.iter().find(|w| w.window_id == window_id)
+                    else {
+                        continue;
+                    };
+
+                    let mut unclipped_rect = area.rect(self);
+                    let mut clipped_rect = area.clipped_rect(self);
+                    let win_h = self.windows[window_id].window_geom.inner_size.y;
+                    unclipped_rect.pos.y = win_h - unclipped_rect.pos.y - unclipped_rect.size.y;
+                    clipped_rect.pos.y = win_h - clipped_rect.pos.y - clipped_rect.size.y;
+                    let parent_view = metal_window.cocoa_window.view;
+
+                    if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
+                        browser.update(
+                            window_id,
+                            parent_view,
+                            unclipped_rect,
+                            clipped_rect,
+                            visible,
+                        );
+                    }
+                }
+                CxOsOp::DetachSystemBrowser { browser_id } => {
+                    if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
+                        browser.detach();
+                    }
+                }
+                CxOsOp::SetSystemBrowserUrl {
+                    browser_id,
+                    url,
+                    replace,
+                } => {
+                    if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
+                        browser.set_url(&url, replace);
+                    }
+                }
+                CxOsOp::SystemBrowserHistoryGo { browser_id, delta } => {
+                    if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
+                        browser.history_go(delta);
+                    }
+                }
+                CxOsOp::CloseSystemBrowser { browser_id } => {
+                    if let Some(mut browser) = self.os.system_browsers.remove(&browser_id) {
+                        browser.cleanup();
+                    }
+                }
                 CxOsOp::SaveFileDialog(settings) => {
                     with_macos_app(|app| app.open_save_file_dialog(settings));
                 }
@@ -1587,4 +1656,5 @@ pub struct CxOs {
     pub(crate) apple_game_input: Option<AppleGameInput>,
     pub(crate) video_players: HashMap<LiveId, AppleUnifiedVideoPlayer>,
     pub(crate) native_camera_previews: HashMap<LiveId, MacosNativeCameraPreview>,
+    pub(crate) system_browsers: HashMap<LiveId, MacosSystemBrowser>,
 }

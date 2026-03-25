@@ -7,8 +7,10 @@ use crate::{
     thread::SignalToUI,
     xr_depth_mesh::{
         empty_bounds, xr_depth_mesh_store, ChunkKey, XrDepthMesh, XrDepthMeshChunk,
-        XrDepthMeshQuery, XrDepthMeshQueryHit, XrDepthMeshQueryResult, XrDepthMeshQuerySurfaceHit,
-        XrDepthMeshStore, XrDepthPlaneKind, XrDepthPlanePatch,
+        XrDepthMeshQuery, XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry,
+        XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface, XrDepthMeshQueryResult,
+        XrDepthMeshQuerySupportPlane, XrDepthMeshQuerySurfaceHit, XrDepthMeshStore,
+        XrDepthPlaneKind, XrDepthPlanePatch,
     },
 };
 use std::{
@@ -57,11 +59,32 @@ const DEPTH_MESH_UPDATE_DISTANCE_METERS: f32 = 4.0;
 const DEPTH_SURFACE_MESH_CHUNKS_PER_TICK: usize = 1;
 const DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS: u64 = 8;
 const DEPTH_QUERY_BATCH_PER_TICK: usize = 24;
-const DEPTH_QUERY_MAX_SURFACES_PER_QUERY: usize = 2;
+const DEPTH_QUERY_MAX_SURFACES_PER_QUERY: usize = 1;
 const DEPTH_DEBUG_LOG_CHUNK_MESH_TIMING: bool = false;
 const DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT: f32 = 0.2;
 const DEPTH_QUERY_SUPPORT_NORMAL_Y_MIN: f32 = 0.25;
 const DEPTH_QUERY_LATERAL_NORMAL_Y_MAX: f32 = 0.80;
+const DEPTH_QUERY_SUPPORT_DISTINCT_RADIUS_SCALE: f32 = 0.18;
+const DEPTH_QUERY_SUPPORT_DISTINCT_RADIUS_MIN: f32 = 0.01;
+const DEPTH_QUERY_DISTINCT_RADIUS_SCALE: f32 = 0.35;
+const DEPTH_QUERY_DISTINCT_RADIUS_MIN: f32 = 0.02;
+const DEPTH_QUERY_SUPPORT_PLANE_RADIUS_SCALE: f32 = 3.2;
+const DEPTH_QUERY_SUPPORT_PLANE_RADIUS_MIN: f32 = 0.08;
+const DEPTH_QUERY_SUPPORT_PLANE_RADIUS_MAX: f32 = 0.26;
+const DEPTH_QUERY_SUPPORT_PLANE_HEIGHT_TOLERANCE_SCALE: f32 = 0.45;
+const DEPTH_QUERY_SUPPORT_PLANE_HEIGHT_TOLERANCE_MIN: f32 = 0.015;
+const DEPTH_QUERY_SUPPORT_PLANE_HEIGHT_TOLERANCE_MAX: f32 = 0.05;
+const DEPTH_QUERY_SUPPORT_PLANE_NORMAL_DOT_MIN: f32 = 0.90;
+const DEPTH_QUERY_SUPPORT_PLANE_DEBUG_HALF_EXTENT_MIN: f32 = 0.05;
+const DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM: usize = 5;
+const DEPTH_QUERY_TSDF_SUPPORT_MAX_SAMPLES: usize =
+    DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM * DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM;
+const DEPTH_QUERY_TSDF_SUPPORT_MIN_SAMPLES: usize = 4;
+const DEPTH_QUERY_TSDF_SUPPORT_NORMAL_Y_MIN: f32 = 0.60;
+const DEPTH_QUERY_TSDF_SUPPORT_RADIUS_SCALE: f32 = 1.15;
+const DEPTH_QUERY_TSDF_SUPPORT_RADIUS_MIN: f32 = 0.04;
+const DEPTH_QUERY_TSDF_SUPPORT_RADIUS_MAX: f32 = 0.12;
+const DEPTH_QUERY_TSDF_SUPPORT_EXTENT_PADDING_SCALE: f32 = 0.22;
 const DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN: f32 = 0.82;
 const DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX: f32 = 0.35;
 const DEPTH_PLANE_VERTEX_LINK_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 0.75;
@@ -79,6 +102,7 @@ const DEPTH_PLANE_SUPPORT_OCCUPIED_WEIGHT: u8 = 2;
 const DEPTH_MESH_PLANAR_SIMPLIFY_MIN_AREA_METERS2: f32 = 0.45;
 const DEPTH_MESH_PLANAR_SIMPLIFY_MIN_RECT_AREA_METERS2: f32 = 0.12;
 const DEPTH_MESH_PLANAR_SIMPLIFY_MAX_RECTS_PER_REGION: usize = 24;
+const DEPTH_ENABLE_REDUCED_PLANAR_PATCHES: bool = false;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct VoxelCoord {
@@ -944,15 +968,24 @@ fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: 
         }
 
         let query_changed = process_geometry_queries(&volume, &store, DEPTH_QUERY_BATCH_PER_TICK);
-        let mesh_changed = process_incremental_surface_mesh(
-            &mut volume,
-            &mut worker_state,
-            DEPTH_SURFACE_MESH_CHUNKS_PER_TICK,
-        );
-        let plane_changed = if mesh_changed {
-            rebuild_reduced_planar_patches(&mut volume)
+        let mesh_enabled = store.mesh_enabled();
+        let (mesh_changed, plane_changed) = if mesh_enabled {
+            let mesh_changed = process_incremental_surface_mesh(
+                &mut volume,
+                &mut worker_state,
+                DEPTH_SURFACE_MESH_CHUNKS_PER_TICK,
+            );
+            let plane_changed = update_reduced_planar_patches(&mut volume, mesh_changed);
+            (mesh_changed, plane_changed)
+        } else if !volume.mesh_chunks.is_empty()
+            || !volume.plane_patches.is_empty()
+            || !volume.pending_mesh_dirty_chunks.is_empty()
+            || !volume.pending_mesh_chunk_queue.is_empty()
+        {
+            volume.reset_mesh_state();
+            (true, false)
         } else {
-            false
+            (false, false)
         };
         if applied_update || mesh_changed || plane_changed || query_changed {
             store.publish(volume.snapshot());
@@ -2612,10 +2645,659 @@ fn process_geometry_queries(
     true
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct ScoredQuerySurfaceHit {
     score: f32,
     surface: XrDepthMeshQuerySurfaceHit,
+}
+
+fn query_support_plane_radius(query_radius: f32) -> f32 {
+    (query_radius * DEPTH_QUERY_SUPPORT_PLANE_RADIUS_SCALE).clamp(
+        DEPTH_QUERY_SUPPORT_PLANE_RADIUS_MIN,
+        DEPTH_QUERY_SUPPORT_PLANE_RADIUS_MAX,
+    )
+}
+
+fn query_support_plane_height_tolerance(query_radius: f32) -> f32 {
+    (query_radius * DEPTH_QUERY_SUPPORT_PLANE_HEIGHT_TOLERANCE_SCALE).clamp(
+        DEPTH_QUERY_SUPPORT_PLANE_HEIGHT_TOLERANCE_MIN,
+        DEPTH_QUERY_SUPPORT_PLANE_HEIGHT_TOLERANCE_MAX,
+    )
+}
+
+fn query_tsdf_support_radius(query_radius: f32) -> f32 {
+    (query_radius * DEPTH_QUERY_TSDF_SUPPORT_RADIUS_SCALE).clamp(
+        DEPTH_QUERY_TSDF_SUPPORT_RADIUS_MIN,
+        DEPTH_QUERY_TSDF_SUPPORT_RADIUS_MAX,
+    )
+}
+
+fn query_support_plane_fallback_tangent(normal: Vec3f) -> Vec3f {
+    let primary_axis = if normal.y.abs() < 0.9 {
+        vec3f(0.0, 1.0, 0.0)
+    } else {
+        vec3f(1.0, 0.0, 0.0)
+    };
+    let tangent = Vec3f::cross(primary_axis, normal);
+    if tangent.length() > 1.0e-6 {
+        tangent.normalize()
+    } else {
+        Vec3f::cross(vec3f(0.0, 0.0, 1.0), normal).normalize()
+    }
+}
+
+fn query_support_plane_seed_tangent(normal: Vec3f, surface: XrDepthMeshQuerySurfaceHit) -> Vec3f {
+    let mut best_tangent = None;
+    let mut best_length_sq = 0.0;
+    let edges = [
+        surface.triangle[1] - surface.triangle[0],
+        surface.triangle[2] - surface.triangle[1],
+        surface.triangle[0] - surface.triangle[2],
+    ];
+    for edge in edges {
+        let projected = edge - normal.scale(edge.dot(normal));
+        let length_sq = projected.dot(projected);
+        if length_sq > best_length_sq && length_sq > 1.0e-8 {
+            best_length_sq = length_sq;
+            best_tangent = Some(projected.scale(length_sq.sqrt().recip()));
+        }
+    }
+    best_tangent.unwrap_or_else(|| query_support_plane_fallback_tangent(normal))
+}
+
+fn solve_linear3(mut a: [[f32; 3]; 3], mut b: [f32; 3]) -> Option<[f32; 3]> {
+    for pivot_index in 0..3 {
+        let mut pivot_row = pivot_index;
+        let mut pivot_abs = a[pivot_index][pivot_index].abs();
+        for row in pivot_index + 1..3 {
+            let candidate_abs = a[row][pivot_index].abs();
+            if candidate_abs > pivot_abs {
+                pivot_abs = candidate_abs;
+                pivot_row = row;
+            }
+        }
+        if pivot_abs <= 1.0e-8 {
+            return None;
+        }
+        if pivot_row != pivot_index {
+            a.swap(pivot_row, pivot_index);
+            b.swap(pivot_row, pivot_index);
+        }
+
+        let pivot_inv = a[pivot_index][pivot_index].recip();
+        for column in pivot_index..3 {
+            a[pivot_index][column] *= pivot_inv;
+        }
+        b[pivot_index] *= pivot_inv;
+
+        for row in 0..3 {
+            if row == pivot_index {
+                continue;
+            }
+            let factor = a[row][pivot_index];
+            if factor.abs() <= 1.0e-8 {
+                continue;
+            }
+            for column in pivot_index..3 {
+                a[row][column] -= factor * a[pivot_index][column];
+            }
+            b[row] -= factor * b[pivot_index];
+        }
+    }
+    Some(b)
+}
+
+fn visit_support_plane_triangles(
+    volume: &DepthMeshVolume,
+    surface: XrDepthMeshQuerySurfaceHit,
+    query_radius: f32,
+    mut visitor: impl FnMut([Vec3f; 3], Vec3f, f32, Vec3f),
+) {
+    let gather_radius = query_support_plane_radius(query_radius);
+    let gather_radius_sq = gather_radius * gather_radius;
+    let height_tolerance = query_support_plane_height_tolerance(query_radius);
+    let seed_normal = surface.normal.normalize();
+    let point_min = surface.point;
+    let point_max = surface.point;
+
+    for chunk in &volume.mesh_chunks {
+        if aabb_aabb_distance_sq(point_min, point_max, chunk.bounds_min, chunk.bounds_max)
+            > gather_radius_sq
+        {
+            continue;
+        }
+        for triangle in chunk.indices.chunks_exact(3) {
+            let triangle = [
+                chunk.vertices[triangle[0] as usize],
+                chunk.vertices[triangle[1] as usize],
+                chunk.vertices[triangle[2] as usize],
+            ];
+            let raw_normal = Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]);
+            let raw_length = raw_normal.length();
+            if raw_length <= 1.0e-6 {
+                continue;
+            }
+
+            let mut normal = raw_normal.scale(raw_length.recip());
+            if normal.dot(seed_normal) < 0.0 {
+                normal = normal.scale(-1.0);
+            }
+            if normal.dot(seed_normal) < DEPTH_QUERY_SUPPORT_PLANE_NORMAL_DOT_MIN
+                || normal.y < DEPTH_QUERY_SUPPORT_NORMAL_Y_MIN
+            {
+                continue;
+            }
+
+            let closest =
+                closest_point_on_triangle(surface.point, triangle[0], triangle[1], triangle[2]);
+            let delta = closest - surface.point;
+            if delta.dot(delta) > gather_radius_sq {
+                continue;
+            }
+
+            let max_plane_offset = triangle
+                .iter()
+                .map(|vertex| (seed_normal.dot(*vertex - surface.point)).abs())
+                .fold(0.0f32, f32::max);
+            if max_plane_offset > height_tolerance {
+                continue;
+            }
+
+            let centroid = (triangle[0] + triangle[1] + triangle[2]).scale(1.0 / 3.0);
+            visitor(triangle, normal, raw_length * 0.5, centroid);
+        }
+    }
+}
+
+fn query_support_plane_fingerprint(plane: &XrDepthMeshQuerySupportPlane) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    [
+        quantize_f32(plane.normal.x, 0.02),
+        quantize_f32(plane.normal.y, 0.02),
+        quantize_f32(plane.normal.z, 0.02),
+        quantize_f32(plane.normal.dot(plane.point), 0.01),
+    ]
+    .hash(&mut hasher);
+    hasher.finish()
+}
+
+fn make_query_halfspace_collider(plane: XrDepthMeshQuerySupportPlane) -> XrDepthMeshQueryCollider {
+    XrDepthMeshQueryCollider {
+        fingerprint: query_support_plane_fingerprint(&plane),
+        geometry: XrDepthMeshQueryColliderGeometry::HalfSpace(plane),
+    }
+}
+
+fn build_query_surface_halfspace_from_patch(
+    surface: XrDepthMeshQuerySurfaceHit,
+    query_radius: f32,
+) -> XrDepthMeshQuerySupportPlane {
+    let tangent_raw = surface.patch[1] - surface.patch[0];
+    let bitangent_raw = surface.patch[3] - surface.patch[0];
+    let tangent = if tangent_raw.length() > 1.0e-6 {
+        tangent_raw.normalize()
+    } else {
+        query_support_plane_seed_tangent(surface.normal, surface)
+    };
+    let bitangent = if bitangent_raw.length() > 1.0e-6 {
+        bitangent_raw.normalize()
+    } else {
+        Vec3f::cross(surface.normal, tangent).normalize()
+    };
+    let debug_half_extent = query_support_plane_radius(query_radius);
+    XrDepthMeshQuerySupportPlane {
+        point: closest_point_on_plane_patch(surface.point, &XrDepthPlanePatch {
+            generation: 0,
+            kind: XrDepthPlaneKind::Unknown,
+            center: (surface.patch[0] + surface.patch[1] + surface.patch[2] + surface.patch[3])
+                .scale(0.25),
+            normal: surface.normal,
+            tangent,
+            bitangent,
+            half_extent_tangent: (surface.patch[1] - surface.patch[0]).length() * 0.5,
+            half_extent_bitangent: (surface.patch[3] - surface.patch[0]).length() * 0.5,
+            area: 0.0,
+            support_triangles: 0,
+        }),
+        normal: surface.normal,
+        tangent,
+        bitangent,
+        half_extent_tangent: debug_half_extent,
+        half_extent_bitangent: debug_half_extent,
+    }
+}
+
+fn build_query_surface_halfspace_from_triangles(
+    volume: &DepthMeshVolume,
+    surface: XrDepthMeshQuerySurfaceHit,
+    query_radius: f32,
+) -> XrDepthMeshQuerySupportPlane {
+    let mut sum_w = 0.0;
+    let mut weighted_normal = vec3f(0.0, 0.0, 0.0);
+    let mut sum_xx = 0.0;
+    let mut sum_xz = 0.0;
+    let mut sum_x = 0.0;
+    let mut sum_zz = 0.0;
+    let mut sum_z = 0.0;
+    let mut sum_xy = 0.0;
+    let mut sum_zy = 0.0;
+    let mut sum_y = 0.0;
+
+    visit_support_plane_triangles(volume, surface, query_radius, |triangle, normal, area, _centroid| {
+        weighted_normal = weighted_normal + normal.scale(area);
+        let vertex_weight = area * (1.0 / 3.0);
+        for vertex in triangle {
+            let local = vertex - surface.point;
+            let x = local.x;
+            let z = local.z;
+            let y = local.y;
+            sum_w += vertex_weight;
+            sum_xx += vertex_weight * x * x;
+            sum_xz += vertex_weight * x * z;
+            sum_x += vertex_weight * x;
+            sum_zz += vertex_weight * z * z;
+            sum_z += vertex_weight * z;
+            sum_xy += vertex_weight * x * y;
+            sum_zy += vertex_weight * z * y;
+            sum_y += vertex_weight * y;
+        }
+    });
+
+    let avg_normal = if weighted_normal.length() > 1.0e-6 {
+        weighted_normal.normalize()
+    } else {
+        surface.normal.normalize()
+    };
+    let mut normal = solve_linear3(
+        [
+            [sum_xx, sum_xz, sum_x],
+            [sum_xz, sum_zz, sum_z],
+            [sum_x, sum_z, sum_w],
+        ],
+        [sum_xy, sum_zy, sum_y],
+    )
+    .map(|solution| vec3f(-solution[0], 1.0, -solution[1]).normalize())
+    .unwrap_or(avg_normal);
+    if normal.dot(avg_normal) < 0.0 {
+        normal = normal.scale(-1.0);
+    }
+    normal = (normal + avg_normal.scale(0.75)).normalize();
+    let up_blend = ((avg_normal.y - DEPTH_QUERY_SUPPORT_NORMAL_Y_MIN)
+        / (1.0 - DEPTH_QUERY_SUPPORT_NORMAL_Y_MIN))
+        .clamp(0.0, 1.0);
+    normal = (normal + vec3f(0.0, 1.0, 0.0).scale(up_blend * 1.25)).normalize();
+
+    let tangent = query_support_plane_seed_tangent(normal, surface);
+    let bitangent = Vec3f::cross(normal, tangent).normalize();
+    let debug_half_extent_max = query_support_plane_radius(query_radius);
+    let debug_half_extent_min =
+        (query_radius * 1.1).max(DEPTH_QUERY_SUPPORT_PLANE_DEBUG_HALF_EXTENT_MIN);
+    let mut max_plane_offset = normal.dot(surface.point);
+    let mut min_u = f32::INFINITY;
+    let mut max_u = -f32::INFINITY;
+    let mut min_v = f32::INFINITY;
+    let mut max_v = -f32::INFINITY;
+
+    visit_support_plane_triangles(volume, surface, query_radius, |triangle, _normal, _area, _centroid| {
+        for vertex in triangle {
+            max_plane_offset = max_plane_offset.max(normal.dot(vertex));
+            let offset = vertex - surface.point;
+            let u = offset.dot(tangent);
+            let v = offset.dot(bitangent);
+            min_u = min_u.min(u);
+            max_u = max_u.max(u);
+            min_v = min_v.min(v);
+            max_v = max_v.max(v);
+        }
+    });
+    let point = surface.point - normal.scale(normal.dot(surface.point) - max_plane_offset);
+
+    let half_extent_tangent = if min_u.is_finite() && max_u.is_finite() {
+        ((max_u - min_u) * 0.5 + query_radius * 0.5)
+            .clamp(debug_half_extent_min, debug_half_extent_max)
+    } else {
+        debug_half_extent_min
+    };
+    let half_extent_bitangent = if min_v.is_finite() && max_v.is_finite() {
+        ((max_v - min_v) * 0.5 + query_radius * 0.5)
+            .clamp(debug_half_extent_min, debug_half_extent_max)
+    } else {
+        debug_half_extent_min
+    };
+
+    XrDepthMeshQuerySupportPlane {
+        point,
+        normal,
+        tangent,
+        bitangent,
+        half_extent_tangent,
+        half_extent_bitangent,
+    }
+}
+
+fn build_query_surface_collider(
+    volume: &DepthMeshVolume,
+    surface: XrDepthMeshQuerySurfaceHit,
+    query_radius: f32,
+) -> XrDepthMeshQueryCollider {
+    let plane = if surface.from_planar_patch {
+        build_query_surface_halfspace_from_patch(surface, query_radius)
+    } else {
+        build_query_surface_halfspace_from_triangles(volume, surface, query_radius)
+    };
+    make_query_halfspace_collider(plane)
+}
+
+fn build_query_surface_result(
+    volume: &DepthMeshVolume,
+    surface: XrDepthMeshQuerySurfaceHit,
+    query_radius: f32,
+) -> XrDepthMeshQueryResolvedSurface {
+    XrDepthMeshQueryResolvedSurface {
+        surface,
+        collider: build_query_surface_collider(volume, surface, query_radius),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DepthGridSupportSample {
+    point: Vec3f,
+    radial_weight: f32,
+}
+
+fn voxel_center_axis(voxel_size: f32, coord: i32) -> f32 {
+    (coord as f32 + 0.5) * voxel_size
+}
+
+fn query_grid_bilinear_distance_at_y(
+    volume: &DepthMeshVolume,
+    sample_x: f32,
+    sample_z: f32,
+    y_coord: i32,
+) -> Option<f32> {
+    let voxel_size = volume.voxel_size_meters;
+    let grid_x = sample_x / voxel_size - 0.5;
+    let grid_z = sample_z / voxel_size - 0.5;
+    let x0 = grid_x.floor() as i32;
+    let z0 = grid_z.floor() as i32;
+    let tx = grid_x - x0 as f32;
+    let tz = grid_z - z0 as f32;
+
+    let v00 = volume
+        .mesh_grid
+        .normalized_distance(VoxelCoord::new(x0, y_coord, z0))?;
+    let v10 = volume
+        .mesh_grid
+        .normalized_distance(VoxelCoord::new(x0 + 1, y_coord, z0))?;
+    let v01 = volume
+        .mesh_grid
+        .normalized_distance(VoxelCoord::new(x0, y_coord, z0 + 1))?;
+    let v11 = volume
+        .mesh_grid
+        .normalized_distance(VoxelCoord::new(x0 + 1, y_coord, z0 + 1))?;
+
+    let vx0 = v00 + (v10 - v00) * tx;
+    let vx1 = v01 + (v11 - v01) * tx;
+    Some(vx0 + (vx1 - vx0) * tz)
+}
+
+fn query_depth_grid_first_support_height(
+    volume: &DepthMeshVolume,
+    sample_x: f32,
+    sample_z: f32,
+    top_y: f32,
+    bottom_y: f32,
+) -> Option<f32> {
+    let top_coord = volume
+        .mesh_grid
+        .world_to_voxel_coord(vec3f(sample_x, top_y, sample_z))
+        .y;
+    let bottom_coord = volume
+        .mesh_grid
+        .world_to_voxel_coord(vec3f(sample_x, bottom_y, sample_z))
+        .y;
+    if top_coord <= bottom_coord {
+        return None;
+    }
+
+    for y_coord in (bottom_coord + 1..=top_coord).rev() {
+        let Some(above) = query_grid_bilinear_distance_at_y(volume, sample_x, sample_z, y_coord)
+        else {
+            continue;
+        };
+        let Some(below) =
+            query_grid_bilinear_distance_at_y(volume, sample_x, sample_z, y_coord - 1)
+        else {
+            continue;
+        };
+        if above <= 0.0 || below > 0.0 {
+            continue;
+        }
+
+        let denom = above - below;
+        let blend = if denom.abs() > 1.0e-6 {
+            (above / denom).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        let y_above = voxel_center_axis(volume.voxel_size_meters, y_coord);
+        let y_below = voxel_center_axis(volume.voxel_size_meters, y_coord - 1);
+        return Some(y_above + (y_below - y_above) * blend);
+    }
+
+    None
+}
+
+fn query_support_plane_quad(plane: XrDepthMeshQuerySupportPlane) -> [Vec3f; 4] {
+    let tangent = plane.tangent.scale(plane.half_extent_tangent);
+    let bitangent = plane.bitangent.scale(plane.half_extent_bitangent);
+    [
+        plane.point - tangent - bitangent,
+        plane.point + tangent - bitangent,
+        plane.point + tangent + bitangent,
+        plane.point - tangent + bitangent,
+    ]
+}
+
+fn evaluate_depth_grid_support_query(
+    volume: &DepthMeshVolume,
+    query: XrDepthMeshQuery,
+    version: u64,
+) -> Option<XrDepthMeshQueryHit> {
+    const GRID_LAST: f32 = (DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM - 1) as f32;
+
+    let search_center = query.center;
+    let travel_distance = (query.predicted_center - query.center).length();
+    let support_radius = query_tsdf_support_radius(query.radius);
+    let top_y = query.center.y.max(query.predicted_center.y)
+        + query.radius
+        + volume.voxel_size_meters;
+    let bottom_y = query.center.y.min(query.predicted_center.y)
+        - (query.radius + query.max_distance + travel_distance + DEPTH_TSD_DISTANCE_METERS);
+    let center_support_y = query_depth_grid_first_support_height(
+        volume,
+        search_center.x,
+        search_center.z,
+        top_y,
+        bottom_y,
+    )?;
+
+    let mut samples = [None; DEPTH_QUERY_TSDF_SUPPORT_MAX_SAMPLES];
+    let mut sample_count = 0usize;
+    let mut max_height = f32::NEG_INFINITY;
+
+    for row in 0..DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM {
+        for column in 0..DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM {
+            let u = if GRID_LAST > 0.0 {
+                column as f32 / GRID_LAST * 2.0 - 1.0
+            } else {
+                0.0
+            };
+            let v = if GRID_LAST > 0.0 {
+                row as f32 / GRID_LAST * 2.0 - 1.0
+            } else {
+                0.0
+            };
+            let sample_x = search_center.x + u * support_radius;
+            let sample_z = search_center.z + v * support_radius;
+            let Some(sample_y) =
+                query_depth_grid_first_support_height(volume, sample_x, sample_z, top_y, bottom_y)
+            else {
+                continue;
+            };
+            let radial_weight = 1.0 / (1.0 + (u * u + v * v) * 1.5);
+            let point = vec3f(sample_x, sample_y, sample_z);
+            max_height = max_height.max(sample_y);
+            samples[sample_count] = Some(DepthGridSupportSample {
+                point,
+                radial_weight,
+            });
+            sample_count += 1;
+        }
+    }
+
+    if sample_count < DEPTH_QUERY_TSDF_SUPPORT_MIN_SAMPLES {
+        return None;
+    }
+
+    let mut height_tolerance =
+        query_support_plane_height_tolerance(query.radius).max(volume.voxel_size_meters * 0.25);
+    let mut selected_count = 0usize;
+    for _ in 0..3 {
+        selected_count = samples[..sample_count]
+            .iter()
+            .filter_map(|sample| *sample)
+            .filter(|sample| max_height - sample.point.y <= height_tolerance)
+            .count();
+        if selected_count >= DEPTH_QUERY_TSDF_SUPPORT_MIN_SAMPLES {
+            break;
+        }
+        height_tolerance += volume.voxel_size_meters * 0.35;
+    }
+    if selected_count < DEPTH_QUERY_TSDF_SUPPORT_MIN_SAMPLES {
+        height_tolerance = f32::INFINITY;
+        selected_count = sample_count;
+    }
+
+    let mut sum_w = 0.0;
+    let mut sum_xx = 0.0;
+    let mut sum_xz = 0.0;
+    let mut sum_x = 0.0;
+    let mut sum_zz = 0.0;
+    let mut sum_z = 0.0;
+    let mut sum_xy = 0.0;
+    let mut sum_zy = 0.0;
+    let mut sum_y = 0.0;
+
+    for sample in samples[..sample_count].iter().filter_map(|sample| *sample) {
+        if max_height - sample.point.y > height_tolerance {
+            continue;
+        }
+        let local = sample.point - search_center;
+        let weight = sample.radial_weight;
+        sum_w += weight;
+        sum_xx += weight * local.x * local.x;
+        sum_xz += weight * local.x * local.z;
+        sum_x += weight * local.x;
+        sum_zz += weight * local.z * local.z;
+        sum_z += weight * local.z;
+        sum_xy += weight * local.x * local.y;
+        sum_zy += weight * local.z * local.y;
+        sum_y += weight * local.y;
+    }
+
+    if selected_count < 3 || sum_w <= 1.0e-5 {
+        return None;
+    }
+
+    let mut normal = solve_linear3(
+        [
+            [sum_xx, sum_xz, sum_x],
+            [sum_xz, sum_zz, sum_z],
+            [sum_x, sum_z, sum_w],
+        ],
+        [sum_xy, sum_zy, sum_y],
+    )
+    .map(|solution| vec3f(-solution[0], 1.0, -solution[1]).normalize())
+    .unwrap_or(vec3f(0.0, 1.0, 0.0));
+    if normal.y < 0.0 {
+        normal = normal.scale(-1.0);
+    }
+    normal = (normal + vec3f(0.0, 1.0, 0.0).scale(0.9)).normalize();
+    if normal.y < DEPTH_QUERY_TSDF_SUPPORT_NORMAL_Y_MIN {
+        return None;
+    }
+
+    let tangent = query_support_plane_fallback_tangent(normal);
+    let bitangent = Vec3f::cross(normal, tangent).normalize();
+    let mut plane_offset = f32::NEG_INFINITY;
+    let mut min_u = f32::INFINITY;
+    let mut max_u = f32::NEG_INFINITY;
+    let mut min_v = f32::INFINITY;
+    let mut max_v = f32::NEG_INFINITY;
+
+    for sample in samples[..sample_count].iter().filter_map(|sample| *sample) {
+        if max_height - sample.point.y > height_tolerance {
+            continue;
+        }
+        plane_offset = plane_offset.max(normal.dot(sample.point));
+        let offset = sample.point - search_center;
+        let u = offset.dot(tangent);
+        let v = offset.dot(bitangent);
+        min_u = min_u.min(u);
+        max_u = max_u.max(u);
+        min_v = min_v.min(v);
+        max_v = max_v.max(v);
+    }
+
+    let point = search_center - normal.scale(normal.dot(search_center) - plane_offset);
+    let extent_padding = (query.radius * DEPTH_QUERY_TSDF_SUPPORT_EXTENT_PADDING_SCALE)
+        .max(volume.voxel_size_meters * 0.45);
+    let debug_half_extent_max = support_radius;
+    let debug_half_extent_min = (query.radius * 0.9)
+        .max(volume.voxel_size_meters * 0.35)
+        .min(debug_half_extent_max);
+    let half_extent_tangent = if min_u.is_finite() && max_u.is_finite() {
+        ((max_u - min_u) * 0.5 + extent_padding)
+            .clamp(debug_half_extent_min, debug_half_extent_max)
+    } else {
+        debug_half_extent_min
+    };
+    let half_extent_bitangent = if min_v.is_finite() && max_v.is_finite() {
+        ((max_v - min_v) * 0.5 + extent_padding)
+            .clamp(debug_half_extent_min, debug_half_extent_max)
+    } else {
+        debug_half_extent_min
+    };
+
+    let plane = XrDepthMeshQuerySupportPlane {
+        point,
+        normal,
+        tangent,
+        bitangent,
+        half_extent_tangent,
+        half_extent_bitangent,
+    };
+    let patch = query_support_plane_quad(plane);
+    let center_support_point = vec3f(search_center.x, center_support_y, search_center.z);
+    let support_point =
+        center_support_point - normal.scale(normal.dot(center_support_point) - plane_offset);
+    let collider = make_query_halfspace_collider(plane);
+
+    Some(XrDepthMeshQueryHit {
+        key: query.key,
+        version,
+        mesh_generation: volume.mesh_generation,
+        distance: (support_point - query.center).length(),
+        point: support_point,
+        normal,
+        from_planar_patch: true,
+        triangle: [patch[0], patch[1], patch[2]],
+        patch,
+        chunk_key: ChunkKey::new(0, 0, 0),
+        collider,
+        additional_hits: Vec::new(),
+    })
 }
 
 fn evaluate_geometry_query(
@@ -2623,6 +3305,16 @@ fn evaluate_geometry_query(
     query: XrDepthMeshQuery,
     version: u64,
 ) -> XrDepthMeshQueryResult {
+    if !volume.mesh_grid.is_empty() {
+        return evaluate_depth_grid_support_query(volume, query, version)
+            .map(XrDepthMeshQueryResult::Hit)
+            .unwrap_or(XrDepthMeshQueryResult::Miss {
+                key: query.key,
+                version,
+                mesh_generation: volume.mesh_generation,
+            });
+    }
+
     let travel = query.predicted_center - query.center;
     let travel_distance = travel.length();
     let motion_dir = if travel_distance > 1.0e-4 {
@@ -2642,9 +3334,7 @@ fn evaluate_geometry_query(
         query.center.y.max(query.predicted_center.y),
         query.center.z.max(query.predicted_center.z),
     );
-    let mut best_any_hit: Option<ScoredQuerySurfaceHit> = None;
-    let mut best_support_hit: Option<ScoredQuerySurfaceHit> = None;
-    let mut best_lateral_hit: Option<ScoredQuerySurfaceHit> = None;
+    let mut best_hits = [None; DEPTH_QUERY_MAX_SURFACES_PER_QUERY];
     let mid_point = query.center + travel.scale(0.5);
     let sweep_radius = query.radius + query.max_distance;
     let sweep_radius_sq = sweep_radius * sweep_radius;
@@ -2739,11 +3429,10 @@ fn evaluate_geometry_query(
                 chunk_key: ChunkKey::new(0, 0, 0),
             };
             consider_query_surface_candidate(
-                &mut best_any_hit,
-                &mut best_support_hit,
-                &mut best_lateral_hit,
+                &mut best_hits,
                 best_sample_score,
                 surface,
+                query.radius,
             );
         }
     }
@@ -2845,31 +3534,25 @@ fn evaluate_geometry_query(
                 chunk_key: chunk.chunk_key,
             };
             consider_query_surface_candidate(
-                &mut best_any_hit,
-                &mut best_support_hit,
-                &mut best_lateral_hit,
+                &mut best_hits,
                 best_sample_score,
                 surface,
+                query.radius,
             );
         }
     }
 
-    let primary_hit = best_support_hit.or(best_any_hit);
-    if let Some(primary_hit) = primary_hit {
-        let mut additional_hits =
-            Vec::with_capacity(DEPTH_QUERY_MAX_SURFACES_PER_QUERY.saturating_sub(1));
-        if DEPTH_QUERY_MAX_SURFACES_PER_QUERY > 1 {
-            if let Some(lateral_hit) = best_lateral_hit {
-                if query_surface_hits_are_distinct(
-                    &primary_hit.surface,
-                    &lateral_hit.surface,
-                    query.radius,
-                ) {
-                    additional_hits.push(lateral_hit.surface);
-                }
-            }
+    if let Some(primary_hit) = best_hits[0] {
+        if query_surface_priority(primary_hit.surface) != 0 {
+            return XrDepthMeshQueryResult::Miss {
+                key: query.key,
+                version,
+                mesh_generation: volume.mesh_generation,
+            };
         }
-        let primary_surface = primary_hit.surface;
+        let primary_resolved =
+            build_query_surface_result(volume, primary_hit.surface, query.radius);
+        let primary_surface = primary_resolved.surface;
         XrDepthMeshQueryResult::Hit(XrDepthMeshQueryHit {
             key: query.key,
             version,
@@ -2881,7 +3564,8 @@ fn evaluate_geometry_query(
             triangle: primary_surface.triangle,
             patch: primary_surface.patch,
             chunk_key: primary_surface.chunk_key,
-            additional_hits,
+            collider: primary_resolved.collider,
+            additional_hits: Vec::new(),
         })
     } else {
         XrDepthMeshQueryResult::Miss {
@@ -2893,33 +3577,135 @@ fn evaluate_geometry_query(
 }
 
 fn consider_query_surface_candidate(
-    best_any_hit: &mut Option<ScoredQuerySurfaceHit>,
-    best_support_hit: &mut Option<ScoredQuerySurfaceHit>,
-    best_lateral_hit: &mut Option<ScoredQuerySurfaceHit>,
+    best_hits: &mut [Option<ScoredQuerySurfaceHit>; DEPTH_QUERY_MAX_SURFACES_PER_QUERY],
     score: f32,
     surface: XrDepthMeshQuerySurfaceHit,
+    query_radius: f32,
 ) {
-    let scored = ScoredQuerySurfaceHit { score, surface };
-    update_best_query_surface(best_any_hit, scored.clone());
-    if scored.surface.normal.y >= DEPTH_QUERY_SUPPORT_NORMAL_Y_MIN {
-        update_best_query_surface(best_support_hit, scored.clone());
+    let candidate = ScoredQuerySurfaceHit { score, surface };
+
+    for index in 0..best_hits.len() {
+        if let Some(current) = best_hits[index] {
+            let distinct_radius =
+                query_surface_distinct_radius(query_radius, &current.surface, &candidate.surface);
+            if !query_surface_hits_are_distinct(
+                &current.surface,
+                &candidate.surface,
+                distinct_radius,
+            ) {
+                if scored_query_surface_is_better(&candidate, &current) {
+                    remove_best_query_surface(best_hits, index);
+                } else {
+                    return;
+                }
+                break;
+            }
+        }
     }
-    if scored.surface.normal.y.abs() <= DEPTH_QUERY_LATERAL_NORMAL_Y_MAX {
-        update_best_query_surface(best_lateral_hit, scored);
+
+    let mut insert_at = best_hits.len();
+    for index in 0..best_hits.len() {
+        match best_hits[index] {
+            Some(current) => {
+                if scored_query_surface_is_better(&candidate, &current) {
+                    insert_at = index;
+                    break;
+                }
+            }
+            None => {
+                insert_at = index;
+                break;
+            }
+        }
+    }
+
+    if insert_at >= best_hits.len() {
+        return;
+    }
+
+    for index in (insert_at + 1..best_hits.len()).rev() {
+        best_hits[index] = best_hits[index - 1];
+    }
+    best_hits[insert_at] = Some(candidate);
+}
+
+fn query_surface_distinct_radius(
+    query_radius: f32,
+    a: &XrDepthMeshQuerySurfaceHit,
+    b: &XrDepthMeshQuerySurfaceHit,
+) -> f32 {
+    let both_support = query_surface_priority(*a) == 0 && query_surface_priority(*b) == 0;
+    if both_support {
+        (query_radius * DEPTH_QUERY_SUPPORT_DISTINCT_RADIUS_SCALE)
+            .max(DEPTH_QUERY_SUPPORT_DISTINCT_RADIUS_MIN)
+    } else {
+        (query_radius * DEPTH_QUERY_DISTINCT_RADIUS_SCALE).max(DEPTH_QUERY_DISTINCT_RADIUS_MIN)
     }
 }
 
-fn update_best_query_surface(
-    slot: &mut Option<ScoredQuerySurfaceHit>,
-    candidate: ScoredQuerySurfaceHit,
+fn remove_best_query_surface(
+    best_hits: &mut [Option<ScoredQuerySurfaceHit>; DEPTH_QUERY_MAX_SURFACES_PER_QUERY],
+    index: usize,
 ) {
-    let should_replace = slot
-        .as_ref()
-        .map(|current| candidate.score < current.score)
-        .unwrap_or(true);
-    if should_replace {
-        *slot = Some(candidate);
+    for slot in index..best_hits.len().saturating_sub(1) {
+        best_hits[slot] = best_hits[slot + 1];
     }
+    if let Some(last) = best_hits.last_mut() {
+        *last = None;
+    }
+}
+
+fn scored_query_surface_is_better(
+    candidate: &ScoredQuerySurfaceHit,
+    current: &ScoredQuerySurfaceHit,
+) -> bool {
+    query_surface_priority(candidate.surface) < query_surface_priority(current.surface)
+        || (query_surface_priority(candidate.surface) == query_surface_priority(current.surface)
+            && candidate.score < current.score)
+}
+
+fn query_surface_priority(surface: XrDepthMeshQuerySurfaceHit) -> u8 {
+    if surface.normal.y >= DEPTH_QUERY_SUPPORT_NORMAL_Y_MIN {
+        0
+    } else if surface.normal.y.abs() <= DEPTH_QUERY_LATERAL_NORMAL_Y_MAX {
+        1
+    } else {
+        2
+    }
+}
+
+fn query_surface_geometry_fingerprint(surface: &XrDepthMeshQuerySurfaceHit) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    surface.from_planar_patch.hash(&mut hasher);
+    if surface.from_planar_patch {
+        let mut vertices = surface.patch.map(|vertex| {
+            [
+                quantize_f32(vertex.x, 0.01),
+                quantize_f32(vertex.y, 0.01),
+                quantize_f32(vertex.z, 0.01),
+            ]
+        });
+        vertices.sort_unstable();
+        vertices.hash(&mut hasher);
+    } else {
+        let mut vertices = surface.triangle.map(|vertex| {
+            [
+                quantize_f32(vertex.x, 0.01),
+                quantize_f32(vertex.y, 0.01),
+                quantize_f32(vertex.z, 0.01),
+            ]
+        });
+        vertices.sort_unstable();
+        vertices.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn query_surface_same_geometry(
+    a: &XrDepthMeshQuerySurfaceHit,
+    b: &XrDepthMeshQuerySurfaceHit,
+) -> bool {
+    query_surface_geometry_fingerprint(a) == query_surface_geometry_fingerprint(b)
 }
 
 fn query_surface_hits_are_distinct(
@@ -2927,10 +3713,32 @@ fn query_surface_hits_are_distinct(
     b: &XrDepthMeshQuerySurfaceHit,
     radius: f32,
 ) -> bool {
+    if query_surface_same_geometry(a, b) {
+        return false;
+    }
+    if query_surface_priority(*a) == 0 && query_surface_priority(*b) == 0 {
+        return true;
+    }
     if a.normal.dot(b.normal).abs() < 0.85 {
         return true;
     }
     (a.point - b.point).length() > radius.max(0.02)
+}
+
+fn update_reduced_planar_patches(volume: &mut DepthMeshVolume, mesh_changed: bool) -> bool {
+    if DEPTH_ENABLE_REDUCED_PLANAR_PATCHES {
+        if mesh_changed {
+            rebuild_reduced_planar_patches(volume)
+        } else {
+            false
+        }
+    } else if !volume.plane_patches.is_empty() {
+        volume.plane_patches.clear();
+        volume.plane_generation = volume.plane_generation.saturating_add(1);
+        true
+    } else {
+        false
+    }
 }
 
 fn closest_point_on_plane_patch(point: Vec3f, patch: &XrDepthPlanePatch) -> Vec3f {
@@ -3058,6 +3866,12 @@ fn closest_point_on_triangle(point: Vec3f, a: Vec3f, b: Vec3f, c: Vec3f) -> Vec3
 }
 
 fn simplify_surface_mesh_planar_regions(mesh: SurfaceMesh32) -> ReducedSurfaceMesh {
+    if !DEPTH_ENABLE_REDUCED_PLANAR_PATCHES {
+        return ReducedSurfaceMesh {
+            mesh,
+            planar_patches: Vec::new(),
+        };
+    }
     let regions =
         simplify_plane_regions(collect_classified_plane_triangles_from_surface_mesh(&mesh));
     if regions.is_empty() {
@@ -3732,25 +4546,81 @@ mod tests {
     }
 
     fn make_triangle_chunk(triangle: [Vec3f; 3]) -> XrDepthMeshChunk {
-        let normal = Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]).normalize();
-        let mut bounds_min = triangle[0];
-        let mut bounds_max = triangle[0];
-        for vertex in &triangle[1..] {
-            bounds_min = Vec3f::min_componentwise(bounds_min, *vertex);
-            bounds_max = Vec3f::max_componentwise(bounds_max, *vertex);
+        make_triangle_chunk_with_key(ChunkKey::new(0, 0, 0), &[triangle], 1)
+    }
+
+    fn make_triangle_chunk_with_key(
+        chunk_key: ChunkKey,
+        triangles: &[[Vec3f; 3]],
+        fingerprint: u64,
+    ) -> XrDepthMeshChunk {
+        let mut vertices = Vec::with_capacity(triangles.len() * 3);
+        let mut normals = Vec::with_capacity(triangles.len() * 3);
+        let mut indices = Vec::with_capacity(triangles.len() * 3);
+        let mut bounds_min = triangles[0][0];
+        let mut bounds_max = triangles[0][0];
+        for triangle in triangles {
+            let normal = Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
+                .normalize();
+            let base = vertices.len() as u32;
+            vertices.extend_from_slice(triangle);
+            normals.extend_from_slice(&[normal; 3]);
+            indices.extend_from_slice(&[base, base + 1, base + 2]);
+            for vertex in triangle {
+                bounds_min = Vec3f::min_componentwise(bounds_min, *vertex);
+                bounds_max = Vec3f::max_componentwise(bounds_max, *vertex);
+            }
         }
 
         XrDepthMeshChunk {
             generation: 1,
-            chunk_key: ChunkKey::new(0, 0, 0),
-            fingerprint: 1,
+            chunk_key,
+            fingerprint,
             bounds_min,
             bounds_max,
-            vertices: triangle.to_vec(),
-            normals: vec![normal; 3],
-            indices: vec![0, 1, 2],
+            vertices,
+            normals,
+            indices,
             planar_patches: Vec::new(),
         }
+    }
+
+    fn make_bulged_plane_chunk_with_key(
+        chunk_key: ChunkKey,
+        grid: usize,
+        size: f32,
+        bulge: f32,
+        fingerprint: u64,
+    ) -> XrDepthMeshChunk {
+        let grid = grid.max(2);
+        let step = size / (grid.saturating_sub(1) as f32);
+        let half = size * 0.5;
+        let mut triangles = Vec::with_capacity((grid - 1) * (grid - 1) * 2);
+        let mut points = vec![vec3f(0.0, 0.0, 0.0); grid * grid];
+
+        for z in 0..grid {
+            for x in 0..grid {
+                let px = -half + x as f32 * step;
+                let pz = -half + z as f32 * step;
+                let radial =
+                    ((px / half).powi(2) + (pz / half).powi(2)).clamp(0.0, 1.0);
+                let py = bulge * (1.0 - radial);
+                points[z * grid + x] = vec3f(px, py, pz);
+            }
+        }
+
+        for z in 0..grid - 1 {
+            for x in 0..grid - 1 {
+                let p00 = points[z * grid + x];
+                let p10 = points[z * grid + x + 1];
+                let p01 = points[(z + 1) * grid + x];
+                let p11 = points[(z + 1) * grid + x + 1];
+                triangles.push([p00, p10, p01]);
+                triangles.push([p10, p11, p01]);
+            }
+        }
+
+        make_triangle_chunk_with_key(chunk_key, &triangles, fingerprint)
     }
 
     fn make_surface_mesh(quads: &[[Vec3f; 4]]) -> SurfaceMesh32 {
@@ -3786,8 +4656,53 @@ mod tests {
         dense
     }
 
+    fn fill_volume_signed_distance_field(
+        volume: &mut DepthMeshVolume,
+        min_coord: VoxelCoord,
+        max_coord: VoxelCoord,
+        signed_distance: impl Fn(Vec3f) -> f32,
+    ) {
+        for z in min_coord.z..=max_coord.z {
+            for y in min_coord.y..=max_coord.y {
+                for x in min_coord.x..=max_coord.x {
+                    let coord = VoxelCoord::new(x, y, z);
+                    let world = volume.mesh_grid.voxel_center_world(coord);
+                    let normalized =
+                        (signed_distance(world) / DEPTH_TSD_DISTANCE_METERS).clamp(-1.0, 1.0);
+                    volume.mesh_grid.overwrite_normalized_distance(
+                        coord,
+                        normalized,
+                        volume.generation.max(1),
+                    );
+                }
+            }
+        }
+        volume.update_bounds();
+    }
+
+    fn bulged_plane_height(world_x: f32, world_z: f32, radius: f32, bulge: f32) -> f32 {
+        let radial =
+            ((world_x / radius).powi(2) + (world_z / radius).powi(2)).clamp(0.0, 1.0);
+        bulge * (1.0 - radial)
+    }
+
+    fn box_signed_distance(point: Vec3f, center: Vec3f, half_extents: Vec3f) -> f32 {
+        let local = point - center;
+        let q = vec3f(
+            local.x.abs() - half_extents.x,
+            local.y.abs() - half_extents.y,
+            local.z.abs() - half_extents.z,
+        );
+        let outside = vec3f(q.x.max(0.0), q.y.max(0.0), q.z.max(0.0)).length();
+        let inside = q.x.max(q.y.max(q.z)).min(0.0);
+        outside + inside
+    }
+
     #[test]
     fn planar_surface_mesh_reduction_collapses_bumpy_wall() {
+        if !DEPTH_ENABLE_REDUCED_PLANAR_PATCHES {
+            return;
+        }
         let mut quads = Vec::new();
         for y in 0..3 {
             for z in 0..3 {
@@ -3824,6 +4739,9 @@ mod tests {
 
     #[test]
     fn planar_surface_mesh_reduction_keeps_doorway_gap() {
+        if !DEPTH_ENABLE_REDUCED_PLANAR_PATCHES {
+            return;
+        }
         let mut quads = Vec::new();
         for y in 0..4 {
             let y0 = y as f32 * 0.5;
@@ -3869,6 +4787,9 @@ mod tests {
 
     #[test]
     fn planar_surface_mesh_reduction_only_consumes_rect_covered_triangles() {
+        if !DEPTH_ENABLE_REDUCED_PLANAR_PATCHES {
+            return;
+        }
         let region = SimplifiedPlaneRegion {
             group: ExtractedPlaneGroup::Vertical,
             source_triangle_indices: vec![11, 12],
@@ -3940,6 +4861,9 @@ mod tests {
 
     #[test]
     fn geometry_query_skips_planar_patches_when_requested() {
+        if !DEPTH_ENABLE_REDUCED_PLANAR_PATCHES {
+            return;
+        }
         let mut volume = DepthMeshVolume::new(1, 0.1);
         volume.mesh_generation = 7;
         volume.plane_patches.push(XrDepthPlanePatch {
@@ -4019,6 +4943,9 @@ mod tests {
 
     #[test]
     fn geometry_query_preserves_exact_reduced_planar_mesh_triangle() {
+        if !DEPTH_ENABLE_REDUCED_PLANAR_PATCHES {
+            return;
+        }
         let triangle = [
             vec3f(-0.25, 0.75, -0.20),
             vec3f(0.25, 0.75, -0.20),
@@ -4086,7 +5013,7 @@ mod tests {
     }
 
     #[test]
-    fn geometry_query_returns_support_and_lateral_surface() {
+    fn geometry_query_returns_support_halfspace_only() {
         let mut volume = DepthMeshVolume::new(1, 0.1);
         volume.mesh_generation = 10;
         volume.mesh_chunks.push(make_triangle_chunk([
@@ -4121,37 +5048,411 @@ mod tests {
                     "expected primary hit to be the support surface, got normal {:?}",
                     hit.normal
                 );
-                assert_eq!(
-                    hit.additional_hits.len(),
-                    1,
-                    "expected one additional lateral surface"
-                );
                 assert!(
-                    hit.additional_hits[0].normal.y.abs() <= DEPTH_QUERY_LATERAL_NORMAL_Y_MAX,
-                    "expected lateral hit normal, got {:?}",
-                    hit.additional_hits[0].normal
+                    hit.additional_hits.is_empty(),
+                    "expected one support result only, got {:?}",
+                    hit.additional_hits
                 );
+                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = hit.collider.geometry;
                 assert!(
-                    query_surface_hits_are_distinct(
-                        &XrDepthMeshQuerySurfaceHit {
-                            distance: hit.distance,
-                            point: hit.point,
-                            normal: hit.normal,
-                            from_planar_patch: hit.from_planar_patch,
-                            triangle: hit.triangle,
-                            patch: hit.patch,
-                            chunk_key: hit.chunk_key,
-                        },
-                        &hit.additional_hits[0],
-                        0.12,
-                    ),
-                    "expected support and lateral hits to remain distinct"
+                    plane.normal.y >= DEPTH_QUERY_SUPPORT_NORMAL_Y_MIN,
+                    "expected support half-space, got normal {:?}",
+                    plane.normal
                 );
             }
             XrDepthMeshQueryResult::Miss { .. } => {
                 panic!("expected support and lateral geometry hits");
             }
         }
+    }
+
+    #[test]
+    fn geometry_query_returns_miss_for_lateral_only_geometry() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.mesh_generation = 12;
+        volume.mesh_chunks.push(make_triangle_chunk([
+            vec3f(0.18, -0.20, -0.20),
+            vec3f(0.18, 0.30, -0.20),
+            vec3f(0.18, -0.20, 0.20),
+        ]));
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 13,
+                center: vec3f(0.06, 0.08, 0.0),
+                predicted_center: vec3f(0.06, 0.08, 0.0),
+                velocity: vec3f(0.0, 0.0, 0.0),
+                radius: 0.04,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        assert!(
+            matches!(result, XrDepthMeshQueryResult::Miss { .. }),
+            "expected lateral-only geometry to return no support plane"
+        );
+    }
+
+    #[test]
+    fn geometry_query_builds_connected_support_halfspace_within_chunk() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.mesh_generation = 14;
+        volume.mesh_chunks.push(make_triangle_chunk_with_key(
+            ChunkKey::new(0, 0, 0),
+            &[
+                [
+                    vec3f(-0.20, 0.0, -0.20),
+                    vec3f(0.00, 0.0, -0.20),
+                    vec3f(-0.20, 0.0, 0.20),
+                ],
+                [
+                    vec3f(0.00, 0.0, -0.20),
+                    vec3f(0.20, 0.0, -0.20),
+                    vec3f(0.00, 0.0, 0.20),
+                ],
+            ],
+            2,
+        ));
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 15,
+                center: vec3f(0.01, 0.07, -0.18),
+                predicted_center: vec3f(0.01, 0.07, -0.18),
+                velocity: vec3f(0.0, 0.0, 0.0),
+                radius: 0.04,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        match result {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = hit.collider.geometry;
+                assert!(
+                    plane.half_extent_tangent >= 0.10 || plane.half_extent_bitangent >= 0.10,
+                    "expected connected support plane extents, got {:?}",
+                    plane
+                );
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected support patch hit");
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_query_builds_connected_support_halfspace_across_shared_edge() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.mesh_generation = 13;
+        volume.mesh_chunks.push(make_triangle_chunk([
+            vec3f(-0.20, 0.0, -0.20),
+            vec3f(0.20, 0.0, -0.20),
+            vec3f(-0.20, 0.0, 0.20),
+        ]));
+        volume.mesh_chunks.push(make_triangle_chunk([
+            vec3f(0.20, 0.0, -0.20),
+            vec3f(0.20, 0.0, 0.20),
+            vec3f(-0.20, 0.0, 0.20),
+        ]));
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 14,
+                center: vec3f(0.0, 0.07, 0.0),
+                predicted_center: vec3f(0.0, 0.07, 0.0),
+                velocity: vec3f(0.0, 0.0, 0.0),
+                radius: 0.04,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        match result {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = hit.collider.geometry;
+                assert!(
+                    plane.half_extent_tangent >= 0.12 || plane.half_extent_bitangent >= 0.12,
+                    "expected support plane to remain connected across the shared edge, got {:?}",
+                    plane
+                );
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected support hits across the shared edge");
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_query_stabilizes_bulged_support_plane() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.mesh_generation = 15;
+        volume
+            .mesh_chunks
+            .push(make_bulged_plane_chunk_with_key(ChunkKey::new(0, 0, 0), 5, 0.40, 0.012, 3));
+
+        let query = XrDepthMeshQuery {
+            key: 16,
+            center: vec3f(0.0, 0.07, 0.0),
+            predicted_center: vec3f(0.0, 0.07, 0.0),
+            velocity: vec3f(0.0, 0.0, 0.0),
+            radius: 0.05,
+            max_distance: 0.12,
+            include_planar_patches: false,
+        };
+
+        let result = evaluate_geometry_query(&volume, query, 1);
+        match result {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = hit.collider.geometry;
+                assert!(
+                    plane.normal.y >= 0.985,
+                    "expected nearly horizontal support plane on shallow bulge, got {:?}",
+                    plane.normal
+                );
+
+                let support_surface = XrDepthMeshQuerySurfaceHit {
+                    distance: hit.distance,
+                    point: hit.point,
+                    normal: hit.normal,
+                    from_planar_patch: hit.from_planar_patch,
+                    triangle: hit.triangle,
+                    patch: hit.patch,
+                    chunk_key: hit.chunk_key,
+                };
+                let mut max_outside = f32::NEG_INFINITY;
+                visit_support_plane_triangles(
+                    &volume,
+                    support_surface,
+                    query.radius,
+                    |triangle, _normal, _area, _centroid| {
+                        for vertex in triangle {
+                            max_outside =
+                                max_outside.max(plane.normal.dot(vertex - plane.point));
+                        }
+                    },
+                );
+                assert!(
+                    max_outside <= 0.003,
+                    "support plane should stay on the local support envelope, got outside distance {}",
+                    max_outside
+                );
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected support hit on bulged synthetic plane");
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_query_from_depth_grid_returns_support_halfspace() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.generation = 21;
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-4, -4, -4),
+            VoxelCoord::new(4, 4, 4),
+            |world| world.y,
+        );
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 101,
+                center: vec3f(0.0, 0.09, 0.0),
+                predicted_center: vec3f(0.0, 0.07, 0.0),
+                velocity: vec3f(0.0, -0.2, 0.0),
+                radius: 0.05,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        match result {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = hit.collider.geometry;
+                assert!(
+                    plane.normal.y >= 0.98,
+                    "expected near-horizontal support plane from TSDF, got {:?}",
+                    plane.normal
+                );
+                assert!(
+                    plane.point.y.abs() <= 0.025,
+                    "expected plane close to y=0, got {:?}",
+                    plane.point
+                );
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected TSDF support hit");
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_query_from_depth_grid_rejects_lateral_wall() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.generation = 22;
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-4, -4, -4),
+            VoxelCoord::new(4, 4, 4),
+            |world| world.x - 0.18,
+        );
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 102,
+                center: vec3f(0.06, 0.10, 0.0),
+                predicted_center: vec3f(0.06, 0.08, 0.0),
+                velocity: vec3f(0.0, -0.2, 0.0),
+                radius: 0.05,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        assert!(
+            matches!(result, XrDepthMeshQueryResult::Miss { .. }),
+            "expected lateral-only TSDF field to produce no support"
+        );
+    }
+
+    #[test]
+    fn geometry_query_from_depth_grid_stabilizes_bulged_support_plane() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.generation = 23;
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-5, -4, -5),
+            VoxelCoord::new(5, 4, 5),
+            |world| world.y - bulged_plane_height(world.x, world.z, 0.45, 0.02),
+        );
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 103,
+                center: vec3f(0.0, 0.08, 0.0),
+                predicted_center: vec3f(0.0, 0.06, 0.0),
+                velocity: vec3f(0.0, -0.2, 0.0),
+                radius: 0.05,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        match result {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = hit.collider.geometry;
+                let center_height = bulged_plane_height(0.0, 0.0, 0.45, 0.02);
+                assert!(
+                    plane.normal.y >= 0.985,
+                    "expected nearly horizontal TSDF support plane on shallow bulge, got {:?}",
+                    plane.normal
+                );
+                assert!(
+                    plane.point.y >= center_height - 0.01 && plane.point.y <= center_height + 0.03,
+                    "expected plane near bulged top envelope, got {:?} expected around {}",
+                    plane.point,
+                    center_height
+                );
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected TSDF support hit on bulged surface");
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_query_from_depth_grid_clears_near_table_overhang() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.generation = 24;
+        let table_center = vec3f(0.0, -0.05, 0.0);
+        let table_half_extents = vec3f(0.20, 0.05, 0.20);
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-5, -4, -5),
+            VoxelCoord::new(5, 4, 5),
+            |world| box_signed_distance(world, table_center, table_half_extents),
+        );
+
+        let inside_result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 104,
+                center: vec3f(0.17, 0.08, 0.0),
+                predicted_center: vec3f(0.17, 0.06, 0.0),
+                velocity: vec3f(0.0, -0.2, 0.0),
+                radius: 0.05,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+        assert!(
+            matches!(inside_result, XrDepthMeshQueryResult::Hit(_)),
+            "expected support while still inside the tabletop footprint"
+        );
+
+        let outside_result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 105,
+                center: vec3f(0.24, 0.08, 0.0),
+                predicted_center: vec3f(0.24, 0.06, 0.0),
+                velocity: vec3f(0.0, -0.2, 0.0),
+                radius: 0.05,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+        assert!(
+            matches!(outside_result, XrDepthMeshQueryResult::Miss { .. }),
+            "expected support to clear once the center leaves the tabletop footprint"
+        );
+    }
+
+    #[test]
+    fn geometry_query_from_depth_grid_handles_small_radius_without_panicking() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.generation = 25;
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-4, -4, -4),
+            VoxelCoord::new(4, 4, 4),
+            |world| world.y,
+        );
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 106,
+                center: vec3f(0.0, 0.03, 0.0),
+                predicted_center: vec3f(0.0, 0.02, 0.0),
+                velocity: vec3f(0.0, -0.1, 0.0),
+                radius: 0.01,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        assert!(
+            matches!(result, XrDepthMeshQueryResult::Hit(_) | XrDepthMeshQueryResult::Miss { .. }),
+            "small-radius TSDF query should complete without panicking"
+        );
     }
 
     #[test]

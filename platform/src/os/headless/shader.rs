@@ -49,6 +49,7 @@ impl DrawVars {
             // Use the Rust backend so the shader compiler emits Rust syntax for
             // function signatures, bodies, struct defs, and type names.
             output.backend = ShaderBackend::Rust;
+            output.use_vulkan = false;
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
 

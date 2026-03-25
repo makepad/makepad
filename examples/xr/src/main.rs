@@ -46,7 +46,7 @@ script_mod! {
             scene_select := XrSelect{
                 pos: vec3(0.0, -0.02, -0.62)
                 scale: vec3(0.5, 0.5, 0.5)
-                active_child: @block_scene
+                active_child: @ico_box_scene
 
                 test_scene := XrNode{
                     on_render: ||{
@@ -149,6 +149,90 @@ script_mod! {
                     }
                 }
 
+                ico_box_scene := XrNode{
+                    pos: vec3(0.0, -0.18, 0.0)
+                    scale: vec3(0.62, 0.62, 0.62)
+                    on_render: ||{
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.78, 0.08, 0.58)
+                            corner_radius: 0.02
+                            roughness: 0.92
+                            metallic: 0.0
+                            color: #x212c39
+                            pos: vec3(0.05, -0.06, -0.10)
+                        }
+
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.06, 0.60, 0.58)
+                            corner_radius: 0.02
+                            roughness: 0.84
+                            metallic: 0.0
+                            color: #x19232e
+                            pos: vec3(-0.31, 0.20, -0.10)
+                        }
+
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.06, 0.60, 0.58)
+                            corner_radius: 0.02
+                            roughness: 0.84
+                            metallic: 0.0
+                            color: #x19232e
+                            pos: vec3(0.41, 0.20, -0.10)
+                        }
+
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.78, 0.60, 0.06)
+                            corner_radius: 0.02
+                            roughness: 0.84
+                            metallic: 0.0
+                            color: #x17202a
+                            pos: vec3(0.05, 0.20, -0.36)
+                        }
+
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.94, 0.24, 0.06)
+                            corner_radius: 0.02
+                            roughness: 0.86
+                            metallic: 0.0
+                            color: #x223140
+                            pos: vec3(0.05, 0.02, 0.16)
+                        }
+
+                        for layer in 0..4 {
+                            for row in 0..4 {
+                                for col in 0..5 {
+                                    let color = if (col + row * 2 + layer * 3) % 6 == 0 {
+                                        #xff6f59
+                                    } else if (col + row * 2 + layer * 3) % 6 == 1 {
+                                        #x46d39a
+                                    } else if (col + row * 2 + layer * 3) % 6 == 2 {
+                                        #x66a9ff
+                                    } else if (col + row * 2 + layer * 3) % 6 == 3 {
+                                        #xffc857
+                                    } else if (col + row * 2 + layer * 3) % 6 == 4 {
+                                        #xff8a4c
+                                    } else {
+                                        #xd58cff
+                                    }
+                                    IcoSphere{
+                                        density: 0.75
+                                        friction: 0.48
+                                        restitution: 0.03
+                                        radius: 0.040
+                                        color: color
+                                        pos: vec3(-0.118 + col * 0.084, 0.04 + layer * 0.082, -0.268 + row * 0.084)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 helmet_scene := XrNode{
                     on_render: ||{
                         Platform{pos: vec3(0.05, -0.06, -0.10)}
@@ -213,15 +297,15 @@ script_mod! {
 
             control_strip := XrView{
                 pos: vec3(0.0, 0.46, -0.84)
-                logical_size: vec2(620, 124)
-                pixel_scale: 0.00062
+                logical_size: vec2(780, 268)
+                pixel_scale: 0.00074
                 dpi_factor: 2.0
                 RoundedView{
                     width: Fill
                     height: Fill
                     flow: Down
-                    padding: 12
-                    spacing: 10
+                    padding: 16
+                    spacing: 12
                     draw_bg.color: #x162331ee
                     draw_bg.border_radius: 16.0
 
@@ -235,12 +319,12 @@ script_mod! {
                         title := Label{
                             text: "XR Scene Picker"
                             draw_text.color: #xeff7ff
-                            draw_text.text_style.font_size: 16.0
+                            draw_text.text_style.font_size: 18.0
                         }
 
                         detail := Label{
                             width: Fill
-                            text: "Script-driven scene switching."
+                            text: "Quest stress scene: 80 faceted icosahedron masses."
                             draw_text.color: #xb8c8d8
                         }
                     }
@@ -255,6 +339,12 @@ script_mod! {
                             width: 88
                             text: "XR Test"
                             on_press: || ui.scene_select.test_scene()
+                        }
+
+                        ico_box_scene_button := Button{
+                            width: 72
+                            text: "Icos"
+                            on_press: || ui.scene_select.ico_box_scene()
                         }
 
                         block_scene_button := Button{
@@ -290,15 +380,49 @@ script_mod! {
                         align: Align{y: 0.5}
 
                         depth_toggle_button := Button{
-                            width: 144
-                            text: "Toggle Depth Mesh"
+                            width: 132
+                            text: "Toggle Env Mesh"
                             on_press: || ui.root.set_depth(!ui.root.depth_mesh_visible())
+                        }
+
+                        query_hits_toggle_button := Button{
+                            width: 148
+                            text: "Toggle Query Hits"
+                            on_press: || ui.root.set_depth_query_hits(!ui.root.depth_query_hits_visible())
                         }
 
                         scene_status := Label{
                             width: Fill
-                            text: "Use the buttons above to switch XR scenes."
+                            text: "Default scene: 80 faceted icosahedra with sphere colliders."
                             draw_text.color: #xe8f4ff
+                        }
+                    }
+
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 8
+
+                        physics_geom_field := TextInput{
+                            width: Fill
+                            height: 32
+                            is_read_only: true
+                            empty_text: "Physics geometry: waiting for frame"
+                        }
+
+                        physics_timing_field := TextInput{
+                            width: Fill
+                            height: 32
+                            is_read_only: true
+                            empty_text: "Physics compute: waiting for frame"
+                        }
+
+                        frame_cpu_field := TextInput{
+                            width: Fill
+                            height: 32
+                            is_read_only: true
+                            empty_text: "CPU frame: waiting for frame"
                         }
                     }
                 }
@@ -313,6 +437,69 @@ script_mod! {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    #[rust]
+    last_physics_geometry_text: String,
+    #[rust]
+    last_physics_timing_text: String,
+    #[rust]
+    last_frame_cpu_text: String,
+}
+
+impl App {
+    fn refresh_debug_fields(&mut self, cx: &mut Cx) {
+        let (
+            surface_count,
+            vertex_count,
+            triangle_count,
+            compute_ms,
+            frame_cpu_ms,
+            frame_update_cpu_ms,
+            frame_draw_cpu_ms,
+        ) =
+            if let Some(root) = self.ui.borrow::<XrRoot>() {
+                (
+                    root.physics_depth_query_surface_count(),
+                    root.physics_depth_query_vertex_count(),
+                    root.physics_depth_query_triangle_count(),
+                    root.physics_compute_ms(),
+                    root.frame_cpu_ms(),
+                    root.frame_update_cpu_ms(),
+                    root.frame_draw_cpu_ms(),
+                )
+            } else {
+                return;
+            };
+
+        let geometry_text = format!(
+            "Physics geometry: {} planes, {} vertices, {} triangles",
+            surface_count, vertex_count, triangle_count
+        );
+        if self.last_physics_geometry_text != geometry_text {
+            self.ui
+                .widget(cx, ids!(physics_geom_field))
+                .set_text(cx, &geometry_text);
+            self.last_physics_geometry_text = geometry_text;
+        }
+
+        let timing_text = format!("Physics compute: {:.2} ms", compute_ms);
+        if self.last_physics_timing_text != timing_text {
+            self.ui
+                .widget(cx, ids!(physics_timing_field))
+                .set_text(cx, &timing_text);
+            self.last_physics_timing_text = timing_text;
+        }
+
+        let frame_cpu_text = format!(
+            "CPU frame: {:.2} ms total | update {:.2} ms | draw {:.2} ms",
+            frame_cpu_ms, frame_update_cpu_ms, frame_draw_cpu_ms
+        );
+        if self.last_frame_cpu_text != frame_cpu_text {
+            self.ui
+                .widget(cx, ids!(frame_cpu_field))
+                .set_text(cx, &frame_cpu_text);
+            self.last_frame_cpu_text = frame_cpu_text;
+        }
+    }
 }
 
 impl AppMain for App {
@@ -324,5 +511,6 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        self.refresh_debug_fields(cx);
     }
 }

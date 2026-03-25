@@ -19,6 +19,8 @@ pub mod apple_classes;
 pub mod apple_game_input;
 pub mod apple_media;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod apple_webview;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod apple_video_playback;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod apple_video_player;

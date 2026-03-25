@@ -1,8 +1,5 @@
 use crate::{
-    cube::Cube,
-    gltf::Gltf,
-    refractive_cube::RefractiveCube,
-    tree::Tree,
+    IcoSphere,
     xr_env::{makepad_pose, RapierScene},
     xr_node::{XrBodyKind, XrNode, XrRuntimeBodyState},
 };
@@ -59,6 +56,7 @@ struct CollectedXrCube {
     pose: Pose,
     scale: Vec3f,
     half_extents: Vec3f,
+    is_sphere: bool,
     density: f32,
     friction: f32,
     restitution: f32,
@@ -78,6 +76,7 @@ pub struct XrScene {
     next_frame: NextFrame,
     #[rust]
     scene_root_pose: Option<Pose>,
+    #[cast]
     #[deref]
     node: XrNode,
 }
@@ -149,12 +148,20 @@ impl XrScene {
         parent: XrTransformState,
         cubes: &mut Vec<CollectedXrCube>,
     ) {
-        if let Some(cube) = widget.borrow::<Cube>() {
-            let node = cube.node();
-            let world = Self::transform_with_node(parent, node);
-            let half_extents = cube.half_extents();
+        let Some(node) = widget.cast_inner::<XrNode>() else {
+            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, parent, cubes));
+            return;
+        };
+
+        let is_sphere = widget.borrow::<IcoSphere>().is_some();
+        let world = Self::transform_with_node(parent, &node);
+        let half_extents = node.physics_half_extents();
+        let should_push = node.body_kind() != XrBodyKind::Disabled
+            && (half_extents.x > 0.0 || half_extents.y > 0.0 || half_extents.z > 0.0);
+
+        if should_push {
             cubes.push(CollectedXrCube {
-                uid: cube.widget_uid(),
+                uid: widget.widget_uid(),
                 body_kind: node.body_kind(),
                 pose: Pose::new(world.orientation, world.position),
                 scale: world.scale,
@@ -163,121 +170,15 @@ impl XrScene {
                     half_extents.y * world.scale.y,
                     half_extents.z * world.scale.z,
                 ),
+                is_sphere,
                 density: node.density(),
                 friction: node.friction(),
                 restitution: node.restitution(),
             });
-            let world = world;
-            drop(cube);
-            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, world, cubes));
-            return;
         }
 
-        if let Some(cube) = widget.borrow::<RefractiveCube>() {
-            let node = cube.node();
-            let world = Self::transform_with_node(parent, node);
-            let half_extents = cube.half_extents();
-            cubes.push(CollectedXrCube {
-                uid: cube.widget_uid(),
-                body_kind: node.body_kind(),
-                pose: Pose::new(world.orientation, world.position),
-                scale: world.scale,
-                half_extents: vec3f(
-                    half_extents.x * world.scale.x,
-                    half_extents.y * world.scale.y,
-                    half_extents.z * world.scale.z,
-                ),
-                density: node.density(),
-                friction: node.friction(),
-                restitution: node.restitution(),
-            });
-            let world = world;
-            drop(cube);
-            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, world, cubes));
-            return;
-        }
-
-        if let Some(gltf) = widget.borrow::<Gltf>() {
-            let node = gltf.node();
-            let world = Self::transform_with_node(parent, node);
-            let half_extents = node.physics_half_extents();
-            if node.body_kind() != XrBodyKind::Disabled
-                && (half_extents.x > 0.0 || half_extents.y > 0.0 || half_extents.z > 0.0)
-            {
-                cubes.push(CollectedXrCube {
-                    uid: gltf.widget_uid(),
-                    body_kind: node.body_kind(),
-                    pose: Pose::new(world.orientation, world.position),
-                    scale: world.scale,
-                    half_extents: vec3f(
-                        half_extents.x * world.scale.x,
-                        half_extents.y * world.scale.y,
-                        half_extents.z * world.scale.z,
-                    ),
-                    density: node.density(),
-                    friction: node.friction(),
-                    restitution: node.restitution(),
-                });
-            }
-            drop(gltf);
-            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, world, cubes));
-            return;
-        }
-
-        if let Some(tree) = widget.borrow::<Tree>() {
-            let node = tree.node();
-            let world = Self::transform_with_node(parent, node);
-            let half_extents = node.physics_half_extents();
-            if node.body_kind() != XrBodyKind::Disabled
-                && (half_extents.x > 0.0 || half_extents.y > 0.0 || half_extents.z > 0.0)
-            {
-                cubes.push(CollectedXrCube {
-                    uid: tree.widget_uid(),
-                    body_kind: node.body_kind(),
-                    pose: Pose::new(world.orientation, world.position),
-                    scale: world.scale,
-                    half_extents: vec3f(
-                        half_extents.x * world.scale.x,
-                        half_extents.y * world.scale.y,
-                        half_extents.z * world.scale.z,
-                    ),
-                    density: node.density(),
-                    friction: node.friction(),
-                    restitution: node.restitution(),
-                });
-            }
-            drop(tree);
-            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, world, cubes));
-            return;
-        }
-
-        if let Some(node) = widget.borrow::<XrNode>() {
-            let world = Self::transform_with_node(parent, &node);
-            let half_extents = node.physics_half_extents();
-            if node.body_kind() != XrBodyKind::Disabled
-                && (half_extents.x > 0.0 || half_extents.y > 0.0 || half_extents.z > 0.0)
-            {
-                cubes.push(CollectedXrCube {
-                    uid: node.widget_uid(),
-                    body_kind: node.body_kind(),
-                    pose: Pose::new(world.orientation, world.position),
-                    scale: world.scale,
-                    half_extents: vec3f(
-                        half_extents.x * world.scale.x,
-                        half_extents.y * world.scale.y,
-                        half_extents.z * world.scale.z,
-                    ),
-                    density: node.density(),
-                    friction: node.friction(),
-                    restitution: node.restitution(),
-                });
-            }
-            drop(node);
-            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, world, cubes));
-            return;
-        }
-
-        widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, parent, cubes));
+        drop(node);
+        widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, world, cubes));
     }
 
     fn collect_rendered_cubes(&self) -> Vec<CollectedXrCube> {
@@ -328,23 +229,50 @@ impl XrScene {
         for cube in cubes {
             match cube.body_kind {
                 XrBodyKind::Disabled => {}
-                XrBodyKind::Dynamic => scene.spawn_dynamic_box(
-                    cube.uid,
-                    cube.pose,
-                    cube.half_extents,
-                    cube.scale,
-                    cube.density,
-                    cube.friction,
-                    cube.restitution,
-                ),
-                XrBodyKind::Fixed => scene.spawn_fixed_box(
-                    cube.uid,
-                    cube.pose,
-                    cube.half_extents,
-                    cube.scale,
-                    cube.friction,
-                    cube.restitution,
-                ),
+                XrBodyKind::Dynamic => {
+                    if cube.is_sphere {
+                        scene.spawn_dynamic_sphere(
+                            cube.uid,
+                            cube.pose,
+                            cube.half_extents.x.min(cube.half_extents.y).min(cube.half_extents.z),
+                            cube.scale,
+                            cube.density,
+                            cube.friction,
+                            cube.restitution,
+                        );
+                    } else {
+                        scene.spawn_dynamic_box(
+                            cube.uid,
+                            cube.pose,
+                            cube.half_extents,
+                            cube.scale,
+                            cube.density,
+                            cube.friction,
+                            cube.restitution,
+                        );
+                    }
+                }
+                XrBodyKind::Fixed => {
+                    if cube.is_sphere {
+                        scene.spawn_fixed_sphere(
+                            cube.uid,
+                            cube.pose,
+                            cube.half_extents.x.min(cube.half_extents.y).min(cube.half_extents.z),
+                            cube.scale,
+                            cube.friction,
+                            cube.restitution,
+                        );
+                    } else {
+                        scene.spawn_fixed_box(
+                            cube.uid,
+                            cube.pose,
+                            cube.half_extents,
+                            cube.scale,
+                            cube.friction,
+                            cube.restitution,
+                        );
+                    }
+                }
             }
         }
         self.scene = Some(scene);

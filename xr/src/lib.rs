@@ -5,6 +5,8 @@ pub use makepad_widgets::*;
 pub mod cube;
 #[path = "obj/gltf.rs"]
 pub mod gltf;
+#[path = "obj/icosphere.rs"]
+pub mod icosphere;
 #[path = "util/gltf_bridge.rs"]
 pub mod gltf_bridge;
 #[path = "util/mesh_generators.rs"]
@@ -36,9 +38,10 @@ pub mod xr_view;
 
 pub use cube::*;
 pub use gltf::*;
+pub use icosphere::*;
 pub use gltf_bridge::*;
 pub use xr_node::*;
-pub use passthrough_env::DrawPassthroughEnvAtlas;
+pub use passthrough_env::DrawPassthroughEnvFace;
 pub use xr_permissions_flow::*;
 pub use physics_view::*;
 pub use refractive_cube::*;
@@ -54,6 +57,7 @@ pub use view_splat::*;
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     xr_node::script_mod(vm);
     gltf::script_mod(vm);
+    icosphere::script_mod(vm);
     cube::script_mod(vm);
     xr_permissions_flow::script_mod(vm);
     physics_view::script_mod(vm);

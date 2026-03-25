@@ -20,6 +20,7 @@ pub struct DrawPbrTextureSet {
     pub emissive: Option<Texture>,
     pub env: Option<Texture>,
     pub env_atlas: Option<Texture>,
+    pub env_faces: Option<[Texture; 6]>,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +95,12 @@ script_mod! {
         emissive_texture: texture_2d(float)
         env_texture: texture_cube(float)
         env_atlas_texture: texture_2d(float)
+        env_pos_x_texture: texture_2d(float)
+        env_neg_x_texture: texture_2d(float)
+        env_pos_y_texture: texture_2d(float)
+        env_neg_y_texture: texture_2d(float)
+        env_pos_z_texture: texture_2d(float)
+        env_neg_z_texture: texture_2d(float)
         u_base_color_factor: uniform(vec4(1.0, 1.0, 1.0, 1.0))
         u_metallic_factor: uniform(float(1.0))
         u_roughness_factor: uniform(float(1.0))
@@ -107,6 +114,7 @@ script_mod! {
         u_has_emissive_texture: uniform(float(0.0))
         u_has_env_texture: uniform(float(0.0))
         u_has_env_atlas_texture: uniform(float(0.0))
+        u_has_env_face_textures: uniform(float(0.0))
         u_enable_occlusion: uniform(float(0.0))
         u_enable_emissive: uniform(float(0.0))
         u_enable_direct_light: uniform(float(0.0))
@@ -307,10 +315,41 @@ script_mod! {
             return self.env_atlas_texture.sample_as_bgra(uv).xyz
         }
 
+        sample_env_faces: fn(dir: vec3f) -> vec3f {
+            let ad = abs(dir);
+            let axis = max(ad.x, max(ad.y, ad.z));
+            let safe_axis = max(axis, 0.00001);
+
+            if ad.x >= ad.y && ad.x >= ad.z {
+                if dir.x >= 0.0 {
+                    let uv = vec2(-dir.z / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
+                    return self.env_pos_x_texture.sample_as_bgra(uv).xyz
+                }
+                let uv = vec2(dir.z / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
+                return self.env_neg_x_texture.sample_as_bgra(uv).xyz
+            } else if ad.y >= ad.z {
+                if dir.y >= 0.0 {
+                    let uv = vec2(dir.x / safe_axis, dir.z / safe_axis) * 0.5 + vec2(0.5, 0.5);
+                    return self.env_pos_y_texture.sample_as_bgra(uv).xyz
+                }
+                let uv = vec2(dir.x / safe_axis, -dir.z / safe_axis) * 0.5 + vec2(0.5, 0.5);
+                return self.env_neg_y_texture.sample_as_bgra(uv).xyz
+            }
+            if dir.z >= 0.0 {
+                let uv = vec2(dir.x / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
+                return self.env_pos_z_texture.sample_as_bgra(uv).xyz
+            }
+            let uv = vec2(-dir.x / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
+            return self.env_neg_z_texture.sample_as_bgra(uv).xyz
+        }
+
         get_env_specular: fn(refl_dir: vec3) {
             let env_t_spec = clamp(refl_dir.y * 0.5 + 0.5, 0.0, 1.0);
             let env_low = vec3(0.03, 0.035, 0.045);
             let env_high = vec3(0.36, 0.43, 0.5);
+            if self.u_has_env_face_textures > 0.5 {
+                return self.sample_env_faces(refl_dir)
+            }
             if self.u_has_env_texture > 0.5 {
                 return self.env_texture.sample_as_bgra(refl_dir).xyz
             }
@@ -324,6 +363,9 @@ script_mod! {
             let env_t_diff = clamp(normal_dir.y * 0.5 + 0.5, 0.0, 1.0);
             let env_low = vec3(0.03, 0.035, 0.045);
             let env_high = vec3(0.36, 0.43, 0.5);
+            if self.u_has_env_face_textures > 0.5 {
+                return self.sample_env_faces(normal_dir)
+            }
             if self.u_has_env_texture > 0.5 {
                 return self.env_texture.sample_as_bgra(normal_dir).xyz
             }
@@ -864,6 +906,8 @@ pub struct DrawPbr {
     pub has_env_texture: f32,
     #[rust(0.0)]
     pub has_env_atlas_texture: f32,
+    #[rust(0.0)]
+    pub has_env_face_textures: f32,
     #[rust(vec3(0.3, 0.7, 1.0))]
     pub light_dir: Vec3f,
     #[rust(vec3(1.0, 1.0, 1.0))]
@@ -935,7 +979,7 @@ pub struct DrawPbrRefractive {
 
 impl DrawPbrRefractive {
     pub fn set_camera_texture(&mut self, texture: Option<Texture>) {
-        self.draw_super.draw_vars.texture_slots[7] = texture;
+        self.draw_super.draw_vars.texture_slots[13] = texture;
     }
 }
 
@@ -1027,6 +1071,7 @@ impl DrawPbr {
         self.set_emissive_texture(None);
         self.set_env_texture(None);
         self.set_env_atlas_texture(None);
+        self.set_env_face_textures(None);
     }
 
     pub fn set_transform(&mut self, transform: Mat4f) {
@@ -1185,6 +1230,19 @@ impl DrawPbr {
         self.draw_vars.texture_slots[6] = texture;
     }
 
+    pub fn set_env_face_textures(&mut self, textures: Option<&[Texture; 6]>) {
+        self.has_env_face_textures = if textures.is_some() { 1.0 } else { 0.0 };
+        if let Some(textures) = textures {
+            for (index, texture) in textures.iter().enumerate() {
+                self.draw_vars.texture_slots[7 + index] = Some(texture.clone());
+            }
+        } else {
+            for slot in 7..13 {
+                self.draw_vars.texture_slots[slot] = None;
+            }
+        }
+    }
+
     pub fn set_depth_write(&mut self, depth_write: bool) {
         self.draw_vars.options.depth_write = depth_write;
     }
@@ -1206,6 +1264,7 @@ impl DrawPbr {
         self.set_emissive_texture(material.textures.emissive.clone());
         self.set_env_texture(material.textures.env.clone());
         self.set_env_atlas_texture(material.textures.env_atlas.clone());
+        self.set_env_face_textures(material.textures.env_faces.as_ref());
     }
 
     fn apply_draw_uniforms(&mut self, cx: &mut CxDraw) {
@@ -1273,6 +1332,11 @@ impl DrawPbr {
             cx.cx,
             live_id!(u_has_env_atlas_texture),
             &[self.has_env_atlas_texture],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_has_env_face_textures),
+            &[self.has_env_face_textures],
         );
         let enable_occlusion = self.occlusion_enabled();
         let enable_emissive = self.emissive_enabled();

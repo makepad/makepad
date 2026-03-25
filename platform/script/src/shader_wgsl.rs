@@ -1034,6 +1034,7 @@ pub fn compile_draw_shader_wgsl_source(
 ) -> Result<WgslDrawShaderSource, String> {
     let mut output = ShaderOutput::default();
     output.backend = ShaderBackend::Wgsl;
+    output.use_vulkan = false;
     output.pre_collect_rust_instance_io(vm, io_self);
     output.pre_collect_shader_io(vm, io_self);
 

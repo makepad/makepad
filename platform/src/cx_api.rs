@@ -36,6 +36,69 @@ pub enum OpenUrlInPlace {
     Yes,
     No,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SystemBrowserId(pub LiveId);
+
+impl From<LiveId> for SystemBrowserId {
+    fn from(value: LiveId) -> Self {
+        Self(value)
+    }
+}
+
+pub struct CxSystemBrowser<'a> {
+    cx: &'a mut Cx,
+    id: SystemBrowserId,
+}
+
+impl<'a> CxSystemBrowser<'a> {
+    pub fn id(&self) -> SystemBrowserId {
+        self.id
+    }
+
+    pub fn spawn(&mut self, url: &str) {
+        self.cx.platform_ops.push(CxOsOp::SpawnSystemBrowser {
+            browser_id: self.id.0,
+            url: url.to_string(),
+        });
+    }
+
+    pub fn update(&mut self, area: Area, visible: bool) {
+        self.cx.platform_ops.push(CxOsOp::UpdateSystemBrowser {
+            browser_id: self.id.0,
+            area,
+            visible,
+        });
+    }
+
+    pub fn detach(&mut self) {
+        self.cx.platform_ops.push(CxOsOp::DetachSystemBrowser {
+            browser_id: self.id.0,
+        });
+    }
+
+    pub fn set_url(&mut self, url: &str, replace: bool) {
+        self.cx.platform_ops.push(CxOsOp::SetSystemBrowserUrl {
+            browser_id: self.id.0,
+            url: url.to_string(),
+            replace,
+        });
+    }
+
+    pub fn history_go(&mut self, delta: i32) {
+        self.cx.platform_ops.push(CxOsOp::SystemBrowserHistoryGo {
+            browser_id: self.id.0,
+            delta,
+        });
+    }
+
+    pub fn close(&mut self) {
+        self.cx.platform_ops.push(CxOsOp::CloseSystemBrowser {
+            browser_id: self.id.0,
+        });
+    }
+}
+
 pub trait CxOsApi {
     fn init_cx_os(&mut self);
 
@@ -194,6 +257,30 @@ pub enum CxOsOp {
     DetachCameraNativePreview {
         video_id: LiveId,
     },
+    SpawnSystemBrowser {
+        browser_id: LiveId,
+        url: String,
+    },
+    UpdateSystemBrowser {
+        browser_id: LiveId,
+        area: Area,
+        visible: bool,
+    },
+    DetachSystemBrowser {
+        browser_id: LiveId,
+    },
+    SetSystemBrowserUrl {
+        browser_id: LiveId,
+        url: String,
+        replace: bool,
+    },
+    SystemBrowserHistoryGo {
+        browser_id: LiveId,
+        delta: i32,
+    },
+    CloseSystemBrowser {
+        browser_id: LiveId,
+    },
     PrepareAudioPlayback(LiveId, VideoSource, bool, bool),
     BeginVideoPlayback(LiveId),
     PauseVideoPlayback(LiveId),
@@ -279,6 +366,12 @@ impl std::fmt::Debug for CxOsOp {
             Self::AttachCameraNativePreview { .. } => write!(f, "AttachCameraNativePreview"),
             Self::UpdateCameraNativePreview { .. } => write!(f, "UpdateCameraNativePreview"),
             Self::DetachCameraNativePreview { .. } => write!(f, "DetachCameraNativePreview"),
+            Self::SpawnSystemBrowser { .. } => write!(f, "SpawnSystemBrowser"),
+            Self::UpdateSystemBrowser { .. } => write!(f, "UpdateSystemBrowser"),
+            Self::DetachSystemBrowser { .. } => write!(f, "DetachSystemBrowser"),
+            Self::SetSystemBrowserUrl { .. } => write!(f, "SetSystemBrowserUrl"),
+            Self::SystemBrowserHistoryGo { .. } => write!(f, "SystemBrowserHistoryGo"),
+            Self::CloseSystemBrowser { .. } => write!(f, "CloseSystemBrowser"),
             Self::PrepareAudioPlayback(..) => write!(f, "PrepareAudioPlayback"),
             Self::BeginVideoPlayback(..) => write!(f, "BeginVideoPlayback"),
             Self::PauseVideoPlayback(..) => write!(f, "PauseVideoPlayback"),
@@ -512,6 +605,13 @@ impl Cx {
 
     pub fn browser_history_go(&mut self, delta: i32) {
         <Self as CxOsApi>::browser_history_go(self, delta);
+    }
+
+    pub fn system_browser(&mut self, id: impl Into<SystemBrowserId>) -> CxSystemBrowser<'_> {
+        CxSystemBrowser {
+            cx: self,
+            id: id.into(),
+        }
     }
 
     // Determines whether to show your application in the dock when it runs. The default value is true.
