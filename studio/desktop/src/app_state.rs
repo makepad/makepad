@@ -9,6 +9,8 @@ struct PersistedMountStateRon {
     dock_items: HashMap<LiveId, DockItem>,
     editor_tab_to_path: HashMap<LiveId, String>,
     terminal_tab_to_path: HashMap<LiveId, String>,
+    sidebar_restore_width: Option<f64>,
+    bottom_panel_restore_height: Option<f64>,
     file_filter: String,
     log_filter: String,
     log_tail: bool,
@@ -40,6 +42,7 @@ impl App {
             id!(editor_first),
             id!(run_first),
             id!(log_first),
+            id!(bottom_terminal_tab),
             id!(terminal_first),
             id!(terminal_add),
         ]);
@@ -305,6 +308,8 @@ impl App {
                 mount_state.file_filter = saved.file_filter.clone();
                 mount_state.log_filter = saved.log_filter.clone();
                 mount_state.log_tail = saved.log_tail;
+                mount_state.sidebar_restore_width = saved.sidebar_restore_width;
+                mount_state.bottom_panel_restore_height = saved.bottom_panel_restore_height;
                 mount_state.terminals_initialized = true;
                 mount_state.terminal_files = terminal_tab_to_path.values().cloned().collect();
                 mount_state.terminal_files.sort();
@@ -383,13 +388,15 @@ impl App {
             dock_items,
             editor_tab_to_path,
             terminal_tab_to_path,
+            sidebar_restore_width: mount_state.sidebar_restore_width,
+            bottom_panel_restore_height: mount_state.bottom_panel_restore_height,
             file_filter: mount_state.file_filter.clone(),
             log_filter: mount_state.log_filter.clone(),
             log_tail: mount_state.log_tail,
         })
     }
 
-    fn save_state(&self, cx: &Cx, slot: usize) {
+    pub(super) fn save_state(&self, cx: &Cx, slot: usize) {
         let valid_mounts: HashSet<String> = self.data.mounts.keys().cloned().collect();
         let mount_dock_items = self
             .ui
@@ -433,5 +440,50 @@ impl App {
         if needs_save {
             self.save_state(cx, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_mount_state_round_trips_sidebar_restore_width() {
+        let state = PersistedMountStateRon {
+            mount: "makepad".to_string(),
+            dock_items: HashMap::new(),
+            editor_tab_to_path: HashMap::new(),
+            terminal_tab_to_path: HashMap::new(),
+            sidebar_restore_width: Some(420.0),
+            bottom_panel_restore_height: Some(260.0),
+            file_filter: String::new(),
+            log_filter: String::new(),
+            log_tail: true,
+        };
+
+        let restored = PersistedMountStateRon::deserialize_ron(&state.serialize_ron()).unwrap();
+
+        assert_eq!(restored.sidebar_restore_width, Some(420.0));
+        assert_eq!(restored.bottom_panel_restore_height, Some(260.0));
+    }
+
+    #[test]
+    fn persisted_mount_state_defaults_missing_sidebar_restore_width() {
+        let legacy = r#"
+            (
+                mount:"makepad",
+                dock_items:{},
+                editor_tab_to_path:{},
+                terminal_tab_to_path:{},
+                file_filter:"",
+                log_filter:"",
+                log_tail:true,
+            )
+        "#;
+
+        let restored = PersistedMountStateRon::deserialize_ron(legacy).unwrap();
+
+        assert_eq!(restored.sidebar_restore_width, None);
+        assert_eq!(restored.bottom_panel_restore_height, None);
     }
 }

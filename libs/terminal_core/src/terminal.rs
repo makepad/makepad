@@ -1624,6 +1624,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn visible_wrapped_prompt_rows_do_not_reflow_on_width_growth() {
+        let mut t = Terminal::new(10, 4);
+        t.process_bytes(b"wheregmis@MacBookPro makepad % wheregmis@MacBookPro makepad % ");
+
+        let before_row_0 = grid_row_text(&t, 0);
+        let before_row_1 = grid_row_text(&t, 1);
+        assert!(!before_row_0.is_empty(), "expected first prompt row to have text");
+        assert!(!before_row_1.is_empty(), "expected wrapped continuation row to have text");
+        assert!(
+            t.screen().grid.line_wrapped[0],
+            "expected prompt to wrap before resize"
+        );
+
+        t.resize(20, 4);
+
+        assert_eq!(
+            grid_row_text(&t, 0),
+            before_row_0,
+            "visible top row should keep its original content after width growth"
+        );
+        assert_eq!(
+            grid_row_text(&t, 1),
+            before_row_1,
+            "visible continuation row should remain separate after width growth"
+        );
+    }
+
     /// Shrink pushes top rows into scrollback to keep cursor visible,
     /// anchoring content to the bottom (matches macOS Terminal).
     #[test]

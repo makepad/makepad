@@ -68,7 +68,7 @@ script_mod! {
 
     load_all_resources() do #(App::script_component(vm)) {
         ui: Root {
-            AppUI {}
+            main_window := AppUI {}
         }
     }
 }
@@ -78,6 +78,20 @@ fn push_capped_deque<T>(entries: &mut std::collections::VecDeque<T>, entry: T, m
     while entries.len() > max_len {
         entries.pop_front();
     }
+}
+
+pub struct SidebarAnimation {
+    mount: String,
+    from_width: f64,
+    to_width: f64,
+    start_time: Option<f64>,
+}
+
+pub struct BottomPanelAnimation {
+    mount: String,
+    from_height: f64,
+    to_height: f64,
+    start_time: Option<f64>,
 }
 
 fn parse_path_line_column_token(token: &str) -> Option<(String, usize, usize)> {
@@ -117,6 +131,14 @@ pub struct App {
     pub file_filter_debounce_timer: Timer,
     #[rust]
     pub pending_file_filter: Option<(String, String)>,
+    #[rust]
+    pub sidebar_animation: Option<SidebarAnimation>,
+    #[rust]
+    pub sidebar_animation_next_frame: NextFrame,
+    #[rust]
+    pub bottom_panel_animation: Option<BottomPanelAnimation>,
+    #[rust]
+    pub bottom_panel_animation_next_frame: NextFrame,
 }
 
 impl MatchEvent for App {
@@ -124,9 +146,24 @@ impl MatchEvent for App {
         self.set_current_file_label(cx, None);
         self.start_backend(cx);
         self.load_state(cx, 0);
+        for mount in self.data.mounts.keys().cloned().collect::<Vec<_>>() {
+            self.sync_run_preview_splitter(cx, &mount);
+        }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(sidebar_toggle)).clicked(actions) {
+            if let Some(active_mount) = self.data.active_mount.clone() {
+                self.toggle_mount_sidebar(cx, &active_mount);
+            }
+        }
+
+        if self.ui.button(cx, ids!(bottom_panel_toggle)).clicked(actions) {
+            if let Some(active_mount) = self.data.active_mount.clone() {
+                self.toggle_bottom_panel(cx, &active_mount);
+            }
+        }
+
         if let Some(active_mount) = self.data.active_mount.clone() {
             if let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) {
                 if let Some(node_id) = workspace
@@ -212,6 +249,7 @@ impl MatchEvent for App {
                             self.select_mount(cx, &mount);
                         } else if tab_id == id!(terminal_add) {
                             if let Some(mount) = self.data.active_mount.clone() {
+                                self.select_bottom_terminal_panel(cx, &mount);
                                 self.create_new_terminal_tab(cx, &mount);
                             }
                         } else {
@@ -223,6 +261,13 @@ impl MatchEvent for App {
                                 self.data
                                     .active_log_build_by_mount
                                     .insert(state.mount.clone(), state.build_id);
+                            }
+                            if tab_id == id!(terminal_first)
+                                || self.terminal_tab_mount_path(tab_id).is_some()
+                            {
+                                if let Some(mount) = self.data.active_mount.clone() {
+                                    self.select_bottom_terminal_panel(cx, &mount);
+                                }
                             }
                             if let Some((_mount, path)) = self.terminal_tab_mount_path(tab_id) {
                                 self.ensure_terminal_session_open(&path);
@@ -300,6 +345,27 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui
             .handle_event(cx, event, &mut Scope::with_data(&mut self.data));
+
+        if let Event::NextFrame(ne) = event {
+            if self.sidebar_animation_next_frame.is_event(event).is_some() {
+                self.step_sidebar_animation(cx, ne.time);
+            }
+            if self.bottom_panel_animation_next_frame.is_event(event).is_some() {
+                self.step_bottom_panel_animation(cx, ne.time);
+            }
+        }
+
+        if let Event::WindowDragQuery(dq) = event {
+            let main_window = self.ui.window(cx, ids!(main_window));
+            if Some(dq.window_id) == main_window.window_id() {
+                let sidebar_rect = self.ui.button(cx, ids!(sidebar_toggle)).area().rect(cx);
+                let panel_rect = self.ui.button(cx, ids!(bottom_panel_toggle)).area().rect(cx);
+                if sidebar_rect.contains(dq.abs) || panel_rect.contains(dq.abs) {
+                    dq.response.set(WindowDragQueryResponse::Client);
+                    cx.set_cursor(MouseCursor::Default);
+                }
+            }
+        }
 
         if matches!(event, Event::Signal) {
             self.drain_studio_messages(cx)
