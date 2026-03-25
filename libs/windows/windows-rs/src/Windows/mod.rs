@@ -23163,6 +23163,7 @@ pub const D3D11_RESOURCE_MISC_TEXTURECUBE: D3D11_RESOURCE_MISC_FLAG = D3D11_RESO
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct D3D11_RTV_DIMENSION(pub i32);
+pub const D3D11_RTV_DIMENSION_TEXTURE2DARRAY: D3D11_RTV_DIMENSION = D3D11_RTV_DIMENSION(5i32);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct D3D11_SAMPLER_DESC {
@@ -23197,6 +23198,8 @@ impl Default for D3D11_SHADER_RESOURCE_VIEW_DESC {
         unsafe { core::mem::zeroed() }
     }
 }
+#[cfg(feature = "Win32_Graphics_Direct3D")]
+pub const D3D11_SRV_DIMENSION_TEXTURECUBE: super::Direct3D::D3D_SRV_DIMENSION = super::Direct3D::D3D_SRV_DIMENSION(8i32);
 #[repr(C)]
 #[cfg(all(feature = "Win32_Graphics_Direct3D", feature = "Win32_Graphics_Dxgi_Common"))]
 #[derive(Clone, Copy)]
