@@ -4,9 +4,11 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
+    let STUDIO_HEADER_HEIGHT = 36.0
+
     let PaneToolbar = RectView {
         width: Fill
-        height: 36.0
+        height: STUDIO_HEADER_HEIGHT
         flow: Right
         align: Align {x: 0.0 y: 0.5}
         padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
@@ -16,12 +18,116 @@ script_mod! {
         }
     }
 
+    let LogToolbarToggle = Toggle {
+        margin: Inset {}
+        padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+        label_walk: Walk {width: Fit height: Fit margin: Inset {left: 24.0 right: 0.0 top: 0.0 bottom: 0.0}}
+        draw_bg +: {
+            size: 13.0
+        }
+        draw_text +: {
+            color: theme.color_label_outer_off
+            color_hover: theme.color_label_outer
+            color_active: theme.color_label_outer
+        }
+    }
+
+    let SidebarFilterInput = TextInputFlat {
+        margin: Inset {}
+        padding: Inset {left: 12.0 right: 12.0 top: 0.0 bottom: 0.0}
+        draw_bg +: {
+            border_radius: 4.0
+
+            color: theme.color_bg_app * 0.82
+            color_hover: theme.color_bg_app * 0.88
+            color_focus: theme.color_bg_app * 0.92
+            color_down: theme.color_bg_app * 0.85
+            color_empty: theme.color_bg_app * 0.82
+
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_focus: theme.color_u_hidden
+            border_color_down: theme.color_u_hidden
+            border_color_empty: theme.color_u_hidden
+            border_color_disabled: theme.color_u_hidden
+
+            border_color_2: theme.color_u_hidden
+            border_color_2_hover: theme.color_u_hidden
+            border_color_2_focus: theme.color_u_hidden
+            border_color_2_down: theme.color_u_hidden
+            border_color_2_empty: theme.color_u_hidden
+            border_color_2_disabled: theme.color_u_hidden
+        }
+        draw_text +: {
+            color_empty: theme.color_label_inner_inactive
+            color_empty_hover: theme.color_label_inner_inactive
+            color_empty_focus: theme.color_label_outer
+        }
+    }
+
+    let LogToolbarFilterInput = TextInputFlat {
+        margin: Inset {}
+        padding: Inset {left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+        draw_bg +: {
+            border_radius: 4.0
+
+            color: theme.color_bg_app * 0.84
+            color_hover: theme.color_bg_app * 0.9
+            color_focus: theme.color_bg_app * 0.94
+            color_down: theme.color_bg_app * 0.87
+            color_empty: theme.color_bg_app * 0.84
+
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_focus: theme.color_u_hidden
+            border_color_down: theme.color_u_hidden
+            border_color_empty: theme.color_u_hidden
+            border_color_disabled: theme.color_u_hidden
+
+            border_color_2: theme.color_u_hidden
+            border_color_2_hover: theme.color_u_hidden
+            border_color_2_focus: theme.color_u_hidden
+            border_color_2_down: theme.color_u_hidden
+            border_color_2_empty: theme.color_u_hidden
+            border_color_2_disabled: theme.color_u_hidden
+        }
+        draw_text +: {
+            color_empty: theme.color_label_inner_inactive
+            color_empty_hover: theme.color_label_inner_inactive
+            color_empty_focus: theme.color_label_outer
+        }
+    }
+
+    let LogToolbarButton = ButtonFlatter {
+        margin: Inset {}
+        padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
+        draw_text +: {
+            color: theme.color_label_outer_off
+            color_hover: theme.color_label_outer
+            color_down: theme.color_label_outer
+            color_focus: theme.color_label_outer
+        }
+    }
+
+    let LogToolbarIconButton = ButtonFlatterIcon {
+        width: 22.0
+        height: 22.0
+        margin: Inset {}
+        icon_walk: Walk {width: 13.0 height: 13.0}
+        draw_icon +: {
+            color: theme.color_label_outer_off
+            color_hover: theme.color_label_outer
+            color_down: theme.color_label_outer
+            color_focus: theme.color_label_outer
+        }
+    }
+
     let FileTreePane = View {
         width: Fill
         height: Fill
         flow: Down
         PaneToolbar {
-            file_tree_filter := TextInputFlat {
+            file_tree_filter := SidebarFilterInput {
                 width: Fill
                 empty_text: "Filter"
             }
@@ -79,29 +185,52 @@ script_mod! {
         height: Fill
         flow: Down
         PaneToolbar {
-            log_tail_toggle := Toggle {
-                text: "Tail"
-                active: true
+            View {
+                width: Fit
+                height: Fit
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                spacing: theme.space_1
+
+                log_tail_toggle := LogToolbarToggle {
+                    text: "Tail"
+                    active: true
+                }
             }
             Filler {}
-            log_filter := TextInputFlat {
-                width: 200.0
-                empty_text: "Filter"
+            View {
+                width: Fit
+                height: Fit
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                spacing: 4.0
+
+                log_filter := LogToolbarFilterInput {
+                    width: 216.0
+                    empty_text: "Filter"
+                }
+                clear_log_filter := LogToolbarButton {
+                    width: 20.0
+                    height: 20.0
+                    text: "x"
+                    padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+                }
             }
-            clear_log_filter := ButtonFlatter {
-                text: "x"
-                padding: Inset {left: 4.0 right: 4.0 top: 0.0 bottom: 0.0}
-            }
-            clear_log := ButtonFlatter {
-                text: "Clear"
-            }
-            log_open_profiler := ButtonFlatterIcon {
-                width: 24.0
-                height: 24.0
-                icon_walk: Walk {width: 14.0 height: 14.0}
-                draw_icon +: {
-                    color: theme.color_label_outer
-                    svg: crate_resource("self://resources/icons/icon_profiler.svg")
+            View {width: 10.0 height: Fit}
+            View {
+                width: Fit
+                height: Fit
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                spacing: 8.0
+
+                clear_log := LogToolbarButton {
+                    text: "Clear"
+                }
+                log_open_profiler := LogToolbarIconButton {
+                    draw_icon +: {
+                        svg: crate_resource("self://resources/icons/icon_profiler.svg")
+                    }
                 }
             }
         }
@@ -117,11 +246,16 @@ script_mod! {
 
     let LogFirstPane = LogPane {}
 
+    let StudioTerminalView = DesktopTerminalView {
+        pad_x: 6.0
+        pad_y: 4.0
+    }
+
     let TerminalPane = View {
         width: Fill
         height: Fill
         flow: Down
-        terminal_view := DesktopTerminalView {}
+        terminal_view := StudioTerminalView {}
     }
 
     let TerminalFirstPane = RectView {
@@ -149,34 +283,29 @@ script_mod! {
         }
     }
 
-    let CaptionSidebarToggle = ButtonFlatterIcon {
-        width: 38.0
-        height: 30.0
-        icon_walk: Walk {width: 17.0 height: 17.0}
+    let CaptionChromeToggle = ButtonFlatterIcon {
+        width: 36.0
+        height: 28.0
+        icon_walk: Walk {width: 16.0 height: 16.0}
         draw_bg +: {
-            color: #x4C4C4C
-            color_hover: #x5C5C5C
-            color_down: #x3F3F3F
-            border_radius: 5.0
+            color: #x474747
+            color_hover: #x525252
+            color_down: #x414141
+            border_radius: 4.0
         }
         draw_icon +: {
-            color: #xD6D6D6
+            color: #xCBCBCB
+        }
+    }
+
+    let CaptionSidebarToggle = CaptionChromeToggle {
+        draw_icon +: {
             svg: crate_resource("self://resources/icons/icon_sidebar_toggle.svg")
         }
     }
 
-    let CaptionPanelToggle = ButtonFlatterIcon {
-        width: 38.0
-        height: 30.0
-        icon_walk: Walk {width: 17.0 height: 17.0}
-        draw_bg +: {
-            color: #x4C4C4C
-            color_hover: #x5C5C5C
-            color_down: #x3F3F3F
-            border_radius: 5.0
-        }
+    let CaptionPanelToggle = CaptionChromeToggle {
         draw_icon +: {
-            color: #xD6D6D6
             svg: crate_resource("self://resources/icons/icon_panel_toggle.svg")
         }
     }
@@ -192,6 +321,34 @@ script_mod! {
         closeable: false
         spacing: theme.space_1
         icon_walk: Walk {width: Fit height: 16.0}
+        close_button +: {
+            width: 11.0
+            height: 11.0
+            margin: Inset {left: 1.0 right: 7.0 top: 0.0 bottom: 0.0}
+            draw_button +: {
+                color: #x8C8C8C
+                color_hover: #xC8C8C8
+                color_active: #xDEDEDE
+            }
+        }
+        draw_text +: {
+            color: theme.color_label_inner_inactive
+            color_hover: theme.color_label_inner
+            color_active: theme.color_label_inner_active
+        }
+        draw_bg +: {
+            color: theme.color_bg_app * 0.84
+            color_hover: theme.color_bg_app * 0.96
+            color_active: theme.color_fg_app
+
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_active: theme.color_bg_app * 0.92
+
+            border_color_2: theme.color_u_hidden
+            border_color_2_hover: theme.color_u_hidden
+            border_color_2_active: theme.color_bg_app * 0.92
+        }
     }
 
     let MountTab = IconTab {
@@ -249,11 +406,89 @@ script_mod! {
         }
     }
 
+    let TerminalCloseableTab = TabFlat {
+        closeable: true
+        spacing: theme.space_1
+        draw_text +: {
+            color: theme.color_label_inner_inactive
+            color_hover: theme.color_label_inner
+            color_active: theme.color_label_inner_active
+        }
+        draw_bg +: {
+            color: theme.color_bg_app * 0.84
+            color_hover: theme.color_bg_app * 0.95
+            color_active: theme.color_fg_app
+
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_active: theme.color_bg_app * 0.92
+
+            border_color_2: theme.color_u_hidden
+            border_color_2_hover: theme.color_u_hidden
+            border_color_2_active: theme.color_bg_app * 0.92
+        }
+        close_button +: {
+            width: 11.0
+            height: 11.0
+            margin: Inset {left: 1.0 right: 7.0 top: 0.0 bottom: 0.0}
+            draw_button +: {
+                color: #x8C8C8C
+                color_hover: #xC8C8C8
+                color_active: #xDEDEDE
+            }
+        }
+    }
+
+    let TerminalAddTab = TabFlat {
+        closeable: false
+        width: 28.0
+        spacing: 0.0
+        align: Center
+        padding: Inset {left: 0.0 right: 0.0 top: theme.space_2 bottom: theme.space_2}
+        icon_walk: Walk {width: 0.0 height: 0.0}
+        draw_text +: {
+            color: theme.color_label_inner_inactive
+            color_hover: theme.color_label_inner
+            color_active: theme.color_label_inner_active
+            text_style: theme.font_bold{
+                font_size: theme.font_size_p + 1.0
+            }
+        }
+        draw_bg +: {
+            color: theme.color_bg_app * 0.82
+            color_hover: theme.color_bg_app * 0.94
+            color_active: theme.color_fg_app
+
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_active: theme.color_bg_app * 0.92
+
+            border_color_2: theme.color_u_hidden
+            border_color_2_hover: theme.color_u_hidden
+            border_color_2_active: theme.color_bg_app * 0.92
+        }
+    }
+
+    let StudioDock = DockFlat {
+        tab_bar +: {
+            height: STUDIO_HEADER_HEIGHT
+        }
+        splitter +: {
+            draw_bg +: {
+                color: theme.color_bg_container
+                color_hover: theme.color_bevel_outset_1_hover * 0.45
+                color_drag: theme.color_bevel_outset_1_hover * 0.7
+                border_radius: 1.5
+                splitter_pad: 1.5
+            }
+        }
+    }
+
     mod.widgets.AppUI = Window {
         window.inner_size: vec2(1400 900)
         caption_bar := SolidView {
             visible: true
-            height: 38.0
+            height: STUDIO_HEADER_HEIGHT
             flow: Right
             align: Align {x: 0.0 y: 0.5}
             draw_bg.color: theme.color_bg_app
@@ -263,7 +498,7 @@ script_mod! {
                 height: Fit
                 flow: Right
                 align: Align {x: 0.0 y: 0.5}
-                margin: Inset {left: 88.0 right: 0.0 top: 0.0 bottom: 0.0}
+                margin: Inset {left: 72.0 right: 0.0 top: 0.0 bottom: 0.0}
 
                 sidebar_toggle := CaptionSidebarToggle {}
             }
@@ -272,15 +507,24 @@ script_mod! {
                 width: Fill
                 height: Fill
                 align: Center
-                label := Label {text: "Makepad"}
+                label := Label {
+                    text: "Makepad"
+                    padding: 0.0
+                    draw_text +: {
+                        color: theme.color_label_outer
+                        text_style: theme.font_bold{
+                            font_size: theme.font_size_p + 0.5
+                        }
+                    }
+                }
             }
 
             right_caption_tools := View {
                 width: Fit
                 height: Fit
                 flow: Right
-                spacing: theme.space_2
-                margin: Inset {left: 0.0 right: 112.0 top: 0.0 bottom: 0.0}
+                spacing: theme.space_1
+                margin: Inset {left: 0.0 right: 96.0 top: 0.0 bottom: 0.0}
 
                 bottom_panel_toggle := CaptionPanelToggle {}
                 voice_wave := VoiceWave {
@@ -345,7 +589,7 @@ script_mod! {
                 }
             }
 
-            mount_dock := DockFlat {
+            mount_dock := StudioDock {
                 width: Fill
                 height: Fill
 
@@ -369,7 +613,7 @@ script_mod! {
                     width: Fill
                     height: Fill
 
-                    dock := DockFlat {
+                    dock := StudioDock {
                         width: Fill
                         height: Fill
 
@@ -383,6 +627,8 @@ script_mod! {
                             LogFirstTab := LogFirstTab {}
                             LogTab := LogTab {}
                             TerminalTab := TerminalTab {}
+                            TerminalCloseableTab := TerminalCloseableTab {}
+                            TerminalAddTab := TerminalAddTab {}
                         }
 
                         root := DockSplitter {
@@ -468,7 +714,7 @@ script_mod! {
 
                         terminal_add := DockTab {
                             name: "+"
-                            template: @PermanentTab
+                            template: @TerminalAddTab
                             kind: @TerminalAddPane
                         }
 

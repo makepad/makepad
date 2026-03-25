@@ -829,7 +829,7 @@ impl App {
                     tab_id,
                     id!(TerminalPane),
                     Self::terminal_tab_title(path),
-                    id!(CloseableTab),
+                    id!(TerminalCloseableTab),
                     Some(pos.saturating_sub(1)),
                 )
                 .is_none()
