@@ -301,6 +301,48 @@ script_mod! {
         }
     }
 
+    let TerminalCloseableTab = TabFlat {
+        closeable: true
+        spacing: theme.space_1
+        draw_text +: {
+            color: theme.color_label_inner_inactive
+            color_hover: theme.color_label_inner
+            color_active: theme.color_label_inner_active
+        }
+        close_button +: {
+            width: 12.0
+            height: 12.0
+            margin: Inset {left: -1.0 right: 8.0 top: 0.0 bottom: 0.0}
+            draw_button +: {
+                color: #x9A9A9A
+                color_hover: #xD0D0D0
+                color_active: #xE2E2E2
+            }
+        }
+    }
+
+    let TerminalAddTab = TabFlat {
+        closeable: false
+        width: 28.0
+        spacing: 0.0
+        align: Center
+        padding: Inset {left: 0.0 right: 0.0 top: theme.space_2 bottom: theme.space_2}
+        icon_walk: Walk {width: 0.0 height: 0.0}
+        draw_text +: {
+            color: theme.color_label_inner_inactive
+            color_hover: theme.color_label_inner
+            color_active: theme.color_label_inner_active
+            text_style: theme.font_bold{
+                font_size: theme.font_size_p + 1.0
+            }
+        }
+        draw_bg +: {
+            color: theme.color_bg_app * 0.82
+            color_hover: theme.color_bg_app * 0.94
+            color_active: theme.color_fg_app
+        }
+    }
+
     let StudioDock = DockFlat {
         tab_bar +: {
             height: STUDIO_HEADER_HEIGHT
@@ -459,6 +501,8 @@ script_mod! {
                             LogFirstTab := LogFirstTab {}
                             LogTab := LogTab {}
                             TerminalTab := TerminalTab {}
+                            TerminalCloseableTab := TerminalCloseableTab {}
+                            TerminalAddTab := TerminalAddTab {}
                         }
 
                         root := DockSplitter {
@@ -544,7 +588,7 @@ script_mod! {
 
                         terminal_add := DockTab {
                             name: "+"
-                            template: @PermanentTab
+                            template: @TerminalAddTab
                             kind: @TerminalAddPane
                         }
 
